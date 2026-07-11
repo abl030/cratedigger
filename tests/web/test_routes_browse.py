@@ -468,6 +468,48 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         })
         self.assertNotIn(raw_reason, str(data))
 
+    def test_artist_release_groups_not_found_is_clean_non_retryable_404(self):
+        raw_reason = "raw upstream artist lookup details"
+        error = HTTPError(
+            url="https://musicbrainz.invalid/artist",
+            code=404,
+            msg=raw_reason,
+            hdrs=email.message.Message(),
+            fp=None,
+        )
+        with patch("web.server.mb_api") as mock_mb:
+            mock_mb.get_artist_release_groups.side_effect = error
+            status, data = self._get(f"/api/artist/{self.ARTIST_ID}")
+
+        self.assertEqual(status, 404)
+        self.assertEqual(data, {
+            "error": "MusicBrainz artist not found",
+            "retryable": False,
+        })
+        self.assertNotIn(raw_reason, str(data))
+        mock_mb.get_official_release_group_ids.assert_not_called()
+
+    def test_official_release_lookup_not_found_is_clean_non_retryable_404(self):
+        raw_reason = "raw official release lookup details"
+        error = HTTPError(
+            url="https://musicbrainz.invalid/releases",
+            code=404,
+            msg=raw_reason,
+            hdrs=email.message.Message(),
+            fp=None,
+        )
+        with patch("web.server.mb_api") as mock_mb:
+            mock_mb.get_artist_release_groups.return_value = []
+            mock_mb.get_official_release_group_ids.side_effect = error
+            status, data = self._get(f"/api/artist/{self.ARTIST_ID}")
+
+        self.assertEqual(status, 404)
+        self.assertEqual(data, {
+            "error": "MusicBrainz artist not found",
+            "retryable": False,
+        })
+        self.assertNotIn(raw_reason, str(data))
+
     def test_artist_release_groups_in_library_when_name_passed(self):
         """When the frontend passes ?name=, each RG gets in_library: bool
         based on a beets lookup. Without name, the field stays absent

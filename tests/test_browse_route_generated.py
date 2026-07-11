@@ -3,10 +3,11 @@
 
 from __future__ import annotations
 
+import email.message
 import json
 import unittest
 from unittest.mock import patch
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 from hypothesis import given, strategies as st
 
@@ -15,6 +16,8 @@ from web.routes.browse import get_artist
 
 
 _CLEAN_ERROR = "MusicBrainz fallback unavailable, retry"
+_NOT_FOUND_ERROR = "MusicBrainz artist not found"
+_REJECTED_ERROR = "MusicBrainz request rejected"
 
 
 def assert_clean_retryable_failure(status: int, data: dict, raw_reason: str) -> None:
@@ -25,6 +28,30 @@ def assert_clean_retryable_failure(status: int, data: dict, raw_reason: str) -> 
         raise AssertionError(f"unstable retry payload: {data!r}")
     if raw_reason in json.dumps(data):
         raise AssertionError("raw MusicBrainz transport reason leaked")
+
+
+def assert_clean_http_failure(
+    status: int,
+    data: dict,
+    upstream_status: int,
+    raw_reason: str,
+) -> None:
+    """Assert stable status-aware handling for real HTTPError failures."""
+    if upstream_status == 404:
+        expected_status = 404
+        expected_data = {"error": _NOT_FOUND_ERROR, "retryable": False}
+    elif upstream_status == 429 or 500 <= upstream_status <= 599:
+        expected_status = 503
+        expected_data = {"error": _CLEAN_ERROR, "retryable": True}
+    else:
+        expected_status = upstream_status
+        expected_data = {"error": _REJECTED_ERROR, "retryable": False}
+    if status != expected_status or data != expected_data:
+        raise AssertionError(
+            f"unstable HTTP failure contract: status={status} data={data!r}"
+        )
+    if raw_reason in json.dumps(data):
+        raise AssertionError("raw MusicBrainz HTTP reason leaked")
 
 
 class _RecordingHandler:
@@ -46,6 +73,16 @@ class TestArtistMusicBrainzFailureGenerated(unittest.TestCase):
             assert_clean_retryable_failure(
                 503,
                 {"error": f"<urlopen error {raw_reason}>"},
+                raw_reason,
+            )
+
+    def test_http_contract_checker_rejects_known_bad_payload(self):
+        raw_reason = "raw HTTP secret"
+        with self.assertRaisesRegex(AssertionError, "unstable HTTP failure contract"):
+            assert_clean_http_failure(
+                503,
+                {"error": f"HTTP Error 404: {raw_reason}", "retryable": True},
+                404,
                 raw_reason,
             )
 
@@ -79,3 +116,51 @@ class TestArtistMusicBrainzFailureGenerated(unittest.TestCase):
         assert handler.status is not None
         assert handler.data is not None
         assert_clean_retryable_failure(handler.status, handler.data, raw_reason)
+
+    @given(
+        failing_call=st.sampled_from(("release_groups", "official_releases")),
+        upstream_status=st.one_of(
+            st.integers(min_value=400, max_value=499),
+            st.integers(min_value=500, max_value=599),
+        ),
+        reason_suffix=st.text(
+            alphabet=st.characters(
+                min_codepoint=0x20,
+                max_codepoint=0x7E,
+                blacklist_characters="\r\n",
+            ),
+            min_size=1,
+            max_size=80,
+        ),
+    )
+    def test_http_statuses_and_both_calls_keep_clean_status_aware_contract(
+        self,
+        failing_call: str,
+        upstream_status: int,
+        reason_suffix: str,
+    ) -> None:
+        raw_reason = f"raw-mb-http-secret::{reason_suffix}"
+        error = HTTPError(
+            url="https://musicbrainz.invalid/artist",
+            code=upstream_status,
+            msg=raw_reason,
+            hdrs=email.message.Message(),
+            fp=None,
+        )
+        handler = _RecordingHandler()
+        with patch("web.server.mb_api") as mock_mb:
+            if failing_call == "release_groups":
+                mock_mb.get_artist_release_groups.side_effect = error
+            else:
+                mock_mb.get_artist_release_groups.return_value = []
+                mock_mb.get_official_release_group_ids.side_effect = error
+            get_artist(handler, {}, self.ARTIST_ID)  # type: ignore[arg-type]
+
+        assert handler.status is not None
+        assert handler.data is not None
+        assert_clean_http_failure(
+            handler.status,
+            handler.data,
+            upstream_status,
+            raw_reason,
+        )

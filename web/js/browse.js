@@ -62,6 +62,10 @@ function applySourceUI(src) {
 export async function setBrowseSource(src) {
   if (state.browseSource === src) return;
   searchArtistsRequestToken++;
+  // Invalidate the current artist page BEFORE the cross-source lookup
+  // awaits. Otherwise an old-source fast-pair failure can paint Retry
+  // while the new source is already selected but its artist ID is pending.
+  artistPageToken++;
   // Explicit user source-toggle clears any active search-by-ID ring.
   // The source-guard in applySearchTargetAfterDiscography would mask
   // the immediate symptom, but a paste→toggle-twice sequence (away
@@ -84,7 +88,6 @@ export async function setBrowseSource(src) {
     }
     toast(`No ${src === 'discogs' ? 'Discogs' : 'MusicBrainz'} match for ${prevName}`, true);
     state.browseArtist = null;
-    artistPageToken++;
     document.getElementById('browse-artist').style.display = 'none';
   }
 

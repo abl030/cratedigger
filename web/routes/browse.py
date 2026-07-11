@@ -112,6 +112,29 @@ def get_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], artist_i
     try:
         rgs = srv.mb_api.get_artist_release_groups(artist_id)
         official_rg_ids = srv.mb_api.get_official_release_group_ids(artist_id)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            status = 404
+            payload = {
+                "error": "MusicBrainz artist not found",
+                "retryable": False,
+            }
+        elif exc.code == 429 or 500 <= exc.code <= 599:
+            status = 503
+            payload = {
+                "error": "MusicBrainz fallback unavailable, retry",
+                "retryable": True,
+            }
+        elif 400 <= exc.code <= 499:
+            status = exc.code
+            payload = {
+                "error": "MusicBrainz request rejected",
+                "retryable": False,
+            }
+        else:
+            raise
+        h._json(payload, status=status)  # type: ignore[attr-defined]
+        return
     except urllib.error.URLError:
         h._json({  # type: ignore[attr-defined]
             "error": "MusicBrainz fallback unavailable, retry",
