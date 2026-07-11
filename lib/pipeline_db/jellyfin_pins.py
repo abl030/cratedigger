@@ -12,6 +12,10 @@ from datetime import datetime
 from typing import Any
 
 from lib.pipeline_db._core import _PipelineDBBase
+from lib.pipeline_db.pin_status import (
+    JELLYFIN_TERMINAL_PIN_STATUSES,
+    JellyfinTerminalPinStatus,
+)
 
 
 class _JellyfinPinsMixin(_PipelineDBBase):
@@ -73,7 +77,7 @@ class _JellyfinPinsMixin(_PipelineDBBase):
         self,
         pin_id: int,
         *,
-        status: str,
+        status: JellyfinTerminalPinStatus,
         reconciled_at: datetime,
     ) -> None:
         """Mark a pin terminal: ``status`` is 'done' (restored /
@@ -105,6 +109,6 @@ class _JellyfinPinsMixin(_PipelineDBBase):
             WHERE status = ANY(%s)
               AND reconciled_at < %s
             """,
-            (["done", "skipped", "expired"], older_than),
+            (list(JELLYFIN_TERMINAL_PIN_STATUSES), older_than),
         )
         return cur.rowcount

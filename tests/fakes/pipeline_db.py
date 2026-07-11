@@ -34,6 +34,12 @@ from lib.import_queue import (
 )
 from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
                              DOWNLOAD_LOG_OUTCOMES,
+                             JELLYFIN_PIN_STATUSES,
+                             JELLYFIN_TERMINAL_PIN_STATUSES,
+                             JellyfinTerminalPinStatus,
+                             PLEX_PIN_STATUSES,
+                             PLEX_TERMINAL_PIN_STATUSES,
+                             PlexTerminalPinStatus,
                              BACKOFF_MAX_MINUTES, BadAudioHashInput,
                              BadAudioHashRow, ConsumedAttemptInput,
                              ConsumedAttemptResult, CURSOR_UPDATE_ADVANCED,
@@ -390,11 +396,18 @@ class FakePipelineDB:
         self,
         pin_id: int,
         *,
-        status: str,
+        status: PlexTerminalPinStatus,
         reconciled_at: datetime,
     ) -> None:
         for p in self.plex_added_at_pins:
             if p["id"] == pin_id:
+                if status not in PLEX_PIN_STATUSES:
+                    import psycopg2.errors
+
+                    raise psycopg2.errors.CheckViolation(
+                        "new row for relation \"plex_added_at_pins\" violates "
+                        "check constraint \"plex_added_at_pins_status_check\""
+                    )
                 p["status"] = status
                 p["reconciled_at"] = reconciled_at
                 return
@@ -404,11 +417,10 @@ class FakePipelineDB:
         *,
         older_than: datetime,
     ) -> int:
-        terminal = {"done", "skipped"}
         survivors = [
             p for p in self.plex_added_at_pins
             if not (
-                p["status"] in terminal
+                p["status"] in PLEX_TERMINAL_PIN_STATUSES
                 and p["reconciled_at"] is not None
                 and _as_datetime(p["reconciled_at"]) < older_than
             )
@@ -461,11 +473,19 @@ class FakePipelineDB:
         self,
         pin_id: int,
         *,
-        status: str,
+        status: JellyfinTerminalPinStatus,
         reconciled_at: datetime,
     ) -> None:
         for p in self.jellyfin_date_created_pins:
             if p["id"] == pin_id:
+                if status not in JELLYFIN_PIN_STATUSES:
+                    import psycopg2.errors
+
+                    raise psycopg2.errors.CheckViolation(
+                        "new row for relation \"jellyfin_date_created_pins\" "
+                        "violates check constraint "
+                        "\"jellyfin_date_created_pins_status_check\""
+                    )
                 p["status"] = status
                 p["reconciled_at"] = reconciled_at
                 return
@@ -475,11 +495,10 @@ class FakePipelineDB:
         *,
         older_than: datetime,
     ) -> int:
-        terminal = {"done", "skipped", "expired"}
         survivors = [
             p for p in self.jellyfin_date_created_pins
             if not (
-                p["status"] in terminal
+                p["status"] in JELLYFIN_TERMINAL_PIN_STATUSES
                 and p["reconciled_at"] is not None
                 and _as_datetime(p["reconciled_at"]) < older_than
             )
