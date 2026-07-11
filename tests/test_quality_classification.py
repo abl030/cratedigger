@@ -340,6 +340,52 @@ class TestLiveBugReproductions(unittest.TestCase):
         self.assertNotEqual(r["stage2_import"], "import")
         self.assertFalse(r["imported"])
 
+    def test_olivia_rodrigo_wav_basis_metric_is_honest_min(self):
+        """BUG: the persisted basis labeled a min value "avg" (dl 36660).
+
+        Request 8781, 2026-07-11. WAV source converted to Opus (real files:
+        min 216 / avg 255) vs on-disk AAC avg 256. The decision pipeline
+        synthesized the compared measurement with avg fabricated = the
+        post-conversion MIN, so the persisted basis read "avg 216k" while
+        the V0-probe row on the same card honestly said "255kbps avg" —
+        the display-lie class #608 exists to kill, injected one seam
+        earlier at measurement synthesis. The basis must label the value
+        it classified as what it really is: the min.
+        """
+        r = full_pipeline_decision(
+            is_flac=True,
+            min_bitrate=0,
+            is_cbr=False,
+            spectral_grade="genuine",
+            existing_min_bitrate=256,
+            existing_avg_bitrate=256,
+            existing_format="AAC",
+            post_conversion_min_bitrate=216,
+            converted_count=14,
+            verified_lossless_target="opus 128",
+            candidate_v0_probe_avg=255,
+            candidate_v0_probe_min=216,
+            existing_v0_probe_avg=250,
+            existing_v0_probe_kind="native_lossy_research_v0",
+        )
+        # Quality passed via the verified-lossless bypass (the rejection in
+        # production was mbid_missing, downstream of this decision).
+        self.assertEqual(r["stage2_import"], "import")
+        self.assertTrue(r["imported"])
+        basis = r["comparison_basis"]
+        assert basis is not None
+        self.assertEqual(basis["branch"], "cross_family_same_rank")
+        self.assertEqual(basis["verdict"], "equivalent")
+        self.assertTrue(basis["verified_lossless_bypass"])
+        # The honest labels: the candidate side classified the
+        # post-conversion MIN (no real avg crosses the decision interface);
+        # the existing side classified its real avg.
+        self.assertEqual(basis["new_metric"], "min",
+                         "a fabricated avg must not label a min value")
+        self.assertEqual(basis["new_value_kbps"], 216)
+        self.assertEqual(basis["existing_metric"], "avg")
+        self.assertEqual(basis["existing_value_kbps"], 256)
+
 
 class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
     """Every TestLiveBugReproductions scenario must produce the same outcome
@@ -642,6 +688,59 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
 
         self.assertNotEqual(r["stage2_import"], "import")
         self.assertFalse(r["imported"])
+
+    def test_olivia_rodrigo_wav_basis_metric_via_evidence(self):
+        """dl 36660 through the production decider: the basis labels the
+        classified candidate value "min" — the evidence carries a real avg
+        (255) but the decision interface classifies the post-conversion
+        min, and the label must say so."""
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            AlbumQualityV0Metric,
+            full_pipeline_decision_from_evidence,
+        )
+        from lib.quality.evidence_types import (
+            V0_SOURCE_LINEAGE_NATIVE_LOSSY_RESEARCH,
+        )
+
+        candidate = self._build_candidate(
+            is_flac=True,
+            min_bitrate=0,
+            is_cbr=False,
+            spectral_grade="genuine",
+            post_conversion_min_bitrate=216,
+            candidate_v0_probe_avg=255,
+            candidate_v0_probe_min=216,
+        )
+        current = self._build_current(
+            min_bitrate=256, avg_bitrate=256,
+            format="AAC", is_cbr=False,
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=208,
+                avg_bitrate_kbps=250,
+                median_bitrate_kbps=251,
+                source_lineage=V0_SOURCE_LINEAGE_NATIVE_LOSSY_RESEARCH,
+            ),
+        )
+
+        r = full_pipeline_decision_from_evidence(
+            candidate, current,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                import_mode="auto",
+                verified_lossless_target="opus 128",
+            ),
+        )
+
+        self.assertEqual(r["stage2_import"], "import")
+        basis = r["comparison_basis"]
+        assert basis is not None
+        self.assertEqual(basis["branch"], "cross_family_same_rank")
+        self.assertTrue(basis["verified_lossless_bypass"])
+        self.assertEqual(basis["new_metric"], "min",
+                         "a fabricated avg must not label a min value")
+        self.assertEqual(basis["new_value_kbps"], 216)
+        self.assertEqual(basis["existing_metric"], "avg")
+        self.assertEqual(basis["existing_value_kbps"], 256)
 
 
 class TestPreimportFactRejects(unittest.TestCase):
@@ -989,7 +1088,6 @@ class TestPreimportFactRejects(unittest.TestCase):
         self.assertIsNone(r["final_status"])
         self.assertFalse(r["denylisted"])
         self.assertFalse(r["keep_searching"])
-
 
 
 if __name__ == "__main__":

@@ -103,8 +103,8 @@ console.log('renderDownloadHistoryItem() shows Bitrate row with inline (was X) c
   // Single grid, every metric on its own row. Existing data inline as "(was X)".
   assertContains(html, 'class="p-hist-grid"',
     'one consistent grid renders for every entry');
-  assertContains(html, 'class="p-hist-label">Bitrate</span>',
-    'Bitrate row label present');
+  assertContains(html, 'class="p-hist-label">Min bitrate</span>',
+    'Min bitrate row label present');
   assertContains(html, 'class="p-hist-label">Spectral</span>',
     'Spectral row label present');
   assertContains(html, '192kbps', 'candidate bitrate rendered');
@@ -188,13 +188,15 @@ console.log('renderDownloadHistoryItem() omits the V0 probe (was X) suffix when 
     'Bitrate row keeps the apples-to-apples min comparison');
 }
 
-console.log('renderDownloadHistoryItem() drops the V0 probe row for non-lossless candidates');
+console.log('renderDownloadHistoryItem() renders the V0 probe row for research probes too');
 {
-  // Non-lossless candidates carry a v0_probe (kind=native_lossy_research_v0)
-  // in the DB so backend policy can read it, but the same number already
-  // appears in the Bitrate row — rendering it twice would be redundant
-  // and the "(measurement)" qualifier was misleading. Drop it from the
-  // UI surface.
+  // V0 probes run on EVERY candidate (native-lossy sources get a real
+  // ffmpeg V0-transcode probe, kind=native_lossy_research_v0) and are
+  // load-bearing for the operator — Wrong Matches has surfaced them
+  // regardless of lineage all along. The "(from lossy)" qualifier keeps
+  // the gold-standard lossless-source probes distinguishable. Note the
+  // probe (247) is an independent measurement, NOT the container bitrate
+  // (232) — the old "redundant with Bitrate" rationale was stale.
   const html = renderDownloadHistoryItem({
     outcome: 'rejected',
     soulseek_username: 'testuser',
@@ -206,12 +208,31 @@ console.log('renderDownloadHistoryItem() drops the V0 probe row for non-lossless
     downloaded_label: 'MP3 V0',
   });
 
-  assertExcludes(html, 'V0 probe',
-    'no V0 probe row when kind is not lossless_source_v0');
-  assertExcludes(html, '(measurement)',
-    'no leftover (measurement) suffix anywhere');
+  assertContains(html, 'V0 probe',
+    'V0 probe row renders for research probes');
+  assertContains(html, '247kbps avg (from lossy)',
+    'research probe carries the from-lossy qualifier');
   assertContains(html, '232kbps',
     'candidate bitrate still rendered from actual_min_bitrate');
+}
+
+console.log('renderDownloadHistoryItem() V0 was-suffix is kind-aware');
+{
+  // dl 36660: lossless-source candidate probe (255) vs the library
+  // album's native-lossy research probe (250). Both render — the
+  // qualifier says which is which instead of hiding the comparison.
+  const html = renderDownloadHistoryItem({
+    outcome: 'rejected',
+    soulseek_username: 'tunnik',
+    created_at: '2026-07-10T23:19:10+00:00',
+    v0_probe_kind: 'lossless_source_v0',
+    v0_probe_avg_bitrate: 255,
+    existing_v0_probe_kind: 'native_lossy_research_v0',
+    existing_v0_probe_avg_bitrate: 250,
+  });
+  assertContains(html, '255kbps avg', 'lossless-source probe renders bare');
+  assertContains(html, '(was 250kbps avg (from lossy))',
+    'existing research probe renders with its qualifier');
 }
 
 console.log('renderDownloadHistoryItem() keeps a consistent row vocabulary across codecs');
@@ -250,8 +271,8 @@ console.log('renderDownloadHistoryItem() keeps a consistent row vocabulary acros
       'Source row in every entry');
     assertContains(html, 'class="p-hist-label">Spectral</span>',
       'Spectral row in every entry');
-    assertContains(html, 'class="p-hist-label">Bitrate</span>',
-      'Bitrate row in every entry');
+    assertContains(html, 'class="p-hist-label">Min bitrate</span>',
+      'Min bitrate row in every entry');
   }
 }
 
@@ -297,19 +318,22 @@ console.log('formatV0Probe() helper picks the right kind suffix per source linea
     failed++;
     console.error('  FAIL: lossless probe should render bare ("260kbps avg")');
   } else { passed++; }
-  // ``native_lossy_research_v0`` still produces a "(measurement)" tag
-  // for any caller that uses the helper directly (e.g. debug surfaces).
-  // The download-history renderer hides the V0 probe row entirely for
-  // non-lossless candidates because the same number appears in Bitrate.
-  if (formatV0Probe(247, 'native_lossy_research_v0') !== '247kbps avg (measurement)') {
+  // ``native_lossy_research_v0`` is a real ffmpeg V0-transcode probe of a
+  // lossy source — qualified "(from lossy)" so it never reads as the
+  // gold-standard lossless-source probe.
+  if (formatV0Probe(247, 'native_lossy_research_v0') !== '247kbps avg (from lossy)') {
     failed++;
-    console.error('  FAIL: native_lossy_research_v0 should add "(measurement)" suffix');
+    console.error('  FAIL: native_lossy_research_v0 should add "(from lossy)" suffix');
   } else { passed++; }
   if (formatV0Probe(200, undefined) !== '200kbps avg') {
     failed++;
     console.error('  FAIL: missing kind should render bare');
   } else { passed++; }
-  if (formatV0Probe(180, 'on_disk_research_v0') !== '180kbps avg (on_disk_research_v0)') {
+  if (formatV0Probe(180, 'on_disk_research_v0') !== '180kbps avg (on-disk re-encode)') {
+    failed++;
+    console.error('  FAIL: on_disk_research_v0 should render the on-disk re-encode qualifier');
+  } else { passed++; }
+  if (formatV0Probe(180, 'future_probe_kind') !== '180kbps avg (future_probe_kind)') {
     failed++;
     console.error('  FAIL: unknown kind should fall back to raw label');
   } else { passed++; }
@@ -344,7 +368,7 @@ console.log('renderDownloadHistoryItem() always renders the core row vocabulary 
     verdict: 'Download failed: file exceeded retry limit',
   });
 
-  for (const label of ['Source', 'Spectral', 'Bitrate', 'Distance']) {
+  for (const label of ['Source', 'Spectral', 'Min bitrate', 'Distance']) {
     assertContains(html, `class="p-hist-label">${label}</span>`,
       `${label} row present even without data`);
   }
@@ -425,10 +449,10 @@ console.log('renderEvidenceStrip() builds the compact IN/HAVE comparison');
   assertContains(strip, 'class="r-evidence"', 'strip wrapper class');
   assertContains(strip, 'IN', 'IN side labelled');
   assertContains(strip, 'MP3 320', 'incoming label rendered');
-  assertContains(strip, '245k', 'incoming measured bitrate rendered');
+  assertContains(strip, 'min 245k', 'incoming measured bitrate rendered with the min label');
   assertContains(strip, '~160k', 'incoming spectral floor rendered');
   assertContains(strip, 'HAVE', 'HAVE side labelled');
-  assertContains(strip, '320k', 'on-disk bitrate rendered');
+  assertContains(strip, 'min 320k', 'on-disk bitrate rendered with the min label');
 }
 
 console.log('renderEvidenceStrip() returns empty string when no evidence exists');
@@ -470,7 +494,7 @@ console.log('renderEvidenceStrip() shows the on-disk format on the HAVE side');
     existing_format: 'MP3',
     existing_min_bitrate: 256,
   });
-  assertContains(strip, 'MP3 256k', 'HAVE side leads with the on-disk format');
+  assertContains(strip, 'MP3 min 256k', 'HAVE side leads with the on-disk format, min-labelled');
 }
 
 console.log('renderDownloadHistoryItem() includes the on-disk format in the Bitrate (was X) suffix');
@@ -498,6 +522,24 @@ console.log('renderDownloadHistoryItem() keeps the bare (was X) when existing fo
     existing_min_bitrate: 256,
   });
   assertContains(html, '(was 256kbps)', 'legacy rows keep the bare suffix');
+}
+
+console.log('renderEvidenceStrip() shows research V0 probes with the from-lossy qualifier');
+{
+  // V0 runs on everything; the strip shows whichever probe each side has,
+  // qualified so research probes never read as lossless-source proof.
+  const strip = renderEvidenceStrip({
+    downloaded_label: 'MP3 V0',
+    actual_min_bitrate: 232,
+    v0_probe_kind: 'native_lossy_research_v0',
+    v0_probe_avg_bitrate: 247,
+    existing_format: 'AAC',
+    existing_min_bitrate: 256,
+    existing_v0_probe_kind: 'native_lossy_research_v0',
+    existing_v0_probe_avg_bitrate: 250,
+  });
+  assertContains(strip, 'V0 247k avg (from lossy)', 'IN research probe qualified');
+  assertContains(strip, 'V0 250k avg (from lossy)', 'HAVE research probe qualified');
 }
 
 console.log('renderEvidenceStrip() escapes injected values');

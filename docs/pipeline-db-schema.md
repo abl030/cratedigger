@@ -86,7 +86,7 @@ that audit trail.
 - `spectral_bitrate INTEGER` — estimated original bitrate from spectral.
 - `existing_min_bitrate INTEGER` — beets min bitrate before this download.
 - `existing_spectral_bitrate INTEGER` — spectral estimate of existing files before download.
-- `v0_probe_kind TEXT` — lineage for this attempt's optional V0 probe evidence. `lossless_source_v0` is comparable; `native_lossy_research_v0` and `on_disk_research_v0` are audit-only.
+- `v0_probe_kind TEXT` — lineage for this attempt's optional V0 probe evidence. V0 probes run on every candidate and are operator-facing across the UI (Recents strip/detail, Wrong Matches; research kinds render qualified — "(from lossy)" / "(on-disk re-encode)"). Only `lossless_source_v0` is comparable for the provisional-lossless policy lane; `native_lossy_research_v0` and `on_disk_research_v0` are real V0-transcode research measurements excluded from that lane.
 - `v0_probe_min_bitrate INTEGER`, `v0_probe_avg_bitrate INTEGER`, `v0_probe_median_bitrate INTEGER` — min/avg/median track bitrates for this attempt's probe.
 - `existing_v0_probe_kind TEXT` — lineage of the comparable probe state used before this attempt, when present.
 - `existing_v0_probe_min_bitrate INTEGER`, `existing_v0_probe_avg_bitrate INTEGER`, `existing_v0_probe_median_bitrate INTEGER` — point-in-time baseline probe values used for history rendering and audit.

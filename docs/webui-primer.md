@@ -112,7 +112,11 @@ Browser → https://music.ablz.au
   track list for the same reason. Force imports show `overridden` in the
   Distance row instead of beets' misleading 0.000. Debug internals (Detail /
   Preview / Reason / Stages) sit behind a collapsed `forensics` toggle per
-  attempt.
+  attempt. Every bitrate says which statistic it is: the min-vs-min row is
+  labelled "Min bitrate" and strip mins render as `min 216k` (request 8781:
+  an unlabelled 216 beside an avg-labelled 255 read as a contradiction).
+  V0 probes render for every candidate — research probes of lossy sources
+  qualified "(from lossy)" — matching the Wrong Matches convention.
 - **Comparison basis rendering (request 6039)** — rows whose
   `import_result` JSONB carries the persisted `comparison_basis` render the
   decision's own comparison: the verdict line names the deciding metric,
