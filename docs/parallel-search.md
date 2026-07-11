@@ -108,7 +108,7 @@ With 16 albums where each search takes 30-60s, this cuts search time from ~8-16 
 
 ### How it works
 
-- **`_submit_search(album, cfg, slskd)`** -- Sequential. Submits one search to slskd, returns `(search_id, query, album_id)`. Retries on 429 with exponential backoff.
+- **`_submit_plan_search(...)`** -- Sequential. Submits one persisted-plan search to slskd and retries transient submission contention with backoff.
 - **`_collect_search_results(search_id, ...)`** -- Parallel. Sleeps 5s, polls search state, fetches responses, builds `SearchResult` dataclass.
 - **`_search_and_queue_parallel(albums)`** -- Orchestrator. Submits all, then collects all via `ThreadPoolExecutor`, processes results as they arrive.
 - **`_merge_search_result(result)`** -- Main-thread only. Merges into `search_cache` and `user_upload_speed`.
@@ -174,15 +174,16 @@ Note: the benchmark currently fires concurrent `search_text()` calls, which work
 | File | Role |
 |------|------|
 | `lib/search.py` | `SearchResult` dataclass |
-| `cratedigger.py` | `_submit_search()`, `_collect_search_results()`, `_search_and_queue_parallel()` |
+| `cratedigger.py` | `_submit_plan_search()`, `_collect_search_results()`, `_search_and_queue_parallel()` |
 | `lib/config.py` | `parallel_searches` config field |
 | `scripts/bench_parallel_search.py` | Concurrency sweep benchmark |
-| `tests/test_slskd_live.py` | `TestParallelSearchTiming` live tests |
+| `tests/test_search_max_inflight.py` | Deterministic pipeline-depth and owner-thread merge tests |
 
-## Live testing
+## Focused testing
 
-The live tests in `test_slskd_live.py` (gated behind `SLSKD_TEST_FULL=1`) verify timing and result quality:
+The deterministic focused tests exercise the parallel pipeline without an
+environment gate:
 
 ```bash
-nix-shell --run "SLSKD_TEST_FULL=1 python3 -m unittest tests.test_slskd_live.TestParallelSearchTiming -v"
+nix-shell --run "python3 -m unittest tests.test_search_max_inflight -v"
 ```

@@ -401,7 +401,7 @@ The dashboard `searches.windows[*]` block surfaces `cursor_wraps`,
 existing dashboard exposes. `cache_attribution_level='cycle_only'` is
 not a placeholder — `search_log` has no per-search cache columns; the
 dashboard cannot honestly imply per-slot cache numbers. See
-`lib/pipeline_db.py::CACHE_ATTRIBUTION_CYCLE_ONLY`.
+`lib/pipeline_db/_shared.py::CACHE_ATTRIBUTION_CYCLE_ONLY`.
 
 ---
 
@@ -498,7 +498,7 @@ Recent bumps:
 | `search-plan/2026-05-08-2` | 2026-05-08 | First post-rollout fix |
 | `search-plan/2026-05-19-1` | 2026-05-19 | Iteration 1 — entropy + matcher pre-filter |
 | `search-plan/2026-05-25-1` | 2026-05-25 | Iteration 2 PR2 — `literal_lossless` retired, `catalog_number` + `track_3_artist` slots added, distinctiveness-ranked tracks with `GENERIC_TITLE_TOKENS` blacklist, VA-specific strategy mix, stopwords collapsed to single `STOPWORDS` constant. Plan-regen wave on first 1-2 cycles post-deploy is expected and bounded by existing wave caps; monitor `journalctl -u cratedigger` for the wave to clear within ~10-15 min. |
-| (no bump) | 2026-05-26 | Iteration 2 PR3 — observability only; **`SEARCH_PLAN_GENERATOR_ID` deliberately not bumped**. PR3 wires the forensics writes (`rejection_reason`, `result_count_uncapped`, `query_token_count`, `query_distinct_token_count`, `expected_track_count`, `matcher_score_top1`, `query_template`) into `lib/pipeline_db.py::log_search`, materialises `album_requests.failure_class` at the cursor-wrap transaction in `lib/search_plan_service.py`, ships the dedicated `cratedigger-unfindable.service` + `cratedigger-unfindable.timer` (daily, K=100/run, ~7d per-request cadence) for the 4-bucket `unfindable_category` taxonomy, and captures `rescued_at` / `prior_unfindable_category` in the importer success path. No new migrations land (027-033 all shipped in PR1). Generator output is unchanged — none of the U11-U14 work touches `generate_search_plan` — so no plan-regen wave fires on rollout. |
+| (no bump) | 2026-05-26 | Iteration 2 PR3 — observability only; **`SEARCH_PLAN_GENERATOR_ID` deliberately not bumped**. PR3 wires the forensics writes (`rejection_reason`, `result_count_uncapped`, `query_token_count`, `query_distinct_token_count`, `expected_track_count`, `matcher_score_top1`, `query_template`) into `lib/pipeline_db/search_plan.py::log_search`, materialises `album_requests.failure_class` at the cursor-wrap transaction in `lib/search_plan_service.py`, ships the dedicated `cratedigger-unfindable.service` + `cratedigger-unfindable.timer` (daily, K=100/run, ~7d per-request cadence) for the 4-bucket `unfindable_category` taxonomy, and captures `rescued_at` / `prior_unfindable_category` in the importer success path. No new migrations land (027-033 all shipped in PR1). Generator output is unchanged — none of the U11-U14 work touches `generate_search_plan` — so no plan-regen wave fires on rollout. |
 
 Any change to those that does **not** bump the id will silently leave
 old plans active under a new generator's rules. Two regression guards:

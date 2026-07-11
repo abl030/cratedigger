@@ -238,6 +238,10 @@ Tools within the method, for quality-decision bugs specifically:
 - Don't build infrastructure without wiring it up. Every new function, dataclass, or mode must be called from production code. If it's only reachable via manual config nobody sets, it's dead code.
 - Before marking any feature complete, trace the full path from trigger to effect. Ask: "Does this actually run in production without manual intervention?" If not, it's not done.
 - A new dataclass that nothing constructs, a config option nobody sets, a fallback that never triggers — these are all incomplete work, not shipped features.
+- Comments and docstrings describe contracts and capabilities, not brittle
+  cardinality. Do not write claims such as "the seven methods" when the
+  surface can grow; name the methods only when each identity matters, or
+  describe the shared contract the open-ended set implements.
 
 ## No Parallel Code Paths
 - Never create a second function that calls the same subprocess (import_one.py, beets_harness.py, etc.). If a new entry point needs the pipeline, write an adapter that constructs the existing function's inputs and delegates. If the interface makes this painful, fix the interface — don't route around it.
@@ -249,7 +253,7 @@ Tools within the method, for quality-decision bugs specifically:
 - Both surfaces wrap the same service-layer method (e.g. `SearchPlanService.advance_for_request`). The CLI subcommand and the HTTP handler are thin adapters with matched outcome → exit-code / outcome → status-code mappings. Never duplicate logic across the two; route everything through the service.
 - Reference layout (worked example: `search-plan advance` in PR for the cursor-advance feature):
   - `lib/<thing>_service.py` — service method + typed `Result` dataclass (one outcome string per branch)
-  - `lib/pipeline_db.py` — atomic mutation with `FOR UPDATE` row lock
+  - `lib/pipeline_db/` — atomic mutation with `FOR UPDATE` row lock
   - `scripts/pipeline_cli/<family>.py` — CLI subcommand wrapping the service (the CLI is a package split by command family, issue #495; ``cli.py`` registers the handler in the dispatch dict, ``routes_meta.py`` adds the argparse subparser)
   - `web/routes/<thing>.py` — HTTP endpoint wrapping the service
   - `tests/test_<thing>_service.py` — authoritative coverage of every outcome branch
@@ -268,10 +272,10 @@ Before writing any new code, decide which test types you owe and what infrastruc
 | A new dispatch / orchestration path | An orchestration test asserting domain state + an integration slice | `FakePipelineDB`, `patch_dispatch_externals()`, `tests/test_integration_slices.py` |
 | A new web API endpoint | A contract test with `REQUIRED_FIELDS` AND `classified=True` on the route's `RouteRegistration` (enforced by `TestRouteContractAudit`) AND a paired `pipeline-cli` subcommand (CLI ⇄ API symmetry) | `_FakeDbWebServerCase` + `_assert_required_fields` from `tests/web/_harness.py`, the matching `tests/web/test_routes_<module>.py`, `scripts/pipeline_cli/` |
 | A new operator action (CLI subcommand or API endpoint) | A service-layer method with a typed `Result`, BOTH a CLI subcommand AND an API endpoint, exit-code and status-code tests for each | `tests/test_<service>.py` for the authoritative coverage; CLI/API tests check the wrapper only |
-| A new slskd interaction | An orchestration test using `FakeSlskdAPI` | `FakeSlskdAPI` from `tests/fakes.py` |
+| A new slskd interaction | An orchestration test using `FakeSlskdAPI` | `FakeSlskdAPI` from `tests/fakes/` |
 | A new typed dataclass | A pure test of construction + serialization, and a builder in `tests/helpers.py` if it crosses test boundaries | `tests/helpers.py` |
-| A new `PipelineDB` method | An equivalent stub on `FakePipelineDB`, with a self-test in `tests/test_fakes.py` | `tests/fakes.py`, `tests/test_fakes.py` |
-| A new `BeetsDB` method | Either (a) an equivalent stub on `FakeBeetsDB` with a self-test in `tests/test_fakes.py::TestFakeBeetsDB`, OR (b) drive the test against a real test SQLite DB if it's a read-only query | `tests/fakes.py`, `tests/test_fakes.py` |
+| A new `PipelineDB` method | An equivalent stub on `FakePipelineDB`, with a self-test in `tests/test_fakes.py` | `tests/fakes/`, `tests/test_fakes.py` |
+| A new `BeetsDB` method | Either (a) an equivalent stub on `FakeBeetsDB` with a self-test in `tests/test_fakes.py::TestFakeBeetsDB`, OR (b) drive the test against a real test SQLite DB if it's a read-only query | `tests/fakes/`, `tests/test_fakes.py` |
 | A feature with policy invariants (pure decisions, lifecycle / state machine, wire or event ingestion) | Generated properties + strategies in the same PR, each invariant checker with a known-bad self-test; invariants written down FIRST | `tests/_hypothesis_profiles.py`, checker/strategy patterns in `tests/test_*_generated.py`, `docs/generated-testing.md` |
 | A documented surface (a module option, a beets plugin, an operator action / CLI subcommand, the permission/ownership model, or a subsystem's documented behavior) | The doc update in the SAME PR (README / `docs/` / `examples/` / CLAUDE.md) — docs are part of done, not a follow-up | `tests/test_docs_audit.py` (structural coverage: plugins, CLI, dead-links, option descriptions); the relevant `docs/*.md` |
 
@@ -304,8 +308,8 @@ Four categories of tests. Each has different rules for what's acceptable. **All 
   - `validation_result` / `import_result` preserved
   - filesystem side effects (cleanup, staging)
 - Mocking is allowed for external edges (subprocess, meelo, plex), but the assertion target must be domain state.
-- **Use `FakePipelineDB` from `tests/fakes.py` for stateful collaborators instead of MagicMock.** It records request rows, download_logs, denylist entries, cooldowns, status history, spectral state updates. See `tests/test_fakes.py` for the full API.
-- **Use `FakeSlskdAPI` from `tests/fakes.py` for slskd interactions.** Stateful `transfers` and `users` fakes with `add_transfer()`, `queue_download_snapshots()`, `set_directory()`, `set_directory_error()`, configurable errors, and call recording.
+- **Use `FakePipelineDB` from `tests/fakes/` for stateful collaborators instead of MagicMock.** It records request rows, download_logs, denylist entries, cooldowns, status history, spectral state updates. See `tests/test_fakes.py` for the full API.
+- **Use `FakeSlskdAPI` from `tests/fakes/` for slskd interactions.** Stateful `transfers` and `users` fakes with `add_transfer()`, `queue_download_snapshots()`, `set_directory()`, `set_directory_error()`, configurable errors, and call recording.
 - Use `make_ctx_with_fake_db(fake_db)` from `tests/helpers.py` to wire `FakePipelineDB` into a `CratediggerContext`.
 - Use builders from `tests/helpers.py` — never hand-roll 20-field dicts.
 
@@ -335,7 +339,7 @@ Always use these instead of inventing parallel scaffolding:
 - `noop_quality_gate(**kwargs) -> None` — drop-in `quality_gate_fn` stub for dispatch tests that don't care about the post-import gate. Pair with `dispatch_import_core(..., quality_gate_fn=noop_quality_gate)`.
 - `RecordingQualityGate()` — recorder `quality_gate_fn` with `assert_called_once()` / `assert_not_called()` / `call_count` / `calls` (list of kwargs). For tests that assert the gate ran with specific args.
 
-**`tests/fakes.py`** — stateful fakes:
+**`tests/fakes/`** — stateful fakes:
 - `FakePipelineDB` — full PipelineDB stand-in: requests, download_logs, denylist, cooldowns, status history, spectral state, attempt counters. Includes `assert_log()` helper. Has `queue_execute_results(*cursors)` + `execute_calls` recording for tests driving raw-SQL CLI paths.
 - `FakeBeetsDB` — minimal BeetsDB stand-in: `album_exists`, `get_album_info(mb_release_id, cfg)`, `get_all_album_ids_for_release`, `get_item_paths`, `get_album_path_by_id`, `close` + context-manager + per-method call recorders + seed helpers (`set_album_exists`, `set_album_info`, `set_album_ids_for_release`, `set_item_paths`, `set_album_path_by_id`). Each method also has a `_default` field for "any key returns the same value" tests. Extend the surface only when a test exercises a new BeetsDB method.
 - `FakeSlskdAPI` — stateful slskd client: `transfers` (enqueue, get_all_downloads, cancel_download, queued snapshots), `users` (directory with per-directory results and errors), call recording.
@@ -350,7 +354,7 @@ Always use these instead of inventing parallel scaffolding:
 `MagicMock` and `patch(...)` are for the **outermost edge** of the test — where our code calls something external we don't own. They are forbidden as a substitute for our own stateful types or our own pure-logic functions. Zero-tolerance: enforced by `tests/test_mock_audit.py` against the allowlist in `tests/_mock_audit_scanner.py`.
 
 **Forbidden:**
-- `MagicMock()` assigned to a variable named `db`, `mock_db`, `failing_db`, `pdb`, `ctx`, `context`, `beets`, `beets_db`, `source`, `pipeline_db`, `slskd`, `fake_db`. Use `FakePipelineDB` / `FakeBeetsDB` / `FakeSlskdAPI` from `tests/fakes.py`.
+- `MagicMock()` assigned to a variable named `db`, `mock_db`, `failing_db`, `pdb`, `ctx`, `context`, `beets`, `beets_db`, `source`, `pipeline_db`, `slskd`, `fake_db`. Use `FakePipelineDB` / `FakeBeetsDB` / `FakeSlskdAPI` from `tests/fakes/`.
 - `patch("lib.X.our_function")` for any target not on the allowlist. If you're mocking your own logic, you're testing the mock.
 - `patch("lib.beets_db.BeetsDB.<method>")`. The class constructor is allowlisted; per-method stubbing isn't — use `FakeBeetsDB`.
 - Allowlisting a pure decision function. Drive the test with real inputs that produce the branch you care about — fixtures usually already exist in the decision's own coverage.
@@ -371,7 +375,7 @@ When adding a wrapper to the allowlist, include a one-line rationale next to the
 4. **Allowlist (last resort).** Only if the target is a thin wrapper around an external boundary.
 
 **Adding a new `PipelineDB` / `BeetsDB` / `SlskdAPI` method:**
-1. Add a state-respecting implementation to the corresponding `Fake*` in `tests/fakes.py`.
+1. Add a state-respecting implementation to the corresponding `Fake*` in `tests/fakes/`.
 2. Add a self-test in `tests/test_fakes.py`.
 3. Tests consume the fake; they do NOT do `mock_db.new_method.return_value = ...`.
 

@@ -336,7 +336,7 @@ search cycles only ask Soulseek for lossless tiers, so the lock
 doesn't fire repeatedly against new peers serving the same lossy
 file. No plan-generator change is needed — `generate_search_plan`
 produces query strategies, and the filetype filter is applied
-downstream in `enqueue.py::effective_search_tiers` from the request's
+downstream in `lib/enqueue.py::effective_search_tiers` from the request's
 override column.
 
 Known wart: library rows imported before this policy landed (2026-05-17)

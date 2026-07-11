@@ -1,7 +1,7 @@
-"""Docs-freshness structural audits (issue #570).
+"""Docs-freshness structural audits (issues #570 and #590).
 
 CLAUDE.md's "New Work Checklist" row for a documented surface says the doc
-update ships in the SAME PR as the code, not a follow-up. These four checks
+update ships in the SAME PR as the code, not a follow-up. These checks
 are the automatic forcing function: each is a structural coverage gate
 between a documented surface and the doc that's supposed to describe it, so
 a code PR that adds a beets plugin / CLI subcommand / module option without
@@ -12,17 +12,12 @@ tests/test_stopwords_audit.py, tests/test_lambda_audit.py,
 tests/web/test_route_audit.py): deterministic, no network, real repo files
 read straight off disk.
 
-    1. TestBeetsPluginDocCoverage    — nix/module.nix `plugins` string <->
-       docs/beets-primer.md "Active Plugins" table.
-    2. TestPipelineCliDocCoverage    — every pipeline-cli top-level
-       subcommand (introspected from routes_meta._build_parser(), never
-       regexed) <-> docs/debugging-cli.md.
-    3. TestDocLinksResolve           — every repo-local markdown link in
-       README.md / CLAUDE.md / docs/**/*.md resolves to a real file.
-    4. TestModuleOptionDescriptions  — every `mkOption { ... }` in
-       nix/module.nix carries a non-empty `description`. Seeded as a
-       ratchet (37 pre-existing gaps at write time — see
-       OPTIONS_WITHOUT_DESCRIPTION_OK); no NEW option may join without one.
+    - TestBeetsPluginDocCoverage — module plugins match the primer table.
+    - TestPipelineCliDocCoverage — CLI commands appear in the CLI doc.
+    - TestDocLinksResolve — repo-local markdown links resolve.
+    - TestModuleOptionDescriptions — module options carry descriptions.
+    - TestLivingCodeReferences — living repo paths and symbols resolve.
+    - TestBacktickedCallReferences — project-shaped call names still exist.
 """
 
 from __future__ import annotations
@@ -30,19 +25,311 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import subprocess
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from scripts.pipeline_cli.routes_meta import _build_parser  # noqa: E402
+from tests._docs_reference_audit import (  # noqa: E402
+    REMOVAL_STABLE_REPO_ROOTS,
+    REMOVAL_STABLE_ROOT_FILES,
+    broken_repo_references,
+    lib_docstrings,
+    living_doc_files,
+    missing_call_references,
+    python_code_identifiers,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCS_DIR = REPO_ROOT / "docs"
 MODULE_NIX = REPO_ROOT / "nix" / "module.nix"
 BEETS_PRIMER = DOCS_DIR / "beets-primer.md"
 DEBUGGING_CLI = DOCS_DIR / "debugging-cli.md"
+
+
+class TestReferenceScannerKnownBadCases(unittest.TestCase):
+    """Synthetic violations prove each reference check constrains input."""
+
+    def test_missing_repo_path_is_rejected(self) -> None:
+        findings = broken_repo_references(
+            REPO_ROOT / "README.md",
+            "See `lib/_missing_issue_590.py`.",
+            REPO_ROOT,
+        )
+        self.assertEqual(len(findings), 1)
+
+    def test_missing_repo_path_in_discovered_tools_root_is_rejected(self) -> None:
+        findings = broken_repo_references(
+            REPO_ROOT / "README.md",
+            "See `tools/_missing_issue_590.py`.",
+            REPO_ROOT,
+        )
+        self.assertEqual(len(findings), 1)
+
+    def test_missing_repo_path_in_absent_registered_root_is_rejected(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            findings = broken_repo_references(
+                root / "README.md",
+                "See `tools/_missing_issue_590.py`.",
+                root,
+            )
+        self.assertEqual(len(findings), 1)
+
+    def test_untracked_top_level_directory_is_not_a_repo_root(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "src").mkdir()
+            findings = broken_repo_references(
+                root / "README.md",
+                "The external project implements this in `src/import.rs`.",
+                root,
+            )
+        self.assertEqual(findings, [])
+
+    def test_missing_repo_path_with_dot_slash_is_rejected(self) -> None:
+        findings = broken_repo_references(
+            REPO_ROOT / "README.md",
+            "See `./lib/_missing_issue_590.py`.",
+            REPO_ROOT,
+        )
+        self.assertEqual(len(findings), 1)
+
+    def test_missing_root_metadata_paths_are_rejected(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "README.md"
+            findings = broken_repo_references(
+                source,
+                "See `flake.lock` and `TODO-missing-issue-590.md`.",
+                root,
+            )
+        self.assertEqual(len(findings), 2)
+
+    def test_missing_ordinary_root_file_is_rejected(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            findings = broken_repo_references(
+                root / "README.md",
+                "See `cratedigger.py`.",
+                root,
+            )
+        self.assertEqual(len(findings), 1)
+
+    def test_missing_symbol_is_rejected(self) -> None:
+        findings = broken_repo_references(
+            REPO_ROOT / "README.md",
+            "See `lib/search.py::_missing_issue_590_symbol`.",
+            REPO_ROOT,
+        )
+        self.assertEqual(len(findings), 1)
+
+    def test_nonexistent_call_identifier_is_rejected(self) -> None:
+        findings = missing_call_references(
+            REPO_ROOT / "lib" / "search.py",
+            "Calls ``_missing_issue_590_call()``.",
+            REPO_ROOT,
+            {"real_call"},
+            {},
+            scope="test_scope",
+        )
+        self.assertEqual(len(findings), 1)
+
+    def test_non_call_identifier_does_not_satisfy_call_reference(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "fixture.py").write_text(
+                "non_call_identifier = 1\n",
+                encoding="utf-8",
+            )
+            identifiers = python_code_identifiers(root)
+        findings = missing_call_references(
+            REPO_ROOT / "lib" / "search.py",
+            "Calls ``non_call_identifier()``.",
+            REPO_ROOT,
+            identifiers,
+            {},
+            scope="test_scope",
+        )
+        self.assertEqual(len(findings), 1)
+
+    def test_call_allowlist_is_scoped_to_one_docstring(self) -> None:
+        identifier = "missing_scoped_call"
+        allowlist = {
+            f"lib/search.py::first_scope::{identifier}": "Historical in first scope.",
+        }
+        allowed = missing_call_references(
+            REPO_ROOT / "lib" / "search.py",
+            f"Calls ``{identifier}()``.",
+            REPO_ROOT,
+            set(),
+            allowlist,
+            scope="first_scope",
+        )
+        rejected = missing_call_references(
+            REPO_ROOT / "lib" / "search.py",
+            f"Calls ``{identifier}()``.",
+            REPO_ROOT,
+            set(),
+            allowlist,
+            scope="second_scope",
+        )
+        self.assertEqual(allowed, [])
+        self.assertEqual(len(rejected), 1)
+
+
+# Genuinely historical call names may stay only with a one-line explanation.
+# Keys are ``repo-relative path::enclosing scope::identifier`` so line edits
+# do not churn them and one exemption cannot mask another docstring.
+STALE_CALL_REFERENCE_ALLOWLIST: dict[str, str] = {
+    "lib/download.py::harvest_terminal_transfer_evidence::remove_completed_downloads":
+        "Past-tense #589 docstring explains the unsafe bulk cleanup replaced by owned purging.",
+    "lib/release_cleanup.py::remove_album_by_selectors::remove_duplicates":
+        "Past-tense beets API mention documents the historical cross-MBID deletion hazard.",
+    "lib/slskd_transfers.py::purge_completed_transfers::remove_completed_downloads":
+        "Past-tense #589 docstring explains the unsafe bulk cleanup replaced by per-id purging.",
+}
+
+
+def _all_missing_call_references(
+    allowlist: dict[str, str],
+) -> list[str]:
+    identifiers = python_code_identifiers(REPO_ROOT)
+    missing: set[str] = set()
+    for path, scope, docstring in lib_docstrings(REPO_ROOT):
+        missing.update(missing_call_references(
+            path,
+            docstring,
+            REPO_ROOT,
+            identifiers,
+            allowlist,
+            scope=scope,
+        ))
+    return sorted(missing)
+
+
+class TestLivingCodeReferences(unittest.TestCase):
+    """Living docs may refer only to paths and symbols that still exist."""
+
+    def test_repo_paths_and_path_symbols_resolve(self) -> None:
+        findings: list[str] = []
+        for path in living_doc_files(REPO_ROOT):
+            findings.extend(broken_repo_references(
+                path,
+                path.read_text(encoding="utf-8"),
+                REPO_ROOT,
+            ))
+        self.assertEqual(
+            findings,
+            [],
+            "Stale repo path/symbol reference(s) in living docs:\n  - "
+            + "\n  - ".join(findings),
+        )
+
+    def test_living_doc_scope_is_not_vacuous(self) -> None:
+        files = living_doc_files(REPO_ROOT)
+        self.assertIn(REPO_ROOT / "CLAUDE.md", files)
+        self.assertIn(REPO_ROOT / "README.md", files)
+        self.assertIn(REPO_ROOT / ".claude" / "rules" / "code-quality.md", files)
+        self.assertIn(REPO_ROOT / "docs" / "beets-primer.md", files)
+        self.assertNotIn(
+            REPO_ROOT / "docs" / "plans"
+            / "2026-05-28-001-feat-youtube-rescue-ingest-api-plan.md",
+            files,
+        )
+
+    def test_frozen_tree_readmes_are_excluded_after_union(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            living = root / "docs" / "guide" / "nested" / "README.md"
+            frozen = [
+                root / "docs" / dirname / "nested" / "README.md"
+                for dirname in ("plans", "brainstorms", "solutions")
+            ]
+            for path in [living, *frozen]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# Test\n", encoding="utf-8")
+            files = living_doc_files(root)
+        self.assertIn(living, files)
+        for path in frozen:
+            self.assertNotIn(path, files)
+
+    def test_tracked_top_level_surfaces_are_registered(self) -> None:
+        result = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        tracked_paths = [
+            Path(value) for value in result.stdout.split("\0") if value
+        ]
+        tracked_roots = {
+            path.parts[0] for path in tracked_paths if len(path.parts) > 1
+        }
+        tracked_root_files = {
+            path.name for path in tracked_paths if len(path.parts) == 1
+        }
+        self.assertEqual(
+            tracked_roots - REMOVAL_STABLE_REPO_ROOTS,
+            set(),
+            "Register new tracked top-level directories in the removal-stable "
+            "repo-root set.",
+        )
+        self.assertEqual(
+            tracked_root_files - REMOVAL_STABLE_ROOT_FILES,
+            set(),
+            "Register new tracked root files in the removal-stable file set.",
+        )
+
+
+class TestBacktickedCallReferences(unittest.TestCase):
+    """Project-shaped calls in lib docstrings must exist."""
+
+    def test_call_identifiers_exist_in_python_code(self) -> None:
+        missing = _all_missing_call_references(STALE_CALL_REFERENCE_ALLOWLIST)
+        self.assertEqual(
+            missing,
+            [],
+            "Backticked snake_case call reference(s) have no Python identifier. "
+            "Fix live prose, or allowlist deliberate history with a one-line "
+            "rationale:\n  - " + "\n  - ".join(missing),
+        )
+
+    def test_allowlist_entries_still_need_exemption(self) -> None:
+        unresolved = set(_all_missing_call_references({}))
+        stale = sorted(set(STALE_CALL_REFERENCE_ALLOWLIST) - unresolved)
+        self.assertEqual(
+            stale,
+            [],
+            "Stale call-reference allowlist entries; remove them:\n  - "
+            + "\n  - ".join(stale),
+        )
+
+    def test_allowlist_rationales_are_one_nonempty_line(self) -> None:
+        invalid = sorted(
+            key for key, rationale in STALE_CALL_REFERENCE_ALLOWLIST.items()
+            if not rationale.strip() or "\n" in rationale
+        )
+        self.assertEqual(
+            invalid,
+            [],
+            "Call-reference allowlist entries need a one-line rationale:\n  - "
+            + "\n  - ".join(invalid),
+        )
+
+    def test_scan_inputs_are_not_vacuous(self) -> None:
+        identifiers = python_code_identifiers(REPO_ROOT)
+        self.assertIn("dispatch_import_core", identifiers)
+        self.assertIn("PipelineDB", identifiers)
+        docstrings = lib_docstrings(REPO_ROOT)
+        self.assertTrue(any(path == REPO_ROOT / "lib" / "search.py"
+                            for path, _scope, _docstring in docstrings))
 
 
 # ======================================================================
@@ -275,8 +562,7 @@ class TestDocLinksResolve(unittest.TestCase):
 # Check 4 — nix/module.nix option `description` coverage (ratchet)
 # ======================================================================
 
-# Pre-existing gaps at audit-creation time (issue #570) — 37 options
-# declared before this scan existed. Ratchet: no NEW option may join this
+# Pre-existing gaps at audit-creation time (issue #570). Ratchet: no NEW option may join this
 # list (test_no_new_options_without_description catches it); entries
 # should shrink to zero as each option earns a real description
 # (test_allowlist_entries_still_missing_description catches staleness).
@@ -399,7 +685,7 @@ class TestModuleOptionDescriptions(unittest.TestCase):
     description IS the documentation for most options, so a description-
     free option is effectively undocumented.
 
-    Ratchet, not a hard gate (issue #570): 37 pre-existing options lacked
+    Ratchet, not a hard gate (issue #570): pre-existing options lacked
     a description when this audit was written. See
     OPTIONS_WITHOUT_DESCRIPTION_OK. No NEW option may join that list.
     """

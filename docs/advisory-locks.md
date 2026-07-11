@@ -49,8 +49,8 @@ Advisory locks are:
 
 ## Namespaces
 
-All namespace constants live in `lib/pipeline_db.py`. The key space is
-PostgreSQL's two-arg `pg_advisory_lock(int4, int4)` — first arg is the
+All namespace constants live in `lib/pipeline_db/_shared.py`. The key space is
+PostgreSQL's two-arg `pg_try_advisory_lock(int4, int4)` — first arg is the
 namespace, second is the per-lock key.
 
 | Namespace | Constant | Hex | ASCII | Key | Scope |
@@ -114,7 +114,7 @@ it.
 `zlib.crc32` mask of the (`.strip()`-normalised) release id string.
 Covers both MB UUIDs and Discogs numeric IDs since both share the
 `mb_release_id` column. See the docstring on `release_id_to_lock_key`
-in `lib/pipeline_db.py` for the collision analysis (probability
+in `lib/pipeline_db/_shared.py` for the collision analysis (probability
 ~N²/2^31; false collision delays an unrelated release by one cycle).
 
 ### PLAN — per-request plan-generation lock
@@ -341,7 +341,7 @@ session and returns False — revisit the ordering rules.
 | Force/manual outer | `lib/dispatch/entry_points.py` | `dispatch_import_from_db` | IMPORT | `request_id` |
 | Replace operator action | `lib/mbid_replace_service.py` | `MbidReplaceService.replace_request_mbid` | IMPORT | `request_id` |
 | Importer worker singleton | `scripts/importer.py` | `main` | IMPORTER | `1` |
-| Import queue dedupe | `lib/pipeline_db.py` | `enqueue_import_job` | unique index | `dedupe_key` |
+| Import queue dedupe | `lib/pipeline_db/` | `enqueue_import_job` | unique index | `dedupe_key` |
 | Plan generation | `lib/search_plan_service.py` | `SearchPlanService.generate_for_new_request` / `generate_for_request` | PLAN | `request_id` |
 | Wrong-match cleanup | `lib/wrong_match_cleanup_service.py` | `cleanup_wrong_match` | WMCL | `wrong_match_cleanup_lock_key(request_id, download_log_id, resolved_path)` |
 
@@ -358,7 +358,7 @@ are intentionally omitted — grep for `advisory_lock(` to find them.
 To add a new lock:
 
 1. Pick a namespace constant with an ASCII-recognisable hex value (make
-   `pg_locks` debuggable). Define it in `lib/pipeline_db.py` next to
+   `pg_locks` debuggable). Define it in `lib/pipeline_db/_shared.py` next to
    the existing `ADVISORY_LOCK_NAMESPACE_*` constants.
 2. Decide key derivation. Natural-int keys (request_id) are trivial.
    String keys need a stable hash — use `zlib.crc32(...) & 0x7FFFFFFF`

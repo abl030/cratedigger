@@ -254,9 +254,11 @@ Example: `2006 - Let Me Introduce My Friends` and `2007 - Let Me Introduce My Fr
 
 If both the embedded `album` tags differ (e.g., `Interpol` vs `Interpol [EP]`), Meelo correctly creates separate albums — these are different works, not different editions.
 
-See `docs/008-meelo-release-identity.md` for the full analysis.
+The full analysis is preserved in this primer's release-identity sections.
 
-After changing the regex, existing files need a **forced refresh** to pick up the new parsing (see Rescanning Library below). A one-off script `scripts/meelo_refresh_brackets.sh` was used to refresh all affected albums.
+After changing the regex, existing files need a **forced refresh** to pick up
+the new parsing (see Rescanning Library below). A disposable operator one-shot
+was used to refresh all affected albums; it was not retained as product code.
 
 ## Secrets
 
@@ -327,7 +329,7 @@ This is upstream design, documented at https://github.com/Arthi-chaud/Meelo/wiki
 
 ### Fixed: Release Collapsing (2026-03-13)
 
-Previously, two different pressings with the same album title collapsed into a single Meelo release because the regex captured the folder name as `Album` (not `Release`). Fixed by renaming the capture group to `Release` — embedded tags now provide `Album`, path provides `Release`. See `docs/008-meelo-release-identity.md` for full analysis.
+Previously, two different pressings with the same album title collapsed into a single Meelo release because the regex captured the folder name as `Album` (not `Release`). Fixed by renaming the capture group to `Release` — embedded tags now provide `Album`, path provides `Release`. The preceding release-identity section preserves the full analysis.
 
 ### Known Issue: Singles Classified as Studio Albums
 
@@ -656,4 +658,4 @@ Plex / Jellyfin (other media servers)
 | Wiki | https://github.com/Arthi-chaud/Meelo/wiki |
 | Albums & Releases | https://github.com/Arthi-chaud/Meelo/wiki/Albums-&-Releases |
 | Refreshing Metadata | https://github.com/Arthi-chaud/Meelo/wiki/Refreshing-Metadata |
-| Release identity analysis | docs/008-meelo-release-identity.md (local) |
+| Release identity analysis | Release-identity sections in this primer |

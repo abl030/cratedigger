@@ -67,10 +67,11 @@ result = resolve_youtube_album(
 **What this catches:** the round 1 #1 bug. `_resolve_mb_group` expected `mb_get_release(rg_mbid)` to return `None` on 404, but the real adapter raised `HTTPError`. Every test used `lambda: None` so the production crash never surfaced.
 
 **Helper rule:** if you find yourself writing `lambda m: None` to fake a mirror lookup, that is a smell — the production adapter doesn't return None on the documented failure mode. Either:
-- Use a documented stand-in (`tests/fakes.py::FakeMBLookup(raises_on_404=True)`), or
+- Use a documented stand-in (`tests/fakes/__init__.py::FakeMBLookup(raises_on_404=True)`), or
 - Inline the real exception class via `lambda m: (_ for _ in ()).throw(urllib.error.HTTPError(...))`.
 
-The first form is preferred — if the helper doesn't exist yet, add it to `tests/fakes.py` with the exception contract documented in its docstring.
+The first form is preferred — if the helper doesn't exist yet, add it to
+`tests/fakes/` with the exception contract documented in its docstring.
 
 ## Stronger enforcement (future work)
 
@@ -85,7 +86,7 @@ Make `PipelineDB.upsert_*` methods accept typed `msgspec.Struct` instances inste
 
 The album_title bug becomes impossible to express.
 
-### 2. `tests/test_pipeline_db_audit.py` (medium ROI, low effort)
+### 2. `tests/test_pipeline_db_write_audit.py` (medium ROI, low effort)
 
 A test that:
 - Introspects `PipelineDB` via `inspect` for every `upsert_*` / `add_*` / `update_*` method

@@ -874,8 +874,8 @@ pipeline-cli routes --json
 - **Replaced-row inclusion in cohorts is pinned**: `status='replaced'`
   audit rows are intentionally returned by `filter=all`/`unfindable`
   so operators can spot patterns across replacement history. Pinned
-  by `tests/test_triage_service.py::TestListTriage::test_list_includes_replaced_rows`
-  and the `lib/pipeline_db.py::list_triage_page` docstring.
+  by `tests/test_triage_service.py::TestListTriage.test_list_includes_replaced_rows`
+  and the `lib/pipeline_db/misc.py::list_triage_page` docstring.
 
 ### Review summary
 

@@ -129,7 +129,7 @@ that need beets' own cache coherence**.
 
 ### Client shape
 
-`lib/beets_rpc_client.py`, new file. Replaces `lib/beets_album_op.py`
+The proposed `beets_rpc_client` module replaces `lib/beets_album_op.py`
 subprocess primitives.
 
 ```python
@@ -180,7 +180,8 @@ Typed helpers return `msgspec.Struct` types, decoded via
 
 Once all callsites are ported:
 
-- **`lib/beets_album_op.py`** → replaced by `lib/beets_rpc_client.py`.
+- **`lib/beets_album_op.py`** → replaced by the proposed
+  `beets_rpc_client` module.
   5 invariants collapse to "spawn rpc, call method". No stdin
   prompts (we pass `delete_files=True` in JSON). No rc parsing (we
   get `{"ok": false, "error": {...}}`). No PATH/PYTHONPATH
@@ -286,11 +287,11 @@ its own — the old subprocess path stays until every callsite is
 ported.
 
 1. **Build `beets_rpc.py` server with `remove_album_by_id` only.**
-   Write it in `harness/beets_rpc.py`. Update
+   Write it in the proposed `beets_rpc` harness. Update
    `harness/run_beets_harness.sh` to be a no-arg spawn. Add unit
    tests for the one method. Don't wire into production yet.
 2. **Build `BeetsRpc` client with typed helpers.** Add
-   `FakeBeetsRpc` in `tests/fakes.py`. Write integration slice in
+   `FakeBeetsRpc` in `tests/fakes/`. Write integration slice in
    `tests/test_integration_slices.py` that spawns a real RPC
    against an ephemeral beets DB and asserts `remove_album_by_id`
    works.
