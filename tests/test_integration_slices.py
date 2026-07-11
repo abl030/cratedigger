@@ -4068,7 +4068,7 @@ class TestPostMoveResumeBlockGuard(unittest.TestCase):
         Exercises ``_materialize_processing_dir`` (the actual fire site
         seen in production logs at ``lib/download.py:583``).
         """
-        from lib.download_processing import Materialized, _materialize_processing_dir
+        from lib.download_materialization import Materialized, _materialize_processing_dir
         from lib.staged_album import StagedAlbum
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4097,7 +4097,7 @@ class TestPostMoveResumeBlockGuard(unittest.TestCase):
         attempt, preserves leftover files under failed_imports, and
         resets the request for a clean redownload.
         """
-        from lib.download_processing import MaterializeFailed, _materialize_processing_dir
+        from lib.download_materialization import MaterializeFailed, _materialize_processing_dir
         from lib.staged_album import StagedAlbum
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -5401,7 +5401,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 "lib.import_preview.measure_preimport_state",
                 side_effect=_sentinel_measure,
             ), patch(
-                "lib.download_processing._materialize_processing_dir",
+                "lib.download_materialization._materialize_processing_dir",
                 side_effect=_sentinel_materialize,
             ):
                 updated = import_preview_worker.process_claimed_preview_job(

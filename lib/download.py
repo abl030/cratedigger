@@ -1,9 +1,9 @@
 """Download polling — the poll state machine and search orchestration.
 
 All functions receive a CratediggerContext instead of reading
-module-level globals. Split (issue #146 phase 3): staging /
-materialization / validation-dispatch live in
-lib/download_processing.py; slskd transfer helpers in
+module-level globals. Split (issue #146 phase 3): materialization and
+recovery live in lib/download_materialization.py; validation/dispatch
+orchestration lives in lib/download_processing.py; slskd transfer helpers in
 lib/slskd_transfers.py; event-feed ingestion in
 lib/slskd_events.py.
 """
@@ -25,6 +25,8 @@ from lib.download_processing import (
     CompletionDispatched,
     CompletionFailed,
     CompletionResult,
+)
+from lib.download_materialization import (
     Materialized,
     MaterializeFailed,
     MaterializeGuarded,
@@ -705,7 +707,7 @@ def _processing_path_ready_for_importer(
     """Fail closed before enqueueing a job that cannot resume local files.
 
     Thin wrapper around the ONE shared staged-path-readiness decision
-    (``lib.download_processing._evaluate_staged_path_readiness``, issue
+    (``lib.download_materialization._evaluate_staged_path_readiness``, issue
     #509) — the same decision ``_materialize_processing_dir`` uses for
     its own non-canonical branch, so this pre-enqueue gate and the
     materialize step it precedes can never drift apart again. This

@@ -20,7 +20,11 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, TYPE_CHECKING, cast
 
-from lib.download_processing import Materialized, MaterializeFailed, MaterializeGuarded
+from lib.download_materialization import (
+    Materialized,
+    MaterializeFailed,
+    MaterializeGuarded,
+)
 from lib.download_recovery import ProcessingPathKind, ProcessingPathLocation
 from lib.pipeline_db import TransferLedgerRow
 from lib.slskd_client import TransferSnapshot
@@ -274,7 +278,7 @@ class TestRequestScopedAutoImportPath(unittest.TestCase):
     ]
 
     def test_matches_only_request_scoped_auto_import_paths(self):
-        from lib.download_processing import _is_request_scoped_auto_import_path
+        from lib.download_materialization import _is_request_scoped_auto_import_path
 
         for desc, current_path, staging_dir, expected in self.CASES:
             with self.subTest(desc=desc):
@@ -382,6 +386,65 @@ class TestDownloadRejectionExtraction(unittest.TestCase):
             imported,
             {"_handle_rejected_result", "_reject_request_auto_import"},
         )
+
+
+class TestDownloadMaterializationExtraction(unittest.TestCase):
+    """Materialization and recovery have one focused owning module."""
+
+    MATERIALIZATION_NAMES = {
+        "ABANDONED_AUTO_IMPORT_SCENARIO",
+        "Materialized",
+        "MaterializeFailed",
+        "MaterializeGuarded",
+        "MaterializeResult",
+        "_is_request_scoped_auto_import_path",
+        "_attempt_fingerprint_for",
+        "classify_staged_album_location",
+        "_log_post_move_resume_blocked",
+        "_request_import_subprocess_started",
+        "_import_subprocess_already_started",
+        "_probe_abandon_path_liveness",
+        "_restore_abandoned_auto_import",
+        "_commit_abandoned_auto_import",
+        "_abandon_interrupted_auto_import",
+        "_abandon_request_scoped_auto_import",
+        "_evaluate_staged_path_readiness",
+        "_materialize_processing_dir",
+    }
+
+    def test_materialization_symbols_are_not_compatibility_exported(self):
+        import lib.download_materialization as materialization
+        import lib.download_processing as processing
+
+        for name in self.MATERIALIZATION_NAMES:
+            with self.subTest(name=name):
+                self.assertTrue(hasattr(materialization, name))
+                self.assertFalse(hasattr(processing, name))
+
+    def test_processing_uses_qualified_materialization_dependency(self):
+        import ast
+        from pathlib import Path
+
+        processing_tree = ast.parse(
+            Path("lib/download_processing.py").read_text(encoding="utf-8")
+        )
+        imported_names = {
+            alias.name
+            for node in ast.walk(processing_tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.module == "lib.download_materialization"
+            for alias in node.names
+        }
+        self.assertEqual(imported_names, set())
+        self.assertTrue(any(
+            isinstance(node, ast.ImportFrom)
+            and node.module == "lib"
+            and any(
+                alias.name == "download_materialization"
+                for alias in node.names
+            )
+            for node in ast.walk(processing_tree)
+        ))
 
 
 ## TestGatherSpectralContext and TestCheckQualityGateDecision removed:
@@ -1669,7 +1732,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                     raise OSError("disk full")
                 return real_move(src, dst, *args, **kwargs)
 
-            with patch("lib.download_processing.shutil.move", side_effect=_failing_move):
+            with patch("lib.download_materialization.shutil.move", side_effect=_failing_move):
                 result = process_completed_album(
                     album, [], ctx, import_job_id=1)
 
@@ -2376,7 +2439,7 @@ class TestAttemptScopedCanonicalFolder(unittest.TestCase):
     """
 
     def test_materialize_never_blends_files_from_a_different_attempt(self):
-        from lib.download_processing import (
+        from lib.download_materialization import (
             Materialized,
             _materialize_processing_dir,
         )
@@ -2705,7 +2768,7 @@ class TestEvaluateStagedPathReadiness(unittest.TestCase):
              seed_row, expected_type, expected_attr) in self.CASES:
             with self.subTest(desc=desc):
                 with tempfile.TemporaryDirectory() as tmpdir:
-                    from lib.download_processing import (
+                    from lib.download_materialization import (
                         _evaluate_staged_path_readiness,
                     )
                     entry, staged_album, location, db = self._seed_and_build(
@@ -2735,7 +2798,7 @@ class TestEvaluateStagedPathReadiness(unittest.TestCase):
         cleanly: the shared decision reports ``MaterializeFailed`` (the
         caller's cue to treat this as a completed self-heal, not a
         guarded manual-recovery case) and the DB row is already reset."""
-        from lib.download_processing import _evaluate_staged_path_readiness
+        from lib.download_materialization import _evaluate_staged_path_readiness
         with tempfile.TemporaryDirectory() as tmpdir:
             entry, staged_album, location, db = self._seed_and_build(
                 tmpdir,
@@ -4611,7 +4674,7 @@ class TestPollActiveDownloads(unittest.TestCase):
             _processing_path_ready_for_importer,
         )
         from lib.download_reconstruction import reconstruct_grab_list_entry
-        from lib.download_processing import (
+        from lib.download_materialization import (
             MaterializeFailed,
             _materialize_processing_dir,
         )
@@ -4930,7 +4993,7 @@ class TestPollActiveDownloads(unittest.TestCase):
                     raise OSError("mount unavailable")
                 return real_stat(path, *args, **kwargs)
 
-            with patch("lib.download_processing.os.stat", side_effect=stat_or_fail):
+            with patch("lib.download_materialization.os.stat", side_effect=stat_or_fail):
                 poll_active_downloads(ctx)
 
             self.assertEqual(fake_db.request(1)["status"], "downloading")

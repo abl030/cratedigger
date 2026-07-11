@@ -342,7 +342,7 @@ def reconcile_processing_current_path(
 def _row_files_fingerprint(files: list[object]) -> str:
     """Fingerprint a raw JSONB ``active_download_state.files`` list.
 
-    Mirrors ``lib.download_processing._attempt_fingerprint_for`` for the
+    Mirrors ``lib.download_materialization._attempt_fingerprint_for`` for the
     typed ``DownloadFile`` side — MUST derive from the same (username,
     filename) pairs so the repair scanner's classification never
     disagrees with the runtime poller's (issue #550 phase 2).

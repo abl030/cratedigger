@@ -128,7 +128,10 @@ def _materialize_automation_preview_path(
     """Ensure automation preview has the same stable folder importer uses."""
     from lib.config import read_runtime_config
     from lib.download_reconstruction import reconstruct_grab_list_entry
-    from lib.download_processing import Materialized, _materialize_processing_dir
+    from lib.download_materialization import (
+        Materialized,
+        _materialize_processing_dir,
+    )
     from lib.staged_album import StagedAlbum
 
     cfg = read_runtime_config()

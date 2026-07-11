@@ -300,7 +300,7 @@ class ActiveDownloadState(msgspec.Struct, omit_defaults=True):
     # subprocess never launched" (None — safe to retry) from "subprocess
     # may already have written to beets" (set — manual recovery required).
     # See ``docs/advisory-locks.md`` and the resume-block guards in
-    # ``lib/download.py::_log_post_move_resume_blocked``.
+    # ``lib/download_materialization.py::_log_post_move_resume_blocked``.
     import_subprocess_started_at: str | None = None
     current_path: str | None = None
 
@@ -324,7 +324,7 @@ class ActiveDownloadState(msgspec.Struct, omit_defaults=True):
         arrives as a JSON ``str``. Collapses the identical
         ``from_dict(x) if isinstance(x, dict) else from_json(str(x))`` dance
         at every call site that reads this column — ``lib/download.py``,
-        ``lib/download_processing.py``, ``lib/slskd_events.py``,
+        ``lib/download_materialization.py``, ``lib/slskd_events.py``,
         ``scripts/importer.py``, and both sites in
         ``scripts/import_preview_worker.py`` (issue #510).
 
