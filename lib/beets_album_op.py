@@ -58,13 +58,9 @@ from __future__ import annotations
 import logging
 import subprocess as sp
 from dataclasses import dataclass
-from typing import Literal, TYPE_CHECKING
+from typing import Literal
 
 import msgspec
-
-if TYPE_CHECKING:
-    from lib.beets_db import BeetsDB
-
 
 log = logging.getLogger("cratedigger")
 

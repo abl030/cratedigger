@@ -26,7 +26,6 @@ import os
 import ssl
 import sys
 import urllib.request
-import urllib.parse
 
 BASE = "https://plex.ablz.au"
 CTX = ssl.create_default_context()

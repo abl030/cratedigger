@@ -5,7 +5,7 @@ set -euo pipefail
 
 OUT="/tmp/cratedigger-test-output.txt"
 
-# Truncate up front: an early gate failure (JS/vulture) exits before the
+# Truncate up front: an early gate failure (JS/Ruff/vulture) exits before the
 # Python tee ever writes $OUT, leaving the PREVIOUS run's green unittest
 # output behind — "grep the output file" then reads as a false pass
 # (bit the 2026-07-11 honest-metrics session mid-review).
@@ -28,10 +28,10 @@ for f in tests/test_js_*.mjs; do
 done
 echo ""
 
-# Dead-code sweep — fails fast on new vulture findings before the slow
-# Python suite runs. Whitelist baseline lives at tools/vulture/whitelist.py;
-# operator either deletes the dead code or regenerates the whitelist with
-# the new entry (see CLAUDE.md § "Finding dead code").
+# Production-liveness sweep — source-local Ruff F401/F811 runs first, then
+# aggregate vulture. Vulture's baseline lives at tools/vulture/whitelist.py;
+# intentional import exports use exact redundant aliases (CLAUDE.md §
+# "Finding dead code").
 echo "=== Dead-code sweep ==="
 bash "$(dirname "$0")/find_dead_code.sh"
 echo ""

@@ -18,7 +18,7 @@ from lib.util import beets_subprocess_env
 from lib.dispatch.types import ImportOneRun
 
 if TYPE_CHECKING:
-    from lib.quality import ImportResult, V0ProbeEvidence
+    from lib.quality import V0ProbeEvidence
 
 
 def import_one_script_from_harness(beets_harness_path: str) -> str:

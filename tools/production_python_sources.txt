@@ -1,0 +1,7 @@
+# Production-only Python liveness roots. Shared by Ruff and aggregate vulture.
+lib
+web
+harness
+scripts
+cratedigger.py
+album_source.py

@@ -11,48 +11,20 @@ Usage:
 """
 
 import hashlib
-import json
 import logging
 import os
 import zlib
-from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Iterable, Iterator, Optional
-
-if TYPE_CHECKING:
-    from lib.quality import CandidateScore
-    from lib.triage_service import ParsedTriageFilter
-    from lib.unfindable_detection_service import UnfindableSearchLogSignal
+from datetime import datetime, timezone
+from typing import Any, Optional
 
 import psycopg2
 import psycopg2.extras
 import msgspec
 
-from lib.import_queue import (
-    IMPORT_JOB_YOUTUBE,
-    ImportJob,
-    IMPORT_JOB_PREVIEW_WAITING,
-    validate_preview_failure_status,
-    validate_job_type,
-    validate_payload,
-    validate_status,
-)
 from lib.quality import (
-    AlbumQualityEvidence,
-    AlbumQualityEvidenceFile,
-    AlbumQualityV0Metric,
-    AudioQualityMeasurement,
-    CooldownConfig,
     SpectralMeasurement,
     V0ProbeEvidence,
-    VerifiedLosslessProof,
-    should_cooldown,
-)
-from lib.release_identity import ReleaseIdentity, normalize_release_id
-from lib.search_classification import (
-    SearchSummary as _SearchSummary,
-    classify_failure_class as _classify_failure_class,
 )
 
 logger = logging.getLogger(__name__)
@@ -1130,4 +1102,3 @@ class TransferIdOwnership:
     """
     stamped: set[str]
     unstamped: set[str]
-

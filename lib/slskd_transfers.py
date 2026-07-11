@@ -20,7 +20,6 @@ from typing import Any, Literal, TYPE_CHECKING
 from lib.download_reconstruction import reconstruct_grab_list_entry
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.processing_paths import (
-    attempt_fingerprint,
     canonical_folder_for_row,
     canonical_processing_path,
     normalize_processing_path,
