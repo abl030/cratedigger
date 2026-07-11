@@ -714,8 +714,11 @@ def _probe_lossless_source_as_v0(album_path: str) -> V0ProbeEvidence | None:
 
 def _probe_native_lossy_as_v0(album_path: str) -> V0ProbeEvidence | None:
     """Non-destructively encode native lossy sources to temp V0 files and
-    measure them. Audit-only research evidence; never eligible for the
-    lossless-source provisional comparison (kind != lossless_source_v0).
+    measure them. A real, independent measurement (NOT the container
+    bitrate) — surfaced across the UI (Recents strip/detail, Wrong
+    Matches) as operator-facing comparison data, qualified "(from lossy)".
+    Never eligible for the lossless-source provisional POLICY comparison
+    (kind != lossless_source_v0).
     """
     lossy_files = sorted(
         f for f in os.listdir(album_path)
@@ -1811,8 +1814,9 @@ def main():
         if r.v0_probe:
             _log(f"  source_v0_probe_avg={r.v0_probe.avg_bitrate_kbps}kbps")
     elif not keep_lossless and not supported_lossless_source:
-        # Native lossy candidate: emit a research probe (audit-only,
-        # never eligible for the lossless-source provisional comparison).
+        # Native lossy candidate: emit a research probe. V0 runs on every
+        # candidate — the operator compares these across the UI; the kind
+        # keeps it out of the lossless-source provisional POLICY lane.
         r.v0_probe = _probe_native_lossy_as_v0(work_path)
         if r.v0_probe:
             _log(f"  native_lossy_research_v0_avg={r.v0_probe.avg_bitrate_kbps}kbps")

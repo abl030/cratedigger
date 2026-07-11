@@ -261,16 +261,16 @@ def full_pipeline_decision(
     # carry a min_bitrate) still classify against the MP3 VBR/CBR band
     # tables. Production always provides a real format via BeetsDB.
     #
-    # avg/median fall back to min_bitrate when the caller didn't supply a
-    # separate avg (legacy scenarios). Supplying existing_avg_bitrate matters
-    # under the default cfg.bitrate_metric=AVG policy — otherwise a VBR album
-    # with avg=245 but min=180 gets ranked off min=180 (GOOD instead of
-    # TRANSPARENT) and downstream comparisons misrepresent production.
+    # Supplying existing_avg_bitrate matters under the default
+    # cfg.bitrate_metric=AVG policy — otherwise a VBR album with avg=245 but
+    # min=180 gets ranked off min=180 (GOOD instead of TRANSPARENT) and
+    # downstream comparisons misrepresent production. When the caller didn't
+    # measure an avg, nothing is fabricated: metric selection falls back to
+    # min and the persisted basis says "min" (dl 36660 display-lie class).
     effective_existing_format = existing_format if existing_format is not None else "MP3"
     existing_m = build_existing_quality_measurement(
         min_bitrate_kbps=existing_min_bitrate,
         avg_bitrate_kbps=existing_avg_bitrate,
-        median_bitrate_kbps=existing_avg_bitrate,
         format=effective_existing_format,
         is_cbr=existing_is_cbr,
         override_min_bitrate=override_min_bitrate,
@@ -295,10 +295,13 @@ def full_pipeline_decision(
             spectral_grade in SPECTRAL_TRANSCODE_GRADES
             and v0_probe_overrides_spectral(candidate_probe_full)
         )
+        # avg/median stay None — only the min crosses this interface. A
+        # fabricated avg=min makes _selected_bitrate_with_source label a min
+        # value "avg" in the persisted basis (dl 36660: "avg 216k" beside an
+        # honest "V0 255kbps avg" on the same card). None falls back to the
+        # min with the honest "min" label; the classified value is identical.
         new_m = AudioQualityMeasurement(
             min_bitrate_kbps=min_bitrate,
-            avg_bitrate_kbps=min_bitrate,
-            median_bitrate_kbps=min_bitrate,
             format=stage2_new_format,
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate)
@@ -391,10 +394,12 @@ def full_pipeline_decision(
             converted_count=converted_count,
             is_transcode=policy_is_transcode,
         )
+        # avg/median stay None — the flat interface carries only the
+        # post-conversion MIN for this side. See the flac-keep site above:
+        # a fabricated avg=min is how the persisted basis learned to call a
+        # min value "avg" (dl 36660).
         new_m = AudioQualityMeasurement(
             min_bitrate_kbps=import_br,
-            avg_bitrate_kbps=import_br,
-            median_bitrate_kbps=import_br,
             format=stage2_new_format,
             verified_lossless=will_be_verified,
             spectral_grade=spectral_grade,
@@ -500,11 +505,12 @@ def full_pipeline_decision(
             explicit_format=new_format,
             native_codec_family="MP3",
         )
-        _mp3_avg = avg_bitrate if avg_bitrate is not None else min_bitrate
+        # No fabricated fallbacks: when the caller measured no avg, the
+        # basis metric falls back to (and honestly says) "min". Median is
+        # not part of this interface at all.
         new_m = AudioQualityMeasurement(
             min_bitrate_kbps=min_bitrate,
-            avg_bitrate_kbps=_mp3_avg,
-            median_bitrate_kbps=_mp3_avg,
+            avg_bitrate_kbps=avg_bitrate,
             format=stage2_new_format,
             is_cbr=is_cbr,
             spectral_grade=spectral_grade,
@@ -545,7 +551,10 @@ def full_pipeline_decision(
 
         result["imported"] = True
         gate_bitrate = min_bitrate
-        gate_avg_bitrate = _mp3_avg
+        # Real avg only; the gate's metric selection falls back to min when
+        # avg is unmeasured (same classified value as the old fabricated
+        # fallback — gate_m is internal and never persisted as a basis).
+        gate_avg_bitrate = avg_bitrate
         gate_cbr = is_cbr
         gate_format = stage2_new_format
 

@@ -421,8 +421,8 @@ console.log('renderRecentsItems() shows the compact IN/HAVE evidence strip on qu
     existing_min_bitrate: 320,
   }]);
   assertContains(html, 'r-evidence', 'evidence strip rendered on quality rows');
-  assertContains(html, '245k', 'incoming bitrate in strip');
-  assertContains(html, '320k', 'on-disk bitrate in strip');
+  assertContains(html, 'min 245k', 'incoming bitrate in strip, min-labelled');
+  assertContains(html, 'min 320k', 'on-disk bitrate in strip');
 }
 
 console.log('renderRecentsItems() omits the evidence strip when a row has no measurements');

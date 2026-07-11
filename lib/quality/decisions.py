@@ -391,12 +391,18 @@ def build_existing_quality_measurement(
         if override_min_bitrate is not None
         else min_bitrate_kbps
     )
-    raw_avg = avg_bitrate_kbps if avg_bitrate_kbps is not None else min_bitrate_kbps
-    raw_median = (
-        median_bitrate_kbps
-        if median_bitrate_kbps is not None
-        else raw_avg
-    )
+    # No fabricated fallbacks: an unmeasured avg/median stays None so the
+    # persisted basis labels the classified value "min" instead of claiming
+    # an avg nobody measured (dl 36660 display-lie class). Value-neutral
+    # under the AVG (deployed) and MIN metrics — selection falls back to
+    # the same min the old fabrication aliased. Only a hypothetical
+    # bitrate_metric=median config sees different stage-2 values, and
+    # median was never honest on this path (no real median crosses the
+    # flat interface). The CBR+override clamp below is different — that's
+    # deliberate policy (a CBR album's avg IS its min), pinned by its own
+    # tests.
+    raw_avg = avg_bitrate_kbps
+    raw_median = median_bitrate_kbps
     if is_cbr and override_min_bitrate is not None:
         effective_avg = override_min_bitrate
         effective_median = override_min_bitrate

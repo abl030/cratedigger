@@ -4,11 +4,13 @@ import { awstDateTime, esc } from './util.js';
 /**
  * Render a single V0 probe value with its provenance suffix.
  *
- * - ``lossless_source_v0`` is the gold standard — render bare ("260kbps avg"),
- *   the source proof itself is the message.
- * - ``native_lossy_research_v0`` means "we measured the candidate's avg
- *   bitrate, but it's not a comparable lossless-source probe" — render
- *   "(measurement)" so the reader doesn't misread it as an upgrade signal.
+ * V0 probes run on EVERY candidate and are load-bearing operator data
+ * (Wrong Matches has surfaced them regardless of lineage all along):
+ * - ``lossless_source_v0`` is the gold standard — render bare ("260kbps
+ *   avg"), the source proof itself is the message.
+ * - ``native_lossy_research_v0`` is a real ffmpeg V0-transcode probe of a
+ *   lossy source — render "(from lossy)" so it never reads as
+ *   lossless-source proof.
  * - Anything else falls back to showing the raw kind so debug rows are
  *   still legible.
  * @param {number|string} avg
@@ -21,8 +23,26 @@ function formatV0Probe(avg, kind) {
     return base;
   }
   if (kind === 'native_lossy_research_v0') {
-    return `${base} (measurement)`;
+    return `${base} (from lossy)`;
   }
+  if (kind === 'on_disk_research_v0') {
+    return `${base} (on-disk re-encode)`;
+  }
+  return `${base} (${esc(kind)})`;
+}
+
+/**
+ * Compact strip form of a V0 probe: "V0 255k avg", research probes
+ * qualified "(from lossy)" — same vocabulary as formatV0Probe.
+ * @param {number|string} avg
+ * @param {string|undefined} kind
+ * @returns {string}
+ */
+function stripV0Phrase(avg, kind) {
+  const base = `V0 ${esc(avg)}k avg`;
+  if (!kind || kind === 'lossless_source_v0') return base;
+  if (kind === 'native_lossy_research_v0') return `${base} (from lossy)`;
+  if (kind === 'on_disk_research_v0') return `${base} (on-disk re-encode)`;
   return `${base} (${esc(kind)})`;
 }
 
@@ -119,7 +139,10 @@ export function renderEvidenceStrip(h) {
     inParts.push(basisSidePhrase(basis, 'new'));
   } else {
     if (h.downloaded_label) inParts.push(esc(h.downloaded_label));
-    if (h.actual_min_bitrate) inParts.push(`${esc(h.actual_min_bitrate)}k`);
+    // Labelled "min": bare numbers on a card that also shows avg-labelled
+    // basis and V0 values invite exactly the min-vs-avg confusion the
+    // basis exists to kill (request 8781 operator report).
+    if (h.actual_min_bitrate) inParts.push(`min ${esc(h.actual_min_bitrate)}k`);
   }
   if (h.spectral_grade) {
     // With a basis, the clamped rank value already carries the floor —
@@ -129,29 +152,30 @@ export function renderEvidenceStrip(h) {
       : h.spectral_grade === 'suspect' ? '#d66' : '#aa8';
     inParts.push(`<span style="color:${sgColor};">${floor}${esc(h.spectral_grade)}</span>`);
   }
-  if (h.v0_probe_avg_bitrate && h.v0_probe_kind === 'lossless_source_v0') {
-    inParts.push(`V0 ${esc(h.v0_probe_avg_bitrate)}k avg`);
+  // V0 on every candidate: whichever probe ran, show it (qualified when
+  // it's a research probe of a lossy source, so lineages stay legible).
+  if (h.v0_probe_avg_bitrate) {
+    inParts.push(stripV0Phrase(h.v0_probe_avg_bitrate, h.v0_probe_kind));
   }
 
   const haveParts = [];
-  // Lead with "MP3 256k" as one piece — the codec class is often the
+  // Lead with "MP3 min 256k" as one piece — the codec class is often the
   // deciding metric (a rank upgrade at equal bitrate is unreadable
-  // without it).
+  // without it), and the min label keeps it distinct from the avg-labelled
+  // basis/V0 values on the same card.
   if (basis) {
     haveParts.push(basisSidePhrase(basis, 'existing'));
   } else if (h.existing_format && h.existing_min_bitrate) {
-    haveParts.push(`${esc(h.existing_format)} ${esc(h.existing_min_bitrate)}k`);
+    haveParts.push(`${esc(h.existing_format)} min ${esc(h.existing_min_bitrate)}k`);
   } else if (h.existing_format) {
     haveParts.push(esc(h.existing_format));
   } else if (h.existing_min_bitrate) {
-    haveParts.push(`${esc(h.existing_min_bitrate)}k`);
+    haveParts.push(`min ${esc(h.existing_min_bitrate)}k`);
   }
   if (h.existing_spectral_bitrate) haveParts.push(`~${esc(h.existing_spectral_bitrate)}k`);
-  if (
-    h.existing_v0_probe_avg_bitrate
-    && h.existing_v0_probe_kind === 'lossless_source_v0'
-  ) {
-    haveParts.push(`V0 ${esc(h.existing_v0_probe_avg_bitrate)}k avg`);
+  if (h.existing_v0_probe_avg_bitrate) {
+    haveParts.push(stripV0Phrase(
+      h.existing_v0_probe_avg_bitrate, h.existing_v0_probe_kind));
   }
 
   if (inParts.length === 0 && haveParts.length === 0) return '';
@@ -170,7 +194,7 @@ export function renderEvidenceStrip(h) {
  * reads positive must not bury its reason below the grid.
  *
  * Fixed schema (issue #575): the core vocabulary — Source / Spectral /
- * Bitrate / Distance — renders on EVERY entry, with an em-dash when a
+ * Min bitrate / Distance — renders on EVERY entry, with an em-dash when a
  * side has no data, so adjacent entries never jump shape. Existing-side
  * data appears inline as "(was Xkbps)" inside the value cell, so each
  * metric is apples-to-apples on the same row. Semantic extras (V0 probe
@@ -235,27 +259,25 @@ export function renderDownloadHistoryItem(h) {
     rows.push(['Spectral', '—']);
   }
 
-  // V0 probe row: only for true lossless-source probes (kind ==
-  // 'lossless_source_v0'). Non-lossless candidates carry a v0_probe
-  // populated from their avg bitrate measurement — useful for
-  // backend policy decisions, but redundant with the Bitrate row in
-  // the UI, where the same number already appears.
+  // V0 probe row: rendered for EVERY probe kind — V0 runs on every
+  // candidate (lossless sources get the gold-standard source probe;
+  // native-lossy sources get a real ffmpeg V0-transcode research probe)
+  // and the numbers are load-bearing operator data. formatV0Probe
+  // qualifies research probes "(from lossy)" on BOTH sides, so a
+  // mixed-lineage comparison stays legible instead of being hidden.
   //
-  // The "(was X)" suffix is V0-probe-avg vs V0-probe-avg only — a true
-  // apples-to-apples comparison against the library album's recorded
-  // lossless-source probe. We deliberately do NOT fall back to the
-  // existing raw min bitrate: painting a V0-probe avg next to a
-  // container min bitrate reads as a fake upgrade (e.g. "239kbps avg
-  // (was 92kbps)" compares two different metrics). When there's no
-  // comparable existing probe, the row shows the candidate alone; the
-  // Bitrate row below already carries the min-vs-min comparison.
-  if (
-    h.v0_probe_avg_bitrate
-    && h.v0_probe_kind === 'lossless_source_v0'
-  ) {
+  // The "(was X)" suffix is V0-probe vs V0-probe only. We deliberately
+  // do NOT fall back to the existing raw min bitrate: painting a
+  // V0-probe avg next to a container min bitrate reads as a fake
+  // upgrade (e.g. "239kbps avg (was 92kbps)" compares two different
+  // metrics). When there's no existing probe, the row shows the
+  // candidate alone; the Min bitrate row below already carries the
+  // min-vs-min comparison.
+  if (h.v0_probe_avg_bitrate) {
     const candidate = formatV0Probe(h.v0_probe_avg_bitrate, h.v0_probe_kind);
     const was = h.existing_v0_probe_avg_bitrate
-      ? `${esc(h.existing_v0_probe_avg_bitrate)}kbps avg`
+      ? formatV0Probe(
+        h.existing_v0_probe_avg_bitrate, h.existing_v0_probe_kind)
       : null;
     rows.push(['V0 probe', withWas(candidate, was)]);
   }
@@ -273,19 +295,21 @@ export function renderDownloadHistoryItem(h) {
     rows.push(['Compared', compared]);
   }
 
-  // Bitrate row — apples-to-apples between candidate and existing on
-  // min bitrate (kbps). The was-side names the on-disk codec when known:
-  // "256kbps (was MP3 256kbps)" explains a rank upgrade that the bare
-  // numbers would contradict.
+  // Min bitrate row — apples-to-apples between candidate and existing on
+  // min bitrate (kbps), and the label SAYS min: an unlabelled "Bitrate:
+  // 216kbps" beside avg-labelled Compared/V0 rows is exactly the
+  // min-vs-avg confusion the operator hit on request 8781. The was-side
+  // names the on-disk codec when known: "256kbps (was MP3 256kbps)"
+  // explains a rank upgrade that the bare numbers would contradict.
   const candidateMin = h.actual_min_bitrate;
   const existingMin = h.existing_min_bitrate;
   if (candidateMin || existingMin) {
     const candidate = candidateMin ? `${esc(candidateMin)}kbps` : '—';
     const wasFmt = h.existing_format ? `${esc(h.existing_format)} ` : '';
     const was = existingMin ? `${wasFmt}${esc(existingMin)}kbps` : null;
-    rows.push(['Bitrate', withWas(candidate, was)]);
+    rows.push(['Min bitrate', withWas(candidate, was)]);
   } else {
-    rows.push(['Bitrate', '—']);
+    rows.push(['Min bitrate', '—']);
   }
 
   if (h.final_format) {

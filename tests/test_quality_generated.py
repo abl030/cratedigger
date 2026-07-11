@@ -53,6 +53,7 @@ from lib.quality import (
     V0_SOURCE_LINEAGE_NATIVE_LOSSY_RESEARCH,
     VerifiedLosslessProof,
     classify_full_pipeline_decision,
+    compute_effective_override_bitrate,
     evidence_decision_name,
     full_pipeline_decision_from_evidence,
 )
@@ -192,6 +193,41 @@ def assert_basis_consistent(result: SimResult) -> None:
     if branch == "transcode_rank_regression" and verdict != "worse":
         raise AssertionError(
             f"transcode rank regression must be worse: {basis!r}")
+
+
+def assert_basis_metrics_truthful(
+    album: AlbumState, download: DownloadScenario, result: SimResult,
+) -> None:
+    """A basis side never claims a statistic the world didn't measure.
+
+    Download_log 36660: the decision layer synthesized the compared
+    candidate measurement with avg fabricated = the post-conversion MIN,
+    so the persisted basis read "avg 216k" beside an honest "255kbps avg"
+    V0-probe row on the same card. The rule: the flat decision interface
+    carries a real candidate avg only on the native-lossy path — both FLAC
+    paths classify the (post-conversion) min and must say "min". The
+    existing side has a real avg only when the album measured one, except
+    the deliberate CBR spectral-override clamp (its own pinned policy,
+    where a CBR album's avg IS its min). "median" never crosses the flat
+    interface on either side.
+    """
+    basis = result.comparison_basis
+    if basis is None:
+        return
+    if "median" in (basis["new_metric"], basis["existing_metric"]):
+        raise AssertionError(
+            f"median never crosses the flat interface: {basis!r}")
+    if basis["new_metric"] == "avg" and (
+            download.is_flac or download.avg_bitrate is None):
+        raise AssertionError(
+            f"candidate basis claims 'avg' but the world measured none: {basis!r}")
+    if basis["existing_metric"] == "avg" and album.avg_bitrate is None:
+        clamped_cbr = album.is_cbr and compute_effective_override_bitrate(
+            album.min_bitrate, album.spectral_bitrate, album.spectral_grade,
+        ) != album.min_bitrate
+        if not clamped_cbr:
+            raise AssertionError(
+                f"existing basis claims 'avg' but the album measured none: {basis!r}")
 
 
 _PARITY_FIELDS = (
@@ -402,6 +438,11 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
     def test_generated_basis_never_contradicts_decision(self, album, download):
         result = simulate(album, download)
         assert_basis_consistent(result)
+
+    @given(album=album_states(), download=download_scenarios())
+    def test_generated_basis_metrics_are_truthful(self, album, download):
+        result = simulate(album, download)
+        assert_basis_metrics_truthful(album, download, result)
 
     @given(album=transparent_mp3_albums(), download=download_scenarios())
     def test_measured_decisions_with_existing_carry_basis(
@@ -1005,6 +1046,59 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         bad = self._planted_basis(branch="vibes")
         with self.assertRaises(AssertionError):
             assert_basis_consistent(self._result_with_basis("import", bad))
+
+    def test_metric_truthfulness_trips_on_fabricated_flac_avg(self):
+        # The dl 36660 shape: a FLAC-source world whose basis claims the
+        # candidate classified an "avg" — no real avg crosses the flat
+        # interface on the FLAC paths.
+        album = AlbumState(
+            "planted", 256, False, None, None, False, None,
+            existing_format="AAC", avg_bitrate=256)
+        download = DownloadScenario(
+            "planted", is_flac=True, min_bitrate=0, is_cbr=False,
+            post_conversion_min_bitrate=216, converted_count=14)
+        bad = self._planted_basis(
+            new_metric="avg", new_value_kbps=216,
+            branch="cross_family_same_rank", verdict="equivalent",
+            new_rank="transparent", existing_rank="transparent")
+        with self.assertRaises(AssertionError):
+            assert_basis_metrics_truthful(
+                album, download, self._result_with_basis("downgrade", bad))
+
+    def test_metric_truthfulness_trips_on_fabricated_existing_avg(self):
+        album = AlbumState(
+            "planted", 256, False, None, None, False, None,
+            existing_format="MP3", avg_bitrate=None)
+        download = DownloadScenario(
+            "planted", is_flac=False, min_bitrate=200, is_cbr=False,
+            avg_bitrate=245)
+        bad = self._planted_basis(existing_metric="avg")
+        with self.assertRaises(AssertionError):
+            assert_basis_metrics_truthful(
+                album, download, self._result_with_basis("import", bad))
+
+    def test_metric_truthfulness_trips_on_median_claim(self):
+        album = AlbumState(
+            "planted", 256, False, None, None, False, None,
+            existing_format="MP3", avg_bitrate=256)
+        download = DownloadScenario(
+            "planted", is_flac=False, min_bitrate=200, is_cbr=False,
+            avg_bitrate=245)
+        bad = self._planted_basis(new_metric="median")
+        with self.assertRaises(AssertionError):
+            assert_basis_metrics_truthful(
+                album, download, self._result_with_basis("import", bad))
+
+    def test_metric_truthfulness_passes_honest_labels(self):
+        album = AlbumState(
+            "planted", 194, False, None, None, False, None,
+            existing_format="MP3", avg_bitrate=196)
+        download = DownloadScenario(
+            "planted", is_flac=False, min_bitrate=194, is_cbr=False,
+            avg_bitrate=288)
+        good = self._planted_basis()
+        assert_basis_metrics_truthful(
+            album, download, self._result_with_basis("import", good))
 
     def test_basis_checker_passes_a_coherent_basis(self):
         good = self._planted_basis()

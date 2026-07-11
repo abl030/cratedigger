@@ -275,6 +275,17 @@ verbatim when present; rows predating the field fall back to the legacy
 min-based labels. Never re-derive a comparison for display — that
 re-derivation is how the display learned to lie.
 
+**Metric labels are truthful at synthesis too (download_log 36660):** the
+same lie can be injected one seam earlier — the decision layer used to
+synthesize comparison measurements with `avg` fabricated `= min` (the
+lossless-conversion path carries only the post-conversion min across the
+flat decision interface), so a persisted basis read "avg 216k" while the
+files' real avg was 255. Synthesized measurements now leave unmeasured
+stats `None`; `_selected_bitrate_with_source` falls back to the min AND
+labels it `min`. Guarded by the `assert_basis_metrics_truthful` generated
+property (`tests/test_quality_generated.py`) and the request-8781 pins in
+`tests/test_quality_classification.py`.
+
 ## TODO
 
 - [ ] Integrate spectral gradient check into pipeline (import_one.py or cratedigger.py)
