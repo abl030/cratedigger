@@ -11,6 +11,7 @@ from lib.wrong_match_policy import (
     WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS,
     rejection_scenario_is_wrong_match_candidate,
 )
+from lib.wrong_matches import wrong_match_row_is_visible
 from tests.fakes import FakePipelineDB
 
 
@@ -54,6 +55,21 @@ def _fake_visibility(scenario: str | None) -> bool:
     return bool(db.get_wrong_matches())
 
 
+def assert_wrong_match_row_visibility(
+    scenario: str | None,
+    request_status: str | None,
+    include_replaced: bool,
+    *,
+    visible: bool,
+) -> None:
+    """Independent oracle for the full row-level worklist predicate."""
+    expected = (
+        scenario not in EXPECTED_NON_MATCH_SCENARIOS
+        and (include_replaced or request_status != "replaced")
+    )
+    assert visible is expected
+
+
 class TestWrongMatchPolicyChecker(unittest.TestCase):
     def test_operator_taxonomy_is_pinned_independently(self) -> None:
         self.assertEqual(
@@ -64,6 +80,15 @@ class TestWrongMatchPolicyChecker(unittest.TestCase):
     def test_checker_rejects_a_fact_rejection_surfacing(self) -> None:
         with self.assertRaises(AssertionError):
             assert_wrong_match_visibility("nested_layout", visible=True)
+
+    def test_row_checker_rejects_a_missing_scenario_guard(self) -> None:
+        with self.assertRaises(AssertionError):
+            assert_wrong_match_row_visibility(
+                "mixed_source",
+                "wanted",
+                False,
+                visible=True,
+            )
 
 
 class TestGeneratedWrongMatchPolicy(unittest.TestCase):
@@ -83,6 +108,77 @@ class TestGeneratedWrongMatchPolicy(unittest.TestCase):
         assert_wrong_match_visibility(
             scenario,
             visible=_fake_visibility(scenario),
+        )
+
+    @example(
+        scenario="audio_corrupt",
+        request_status="wanted",
+        include_replaced=False,
+    )
+    @example(
+        scenario="bad_audio_hash",
+        request_status="manual",
+        include_replaced=True,
+    )
+    @example(
+        scenario="nested_layout",
+        request_status="replaced",
+        include_replaced=True,
+    )
+    @example(
+        scenario="empty_fileset",
+        request_status=None,
+        include_replaced=False,
+    )
+    @example(
+        scenario="mixed_source",
+        request_status="wanted",
+        include_replaced=False,
+    )
+    @example(
+        scenario="spectral_reject",
+        request_status="wanted",
+        include_replaced=True,
+    )
+    @example(
+        scenario="high_distance",
+        request_status="replaced",
+        include_replaced=False,
+    )
+    @example(
+        scenario=None,
+        request_status="replaced",
+        include_replaced=True,
+    )
+    @given(
+        scenario=st.one_of(st.none(), st.text(max_size=40)),
+        request_status=st.one_of(
+            st.none(),
+            st.sampled_from(("wanted", "downloading", "manual", "imported", "replaced")),
+        ),
+        include_replaced=st.booleans(),
+    )
+    def test_row_visibility_obeys_scenario_and_status_policy(
+        self,
+        scenario: str | None,
+        request_status: str | None,
+        include_replaced: bool,
+    ) -> None:
+        row: dict[str, object] = {
+            "request_status": request_status,
+            "validation_result": {
+                "failed_path": "/failed/generated",
+                "scenario": scenario,
+            },
+        }
+        assert_wrong_match_row_visibility(
+            scenario,
+            request_status,
+            include_replaced,
+            visible=wrong_match_row_is_visible(
+                row,
+                include_replaced=include_replaced,
+            ),
         )
 
 

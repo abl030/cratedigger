@@ -50,6 +50,10 @@ from lib.dispatch.entry_points import (
     dispatch_import_from_db,
 )
 
+# Pyright-visible proof that the production callable continues to satisfy the
+# exact test-injection protocol when either signature changes.
+_dispatch_core_conformance: DispatchCoreFn = dispatch_import_core
+
 __all__ = [
     "DISPATCH_CODE_BAD_REQUEST",
     "DISPATCH_CODE_IMPORT_MANIFEST_REJECTED",
