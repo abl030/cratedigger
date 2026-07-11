@@ -10,8 +10,6 @@ and end-to-end through
 ``tests/test_integration_slices.py::TestSpectralPropagationSlice``.
 """
 
-import ast
-import inspect
 import unittest
 from unittest.mock import MagicMock, patch, PropertyMock
 import logging
@@ -3093,69 +3091,6 @@ class TestHarvestTerminalTransferEvidence(unittest.TestCase):
         harvest_terminal_transfer_evidence(ctx)
 
         self.assertEqual(fake_db.update_download_state_calls, [])
-
-
-class TestHarvestPhase0Wiring(unittest.TestCase):
-    """harvest_terminal_transfer_evidence must run immediately BEFORE
-    purge_completed_transfers() (issue #571 PR 5 — the per-id ledger-owned
-    purge that replaced the old bulk remove_completed_downloads() call),
-    guarded by its own try/except so a harvest failure can never block the
-    purge or the cycle — mirrors the same source-inspection pattern as
-    tests/test_disk_reaper_generated.py::TestDiskReaperPhase0Wiring.
-    """
-
-    def _main_source(self) -> str:
-        import cratedigger
-        return inspect.getsource(cratedigger.main)
-
-    def test_called_immediately_before_completed_transfer_purge(self):
-        source = self._main_source()
-        harvest_idx = source.index("harvest_terminal_transfer_evidence(_module_ctx)")
-        purge_idx = source.index("purge_completed_transfers(_module_ctx)")
-        self.assertLess(harvest_idx, purge_idx)
-
-    def test_call_is_isolated_in_its_own_try_except_exception_block(self):
-        tree = ast.parse(self._main_source())
-
-        def _calls_harvest(node: ast.AST) -> bool:
-            return (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "harvest_terminal_transfer_evidence"
-            )
-
-        matches = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Try):
-                continue
-            in_body = any(
-                _calls_harvest(n) for stmt in node.body for n in ast.walk(stmt))
-            if in_body:
-                matches.append(node)
-
-        inner_matches = [
-            m for m in matches
-            if not any(
-                other is not m and id(other) in {id(n) for n in ast.walk(m)}
-                for other in matches
-            )
-        ]
-
-        self.assertEqual(
-            len(inner_matches), 1,
-            "expected exactly one (innermost) try block calling "
-            "harvest_terminal_transfer_evidence")
-        node = inner_matches[0]
-        self.assertTrue(node.handlers, "the try block must have a handler")
-        for handler in node.handlers:
-            self.assertIsInstance(
-                handler.type, ast.Name,
-                "handler must catch a bare exception type")
-            assert isinstance(handler.type, ast.Name)
-            self.assertEqual(
-                handler.type.id, "Exception",
-                "must catch Exception broadly so a harvest failure can't "
-                "abort the cycle")
 
 
 class TestPollActiveDownloads(unittest.TestCase):

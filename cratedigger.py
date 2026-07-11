@@ -1474,72 +1474,13 @@ def main():
             logger.exception(
                 "JELLYFIN PIN: reconciliation failed; continuing with the cycle.")
 
-        # --- Phase 0: slskd orphan-transfer convergence (issue #278) ---
-        # Cancel live slskd transfers that no downloading row owns.
-        # Operator actions (Replace) deliberately leave in-flight
-        # transfers running instead of building per-action cancellation
-        # (CLAUDE.md invariant 7); this is the convergence that reaps
-        # them. Must run BEFORE Phase 1/Phase 2 start: the loop is
-        # quiescent here, so an unowned live transfer is genuinely
-        # orphaned rather than racing a mid-flight enqueue. Best-effort —
-        # never blocks the cycle.
-        try:
-            from lib.slskd_transfers import converge_slskd_orphans
-            converge_slskd_orphans(_module_ctx)
-        except Exception:
-            logger.exception(
-                "SLSKD ORPHAN: convergence failed; continuing with the cycle.")
-
-        # --- Phase 0b: on-disk orphan reaper (issue #550 defect 3, flipped
-        # to positive ledger ownership by issue #571) ---
-        # Completed-but-unconsumed downloads may have no slskd-side
-        # handle: the convergence above only cancels LIVE transfers, and
-        # the end-of-cycle purge removes stamped-owned completed records
-        # (#571 PR 5). This reaper reasons from
-        # filesystem + DB state instead — and only ever deletes a file it
-        # can positively prove it created (the write-ahead transfer
-        # ledger, migration 045, or a currently-downloading row's active
-        # canonical folder); an unrecognised file is never touched,
-        # however old. Same quiescent-window guarantee as the convergence
-        # above; best-effort — never blocks the cycle.
-        try:
-            from lib.slskd_transfers import reap_disk_orphans
-            reap_disk_orphans(_module_ctx)
-        except Exception:
-            logger.exception(
-                "DISK-REAP: sweep failed; continuing with the cycle.")
-
-        # --- Phase 0c: slskd search-ledger sweep (issue #576) ---
-        # Delete completed slskd searches whose id is in cratedigger's
-        # write-ahead ledger — heals every leak path a process death can
-        # create (kill/SIGTERM mid-cycle, a submit retry's half-created
-        # earlier attempt, a submit error after slskd already accepted the
-        # POST, a post-accept collection crash). Never touches a search
-        # whose id isn't ledgered (#571 good-citizen doctrine). Best-effort
-        # internally as well — never blocks the cycle.
-        try:
-            from lib.slskd_searches import converge_slskd_searches
-            converge_slskd_searches(_module_ctx)
-        except Exception:
-            logger.exception(
-                "SEARCH-LEDGER: sweep failed; continuing with the cycle.")
-
-        # --- Phase 0d: slskd transfer-ledger prune (issue #571) ---
-        # Every production enqueue call site now write-ahead ledgers the
-        # (username, filename) it is about to POST to slskd (migration
-        # 045) — this is ONLY the bounded-retention prune of that
-        # bookkeeping table; it never touches slskd or disk state itself.
-        # The convergence (Phase 0), disk reaper (Phase 0b), and the
-        # end-of-cycle completed-transfer purge all consult this ledger
-        # to prove ownership. The prune window (90d) must strictly
-        # exceed the reaper's own age threshold — see
-        # reap_disk_orphans' docstring.
-        try:
-            from lib.slskd_transfer_ledger import prune_transfer_ledger_cycle
-            prune_transfer_ledger_cycle(_module_ctx)
-        except Exception:
-            logger.exception(
-                "TRANSFER-LEDGER: prune failed; continuing with the cycle.")
+        # --- Phase 0 convergence ---
+        # Run the ordered transfer convergence, disk reaper, search-ledger
+        # sweep, and transfer-ledger prune while the loop is quiescent, before
+        # Phase 1/Phase 2 can race their ownership snapshots.  The registry's
+        # runner isolates every step so cleanup can never abort the cycle.
+        from lib.convergence import ConvergenceGroup, run_convergence_group
+        run_convergence_group(_module_ctx, ConvergenceGroup.PHASE_ZERO)
 
         logger.info("Starting Phase 1 (poll downloads) in background...")
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="phase1") as pool:
@@ -1581,37 +1522,12 @@ def main():
             except Exception:
                 logger.exception("Phase 1 (poll downloads) failed — continuing to cleanup")
 
-        # --- Pre-purge terminal transfer evidence harvest (issue #564) ---
-        # The completed-transfer purge below discards slskd's per-transfer
-        # terminal state (including the failure reason) for anything it
-        # removes this cycle before the next poll cycle ever observes it.
-        # This harvest takes one last snapshot and stamps that evidence
-        # into active_download_state first. MUST stay ordered before the
-        # purge — best-effort, never blocks the cycle (the purge still
-        # runs even if the harvest fails).
-        try:
-            from lib.download import harvest_terminal_transfer_evidence
-            harvest_terminal_transfer_evidence(_module_ctx)
-        except Exception:
-            logger.exception(
-                "HARVEST: pre-purge evidence harvest failed; continuing "
-                "with the cycle.")
-
-        # --- Completed-transfer purge (issue #571 PR 5) ---
-        # Per-id removal of ledger-owned, completion-stamped completed
-        # slskd transfer records — replaces the old bulk
-        # remove_completed_downloads() call, which purged every completed
-        # record including a human's, on a shared instance. MUST stay
-        # ordered after the harvest above, for the same reason the old
-        # bulk call did: the harvest's snapshot must land in
-        # active_download_state before any of these records are removed.
-        # Best-effort — never blocks the cycle.
-        try:
-            from lib.slskd_transfers import purge_completed_transfers
-            purge_completed_transfers(_module_ctx)
-        except Exception:
-            logger.exception(
-                "COMPLETED-PURGE: sweep failed; continuing with the cycle.")
+        # --- End-of-cycle convergence ---
+        # The registry pins harvest-before-purge as ordering data: terminal
+        # transfer evidence must land in active_download_state before the
+        # ledger-owned completed records are removed.  Failure isolation is
+        # per step, so a failed harvest still cannot block the purge.
+        run_convergence_group(_module_ctx, ConvergenceGroup.END_OF_CYCLE)
 
         elapsed = time.time() - cycle_start
         from lib.cycle_summary import format_cycle_summary
