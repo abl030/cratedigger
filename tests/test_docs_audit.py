@@ -17,6 +17,7 @@ read straight off disk.
     - TestDocLinksResolve — repo-local markdown links resolve.
     - TestModuleOptionDescriptions — module options carry descriptions.
     - TestLivingCodeReferences — living repo paths and symbols resolve.
+    - TestSkillInstructionCodeReferences — tracked skill paths resolve.
     - TestBacktickedCallReferences — project-shaped call names still exist.
 """
 
@@ -38,10 +39,12 @@ from tests._docs_reference_audit import (  # noqa: E402
     REMOVAL_STABLE_REPO_ROOTS,
     REMOVAL_STABLE_ROOT_FILES,
     broken_repo_references,
+    broken_skill_instruction_references,
     lib_docstrings,
     living_doc_files,
     missing_call_references,
     python_code_identifiers,
+    tracked_skill_instruction_files,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -127,6 +130,95 @@ class TestReferenceScannerKnownBadCases(unittest.TestCase):
             REPO_ROOT,
         )
         self.assertEqual(len(findings), 1)
+
+    def test_missing_repo_path_in_fenced_skill_command_is_rejected(self) -> None:
+        findings = broken_skill_instruction_references(
+            REPO_ROOT / ".claude" / "skills" / "check" / "SKILL.md",
+            """Run the check:\n```bash\npyright lib/_missing_issue_620.py\n```\n""",
+            REPO_ROOT,
+        )
+        self.assertEqual(len(findings), 1)
+
+    def test_commonmark_fence_variants_cannot_hide_stale_paths(self) -> None:
+        cases = {
+            "indented backticks": (
+                "   ```bash\npyright lib/_missing_indented_issue_620.py\n   ```\n"
+            ),
+            "long backticks": (
+                "````bash\npyright lib/_missing_long_issue_620.py\n`````\n"
+            ),
+            "tilde fence": (
+                "~~~bash\npyright lib/_missing_tilde_issue_620.py\n~~~\n"
+            ),
+        }
+        path = REPO_ROOT / ".claude" / "skills" / "check" / "SKILL.md"
+        for label, text in cases.items():
+            with self.subTest(label=label):
+                findings = broken_skill_instruction_references(
+                    path,
+                    text,
+                    REPO_ROOT,
+                )
+                self.assertEqual(len(findings), 1)
+
+    def test_missing_root_file_in_fenced_skill_command_is_rejected(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / ".claude" / "skills" / "check" / "SKILL.md"
+            findings = broken_skill_instruction_references(
+                source,
+                "```bash\npyright album_source.py\n```\n",
+                root,
+            )
+        self.assertTrue(any(
+            "missing path album_source.py" in finding
+            for finding in findings
+        ))
+
+    def test_missing_inline_repo_path_in_skill_is_rejected(self) -> None:
+        findings = broken_skill_instruction_references(
+            REPO_ROOT / ".claude" / "skills" / "check" / "SKILL.md",
+            "See `lib/_missing_inline_issue_620.py`.",
+            REPO_ROOT,
+        )
+        self.assertEqual(len(findings), 1)
+
+    def test_missing_path_in_inline_skill_command_is_rejected_once(self) -> None:
+        findings = broken_skill_instruction_references(
+            REPO_ROOT / ".claude" / "skills" / "check" / "SKILL.md",
+            "Run `pyright lib/_missing_inline_command_issue_620.py`.",
+            REPO_ROOT,
+        )
+        self.assertEqual(len(findings), 1)
+
+    def test_upstream_beets_doc_path_is_excluded_only_for_beets_skill(self) -> None:
+        text = "See `docs/reference/_missing_upstream_issue_620.rst`."
+        beets_findings = broken_skill_instruction_references(
+            REPO_ROOT / ".claude" / "skills" / "beets-docs" / "SKILL.md",
+            text,
+            REPO_ROOT,
+        )
+        check_findings = broken_skill_instruction_references(
+            REPO_ROOT / ".claude" / "skills" / "check" / "SKILL.md",
+            text,
+            REPO_ROOT,
+        )
+        self.assertEqual(beets_findings, [])
+        self.assertEqual(len(check_findings), 1)
+
+    def test_cratedigger_doc_in_beets_skill_is_not_exempt(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / ".claude" / "skills" / "beets-docs" / "SKILL.md"
+            findings = broken_skill_instruction_references(
+                source,
+                "See `docs/beets-primer.md`.",
+                root,
+            )
+        self.assertTrue(any(
+            "missing path docs/beets-primer.md" in finding
+            for finding in findings
+        ))
 
     def test_nonexistent_call_identifier_is_rejected(self) -> None:
         findings = missing_call_references(
@@ -286,6 +378,84 @@ class TestLivingCodeReferences(unittest.TestCase):
             set(),
             "Register new tracked root files in the removal-stable file set.",
         )
+
+
+class TestSkillInstructionCodeReferences(unittest.TestCase):
+    """Tracked repo-owned skill instructions may only name live paths."""
+
+    def test_repo_paths_resolve(self) -> None:
+        findings: list[str] = []
+        for path in tracked_skill_instruction_files(REPO_ROOT):
+            findings.extend(broken_skill_instruction_references(
+                path,
+                path.read_text(encoding="utf-8"),
+                REPO_ROOT,
+            ))
+        self.assertEqual(
+            findings,
+            [],
+            "Stale repo path reference(s) in tracked skill instructions:\n  - "
+            + "\n  - ".join(findings),
+        )
+
+    def test_scope_is_repo_owned_tracked_skills_only(self) -> None:
+        files = tracked_skill_instruction_files(REPO_ROOT)
+        for skill_name in ("beets-docs", "check", "debug-download", "deploy"):
+            self.assertIn(
+                REPO_ROOT / ".claude" / "skills" / skill_name / "SKILL.md",
+                files,
+            )
+        for path in files:
+            relative = path.relative_to(REPO_ROOT)
+            self.assertEqual(relative.parts[:2], (".claude", "skills"))
+            self.assertEqual(relative.name, "SKILL.md")
+
+    def test_known_bad_stale_path_in_tracked_skill_is_rejected(self) -> None:
+        path = REPO_ROOT / ".claude" / "skills" / "check" / "SKILL.md"
+        self.assertIn(path, tracked_skill_instruction_files(REPO_ROOT))
+        text = path.read_text(encoding="utf-8")
+        stale_text = text.replace(
+            "lib/pipeline_db",
+            "lib/_missing_issue_620.py",
+            1,
+        )
+        self.assertNotEqual(stale_text, text)
+        findings = broken_skill_instruction_references(
+            path,
+            stale_text,
+            REPO_ROOT,
+        )
+        self.assertTrue(any(
+            "missing path lib/_missing_issue_620.py" in finding
+            for finding in findings
+        ))
+
+    def test_generated_plugin_and_untracked_skill_trees_are_excluded(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            tracked = root / ".claude" / "skills" / "owned" / "SKILL.md"
+            untracked = root / ".claude" / "skills" / "local" / "SKILL.md"
+            plugin = (
+                root / ".codex" / "plugins" / "cache" / "external"
+                / "SKILL.md"
+            )
+            for path in (tracked, untracked, plugin):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# Test\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(
+                [
+                    "git", "add", "--",
+                    tracked.relative_to(root).as_posix(),
+                    plugin.relative_to(root).as_posix(),
+                ],
+                cwd=root,
+                check=True,
+            )
+            files = tracked_skill_instruction_files(root)
+        self.assertIn(tracked, files)
+        self.assertNotIn(untracked, files)
+        self.assertNotIn(plugin, files)
 
 
 class TestBacktickedCallReferences(unittest.TestCase):

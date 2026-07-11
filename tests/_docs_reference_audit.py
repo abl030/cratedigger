@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import re
+import subprocess
 from pathlib import Path
 
 _FROZEN_DOC_DIRS = frozenset({"plans", "brainstorms", "solutions"})
@@ -45,6 +46,16 @@ _REMOVAL_STABLE_ROOT_FILE_FAMILIES_RE = re.compile(
 _CODE_SPAN_RE = re.compile(
     r"(?<!`)(?P<fence>`{1,2})(?!`)(?P<code>[^`\n]+?)(?P=fence)(?!`)"
 )
+_FENCE_OPEN_RE = re.compile(
+    r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>[^\r\n]*)$",
+)
+_FENCED_COMMAND_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_./~${}-])"
+    r"(?P<code>(?:\./)?[A-Za-z0-9_.-]+"
+    r"(?:/[A-Za-z0-9_.*?{}\[\]<>$-]+)*"
+    r"(?:#[A-Za-z0-9_.-]+)?(?::\d+(?:-\d+)?)?)"
+    r"(?![A-Za-z0-9_./-])"
+)
 _PY_SYMBOL_REFERENCE_RE = re.compile(
     r"^(?P<path>(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.py)"
     r"::(?P<symbol>[A-Za-z_][A-Za-z0-9_.]*)"
@@ -55,6 +66,18 @@ _CALL_FORM_RE = re.compile(
 )
 _LINE_SUFFIX_RE = re.compile(r":\d+(?:-\d+)?$")
 _TEMPLATE_MARKERS_RE = re.compile(r"[*?\[\]{}<>$]|(?:^|/)N{2,}[A-Za-z0-9_-]*")
+
+# These RST families are relative to the Beets source tree resolved by the
+# beets-docs skill, not Cratedigger. The source and exact upstream families
+# are both pinned so Cratedigger-owned ``docs/`` references remain audited.
+_SKILL_EXTERNAL_REFERENCE_RULES = {
+    ".claude/skills/beets-docs/SKILL.md": (
+        re.compile(
+            r"docs/(?:(?:reference|plugins|guides)/[^/]+\.rst|faq\.rst)"
+        ),
+        "Beets RST path resolved below the skill's BEETS_SRC directory.",
+    ),
+}
 
 
 def _relative(path: Path, repo_root: Path) -> str:
@@ -70,6 +93,66 @@ def _code_spans(text: str) -> list[tuple[str, int]]:
         (match.group("code").strip(), text.count("\n", 0, match.start()) + 1)
         for match in _CODE_SPAN_RE.finditer(text)
     ]
+
+
+def _command_token_spans(
+    text: str,
+    *,
+    first_line: int,
+) -> list[tuple[str, int]]:
+    """Return safely delimited command tokens with source lines."""
+    return [
+        (
+            match.group("code"),
+            first_line + text.count("\n", 0, match.start("code")),
+        )
+        for match in _FENCED_COMMAND_TOKEN_RE.finditer(text)
+    ]
+
+
+def _fenced_command_token_spans(text: str) -> list[tuple[str, int]]:
+    """Return tokens inside CommonMark fenced code blocks."""
+    lines = text.splitlines(keepends=True)
+    spans: list[tuple[str, int]] = []
+    index = 0
+    while index < len(lines):
+        opening_line = lines[index].rstrip("\r\n")
+        opening = _FENCE_OPEN_RE.fullmatch(opening_line)
+        if opening is None:
+            index += 1
+            continue
+
+        fence = opening.group("fence")
+        if fence[0] == "`" and "`" in opening.group("info"):
+            index += 1
+            continue
+        closing_re = re.compile(
+            rf"^ {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*$"
+        )
+        content_start = index + 1
+        closing_index = content_start
+        while closing_index < len(lines):
+            candidate = lines[closing_index].rstrip("\r\n")
+            if closing_re.fullmatch(candidate):
+                break
+            closing_index += 1
+
+        block_text = "".join(lines[content_start:closing_index])
+        spans.extend(_command_token_spans(
+            block_text,
+            first_line=content_start + 1,
+        ))
+        index = closing_index + 1
+    return spans
+
+
+def _is_external_skill_reference(rel_source: str, code: str) -> bool:
+    """Return whether a path is explicitly relative to an upstream tree."""
+    rule = _SKILL_EXTERNAL_REFERENCE_RULES.get(rel_source)
+    if rule is None:
+        return False
+    pattern, _rationale = rule
+    return pattern.fullmatch(code) is not None
 
 
 def _is_repo_path_candidate(value: str, repo_root: Path) -> bool:
@@ -126,6 +209,48 @@ def living_doc_files(repo_root: Path) -> list[Path]:
     return sorted(living)
 
 
+def tracked_skill_instruction_files(repo_root: Path) -> list[Path]:
+    """Return git-tracked, repo-owned skill instruction files only."""
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--", ".claude/skills/**/SKILL.md"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return sorted(
+        repo_root / value
+        for value in result.stdout.split("\0")
+        if value
+    )
+
+
+def _broken_repo_reference(
+    path: Path,
+    code: str,
+    line: int,
+    repo_root: Path,
+) -> str | None:
+    rel_source = _relative(path, repo_root)
+    normalised_code = code[2:] if code.startswith("./") else code
+    symbol_match = _PY_SYMBOL_REFERENCE_RE.fullmatch(normalised_code)
+    if symbol_match is not None:
+        repo_path = symbol_match.group("path")
+        symbol = symbol_match.group("symbol")
+        target = repo_root / repo_path
+        if not target.is_file():
+            return f"{rel_source}:{line}: missing path {repo_path}"
+        target_text = target.read_text(encoding="utf-8")
+        if not _symbol_occurs(symbol, target_text):
+            return f"{rel_source}:{line}: {repo_path} has no symbol {symbol}"
+        return None
+
+    repo_path = _normalise_repo_path(code, repo_root)
+    if repo_path is None or (repo_root / repo_path).exists():
+        return None
+    return f"{rel_source}:{line}: missing path {repo_path}"
+
+
 def broken_repo_references(
     path: Path,
     text: str,
@@ -133,31 +258,35 @@ def broken_repo_references(
 ) -> list[str]:
     """Return unresolved repo-path and ``path.py::symbol`` references."""
     findings: list[str] = []
-    rel_source = _relative(path, repo_root)
     for code, line in _code_spans(text):
-        normalised_code = code[2:] if code.startswith("./") else code
-        symbol_match = _PY_SYMBOL_REFERENCE_RE.fullmatch(normalised_code)
-        if symbol_match is not None:
-            repo_path = symbol_match.group("path")
-            symbol = symbol_match.group("symbol")
-            target = repo_root / repo_path
-            if not target.is_file():
-                findings.append(
-                    f"{rel_source}:{line}: missing path {repo_path}"
-                )
-                continue
-            target_text = target.read_text(encoding="utf-8")
-            if not _symbol_occurs(symbol, target_text):
-                findings.append(
-                    f"{rel_source}:{line}: {repo_path} has no symbol {symbol}"
-                )
-            continue
+        finding = _broken_repo_reference(path, code, line, repo_root)
+        if finding is not None:
+            findings.append(finding)
+    return findings
 
-        repo_path = _normalise_repo_path(code, repo_root)
-        if repo_path is None:
+
+def broken_skill_instruction_references(
+    path: Path,
+    text: str,
+    repo_root: Path,
+) -> list[str]:
+    """Return stale repo paths in tracked skill prose and command blocks."""
+    rel_source = _relative(path, repo_root)
+    spans: list[tuple[str, int]] = []
+    for code, line in _code_spans(text):
+        spans.append((code, line))
+        spans.extend(_command_token_spans(code, first_line=line))
+    spans.extend(_fenced_command_token_spans(text))
+
+    findings: list[str] = []
+    seen_findings: set[str] = set()
+    for code, line in spans:
+        if _is_external_skill_reference(rel_source, code):
             continue
-        if not (repo_root / repo_path).exists():
-            findings.append(f"{rel_source}:{line}: missing path {repo_path}")
+        finding = _broken_repo_reference(path, code, line, repo_root)
+        if finding is not None and finding not in seen_findings:
+            findings.append(finding)
+            seen_findings.add(finding)
     return findings
 
 
