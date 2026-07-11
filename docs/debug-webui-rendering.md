@@ -19,7 +19,7 @@ The server-side pagination fix is deployed and working:
 
 ## Frontend code to investigate
 
-The rendering logic is in `web/index.html`, function `loadReleaseGroup()` (around line 268):
+The rendering logic is in `web/js/discography.js`, function `loadReleaseGroup()` (around line 268):
 
 ```javascript
 async function loadReleaseGroup(id, el) {
@@ -30,8 +30,7 @@ async function loadReleaseGroup(id, el) {
     const r = await fetch(`${API}/api/release-group/${id}`);
     const data = await r.json();
     const all = (data.releases || []).sort(...);
-    const official = all.filter(r => r.status === 'Official' || !r.status);
-    const bootleg = all.filter(r => r.status && r.status !== 'Official');
+    const { visible, hidden } = splitPressings(all);  // owned/in-flight never hidden
     // ... renderRelease() for each, set relEl.innerHTML
   } catch (e) { relEl.innerHTML = '<div class="loading">Failed to load</div>'; }
 }

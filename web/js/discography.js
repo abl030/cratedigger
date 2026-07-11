@@ -174,6 +174,48 @@ export function synthesizeMasterlessRow(data) {
 }
 
 /**
+ * Split a release group's date-sorted pressing rows into the visible
+ * list and the collapsed Bootleg / Promo bucket.
+ *
+ * Invariant: a pressing the operator owns (``in_library``) or has an
+ * ACTIVE pipeline request on is NEVER hidden, whatever its status — the
+ * collapsed bucket only ever holds unowned, inactive non-official
+ * pressings. The Wrens "The Meadowlands" (request 4228) is the pin: its
+ * library copy is a Promotion pressing, and the old status-only split
+ * buried it in the collapsed section, making the expansion contradict
+ * the row header's "in library · wanted" badges.
+ *
+ * ``replaced`` does not pin: it's the terminal frozen-audit status (the
+ * overlay carries it through unfiltered), renders no badge, and an
+ * abandoned request is not a claim on the pressing.
+ *
+ * @param {Array<Object>} rows - Pressing rows (overlay fields present).
+ * @returns {{visible: Object[], hidden: Object[]}}
+ */
+export function splitPressings(rows) {
+  const pinned = (r) => r.in_library === true
+    || (!!r.pipeline_status && r.pipeline_status !== 'replaced');
+  const official = (r) => r.status === 'Official' || !r.status;
+  return {
+    visible: rows.filter(r => official(r) || pinned(r)),
+    hidden: rows.filter(r => !official(r) && !pinned(r)),
+  };
+}
+
+/**
+ * Provenance chip for non-official pressings ("promo", "bootleg", ...).
+ * Rendered on every non-official pressing row so a hoisted row (see
+ * splitPressings) carries its provenance into the main list.
+ * @param {string|undefined} status - MB release status.
+ * @returns {string} '' for Official / missing status.
+ */
+export function statusChipHtml(status) {
+  if (!status || status === 'Official') return '';
+  const label = status === 'Promotion' ? 'promo' : status.toLowerCase();
+  return `<span class="badge badge-nonofficial">${esc(label)}</span>`;
+}
+
+/**
  * Load and display releases for a release group.
  *
  * @param {string} id - MusicBrainz release group ID or Discogs master ID
@@ -228,8 +270,7 @@ export async function loadReleaseGroup(id, el, opts = {}) {
       ? [synthesizeMasterlessRow(data)]
       : (data.releases || []);
     const all = releaseRows.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
-    const official = all.filter(r => r.status === 'Official' || !r.status);
-    const bootleg = all.filter(r => r.status && r.status !== 'Official');
+    const { visible, hidden } = splitPressings(all);
 
     // For MB release-group endpoints the parent ``id`` IS the
     // release_group_id. For Discogs masters it is the master id, which
@@ -298,21 +339,21 @@ export async function loadReleaseGroup(id, el, opts = {}) {
       return renderReleaseRow({
         dataReleaseId: rel.id,
         onclick: `event.stopPropagation(); window.toggleReleaseDetail('${rel.id}')`,
-        titleHtml: `${esc(rel.title)}${badges}`,
+        titleHtml: `${esc(rel.title)}${statusChipHtml(rel.status)}${badges}`,
         metaLines: [`${rel.country || '?'} ${rel.date || '?'} - ${rel.format} - ${rel.track_count}t - ${rel.status || '?'}`],
         actionsHtml: `${toolbar}${replaceBtn}${spBtn}`,
         detail: { id: `reldet-${rel.id}` },
       });
     }
 
-    let html = official.map(renderRelease).join('');
-    if (bootleg.length > 0) {
+    let html = visible.map(renderRelease).join('');
+    if (hidden.length > 0) {
       html += `
         <div class="type-header" onclick="event.stopPropagation(); window.toggleSection(this)" style="color:#777;margin-top:6px;">
-          Bootleg / Promo <span class="type-count">${bootleg.length}</span>
+          Bootleg / Promo <span class="type-count">${hidden.length}</span>
         </div>
         <div class="type-body">
-          ${bootleg.map(renderRelease).join('')}
+          ${hidden.map(renderRelease).join('')}
         </div>
       `;
     }
