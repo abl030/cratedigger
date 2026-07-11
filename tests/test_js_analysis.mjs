@@ -74,7 +74,8 @@ console.log('renderRecordingsBlock() — markers stay with titles');
     ],
   };
   const html = renderRecordingsBlock(rg);
-  assertContains(html, 'Recordings:', 'heading present');
+  assertContains(html, 'Recordings', 'heading present');
+  assertContains(html, 'type-header', 'heading styled as a section header (separates the block from Bootleg / Promo)');
   // Single-span rows: marker and title inside one <span> (the flex
   // justify-between fix from PR3's screenshot loop).
   assertContains(html, '●</span></span>Only On P0', 'dot adjacent to partial-coverage title');

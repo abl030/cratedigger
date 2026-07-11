@@ -42,7 +42,7 @@
   .rg-year { color: #777; font-size: 0.85em; }
   .rg-meta { color: #777; font-size: 0.8em; }
   .releases { margin-top: 6px; padding-left: 12px; }
-  .release { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; background: #222; border-radius: 6px; margin-bottom: 0; cursor: pointer; }
+  .release { display: flex; justify-content: space-between; align-items: center; gap: 4px 6px; padding: 8px 10px; background: #222; border-radius: 6px; margin-bottom: 0; cursor: pointer; }
   /* Search-by-ID target ring. Persistent until close-artist / mode-switch / next paste. */
   .release.search-target { background: #1a2a22; box-shadow: 0 0 0 2px #6a9; }
   .rg.search-target { background: #1a2a22; border-left-color: #6a9; box-shadow: 0 0 0 2px #6a9; }
@@ -50,6 +50,14 @@
   .release-info { flex: 1; }
   .release-title { font-size: 0.9em; }
   .release-meta { color: #777; font-size: 0.75em; }
+  /* Phone widths: the action buttons don't shrink, so give the
+     title/meta column the full first line and let the buttons wrap
+     beneath it instead of crushing the text into a sliver. Must come
+     AFTER the base .release-info rule — same specificity, order wins. */
+  @media (max-width: 640px) {
+    .release { flex-wrap: wrap; justify-content: flex-start; }
+    .release-info { flex: 1 1 100%; min-width: 0; }
+  }
   .release-detail { background: #1a1a1a; padding: 10px 12px; margin: 0 0 4px 0; border-radius: 0 0 6px 6px; display: none; font-size: 0.85em; }
   .release-detail.open { display: block; }
   .release-detail .lib-track { font-size: 0.85em; color: #888; padding: 1px 0; display: flex; justify-content: space-between; }
@@ -59,7 +67,8 @@
   .btn-add { background: #2a5a2a; color: #8d8; }
   .btn-add:hover { background: #3a6a3a; }
   .btn-add:disabled { background: #333; color: #666; cursor: default; }
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.7em; font-weight: 600; margin-left: 6px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.7em; font-weight: 600; margin-left: 6px; white-space: nowrap; }
+  .badge-nonofficial { background: #2f2a38; color: #a9b; }
   .badge-new { background: #1a4a2a; color: #6d6; }
   .badge-upgraded { background: #1a4a2a; color: #6d6; }
   .badge-rejected { background: #4a1a1a; color: #d66; }

@@ -83,7 +83,11 @@ Browser → https://music.ablz.au
   download history, status / min-bitrate / intent controls) fetched from
   `/api/beets/album/<id>`.
 - **Release editions** — when you expand a release group, shows all editions sorted by date
-  - Official releases first, bootleg/promo collapsed
+  - Official releases first, bootleg/promo collapsed — EXCEPT pressings that
+    are in the library or have a pipeline request, which are always hoisted
+    into the visible list with a `promo`/`bootleg` provenance chip
+    (`splitPressings` in `web/js/discography.js`; an owned pressing is never
+    hidden, whatever its status)
   - Releases already in pipeline DB or beets library are badged
   - Click release metadata to open MB release page in new tab
 - **Add button** — adds release to pipeline DB (same logic as `pipeline-cli add`)

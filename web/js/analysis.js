@@ -29,12 +29,12 @@ export const _PRESSING_COLORS = ['#6af','#fa6','#6d6','#f6a','#af6','#6ff','#ff6
  */
 export function analysisChipHtml(rg) {
   if (rg.covered_by) {
-    return `<span style="color:#777;font-size:0.85em;margin-left:6px;">covered by ${esc(rg.covered_by)}</span>`;
+    return `<span style="color:#777;font-size:0.85em;margin-left:6px;white-space:nowrap;">covered by ${esc(rg.covered_by)}</span>`;
   }
   if (rg.unique_track_count > 0) {
-    return `<span style="color:#6d6;font-weight:600;margin-left:6px;">${rg.unique_track_count} unique</span>`;
+    return `<span style="color:#6d6;font-weight:600;margin-left:6px;white-space:nowrap;">${rg.unique_track_count} unique</span>`;
   }
-  return '<span style="color:#555;margin-left:6px;">0 unique</span>';
+  return '<span style="color:#555;margin-left:6px;white-space:nowrap;">0 unique</span>';
 }
 
 /**
@@ -93,7 +93,11 @@ export function computeRecordingDots(rg) {
 export function renderRecordingsBlock(rg) {
   if (!rg.tracks || rg.tracks.length === 0) return '';
   const { trackToPressings, totalPressings } = computeRecordingDots(rg);
-  let html = '<div style="margin:8px 0 4px;color:#888;font-size:0.85em;">Recordings:</div>';
+  // Styled like the collapsible sub-section headers (Bootleg / Promo)
+  // so the block reads as its own section of the expansion, not as a
+  // tracklist of whichever pressing row happens to render above it.
+  let html = '<div class="type-header" style="cursor:default;padding-left:0;" '
+    + 'onclick="event.stopPropagation()">Recordings <span class="type-count">across pressings</span></div>';
   // One span per row — .lib-track is flex justify-between, so marker
   // and title must live together or they get pushed to opposite edges.
   html += rg.tracks.map(t => {
@@ -146,13 +150,15 @@ export function applyAnalysisToExpansion(relEl, rgId) {
     const exCount = pressingExclusiveCounts[i];
     if (exCount > 0) {
       title.insertAdjacentHTML('beforeend',
-        `<span style="color:${color};font-weight:600;margin-left:6px;">${exCount} exclusive</span>`);
+        `<span style="color:${color};font-weight:600;margin-left:6px;white-space:nowrap;">${exCount} exclusive</span>`);
     }
   });
   const block = renderRecordingsBlock(rg);
   if (block) {
+    // border-top separator: without it the block visually attaches to
+    // the Bootleg / Promo sub-section rendered directly above it.
     relEl.insertAdjacentHTML('beforeend',
-      `<div class="disamb-recordings" style="padding:4px 10px 8px;">${block}</div>`);
+      `<div class="disamb-recordings" style="padding:4px 10px 8px;margin-top:10px;border-top:1px solid #2a2a2a;">${block}</div>`);
   }
 }
 
