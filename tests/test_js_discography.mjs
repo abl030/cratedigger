@@ -3,7 +3,13 @@
  * Run with: node tests/test_js_discography.mjs
  */
 
-import { synthesizeMasterlessRow, splitPressings, statusChipHtml } from '../web/js/discography.js';
+import {
+  renderPressingRow,
+  renderRgRow,
+  synthesizeMasterlessRow,
+  splitPressings,
+  statusChipHtml,
+} from '../web/js/discography.js';
 
 let passed = 0;
 let failed = 0;
@@ -15,6 +21,25 @@ function assertEqual(actual, expected, msg) {
     failed++;
     console.error(`  FAIL: ${msg} - expected '${expected}', got '${actual}'`);
   }
+}
+
+function assertContains(haystack, needle, msg) {
+  assertEqual(haystack.includes(needle), true, msg);
+}
+
+function assertExcludes(haystack, needle, msg) {
+  assertEqual(haystack.includes(needle), false, msg);
+}
+
+/** Independent expected encoder: JSON JS literal, then HTML attribute escaping. */
+function expectedJsArg(value) {
+  return JSON.stringify(String(value))
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/\\/g, '&#92;');
 }
 
 console.log('synthesizeMasterlessRow() — overlay fields survive the synthesis');
@@ -166,6 +191,71 @@ console.log('statusChipHtml() — non-official pressings get a provenance chip')
   assertEqual(statusChipHtml('Promotion').includes('badge-nonofficial'), true, 'chip uses the nonofficial badge class');
   assertEqual(statusChipHtml('Bootleg').includes('bootleg'), true, 'Bootleg -> bootleg chip');
   assertEqual(statusChipHtml('Pseudo-Release').includes('pseudo-release'), true, 'other statuses lowercased verbatim');
+}
+
+console.log('Release-id onclick arguments — adversarial deterministic pin');
+{
+  const id = "rg'\"\\</div><script>alert(1)</script>";
+  const arg = expectedJsArg(id);
+  const rgHtml = renderRgRow(
+    { id, title: 'Adversarial RG', first_release_date: '2003', is_masterless: true },
+    { artistName: 'The Wrens', nameLC: 'the wrens', source: 'mb' },
+  );
+  const pressingHtml = renderPressingRow({
+    id,
+    title: 'Adversarial pressing',
+    status: 'Official',
+    in_library: false,
+    pipeline_status: null,
+    country: 'US',
+    date: '2003',
+    format: 'CD',
+    track_count: 13,
+  }, { artistName: 'The Wrens', parentRgId: 'parent', canReplace: false });
+
+  assertContains(rgHtml, `window.loadReleaseGroup(${arg}, this`, 'RG click passes one encoded JS string argument');
+  assertExcludes(rgHtml, `window.loadReleaseGroup('${id}'`, 'known-bad raw single-quoted RG interpolation is absent');
+  assertContains(pressingHtml, `window.toggleReleaseDetail(${arg})`, 'pressing click passes one encoded JS string argument');
+  assertExcludes(pressingHtml, `window.toggleReleaseDetail('${id}')`, 'known-bad raw single-quoted pressing interpolation is absent');
+  assertExcludes(pressingHtml, '>Remove from beets</button>', 'unowned pressing omits disabled beets action');
+  assertContains(pressingHtml, '>Add request</button>', 'unowned pressing keeps Add request');
+  assertContains(pressingHtml, '>Replace</button>', 'unowned pressing keeps Replace');
+}
+
+console.log('Release-id onclick arguments — generated critical-character property sweep');
+{
+  const atoms = ['a', "'", '"', '\\', '<', '>', '&', '\n', '\u2028'];
+  const ids = ['plain-id', ...atoms];
+  for (const left of atoms) {
+    for (const right of atoms) ids.push(`id${left}${right}tail`);
+  }
+  for (const id of ids) {
+    const arg = expectedJsArg(id);
+    const rgHtml = renderRgRow(
+      { id, title: 'RG', first_release_date: '2000' },
+      { artistName: 'Artist', nameLC: 'artist' },
+    );
+    const pressingHtml = renderPressingRow({
+      id,
+      title: 'Pressing',
+      status: 'Official',
+      in_library: true,
+      beets_album_id: 42,
+      country: 'AU',
+      date: '2000',
+      format: 'CD',
+      track_count: 10,
+    }, { artistName: 'Artist', parentRgId: 'parent', canReplace: true });
+    assertContains(rgHtml, `window.loadReleaseGroup(${arg}, this`, `RG id round-trips safely: ${JSON.stringify(id)}`);
+    assertContains(pressingHtml, `window.toggleReleaseDetail(${arg})`, `pressing id round-trips safely: ${JSON.stringify(id)}`);
+    assertContains(pressingHtml, 'window.confirmDeleteBeets(42', `owned removal survives: ${JSON.stringify(id)}`);
+  }
+
+  const badId = "break'out";
+  const oldHandler = `window.toggleReleaseDetail('${badId}')`;
+  let oldCompiles = true;
+  try { new Function('window', oldHandler); } catch (_) { oldCompiles = false; }
+  assertEqual(oldCompiles, false, 'known-bad raw interpolation checker rejects apostrophe ID');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

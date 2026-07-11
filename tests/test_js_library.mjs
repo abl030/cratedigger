@@ -3,7 +3,7 @@
  * Run with: node tests/test_js_library.mjs
  */
 
-import { buildDeleteConfirmHtml } from '../web/js/library.js';
+import { buildDeleteConfirmHtml, renderLibraryDetailBody } from '../web/js/library.js';
 
 let passed = 0;
 let failed = 0;
@@ -46,6 +46,68 @@ console.log('buildDeleteConfirmHtml() omits pipeline note without release id');
   const html = buildDeleteConfirmHtml(7, 'Bodyjar', 'Plastic Skies', 12, null, '');
   assertContains(html, 'window.executeBeetsDeletion(7, this, null, &quot;&quot;)', 'empty release id still encoded safely');
   assertExcludes(html, 'matching pipeline request/history', 'no pipeline note without release id');
+}
+
+/** Independent expected encoder: JSON JS literal, then HTML attribute escaping. */
+function expectedJsArg(value) {
+  return JSON.stringify(String(value))
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/\\/g, '&#92;');
+}
+
+function libraryDetail(releaseId) {
+  return renderLibraryDetailBody({
+    mb_albumid: releaseId,
+    pipeline_id: 1712,
+    pipeline_status: 'wanted',
+    pipeline_source: 'request',
+    artist: 'Artist',
+    album: 'Album',
+    tracks: [],
+  }, 42);
+}
+
+console.log('Library quality controls — adversarial deterministic release-id pin');
+{
+  const id = "release'\"\\</button><script>alert(1)</script>";
+  const html = libraryDetail(id);
+  const arg = expectedJsArg(id);
+  assertContains(html, `window.setLibQuality(${arg}, 'wanted', null)`, 'wanted control encodes release id');
+  assertContains(html, `window.setLibQuality(${arg}, 'manual', null)`, 'manual control encodes release id');
+  assertContains(html, `window.setLibQuality(${arg}, null, parseInt(v))`, 'min-bitrate control encodes release id');
+  assertExcludes(html, `window.setLibQuality('${id}'`, 'known-bad raw single-quoted interpolation is absent');
+}
+
+console.log('Library quality controls — generated critical-character property sweep');
+{
+  const atoms = ['a', "'", '"', '\\', '<', '>', '&', '\n', '\u2028'];
+  const ids = ['plain-id'];
+  for (const left of atoms) {
+    for (const right of atoms) ids.push(`id${left}${right}tail`);
+  }
+  for (const id of ids) {
+    const html = libraryDetail(id);
+    const arg = expectedJsArg(id);
+    const encodedCalls = html.split(`window.setLibQuality(${arg},`).length - 1;
+    assertContains(html, `window.setLibQuality(${arg},`, `library ID encoded: ${JSON.stringify(id)}`);
+    if (encodedCalls !== 5) {
+      failed++;
+      console.error(`  FAIL: all five quality controls encode ${JSON.stringify(id)} — got ${encodedCalls}`);
+    } else {
+      passed++;
+    }
+  }
+
+  const badId = "break'out";
+  const oldHandler = `window.setLibQuality('${badId}', 'wanted', null)`;
+  let oldCompiles = true;
+  try { new Function('window', oldHandler); } catch (_) { oldCompiles = false; }
+  if (!oldCompiles) passed++;
+  else { failed++; console.error('  FAIL: known-bad raw library interpolation unexpectedly compiles'); }
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

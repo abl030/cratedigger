@@ -286,6 +286,58 @@ clearStore();
   assertEqual(html, '', 'detail disabled delete action can be omitted');
 }
 
+console.log('Child pressing toolbar — hides only meaningless disabled beets removal');
+clearStore();
+{
+  // Deterministic pin: a fresh unowned pressing must keep Add + Replace
+  // affordances at its call site while dropping the disabled beets action.
+  const state = buildReleaseActionState({ id: 'pressing-unowned', in_library: false });
+  const oldHtml = renderActionToolbar(state);
+  const html = renderActionToolbar(state, { hideDisabledRemove: true });
+  assertContains(oldHtml, '<button class="btn"', 'known-bad default toolbar contains disabled beets button');
+  assertContains(oldHtml, '>Remove from beets</button>', 'known-bad old child rendering shows meaningless action');
+  assertContains(html, '>Add request</button>', 'Add request remains visible');
+  assertExcludes(html, '>Remove from beets</button>', 'disabled beets action is omitted');
+}
+
+console.log('Child pressing toolbar — state-space sweep preserves acquire action and enabled removal');
+clearStore();
+{
+  const cases = [
+    { in_library: false, beets_album_id: null, pipeline_status: null, pipeline_id: null },
+    { in_library: false, beets_album_id: null, pipeline_status: 'wanted', pipeline_id: 101 },
+    { in_library: false, beets_album_id: null, pipeline_status: 'downloading', pipeline_id: 102 },
+    { in_library: false, beets_album_id: null, pipeline_status: 'imported', pipeline_id: 103 },
+    { in_library: false, beets_album_id: null, pipeline_status: 'manual', pipeline_id: 104 },
+    { in_library: true, beets_album_id: null, pipeline_status: null, pipeline_id: null },
+    { in_library: true, beets_album_id: 42, pipeline_status: null, pipeline_id: null },
+    { in_library: true, beets_album_id: 43, pipeline_status: 'wanted', pipeline_id: 105 },
+  ];
+  const acquireLabels = ['Add request', 'Upgrade', 'Remove request'];
+  for (const [i, input] of cases.entries()) {
+    const state = buildReleaseActionState({ id: `pressing-${i}`, ...input });
+    const baseline = renderActionToolbar(state);
+    const compact = renderActionToolbar(state, { hideDisabledRemove: true });
+    for (const label of acquireLabels) {
+      assertEqual(
+        compact.includes(`>${label}</button>`),
+        baseline.includes(`>${label}</button>`),
+        `case ${i}: ${label} visibility is unchanged`,
+      );
+    }
+    assertEqual(
+      compact.includes('>Remove from beets</button>'),
+      state.canRemoveBeets,
+      `case ${i}: beets removal renders exactly when enabled`,
+    );
+    assertEqual(
+      compact.includes('window.confirmDeleteBeets'),
+      state.canRemoveBeets,
+      `case ${i}: enabled beets handler is retained`,
+    );
+  }
+}
+
 console.log('Acquire button — manual review → disabled Add request');
 clearStore();
 {

@@ -1,6 +1,6 @@
 // @ts-check
 import { API, state, toast, updatePipelineStatus } from './state.js';
-import { esc, externalReleaseUrl, sourceLabel, detectSource, normalizeReleaseId } from './util.js';
+import { esc, externalReleaseUrl, sourceLabel, detectSource, jsArg, normalizeReleaseId } from './util.js';
 import { buildReleaseActionState } from './release_action_state.js';
 import { renderActionToolbar, renderAcquireActionButton, renderRemoveFromBeetsButton, renderReplaceButton } from './release_actions.js';
 import { renderStatusBadges } from './badges.js';
@@ -34,7 +34,7 @@ export function renderRgRow(rg, ctx) {
   const badges = renderStatusBadges(rg);
   // Masterless Discogs releases have no child master to expand; the rg row
   // is the leaf, so it carries data-release-id for search-by-ID ringing.
-  const leafAttr = rg.is_masterless ? ` data-release-id="${rg.id}"` : '';
+  const leafAttr = rg.is_masterless ? ` data-release-id="${esc(rg.id)}"` : '';
   // Search-plan inspector button — only when this rg has a pipeline
   // request. RG-level pipeline_id surfaces from the analysis overlay's
   // disambData snapshot via pipelineStore (see release_action_state.js).
@@ -51,10 +51,10 @@ export function renderRgRow(rg, ctx) {
   const opts = `{${optParts.join(',')}}`;
   return `
     <div class="rg" data-rg-id="${esc(rg.id)}"${leafAttr}>
-      <div onclick="event.stopPropagation(); window.loadReleaseGroup('${rg.id}', this, ${opts})">
+      <div onclick="event.stopPropagation(); window.loadReleaseGroup(${jsArg(rg.id)}, this, ${opts})">
         <span class="rg-year">${year}</span> <span class="rg-title">${esc(rg.title)}</span>${creditNote}${badges}${spBtn}
       </div>
-      <div class="releases" id="rel-${rg.id}"></div>
+      <div class="releases" id="rel-${esc(rg.id)}"></div>
     </div>
   `;
 }
@@ -216,6 +216,87 @@ export function statusChipHtml(status) {
 }
 
 /**
+ * Render one child pressing row in a release-group expansion.
+ *
+ * Child rows omit only the unavailable beets-removal action. Their acquire,
+ * Replace, and search-plan actions keep the same state semantics as every
+ * other browse surface; an enabled beets removal remains visible.
+ *
+ * @param {Object} rel - Pressing row with pipeline/library overlay fields.
+ * @param {{artistName: string, parentRgId: string|null, canReplace: boolean}} ctx
+ * @returns {string}
+ */
+export function renderPressingRow(rel, ctx) {
+  const badges = renderStatusBadges(rel);
+  const actionState = buildReleaseActionState({
+    ...rel,
+    artist: ctx.artistName,
+    album: rel.title,
+  });
+  const toolbar = renderActionToolbar(actionState, {
+    size: 'small',
+    hideDisabledRemove: true,
+  });
+  // Search-plan inspector button — Browse-tab only renders when the
+  // release has an active pipeline request (see release_action_state.js
+  // for the pipelineStore lookup).
+  const spBtn = renderSearchPlanButton({ pipelineId: actionState.pipelineId });
+  // Replace button — two variants:
+  //
+  //   - ``isCurrent`` (acquireKind === 'remove_request'): this row
+  //     IS the active/imported request. Standard mode — clicking
+  //     opens the picker on this request's release group so the
+  //     operator can switch to a sibling pressing.
+  //
+  //   - Otherwise: inverted mode. Clicking asks the operator which
+  //     active request in this RG should be replaced with the
+  //     clicked row's MBID. Enabled only when an existing
+  //     non-replaced row already targets a sibling MBID in the same RG.
+  //
+  // ``releaseGroupId`` may be null for legacy rows; the picker
+  // lazy-resolves it via ``POST /api/pipeline/<id>/resolve-rg``
+  // (standard) or ``GET /api/release/<mbid>`` (inverted) before
+  // fetching siblings.
+  const rgForReplace = rel.release_group_id || ctx.parentRgId || null;
+  const isCurrent = actionState.acquireKind === 'remove_request';
+  let replaceBtn = '';
+  if (isCurrent) {
+    if (actionState.pipelineId) {
+      replaceBtn = renderReplaceButton({
+        mode: 'standard',
+        sourceRequestId: actionState.pipelineId,
+        releaseGroupId: rgForReplace,
+        sourceLabel: `${ctx.artistName} — ${rel.title || ''}`,
+      }, {
+        className: 'btn',
+        style: 'padding:2px 8px;font-size:0.7em;white-space:nowrap;',
+        stopPropagation: true,
+      });
+    }
+  } else {
+    replaceBtn = renderReplaceButton({
+      mode: 'inverted',
+      targetMbid: rel.id,
+      releaseGroupId: rgForReplace,
+      targetLabel: `${ctx.artistName} — ${rel.title || ''}`,
+    }, {
+      className: 'btn',
+      style: 'padding:2px 8px;font-size:0.7em;white-space:nowrap;',
+      enabled: ctx.canReplace,
+      stopPropagation: true,
+    });
+  }
+  return renderReleaseRow({
+    dataReleaseId: rel.id,
+    onclick: `event.stopPropagation(); window.toggleReleaseDetail(${jsArg(rel.id)})`,
+    titleHtml: `${esc(rel.title)}${statusChipHtml(rel.status)}${badges}`,
+    metaLines: [`${rel.country || '?'} ${rel.date || '?'} - ${rel.format} - ${rel.track_count}t - ${rel.status || '?'}`],
+    actionsHtml: `${toolbar}${replaceBtn}${spBtn}`,
+    detail: { id: `reldet-${rel.id}` },
+  });
+}
+
+/**
  * Load and display releases for a release group.
  *
  * @param {string} id - MusicBrainz release group ID or Discogs master ID
@@ -278,73 +359,15 @@ export async function loadReleaseGroup(id, el, opts = {}) {
     // that path because ``hasActiveRg`` will look up a non-MB id.
     const parentRgId = isDiscogs ? null : id;
 
-    function renderRelease(rel) {
-      const badges = renderStatusBadges(rel);
-      const actionState = buildReleaseActionState({
-        ...rel,
-        artist: state.browseArtist?.name || '',
-        album: rel.title,
-      });
-      const toolbar = renderActionToolbar(actionState, { size: 'small' });
-      // Search-plan inspector button — Browse-tab only renders when the
-      // release has an active pipeline request (see release_action_state.js
-      // for the pipelineStore lookup).
-      const spBtn = renderSearchPlanButton({ pipelineId: actionState.pipelineId });
-      // Replace button — two variants:
-      //
-      //   - ``isCurrent`` (acquireKind === 'remove_request'): this row
-      //     IS the active/imported request. Standard mode — clicking
-      //     opens the picker on this request's release group so the
-      //     operator can switch to a sibling pressing.
-      //
-      //   - Otherwise: inverted mode. Clicking asks the operator which
-      //     active request in this RG should be replaced with the
-      //     clicked row's MBID. Enabled only when an existing
-      //     non-replaced row already targets a sibling MBID in the same
-      //     RG (``hasActiveRg``).
-      //
-      // ``releaseGroupId`` may be null for legacy rows; the picker
-      // lazy-resolves it via ``POST /api/pipeline/<id>/resolve-rg``
-      // (standard) or ``GET /api/release/<mbid>`` (inverted) before
-      // fetching siblings.
+    const artistName = state.browseArtist?.name || '';
+    const renderRelease = (rel) => {
       const rgForReplace = rel.release_group_id || parentRgId || null;
-      const isCurrent = actionState.acquireKind === 'remove_request';
-      let replaceBtn = '';
-      if (isCurrent) {
-        if (actionState.pipelineId) {
-          replaceBtn = renderReplaceButton({
-            mode: 'standard',
-            sourceRequestId: actionState.pipelineId,
-            releaseGroupId: rgForReplace,
-            sourceLabel: `${state.browseArtist?.name || ''} — ${rel.title || ''}`,
-          }, {
-            className: 'btn',
-            style: 'padding:2px 8px;font-size:0.7em;white-space:nowrap;',
-            stopPropagation: true,
-          });
-        }
-      } else {
-        replaceBtn = renderReplaceButton({
-          mode: 'inverted',
-          targetMbid: rel.id,
-          releaseGroupId: rgForReplace,
-          targetLabel: `${state.browseArtist?.name || ''} — ${rel.title || ''}`,
-        }, {
-          className: 'btn',
-          style: 'padding:2px 8px;font-size:0.7em;white-space:nowrap;',
-          enabled: hasActiveRg(rgForReplace),
-          stopPropagation: true,
-        });
-      }
-      return renderReleaseRow({
-        dataReleaseId: rel.id,
-        onclick: `event.stopPropagation(); window.toggleReleaseDetail('${rel.id}')`,
-        titleHtml: `${esc(rel.title)}${statusChipHtml(rel.status)}${badges}`,
-        metaLines: [`${rel.country || '?'} ${rel.date || '?'} - ${rel.format} - ${rel.track_count}t - ${rel.status || '?'}`],
-        actionsHtml: `${toolbar}${replaceBtn}${spBtn}`,
-        detail: { id: `reldet-${rel.id}` },
+      return renderPressingRow(rel, {
+        artistName,
+        parentRgId,
+        canReplace: hasActiveRg(rgForReplace),
       });
-    }
+    };
 
     let html = visible.map(renderRelease).join('');
     if (hidden.length > 0) {

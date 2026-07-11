@@ -55,6 +55,8 @@
      beneath it instead of crushing the text into a sliver. Must come
      AFTER the base .release-info rule — same specificity, order wins. */
   @media (max-width: 640px) {
+    .tabs { gap: 4px; }
+    .tab { padding: 8px 8px; font-size: 13px; white-space: nowrap; }
     .release { flex-wrap: wrap; justify-content: flex-start; }
     .release-info { flex: 1 1 100%; min-width: 0; }
   }
