@@ -152,7 +152,14 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   matrix in the issue/PR. Canonical run: issue #548, 2026-07-08 — 13
   mutants, incl. reverting fix `6cf26a4`, led to PR #555.
 - Use `nix-shell --run "bash scripts/run_tests.sh"` for full suite
-- Read `/tmp/cratedigger-test-output.txt` instead of re-running the 2-minute suite
+- Copy the unique artifact directory printed at start/completion; read its
+  `output.log` instead of re-running the 2-minute suite. `summary.json` records
+  the canonical worktree, start/end HEAD and cleanliness, timestamps, status,
+  and Python discovered/run counts. There is no global latest-output alias.
+- An exact-target citation must pass the `verify` subcommand of
+  `scripts/test_artifact.py` for the expected commit. Set
+  `CRATEDIGGER_TEST_ARTIFACT` on `git push` when the hook must require that
+  citation for every peeled target commit.
 - For single modules during dev: `nix-shell --run "python3 -m unittest tests.<module> -v"`
 
 ## API Contract Tests

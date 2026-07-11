@@ -1,15 +1,47 @@
 #!/usr/bin/env bash
-# Run full test suite, save output, print summary.
+# Run the full gate suite into a unique, exact-worktree artifact.
 # Usage: nix-shell --run "bash scripts/run_tests.sh"
 set -euo pipefail
 
-OUT="/tmp/cratedigger-test-output.txt"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+ARTIFACT_DIR="$(python3 scripts/test_artifact.py start --worktree "$REPO_ROOT")"
+OUT="$ARTIFACT_DIR/output.log"
+COUNTS="$ARTIFACT_DIR/python-counts.json"
 
-# Truncate up front: an early gate failure (JS/Ruff/vulture) exits before the
-# Python tee ever writes $OUT, leaving the PREVIOUS run's green unittest
-# output behind — "grep the output file" then reads as a false pass
-# (bit the 2026-07-11 honest-metrics session mid-review).
-: > "$OUT"
+# Capture every gate, not only unittest output. Process substitution keeps
+# each gate's real exit code visible to `set -euo pipefail`.
+exec > >(tee "$OUT") 2>&1
+
+finalize_run() {
+  local status=$?
+  local finalize_status=0
+  trap - EXIT
+  set +e
+  python3 scripts/test_artifact.py finalize \
+    --artifact "$ARTIFACT_DIR" \
+    --worktree "$REPO_ROOT" \
+    --exit-code "$status" \
+    --counts-file "$COUNTS"
+  finalize_status=$?
+  rm -f "$COUNTS"
+  if [[ "$status" -eq 0 && "$finalize_status" -ne 0 ]]; then
+    status=$finalize_status
+  fi
+  echo ""
+  echo "=== TEST ARTIFACT COMPLETE ==="
+  echo "Artifact directory: $ARTIFACT_DIR"
+  echo "Full output: $OUT"
+  echo "Structured summary: $ARTIFACT_DIR/summary.json"
+  echo "Exit status: $status"
+  exit "$status"
+}
+trap finalize_run EXIT
+
+echo "=== TEST ARTIFACT ==="
+echo "Artifact directory: $ARTIFACT_DIR"
+echo "Full output: $OUT"
+echo "Structured summary: $ARTIFACT_DIR/summary.json"
+echo ""
 
 # JS syntax check
 echo "=== JS syntax check ==="
@@ -38,7 +70,7 @@ echo ""
 
 # Python tests
 echo "=== Python tests ==="
-python3 -m unittest discover -s tests -t . -v 2>&1 | tee "$OUT"
+python3 scripts/test_artifact.py run-python --counts-file "$COUNTS"
 
 echo ""
 echo "=== SUMMARY ==="

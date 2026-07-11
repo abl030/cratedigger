@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 import unittest
 
+from scripts.test_artifact import create_artifact, finalize_artifact
+
 
 HOOK = Path(__file__).parents[1] / "scripts" / "pre-push"
 
@@ -32,8 +34,17 @@ class TestPrePushHook(unittest.TestCase):
             stub = self.stub_dir / command
             stub.write_text(
                 "#!/usr/bin/env bash\n"
+                "kind='" + command + "'\n"
+                "if [[ \"$kind\" == 'nix-shell' && \"${2:-}\" == "
+                "*'CRATEDIGGER_ARTIFACT_TOOL'* ]]; then\n"
+                "  kind='nix-shell-verify'\n"
+                "fi\n"
                 "printf '%s\\t%s\\t%s\\n' "
-                f"'{command}' \"$(git rev-parse HEAD)\" \"$PWD\" >> \"$GATE_LOG\"\n"
+                "\"$kind\" \"$(git rev-parse HEAD)\" \"$PWD\" >> \"$GATE_LOG\"\n"
+                "if [[ \"$kind\" == 'nix-shell-verify' ]]; then\n"
+                "  bash -c \"$2\"\n"
+                "  exit $?\n"
+                "fi\n"
                 f"[[ \"${{FAIL_GATE:-}}\" != '{command}' ]]\n"
             )
             stub.chmod(0o755)
@@ -80,7 +91,11 @@ class TestPrePushHook(unittest.TestCase):
         )
 
     def _run(
-        self, records: str, *, fail_gate: str | None = None
+        self,
+        records: str,
+        *,
+        fail_gate: str | None = None,
+        artifact: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["GIT_EDITOR"] = "true"
@@ -89,6 +104,8 @@ class TestPrePushHook(unittest.TestCase):
         env["GATE_LOG"] = str(self.gate_log)
         if fail_gate is not None:
             env["FAIL_GATE"] = fail_gate
+        if artifact is not None:
+            env["CRATEDIGGER_TEST_ARTIFACT"] = str(artifact)
         return subprocess.run(
             [str(HOOK), "origin", "ssh://example.invalid/repo.git"],
             cwd=self.repo,
@@ -97,6 +114,18 @@ class TestPrePushHook(unittest.TestCase):
             capture_output=True,
             env=env,
         )
+
+    def _green_artifact(self) -> Path:
+        artifact = create_artifact(self.repo, self.root / "artifacts")
+        (artifact / "output.log").write_text("Ran 1 test\nOK\n")
+        finalize_artifact(
+            artifact,
+            self.repo,
+            exit_code=0,
+            discovered_tests=1,
+            run_tests=1,
+        )
+        return artifact
 
     def _gates(self) -> list[tuple[str, str, Path]]:
         if not self.gate_log.exists():
@@ -192,6 +221,51 @@ class TestPrePushHook(unittest.TestCase):
         gates = self._gates()
         self.assertEqual([gate[0] for gate in gates], ["nix-shell", "nix"] * 2)
         self.assertEqual([gate[1] for gate in gates], [self.second] * 2 + [self.first] * 2)
+
+    def test_cited_artifact_matching_target_is_verified_before_gates(self) -> None:
+        artifact = self._green_artifact()
+
+        result = self._run(
+            self._record("refs/heads/main", self.second), artifact=artifact
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        gates = self._gates()
+        self.assertEqual(
+            [gate[0] for gate in gates],
+            ["nix-shell-verify", "nix-shell", "nix"],
+        )
+        self.assertIn("suite artifact verified", result.stderr)
+        self.assertIn(str(artifact), result.stderr)
+
+    def test_cited_artifact_mismatching_target_fails_without_gates(self) -> None:
+        artifact = self._green_artifact()
+
+        result = self._run(
+            self._record("refs/heads/old", self.first), artifact=artifact
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(
+            [gate[0] for gate in self._gates()], ["nix-shell-verify"]
+        )
+        self.assertIn("expected HEAD", result.stderr)
+        self.assertIn(self.first, result.stderr)
+
+    def test_one_cited_artifact_cannot_cover_distinct_target_commits(self) -> None:
+        artifact = self._green_artifact()
+        records = self._record("refs/heads/main", self.second)
+        records += self._record("refs/tags/old", self.first)
+
+        result = self._run(records, artifact=artifact)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(
+            [gate[0] for gate in self._gates()],
+            ["nix-shell-verify", "nix-shell-verify"],
+        )
+        self.assertIn(self.first, result.stderr)
+        self.assertIn("expected HEAD", result.stderr)
 
     def test_noncommit_ref_fails_loudly_without_running_gates(self) -> None:
         blob = self._git("hash-object", "-w", "--stdin", input_text="not a commit")

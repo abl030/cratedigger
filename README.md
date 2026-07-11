@@ -163,9 +163,16 @@ A request can be `wanted` while intentionally skipped for a few hours: retry-wor
 ## Development
 
 ```bash
-nix-shell --run "bash scripts/run_tests.sh"   # full suite (~2 min): JS, dead-code sweep, 4600+ python tests
+nix-shell --run "bash scripts/run_tests.sh"   # full suite; prints a unique artifact directory
 nix-shell --run "pyright"                     # 0 errors, enforced
 ```
+
+Each suite invocation stores its complete gate output and structured
+worktree/commit/count provenance in the printed directory. Read that run's
+`output.log`; there is no shared latest-output file that concurrent worktrees
+can overwrite. A clean committed run can be checked with
+the `verify` subcommand of `scripts/test_artifact.py`, and cited to the push
+hook via `CRATEDIGGER_TEST_ARTIFACT=<printed-directory> git push`.
 
 The dev shell resolves the same pinned nixpkgs as the module and production — one beets everywhere; `tests/test_harness_beets2_contract.py` runs the real beets so version drift fails the suite instead of production.
 

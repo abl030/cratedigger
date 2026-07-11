@@ -9,9 +9,9 @@ Run pyright + full test suite + type safety grep gate. Use this before committin
 
 ## Steps
 
-1. Run pyright on all key files:
+1. Run pyright on the full repository:
 ```bash
-pyright lib/quality lib/beets.py lib/beets_db.py lib/pipeline_db lib/dispatch lib/download.py harness/import_one.py harness/beets_harness.py album_source.py cratedigger.py scripts/pipeline_cli web/routes/pipeline.py web/routes/imports.py web/routes/library.py web/routes/browse.py tests/test_validation_result.py tests/test_import_result.py tests/test_quality_decisions.py tests/test_beets_db.py tests/test_pipeline_db.py tests/test_album_source.py tests/test_import_dispatch.py tests/web
+nix-shell --run "pyright"
 ```
 
 Must be **0 errors**. Do not proceed if there are new errors (psycopg2/slskd_api "could not be resolved" warnings are OK — they're C extensions).
@@ -30,11 +30,18 @@ nix-shell --run "bash scripts/run_tests.sh"
 
 4. Check results:
 ```bash
-grep -E "^Ran |^OK|^FAILED" /tmp/cratedigger-test-output.txt
-grep "^FAIL:\|^ERROR:" /tmp/cratedigger-test-output.txt
+# Set ARTIFACT to the unique directory printed by that run.
+grep -E "^Ran |^OK|^FAILED" "$ARTIFACT/output.log"
+grep "^FAIL:\|^ERROR:" "$ARTIFACT/output.log"
 ```
 
 Must show `OK` with no skipped tests. Investigate every failure; do not carry a
 chat-era "known issue" exemption forward without current repository evidence.
+For a clean committed target, verify exact provenance with:
+
+```bash
+nix-shell --run 'python3 scripts/test_artifact.py verify --artifact \
+  "$ARTIFACT" --expected-head "$(git rev-parse HEAD)"'
+```
 
 5. If all pass, safe to commit.

@@ -156,12 +156,23 @@ Schema lives in `migrations/NNN_name.sql`; the migrate oneshot runs them on ever
 ## Running tests
 
 ```bash
-nix-shell --run "bash scripts/run_tests.sh"    # full suite (~2 min) → /tmp/cratedigger-test-output.txt
-grep "^FAIL\|^ERROR" /tmp/cratedigger-test-output.txt
+nix-shell --run "bash scripts/run_tests.sh"    # prints its unique artifact directory
+# Set ARTIFACT to the directory printed by that invocation.
+grep "^FAIL\|^ERROR" "$ARTIFACT/output.log"
+nix-shell --run 'python3 scripts/test_artifact.py verify --artifact \
+  "$ARTIFACT" --expected-head "$(git rev-parse HEAD)"'
 nix-shell --run "python3 -m unittest tests.test_X -v"
 ```
 
-**ALWAYS `nix-shell --run` for Python** (`.claude/rules/nix-shell.md`). **Never re-run the full suite just to grep differently** — read the output file. The suite gates: JS syntax + JS tests, Ruff's source-local `F401`/`F811` import check, the aggregate vulture sweep, then unittest discovery — which includes `tests/test_docs_audit.py`, so the suite **fails if a new beets plugin, module option, or `pipeline-cli` subcommand ships undocumented** (or a doc link goes dead); docs are part of "done". `.claude/rules/code-quality.md` covers the test taxonomy, shared fakes/builders, the new-work checklist, and the docs-freshness rule.
+Set `ARTIFACT` to the directory printed at the start and completion of that
+invocation. It contains the full gate stream in `output.log` and exact
+worktree/HEAD/count provenance in `summary.json`; there is deliberately no
+global "latest output" alias. The verifier only accepts a completed green run
+that started and ended clean at the expected HEAD. To cite it during a push,
+run `CRATEDIGGER_TEST_ARTIFACT="$ARTIFACT" git push`; the hook checks it against
+every distinct peeled target commit before running its other gates.
+
+**ALWAYS `nix-shell --run` for Python** (`.claude/rules/nix-shell.md`). **Never re-run the full suite just to grep differently** — read the printed artifact's `output.log`. The suite gates: JS syntax + JS tests, Ruff's source-local `F401`/`F811` import check, the aggregate vulture sweep, then unittest discovery — which includes `tests/test_docs_audit.py`, so the suite **fails if a new beets plugin, module option, or `pipeline-cli` subcommand ships undocumented** (or a doc link goes dead); docs are part of "done". `.claude/rules/code-quality.md` covers the test taxonomy, shared fakes/builders, the new-work checklist, and the docs-freshness rule.
 
 **Generated (property-based) tests** (`tests/test_*_generated.py`, Hypothesis) run deterministically in the suite; after changing quality policy, run the randomized fuzz burst: `CRATEDIGGER_HYPOTHESIS_PROFILE=fuzz` on those modules. Failures shrink to minimal worlds — promote them to named `@example` pins or album-test-set scenarios, never JSON artifacts. **New features start by writing their invariants down, and every invariant ships as a PAIR — deterministic pin + generated property — in the same PR, with known-bad self-tests** (`.claude/rules/code-quality.md` § Red/Green TDD). When in doubt that the harness constrains anything, qualify it by fault injection. `docs/generated-testing.md`.
 
@@ -172,7 +183,7 @@ nix-shell --run "python3 -m unittest tests.test_X -v"
 ### Hooks
 
 - Pre-commit (`ln -sf ../../scripts/pre-commit .git/hooks/pre-commit`): pyright on staged `.py`.
-- Pre-push (`git config core.hooksPath scripts`, once per clone): the relative tracked hooks path makes every linked worktree invoke its own `scripts/pre-push`; it runs the randomized generated-test burst (push profile, fresh entropy each push — `docs/generated-testing.md`), then `nix flake check` (VM boot gate + eval guards + CLI bundle). Escape hatch: `git push --no-verify`.
+- Pre-push (`git config core.hooksPath scripts`, once per clone): the relative tracked hooks path makes every linked worktree invoke its own `scripts/pre-push`; when `CRATEDIGGER_TEST_ARTIFACT` is set it first verifies that exact suite artifact against every pushed commit, then runs the randomized generated-test burst (push profile, fresh entropy each push — `docs/generated-testing.md`) and `nix flake check` (VM boot gate + eval guards + CLI bundle). Escape hatch: `git push --no-verify`.
 - **Tag convention:** `vYYYY.MM.DD` (suffix `-N`) cut AFTER live verification on doc2.
 
 ## Shared AI surfaces

@@ -415,7 +415,7 @@ class TestSkillInstructionCodeReferences(unittest.TestCase):
         self.assertIn(path, tracked_skill_instruction_files(REPO_ROOT))
         text = path.read_text(encoding="utf-8")
         stale_text = text.replace(
-            "lib/pipeline_db",
+            "scripts/run_tests.sh",
             "lib/_missing_issue_620.py",
             1,
         )
