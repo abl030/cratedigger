@@ -432,7 +432,7 @@ MULTILINE_PATCH_BASELINE: dict[str, int] = {
     'lib.dispatch.evidence_gate.load_current_evidence_for_action': 2,
     'lib.download._run_completed_processing': 3,
     'lib.download_processing._handle_valid_result': 1,
-    'lib.download_processing._materialize_processing_dir': 2,
+    'lib.download_materialization._materialize_processing_dir': 2,
     'lib.download_processing.process_completed_album': 8,
     'lib.enqueue.check_for_match': 1,
     'lib.import_evidence.ensure_current_evidence_for_action': 6,

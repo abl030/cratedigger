@@ -2196,7 +2196,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             ) as preview, patch(
                 "lib.measurement.measure_preimport_state",
             ) as preimport, patch(
-                "lib.download_processing._materialize_processing_dir",
+                "lib.download_materialization._materialize_processing_dir",
             ) as materialize:
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,

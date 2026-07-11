@@ -13,7 +13,7 @@ Hypothesis property coverage.
 Two properties, driving REAL production functions
 (``lib/processing_paths.py::attempt_fingerprint`` /
 ``canonical_processing_path`` and
-``lib/download_processing.py::_materialize_processing_dir``):
+``lib/download_materialization.py::_materialize_processing_dir``):
 
 1. **Fingerprint properties** — ``attempt_fingerprint`` over generated
    ``(username, filename)`` sets is permutation-invariant, deterministic,
@@ -57,7 +57,7 @@ import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from hypothesis import assume, example, given
 from hypothesis import strategies as st
 
-from lib.download_processing import (
+from lib.download_materialization import (
     Materialized,
     _materialize_processing_dir,
 )

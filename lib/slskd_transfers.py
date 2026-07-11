@@ -2,8 +2,9 @@
 
 Split out of lib/download.py (issue #146 phase 3). Everything here
 talks to slskd's transfers API or reasons about its snapshots; pipeline
-polling lives in lib/download.py and staging/completion processing
-in lib/download_processing.py.
+polling lives in lib/download.py, materialization in
+lib/download_materialization.py, and validation/dispatch orchestration in
+lib/download_processing.py.
 """
 
 from __future__ import annotations
