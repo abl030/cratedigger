@@ -29,6 +29,16 @@ upgrade wrongly surfaces at the top. This module preserves the original date:
 The Jellyfin client (find/children/set) lives in ``lib/util.py``; all three
 functions take kwarg-DI seams so tests drive them without touching the
 network.
+
+Deliberate sibling duplication: this module and ``lib/plex_pin_service.py``
+share a capture-then-reconcile outline, but not a useful common state machine.
+Jellyfin stores ISO strings, waits on a landed detector plus TTL, and writes
+the album and its children; Plex stores epoch integers, locks one album field,
+and closes after a grace window. A shared core would mainly turn those real
+differences into strategy plumbing. Before adding a third backend, compare its
+actual capture/reconcile lifecycle with both siblings; extract a common engine
+only if it materially simplifies the behavior, otherwise keep the backend
+contract explicit in its own module.
 """
 from __future__ import annotations
 

@@ -564,6 +564,28 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertEqual(db.plex_added_at_pins[0]["status"], "done")
         self.assertEqual(db.plex_added_at_pins[0]["reconciled_at"], now)
 
+    def test_plex_pin_prune_matches_strict_terminal_age_contract(self):
+        db = FakePipelineDB()
+        cutoff = datetime(2026, 7, 11, tzinfo=timezone.utc)
+        for status, reconciled_at in (
+            ("done", cutoff - timedelta(seconds=1)),
+            ("skipped", cutoff),
+            ("pending", cutoff - timedelta(days=365)),
+        ):
+            pin_id = db.add_plex_added_at_pin(
+                imported_path=status, original_added_at=1,
+                rating_key=None, request_id=None)
+            db.plex_added_at_pins[pin_id - 1].update(
+                status=status, reconciled_at=reconciled_at)
+
+        removed = db.prune_terminal_plex_added_at_pins(older_than=cutoff)
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(
+            [row["status"] for row in db.plex_added_at_pins],
+            ["skipped", "pending"],
+        )
+
     def test_jellyfin_date_created_pin_add_get_pending_and_mark(self):
         """The fake mirrors migration-046 semantics: monotonic ids, pending
         filtered by status + captured_before cutoff, mark moves it terminal."""
@@ -600,6 +622,31 @@ class TestFakePipelineDB(unittest.TestCase):
             [])
         self.assertEqual(db.jellyfin_date_created_pins[0]["status"], "expired")
         self.assertEqual(db.jellyfin_date_created_pins[0]["reconciled_at"], now)
+
+    def test_jellyfin_pin_prune_matches_strict_terminal_age_contract(self):
+        db = FakePipelineDB()
+        cutoff = datetime(2026, 7, 11, tzinfo=timezone.utc)
+        for status, reconciled_at in (
+            ("done", cutoff - timedelta(seconds=1)),
+            ("skipped", cutoff - timedelta(days=1)),
+            ("expired", cutoff),
+            ("pending", cutoff - timedelta(days=365)),
+        ):
+            pin_id = db.add_jellyfin_date_created_pin(
+                imported_path=status,
+                original_date_created="2000-01-01T00:00:00Z",
+                album_item_id=status, children_item_ids=[], request_id=None)
+            db.jellyfin_date_created_pins[pin_id - 1].update(
+                status=status, reconciled_at=reconciled_at)
+
+        removed = db.prune_terminal_jellyfin_date_created_pins(
+            older_than=cutoff)
+
+        self.assertEqual(removed, 2)
+        self.assertEqual(
+            [row["status"] for row in db.jellyfin_date_created_pins],
+            ["expired", "pending"],
+        )
 
     def test_log_download_rejects_non_canonical_outcome(self):
         """Mirror of download_log_outcome_check — the fake must reject

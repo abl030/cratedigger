@@ -87,3 +87,24 @@ class _JellyfinPinsMixin(_PipelineDBBase):
             """,
             (status, reconciled_at, int(pin_id)),
         )
+
+    def prune_terminal_jellyfin_date_created_pins(
+        self,
+        *,
+        older_than: datetime,
+    ) -> int:
+        """Hard-delete terminal convergence rows strictly older than cutoff.
+
+        Pending rows are live bookkeeping and survive regardless of age.
+        ``reconciled_at == older_than`` also survives: retention uses a strict
+        age boundary, matching the transfer-ledger pruner convention.
+        """
+        cur = self._execute(
+            """
+            DELETE FROM jellyfin_date_created_pins
+            WHERE status = ANY(%s)
+              AND reconciled_at < %s
+            """,
+            (["done", "skipped", "expired"], older_than),
+        )
+        return cur.rowcount

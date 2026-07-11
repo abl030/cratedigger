@@ -411,6 +411,7 @@
     [Jellyfin]
     url = ${cfg.notifiers.jellyfin.url}
     token_file = ${toString cfg.notifiers.jellyfin.tokenFile}
+    ${optionalString (cfg.notifiers.jellyfin.libraryId != null) "library_id = ${cfg.notifiers.jellyfin.libraryId}"}
     path_map = ${cfg.notifiers.jellyfin.pathMap}
 
     [Logging]
@@ -1080,6 +1081,16 @@ in {
         tokenFile = mkOption {
           type = types.nullOr types.path;
           default = null;
+        };
+        libraryId = mkOption {
+          type = types.nullOr types.nonEmptyStr;
+          default = null;
+          example = "music-library-item-id";
+          description = ''
+            Jellyfin music library item ID for a targeted
+            POST /Items/{id}/Refresh. Null preserves the full-library
+            POST /Library/Refresh fallback.
+          '';
         };
         pathMap = mkOption {
           type = types.str;

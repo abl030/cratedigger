@@ -548,6 +548,15 @@ class TestSecretFileFields(unittest.TestCase):
         self.assertEqual(cfg.plex_token_file, "")
         self.assertEqual(cfg.jellyfin_token_file, "")
 
+    def test_jellyfin_library_id_is_optional_and_round_trips(self):
+        absent = CratediggerConfig.from_ini(configparser.RawConfigParser())
+        self.assertIsNone(absent.jellyfin_library_id)
+
+        config = configparser.RawConfigParser()
+        config.read_string("[Jellyfin]\nlibrary_id = music-library-id\n")
+        configured = CratediggerConfig.from_ini(config)
+        self.assertEqual(configured.jellyfin_library_id, "music-library-id")
+
 
 class TestResolvedSecrets(unittest.TestCase):
     """Resolver methods prefer *_file path over the legacy plaintext field.

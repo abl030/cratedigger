@@ -290,6 +290,38 @@ class TestPlexAddedAtPinsRoundTrip(unittest.TestCase):
         rows = db.get_pending_plex_added_at_pins(captured_before=past, limit=100)
         self.assertEqual([r for r in rows if r["id"] == pin_id], [])
 
+    def test_prune_terminal_pins_has_strict_status_and_age_boundary(self):
+        db = make_db()
+        cutoff = datetime(2026, 7, 11, 0, 0, tzinfo=timezone.utc)
+        cases = (
+            ("old done", "done", cutoff - timedelta(seconds=1), False),
+            ("old skipped", "skipped", cutoff - timedelta(days=1), False),
+            ("exact boundary", "done", cutoff, True),
+            ("inside retention", "skipped", cutoff + timedelta(seconds=1), True),
+            ("old pending", "pending", cutoff - timedelta(days=365), True),
+        )
+        ids: dict[str, int] = {}
+        for label, status, reconciled_at, _survives in cases:
+            pin_id = db.add_plex_added_at_pin(
+                imported_path=f"Artist/{label}", original_added_at=100,
+                rating_key=None, request_id=None)
+            db._execute(
+                "UPDATE plex_added_at_pins SET status = %s, "
+                "reconciled_at = %s WHERE id = %s",
+                (status, reconciled_at, pin_id),
+            )
+            ids[label] = pin_id
+
+        removed = db.prune_terminal_plex_added_at_pins(older_than=cutoff)
+
+        self.assertEqual(removed, 2)
+        cur = db._execute("SELECT id FROM plex_added_at_pins")
+        surviving_ids = {row["id"] for row in cur.fetchall()}
+        self.assertEqual(
+            surviving_ids,
+            {ids[label] for label, _status, _at, survives in cases if survives},
+        )
+
 
 @requires_postgres
 class TestJellyfinDateCreatedPinsRoundTrip(unittest.TestCase):
@@ -371,6 +403,42 @@ class TestJellyfinDateCreatedPinsRoundTrip(unittest.TestCase):
         rows = db.get_pending_jellyfin_date_created_pins(
             captured_before=past, limit=100)
         self.assertEqual([r for r in rows if r["id"] == pin_id], [])
+
+    def test_prune_terminal_pins_has_strict_status_and_age_boundary(self):
+        db = make_db()
+        cutoff = datetime(2026, 7, 11, 0, 0, tzinfo=timezone.utc)
+        cases = (
+            ("old done", "done", cutoff - timedelta(seconds=1), False),
+            ("old skipped", "skipped", cutoff - timedelta(days=1), False),
+            ("old expired", "expired", cutoff - timedelta(days=90), False),
+            ("exact boundary", "expired", cutoff, True),
+            ("inside retention", "done", cutoff + timedelta(seconds=1), True),
+            ("old pending", "pending", cutoff - timedelta(days=365), True),
+        )
+        ids: dict[str, int] = {}
+        for label, status, reconciled_at, _survives in cases:
+            pin_id = db.add_jellyfin_date_created_pin(
+                imported_path=f"Artist/{label}",
+                original_date_created="2000-01-01T00:00:00Z",
+                album_item_id=f"album-{label}", children_item_ids=[],
+                request_id=None)
+            db._execute(
+                "UPDATE jellyfin_date_created_pins SET status = %s, "
+                "reconciled_at = %s WHERE id = %s",
+                (status, reconciled_at, pin_id),
+            )
+            ids[label] = pin_id
+
+        removed = db.prune_terminal_jellyfin_date_created_pins(
+            older_than=cutoff)
+
+        self.assertEqual(removed, 3)
+        cur = db._execute("SELECT id FROM jellyfin_date_created_pins")
+        surviving_ids = {row["id"] for row in cur.fetchall()}
+        self.assertEqual(
+            surviving_ids,
+            {ids[label] for label, _status, _at, survives in cases if survives},
+        )
 
 
 @requires_postgres
