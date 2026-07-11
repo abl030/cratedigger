@@ -72,7 +72,14 @@ def get_triage_quarantine(
         list_unreferenced_quarantine_folders,
     )
 
-    db = _server()._db()
+    try:
+        db = _server()._db()
+    except Exception:
+        h._json(
+            {"error": "Could not open pipeline database for quarantine scan"},
+            status=503,
+        )
+        return
     try:
         result = list_unreferenced_quarantine_folders(db)
     except QuarantineScanError as exc:

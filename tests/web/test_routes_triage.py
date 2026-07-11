@@ -118,6 +118,20 @@ class TestTriageRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 503)
         self.assertIn("error", data)
 
+    def test_quarantine_db_acquisition_failure_returns_stable_503(self):
+        import web.server as srv
+
+        # Exercise the real route + Handler harness with no injected DB. This
+        # makes web.server._db() fail at acquisition before the service runs.
+        with patch.object(srv, "db", None):
+            status, data = self._get("/api/triage/quarantine")
+
+        self.assertEqual(status, 503)
+        self.assertEqual(
+            data,
+            {"error": "Could not open pipeline database for quarantine scan"},
+        )
+
     # --- /api/triage/<id> -------------------------------------------------
 
     def test_show_returns_200_with_required_fields_and_roundtrips(self):

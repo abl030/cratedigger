@@ -983,6 +983,120 @@ class TestCmdWrongMatchDeleteGroup(unittest.TestCase):
 
 
 class TestMainExitCodes(unittest.TestCase):
+    def test_non_quarantine_main_still_configures_mirror_api_bases(self):
+        import web.mb
+
+        argv = [
+            "pipeline_cli.py",
+            "--dsn",
+            "postgresql://example/test",
+            "status",
+        ]
+        db = FakePipelineDB()
+        old_mb_base = web.mb.MB_API_BASE
+        self.addCleanup(setattr, web.mb, "MB_API_BASE", old_mb_base)
+        with tempfile.TemporaryDirectory() as root:
+            config_path = os.path.join(root, "config.ini")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "[MusicBrainz]\n"
+                    "api_base = http://main-entrypoint-mirror.test:5200\n"
+                )
+            with patch.object(sys, "argv", argv), patch.dict(
+                os.environ,
+                {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
+                clear=False,
+            ), patch(
+                "scripts.pipeline_cli.cli.PipelineDB",
+                return_value=db,
+            ), redirect_stdout(io.StringIO()):
+                pipeline_cli.main()
+
+        self.assertEqual(
+            web.mb.MB_API_BASE,
+            "http://main-entrypoint-mirror.test:5200/ws/2",
+        )
+        self.assertEqual(db.close_calls, 1)
+
+    def test_quarantine_main_maps_runtime_config_failure_and_closes_db(self):
+        argv = [
+            "pipeline_cli.py",
+            "--dsn",
+            "postgresql://example/test",
+            "triage",
+            "quarantine",
+            "--json",
+        ]
+        db = FakePipelineDB()
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch.object(sys, "argv", argv), patch(
+            "lib.config.read_runtime_config",
+            side_effect=PermissionError("runtime config unreadable"),
+        ), patch(
+            "scripts.pipeline_cli.cli.PipelineDB",
+            return_value=db,
+        ), redirect_stdout(stdout), redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as raised:
+                pipeline_cli.main()
+
+        self.assertEqual(raised.exception.code, 5)
+        self.assertEqual(stderr.getvalue(), "")
+        payload = json.loads(stdout.getvalue())
+        self.assertIn("error", payload)
+        self.assertIn("runtime configuration", payload["error"])
+        self.assertEqual(db.close_calls, 1)
+
+    def test_quarantine_main_maps_db_construction_failure_to_json_exit_5(self):
+        argv = [
+            "pipeline_cli.py",
+            "--dsn",
+            "postgresql://example/test",
+            "triage",
+            "quarantine",
+            "--json",
+        ]
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch.object(sys, "argv", argv), patch(
+            "scripts.pipeline_cli.cli.PipelineDB",
+            side_effect=RuntimeError("database unavailable"),
+        ), redirect_stdout(stdout), redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as raised:
+                pipeline_cli.main()
+
+        self.assertEqual(raised.exception.code, 5)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(
+            json.loads(stdout.getvalue()),
+            {"error": "Could not open pipeline database for quarantine scan"},
+        )
+
+    def test_quarantine_main_maps_db_construction_failure_to_human_exit_5(self):
+        argv = [
+            "pipeline_cli.py",
+            "--dsn",
+            "postgresql://example/test",
+            "triage",
+            "quarantine",
+        ]
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch.object(sys, "argv", argv), patch(
+            "scripts.pipeline_cli.cli.PipelineDB",
+            side_effect=RuntimeError("database unavailable"),
+        ), redirect_stdout(stdout), redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as raised:
+                pipeline_cli.main()
+
+        self.assertEqual(raised.exception.code, 5)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("Quarantine scan unavailable", stderr.getvalue())
+        self.assertIn(
+            "Could not open pipeline database for quarantine scan",
+            stderr.getvalue(),
+        )
+
     def test_main_propagates_command_return_code(self):
         argv = [
             "pipeline_cli.py",

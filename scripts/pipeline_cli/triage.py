@@ -343,11 +343,7 @@ def cmd_triage_quarantine(db, args):
     try:
         result = list_unreferenced_quarantine_folders(db)
     except QuarantineScanError as exc:
-        if json_mode:
-            print(json.dumps({"error": str(exc)}, indent=2, sort_keys=True))
-        else:
-            print(f"  Quarantine scan unavailable: {exc}", file=sys.stderr)
-        return 5
+        return _quarantine_scan_unavailable(args, str(exc))
 
     if json_mode:
         print(json.dumps(
@@ -366,6 +362,15 @@ def cmd_triage_quarantine(db, args):
         print(f"    {folder.path}")
     print(f"  ({len(result.folders)} folders)")
     return 0
+
+
+def _quarantine_scan_unavailable(args, error: str) -> int:
+    """Render the quarantine command's stable unavailable mapping."""
+    if bool(getattr(args, "json", False)):
+        print(json.dumps({"error": error}, indent=2, sort_keys=True))
+    else:
+        print(f"  Quarantine scan unavailable: {error}", file=sys.stderr)
+    return 5
 
 
 def add_triage_subparser(
