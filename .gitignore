@@ -10,7 +10,6 @@ __pycache__/
 .pyright/
 .pyright-venv
 .nixpkgs-src
-.mcp.json
 .playwright-mcp/
 # Claude Code — only ignore machine-specific files
 .claude/settings.local.json

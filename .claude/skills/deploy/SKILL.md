@@ -1,3 +1,8 @@
+---
+name: deploy
+description: Deploy a verified Cratedigger revision through GitHub, the nixosconfig Forgejo pin, and doc2 fleet-update.
+---
+
 # Deploy to doc2
 
 Push code, update flake input on doc1, push nixosconfig to Forgejo, run fleet-update on doc2 (which auto-runs migrations), verify.

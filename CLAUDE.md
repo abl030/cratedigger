@@ -2,6 +2,16 @@
 
 A quality-obsessed music acquisition pipeline. Searches Soulseek via slskd, validates downloads against MusicBrainz/Discogs via beets, auto-imports with spectral quality verification, or stages for manual review. Web UI at `music.ablz.au`. Originally inspired by [mrusse/soularr](https://github.com/mrusse/soularr); long since its own project — the pipeline DB is the sole source of truth, the web UI is the album picker.
 
+## Session start
+
+Before doing anything else, silently run `hostname` and `date`. Then read
+`.claude/memory/MEMORY.md` unless the client already injected it. This establishes
+the current machine, time, and shared cross-agent memory.
+
+Do not use Compound Engineering (`ce-*`, `compound-engineering:*`, or `lfg`) in
+this repository. Native agent planning, implementation, debugging, and review
+are sufficient.
+
 ## Why this exists — the archivist frame
 
 Cratedigger is a **music archival tool first, an acquisition pipeline second**. The operator is an archivist: most of the long-tail music here is genuinely vanishing — niche pressings, Australian indie, demos that lived on one peer who logged off years ago. This frame is load-bearing; these invariants flow from it:
@@ -104,7 +114,7 @@ tests/            — shared infra in fakes.py + helpers.py
 nix/              — package.nix, beets.nix, shell.nix, module.nix, VM check
 examples/         — sample consumer + mirror NixOS configs
 docs/             — subsystem docs; docs/solutions/ = compounding lessons (grep when debugging)
-.claude/rules/    — path-scoped auto-loaded rules
+.claude/rules/    — shared rules (Claude auto-loads; Codex reads as directed below)
 ```
 
 `lib/config.py`/`lib/context.py` hold the typed `CratediggerConfig`/`CratediggerContext` — never construct a partial config; always `CratediggerConfig.from_ini()`.
@@ -135,7 +145,7 @@ Wire-boundary types (harness, JSONB, subprocess stdout) are `msgspec.Struct`, no
 
 ## Deploying changes
 
-Push cratedigger (GitHub) → `nix flake update cratedigger-src` on doc1 → signed commit + push nixosconfig to **Forgejo** (`git.ablz.au` — GitHub nixosconfig is a frozen fallback, never deploy from it) → `ssh doc2 'sudo fleet-update'`. `cratedigger.service` has `restartIfChanged = false` (the back-to-back timer picks up new code on the next cycle); web/migrate restart on switch. Before `nix/module.nix` changes, run `nix build .#checks.x86_64-linux.moduleVm`. Full sequence + verification in `.claude/rules/deploy.md` (always loaded); `/deploy` runs it end-to-end.
+Push cratedigger (GitHub) → `nix flake update cratedigger-src` on doc1 → signed commit + push nixosconfig to **Forgejo** (`git.ablz.au` — GitHub nixosconfig is a frozen fallback, never deploy from it) → `ssh doc2 'sudo fleet-update'`. `cratedigger.service` has `restartIfChanged = false` (the back-to-back timer picks up new code on the next cycle); web/migrate restart on switch. Before `nix/module.nix` changes, run `nix build .#checks.x86_64-linux.moduleVm`. Full sequence + verification in `.claude/rules/deploy.md`; the `deploy` skill runs it end-to-end.
 
 **PR merges: use GitHub "Create a merge commit"** — never rebase- or squash-merge.
 
@@ -165,17 +175,53 @@ nix-shell --run "python3 -m unittest tests.test_X -v"
 - Pre-push (`ln -sf ../../scripts/pre-push .git/hooks/pre-push`): randomized generated-test burst (push profile, fresh entropy each push — `docs/generated-testing.md`), then `nix flake check` (VM boot gate + eval guards + CLI bundle). Escape hatch: `git push --no-verify`.
 - **Tag convention:** `vYYYY.MM.DD` (suffix `-N`) cut AFTER live verification on doc2.
 
-### Claude Code commands
+## Shared AI surfaces
 
-`/deploy` (full deploy sequence) · `/debug-download <id>` · `/check` (pyright + suite) · `/refactor`
+One authored source exists for each concept; client-specific formats are adapters:
 
-### Claude Code rules (auto-loaded)
+- Instructions: `CLAUDE.md`; `AGENTS.md` is its symlink.
+- Skills: `.claude/skills/`; `.agents/skills` is the Codex discovery symlink.
+- Shared rules: `.claude/rules/`; Claude auto-loads them and Codex follows the
+  loading rule below.
+- Specialist agents: `.claude/agents/*.md`; `.codex/agents/*.toml` is generated.
+- Project MCP: `.mcp.json`; `.codex/config.toml` is generated.
+- Durable learning: `.claude/memory/`, `docs/`, and GitHub issues/PRs.
 
-`code-quality.md`, `deploy.md`, `scope.md`, `test-fidelity.md` (always loaded) · `nix-shell.md` (`*.py`) · `harness.md` (`harness/`, `lib/beets.py`) · `web.md` (`web/`) · `pipeline-db.md` (`lib/pipeline_db.py`)
+After editing an agent or `.mcp.json`, run:
+
+```bash
+nix-shell --run "python3 tools/generate-ai-adapters.py"
+nix-shell --run "python3 tools/generate-ai-adapters.py --check"
+```
+
+Never edit generated `.codex/agents/*.toml` or `.codex/config.toml` directly.
+Author skills in the common `SKILL.md` format and keep platform-specific tool
+names out of workflows where a normal shell/read/edit instruction suffices.
+
+Claude auto-memory and Codex native memory are client-local recall caches, not
+project truth. Promote durable discoveries to the shared memory index, docs, or
+issue/PR surfaces so either client can recover them. Do not duplicate rationale
+across client-local memory stores.
+
+### Shared skills
+
+`deploy` (full deploy sequence) · `debug-download` (live audit trail) · `check`
+(pyright + suite) · `beets-docs` (pinned upstream reference)
+
+### Shared rule loading
+
+Both clients must follow `code-quality.md`, `deploy.md`, `scope.md`, and
+`test-fidelity.md` for repository work. Also read the matching path-scoped rule
+before touching its surface: `nix-shell.md` (`*.py`, tests, shell), `harness.md`
+(`harness/`, `lib/beets.py`, `lib/quality/`), `web.md` (`web/`), and
+`pipeline-db.md` (pipeline DB, CLI DB code, migrations). The YAML `paths` lists
+inside those files are authoritative.
 
 ## Playwright MCP
 
-Browser automation for `music.ablz.au` — per-machine `.mcp.json` (gitignored). Always HTTPS (http times out). `docs/playwright-mcp.md`.
+Browser automation for `music.ablz.au` is authored in the tracked `.mcp.json`;
+Codex consumes its generated adapter. Always use HTTPS (HTTP times out).
+`docs/playwright-mcp.md`.
 
 ## Hunting bugs — generated-first (the house method)
 

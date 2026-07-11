@@ -1,4 +1,9 @@
-**Before doing anything, run `date` to get the current date and time.**
+---
+name: beets-docs
+description: Look up the pinned beets documentation and implementation used by Cratedigger.
+---
+
+Before doing anything, run `date` to get the current date and time.
 
 # Beets Documentation Lookup
 
@@ -31,9 +36,10 @@ This returns a path like `/nix/store/<hash>-source`. The docs live at `${BEETS_S
 ### How to Use
 
 1. **Resolve the path** using the nix build command above
-2. **Read docs** with the Read tool: `Read file_path="${BEETS_SRC}/docs/reference/config.rst"`
-3. **Search docs** with Grep: `Grep pattern="import" path="${BEETS_SRC}/docs/reference" output_mode="content"`
-4. **Find plugin docs**: `Read file_path="${BEETS_SRC}/docs/plugins/chroma.rst"`
+2. **Read docs** with `sed -n '1,220p' "${BEETS_SRC}/docs/reference/config.rst"`
+3. **Search docs** with `rg -n "import" "${BEETS_SRC}/docs/reference"`
+4. **Find plugin docs** with `sed` or `rg`, for example
+   `${BEETS_SRC}/docs/plugins/chroma.rst`
 
 ### Quick Lookups
 
@@ -43,14 +49,13 @@ This returns a path like `/nix/store/<hash>-source`. The docs live at `${BEETS_S
 - **Import behaviour**: search config.rst for `import`
 - **Matching/autotagger**: read `docs/guides/tagger.rst` and search config.rst for `match`
 
-### Current Beets Nix Module
+### Current Beets Packaging
 
-The beets config is managed by the Home Manager module at:
-`/home/abl030/nixosconfig/modules/home-manager/services/beets.nix`
+Cratedigger owns its pinned beets build and module integration in:
 
-The module header (~230 lines) contains the full plugin catalogue and Home Manager options reference. Read that first for available options and plugins before diving into the RST docs.
+- `nix/beets.nix` for the patched beets package
+- `nix/module.nix` for service options and the rendered beets configuration
 
-After changes, rebuild with:
-```bash
-cd /home/abl030/nixosconfig && nix fmt && sudo nixos-rebuild switch --flake .#proxmox-vm
-```
+Read those first for the deployed shape before diving into upstream RST docs.
+After changes, run the relevant Cratedigger tests and use the `deploy` skill; do
+not rebuild a hard-coded NixOS target from this workflow.
