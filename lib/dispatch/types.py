@@ -8,10 +8,13 @@ remaining types are value-only definitions shared above every use site.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Callable, Protocol, Sequence, TYPE_CHECKING
 
 from lib.wrong_match_policy import PREIMPORT_FACT_REJECTION_SCENARIOS
+
+logger = logging.getLogger("cratedigger")
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
@@ -142,6 +145,34 @@ class ImportAttemptResult:
     @property
     def result(self) -> "ImportResult | None":
         return self._result
+
+    @classmethod
+    def from_import_job(
+        cls,
+        db: "PipelineDB",
+        import_job_id: int | None,
+        audit: "SpectralDetail | None" = None,
+    ) -> "ImportAttemptResult":
+        """Recover the preview audit once, before any terminal branch."""
+        if audit is not None or import_job_id is None:
+            return cls(audit)
+        try:
+            job = db.get_import_job(import_job_id)
+            raw = (
+                job.preview_result.get("import_result")
+                if job is not None and job.preview_result is not None
+                else None
+            )
+            if isinstance(raw, dict):
+                from lib.quality import ImportResult
+                audit = ImportResult.from_dict(raw).spectral
+        except Exception:
+            logger.warning(
+                "Unable to decode preview spectral audit for import job %s",
+                import_job_id,
+                exc_info=True,
+            )
+        return cls(audit)
 
     def merge(self, result: "ImportResult") -> "ImportResult":
         if self._audit is not None:

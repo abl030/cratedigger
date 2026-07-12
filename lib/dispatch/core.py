@@ -88,6 +88,7 @@ def dispatch_import_core(
     source_dirs: list[str] | None = None,
     candidate_import_job_id: int | None = None,
     attempt_spectral_audit: "SpectralDetail | None" = None,
+    attempt_result: ImportAttemptResult | None = None,
     candidate_download_log_id: int | None = None,
     prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
     quality_gate_fn: QualityGateFn = _check_quality_gate_core,
@@ -116,24 +117,12 @@ def dispatch_import_core(
     logger.info(f"{mode}: {label} "
                 f"(source=request, dist={dist_label})")
 
-    if attempt_spectral_audit is None and candidate_import_job_id is not None:
-        try:
-            job = db.get_import_job(candidate_import_job_id)
-            raw = (
-                job.preview_result.get("import_result")
-                if job is not None and job.preview_result is not None
-                else None
-            )
-            if isinstance(raw, dict):
-                attempt_spectral_audit = ImportResult.from_dict(raw).spectral
-        except Exception:
-            logger.warning(
-                "Unable to decode preview spectral audit for import job %s",
-                candidate_import_job_id,
-                exc_info=True,
-            )
-
-    attempt_result = ImportAttemptResult(attempt_spectral_audit)
+    if attempt_result is None:
+        attempt_result = ImportAttemptResult.from_import_job(
+            db,
+            candidate_import_job_id,
+            attempt_spectral_audit,
+        )
 
     outcome_success = False
     outcome_message = ""

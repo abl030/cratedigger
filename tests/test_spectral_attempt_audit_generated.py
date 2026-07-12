@@ -146,20 +146,52 @@ def _run_dispatch_finalization_world(
             raise RuntimeError("after result")
         noop_quality_gate()
 
-    with patch_dispatch_externals(), _silence_logs():
-        dispatch_import_core(
-            path="/tmp/cratedigger-generated-attempt",
-            mb_release_id="generated-mbid",
-            request_id=42,
-            label="Generated Artist - Generated Album",
-            beets_harness_path=cfg.beets_harness_path,
-            db=db,  # type: ignore[arg-type]
-            dl_info=DownloadInfo(username="generated-user", filetype="mp3"),
-            cfg=cfg,
-            attempt_spectral_audit=audit,
-            run_import_fn=run_import,
-            quality_gate_fn=quality_gate,
-        )
+    if mode == "manifest_rejection":
+        from lib.dispatch import dispatch_import_from_db
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+
+        db.set_tracks(42, [{"track_number": 1, "title": "One"}])
+        with tempfile.TemporaryDirectory() as source:
+            for filename in ("01.mp3", "bonus.mp3"):
+                with open(os.path.join(source, filename), "wb") as handle:
+                    handle.write(b"audio")
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                payload=manual_import_payload(failed_path=source),
+            )
+            preview_result: dict[str, Any] = {}
+            if audit is not None:
+                builtins = msgspec.to_builtins(ImportResult(spectral=audit))
+                assert isinstance(builtins, dict)
+                preview_result["import_result"] = builtins
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result=preview_result,
+            )
+            with _silence_logs():
+                dispatch_import_from_db(
+                    db,  # type: ignore[arg-type]
+                    request_id=42,
+                    failed_path=source,
+                    import_job_id=job.id,
+                    source_username="generated-user",
+                )
+    else:
+        with patch_dispatch_externals(), _silence_logs():
+            dispatch_import_core(
+                path="/tmp/cratedigger-generated-attempt",
+                mb_release_id="generated-mbid",
+                request_id=42,
+                label="Generated Artist - Generated Album",
+                beets_harness_path=cfg.beets_harness_path,
+                db=db,  # type: ignore[arg-type]
+                dl_info=DownloadInfo(username="generated-user", filetype="mp3"),
+                cfg=cfg,
+                attempt_spectral_audit=audit,
+                run_import_fn=run_import,
+                quality_gate_fn=quality_gate,
+            )
 
     last_log = db.download_logs[-1]
     return {
@@ -199,6 +231,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         mode=st.sampled_from((
             "success", "rejection", "no_json", "timeout",
             "pre_result_exception", "post_result_exception",
+            "manifest_rejection",
         )),
         new_bitrate=st.integers(min_value=64, max_value=400),
         existing_bitrate=st.integers(min_value=64, max_value=400),
