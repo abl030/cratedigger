@@ -1,7 +1,7 @@
 """Tests for global user cooldown system (issue #39)."""
 
 import configparser
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 from typing import Sequence
 import unittest
@@ -223,23 +223,39 @@ class TestEnqueueCooldownFiltering(unittest.TestCase):
         tracks: list[TrackRecord] = [
             {"albumId": 1, "title": "Track 1", "mediumNumber": 1},
         ]
-        wrong_call = _MatchCall(
+        valid_call = _MatchCall(
             tracks=tracks,
-            allowed_filetype="mp3",
-            file_dirs=["Music\\Wrong Album"],
-            username="wronguser",
+            allowed_filetype="flac",
+            file_dirs=["Music\\Album"],
+            username="gooduser",
             ctx=ctx,
         )
+        wrong_calls = {
+            "tracks": replace(
+                valid_call,
+                tracks=[
+                    {"albumId": 1, "title": "Wrong Track", "mediumNumber": 1},
+                ],
+            ),
+            "allowed_filetype": replace(valid_call, allowed_filetype="mp3"),
+            "file_dirs": replace(
+                valid_call,
+                file_dirs=["Music\\Wrong Album"],
+            ),
+            "username": replace(valid_call, username="wronguser"),
+            "ctx_identity": replace(valid_call, ctx=self._make_ctx()),
+        }
 
-        with self.assertRaises(AssertionError):
-            _assert_match_call_contract(
-                wrong_call,
-                tracks=tracks,
-                allowed_filetype="flac",
-                file_dirs=["Music\\Album"],
-                username="gooduser",
-                ctx=ctx,
-            )
+        for field, wrong_call in wrong_calls.items():
+            with self.subTest(field=field), self.assertRaises(AssertionError):
+                _assert_match_call_contract(
+                    wrong_call,
+                    tracks=tracks,
+                    allowed_filetype="flac",
+                    file_dirs=["Music\\Album"],
+                    username="gooduser",
+                    ctx=ctx,
+                )
 
     def test_cooldown_log_message_distinct_from_denylist(self):
         """Log message for cooled-down users should say 'on cooldown', not 'denylisted'."""

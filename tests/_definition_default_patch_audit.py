@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Literal, Mapping
 
 
 @dataclass(frozen=True, order=True)
@@ -24,6 +24,13 @@ class _CapturedDefault:
     callable_path: str
     injectable_keyword: str
     targets: frozenset[str]
+    parameter_kind: Literal[
+        "positional_only",
+        "positional_or_keyword",
+        "keyword_only",
+    ]
+    positional_index: int | None
+    bound_receiver: bool
 
 
 _PRODUCTION_ROOTS = (
@@ -96,15 +103,30 @@ def _definition_captures(
     callable_path: str,
     module: str,
     aliases: Mapping[str, str],
+    bound_receiver: bool,
 ) -> tuple[_CapturedDefault, ...]:
     captures: list[_CapturedDefault] = []
     positional = [*definition.args.posonlyargs, *definition.args.args]
-    defaulted_positional = positional[-len(definition.args.defaults):]
-    for argument, default in zip(defaulted_positional, definition.args.defaults):
+    first_default_index = len(positional) - len(definition.args.defaults)
+    for default_offset, default in enumerate(definition.args.defaults):
+        positional_index = first_default_index + default_offset
+        argument = positional[positional_index]
+        parameter_kind: Literal["positional_only", "positional_or_keyword"] = (
+            "positional_only"
+            if positional_index < len(definition.args.posonlyargs)
+            else "positional_or_keyword"
+        )
         targets = _default_targets(default, module=module, aliases=aliases)
         if targets:
             captures.append(
-                _CapturedDefault(callable_path, argument.arg, targets),
+                _CapturedDefault(
+                    callable_path,
+                    argument.arg,
+                    targets,
+                    parameter_kind,
+                    positional_index,
+                    bound_receiver,
+                ),
             )
     for argument, default in zip(
         definition.args.kwonlyargs,
@@ -115,15 +137,23 @@ def _definition_captures(
         targets = _default_targets(default, module=module, aliases=aliases)
         if targets:
             captures.append(
-                _CapturedDefault(callable_path, argument.arg, targets),
+                _CapturedDefault(
+                    callable_path,
+                    argument.arg,
+                    targets,
+                    "keyword_only",
+                    None,
+                    bound_receiver,
+                ),
             )
     return tuple(captures)
 
 
 def _captured_defaults(
     production_sources: Mapping[str, str],
-) -> dict[str, tuple[_CapturedDefault, ...]]:
+) -> tuple[dict[str, tuple[_CapturedDefault, ...]], frozenset[str]]:
     captures_by_callable: dict[str, list[_CapturedDefault]] = {}
+    class_paths: set[str] = set()
     for relative_path, source in production_sources.items():
         module = _module_path(relative_path)
         if not module:
@@ -132,27 +162,39 @@ def _captured_defaults(
         aliases = _import_aliases(tree)
         for statement in tree.body:
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                definitions = ((statement, f"{module}.{statement.name}"),)
+                definitions = ((statement, f"{module}.{statement.name}", False),)
             elif isinstance(statement, ast.ClassDef):
+                class_paths.add(f"{module}.{statement.name}")
                 definitions = tuple(
-                    (member, f"{module}.{statement.name}.{member.name}")
+                    (
+                        member,
+                        f"{module}.{statement.name}.{member.name}",
+                        not any(
+                            _dotted_name(decorator) == "staticmethod"
+                            for decorator in member.decorator_list
+                        ),
+                    )
                     for member in statement.body
                     if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
                 )
             else:
                 continue
-            for definition, callable_path in definitions:
+            for definition, callable_path, bound_receiver in definitions:
                 for capture in _definition_captures(
                     definition,
                     callable_path=callable_path,
                     module=module,
                     aliases=aliases,
+                    bound_receiver=bound_receiver,
                 ):
                     captures_by_callable.setdefault(callable_path, []).append(capture)
-    return {
-        callable_path: tuple(captures)
-        for callable_path, captures in captures_by_callable.items()
-    }
+    return (
+        {
+            callable_path: tuple(captures)
+            for callable_path, captures in captures_by_callable.items()
+        },
+        frozenset(class_paths),
+    )
 
 
 def _assigned_names(node: ast.expr) -> set[str]:
@@ -173,10 +215,13 @@ class _TestPatchVisitor(ast.NodeVisitor):
         *,
         test_path: str,
         captures: Mapping[str, tuple[_CapturedDefault, ...]],
+        class_paths: frozenset[str],
     ) -> None:
         self.test_path = test_path
         self.captures = captures
+        self.class_paths = class_paths
         self.aliases: dict[str, str] = {}
+        self.instances: dict[str, str] = {}
         self.active_patch_targets: tuple[str, ...] = ()
         self.findings: list[DefaultPatchFinding] = []
 
@@ -192,11 +237,11 @@ class _TestPatchVisitor(ast.NodeVisitor):
         function = self._resolved_expression(node.func)
         if function is None:
             return None
-        if function.endswith(".patch") or function == "patch":
+        if function == "unittest.mock.patch":
             if node.args and isinstance(node.args[0], ast.Constant):
                 target = node.args[0].value
                 return target if isinstance(target, str) else None
-        if function.endswith(".patch.object") or function == "patch.object":
+        if function == "unittest.mock.patch.object":
             if len(node.args) < 2:
                 return None
             owner = self._resolved_expression(node.args[0])
@@ -209,15 +254,75 @@ class _TestPatchVisitor(ast.NodeVisitor):
                 return f"{owner}.{attribute.value}"
         return None
 
-    def _keyword_is_injected(self, call: ast.Call, keyword: str) -> bool:
+    def _dependency_is_injected(
+        self,
+        call: ast.Call,
+        capture: _CapturedDefault,
+        *,
+        bound_call: bool,
+    ) -> bool:
         for argument in call.keywords:
-            if argument.arg == keyword:
+            if (
+                capture.parameter_kind != "positional_only"
+                and argument.arg == capture.injectable_keyword
+            ):
                 return True
-            if argument.arg is None and isinstance(argument.value, ast.Dict):
+            if (
+                capture.parameter_kind != "positional_only"
+                and argument.arg is None
+                and isinstance(argument.value, ast.Dict)
+            ):
                 for key in argument.value.keys:
-                    if isinstance(key, ast.Constant) and key.value == keyword:
+                    if (
+                        isinstance(key, ast.Constant)
+                        and key.value == capture.injectable_keyword
+                    ):
                         return True
+        if capture.parameter_kind == "keyword_only":
+            return False
+        explicit_prefix = 0
+        for argument in call.args:
+            if isinstance(argument, ast.Starred):
+                break
+            explicit_prefix += 1
+        supplied = explicit_prefix
+        if bound_call and capture.bound_receiver:
+            supplied += 1
+        assert capture.positional_index is not None
+        if supplied > capture.positional_index:
+            return True
         return False
+
+    def _constructed_class(self, node: ast.expr) -> str | None:
+        if not isinstance(node, ast.Call):
+            return None
+        target = self._resolved_expression(node.func)
+        return target if target in self.class_paths else None
+
+    def _resolved_call_target(self, node: ast.expr) -> tuple[str | None, bool]:
+        """Resolve calls without interprocedural type inference.
+
+        The source-local instance boundary is deliberately explicit: a bound
+        method is known when its receiver was assigned directly from a class
+        constructor in the same lexical scope, or when the constructor call is
+        the receiver expression itself. Factory returns and attribute dataflow
+        remain unresolved rather than guessed.
+        """
+        direct = self._resolved_expression(node)
+        if direct in self.captures:
+            return direct, False
+        if direct in self.class_paths:
+            constructor = f"{direct}.__init__"
+            return constructor, True
+        if isinstance(node, ast.Attribute):
+            if isinstance(node.value, ast.Name):
+                instance_class = self.instances.get(node.value.id)
+                if instance_class is not None:
+                    return f"{instance_class}.{node.attr}", True
+            instance_class = self._constructed_class(node.value)
+            if instance_class is not None:
+                return f"{instance_class}.{node.attr}", True
+        return direct, False
 
     def _visit_function(
         self,
@@ -229,8 +334,10 @@ class _TestPatchVisitor(ast.NodeVisitor):
             if (target := self._patch_target(decorator)) is not None
         )
         prior_aliases = self.aliases
+        prior_instances = self.instances
         prior_targets = self.active_patch_targets
         self.aliases = dict(prior_aliases)
+        self.instances = dict(prior_instances)
         arguments = [
             *node.args.posonlyargs,
             *node.args.args,
@@ -242,10 +349,12 @@ class _TestPatchVisitor(ast.NodeVisitor):
             arguments.append(node.args.kwarg)
         for argument in arguments:
             self.aliases.pop(argument.arg, None)
+            self.instances.pop(argument.arg, None)
         self.active_patch_targets = decorator_targets
         for statement in node.body:
             self.visit(statement)
         self.aliases = prior_aliases
+        self.instances = prior_instances
         self.active_patch_targets = prior_targets
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -263,6 +372,7 @@ class _TestPatchVisitor(ast.NodeVisitor):
         for alias in node.names:
             bound = alias.asname or alias.name.split(".")[0]
             self.aliases[bound] = alias.name if alias.asname else bound
+            self.instances.pop(bound, None)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         if node.level != 0:
@@ -271,7 +381,9 @@ class _TestPatchVisitor(ast.NodeVisitor):
         for alias in node.names:
             if alias.name == "*":
                 continue
-            self.aliases[alias.asname or alias.name] = f"{module}.{alias.name}"
+            bound = alias.asname or alias.name
+            self.aliases[bound] = f"{module}.{alias.name}"
+            self.instances.pop(bound, None)
 
     def visit_With(self, node: ast.With) -> None:
         targets = tuple(
@@ -299,18 +411,30 @@ class _TestPatchVisitor(ast.NodeVisitor):
 
     def visit_Assign(self, node: ast.Assign) -> None:
         self.visit(node.value)
+        constructed_class = self._constructed_class(node.value)
         for target in node.targets:
             for name in _assigned_names(target):
                 self.aliases.pop(name, None)
+                if constructed_class is None:
+                    self.instances.pop(name, None)
+                else:
+                    self.instances[name] = constructed_class
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         if node.value is not None:
             self.visit(node.value)
+        constructed_class = (
+            self._constructed_class(node.value) if node.value is not None else None
+        )
         for name in _assigned_names(node.target):
             self.aliases.pop(name, None)
+            if constructed_class is None:
+                self.instances.pop(name, None)
+            else:
+                self.instances[name] = constructed_class
 
     def visit_Call(self, node: ast.Call) -> None:
-        callable_path = self._resolved_expression(node.func)
+        callable_path, bound_call = self._resolved_call_target(node.func)
         if callable_path is not None and self.active_patch_targets:
             for capture in self.captures.get(callable_path, ()):
                 matching_targets = sorted(
@@ -318,9 +442,10 @@ class _TestPatchVisitor(ast.NodeVisitor):
                 )
                 if (
                     matching_targets
-                    and not self._keyword_is_injected(
+                    and not self._dependency_is_injected(
                         node,
-                        capture.injectable_keyword,
+                        capture,
+                        bound_call=bound_call,
                     )
                 ):
                     self.findings.append(
@@ -339,12 +464,22 @@ def find_ineffective_default_patches(
     production_sources: Mapping[str, str],
     test_sources: Mapping[str, str],
 ) -> tuple[DefaultPatchFinding, ...]:
-    """Return calls whose active patch cannot replace a captured default."""
-    captures = _captured_defaults(production_sources)
+    """Return calls whose active patch cannot replace a captured default.
+
+    Patch context managers/decorators count only when their binding resolves
+    exactly to ``unittest.mock.patch`` or ``unittest.mock.patch.object``.
+    Same-named helpers, parameters, and object attributes are not inferred to
+    be mocks.
+    """
+    captures, class_paths = _captured_defaults(production_sources)
     findings: list[DefaultPatchFinding] = []
     for test_path, source in test_sources.items():
         tree = ast.parse(source, filename=test_path)
-        visitor = _TestPatchVisitor(test_path=test_path, captures=captures)
+        visitor = _TestPatchVisitor(
+            test_path=test_path,
+            captures=captures,
+            class_paths=class_paths,
+        )
         visitor.visit(tree)
         findings.extend(visitor.findings)
     return tuple(sorted(set(findings)))
