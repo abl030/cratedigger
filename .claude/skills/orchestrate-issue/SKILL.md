@@ -233,7 +233,16 @@ The release sequence is strict; do not reorder it:
 
 ## 10. Communicate without losing the thread
 
-- Send concise progress updates at least once per minute during long gates.
+- After dispatch, let implementation and review agents run autonomously. Do
+  not send reassurance pings, request interim status, or list agents merely
+  because time has passed.
+- When no independent orchestrator work remains, wait for an agent blocker or
+  completion notification for up to 15 minutes. If the wait times out, check
+  status once and begin another 15-minute wait. Never approximate this cadence
+  with repeated shorter polls.
+- Do not send the operator routine updates that only say an agent or long gate
+  is still running. Report material milestones, blockers that need a decision,
+  corrections to prior claims, and completed handoffs.
 - Correct premature status claims immediately when live process evidence
   contradicts them.
 - Keep the final response self-contained: merged PRs, final merge, deploy pin,
