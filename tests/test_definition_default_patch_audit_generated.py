@@ -856,6 +856,237 @@ def _local_call_order_worlds(draw):
     )
 
 
+@st.composite
+def _class_definition_worlds(draw):
+    shape = draw(st.sampled_from((
+        "class_patch",
+        "outer_body",
+        "outer_decorator_expression",
+        "class_patch_body_only",
+        "canonical_then_helper",
+        "helper_then_canonical",
+        "non_patch_decorator",
+    )))
+    imports = (
+        f"from unittest.mock import {_PATCH_NAME}\n"
+        "from helper import decorate, helper_patch\n"
+    )
+    if shape == "class_patch":
+        body = (
+            f"@{_PATCH_NAME}(\"lib.subject.deliver\")\n"
+            "class TestSubject:\n"
+            "    def test_subject(self, mock_dependency):\n"
+            "        execute()\n"
+        )
+        expected_valid = False
+    elif shape == "outer_body":
+        body = (
+            "def test_subject():\n"
+            f"    with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            "        class Helper:\n"
+            "            value = execute()\n"
+        )
+        expected_valid = False
+    elif shape == "outer_decorator_expression":
+        body = (
+            "def test_subject():\n"
+            f"    with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            "        @decorate(execute())\n"
+            "        class Helper:\n"
+            "            pass\n"
+        )
+        expected_valid = False
+    elif shape == "class_patch_body_only":
+        body = (
+            f"@{_PATCH_NAME}(\"lib.subject.deliver\")\n"
+            "class TestSubject:\n"
+            "    value = execute()\n"
+            "    def test_subject(self, mock_dependency):\n"
+            "        execute(dependency_fn=object())\n"
+        )
+        expected_valid = True
+    elif shape == "canonical_then_helper":
+        body = (
+            f"@{_PATCH_NAME}(\"lib.subject.deliver\")\n"
+            "class TestSubject:\n"
+            "    def test_subject(self, mock_dependency):\n"
+            "        execute()\n"
+            f"{_PATCH_NAME} = helper_patch\n"
+        )
+        expected_valid = False
+    elif shape == "helper_then_canonical":
+        imports = (
+            f"from helper import {_PATCH_NAME}, decorate, helper_patch\n"
+            f"from unittest.mock import {_PATCH_NAME} as canonical_patch\n"
+        )
+        body = (
+            f"@{_PATCH_NAME}(\"lib.subject.deliver\")\n"
+            "class TestSubject:\n"
+            "    def test_subject(self, mock_dependency):\n"
+            "        execute()\n"
+            f"{_PATCH_NAME} = canonical_patch\n"
+        )
+        expected_valid = True
+    else:
+        body = (
+            "@decorate(object())\n"
+            "class TestSubject:\n"
+            "    def test_subject(self):\n"
+            "        execute()\n"
+        )
+        expected_valid = True
+    return _AuditWorld(
+        production={
+            "lib/subject.py": (
+                "from lib.dependencies import deliver\n\n"
+                "def execute(*, dependency_fn=deliver):\n"
+                "    return dependency_fn()\n"
+            ),
+        },
+        tests={
+            "tests/test_subject.py": (
+                imports
+                + "from lib.subject import execute\n\n"
+                + body
+            ),
+        },
+        expected_valid=expected_valid,
+        label=f"class_definition/{shape}",
+    )
+
+
+@st.composite
+def _assignment_patch_alias_worlds(draw):
+    shape = draw(st.sampled_from((
+        "assign",
+        "annassign",
+        "walrus",
+        "helper_overwrite",
+        "assigned_callback",
+    )))
+    if shape == "assign":
+        setup = f"    replace = {_PATCH_NAME}\n"
+        patch_name = "replace"
+        expected_valid = False
+        call_name = "execute"
+    elif shape == "annassign":
+        setup = f"    replace: object = {_PATCH_NAME}\n"
+        patch_name = "replace"
+        expected_valid = False
+        call_name = "execute"
+    elif shape == "walrus":
+        setup = ""
+        patch_name = f"(replace := {_PATCH_NAME})"
+        expected_valid = False
+        call_name = "execute"
+    elif shape == "helper_overwrite":
+        setup = f"    replace = {_PATCH_NAME}\n    replace = helper_patch\n"
+        patch_name = "replace"
+        expected_valid = True
+        call_name = "execute"
+    else:
+        setup = "    callback = execute\n"
+        patch_name = _PATCH_NAME
+        expected_valid = True
+        call_name = "callback"
+    return _AuditWorld(
+        production={
+            "lib/subject.py": (
+                "from lib.dependencies import deliver\n\n"
+                "def execute(*, dependency_fn=deliver):\n"
+                "    return dependency_fn()\n"
+            ),
+        },
+        tests={
+            "tests/test_subject.py": (
+                f"from unittest.mock import {_PATCH_NAME}\n"
+                "from helper import helper_patch\n"
+                "from lib.subject import execute\n\n"
+                "def test_subject():\n"
+                + setup
+                + f"    with {patch_name}(\"lib.subject.deliver\"):\n"
+                + f"        {call_name}()\n"
+            ),
+        },
+        expected_valid=expected_valid,
+        label=f"assignment_patch_alias/{shape}",
+    )
+
+
+@st.composite
+def _declaration_shadow_worlds(draw):
+    shape = draw(st.sampled_from((
+        "module_function",
+        "module_class",
+        "nested_function",
+        "nested_class",
+        "unshadowed",
+    )))
+    production = {
+        "lib/subject.py": (
+            "from lib.dependencies import deliver\n\n"
+            "def execute(*, dependency_fn=deliver):\n"
+            "    return dependency_fn()\n\n"
+            "class Worker:\n"
+            "    def __init__(self, *, dependency_fn=deliver):\n"
+            "        self.dependency_fn = dependency_fn\n"
+        ),
+    }
+    if shape == "module_function":
+        imported = "from lib.subject import execute\n"
+        declarations = "def execute():\n    pass\n\n"
+        body = "        execute()\n"
+        expected_valid = True
+    elif shape == "module_class":
+        imported = "from lib.subject import Worker\n"
+        declarations = "class Worker:\n    pass\n\n"
+        body = "        Worker()\n"
+        expected_valid = True
+    elif shape == "nested_function":
+        imported = "from lib.subject import execute\n"
+        declarations = ""
+        body = "    def execute():\n        pass\n    with PATCH:\n        execute()\n"
+        expected_valid = True
+    elif shape == "nested_class":
+        imported = "from lib.subject import Worker\n"
+        declarations = ""
+        body = "    class Worker:\n        pass\n    with PATCH:\n        Worker()\n"
+        expected_valid = True
+    else:
+        imported = "from lib.subject import execute\n"
+        declarations = ""
+        body = "        execute()\n"
+        expected_valid = False
+    if shape in {"nested_function", "nested_class"}:
+        function = (
+            "def test_subject():\n"
+            + body.replace(
+                "with PATCH:",
+                f"with {_PATCH_NAME}(\"lib.subject.deliver\"):",
+            )
+        )
+    else:
+        function = (
+            "def test_subject():\n"
+            f"    with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            + body
+        )
+    return _AuditWorld(
+        production=production,
+        tests={
+            "tests/test_subject.py": (
+                f"from unittest.mock import {_PATCH_NAME}\n"
+                + imported
+                + "\n"
+                + declarations
+                + function
+            ),
+        },
+        expected_valid=expected_valid,
+        label=f"declaration_shadow/{shape}",
+    )
+
+
 class TestGeneratedDefinitionDefaultPatchAudit(unittest.TestCase):
     @given(world=_default_patch_worlds())
     @example(world=_OMITTED_CONSTRUCTOR)
@@ -935,6 +1166,30 @@ class TestGeneratedDefinitionDefaultPatchAudit(unittest.TestCase):
             expected_count,
             msg=f"world={world.label}: findings={findings!r}",
         )
+
+    @given(world=_class_definition_worlds())
+    def test_class_definition_and_decorator_timing(
+        self,
+        world: _AuditWorld,
+    ) -> None:
+        findings = find_ineffective_default_patches(world.production, world.tests)
+        assert_default_patch_invariant(findings, expected_valid=world.expected_valid)
+
+    @given(world=_assignment_patch_alias_worlds())
+    def test_assignment_forms_preserve_patch_provenance(
+        self,
+        world: _AuditWorld,
+    ) -> None:
+        findings = find_ineffective_default_patches(world.production, world.tests)
+        assert_default_patch_invariant(findings, expected_valid=world.expected_valid)
+
+    @given(world=_declaration_shadow_worlds())
+    def test_declarations_shadow_imported_callables(
+        self,
+        world: _AuditWorld,
+    ) -> None:
+        findings = find_ineffective_default_patches(world.production, world.tests)
+        assert_default_patch_invariant(findings, expected_valid=world.expected_valid)
 
 
 if __name__ == "__main__":

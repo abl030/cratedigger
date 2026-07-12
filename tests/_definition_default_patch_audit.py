@@ -248,9 +248,11 @@ class _TestPatchVisitor(ast.NodeVisitor):
         self.class_paths = class_paths
         self.annotations_deferred = annotations_deferred
         self.aliases: dict[str, str] = {}
+        self.patch_aliases: dict[str, str] = {}
         self.instances: dict[str, str] = {}
         self.local_functions: dict[str, _LocalFunction] = {}
         self.function_depth = 0
+        self.class_depth = 0
         self.active_local_functions: set[int] = set()
         self.comprehension_walrus_bindings: list[set[str]] = []
         self.active_patch_targets: tuple[str, ...] = ()
@@ -262,10 +264,18 @@ class _TestPatchVisitor(ast.NodeVisitor):
             return None
         return _resolve_dotted(dotted, self.aliases)
 
+    def _resolved_patch_expression(self, node: ast.expr) -> str | None:
+        if isinstance(node, ast.NamedExpr):
+            return self._resolved_patch_expression(node.value)
+        dotted = _dotted_name(node)
+        if dotted is None:
+            return None
+        return _resolve_dotted(dotted, self.patch_aliases)
+
     def _patch_target(self, node: ast.expr) -> str | None:
         if not isinstance(node, ast.Call):
             return None
-        function = self._resolved_expression(node.func)
+        function = self._resolved_patch_expression(node.func)
         if function is None:
             return None
         if function == "unittest.mock.patch":
@@ -377,6 +387,7 @@ class _TestPatchVisitor(ast.NodeVisitor):
     def _invalidate_binding(self, target: ast.expr) -> None:
         for name in _assigned_names(target):
             self.aliases.pop(name, None)
+            self.patch_aliases.pop(name, None)
             self.instances.pop(name, None)
             self.local_functions.pop(name, None)
 
@@ -398,11 +409,13 @@ class _TestPatchVisitor(ast.NodeVisitor):
             )
         )
         prior_aliases = self.aliases
+        prior_patch_aliases = self.patch_aliases
         prior_instances = self.instances
         prior_local_functions = self.local_functions
         prior_comprehension_walrus_bindings = self.comprehension_walrus_bindings
         prior_targets = self.active_patch_targets
         self.aliases = dict(prior_aliases)
+        self.patch_aliases = dict(prior_patch_aliases)
         self.instances = dict(prior_instances)
         self.local_functions = (
             dict(prior_local_functions)
@@ -421,6 +434,7 @@ class _TestPatchVisitor(ast.NodeVisitor):
             arguments.append(node.args.kwarg)
         for argument in arguments:
             self.aliases.pop(argument.arg, None)
+            self.patch_aliases.pop(argument.arg, None)
             self.instances.pop(argument.arg, None)
             self.local_functions.pop(argument.arg, None)
         self.active_patch_targets = (
@@ -431,6 +445,7 @@ class _TestPatchVisitor(ast.NodeVisitor):
             self.visit(statement)
         self.function_depth -= 1
         self.aliases = prior_aliases
+        self.patch_aliases = prior_patch_aliases
         self.instances = prior_instances
         self.local_functions = prior_local_functions
         self.comprehension_walrus_bindings = prior_comprehension_walrus_bindings
@@ -476,13 +491,12 @@ class _TestPatchVisitor(ast.NodeVisitor):
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         decorator_targets = self._visit_definition_expressions(node)
+        self._invalidate_binding(ast.Name(id=node.name))
         if self.function_depth:
             self.local_functions[node.name] = _LocalFunction(
                 node=node,
                 decorator_targets=decorator_targets,
             )
-            self.aliases.pop(node.name, None)
-            self.instances.pop(node.name, None)
             return
         self._visit_function(
             node,
@@ -491,13 +505,12 @@ class _TestPatchVisitor(ast.NodeVisitor):
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         decorator_targets = self._visit_definition_expressions(node)
+        self._invalidate_binding(ast.Name(id=node.name))
         if self.function_depth:
             self.local_functions[node.name] = _LocalFunction(
                 node=node,
                 decorator_targets=decorator_targets,
             )
-            self.aliases.pop(node.name, None)
-            self.instances.pop(node.name, None)
             return
         self._visit_function(
             node,
@@ -513,14 +526,69 @@ class _TestPatchVisitor(ast.NodeVisitor):
                 self.visit(default)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        decorator_targets: list[str] = []
+        for decorator in node.decorator_list:
+            target = self._patch_target(decorator)
+            self.visit(decorator)
+            if target is not None:
+                decorator_targets.append(target)
+        construction_expressions = [
+            *node.bases,
+            *(keyword.value for keyword in node.keywords),
+        ]
+        for expression in sorted(
+            construction_expressions,
+            key=lambda item: (item.lineno, item.col_offset),
+        ):
+            self.visit(expression)
+
+        prior_aliases = self.aliases
+        prior_patch_aliases = self.patch_aliases
+        prior_instances = self.instances
+        prior_local_functions = self.local_functions
+        prior_class_depth = self.class_depth
+        self.aliases = dict(prior_aliases)
+        self.patch_aliases = dict(prior_patch_aliases)
+        self.instances = dict(prior_instances)
+        self.local_functions = {}
+        self.class_depth += 1
+        methods: list[
+            tuple[ast.FunctionDef | ast.AsyncFunctionDef, tuple[str, ...]]
+        ] = []
         for statement in node.body:
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                method_targets = self._visit_definition_expressions(statement)
+                self._invalidate_binding(ast.Name(id=statement.name))
+                methods.append((statement, method_targets))
+            else:
                 self.visit(statement)
+        self.aliases = prior_aliases
+        self.patch_aliases = prior_patch_aliases
+        self.instances = prior_instances
+        self.local_functions = prior_local_functions
+        self.class_depth = prior_class_depth
+        self._invalidate_binding(ast.Name(id=node.name))
+
+        if self.function_depth == 0 and prior_class_depth == 0:
+            for method, method_targets in methods:
+                inherited_class_targets = (
+                    tuple(decorator_targets)
+                    if method.name.startswith("test")
+                    else ()
+                )
+                self._visit_function(
+                    method,
+                    definition_decorator_targets=(
+                        inherited_class_targets + method_targets
+                    ),
+                )
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
             bound = alias.asname or alias.name.split(".")[0]
-            self.aliases[bound] = alias.name if alias.asname else bound
+            resolved = alias.name if alias.asname else bound
+            self.aliases[bound] = resolved
+            self.patch_aliases[bound] = resolved
             self.instances.pop(bound, None)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
@@ -531,7 +599,9 @@ class _TestPatchVisitor(ast.NodeVisitor):
             if alias.name == "*":
                 continue
             bound = alias.asname or alias.name
-            self.aliases[bound] = f"{module}.{alias.name}"
+            resolved = f"{module}.{alias.name}"
+            self.aliases[bound] = resolved
+            self.patch_aliases[bound] = resolved
             self.instances.pop(bound, None)
 
     def _visit_with_items(
@@ -559,30 +629,34 @@ class _TestPatchVisitor(ast.NodeVisitor):
         self._visit_with_items(node.items, node.body)
 
     def visit_Assign(self, node: ast.Assign) -> None:
+        resolved_patch = self._resolved_patch_expression(node.value)
         self.visit(node.value)
         constructed_class = self._constructed_class(node.value)
         for target in node.targets:
-            for name in _assigned_names(target):
-                self.aliases.pop(name, None)
-                self.local_functions.pop(name, None)
-                if constructed_class is None:
-                    self.instances.pop(name, None)
-                else:
-                    self.instances[name] = constructed_class
+            self._invalidate_binding(target)
+            if isinstance(target, ast.Name):
+                if resolved_patch is not None:
+                    self.patch_aliases[target.id] = resolved_patch
+                if constructed_class is not None:
+                    self.instances[target.id] = constructed_class
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        resolved_patch = (
+            self._resolved_patch_expression(node.value)
+            if node.value is not None
+            else None
+        )
         if node.value is not None:
             self.visit(node.value)
         constructed_class = (
             self._constructed_class(node.value) if node.value is not None else None
         )
-        for name in _assigned_names(node.target):
-            self.aliases.pop(name, None)
-            self.local_functions.pop(name, None)
-            if constructed_class is None:
-                self.instances.pop(name, None)
-            else:
-                self.instances[name] = constructed_class
+        self._invalidate_binding(node.target)
+        if isinstance(node.target, ast.Name):
+            if resolved_patch is not None:
+                self.patch_aliases[node.target.id] = resolved_patch
+            if constructed_class is not None:
+                self.instances[node.target.id] = constructed_class
 
     def visit_Call(self, node: ast.Call) -> None:
         callable_path, call_access = self._resolved_call_target(node.func)
@@ -664,23 +738,16 @@ class _TestPatchVisitor(ast.NodeVisitor):
             self.visit(statement)
 
     def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
-        resolved_value = self._resolved_expression(node.value)
+        resolved_patch = self._resolved_patch_expression(node.value)
         constructed_class = self._constructed_class(node.value)
-        local_function = (
-            self.local_functions.get(node.value.id)
-            if isinstance(node.value, ast.Name)
-            else None
-        )
         self.visit(node.value)
         names = _assigned_names(node.target)
         self._invalidate_binding(node.target)
         if isinstance(node.target, ast.Name):
-            if resolved_value is not None:
-                self.aliases[node.target.id] = resolved_value
+            if resolved_patch is not None:
+                self.patch_aliases[node.target.id] = resolved_patch
             if constructed_class is not None:
                 self.instances[node.target.id] = constructed_class
-            if local_function is not None:
-                self.local_functions[node.target.id] = local_function
         for bindings in self.comprehension_walrus_bindings:
             bindings.update(names)
 
@@ -690,9 +757,11 @@ class _TestPatchVisitor(ast.NodeVisitor):
         values: tuple[ast.expr, ...],
     ) -> None:
         prior_aliases = self.aliases
+        prior_patch_aliases = self.patch_aliases
         prior_instances = self.instances
         prior_local_functions = self.local_functions
         self.aliases = dict(prior_aliases)
+        self.patch_aliases = dict(prior_patch_aliases)
         self.instances = dict(prior_instances)
         self.local_functions = dict(prior_local_functions)
         self.comprehension_walrus_bindings.append(set())
@@ -705,6 +774,7 @@ class _TestPatchVisitor(ast.NodeVisitor):
             self.visit(value)
         persistent_bindings = self.comprehension_walrus_bindings.pop()
         self.aliases = prior_aliases
+        self.patch_aliases = prior_patch_aliases
         self.instances = prior_instances
         self.local_functions = prior_local_functions
         for name in persistent_bindings:
@@ -732,10 +802,15 @@ def find_ineffective_default_patches(
     Patch context managers/decorators count only when their binding resolves
     exactly to ``unittest.mock.patch`` or ``unittest.mock.patch.object``.
     Same-named helpers, parameters, and object attributes are not inferred to
-    be mocks. Nested local functions are evaluated only when called directly
-    by their local name, using patch state at that call site. Calls through
-    returned, assigned, or passed callback aliases remain outside the bounded
-    source-local analysis rather than inheriting definition-time patch state.
+    be mocks. Proven patch-callable aliases propagate through simple ordinary,
+    annotated, and walrus assignment without propagating general callable
+    aliases. Nested local functions are evaluated only when called directly by
+    their declared local name, using patch state at that call site. Calls
+    through returned, assigned, or passed callback aliases remain outside the
+    bounded source-local analysis rather than inheriting definition-time patch
+    state. Class construction expressions and bodies execute under enclosing
+    patches; canonical class patch decorators apply afterward to ``test*``
+    methods only.
     Lambda defaults are evaluated at their definition site, but lambda bodies
     remain outside that callback analysis boundary even for direct calls.
     """
