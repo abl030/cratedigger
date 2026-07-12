@@ -118,7 +118,6 @@ def _populate_dl_info_from_import_result(dl_info: DownloadInfo,
             existing_m.spectral_grade, existing_m.spectral_bitrate_kbps)
         if existing_m.min_bitrate_kbps is not None:
             dl_info.existing_min_bitrate = existing_m.min_bitrate_kbps
-    dl_info.import_result = ir.to_json()
     dl_info.v0_probe = ir.v0_probe
     dl_info.existing_v0_probe = ir.existing_v0_probe
     if ir.final_format:

@@ -345,7 +345,11 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
 
     def test_evidence_rejection_populates_download_log_columns(self) -> None:
         from lib.dispatch import _reject_import_from_evidence_decision
-        from lib.quality import AudioQualityMeasurement, ImportResult
+        from lib.dispatch.types import ImportAttemptResult
+        from lib.quality import (
+            AudioQualityMeasurement, ImportResult, SpectralAnalysisDetail,
+            SpectralDetail,
+        )
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -368,13 +372,21 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
                 is_cbr=True,
             ),
         )
+        audit = SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True, grade="suspect", bitrate_kbps=96),
+            existing=SpectralAnalysisDetail(
+                attempted=True, grade="genuine", bitrate_kbps=192),
+        )
+        attempt_result = ImportAttemptResult(audit)
+        attempt_result.merge(ir)
 
         with patch_dispatch_externals():
             _reject_import_from_evidence_decision(
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
                 dl_info=dl_info,
-                import_result=ir,
+                attempt_result=attempt_result,
                 distance=0.1279,
                 decision="downgrade",
                 detail="import-time persisted evidence rejected candidate",
@@ -403,6 +415,8 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
         self.assertEqual(log.extra["existing_spectral_bitrate"], None)
         # The full ImportResult is still serialized into the JSONB.
         self.assertIsNotNone(log.import_result)
+        assert log.import_result is not None
+        self.assertEqual(ImportResult.from_json(log.import_result).spectral, audit)
 
 
 class TestRejectImportFromEvidenceDecisionForcedRequeue(unittest.TestCase):
@@ -421,6 +435,7 @@ class TestRejectImportFromEvidenceDecisionForcedRequeue(unittest.TestCase):
 
     def _reject(self, *, decision: str, requeue_on_failure: bool):
         from lib.dispatch import _reject_import_from_evidence_decision
+        from lib.dispatch.types import ImportAttemptResult
         from lib.quality import AudioQualityMeasurement, ImportResult
 
         db = FakePipelineDB()
@@ -439,12 +454,14 @@ class TestRejectImportFromEvidenceDecisionForcedRequeue(unittest.TestCase):
                 is_cbr=True,
             ),
         )
+        attempt_result = ImportAttemptResult(None)
+        attempt_result.merge(ir)
         with patch_dispatch_externals():
             _reject_import_from_evidence_decision(
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
                 dl_info=dl_info,
-                import_result=ir,
+                attempt_result=attempt_result,
                 distance=0.0,
                 decision=decision,
                 detail=f"test {decision}",
@@ -810,6 +827,7 @@ class TestDispatchImport(unittest.TestCase):
 
     def test_duplicate_remove_guard_failure_denylists_and_quarantines(self):
         from lib.dispatch import dispatch_import_core
+        from lib.quality import SpectralAnalysisDetail, SpectralDetail
 
         staging_root = tempfile.mkdtemp()
         source = os.path.join(staging_root, "auto-import", "Artist", "Album")
@@ -838,11 +856,22 @@ class TestDispatchImport(unittest.TestCase):
                 ),
             ],
         )
-        ir = ImportResult(
-            exit_code=7,
+        ir = make_import_result(
             decision="duplicate_remove_guard_failed",
-            error=guard.message,
-            postflight=PostflightInfo(duplicate_remove_guard=guard),
+            new_min_bitrate=245,
+            prev_min_bitrate=128,
+            was_converted=True,
+            original_filetype="flac",
+            target_filetype="opus",
+        )
+        ir.exit_code = 7
+        ir.error = guard.message
+        ir.postflight.duplicate_remove_guard = guard
+        audit = SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True, grade="suspect", bitrate_kbps=128),
+            existing=SpectralAnalysisDetail(
+                attempted=True, grade="genuine", bitrate_kbps=245),
         )
 
         db = FakePipelineDB()
@@ -868,6 +897,7 @@ class TestDispatchImport(unittest.TestCase):
                     files=[],
                     cfg=cfg,
                     requeue_on_failure=True,
+                    attempt_spectral_audit=audit,
                 )
         finally:
             shutil.rmtree(staging_root, ignore_errors=True)
@@ -882,6 +912,11 @@ class TestDispatchImport(unittest.TestCase):
         ext.cleanup.assert_not_called()
 
         persisted = ImportResult.from_json(db.download_logs[0].import_result)
+        self.assertEqual(persisted.spectral, audit)
+        self.assertEqual(persisted.decision, "duplicate_remove_guard_failed")
+        self.assertIsNotNone(persisted.new_measurement)
+        self.assertIsNotNone(persisted.existing_measurement)
+        self.assertTrue(persisted.conversion.was_converted)
         persisted_guard = persisted.postflight.duplicate_remove_guard
         assert persisted_guard is not None
         self.assertIsNotNone(persisted_guard.quarantine_path)
