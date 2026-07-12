@@ -47,6 +47,7 @@ class FakeBeetsDB:
         self.close_calls: int = 0
         self.album_exists_calls: list[str] = []
         self.get_album_info_calls: list[str] = []
+        self.get_album_path_calls: list[str] = []
         self.get_all_album_ids_for_release_calls: list[str] = []
         self.get_album_path_by_id_calls: list[int] = []
         self.get_item_paths_calls: list[str] = []
@@ -315,6 +316,11 @@ class FakeBeetsDB:
     ) -> Any:
         self.get_album_info_calls.append(mb_release_id)
         return self._album_info.get(mb_release_id, self._album_info_default)
+
+    def get_album_path(self, mb_release_id: str) -> str | None:
+        self.get_album_path_calls.append(mb_release_id)
+        info = self._album_info.get(mb_release_id, self._album_info_default)
+        return getattr(info, "album_path", None)
 
     def get_item_paths(self, release_id: str) -> list[tuple[int, str]]:
         self.get_item_paths_calls.append(release_id)

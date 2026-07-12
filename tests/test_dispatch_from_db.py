@@ -9,13 +9,15 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+import msgspec
+
 from lib.config import CratediggerConfig
 from lib.import_evidence import (
     ActionEvidenceProvenance,
     CandidateEvidenceActionResult,
 )
 from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
-from lib.quality import AudioQualityMeasurement
+from lib.quality import AudioQualityMeasurement, ImportResult
 from lib.quality_evidence import snapshot_audio_files
 from tests.helpers import (
     RecordingQualityGate,
@@ -153,6 +155,18 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 payload=manual_import_payload(failed_path=tmpdir),
             )
             import_job_id = job.id
+            from lib.quality import SpectralAnalysisDetail, SpectralDetail
+            preview_ir = ImportResult(spectral=SpectralDetail(
+                candidate=SpectralAnalysisDetail(
+                    attempted=True, grade="suspect", bitrate_kbps=160),
+                existing=SpectralAnalysisDetail(
+                    attempted=True, grade="genuine", bitrate_kbps=None),
+            ))
+            db.mark_import_job_preview_importable(
+                import_job_id,
+                preview_result={"import_result": msgspec.to_builtins(preview_ir)},
+                message="two-sided spectral audit ready",
+            )
 
             # Seed candidate evidence matching the on-disk snapshot.
             _seed_candidate_for_import_job(
@@ -256,6 +270,11 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                                 new_min_bitrate=128, prev_min_bitrate=180)
         r = self._dispatch(ir=ir)
         self.assertFalse(r["result"].success)
+        logged = ImportResult.from_json(r["db"].download_logs[-1].import_result)
+        assert logged.spectral.candidate is not None
+        assert logged.spectral.existing is not None
+        self.assertEqual(logged.spectral.candidate.grade, "suspect")
+        self.assertEqual(logged.spectral.existing.grade, "genuine")
 
     def test_downgrade_denylists_source_user(self):
         ir = make_import_result(decision="downgrade",
@@ -423,6 +442,18 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 payload=manual_import_payload(failed_path=tmpdir),
             )
             import_job_id = job.id
+            from lib.quality import SpectralAnalysisDetail, SpectralDetail
+            preview_ir = ImportResult(spectral=SpectralDetail(
+                candidate=SpectralAnalysisDetail(
+                    attempted=True, grade="suspect", bitrate_kbps=160),
+                existing=SpectralAnalysisDetail(
+                    attempted=True, grade="genuine", bitrate_kbps=None),
+            ))
+            db.mark_import_job_preview_importable(
+                import_job_id,
+                preview_result={"import_result": msgspec.to_builtins(preview_ir)},
+                message="two-sided spectral audit ready",
+            )
             files = snapshot_audio_files(tmpdir)
             _seed_candidate_for_import_job(
                 db, import_job_id,
@@ -476,6 +507,11 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             cmd = ext.run.call_args[0][0]
             self.assertIn("--quality-evidence-action-file", cmd)
             self.assertNotIn("--force", cmd)
+            logged_ir = ImportResult.from_json(db.download_logs[-1].import_result)
+            assert logged_ir.spectral.candidate is not None
+            assert logged_ir.spectral.existing is not None
+            self.assertEqual(logged_ir.spectral.candidate.grade, "suspect")
+            self.assertEqual(logged_ir.spectral.existing.grade, "genuine")
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)

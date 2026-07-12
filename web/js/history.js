@@ -54,13 +54,19 @@ function stripV0Phrase(avg, kind) {
  * @param {string} grade
  * @param {number|string|undefined} bitrate
  */
+function spectralGradeLabel(grade) {
+  return esc(String(grade || '').replace(/_/g, ' '));
+}
+
 function formatSpectral(grade, bitrate) {
   const sgColor = grade === 'genuine' ? '#6d6' : grade === 'suspect' ? '#d66' : '#aa8';
   // Show the spectral floor whenever it's present — even when the album's
   // rollup grade is `genuine`, a non-null spectral_bitrate means at least
   // one track triggered a cliff and the min-across-tracks is this value
   // (Eno case, download_log 3291).
-  const label = bitrate ? `${esc(grade)} (~${esc(bitrate)}kbps)` : esc(grade);
+  const label = bitrate
+    ? `${spectralGradeLabel(grade)} (~${esc(bitrate)}kbps)`
+    : spectralGradeLabel(grade);
   return `<span style="color:${sgColor};">${label}</span>`;
 }
 
@@ -123,6 +129,7 @@ export function renderEvidenceStrip(h) {
   // would render a noisy "IN MP3 HAVE —" on every failure row.
   const hasMeasurement = Boolean(
     h.actual_min_bitrate || h.spectral_bitrate || h.spectral_grade
+    || h.spectral_error || h.existing_spectral_error
     || h.v0_probe_avg_bitrate || h.existing_min_bitrate
     || h.existing_spectral_bitrate || h.existing_v0_probe_avg_bitrate
     || h.comparison_basis,
@@ -147,10 +154,17 @@ export function renderEvidenceStrip(h) {
   if (h.spectral_grade) {
     // With a basis, the clamped rank value already carries the floor —
     // repeating "~250k" in the grade chip would double it up.
-    const floor = (!basis && h.spectral_bitrate) ? `~${esc(h.spectral_bitrate)}k ` : '';
+    const basisAlreadyHasFloor = Boolean(
+      basis && basis.spectral_clamped && basis.branch === 'rank'
+      && Number(basis.new_value_kbps) === Number(h.spectral_bitrate),
+    );
+    const floor = (h.spectral_bitrate && !basisAlreadyHasFloor)
+      ? `~${esc(h.spectral_bitrate)}k ` : '';
     const sgColor = h.spectral_grade === 'genuine' ? '#6d6'
       : h.spectral_grade === 'suspect' ? '#d66' : '#aa8';
-    inParts.push(`<span style="color:${sgColor};">${floor}${esc(h.spectral_grade)}</span>`);
+    inParts.push(`<span style="color:${sgColor};">${floor}${spectralGradeLabel(h.spectral_grade)}</span>`);
+  } else if (h.spectral_attempted && h.spectral_error) {
+    inParts.push(`<span style="color:#d66;" title="${esc(h.spectral_error)}">spectral failed</span>`);
   }
   // V0 on every candidate: whichever probe ran, show it (qualified when
   // it's a research probe of a lossy source, so lineages stay legible).
@@ -172,7 +186,17 @@ export function renderEvidenceStrip(h) {
   } else if (h.existing_min_bitrate) {
     haveParts.push(`min ${esc(h.existing_min_bitrate)}k`);
   }
-  if (h.existing_spectral_bitrate) haveParts.push(`~${esc(h.existing_spectral_bitrate)}k`);
+  if (h.existing_spectral_grade) {
+    const floor = h.existing_spectral_bitrate ? `~${esc(h.existing_spectral_bitrate)}k ` : '';
+    const color = h.existing_spectral_grade === 'genuine' ? '#6d6'
+      : h.existing_spectral_grade === 'suspect' ? '#d66' : '#aa8';
+    haveParts.push(`<span style="color:${color};">${floor}${spectralGradeLabel(h.existing_spectral_grade)}</span>`);
+  } else if (h.existing_spectral_attempted && h.existing_spectral_error) {
+    haveParts.push(`<span style="color:#d66;" title="${esc(h.existing_spectral_error)}">spectral failed</span>`);
+  } else if (h.existing_spectral_bitrate) {
+    // Historical attempts measured only the existing floor, not its grade.
+    haveParts.push(`ungraded (~${esc(h.existing_spectral_bitrate)}k)`);
+  }
   if (h.existing_v0_probe_avg_bitrate) {
     haveParts.push(stripV0Phrase(
       h.existing_v0_probe_avg_bitrate, h.existing_v0_probe_kind));
@@ -249,12 +273,22 @@ export function renderDownloadHistoryItem(h) {
 
   rows.push(['Source', h.downloaded_label ? esc(h.downloaded_label) : '—']);
 
-  if (h.spectral_grade) {
-    const candidate = formatSpectral(h.spectral_grade, h.spectral_bitrate);
-    const was = h.existing_spectral_bitrate
-      ? `<span style="color:#aa8;">~${esc(h.existing_spectral_bitrate)}kbps</span>`
-      : null;
-    rows.push(['Spectral', withWas(candidate, was)]);
+  if (h.spectral_grade || h.existing_spectral_grade || h.existing_spectral_bitrate
+      || h.spectral_error || h.existing_spectral_error) {
+    const candidate = h.spectral_error
+      ? `<span style="color:#d66;" title="${esc(h.spectral_error)}">analysis failed</span>`
+      : h.spectral_grade
+      ? formatSpectral(h.spectral_grade, h.spectral_bitrate)
+      : 'unmeasured';
+    const existing = h.existing_spectral_error
+      ? `<span style="color:#d66;" title="${esc(h.existing_spectral_error)}">analysis failed</span>`
+      : h.existing_spectral_grade
+      ? formatSpectral(h.existing_spectral_grade, h.existing_spectral_bitrate)
+      : h.existing_spectral_bitrate
+        ? `<span style="color:#aa8;">ungraded (~${esc(h.existing_spectral_bitrate)}kbps)</span>`
+        : 'unmeasured';
+    rows.push(['Spectral', `<span class="r-ev-tag">IN</span> ${candidate} `
+      + `<span class="r-ev-tag">HAVE</span> ${existing}`]);
   } else {
     rows.push(['Spectral', '—']);
   }
@@ -343,6 +377,12 @@ export function renderDownloadHistoryItem(h) {
   }
 
   const forensicRows = [];
+  if (h.spectral_error) {
+    forensicRows.push(['Spectral IN error', esc(h.spectral_error)]);
+  }
+  if (h.existing_spectral_error) {
+    forensicRows.push(['Spectral HAVE error', esc(h.existing_spectral_error)]);
+  }
   // The raw beets/harness detail (e.g. "Target MBID … not in candidates")
   // explains WHY a match-failure verdict fired — reachable, but debug-tier.
   // Skipped when it just repeats the verdict.

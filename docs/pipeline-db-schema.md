@@ -181,7 +181,7 @@ as live queue work.
 
 ## `download_log.import_result` JSONB
 
-`import_one.py` emits an `ImportResult` JSON blob (`__IMPORT_RESULT__` sentinel on stdout). Contains: decision, conversion details, V0 probe evidence, per-track spectral analysis (grade, hf_deficit, cliff detection per track), quality comparison (new vs prev bitrate), postflight verification (beets_id, path). Every import path (success, downgrade, transcode, provisional, suspect-lossless rejection, error, timeout, crash) logs to download_log.
+`import_one.py` emits an `ImportResult` JSON blob (`__IMPORT_RESULT__` sentinel on stdout). Contains: decision, conversion details, V0 probe evidence, quality comparison (new vs prev bitrate), postflight verification (beets_id, path), and an attempt-local `spectral` audit. Preview independently analyzes the incoming candidate and the exact-release files already in beets, preserving each side's album grade, spectral floor, suspect percentage, per-track grade/HF deficit/cliff detail, or side-specific error. One side failing never erases the other. These audit fields are display-only and deliberately separate from `new_measurement` / `existing_measurement`, so gathering richer existing-file evidence cannot change an import decision. Every import path (success, downgrade, transcode, provisional, suspect-lossless rejection, error, timeout, crash) logs to download_log.
 
 ```sql
 SELECT import_result->>'decision',

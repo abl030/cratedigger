@@ -71,6 +71,7 @@ from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          V0_PROBE_NATIVE_LOSSY_RESEARCH,
                          V0ProbeEvidence,
                          SPECTRAL_TRANSCODE_GRADES,
+                         SpectralAnalysisDetail,
                          build_existing_quality_measurement,
                          comparison_basis_from_decision,
                          comparison_format_hint, native_codec_format_label,
@@ -87,6 +88,26 @@ DUPLICATE_REMOVE_GUARD_EXIT_CODE = 7
 _current_result: ImportResult | None = None
 _preview_temp_root: str | None = None
 _import_total_start: float | None = None
+
+
+def _resolve_existing_spectral_path(
+    beets: BeetsDB,
+    mbid: str,
+    already_in_beets: bool,
+) -> tuple[str | None, SpectralAnalysisDetail | None]:
+    """Resolve existing files without allowing audit lookup to abort import."""
+    if not already_in_beets:
+        return None, None
+    try:
+        path = beets.get_album_path(mbid)
+    except Exception as exc:
+        return None, SpectralAnalysisDetail(
+            attempted=True,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    if path and os.path.isdir(path):
+        return path, None
+    return None, None
 
 # Rank config for BeetsDB.get_album_info() mixed-format reduction + (commit 5)
 # quality_rank() / compare_quality() / quality_gate_decision(). main() replaces
@@ -1667,42 +1688,47 @@ def main():
     existing_spectral_grade: str | None = None
     existing_spectral_bitrate: int | None = None
     stage_start = time.monotonic()
-    try:
-        from lib.spectral_check import analyze_album as spectral_analyze
-        spectral_result = spectral_analyze(work_path, trim_seconds=30)
-        spectral_grade = spectral_result.grade
-        spectral_bitrate = spectral_result.estimated_bitrate_kbps
-        r.spectral.suspect_pct = spectral_result.suspect_pct
-        r.spectral.per_track = [
-            {"grade": t.grade, "hf_deficit_db": round(t.hf_deficit_db, 1),
-             "cliff_detected": t.cliff_detected,
-             "cliff_freq_hz": t.cliff_freq_hz,
-             "estimated_bitrate_kbps": t.estimated_bitrate_kbps}
-            for t in spectral_result.tracks
-        ]
+    from lib.measurement import collect_attempt_spectral_audit
+    existing_path, existing_lookup_failure = _resolve_existing_spectral_path(
+        beets, mbid, already_in_beets)
+    r.spectral = collect_attempt_spectral_audit(work_path, existing_path)
+    if existing_lookup_failure is not None:
+        r.spectral.existing = existing_lookup_failure
+    candidate_audit = r.spectral.candidate
+    existing_audit = r.spectral.existing
+    candidate_spectral_ok = (
+        candidate_audit is not None and candidate_audit.error is None
+    )
+    if candidate_audit is not None:
+        spectral_grade = candidate_audit.grade
+        spectral_bitrate = candidate_audit.bitrate_kbps
+        r.spectral.suspect_pct = candidate_audit.suspect_pct or 0.0
+        r.spectral.per_track = list(candidate_audit.per_track)
         _log(f"  spectral_grade={spectral_grade}")
         if spectral_bitrate is not None:
             _log(f"  spectral_bitrate={spectral_bitrate}")
         if spectral_grade in ("suspect", "likely_transcode"):
-            cliff_tracks = [t for t in spectral_result.tracks if t.cliff_detected]
+            cliff_tracks = [t for t in candidate_audit.per_track if t.cliff_detected]
             if cliff_tracks:
                 r.spectral.cliff_freq_hz = cliff_tracks[0].cliff_freq_hz
                 _log(f"  spectral_cliff={cliff_tracks[0].cliff_freq_hz}Hz")
-        # Spectral check on existing beets files
-        if already_in_beets:
-            existing_path = beets.get_album_path(mbid)
-            if existing_path and os.path.isdir(existing_path):
-                existing_spectral = spectral_analyze(existing_path, trim_seconds=30)
-                existing_spectral_grade = existing_spectral.grade
-                existing_spectral_bitrate = existing_spectral.estimated_bitrate_kbps
-                r.spectral.existing_suspect_pct = existing_spectral.suspect_pct
-                _log(f"  existing_spectral_grade={existing_spectral_grade}")
-                if existing_spectral_bitrate is not None:
-                    _log(f"  existing_spectral_bitrate={existing_spectral_bitrate}")
-    except Exception as e:
-        _log(f"  [SPECTRAL] error: {e}")
-    finally:
-        _log_timing("spectral_analysis", stage_start)
+        if candidate_audit.error:
+            _log(f"  [SPECTRAL candidate] error: {candidate_audit.error}")
+
+    # Existing-side audit is an independent attempt. Only feed it to the
+    # legacy decision variables when candidate analysis succeeded, preserving
+    # the exact pre-audit decision inputs on candidate failure.
+    if existing_audit is not None and existing_audit.attempted:
+        if candidate_spectral_ok:
+            existing_spectral_grade = existing_audit.grade
+            existing_spectral_bitrate = existing_audit.bitrate_kbps
+        r.spectral.existing_suspect_pct = existing_audit.suspect_pct or 0.0
+        _log(f"  existing_spectral_grade={existing_audit.grade}")
+        if existing_audit.bitrate_kbps is not None:
+            _log(f"  existing_spectral_bitrate={existing_audit.bitrate_kbps}")
+        if existing_audit.error:
+            _log(f"  [SPECTRAL existing] error: {existing_audit.error}")
+    _log_timing("spectral_analysis", stage_start)
 
     # --- Convert lossless → V0 (unless keeping lossless on disk) ---
     keep_lossless = args.target_format in ("flac", "lossless")

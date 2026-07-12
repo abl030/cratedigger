@@ -58,6 +58,7 @@ class LogEntry:
     spectral_bitrate: Optional[int] = None     # kbps
     existing_min_bitrate: Optional[int] = None  # kbps
     existing_spectral_bitrate: Optional[int] = None  # kbps
+    existing_spectral_grade: Optional[str] = None
     final_format: Optional[str] = None
     v0_probe_kind: Optional[str] = None
     v0_probe_min_bitrate: Optional[int] = None
@@ -140,6 +141,14 @@ class ClassifiedEntry(msgspec.Struct):
     # frontend evidence strip / detail grid. None on rows predating the
     # field (request 6039 lesson: labels re-derived from min bitrate lie).
     comparison_basis: dict[str, object] | None = None
+    spectral_grade: str | None = None
+    spectral_bitrate: int | None = None
+    existing_spectral_grade: str | None = None
+    existing_spectral_bitrate: int | None = None
+    spectral_attempted: bool | None = None
+    spectral_error: str | None = None
+    existing_spectral_attempted: bool | None = None
+    existing_spectral_error: str | None = None
 
 
 class _Classification(msgspec.Struct, frozen=True):
@@ -207,6 +216,7 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
     bad_extensions = _extract_bad_extensions(entry)
     triage = _extract_wrong_match_triage(entry)
     basis = _entry_comparison_basis(entry)
+    spectral = _extract_attempt_spectral(entry)
     return ClassifiedEntry(
         badge=core.badge, badge_class=core.badge_class,
         border_color=core.border_color, verdict=core.verdict,
@@ -225,6 +235,49 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         wrong_match_triage_stage_chain=triage["stage_chain"],
         wrong_match_triage_detail=triage["detail"],
         existing_format=existing_format,
+        spectral_grade=spectral[0],
+        spectral_bitrate=spectral[1],
+        existing_spectral_grade=spectral[2],
+        existing_spectral_bitrate=spectral[3],
+        spectral_attempted=spectral[4],
+        spectral_error=spectral[5],
+        existing_spectral_attempted=spectral[6],
+        existing_spectral_error=spectral[7],
+    )
+
+
+def _extract_attempt_spectral(
+    entry: LogEntry,
+) -> tuple[
+    str | None, int | None, str | None, int | None,
+    bool | None, str | None, bool | None, str | None,
+]:
+    """Prefer attempt-local audit, preserving honest historical fallbacks."""
+    ir = _parse_import_result(entry)
+    candidate_grade = entry.spectral_grade
+    candidate_bitrate = entry.spectral_bitrate
+    existing_grade = entry.existing_spectral_grade
+    existing_bitrate = entry.existing_spectral_bitrate
+    candidate_attempted: bool | None = None
+    candidate_error: str | None = None
+    existing_attempted: bool | None = None
+    existing_error: str | None = None
+    if ir is not None:
+        candidate = ir.spectral.candidate
+        existing = ir.spectral.existing
+        if candidate is not None:
+            candidate_attempted = candidate.attempted
+            candidate_error = candidate.error
+            candidate_grade = candidate.grade
+            candidate_bitrate = candidate.bitrate_kbps
+        if existing is not None:
+            existing_attempted = existing.attempted
+            existing_error = existing.error
+            existing_grade = existing.grade
+            existing_bitrate = existing.bitrate_kbps
+    return (
+        candidate_grade, candidate_bitrate, existing_grade, existing_bitrate,
+        candidate_attempted, candidate_error, existing_attempted, existing_error,
     )
 
 

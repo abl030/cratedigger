@@ -125,7 +125,9 @@ from lib.quality.import_result_types import (
     MovedSibling,
     PostflightInfo,
     QualityEvidenceActionProvenance,
+    SpectralAnalysisDetail,
     SpectralDetail,
+    SpectralTrackDetail,
     parse_import_result,
 )
 from lib.quality.gates import (
@@ -258,7 +260,9 @@ __all__ = [
     "QualityRankConfig",
     "RankBitrateMetric",
     "SPECTRAL_TRANSCODE_GRADES",
+    "SpectralAnalysisDetail",
     "SpectralDetail",
+    "SpectralTrackDetail",
     "SpectralMeasurement",
     "TRANSCODE_MIN_BITRATE_KBPS",
     "TrackMapping",

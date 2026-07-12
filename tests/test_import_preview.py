@@ -4,12 +4,14 @@ import os
 import tempfile
 import unittest
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 from unittest.mock import patch
 
 from lib.config import CratediggerConfig
 from lib.import_preview import (
     ImportPreviewValues,
+    _prefer_successful_spectral_detail,
+    measure_and_persist_candidate_evidence,
     preview_import_from_path,
     preview_import_from_values,
 )
@@ -17,11 +19,35 @@ from lib.measurement import LocalFileInspection, PreimportMeasurement
 from lib.quality import (
     AudioQualityMeasurement,
     ImportResult,
+    SpectralAnalysisDetail,
+    SpectralDetail,
     full_pipeline_decision,
 )
 
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
+
+
+class TestSpectralAuditMerge(unittest.TestCase):
+    def test_candidate_measured_error_yields_to_harness_success(self):
+        measured = SpectralAnalysisDetail(
+            attempted=True, error="RuntimeError: measured failed")
+        harness = SpectralAnalysisDetail(
+            attempted=True, grade="genuine", suspect_pct=0.0)
+
+        self.assertIs(
+            _prefer_successful_spectral_detail(measured, harness), harness)
+
+    def test_existing_measured_error_yields_to_harness_success(self):
+        measured = SpectralAnalysisDetail(
+            attempted=True, grade="suspect",
+            error="TypeError: malformed track detail")
+        harness = SpectralAnalysisDetail(
+            attempted=True, grade="suspect", bitrate_kbps=128,
+            suspect_pct=60.0)
+
+        self.assertIs(
+            _prefer_successful_spectral_detail(measured, harness), harness)
 
 
 class TestImportPreviewValues(unittest.TestCase):
@@ -402,6 +428,93 @@ class TestImportPreviewPath(unittest.TestCase):
             loaded = db.load_album_quality_evidence_by_id(evidence_id)
             assert loaded is not None
             self.assertEqual(loaded.measurement.avg_bitrate_kbps, 245)
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_measurement_audit_survives_evidence_persistence_failure(self):
+        db = self._db()
+        source = self._source_dir()
+        audit = SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True, grade="suspect", bitrate_kbps=128),
+            existing=SpectralAnalysisDetail(
+                attempted=True, grade="genuine"),
+        )
+        try:
+            with patch("lib.config.read_runtime_config",
+                       return_value=CratediggerConfig(
+                           beets_harness_path="/fake/harness/run_beets_harness.sh",
+                           pipeline_db_enabled=True)), \
+                 patch("lib.import_preview.inspect_local_files",
+                       return_value=LocalFileInspection(filetype="mp3")), \
+                 patch("lib.import_preview.measure_preimport_state",
+                       return_value=PreimportMeasurement(
+                           audio_corrupt=True,
+                           corrupt_files=["01.mp3"],
+                           folder_layout="flat",
+                           audio_file_count=1,
+                           spectral_audit=audit,
+                       )):
+                preview = measure_and_persist_candidate_evidence(
+                    db, request_id=42, path=source,
+                    persist_measurement_fn=(
+                        lambda *args, **kwargs: (_ for _ in ()).throw(
+                            RuntimeError("database unavailable"))
+                    ),
+                )
+
+            self.assertEqual(preview.verdict, "measurement_failed")
+            self.assertEqual(preview.decision, "evidence_persist_failed")
+            assert preview.import_result is not None
+            self.assertEqual(preview.import_result.spectral, audit)
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_measurement_audit_survives_harness_crash_and_no_json(self):
+        from lib.dispatch.types import ImportOneRun
+        db = self._db()
+        source = self._source_dir()
+        audit = SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True, grade="suspect", bitrate_kbps=128),
+            existing=SpectralAnalysisDetail(
+                attempted=True, error="existing decode failed"),
+        )
+        measurement = PreimportMeasurement(
+            folder_layout="flat", audio_file_count=1,
+            spectral_audit=audit,
+        )
+        common = (
+            patch("lib.config.read_runtime_config", return_value=CratediggerConfig(
+                beets_harness_path="/fake/harness/run_beets_harness.sh",
+                pipeline_db_enabled=True)),
+            patch("lib.import_preview.inspect_local_files",
+                  return_value=LocalFileInspection(filetype="mp3")),
+            patch("lib.import_preview.measure_preimport_state",
+                  return_value=measurement),
+        )
+        try:
+            for decision, run_value in (
+                ("harness_crashed", RuntimeError("harness exploded")),
+                ("no_json_result", ImportOneRun(
+                    command=(), returncode=1, stdout="",
+                    stderr="no sentinel", import_result=None)),
+            ):
+                def run_import(*args: Any, **kwargs: Any) -> ImportOneRun:
+                    if isinstance(run_value, Exception):
+                        raise run_value
+                    return run_value
+
+                with common[0], common[1], common[2]:
+                    preview = measure_and_persist_candidate_evidence(
+                        db, request_id=42, path=source,
+                        run_import_fn=run_import,
+                    )
+                self.assertEqual(preview.decision, decision)
+                assert preview.import_result is not None
+                self.assertEqual(preview.import_result.spectral, audit)
         finally:
             import shutil
             shutil.rmtree(source, ignore_errors=True)

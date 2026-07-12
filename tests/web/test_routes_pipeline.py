@@ -86,7 +86,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         "downloaded_label", "verdict", "beets_scenario", "beets_distance",
         "disambiguation_failure", "disambiguation_detail", "bad_extensions",
         "spectral_grade", "spectral_bitrate", "existing_min_bitrate",
-        "existing_spectral_bitrate", "existing_format",
+        "existing_spectral_grade", "existing_spectral_bitrate", "existing_format",
         "source", "youtube_metadata",
         "wrong_match_triage_action", "wrong_match_triage_summary",
         "wrong_match_triage_reason", "wrong_match_triage_preview_verdict",

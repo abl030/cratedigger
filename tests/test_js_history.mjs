@@ -97,6 +97,7 @@ console.log('renderDownloadHistoryItem() shows Bitrate row with inline (was X) c
     existing_min_bitrate: 192,
     spectral_grade: 'likely_transcode',
     spectral_bitrate: 160,
+    existing_spectral_grade: 'suspect',
     existing_spectral_bitrate: 96,
   });
 
@@ -112,8 +113,8 @@ console.log('renderDownloadHistoryItem() shows Bitrate row with inline (was X) c
   assertContains(html, 'class="p-hist-was">(was 192kbps)',
     'existing bitrate appears inline as (was X) on the candidate row');
   assertContains(html, '~160kbps', 'candidate spectral floor rendered');
-  assertContains(html, 'class="p-hist-was">(was <span style="color:#aa8;">~96kbps</span>)',
-    'existing spectral appears inline as (was ~Xkbps) on the spectral row');
+  assertContains(html, 'suspect (~96kbps)',
+    'existing spectral grade and floor appear on the spectral row');
 }
 
 console.log('renderDownloadHistoryItem() omits the (was X) suffix when no existing data');
@@ -129,6 +130,39 @@ console.log('renderDownloadHistoryItem() omits the (was X) suffix when no existi
 
   assertContains(html, '192kbps', 'candidate bitrate rendered');
   assertExcludes(html, '(was', 'no (was) suffix when existing data absent');
+}
+
+console.log('two-sided spectral failures remain distinct from legacy unmeasured rows');
+{
+  const failedHtml = renderDownloadHistoryItem({
+    outcome: 'rejected', created_at: '2026-07-12T00:00:00+00:00',
+    spectral_attempted: true,
+    spectral_error: 'RuntimeError: decode failed',
+    existing_spectral_attempted: true, existing_spectral_grade: 'genuine',
+  });
+  assertContains(failedHtml, 'analysis failed', 'attempted failure is explicit');
+  assertContains(failedHtml, 'RuntimeError: decode failed', 'failure detail is available');
+  assertContains(failedHtml, '<details class="p-hist-forensics">',
+    'spectral errors are reachable in focusable forensics');
+  assertContains(failedHtml, 'Spectral IN error',
+    'candidate error has a labelled forensic row');
+  const strip = renderEvidenceStrip({
+    spectral_attempted: true, spectral_error: 'candidate failed',
+    existing_spectral_attempted: true, existing_spectral_error: 'existing failed',
+  });
+  assertContains(strip, 'IN', 'failure-only audit still renders in Recents');
+  assertContains(strip, 'spectral failed', 'Recents keeps failure state compact');
+  const legacyHtml = renderDownloadHistoryItem({
+    outcome: 'rejected', created_at: '2026-07-12T00:00:00+00:00',
+  });
+  assertExcludes(legacyHtml, 'analysis failed', 'legacy row stays unmeasured');
+}
+
+console.log('legacy existing floor-only Recents labels the missing grade');
+{
+  const strip = renderEvidenceStrip({ existing_spectral_bitrate: 128 });
+  assertContains(strip, 'ungraded (~128k)',
+    'legacy HAVE floor cannot read like a complete spectral grade');
 }
 
 console.log('renderDownloadHistoryItem() renders lossless V0 probe with inline (was X) comparison');
@@ -310,6 +344,20 @@ console.log('formatSpectral() helper colors grades and prefixes the floor');
     failed++;
     console.error('  FAIL: spectral without floor should not show ~');
   } else { passed++; }
+  if (!formatSpectral('likely_transcode', 160).includes('likely transcode (~160kbps)')) {
+    failed++;
+    console.error('  FAIL: spectral grade tokens should be humanized');
+  } else { passed++; }
+}
+
+console.log('renderEvidenceStrip() humanizes spectral tokens on both sides');
+{
+  const html = renderEvidenceStrip({
+    spectral_grade: 'likely_transcode', spectral_bitrate: 160,
+    existing_spectral_grade: 'likely_transcode', existing_spectral_bitrate: 128,
+  });
+  assertContains(html, 'likely transcode', 'humanized grade rendered');
+  assertExcludes(html, 'likely_transcode', 'raw grade token never leaks');
 }
 
 console.log('formatV0Probe() helper picks the right kind suffix per source lineage');
@@ -560,6 +608,7 @@ console.log('renderEvidenceStrip() renders the persisted comparison basis when p
     downloaded_label: 'MP3 V2',
     actual_min_bitrate: 194,
     spectral_grade: 'genuine',
+    spectral_bitrate: 160,
     existing_format: 'MP3',
     existing_min_bitrate: 194,
     comparison_basis: {
@@ -577,6 +626,8 @@ console.log('renderEvidenceStrip() renders the persisted comparison basis when p
   assertContains(strip, 'avg 196k', 'HAVE side shows the deciding avg');
   assertContains(strip, 'good', 'HAVE side shows the rank');
   assertContains(strip, 'genuine', 'spectral grade chip survives');
+  assertContains(strip, '~160k genuine',
+    'ordinary avg basis does not suppress a distinct spectral floor');
   assertExcludes(strip, 'MP3 V2', 'min-derived label replaced by the basis');
 }
 

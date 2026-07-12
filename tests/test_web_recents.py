@@ -22,6 +22,8 @@ from lib.quality import (
     DuplicateRemoveGuardInfo,
     ImportResult,
     PostflightInfo,
+    SpectralAnalysisDetail,
+    SpectralDetail,
 )
 
 
@@ -136,6 +138,53 @@ class TestClassifiedEntry(unittest.TestCase):
         self.assertIsNone(c.wrong_match_triage_action)
         self.assertIsNone(c.wrong_match_triage_summary)
         self.assertEqual(c.wrong_match_triage_stage_chain, [])
+
+    def test_attempt_audit_surfaces_both_spectral_grades_and_floors(self):
+        result = classify_log_entry(_entry(import_result=ImportResult(
+            spectral=SpectralDetail(
+                candidate=SpectralAnalysisDetail(
+                    attempted=True, grade="suspect", bitrate_kbps=160),
+                existing=SpectralAnalysisDetail(
+                    attempted=True, grade="genuine", bitrate_kbps=None),
+            )
+        ).to_json()))
+        self.assertEqual(result.spectral_grade, "suspect")
+        self.assertEqual(result.spectral_bitrate, 160)
+        self.assertEqual(result.existing_spectral_grade, "genuine")
+        self.assertIsNone(result.existing_spectral_bitrate)
+
+    def test_attempt_audit_surfaces_side_specific_analysis_failure(self):
+        from lib.quality import SpectralAnalysisDetail, SpectralDetail
+        result = classify_log_entry(_entry(import_result=ImportResult(
+            spectral=SpectralDetail(
+                candidate=SpectralAnalysisDetail(
+                    attempted=True, error="RuntimeError: candidate failed"),
+                existing=SpectralAnalysisDetail(
+                    attempted=True, grade="genuine"),
+            )
+        ).to_json()))
+        self.assertTrue(result.spectral_attempted)
+        self.assertEqual(result.spectral_error, "RuntimeError: candidate failed")
+        self.assertTrue(result.existing_spectral_attempted)
+        self.assertIsNone(result.existing_spectral_error)
+
+    def test_explicit_unattempted_sides_suppress_legacy_spectral_fallbacks(self):
+        result = classify_log_entry(_entry(
+            spectral_grade="suspect",
+            spectral_bitrate=160,
+            existing_spectral_grade="likely_transcode",
+            existing_spectral_bitrate=128,
+            import_result=ImportResult(spectral=SpectralDetail(
+                candidate=SpectralAnalysisDetail(attempted=False),
+                existing=SpectralAnalysisDetail(attempted=False),
+            )).to_json(),
+        ))
+        self.assertFalse(result.spectral_attempted)
+        self.assertIsNone(result.spectral_grade)
+        self.assertIsNone(result.spectral_bitrate)
+        self.assertFalse(result.existing_spectral_attempted)
+        self.assertIsNone(result.existing_spectral_grade)
+        self.assertIsNone(result.existing_spectral_bitrate)
 
 
 # ============================================================================
