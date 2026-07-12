@@ -12,7 +12,7 @@ import sys
 import tempfile
 import unittest
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import Sequence, TYPE_CHECKING
 from unittest.mock import MagicMock, patch, PropertyMock
 
 if TYPE_CHECKING:
@@ -679,18 +679,57 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
         )
 
         from lib.matching import MatchResult
-        with patch.object(
-            enqueue_module,
-            "check_for_match",
-            side_effect=[
-                MatchResult(matched=True, directory=dir1, file_dir="Music\\Disc1"),
-                MatchResult(matched=True, directory=dir2, file_dir="Music\\Disc2"),
-            ],
-        ), patch("time.sleep"):
-            enqueue_module.try_multi_enqueue(
-                release, tracks, results, "flac", self.ctx
+        match_results = iter((
+            MatchResult(matched=True, directory=dir1, file_dir="Music\\Disc1"),
+            MatchResult(matched=True, directory=dir2, file_dir="Music\\Disc2"),
+        ))
+        match_calls: list[tuple[
+            list[cratedigger.TrackRecord],
+            str,
+            list[str],
+            str,
+            CratediggerContext,
+        ]] = []
+
+        def recording_match(
+            disc_tracks: Sequence[cratedigger.TrackRecord],
+            allowed_filetype: str,
+            file_dirs: list[str],
+            username: str,
+            ctx: CratediggerContext,
+        ) -> MatchResult:
+            match_calls.append((
+                list(disc_tracks),
+                allowed_filetype,
+                list(file_dirs),
+                username,
+                ctx,
+            ))
+            return next(match_results)
+
+        with patch("time.sleep"):
+            attempt = enqueue_module.try_multi_enqueue(
+                release,
+                tracks,
+                results,
+                "flac",
+                self.ctx,
+                match_fn=recording_match,
             )
 
+        self.assertTrue(attempt.matched)
+        self.assertEqual(
+            [[track["mediumNumber"] for track in call[0]] for call in match_calls],
+            [[1], [2]],
+        )
+        self.assertEqual(
+            [call[1:4] for call in match_calls],
+            [
+                ("flac", ["Music\\Disc1", "Music\\Disc2"], "user1"),
+                ("flac", ["Music\\Disc2"], "user1"),
+            ],
+        )
+        self.assertTrue(all(call[4] is self.ctx for call in match_calls))
         self.assertEqual(results, original_results)
 
     def test_directory_file_entries_not_mutated_when_prefixing_paths(self):
