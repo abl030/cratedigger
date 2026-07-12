@@ -9,7 +9,7 @@ import { state } from './state.js';
 import { searchArtists, cancelBrowseSearch, setSearchType, setBrowseSource, openBrowseArtist, closeBrowseArtist, reloadBrowseArtist, invalidateBrowseArtist, closeVaFallback } from './browse.js';
 import { loadReleaseGroup, addRelease, toggleReleaseDetail } from './discography.js';
 import { loadRecents, setRecentsFilter, setRecentsSub, renderRecentsItems } from './recents.js';
-import { loadPipeline, loadPipelineDashboard, setPipelineView, setFilter, renderPipeline, toggleCoverageMatchGraph, toggleDetail, deleteRequest, updateStatus, togglePipelineReplacedFilter, onPipelineSearchInput } from './pipeline.js';
+import { loadPipeline, loadPipelineDashboard, setPipelineView, renderPipeline, toggleCoverageMatchGraph, toggleDetail, deleteRequest, updateStatus } from './pipeline.js';
 import { loadLongTail, setLongTailBand, onLongTailSearchInput } from './long_tail.js';
 import { toggleLongTailDetail, toggleLongTailPeers, checkYoutube, pickYoutubeRescue, longTailAcceptSibling, longTailSetIntent, longTailSetImported, longTailDeleteRequest } from './long_tail_console.js';
 import { toggleLibDetail, toggleReleaseLibDetail, banSource, setLibQuality, upgradeAlbum, setIntent, confirmDeleteBeets, executeBeetsDeletion } from './library.js';
@@ -45,8 +45,8 @@ async function openReplacePickerAndHandle(options) {
     // logic stays accurate).
     invalidateActiveRgs();
     // Best-effort refetch on whichever tab the operator is most likely
-    // on. Pipeline is the canonical viewer of an album_requests row;
-    // wrong-matches and browse re-fetch on their own next interaction.
+    // on. Pipeline's operational views and Wrong Matches may expose state
+    // affected by the replacement; Browse refreshes on its next interaction.
     const pipeSection = document.getElementById('pipeline-section');
     if (pipeSection && pipeSection.classList.contains('active')) {
       loadPipeline();
@@ -81,12 +81,12 @@ function showTab(name) {
   // F12: Tab-switch reset for the search-plan detail subview. When the
   // operator is on the detail page and clicks a tab — including
   // re-clicking the Pipeline tab — clear the detail context so the
-  // dispatcher renders the queue/dashboard rather than re-running the
+  // dispatcher renders the operational view rather than re-running the
   // (now-stale) detail render. The `suppressDetailReset` flag carves
   // out an exception for `openSearchPlanDetail`'s internally-driven
   // showTab('pipeline') call (which has just set pipelineView).
   if (!suppressDetailReset && state.pipelineView === 'search-plan-detail') {
-    state.pipelineView = 'queue';
+    state.pipelineView = 'dashboard';
     state.searchPlanDetailContext = null;
   }
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -162,8 +162,6 @@ Object.assign(window, {
   loadPipeline,
   loadPipelineDashboard,
   setPipelineView,
-  setFilter,
-  onPipelineSearchInput,
   renderPipeline,
   toggleCoverageMatchGraph,
   toggleDetail,
@@ -223,7 +221,6 @@ Object.assign(window, {
   // Replace operator action — U9 binding so cross-module onclick
   // handlers in `release_actions.js` can call into the picker.
   openReplacePicker: openReplacePickerAndHandle,
-  togglePipelineReplacedFilter,
   toggleWrongMatchesReplacedFilter,
   // Long-tail YouTube rescue (U5) — the two-step flow. `checkYoutube` runs
   // the slow, side-effectful resolver GET (double-fire-guarded, stale-result

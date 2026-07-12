@@ -17,7 +17,7 @@ export function setRecentsFilter(f) {
 }
 
 /**
- * Switch Recents between history and import queue timeline.
+ * Switch Recents between history, active downloads, and importer work.
  * @param {string} sub
  */
 export function setRecentsSub(sub) {
@@ -29,7 +29,7 @@ function renderRecentsSubnav() {
   return `<div class="pipeline-subtabs">
     <button class="p-btn ${state.recentsSub === 'history' ? 'active-status' : ''}" onclick="window.setRecentsSub('history')">History</button>
     <button class="p-btn ${state.recentsSub === 'downloading' ? 'active-status' : ''}" onclick="window.setRecentsSub('downloading')">Downloading</button>
-    <button class="p-btn ${state.recentsSub === 'queue' ? 'active-status' : ''}" onclick="window.setRecentsSub('queue')">Queue</button>
+    <button class="p-btn ${state.recentsSub === 'imports' ? 'active-status' : ''}" onclick="window.setRecentsSub('imports')">Imports</button>
     <button class="p-btn subtab-refresh" onclick="window.loadRecents()">Refresh</button>
   </div>`;
 }
@@ -131,41 +131,6 @@ function renderRecentsDateHeader(date, matchRates) {
   </div>`;
 }
 
-function queueBadge(job, index) {
-  if (job.status === 'completed') return ['completed', 'badge-new'];
-  if (job.status === 'failed') return ['failed', 'badge-failed'];
-  if (job.status === 'running') return ['importing', 'badge-force'];
-  if (job.preview_status === 'evidence_ready') {
-    return [index === 0 ? 'next check' : 'ready check', 'badge-new'];
-  }
-  if (job.preview_status === 'would_import') {
-    return [index === 0 ? 'next legacy check' : 'legacy ready', 'badge-new'];
-  }
-  if (job.preview_status === 'running') return ['previewing', 'badge-warn'];
-  if (job.preview_status === 'waiting') return ['waiting preview', 'badge-library'];
-  if (job.preview_status === 'confident_reject') return ['preview reject', 'badge-failed'];
-  if (job.preview_status === 'measurement_failed') return ['measurement failed', 'badge-failed'];
-  if (job.preview_status === 'uncertain') return ['uncertain', 'badge-warn'];
-  if (job.preview_status === 'error') return ['preview error', 'badge-failed'];
-  return [job.status || 'queued', 'badge-library'];
-}
-
-function queueBorderColor(job) {
-  if (job.status === 'failed'
-      || ['confident_reject', 'measurement_failed', 'error'].includes(job.preview_status)) return '#a33';
-  if (job.preview_status === 'uncertain' || job.preview_status === 'running') return '#a93';
-  if (job.preview_status === 'evidence_ready' || job.preview_status === 'would_import' || job.status === 'completed') return '#1a4a2a';
-  if (job.status === 'running') return '#36c';
-  return '#1a3a5a';
-}
-
-function queueMessage(job) {
-  if (job.status === 'completed' || job.status === 'failed') {
-    return job.message || job.error || job.preview_message || job.preview_error || '';
-  }
-  return job.preview_message || job.message || job.preview_error || job.error || '';
-}
-
 function jobCleanupChip(job) {
   const cleanup = job && job.result && typeof job.result === 'object'
     ? job.result.cleanup
@@ -183,17 +148,18 @@ function jobCleanupChip(job) {
 }
 
 /**
- * Render import queue timeline rows.
+ * Render active importer timeline rows.
  * @param {Array<Object>} jobs
  * @returns {string}
  */
-export function renderImportQueueItems(jobs) {
-  if (jobs.length === 0) return '<div class="loading">No queued imports</div>';
-  return jobs.map((job, index) => {
-    const [badge, badgeClass] = queueBadge(job, index);
+export function renderImportItems(jobs) {
+  if (jobs.length === 0) return '<div class="loading">No active imports</div>';
+  return jobs.map((job) => {
+    const badge = job.badge || '';
+    const badgeClass = job.badge_class || '';
     const title = job.album_title || `Import job ${job.id}`;
     const artist = job.artist_name || job.job_type || '';
-    const message = queueMessage(job);
+    const message = job.summary || '';
     const stages = job.preview_result && Array.isArray(job.preview_result.stage_chain)
       ? job.preview_result.stage_chain.join(' · ')
       : '';
@@ -203,13 +169,13 @@ export function renderImportQueueItems(jobs) {
       job.status ? `import: ${job.status}` : '',
     ].filter(Boolean).join(' · ');
     const cleanupChip = jobCleanupChip(job);
-    // Search-plan inspector button — Recents queue rows render the
+    // Search-plan inspector button — Recents Imports rows render the
     // button when the import job is bound to a pipeline request. Orphan
     // imports (job.request_id null) get nothing — the conditional in
     // renderSearchPlanButton handles the absent case.
     const spBtn = renderSearchPlanButton({ pipelineId: job.request_id });
     return `
-      <div class="r-item" style="border-left-color:${queueBorderColor(job)}">
+      <div class="r-item" style="border-left-color:${esc(job.border_color || '#444')}">
         <div class="p-top">
           <div>
             <div class="p-title">${esc(title)} <span class="badge ${badgeClass}">${esc(badge)}</span>${cleanupChip}</div>
@@ -365,7 +331,7 @@ export function renderDownloadingItems(items) {
   }).join('');
 }
 
-async function loadImportQueue() {
+async function loadImports() {
   const el = document.getElementById('recents-content');
   el.innerHTML = renderRecentsSubnav() + '<div class="loading">Loading...</div>';
   try {
@@ -374,14 +340,14 @@ async function loadImportQueue() {
     const data = await r.json();
     const jobs = data.jobs || [];
     el.innerHTML = renderRecentsSubnav()
-      + renderImportQueueHeader(jobs, data.counts || {})
-      + renderImportQueueItems(jobs);
+      + renderImportsHeader(jobs, data.counts || {})
+      + renderImportItems(jobs);
   } catch (e) {
-    el.innerHTML = renderRecentsSubnav() + '<div class="loading">Failed to load queue</div>';
+    el.innerHTML = renderRecentsSubnav() + '<div class="loading">Failed to load imports</div>';
   }
 }
 
-function renderImportQueueHeader(jobs, counts) {
+function renderImportsHeader(jobs, counts) {
   const queued = Number(counts.queued || 0);
   const running = Number(counts.running || 0);
   const activeTotal = queued + running || jobs.length;
@@ -480,8 +446,8 @@ function renderRecentsCounts() {
  */
 export async function loadRecents() {
   const el = document.getElementById('recents-content');
-  if (state.recentsSub === 'queue') {
-    await loadImportQueue();
+  if (state.recentsSub === 'imports') {
+    await loadImports();
     return;
   }
   if (state.recentsSub === 'downloading') {
@@ -513,7 +479,7 @@ export const __test__ = {
   triageLabelText,
   renderDownloadingItems,
   normalizeYoutubeIngestItem,
-  renderImportQueueItems,
+  renderImportItems,
   renderRecentsCounts,
   renderRecentsDateHeader,
   renderRecentsSubnav,

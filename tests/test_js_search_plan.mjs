@@ -159,11 +159,11 @@ console.log('captureOriginContext() / restoreOriginContext()');
 }
 
 {
-  const captured = captureOriginContext({ tab: 'pipeline', scrollY: 0, subView: 'queue' });
+  const captured = captureOriginContext({ tab: 'pipeline', scrollY: 0, subView: 'long-tail' });
   const restored = restoreOriginContext(captured);
   assertEqual(restored.tab, 'pipeline', 'pipeline tab round-trips');
   assertEqual(restored.scrollY, 0, 'scrollY=0 round-trips');
-  assertEqual(restored.subView, 'queue', 'pipeline queue subView round-trips');
+  assertEqual(restored.subView, 'long-tail', 'pipeline long-tail subView round-trips');
 }
 
 {
@@ -870,18 +870,18 @@ function withFakeWindow(impl) {
 }
 
 {
-  // Origin tab is pipeline+queue: pipelineView restored to queue.
+  // Origin tab is pipeline+long-tail: pipelineView restored to long-tail.
   withFakeWindow((win, calls) => {
     state.searchPlanDetailContext = {
       requestId: 100,
       originTab: 'pipeline',
       originScrollY: 64,
-      originSubView: 'queue',
+      originSubView: 'long-tail',
     };
     state.pipelineView = 'search-plan-detail';
     closeSearchPlanDetail();
-    assertEqual(state.pipelineView, 'queue',
-      'pipeline-origin: pipelineView restored to queue');
+    assertEqual(state.pipelineView, 'long-tail',
+      'pipeline-origin: pipelineView restored to long-tail');
     assert(calls.showTab.length === 1 && calls.showTab[0] === 'pipeline',
       'pipeline-origin: showTab("pipeline") called');
     assert(calls.scrollTo.length === 1 && calls.scrollTo[0] === 64,
@@ -924,7 +924,25 @@ function withFakeWindow(impl) {
 }
 
 {
-  // No origin context: fallback to pipeline/queue, no throw.
+  // PR5 renamed the importer subview to Imports; Back must restore it.
+  withFakeWindow((win, calls) => {
+    state.searchPlanDetailContext = {
+      requestId: 101,
+      originTab: 'recents',
+      originScrollY: 0,
+      originSubView: 'imports',
+    };
+    state.recentsSub = 'history';
+    closeSearchPlanDetail();
+    assertEqual(state.recentsSub, 'imports',
+      'recents-origin: Imports subview restored');
+    assert(calls.showTab[0] === 'recents',
+      'imports-origin: showTab("recents") called');
+  });
+}
+
+{
+  // No origin context: fallback to pipeline/dashboard, no throw.
   withFakeWindow((win, calls) => {
     state.searchPlanDetailContext = null;
     state.pipelineView = 'search-plan-detail';
@@ -935,8 +953,8 @@ function withFakeWindow(impl) {
       threw = true;
     }
     assert(!threw, 'no-origin: close does not throw');
-    assertEqual(state.pipelineView, 'queue',
-      'no-origin: fallback to pipelineView=queue');
+    assertEqual(state.pipelineView, 'dashboard',
+      'no-origin: fallback to pipelineView=dashboard');
     assert(calls.showTab.length === 1 && calls.showTab[0] === 'pipeline',
       'no-origin: fallback shows the pipeline tab');
   });
@@ -1919,8 +1937,8 @@ console.log('F12: tab-switch clears detail context');
     };
     // Switch to a different tab.
     showTab('browse');
-    assertEqual(state.pipelineView, 'queue',
-      'F12: switching away from pipeline resets pipelineView from search-plan-detail to queue');
+    assertEqual(state.pipelineView, 'dashboard',
+      'F12: switching away resets search-plan-detail to dashboard');
     assert(state.searchPlanDetailContext === null,
       'F12: detail context cleared when leaving search-plan-detail');
     // Now re-set and switch INTO pipeline directly — should also reset.
@@ -1930,8 +1948,8 @@ console.log('F12: tab-switch clears detail context');
       originScrollY: 0, originSubView: null,
     };
     showTab('pipeline');
-    assertEqual(state.pipelineView, 'queue',
-      'F12: switching into pipeline tab resets stuck search-plan-detail state to queue');
+    assertEqual(state.pipelineView, 'dashboard',
+      'F12: switching into pipeline resets stuck detail state to dashboard');
     assert(state.searchPlanDetailContext === null,
       'F12: switching into pipeline tab clears stale detail context');
     // Verify the openSearchPlanDetail flow does NOT trip the reset:

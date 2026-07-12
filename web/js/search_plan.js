@@ -153,7 +153,7 @@ export function buildHistoryUrl(opts) {
  * @typedef {Object} OriginContextInput
  * @property {string} tab        Active tab when the operator clicked "Open detail" — `'browse'`, `'pipeline'`, `'recents'`, etc.
  * @property {number} scrollY    `window.scrollY` at click time.
- * @property {string|null} subView  Active sub-view (e.g. `'queue'` / `'dashboard'` on Pipeline). `null` for tabs with no sub-view.
+ * @property {string|null} subView  Active sub-view (e.g. `'dashboard'` / `'long-tail'` on Pipeline). `null` for tabs with no sub-view.
  */
 
 /**
@@ -621,7 +621,7 @@ export function snapshotActiveTab() {
   /** @type {string|null} */
   let subView = null;
   if (tab === 'pipeline') {
-    subView = state.pipelineView ?? 'queue';
+    subView = state.pipelineView ?? 'dashboard';
   } else if (tab === 'recents') {
     subView = state.recentsSub ?? 'history';
   }
@@ -692,7 +692,7 @@ export function openSearchPlanDetail(requestId, _originEl) {
  *
  * Reads `state.searchPlanDetailContext`. When null (operator refreshed,
  * lost the stash, or navigated here directly somehow), falls back to
- * the Pipeline queue view so the operator is never stranded.
+ * the Pipeline dashboard so the operator is never stranded.
  *
  * Mutations: clears `state.searchPlanDetailContext`, restores
  * `state.pipelineView` when the origin tab was Pipeline, schedules a
@@ -707,13 +707,13 @@ export function closeSearchPlanDetail() {
   bumpDetailGeneration();
   const ctx = state.searchPlanDetailContext;
   if (!ctx) {
-    // No stash — fall back to the Pipeline queue without throwing.
+    // No stash — fall back to the Pipeline dashboard without throwing.
     if (typeof console !== 'undefined' && console.warn) {
       console.warn(
-        'closeSearchPlanDetail: no origin context — falling back to pipeline/queue',
+        'closeSearchPlanDetail: no origin context — falling back to pipeline/dashboard',
       );
     }
-    state.pipelineView = 'queue';
+    state.pipelineView = 'dashboard';
     if (typeof window !== 'undefined') {
       const showTab = /** @type {(name: string) => void} */ (
         /** @type {any} */ (window).showTab);
@@ -724,18 +724,18 @@ export function closeSearchPlanDetail() {
   const { tab, scrollY, subView } = restoreOriginContext(ctx);
   if (tab === 'pipeline') {
     state.pipelineView = (subView === 'dashboard'
-      || subView === 'queue')
+      || subView === 'long-tail')
       ? subView
-      : 'queue';
+      : 'dashboard';
   } else {
     // Leave pipelineView alone on non-pipeline origins; the next time
     // the operator opens Pipeline they should land where they were last
-    // (queue by default).
+    // (dashboard by default).
     if (state.pipelineView === 'search-plan-detail') {
-      state.pipelineView = 'queue';
+      state.pipelineView = 'dashboard';
     }
     if (tab === 'recents'
-      && (subView === 'history' || subView === 'downloading' || subView === 'queue')) {
+      && (subView === 'history' || subView === 'downloading' || subView === 'imports')) {
       state.recentsSub = subView;
     }
   }

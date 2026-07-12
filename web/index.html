@@ -321,6 +321,15 @@
   .sp-advance-form-error { color: #d88; font-size: 0.78em; flex-basis: 100%; padding: 2px 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .p-tracks { margin-top: 8px; }
   .p-history { margin-top: 8px; }
+  .p-tracks > summary,
+  .p-history-older > summary { cursor: pointer; user-select: none; color: #889; }
+  .p-tracks > summary:hover,
+  .p-tracks[open] > summary,
+  .p-history-older > summary:hover,
+  .p-history-older[open] > summary { color: #ccd; }
+  .p-history-older { margin: 6px 0 0 8px; }
+  .p-history-older > summary { font-size: 0.8em; }
+  .p-tracks > .lib-track:first-of-type { margin-top: 4px; }
   .p-hist-item { font-size: 0.75em; color: #777; padding: 6px 0; border-bottom: 1px solid #222; }
   .p-hist-header { display: flex; gap: 8px; align-items: center; margin-bottom: 3px; }
   /* One label/value pair per row (issue #575): the previous 4-column
