@@ -169,10 +169,14 @@ elif args[:2] == ["commit", "-m"]:
         "parent": state["worktree_base"],
         "target": target,
         "message": args[2],
-        "signature_good": state.get("fault") not in {
-            "signature",
-            "invalid_signature_signal_after_commit",
-        },
+        "signature_material": (
+            "bad"
+            if state.get("fault") in {
+                "signature",
+                "invalid_signature_signal_after_commit",
+            }
+            else "good"
+        ),
     }
     state["worktree_head"] = revision
     if state.get("worktree_attached_ref") == (
@@ -197,10 +201,14 @@ elif args[:3] == ["log", "-1", "--format=%G?"]:
     if state.get("fault") == "post_commit_verify":
         fail("fake post-commit verification failed")
     commit = state["commits"].get(revision)
-    if commit is not None and not commit["signature_good"]:
-        print("B")
+    if state.get("fault") == "signature_unknown":
+        signature_status = "U"
+    elif commit is not None and commit["signature_material"] == "bad":
+        signature_status = "B"
     else:
-        print("G")
+        signature_status = "G"
+    state["events"].append(["signature-status", revision, signature_status])
+    print(signature_status)
 elif args[:2] == ["cat-file", "commit"]:
     print("tree deadbeef")
     print("parent " + state["commits"].get(args[2], {}).get(

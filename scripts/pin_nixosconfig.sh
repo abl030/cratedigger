@@ -98,10 +98,18 @@ verify_ssh_signature() {
     die "could not read signature status for revision $revision"
     return 1
   fi
-  if [[ "$signature_status" != 'G' ]]; then
-    die "revision $revision does not have a good signature (status=$signature_status)"
-    return 2
-  fi
+  case "$signature_status" in
+    G)
+      ;;
+    B|N)
+      die "revision $revision has a definitively invalid or missing signature (status=$signature_status)"
+      return 2
+      ;;
+    *)
+      die "could not establish signature validity for revision $revision (status=$signature_status)"
+      return 1
+      ;;
+  esac
   if ! commit_object=$(git -C "$NIXOSCONFIG_REPO" \
     cat-file commit "$revision"); then
     die "could not read commit object for revision $revision"

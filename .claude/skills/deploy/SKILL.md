@@ -46,9 +46,10 @@ still at the pin's parent, it pushes the already-created commit; if Forgejo is
 already at the pending revision, it reports success without creating another
 commit; and if Forgejo advanced to an incompatible revision, it fails with the
 exact pending, base, and remote SHAs. Never delete or rewrite either private
-recovery ref by hand during a retry. A transient verification failure retains
-the pending candidate; a definitively invalid or unsigned candidate is
-discarded so a later invocation can create a valid signed pin.
+recovery ref by hand during a retry. A transient or inconclusive verification
+result (for example, unavailable allowed-signers configuration) retains the
+pending candidate; only a definitively bad or unsigned candidate is discarded
+so a later invocation can create a valid signed pin.
 
 The Forgejo token remains confined to the helper's fail-fast subshell
 environment and must never appear in an argv value, command-line `-c`

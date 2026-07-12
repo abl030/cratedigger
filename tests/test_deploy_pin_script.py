@@ -206,7 +206,9 @@ class TestDeployPinScript(unittest.TestCase):
 
         self.assertNotEqual(interrupted.returncode, 0)
         self.assertIsNotNone(invalid)
-        self.assertFalse(self.fake.state["commits"][invalid]["signature_good"])
+        self.assertEqual(
+            self.fake.state["commits"][invalid]["signature_material"], "bad"
+        )
 
         self.fake.clear_fault()
         rejected = self.fake.run(SCRIPT)
@@ -221,9 +223,37 @@ class TestDeployPinScript(unittest.TestCase):
         final_state = self.fake.state
         self.assertEqual(recovered.returncode, 0, recovered.stderr)
         self.assertEqual(final_state["commit_count"], 2)
-        self.assertTrue(
-            final_state["commits"][final_state["receipt_rev"]]["signature_good"]
+        self.assertEqual(
+            final_state["commits"][final_state["receipt_rev"]][
+                "signature_material"
+            ],
+            "good",
         )
+        self.assertIsNone(final_state["pending_rev"])
+
+    def test_unknown_signature_verifier_retains_same_pending_commit(self) -> None:
+        self.fake.update_state(fault="signal_after_commit")
+        interrupted = self.fake.run(SCRIPT)
+        pending = self.fake.state["pending_rev"]
+
+        self.assertNotEqual(interrupted.returncode, 0)
+        self.assertIsNotNone(pending)
+        self.assertEqual(
+            self.fake.state["commits"][pending]["signature_material"], "good"
+        )
+
+        self.fake.update_state(fault="signature_unknown")
+        unavailable = self.fake.run(SCRIPT)
+        self.assertEqual(unavailable.returncode, 1, unavailable.stderr)
+        self.assertEqual(self.fake.state["pending_rev"], pending)
+        self.assertEqual(self.fake.state["commit_count"], 1)
+
+        self.fake.clear_fault()
+        recovered = self.fake.run(SCRIPT)
+        final_state = self.fake.state
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(final_state["commit_count"], 1)
+        self.assertEqual(final_state["receipt_rev"], pending)
         self.assertIsNone(final_state["pending_rev"])
 
     def test_cleanup_failure_reports_recoverable_remote_revision(self) -> None:
