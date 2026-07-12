@@ -23,61 +23,31 @@ set -euo pipefail
 git add <files> && git commit -m "<message>" && git push
 ```
 
-2. Update nixosconfig in a throwaway worktree from freshly fetched
-`origin/master`; never make the deploy pin in whatever state the primary
-checkout happens to have. Create and verify an SSH-signed commit:
+2. From the pushed Cratedigger checkout, invoke the checked Bash entrypoint
+with the exact revision to pin. The entrypoint runs the complete nixosconfig
+fetch → detached worktree → `cratedigger-src`-only lock update → SSH-signature
+verification → token-header Forgejo push → exact remote-SHA verification →
+cleanup lifecycle. It refuses to run anywhere except doc1 and never depends on
+the caller's interactive/default shell:
 ```bash
 set -euo pipefail
-test "$(hostname)" = proxmox-vm
-NIXOSCONFIG_REPO=$HOME/nixosconfig
-NIXOSCONFIG_CALLER_DIR=$PWD
-NIXOSCONFIG_TMP=$(mktemp -d "${TMPDIR:-/tmp}/nixosconfig-deploy.XXXXXX")
-NIXOSCONFIG_WORKTREE=$NIXOSCONFIG_TMP/worktree
-cleanup_nixosconfig_worktree() {
-  cd "$HOME"
-  git -C "$NIXOSCONFIG_REPO" worktree remove --force "$NIXOSCONFIG_WORKTREE" \
-    >/dev/null 2>&1 || rm -rf "$NIXOSCONFIG_WORKTREE"
-  rm -rf "$NIXOSCONFIG_TMP"
-}
-cleanup_nixosconfig_on_exit() {
-  local status=$?
-  trap - EXIT
-  cleanup_nixosconfig_worktree || true
-  exit "$status"
-}
-trap cleanup_nixosconfig_on_exit EXIT
-git -C "$NIXOSCONFIG_REPO" fetch origin \
-  '+refs/heads/master:refs/remotes/origin/master'
-git -C "$NIXOSCONFIG_REPO" worktree add --detach "$NIXOSCONFIG_WORKTREE" origin/master
-cd "$NIXOSCONFIG_WORKTREE"
-nix flake update cratedigger-src
-git add flake.lock
-git commit -m "cratedigger: <description>"
-test "$(git log -1 --format=%G?)" = G
-NIXOSCONFIG_REV=$(git rev-parse HEAD)
-
-# Keep the token in a fail-fast subshell: its environment disappears on both
-# success and failure, while the subshell status remains authoritative.
-(
-  set -euo pipefail
-  TOKEN=$(cat /run/secrets/forgejo/nixbot-token)
-  test -n "$TOKEN"
-  export GIT_CONFIG_COUNT=1
-  export GIT_CONFIG_KEY_0="http.https://git.ablz.au.extraHeader"
-  export GIT_CONFIG_VALUE_0="Authorization: token $TOKEN"
-  unset TOKEN
-  git push origin HEAD:master
-  REMOTE_REV=$(git ls-remote origin refs/heads/master | cut -f1)
-  test "$REMOTE_REV" = "$NIXOSCONFIG_REV"
-)
-printf 'signed nixosconfig revision: %s\n' "$NIXOSCONFIG_REV"
-cd "$NIXOSCONFIG_CALLER_DIR"
-cleanup_nixosconfig_worktree
-trap - EXIT
+CRATEDIGGER_REPO=$(git rev-parse --show-toplevel)
+CRATEDIGGER_REV=$(git rev-parse HEAD)
+"$CRATEDIGGER_REPO/scripts/pin_nixosconfig.sh" \
+  "$CRATEDIGGER_REV" "cratedigger: <description>"
 ```
 
-The token must never appear in an argv value, command-line `-c` assignment, or
-remote URL.
+The helper keeps the last intended signed pin reachable through the private
+`refs/cratedigger-deploy/cratedigger-src` ref. Retry the exact same invocation
+after any failure: if Forgejo master is still at the pin's parent, it pushes
+the already-created commit; if Forgejo is already at the pending revision, it
+reports success without creating another commit; and if Forgejo advanced to an
+incompatible revision, it fails with the exact pending, base, and remote SHAs.
+Never delete or rewrite that recovery ref by hand during a retry.
+
+The Forgejo token remains confined to the helper's fail-fast subshell
+environment and must never appear in an argv value, command-line `-c`
+assignment, or remote URL.
 
 3. Capture the current systemd invocation, deploy doc2 through the
 forced-command locked-sibling trigger, then wait up to 30 minutes for a **new,
