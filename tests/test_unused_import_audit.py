@@ -20,32 +20,12 @@ EXPECTED_PRODUCTION_ROOTS = (
     "cratedigger.py",
     "album_source.py",
 )
-LEGACY_EXPORT_SURFACES = (
+REDUNDANT_ALIAS_AUDIT_SURFACES = (
     "cratedigger.py",
     "scripts/pipeline_cli/__init__.py",
 )
 EXPECTED_REDUNDANT_ALIASES = {
-    "cratedigger.py": frozenset({
-        ("lib.browse", "_browse_directories"),
-        ("lib.browse", "_browse_one"),
-        ("lib.browse", "download_filter"),
-        ("lib.browse", "rank_candidate_dirs"),
-        ("lib.enqueue", "_get_denied_users"),
-        ("lib.enqueue", "_get_user_dirs"),
-        ("lib.enqueue", "_prefixed_directory_files"),
-        ("lib.enqueue", "_try_filetype"),
-        ("lib.enqueue", "choose_release"),
-        ("lib.enqueue", "get_album_tracks"),
-        ("lib.enqueue", "release_trackcount_mode"),
-        ("lib.enqueue", "try_enqueue"),
-        ("lib.enqueue", "try_multi_enqueue"),
-        ("lib.matching", "album_match"),
-        ("lib.matching", "album_track_num"),
-        ("lib.matching", "check_for_match"),
-        ("lib.matching", "check_ratio"),
-        ("lib.matching", "get_album_by_id"),
-        ("lib.util", "_track_titles_cross_check"),
-    }),
+    "cratedigger.py": frozenset(),
     "scripts/pipeline_cli/__init__.py": frozenset({
         ("scripts.pipeline_cli._format", "_fmt_br"),
         ("scripts.pipeline_cli._format", "_fmt_measurement"),
@@ -219,7 +199,7 @@ class TestUnusedImportAudit(unittest.TestCase):
     def test_legacy_redundant_alias_baseline_is_exact(self) -> None:
         self.assertEqual(
             set(EXPECTED_REDUNDANT_ALIASES),
-            set(LEGACY_EXPORT_SURFACES),
+            set(REDUNDANT_ALIAS_AUDIT_SURFACES),
         )
         for relative_path, expected in EXPECTED_REDUNDANT_ALIASES.items():
             with self.subTest(relative_path=relative_path):
@@ -360,8 +340,8 @@ class TestUnusedImportAudit(unittest.TestCase):
                     import_is_live=True,
                 )
 
-    def test_each_legacy_surface_still_rejects_a_new_unused_import(self) -> None:
-        for relative_path in LEGACY_EXPORT_SURFACES:
+    def test_each_audited_surface_still_rejects_a_new_unused_import(self) -> None:
+        for relative_path in REDUNDANT_ALIAS_AUDIT_SURFACES:
             with self.subTest(relative_path=relative_path):
                 source = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
                 findings = ruff_findings({

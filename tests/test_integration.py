@@ -24,7 +24,9 @@ sys.modules["music_tag"] = MagicMock()
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import cratedigger
+from lib import browse as browse_module
 from lib import enqueue as enqueue_module
+from lib import matching as matching_module
 from lib.grab_list import DownloadFile
 from lib.slskd_transfers import cancel_and_delete, slskd_do_enqueue
 from lib.dispatch import _build_download_info
@@ -274,28 +276,28 @@ class TestGetUserDirs(unittest.TestCase):
     def test_specific_filetype(self):
         """Should return dirs for the exact filetype requested."""
         results = {"flac": ["Dir1", "Dir2"], "mp3 v0": ["Dir3"]}
-        self.assertEqual(cratedigger._get_user_dirs(results, "flac"), ["Dir1", "Dir2"])
+        self.assertEqual(enqueue_module._get_user_dirs(results, "flac"), ["Dir1", "Dir2"])
 
     def test_missing_filetype_returns_none(self):
         """Should return None when the user has no dirs for that filetype."""
         results = {"flac": ["Dir1"]}
-        self.assertIsNone(cratedigger._get_user_dirs(results, "mp3 v0"))
+        self.assertIsNone(enqueue_module._get_user_dirs(results, "mp3 v0"))
 
     def test_catch_all_merges_all(self):
         """Catch-all '*' should merge dirs from all filetypes, deduped."""
         results = {"flac": ["Dir1", "Dir2"], "mp3 v0": ["Dir2", "Dir3"]}
-        dirs = cratedigger._get_user_dirs(results, "*")
+        dirs = enqueue_module._get_user_dirs(results, "*")
         self.assertEqual(dirs, ["Dir1", "Dir2", "Dir3"])
 
     def test_catch_all_empty_returns_none(self):
         """Catch-all with no dirs should return None."""
         results = {"flac": [], "mp3 v0": []}
-        self.assertIsNone(cratedigger._get_user_dirs(results, "*"))
+        self.assertIsNone(enqueue_module._get_user_dirs(results, "*"))
 
     def test_catch_all_single_filetype(self):
         """Catch-all with one filetype should return those dirs."""
         results = {"flac": ["Dir1"]}
-        self.assertEqual(cratedigger._get_user_dirs(results, "*"), ["Dir1"])
+        self.assertEqual(enqueue_module._get_user_dirs(results, "*"), ["Dir1"])
 
 
 class TestRawDictBoundary(unittest.TestCase):
@@ -312,7 +314,7 @@ class TestRawDictBoundary(unittest.TestCase):
                 {"filename": "02 - Track.flac", "size": 100},
                 {"filename": "cover.jpg", "size": 50},
             ])
-            result = cratedigger.album_track_num(directory, cratedigger.cfg)
+            result = matching_module.album_track_num(directory, cratedigger.cfg)
             self.assertEqual(result["count"], 2)
             self.assertEqual(result["filetype"], "flac")
         finally:
@@ -332,7 +334,7 @@ class TestRawDictBoundary(unittest.TestCase):
                 {"filename": "cover.jpg", "size": 50},
                 {"filename": "info.nfo", "size": 10},
             ])
-            filtered = cratedigger.download_filter("flac", directory, cratedigger.cfg)
+            filtered = browse_module.download_filter("flac", directory, cratedigger.cfg)
             filenames = [f["filename"] for f in filtered["files"]]
             self.assertIn("01 - Track.flac", filenames)
             self.assertIn("cover.jpg", filenames)
@@ -374,7 +376,7 @@ class TestContextDependencyPropagation(unittest.TestCase):
         }
         ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
-        result = cratedigger.check_for_match(
+        result = matching_module.check_for_match(
             make_tracks((1, "Track One", 1)),
             "flac",
             ["Music\\Album"],
@@ -398,7 +400,7 @@ class TestContextDependencyPropagation(unittest.TestCase):
         global_source._get_db.return_value = global_db
         cratedigger.pipeline_db_source = global_source
 
-        denied = cratedigger._get_denied_users(12, ctx)
+        denied = enqueue_module._get_denied_users(12, ctx)
 
         self.assertEqual(denied, {"baduser"})
         ctx_source._get_db.assert_called_once()
@@ -416,7 +418,7 @@ class TestContextDependencyPropagation(unittest.TestCase):
         global_source.get_tracks.return_value = []
         cratedigger.pipeline_db_source = global_source
 
-        tracks = cratedigger.get_album_tracks(album, ctx)
+        tracks = enqueue_module.get_album_tracks(album, ctx)
 
         self.assertEqual(tracks, expected_tracks)
         ctx_source.get_tracks.assert_called_once_with(album)
@@ -685,7 +687,9 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
                 MatchResult(matched=True, directory=dir2, file_dir="Music\\Disc2"),
             ],
         ), patch("time.sleep"):
-            cratedigger.try_multi_enqueue(release, tracks, results, "flac", self.ctx)
+            enqueue_module.try_multi_enqueue(
+                release, tracks, results, "flac", self.ctx
+            )
 
         self.assertEqual(results, original_results)
 
@@ -733,7 +737,7 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
             return next(match_results)
 
         with patch("time.sleep"):
-            attempt = cratedigger.try_multi_enqueue(
+            attempt = enqueue_module.try_multi_enqueue(
                 release, tracks, results, "flac", self.ctx, match_fn=fake_match,
             )
 
@@ -799,13 +803,13 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
 
         # First call: match with 1 track, 1 audio file
         tracks = make_tracks((1, "Track One", 1))
-        result = cratedigger.check_for_match(
+        result = matching_module.check_for_match(
             tracks, "flac", ["Music\\Album"], "testuser", self.ctx
         )
         self.assertTrue(result.matched)
 
         # Mutate the returned directory via download_filter (as try_enqueue does)
-        cratedigger.download_filter("flac", result.directory, self.ctx.cfg)
+        browse_module.download_filter("flac", result.directory, self.ctx.cfg)
 
         # folder_cache should still have ALL 3 files (including .nfo)
         cached = self.ctx.folder_cache["testuser"]["Music\\Album"]
@@ -827,16 +831,16 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
         tracks = make_tracks((1, "Track One", 1))
 
         # First match
-        result1 = cratedigger.check_for_match(
+        result1 = matching_module.check_for_match(
             tracks, "flac", ["Music\\Album"], "testuser", self.ctx
         )
         self.assertTrue(result1.matched)
 
         # Mutate it
-        cratedigger.download_filter("flac", result1.directory, self.ctx.cfg)
+        browse_module.download_filter("flac", result1.directory, self.ctx.cfg)
 
         # Second match on the same cached dir should still succeed
-        result2 = cratedigger.check_for_match(
+        result2 = matching_module.check_for_match(
             tracks, "flac", ["Music\\Album"], "testuser", self.ctx
         )
         self.assertTrue(result2.matched)
@@ -858,7 +862,7 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
             "deepcopy",
             side_effect=AssertionError("deepcopy should not be used"),
         ):
-            result = cratedigger.check_for_match(
+            result = matching_module.check_for_match(
                 make_tracks((1, "Track One", 1)),
                 "flac",
                 ["Music\\Album"],
@@ -914,7 +918,7 @@ class TestSingleEnqueuePathPrefixing(unittest.TestCase):
             matched=True, directory=directory, file_dir="Music\\Album",
         )
         with patch("time.sleep"):
-            attempt = cratedigger.try_enqueue(
+            attempt = enqueue_module.try_enqueue(
                 make_tracks((1, "Track One", 1)),
                 results,
                 "flac",
@@ -965,7 +969,7 @@ class TestSingleEnqueuePathPrefixing(unittest.TestCase):
         )
 
         with patch("time.sleep"):
-            attempt = cratedigger.try_enqueue(
+            attempt = enqueue_module.try_enqueue(
                 make_tracks((1, "Track One", 1)),
                 results,
                 "lossless",
@@ -1098,7 +1102,7 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
         match_result = MatchResult(
             matched=True, directory=directory, file_dir="Music\\Album",
         )
-        attempt = cratedigger.try_enqueue(
+        attempt = enqueue_module.try_enqueue(
             make_tracks((1, "Track One", 1)),
             results,
             "flac",
@@ -1155,7 +1159,9 @@ class TestNegativeMatchCache(unittest.TestCase):
         )
 
         # First call — misses (1 file vs 3 tracks)
-        result1 = cratedigger.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
+        result1 = matching_module.check_for_match(
+            tracks, "flac", ["Music\\Album"], "user1", self.ctx
+        )
         self.assertFalse(result1.matched)
 
         # Negative cache should contain (user1, Music\Album, 3, flac)
@@ -1163,7 +1169,9 @@ class TestNegativeMatchCache(unittest.TestCase):
 
         # Second call with same track count — should skip (no album_track_num re-eval)
         # We verify by checking that the negative cache hit prevents redundant work
-        result2 = cratedigger.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
+        result2 = matching_module.check_for_match(
+            tracks, "flac", ["Music\\Album"], "user1", self.ctx
+        )
         self.assertFalse(result2.matched)
 
     def test_same_dir_different_filetype_not_skipped(self):
@@ -1178,7 +1186,9 @@ class TestNegativeMatchCache(unittest.TestCase):
         tracks = make_tracks((1, "Track One", 1))
 
         # Fails for "flac" (file is .mp3, album_track_num won't count it as flac)
-        cratedigger.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
+        matching_module.check_for_match(
+            tracks, "flac", ["Music\\Album"], "user1", self.ctx
+        )
         self.assertIn(("user1", "Music\\Album", 1, "flac"), self.ctx.negative_matches)
 
         # Should NOT be skipped for "*" (different filetype key)
@@ -1198,11 +1208,15 @@ class TestNegativeMatchCache(unittest.TestCase):
             (1, "Track Two", 1),
             (1, "Track Three", 1),
         )
-        cratedigger.check_for_match(tracks_3, "flac", ["Music\\Album"], "user1", self.ctx)
+        matching_module.check_for_match(
+            tracks_3, "flac", ["Music\\Album"], "user1", self.ctx
+        )
 
         # Now try with 1 track — should NOT be skipped (different track count)
         tracks_1 = make_tracks((1, "Track One", 1))
-        result = cratedigger.check_for_match(tracks_1, "flac", ["Music\\Album"], "user1", self.ctx)
+        result = matching_module.check_for_match(
+            tracks_1, "flac", ["Music\\Album"], "user1", self.ctx
+        )
         self.assertTrue(result.matched)  # 1 file matches 1 track
 
 
@@ -1249,7 +1263,9 @@ class TestSearchResultPreFiltering(unittest.TestCase):
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
         tracks: list[cratedigger.TrackRecord] = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]  # type: ignore[misc]
-        cratedigger.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
+        matching_module.check_for_match(
+            tracks, "flac", ["Music\\Album"], "user1", self.ctx
+        )
 
         # Should NOT have called slskd.users.directory — skipped before browse
         self.assertEqual(self.slskd.users.directory_calls, [])
@@ -1278,7 +1294,7 @@ class TestSearchResultPreFiltering(unittest.TestCase):
             {"albumId": 1, "title": f"Track {i}", "mediumNumber": 1}
             for i in range(12)
         ]  # type: ignore[misc]
-        cratedigger.check_for_match(
+        matching_module.check_for_match(
             tracks, "flac", ["Music\\Album"], "user1", self.ctx)
 
         # SHOULD have browsed — search_count=1 is below the 2*track_num guard.
@@ -1306,7 +1322,9 @@ class TestSearchResultPreFiltering(unittest.TestCase):
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
         tracks: list[cratedigger.TrackRecord] = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]  # type: ignore[misc]
-        cratedigger.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
+        matching_module.check_for_match(
+            tracks, "flac", ["Music\\Album"], "user1", self.ctx
+        )
 
         # SHOULD have browsed — count is close enough
         self.assertEqual(
@@ -1323,7 +1341,9 @@ class TestSearchResultPreFiltering(unittest.TestCase):
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
         tracks: list[cratedigger.TrackRecord] = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]  # type: ignore[misc]
-        cratedigger.check_for_match(tracks, "flac", ["Music\\Album"], "user1", self.ctx)
+        matching_module.check_for_match(
+            tracks, "flac", ["Music\\Album"], "user1", self.ctx
+        )
 
         # Should browse — no metadata to pre-filter
         self.assertEqual(
@@ -1341,7 +1361,7 @@ class TestRankCandidateDirs(unittest.TestCase):
             "Music\\Artist\\The Album Name",
             "Music\\Other\\Random",
         ]
-        ranked = cratedigger.rank_candidate_dirs(dirs, "The Album Name", "Artist")
+        ranked = browse_module.rank_candidate_dirs(dirs, "The Album Name", "Artist")
         self.assertEqual(ranked[0], "Music\\Artist\\The Album Name")
 
     def test_artist_name_in_path_promoted(self):
@@ -1349,7 +1369,7 @@ class TestRankCandidateDirs(unittest.TestCase):
             "Music\\Other\\Album",
             "Music\\Artist\\Album",
         ]
-        ranked = cratedigger.rank_candidate_dirs(dirs, "Album", "Artist")
+        ranked = browse_module.rank_candidate_dirs(dirs, "Album", "Artist")
         self.assertEqual(ranked[0], "Music\\Artist\\Album")
 
     def test_penalty_keywords_demoted(self):
@@ -1358,7 +1378,7 @@ class TestRankCandidateDirs(unittest.TestCase):
             "Music\\Artist\\The Real Album",
             "Music\\Artist\\Greatest Hits",
         ]
-        ranked = cratedigger.rank_candidate_dirs(dirs, "The Real Album", "Artist")
+        ranked = browse_module.rank_candidate_dirs(dirs, "The Real Album", "Artist")
         self.assertEqual(ranked[0], "Music\\Artist\\The Real Album")
         # Best Of and Greatest Hits should be last
         penalty_dirs = ranked[1:]
@@ -1372,7 +1392,7 @@ class TestRankCandidateDirs(unittest.TestCase):
             "Music\\Artist\\Discography\\Album",
             "Music\\Artist\\Album",
         ]
-        ranked = cratedigger.rank_candidate_dirs(dirs, "Album", "Artist")
+        ranked = browse_module.rank_candidate_dirs(dirs, "Album", "Artist")
         self.assertEqual(ranked[0], "Music\\Artist\\Album")
 
     def test_case_insensitive(self):
@@ -1380,13 +1400,13 @@ class TestRankCandidateDirs(unittest.TestCase):
             "music\\other\\random",
             "MUSIC\\ARTIST\\THE ALBUM",
         ]
-        ranked = cratedigger.rank_candidate_dirs(dirs, "The Album", "Artist")
+        ranked = browse_module.rank_candidate_dirs(dirs, "The Album", "Artist")
         self.assertEqual(ranked[0], "MUSIC\\ARTIST\\THE ALBUM")
 
     def test_preserves_order_for_equal_scores(self):
         """Dirs with equal scores should preserve original order."""
         dirs = ["Music\\Dir1", "Music\\Dir2", "Music\\Dir3"]
-        ranked = cratedigger.rank_candidate_dirs(dirs, "Unrelated", "Nobody")
+        ranked = browse_module.rank_candidate_dirs(dirs, "Unrelated", "Nobody")
         self.assertEqual(ranked, dirs)
 
 
@@ -1425,7 +1445,7 @@ class TestParallelDirectoryBrowsing(unittest.TestCase):
                 ])
             ])
 
-        results = cratedigger._browse_directories(
+        results = browse_module._browse_directories(
             dirs_to_browse, "user1", self.slskd, max_workers=2
         )
 
@@ -1454,7 +1474,7 @@ class TestParallelDirectoryBrowsing(unittest.TestCase):
             Exception("Peer offline"),
         )
 
-        results = cratedigger._browse_directories(
+        results = browse_module._browse_directories(
             dirs_to_browse, "user1", self.slskd, max_workers=2
         )
 
@@ -1476,7 +1496,7 @@ class TestParallelDirectoryBrowsing(unittest.TestCase):
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
         tracks = make_tracks((1, "Track One", 1))
 
-        result = cratedigger.check_for_match(
+        result = matching_module.check_for_match(
             tracks, "flac", ["Music\\Dir1", "Music\\Dir2"], "user1", self.ctx
         )
         self.assertFalse(result.matched)
