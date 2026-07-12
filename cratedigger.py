@@ -84,36 +84,12 @@ def _create_slskd_client(client_cfg: CratediggerConfig) -> SlskdClient:
         pool_size=derive_slskd_http_pool_size(client_cfg),
     )
 
-# Explicit redundant aliases are the exact baseline for legacy test-facing
-# exports from the former monolith. New unused imports remain F401 failures.
-from lib.browse import (
-    _browse_directories as _browse_directories,
-    _browse_one as _browse_one,
-    download_filter as download_filter,
-    rank_candidate_dirs as rank_candidate_dirs,
-    shutdown_browse_coordinator,
-)
+from lib.browse import shutdown_browse_coordinator
 from lib.enqueue import (
     FindDownloadResult,
     FindDownloadOwnerPathError,
-    _get_denied_users as _get_denied_users,
-    _get_user_dirs as _get_user_dirs,
-    _prefixed_directory_files as _prefixed_directory_files,
-    _try_filetype as _try_filetype,
-    choose_release as choose_release,
     find_download,
-    get_album_tracks as get_album_tracks,
     prepare_find_download_context,
-    release_trackcount_mode as release_trackcount_mode,
-    try_enqueue as try_enqueue,
-    try_multi_enqueue as try_multi_enqueue,
-)
-from lib.matching import (
-    album_match as album_match,
-    album_track_num as album_track_num,
-    check_for_match as check_for_match,
-    check_ratio as check_ratio,
-    get_album_by_id as get_album_by_id,
 )
 from lib.quality import top_candidates_with_skip_split
 
@@ -1209,8 +1185,7 @@ def grab_most_wanted(albums):
     return _grab_most_wanted_impl(albums, lambda albs: search_and_queue(albs, _module_ctx), _module_ctx)
 
 
-from lib.util import (_track_titles_cross_check as _track_titles_cross_check,
-                      setup_logging)
+from lib.util import setup_logging
 
 
 def main():
