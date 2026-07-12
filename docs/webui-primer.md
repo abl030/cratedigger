@@ -245,12 +245,17 @@ Code changes in `web/` deploy via the normal cratedigger flake update:
 
 ```bash
 cd ~/cratedigger && git add web/ && git commit -m "..." && git push
-cd ~/nixosconfig && nix flake update cratedigger-src && nix fmt
-git add flake.lock && git commit -m "..." && git push
-ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
+CRATEDIGGER_REV=$(git rev-parse HEAD)
+scripts/pin_nixosconfig.sh "$CRATEDIGGER_REV" "cratedigger: <description>"
+fleet-deploy doc2
 ```
 
-The service auto-restarts when the Nix store path changes.
+The pin helper is the checked doc1-only Bash boundary: it creates an
+SSH-signed nixosconfig commit, pushes Forgejo master without exposing the token
+in argv or a URL, and verifies the exact remote SHA. Follow the deploy skill's
+bounded `nixos-upgrade.service` polling and exact fleet-anchor verification;
+GitHub nixosconfig is a frozen fallback and is never a deployment source.
+The web service auto-restarts when the Nix store path changes.
 
 After deploy, check `systemctl status cratedigger-import-preview-worker
 cratedigger-importer` and the worker journals. The Recents Queue subview shows
