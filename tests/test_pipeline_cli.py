@@ -19,6 +19,8 @@ import conftest  # noqa: F401
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from typing import Any, cast
 
+import scripts.pipeline_cli.album_requests as pipeline_cli_album_requests
+import scripts.pipeline_cli.long_tail as pipeline_cli_long_tail
 from scripts import pipeline_cli
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
@@ -67,7 +69,7 @@ class TestMbApiBase(unittest.TestCase):
             with patch.dict(os.environ,
                             {"CRATEDIGGER_RUNTIME_CONFIG": path},
                             clear=False):
-                self.assertEqual(pipeline_cli._mb_api(),
+                self.assertEqual(pipeline_cli_album_requests._mb_api(),
                                  "http://mb-mirror.test:5200/ws/2")
 
     def test_mb_api_defaults_to_public(self) -> None:
@@ -78,7 +80,7 @@ class TestMbApiBase(unittest.TestCase):
             with patch.dict(os.environ,
                             {"CRATEDIGGER_RUNTIME_CONFIG": path},
                             clear=False):
-                self.assertEqual(pipeline_cli._mb_api(),
+                self.assertEqual(pipeline_cli_album_requests._mb_api(),
                                  "https://musicbrainz.org/ws/2")
 
 
@@ -3800,7 +3802,7 @@ class TestPipelineCliLongTail(unittest.TestCase):
         band_release_ids' web fallback, so a beets hiccup degrades the worklist
         instead of erroring it."""
         with patch("lib.beets_db.BeetsDB", side_effect=OSError("db locked")):
-            out = pipeline_cli._cli_band_fn(["rel-1", "rel-2"])
+            out = pipeline_cli_long_tail._cli_band_fn(["rel-1", "rel-2"])
         self.assertEqual(out, {"rel-1": "missing", "rel-2": "missing"})
 
     def test_empty_cohort_exit_zero(self):
