@@ -3,9 +3,9 @@
 Two complementary static checks protect production liveness:
 
 - Ruff `F401`/`F811` runs source-locally, so a name used in another module
-  cannot hide an unused import. Explicit redundant aliases mark the exact
-  remaining legacy export baseline in `scripts/pipeline_cli/__init__.py`;
-  the audit pins every identity and keeps `cratedigger.py` empty of facades.
+  cannot hide an unused import. The exact redundant-alias audit pins both
+  `cratedigger.py` and `scripts/pipeline_cli/__init__.py` to empty baselines,
+  preventing private facades from returning.
 - Vulture keeps the aggregate repository view for dead functions, classes,
   attributes, and cross-module APIs.
 

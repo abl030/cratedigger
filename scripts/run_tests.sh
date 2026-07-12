@@ -34,8 +34,8 @@ run_gates() {
 
   # Production-liveness sweep — source-local Ruff F401/F811 runs first, then
   # aggregate vulture. Vulture's baseline lives at tools/vulture/whitelist.py;
-  # intentional import exports use exact redundant aliases (CLAUDE.md §
-  # "Finding dead code").
+  # intentional import exports, if any, require exact redundant-alias baselines
+  # (CLAUDE.md § "Finding dead code").
   echo "=== Dead-code sweep ==="
   bash "$(dirname "$0")/find_dead_code.sh"
   echo ""

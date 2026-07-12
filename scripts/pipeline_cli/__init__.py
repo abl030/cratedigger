@@ -28,10 +28,9 @@ mechanical pattern as the ``lib/quality/`` split, issue #477):
     __main__.py           thin script-mode entry shim (nix wrappers exec
                        this file directly)
 
-This ``__init__.py`` re-exports the full historical surface so
-``from scripts.pipeline_cli import X`` / ``pipeline_cli.X`` keeps working
-for every X callers and tests imported from the monolith. Submodule
-docstrings say what lives where.
+The package root exposes the supported operator and API surface listed in
+``__all__``. Private helpers live only in their defining command-family
+modules; tests and patch sites import those owners directly.
 
 Note on ``finalize_request``: it's a module-level DI seam
 (``finalize_request = transitions.finalize_request``) bound
@@ -41,7 +40,7 @@ and ``quality.py`` (repair-spectral) — same pattern as
 Patches targeting a specific command's test must patch the module that
 actually calls it (e.g. ``scripts.pipeline_cli.album_requests.finalize_request``),
 not this re-export. This package re-exports the ``album_requests.py``
-binding under the historical name for any non-patched caller.
+binding as part of its supported public surface.
 """
 
 import logging
@@ -57,23 +56,8 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 
-# Explicit redundant aliases are the exact baseline for the legacy private
-# test-facing surface from the former CLI monolith. New imports still fail F401.
-from scripts.pipeline_cli._format import (
-    _fmt_br as _fmt_br,
-    _fmt_measurement as _fmt_measurement,
-    _format_dt as _format_dt,
-    _json_default as _json_default,
-    _truncate as _truncate,
-)
 from scripts.pipeline_cli.album_requests import (
     VALID_STATUSES,
-    _build_search_plan_service as _build_search_plan_service,
-    _cmd_add_discogs as _cmd_add_discogs,
-    _cmd_add_mb as _cmd_add_mb,
-    _generate_plan_after_add as _generate_plan_after_add,
-    _mb_api as _mb_api,
-    _resolve_and_update_after_add as _resolve_and_update_after_add,
     cmd_add,
     cmd_cancel,
     cmd_disk_coverage,
@@ -86,48 +70,26 @@ from scripts.pipeline_cli.album_requests import (
     finalize_request,
     tracks_from_mb_release,
 )
-from scripts.pipeline_cli.query import (
-    _get_query_sql as _get_query_sql,
-    _render_query_table as _render_query_table,
-    _stringify_query_value as _stringify_query_value,
-    cmd_query,
-)
-from scripts.pipeline_cli.show import (
-    _render_download_history_header as _render_download_history_header,
-    _render_import_result as _render_import_result,
-    _render_search_forensics_summary as _render_search_forensics_summary,
-    _render_youtube_metadata as _render_youtube_metadata,
-    cmd_show,
-)
+from scripts.pipeline_cli.query import cmd_query
+from scripts.pipeline_cli.show import cmd_show
 from scripts.pipeline_cli.quality import (
-    _load_beets_album_info as _load_beets_album_info,
-    _load_runtime_audio_check_mode as _load_runtime_audio_check_mode,
-    _load_runtime_rank_config as _load_runtime_rank_config,
-    _load_runtime_verified_lossless_target as _load_runtime_verified_lossless_target,
-    _quality_preview_target_label as _quality_preview_target_label,
     cmd_quality,
     cmd_repair_spectral,
 )
 from scripts.pipeline_cli.imports import (
     SLSKD_DOWNLOAD_DIRS,
     SPECTRAL_GRADE_CHOICES,
-    _preview_values_from_args as _preview_values_from_args,
-    _print_preview_result as _print_preview_result,
-    _resolve_failed_path as _resolve_failed_path,
     cmd_force_import,
     cmd_import_jobs,
     cmd_import_preview,
     cmd_manual_import,
 )
 from scripts.pipeline_cli.wrong_match import (
-    _print_wrong_match_delete_result as _print_wrong_match_delete_result,
-    _wrong_match_delete_group_exit_code as _wrong_match_delete_group_exit_code,
     cmd_wrong_match_delete,
     cmd_wrong_match_delete_group,
     cmd_wrong_match_triage,
 )
 from scripts.pipeline_cli.search_plan import (
-    _search_plan_exit_code as _search_plan_exit_code,
     cmd_search_plan_advance,
     cmd_search_plan_dry_run,
     cmd_search_plan_history,
@@ -139,26 +101,17 @@ from scripts.pipeline_cli.replace import cmd_replace
 from scripts.pipeline_cli.beets_distance import cmd_beets_distance
 from scripts.pipeline_cli.youtube import (
     OUTCOME_EXIT_CODE,
-    _RedisYoutubeCache as _RedisYoutubeCache,
-    _build_youtube_client as _build_youtube_client,
     cmd_youtube_album,
     cmd_youtube_rescue,
     resolve_youtube_album,
 )
 from scripts.pipeline_cli.triage import (
-    _TRIAGE_VALID_FILTER_FORMS as _TRIAGE_VALID_FILTER_FORMS,
-    _TRIAGE_VALID_FILTER_FORMS_BASE as _TRIAGE_VALID_FILTER_FORMS_BASE,
     cmd_triage_list,
     cmd_triage_quarantine,
     cmd_triage_show,
 )
-from scripts.pipeline_cli.long_tail import _cli_band_fn as _cli_band_fn, cmd_long_tail
-from scripts.pipeline_cli.routes_meta import (
-    _build_parser as _build_parser,
-    _collect_cli_routes as _collect_cli_routes,
-    _describe_argparse_action as _describe_argparse_action,
-    cmd_routes,
-)
+from scripts.pipeline_cli.long_tail import cmd_long_tail
+from scripts.pipeline_cli.routes_meta import cmd_routes
 from scripts.pipeline_cli.cli import PipelineDB, main
 
 __all__ = [
