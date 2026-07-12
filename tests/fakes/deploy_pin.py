@@ -309,6 +309,7 @@ save()
 class FakeDeployPinCommands:
     """State-respecting fake git/nix/token environment for the Bash helper."""
 
+    TOKEN_BYTES = b"test-secret-token" + (b"x" * 23)
     BASE_REV = "1" * 40
     OLD_TARGET = "2" * 40
     TARGET_REV = "3" * 40
@@ -326,7 +327,7 @@ class FakeDeployPinCommands:
         (self.repo / ".git").mkdir()
         self.fake_bin.mkdir()
         self.tmp.mkdir()
-        self.token_file.write_text("test-secret-token\n", encoding="utf-8")
+        self.token_file.write_bytes(self.TOKEN_BYTES)
         for name in ("git", "nix", "hostname"):
             path = self.fake_bin / name
             path.write_text(_FAKE_COMMAND, encoding="utf-8")
