@@ -819,7 +819,8 @@ def dispatch_import_core(
                         trigger_meelo_clean(cfg)
         except sp.TimeoutExpired:
             logger.error(f"{mode} TIMEOUT: {label}")
-            if attempt_spectral_audit is not None:
+            if (attempt_spectral_audit is not None
+                    and dl_info.import_result is None):
                 dl_info.import_result = _attach_attempt_spectral_audit(
                     ImportResult(), attempt_spectral_audit).to_json()
             _record_rejection_and_maybe_requeue(
@@ -837,7 +838,8 @@ def dispatch_import_core(
             outcome_message = "Import timed out"
         except Exception:
             logger.exception(f"{mode} ERROR: {label}")
-            if attempt_spectral_audit is not None:
+            if (attempt_spectral_audit is not None
+                    and dl_info.import_result is None):
                 dl_info.import_result = _attach_attempt_spectral_audit(
                     ImportResult(), attempt_spectral_audit).to_json()
             _record_rejection_and_maybe_requeue(

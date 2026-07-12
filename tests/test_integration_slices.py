@@ -1458,6 +1458,87 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         logged = ImportResult.from_json(logged_raw)
         self.assertEqual(logged.spectral, audit)
 
+    def test_post_result_exception_preserves_full_import_result_and_audit(self):
+        from lib.dispatch import dispatch_import_core
+        from lib.dispatch.types import ImportOneRun
+        from lib.quality import (
+            QualityEvidenceActionProvenance,
+            SpectralAnalysisDetail,
+            SpectralDetail,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS, pipeline_db_enabled=True)
+        audit = SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True, grade="suspect", bitrate_kbps=128),
+            existing=SpectralAnalysisDetail(
+                attempted=True, grade="genuine"),
+        )
+        result = make_import_result(
+            decision="import",
+            new_min_bitrate=245,
+            prev_min_bitrate=128,
+            was_converted=True,
+            original_filetype="flac",
+            target_filetype="opus",
+            imported_path="/Beets/Artist/Album",
+            disambiguated=True,
+            final_format="opus 128",
+        )
+        result.postflight.beets_id = 77
+        result.postflight.track_count = 9
+        result.quality_evidence_provenance = QualityEvidenceActionProvenance(
+            candidate_status="ready",
+            current_status="ready",
+            snapshot_status="matched",
+            fallback_reason=None,
+        )
+
+        def parsed_import(*args: Any, **kwargs: Any) -> ImportOneRun:
+            return ImportOneRun(
+                command=("import_one",), returncode=0,
+                stdout="", stderr="", import_result=result)
+
+        def failed_quality_gate(**kwargs: Any) -> None:
+            raise RuntimeError("post-result quality gate failed")
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch("lib.beets_db.BeetsDB", _mock_beets_db(None)):
+                dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="mbid-123",
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=DownloadInfo(username="user1"),
+                    cfg=cfg,
+                    attempt_spectral_audit=audit,
+                    run_import_fn=parsed_import,
+                    quality_gate_fn=failed_quality_gate,
+                )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        failure_log = db.download_logs[-1]
+        self.assertEqual(failure_log.outcome, "failed")
+        logged_raw = failure_log.import_result
+        assert logged_raw is not None
+        logged = ImportResult.from_json(logged_raw)
+        self.assertEqual(logged, result)
+        self.assertEqual(logged.spectral, audit)
+        self.assertEqual(logged.decision, "import")
+        self.assertIsNotNone(logged.new_measurement)
+        self.assertIsNotNone(logged.existing_measurement)
+        self.assertTrue(logged.conversion.was_converted)
+        self.assertEqual(logged.postflight.beets_id, 77)
+        self.assertEqual(
+            logged.quality_evidence_provenance.candidate_status, "ready")
+
 
 class TestForceImportSlice(unittest.TestCase):
     """Integration slice: dispatch_import_from_db with force=True."""
