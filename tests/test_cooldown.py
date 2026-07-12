@@ -1,12 +1,15 @@
 """Tests for global user cooldown system (issue #39)."""
 
 import configparser
+from dataclasses import dataclass
 import logging
+from typing import Sequence
 import unittest
 from unittest.mock import MagicMock, patch
 
 from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
+from lib.matching import MatchResult
 from lib.quality import CooldownConfig, should_cooldown
 from cratedigger import TrackRecord
 from tests.fakes import (
@@ -21,6 +24,49 @@ from tests.helpers import (
     make_grab_list_entry,
     make_request_row,
 )
+
+
+@dataclass(frozen=True)
+class _MatchCall:
+    tracks: Sequence[TrackRecord]
+    allowed_filetype: str
+    file_dirs: list[str]
+    username: str
+    ctx: CratediggerContext
+
+
+class _RecordingMatcher:
+    def __init__(self) -> None:
+        self.calls: list[_MatchCall] = []
+
+    def __call__(
+        self,
+        tracks: Sequence[TrackRecord],
+        allowed_filetype: str,
+        file_dirs: list[str],
+        username: str,
+        ctx: CratediggerContext,
+    ) -> MatchResult:
+        self.calls.append(
+            _MatchCall(tracks, allowed_filetype, file_dirs, username, ctx),
+        )
+        return MatchResult(matched=False, directory=None, file_dir="")
+
+
+def _assert_match_call_contract(
+    call: _MatchCall,
+    *,
+    tracks: Sequence[TrackRecord],
+    allowed_filetype: str,
+    file_dirs: list[str],
+    username: str,
+    ctx: CratediggerContext,
+) -> None:
+    assert call.tracks == tracks, (call.tracks, tracks)
+    assert call.allowed_filetype == allowed_filetype
+    assert call.file_dirs == file_dirs, (call.file_dirs, file_dirs)
+    assert call.username == username
+    assert call.ctx is ctx
 
 
 class TestShouldCooldown(unittest.TestCase):
@@ -150,16 +196,50 @@ class TestEnqueueCooldownFiltering(unittest.TestCase):
             {"albumId": 1, "title": "Track 1", "mediumNumber": 1},
         ]
         results = {"gooduser": {"flac": ["Music\\Album"]}}
+        matcher = _RecordingMatcher()
 
-        from lib.matching import MatchResult
-        with patch(
-            "lib.enqueue.check_for_match",
-            return_value=MatchResult(matched=False, directory=None, file_dir=""),
-        ):
-            attempt = try_enqueue(tracks, results, "flac", ctx)
+        attempt = try_enqueue(
+            tracks,
+            results,
+            "flac",
+            ctx,
+            match_fn=matcher,
+        )
 
-        # check_for_match WAS called for the non-cooled user
         self.assertFalse(attempt.matched)
+        self.assertEqual(len(matcher.calls), 1)
+        _assert_match_call_contract(
+            matcher.calls[0],
+            tracks=tracks,
+            allowed_filetype="flac",
+            file_dirs=["Music\\Album"],
+            username="gooduser",
+            ctx=ctx,
+        )
+
+    def test_matcher_contract_checker_rejects_wrong_arguments(self):
+        """The non-cooled-user assertion trips if the matcher seam drifts."""
+        ctx = self._make_ctx()
+        tracks: list[TrackRecord] = [
+            {"albumId": 1, "title": "Track 1", "mediumNumber": 1},
+        ]
+        wrong_call = _MatchCall(
+            tracks=tracks,
+            allowed_filetype="mp3",
+            file_dirs=["Music\\Wrong Album"],
+            username="wronguser",
+            ctx=ctx,
+        )
+
+        with self.assertRaises(AssertionError):
+            _assert_match_call_contract(
+                wrong_call,
+                tracks=tracks,
+                allowed_filetype="flac",
+                file_dirs=["Music\\Album"],
+                username="gooduser",
+                ctx=ctx,
+            )
 
     def test_cooldown_log_message_distinct_from_denylist(self):
         """Log message for cooled-down users should say 'on cooldown', not 'denylisted'."""

@@ -435,7 +435,6 @@ MULTILINE_PATCH_BASELINE: dict[str, int] = {
     'lib.download_validation._handle_valid_result': 1,
     'lib.download_materialization._materialize_processing_dir': 2,
     'lib.download_processing.process_completed_album': 8,
-    'lib.enqueue.check_for_match': 1,
     'lib.import_evidence.ensure_current_evidence_for_action': 6,
     'lib.import_evidence.load_or_backfill_current_evidence': 1,
     'lib.import_preview.preview_import_from_download_log': 1,
