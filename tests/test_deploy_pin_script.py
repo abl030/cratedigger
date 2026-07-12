@@ -68,6 +68,31 @@ class TestDeployPinScript(unittest.TestCase):
             self.assertNotIn("test-secret-token", " ".join(call))
             self.assertNotIn("Authorization:", " ".join(call))
 
+    def test_inherited_xtrace_never_prints_token(self) -> None:
+        proc = self.fake.run(
+            SCRIPT,
+            extra_env={"SHELLOPTS": "braceexpand:hashall:xtrace"},
+        )
+        output = proc.stdout + proc.stderr
+
+        self.assertEqual(proc.returncode, 0, output)
+        self.assertNotIn("test-secret-token", output)
+        self.assertNotIn("Authorization: token", output)
+
+    def test_inherited_git_trace2_never_prints_token(self) -> None:
+        proc = self.fake.run(
+            SCRIPT,
+            extra_env={
+                "GIT_TRACE2": "1",
+                "GIT_TRACE2_ENV_VARS": "GIT_CONFIG_VALUE_0",
+            },
+        )
+        output = proc.stdout + proc.stderr
+
+        self.assertEqual(proc.returncode, 0, output)
+        self.assertNotIn("test-secret-token", output)
+        self.assertNotIn("Authorization: token", output)
+
     def test_concurrent_same_target_invocations_create_one_pin(self) -> None:
         self.fake.update_state(nix_delay_seconds=0.25)
         first = self.fake.popen(SCRIPT)
@@ -122,8 +147,51 @@ class TestDeployPinScript(unittest.TestCase):
 
         self.assertNotEqual(proc.returncode, 0)
         self.assertIsNone(state["receipt_rev"])
+        self.assertIsNone(state["pending_rev"])
         self.assertFalse(any(event[0] == "push" for event in state["events"]))
         self.assertIsNone(state["worktree"])
+
+    def test_post_commit_failures_recover_one_exact_signed_commit(self) -> None:
+        for fault in (
+            "post_commit_rev_parse",
+            "post_commit_verify",
+            "post_commit_update_ref",
+        ):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as td:
+                fake = FakeDeployPinCommands(Path(td))
+                fake.update_state(fault=fault)
+                first = fake.run(SCRIPT)
+                pending = fake.state["pending_rev"]
+
+                self.assertNotEqual(first.returncode, 0)
+                self.assertIsNotNone(pending)
+                self.assertIn(pending, fake.state["commits"])
+                self.assertIn(str(pending), first.stderr)
+
+                fake.clear_fault()
+                second = fake.run(SCRIPT)
+                state = fake.state
+                self.assertEqual(second.returncode, 0, second.stderr)
+                self.assertEqual(state["commit_count"], 1)
+                self.assertEqual(state["receipt_rev"], pending)
+                self.assertIsNone(state["pending_rev"])
+
+    def test_signal_after_commit_preserves_and_recovers_exact_commit(self) -> None:
+        self.fake.update_state(fault="signal_after_commit")
+        first = self.fake.run(SCRIPT)
+        pending = self.fake.state["pending_rev"]
+
+        self.assertNotEqual(first.returncode, 0)
+        self.assertIsNotNone(pending)
+        self.assertIn(pending, self.fake.state["commits"])
+
+        self.fake.clear_fault()
+        second = self.fake.run(SCRIPT)
+        state = self.fake.state
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(state["commit_count"], 1)
+        self.assertEqual(state["receipt_rev"], pending)
+        self.assertIsNone(state["pending_rev"])
 
     def test_cleanup_failure_reports_recoverable_remote_revision(self) -> None:
         self.fake.update_state(fault="cleanup")
@@ -210,16 +278,58 @@ class TestDeployPinScript(unittest.TestCase):
 
     def test_non_forgejo_origin_fails_before_fetch_or_token_read(self) -> None:
         self.fake.update_state(
-            origin_url="https://github.com/abl030/nixosconfig.git"
+            fetch_urls=["https://github.com/abl030/nixosconfig.git"]
         )
         proc = self.fake.run(SCRIPT)
         state = self.fake.state
 
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("origin must be https://git.ablz.au", proc.stderr)
+        self.assertIn("fetch URL must be https://git.ablz.au", proc.stderr)
         self.assertFalse(any(event[0] == "fetch" for event in state["events"]))
         self.assertFalse(any(event[0] == "ls-remote"
                              for event in state["events"]))
+
+    def test_distinct_push_url_fails_before_token_read_or_push(self) -> None:
+        self.fake.token_file.unlink()
+        self.fake.update_state(
+            push_urls=["https://example.invalid/attacker/nixosconfig.git"]
+        )
+        proc = self.fake.run(SCRIPT)
+        state = self.fake.state
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("push URL", proc.stderr)
+        self.assertNotIn("token", proc.stderr.lower())
+        self.assertFalse(any(event[0] == "fetch" for event in state["events"]))
+        self.assertFalse(any(event[0] == "push" for event in state["events"]))
+
+    def test_multiple_fetch_or_push_urls_fail_before_token_or_network(self) -> None:
+        cases = (
+            {
+                "fetch_urls": [
+                    "https://git.ablz.au/abl030/nixosconfig.git",
+                    "https://example.invalid/second.git",
+                ],
+            },
+            {
+                "push_urls": [
+                    "https://git.ablz.au/abl030/nixosconfig.git",
+                    "https://example.invalid/second.git",
+                ],
+            },
+        )
+        for changes in cases:
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as td:
+                fake = FakeDeployPinCommands(Path(td))
+                fake.token_file.unlink()
+                fake.update_state(**changes)
+                proc = fake.run(SCRIPT)
+                state = fake.state
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn("exactly one", proc.stderr)
+                self.assertNotIn("token", proc.stderr.lower())
+                self.assertFalse(any(event[0] in {"fetch", "push"}
+                                     for event in state["events"]))
 
 
 if __name__ == "__main__":

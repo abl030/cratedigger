@@ -37,17 +37,20 @@ CRATEDIGGER_REV=$(git rev-parse HEAD)
   "$CRATEDIGGER_REV" "cratedigger: <description>"
 ```
 
-The helper keeps the last intended signed pin reachable through the private
-`refs/cratedigger-deploy/cratedigger-src` ref. Retry the exact same invocation
-after any failure: if Forgejo master is still at the pin's parent, it pushes
-the already-created commit; if Forgejo is already at the pending revision, it
-reports success without creating another commit; and if Forgejo advanced to an
-incompatible revision, it fails with the exact pending, base, and remote SHAs.
-Never delete or rewrite that recovery ref by hand during a retry.
+The helper commits through a private pending ref, so the signed commit becomes
+durably reachable in the commit transaction itself, then promotes that exact
+commit to `refs/cratedigger-deploy/cratedigger-src` before pushing. Retry the
+exact same invocation after any failure: it recovers
+`refs/cratedigger-deploy/cratedigger-src-pending` first; if Forgejo master is
+still at the pin's parent, it pushes the already-created commit; if Forgejo is
+already at the pending revision, it reports success without creating another
+commit; and if Forgejo advanced to an incompatible revision, it fails with the
+exact pending, base, and remote SHAs. Never delete or rewrite either private
+recovery ref by hand during a retry.
 
 The Forgejo token remains confined to the helper's fail-fast subshell
 environment and must never appear in an argv value, command-line `-c`
-assignment, or remote URL.
+assignment, remote URL, xtrace, or Git trace output.
 
 3. Capture the current systemd invocation, deploy doc2 through the
 forced-command locked-sibling trigger, then wait up to 30 minutes for a **new,

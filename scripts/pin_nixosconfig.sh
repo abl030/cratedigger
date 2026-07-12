@@ -3,6 +3,7 @@
 set -euo pipefail
 
 readonly RECEIPT_REF='refs/cratedigger-deploy/cratedigger-src'
+readonly PENDING_REF='refs/cratedigger-deploy/cratedigger-src-pending'
 readonly EXPECTED_ORIGIN='https://git.ablz.au/abl030/nixosconfig.git'
 readonly TOKEN_FILE="${NIXOSCONFIG_TOKEN_FILE:-/run/secrets/forgejo/nixbot-token}"
 readonly NIXOSCONFIG_REPO="${HOME}/nixosconfig"
@@ -13,6 +14,7 @@ WORKTREE_STARTED=0
 INTENDED_REV=''
 INTENDED_TARGET=''
 INTENDED_BASE=''
+PENDING_BASE=''
 
 die() {
   printf 'pin-nixosconfig: ERROR: %s\n' "$*" >&2
@@ -21,6 +23,7 @@ die() {
 
 cleanup_worktree() {
   local cleanup_rc=0
+  local pending_revision=''
 
   if ((WORKTREE_STARTED)); then
     if ! git -C "$NIXOSCONFIG_REPO" worktree remove --force "$WORKTREE" \
@@ -31,6 +34,16 @@ cleanup_worktree() {
   fi
   if [[ -n "$TEMP_ROOT" ]]; then
     rm -rf "$TEMP_ROOT" || cleanup_rc=1
+  fi
+  if pending_revision=$(git -C "$NIXOSCONFIG_REPO" \
+    show-ref --verify --hash "$PENDING_REF" 2>/dev/null); then
+    if [[ -n "$PENDING_BASE" && "$pending_revision" == "$PENDING_BASE" ]]; then
+      git -C "$NIXOSCONFIG_REPO" update-ref -d \
+        "$PENDING_REF" "$pending_revision" || cleanup_rc=1
+    else
+      printf 'pin-nixosconfig: pending candidate retained: revision=%s ref=%s\n' \
+        "$pending_revision" "$PENDING_REF" >&2
+    fi
   fi
   return "$cleanup_rc"
 }
@@ -80,40 +93,81 @@ verify_ssh_signature() {
   local revision=$1
   local signature_status commit_object
 
-  signature_status=$(git -C "$NIXOSCONFIG_REPO" \
-    log -1 '--format=%G?' "$revision")
-  [[ "$signature_status" == 'G' ]] \
-    || die "revision $revision does not have a good signature (status=$signature_status)"
-  commit_object=$(git -C "$NIXOSCONFIG_REPO" cat-file commit "$revision")
-  grep -q '^gpgsig -----BEGIN SSH SIGNATURE-----$' <<<"$commit_object" \
-    || die "revision $revision is not SSH-signed"
+  if ! signature_status=$(git -C "$NIXOSCONFIG_REPO" \
+    log -1 '--format=%G?' "$revision"); then
+    die "could not read signature status for revision $revision"
+    return 1
+  fi
+  if [[ "$signature_status" != 'G' ]]; then
+    die "revision $revision does not have a good signature (status=$signature_status)"
+    return 2
+  fi
+  if ! commit_object=$(git -C "$NIXOSCONFIG_REPO" \
+    cat-file commit "$revision"); then
+    die "could not read commit object for revision $revision"
+    return 1
+  fi
+  if ! grep -q '^gpgsig -----BEGIN SSH SIGNATURE-----$' \
+    <<<"$commit_object"; then
+    die "revision $revision is not SSH-signed"
+    return 2
+  fi
 }
 
 VERIFIED_PARENT=''
 VERIFIED_TARGET=''
 verify_pin_commit() {
   local revision=$1
-  local ancestry commit parent extra changed_paths
+  local ancestry commit parent extra changed_paths signature_rc
 
-  verify_ssh_signature "$revision"
-  ancestry=$(git -C "$NIXOSCONFIG_REPO" rev-list --parents -n1 "$revision")
+  if verify_ssh_signature "$revision"; then
+    signature_rc=0
+  else
+    signature_rc=$?
+    return "$signature_rc"
+  fi
+  if ! ancestry=$(git -C "$NIXOSCONFIG_REPO" \
+    rev-list --parents -n1 "$revision"); then
+    die "could not read ancestry for pin revision $revision"
+    return 1
+  fi
   read -r commit parent extra <<<"$ancestry"
-  [[ "$commit" == "$revision" && -n "$parent" && -z "${extra:-}" ]] \
-    || die "pin revision $revision must have exactly one parent"
-  changed_paths=$(git -C "$NIXOSCONFIG_REPO" \
-    diff-tree --no-commit-id --name-only -r "$revision")
-  [[ "$changed_paths" == 'flake.lock' ]] \
-    || die "pin revision $revision changes paths other than flake.lock: $changed_paths"
-  VERIFIED_TARGET=$(commit_locked_revision "$revision")
+  if [[ "$commit" != "$revision" || -z "$parent" || -n "${extra:-}" ]]; then
+    die "pin revision $revision must have exactly one parent"
+    return 2
+  fi
+  if ! changed_paths=$(git -C "$NIXOSCONFIG_REPO" \
+    diff-tree --no-commit-id --name-only -r "$revision"); then
+    die "could not read changed paths for pin revision $revision"
+    return 1
+  fi
+  if [[ "$changed_paths" != 'flake.lock' ]]; then
+    die "pin revision $revision changes paths other than flake.lock: $changed_paths"
+    return 2
+  fi
+  if ! VERIFIED_TARGET=$(commit_locked_revision "$revision"); then
+    die "could not read cratedigger-src lock from pin revision $revision"
+    return 1
+  fi
   VERIFIED_PARENT=$parent
 }
 
 forgejo_with_token() (
+  # A caller can export SHELLOPTS=xtrace, and Git's Trace2 can be configured to
+  # print selected environment variables. Both must be disabled before the
+  # secret is read or placed in GIT_CONFIG_VALUE_0.
+  set +x
   set -euo pipefail
   local operation=$1
   local revision=${2:-}
   local token output sha ref extra
+  local trace_variable
   local -a lines
+
+  for trace_variable in ${!GIT_TRACE@}; do
+    unset "$trace_variable"
+  done
+  unset GIT_CURL_VERBOSE
 
   [[ -r "$TOKEN_FILE" ]] || die "Forgejo token is not readable: $TOKEN_FILE"
   IFS= read -r token < "$TOKEN_FILE"
@@ -126,7 +180,7 @@ forgejo_with_token() (
   if [[ "$operation" == 'push' ]]; then
     [[ "$revision" =~ ^[0-9a-f]{40}$ ]] \
       || die "invalid revision passed to Forgejo push: $revision"
-    if ! git -C "$NIXOSCONFIG_REPO" push origin \
+    if ! git -C "$NIXOSCONFIG_REPO" push "$EXPECTED_ORIGIN" \
       "${revision}:refs/heads/master"; then
       die "Forgejo push rejected for revision $revision"
       return 1
@@ -136,7 +190,7 @@ forgejo_with_token() (
   fi
 
   if ! output=$(git -C "$NIXOSCONFIG_REPO" \
-    ls-remote origin refs/heads/master); then
+    ls-remote "$EXPECTED_ORIGIN" refs/heads/master); then
     die 'Forgejo master lookup failed'
     return 1
   fi
@@ -162,8 +216,10 @@ push_and_verify_with_token() {
 
 main() {
   local target_revision commit_message remote_revision receipt_revision=''
-  local remote_target status_output previous_receipt=''
-  local candidate_revision git_common_dir origin_url
+  local pending_revision='' remote_target status_output previous_receipt=''
+  local candidate_revision git_common_dir origin_url verification_rc
+  local fetch_url_output push_url_output
+  local -a fetch_urls push_urls
 
   (($# == 2)) \
     || die 'usage: pin_nixosconfig.sh <40-hex-cratedigger-revision> <commit-message>'
@@ -182,9 +238,21 @@ main() {
   command -v jq >/dev/null
   command -v flock >/dev/null
 
-  origin_url=$(git -C "$NIXOSCONFIG_REPO" remote get-url origin)
+  fetch_url_output=$(git -C "$NIXOSCONFIG_REPO" \
+    remote get-url --all origin)
+  push_url_output=$(git -C "$NIXOSCONFIG_REPO" \
+    remote get-url --push --all origin)
+  mapfile -t fetch_urls <<<"$fetch_url_output"
+  mapfile -t push_urls <<<"$push_url_output"
+  ((${#fetch_urls[@]} == 1)) \
+    || die "nixosconfig origin must have exactly one fetch URL"
+  ((${#push_urls[@]} == 1)) \
+    || die "nixosconfig origin must have exactly one push URL"
+  origin_url=${fetch_urls[0]}
   [[ "$origin_url" == "$EXPECTED_ORIGIN" ]] \
-    || die "nixosconfig origin must be $EXPECTED_ORIGIN (actual=$origin_url)"
+    || die "nixosconfig fetch URL must be $EXPECTED_ORIGIN (actual=$origin_url)"
+  [[ "${push_urls[0]}" == "$EXPECTED_ORIGIN" ]] \
+    || die "nixosconfig push URL must be $EXPECTED_ORIGIN (actual=${push_urls[0]})"
   git_common_dir=$(git -C "$NIXOSCONFIG_REPO" \
     rev-parse --path-format=absolute --git-common-dir)
   [[ "$git_common_dir" == /* && -d "$git_common_dir" ]] \
@@ -192,15 +260,45 @@ main() {
   exec 9>"$git_common_dir/cratedigger-deploy-pin.lock"
   flock 9
 
-  git -C "$NIXOSCONFIG_REPO" fetch origin \
+  git -C "$NIXOSCONFIG_REPO" fetch "$EXPECTED_ORIGIN" \
     '+refs/heads/master:refs/remotes/origin/master'
   remote_revision=$(git -C "$NIXOSCONFIG_REPO" \
     rev-parse refs/remotes/origin/master)
   [[ "$remote_revision" =~ ^[0-9a-f]{40}$ ]] \
     || die "invalid fetched origin/master revision: $remote_revision"
 
-  if receipt_revision=$(git -C "$NIXOSCONFIG_REPO" \
+  if ! receipt_revision=$(git -C "$NIXOSCONFIG_REPO" \
     rev-parse --verify --quiet "$RECEIPT_REF"); then
+    receipt_revision=''
+  fi
+
+  if pending_revision=$(git -C "$NIXOSCONFIG_REPO" \
+    rev-parse --verify --quiet "$PENDING_REF"); then
+    if [[ "$pending_revision" == "$remote_revision" ]]; then
+      git -C "$NIXOSCONFIG_REPO" update-ref -d \
+        "$PENDING_REF" "$pending_revision"
+      pending_revision=''
+    else
+      printf 'recovering durable pending candidate: %s ref=%s\n' \
+        "$pending_revision" "$PENDING_REF"
+      verify_pin_commit "$pending_revision"
+      [[ "$VERIFIED_TARGET" == "$target_revision" ]] \
+        || die "different candidate is pending: requested=$target_revision pending_target=$VERIFIED_TARGET pending=$pending_revision ref=$PENDING_REF"
+      previous_receipt=$receipt_revision
+      if [[ "$receipt_revision" != "$pending_revision" ]]; then
+        git -C "$NIXOSCONFIG_REPO" update-ref "$RECEIPT_REF" \
+          "$pending_revision" "$previous_receipt"
+      fi
+      INTENDED_REV=$pending_revision
+      INTENDED_TARGET=$VERIFIED_TARGET
+      INTENDED_BASE=$VERIFIED_PARENT
+      git -C "$NIXOSCONFIG_REPO" update-ref -d \
+        "$PENDING_REF" "$pending_revision"
+      receipt_revision=$pending_revision
+    fi
+  fi
+
+  if [[ -n "$receipt_revision" ]]; then
     verify_pin_commit "$receipt_revision"
     INTENDED_REV=$receipt_revision
     INTENDED_TARGET=$VERIFIED_TARGET
@@ -256,9 +354,13 @@ main() {
 
   TEMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/nixosconfig-deploy.XXXXXX")
   WORKTREE="$TEMP_ROOT/worktree"
+  PENDING_BASE=$remote_revision
+  git -C "$NIXOSCONFIG_REPO" update-ref "$PENDING_REF" \
+    "$remote_revision" ''
   WORKTREE_STARTED=1
   git -C "$NIXOSCONFIG_REPO" worktree add --detach \
     "$WORKTREE" "$remote_revision"
+  git -C "$WORKTREE" symbolic-ref HEAD "$PENDING_REF"
 
   (
     cd "$WORKTREE"
@@ -273,8 +375,19 @@ main() {
 
   git -C "$WORKTREE" add flake.lock
   SSH_AUTH_SOCK='' git -C "$WORKTREE" commit -m "$commit_message"
-  candidate_revision=$(git -C "$WORKTREE" rev-parse HEAD)
-  verify_pin_commit "$candidate_revision"
+  candidate_revision=$(git -C "$NIXOSCONFIG_REPO" \
+    rev-parse --verify "$PENDING_REF")
+  PENDING_BASE=''
+  if verify_pin_commit "$candidate_revision"; then
+    :
+  else
+    verification_rc=$?
+    if ((verification_rc == 2)); then
+      git -C "$NIXOSCONFIG_REPO" update-ref -d \
+        "$PENDING_REF" "$candidate_revision"
+    fi
+    return "$verification_rc"
+  fi
   [[ "$VERIFIED_TARGET" == "$target_revision" \
     && "$VERIFIED_PARENT" == "$remote_revision" ]] \
     || die "new pin commit has unexpected state: revision=$candidate_revision target=$VERIFIED_TARGET base=$VERIFIED_PARENT"
@@ -284,6 +397,8 @@ main() {
   INTENDED_REV=$candidate_revision
   INTENDED_TARGET=$VERIFIED_TARGET
   INTENDED_BASE=$VERIFIED_PARENT
+  git -C "$NIXOSCONFIG_REPO" update-ref -d \
+    "$PENDING_REF" "$candidate_revision"
   push_and_verify_with_token "$INTENDED_REV"
   printf 'signed nixosconfig revision: %s\n' "$INTENDED_REV"
 }

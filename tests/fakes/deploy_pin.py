@@ -14,6 +14,7 @@ import fcntl
 import json
 import os
 import shutil
+import signal
 import sys
 import time
 from pathlib import Path
@@ -48,6 +49,17 @@ def lock_payload(revision):
 
 state["argv_calls"].append([command, *raw_args])
 
+if (
+    command == "git"
+    and os.environ.get("GIT_TRACE2")
+    and "GIT_CONFIG_VALUE_0" in os.environ.get("GIT_TRACE2_ENV_VARS", "")
+    and os.environ.get("GIT_CONFIG_VALUE_0")
+):
+    print(
+        "trace2: GIT_CONFIG_VALUE_0=" + os.environ["GIT_CONFIG_VALUE_0"],
+        file=sys.stderr,
+    )
+
 if command == "hostname":
     print(state.get("hostname", "proxmox-vm"))
     save()
@@ -78,20 +90,53 @@ if args[:1] == ["-C"]:
     cwd = Path(args[1])
     args = args[2:]
 
-if args[:2] == ["fetch", "origin"]:
+if args[:1] == ["fetch"]:
     state["events"].append(["fetch"])
 elif args == ["remote", "get-url", "origin"]:
     print(state["origin_url"])
+elif args == ["remote", "get-url", "--all", "origin"]:
+    print("\n".join(state["fetch_urls"]))
+elif args == ["remote", "get-url", "--push", "--all", "origin"]:
+    print("\n".join(state["push_urls"]))
 elif args == ["rev-parse", "--path-format=absolute", "--git-common-dir"]:
     print(state["git_common_dir"])
 elif args == ["rev-parse", "refs/remotes/origin/master"]:
     print(state["remote_rev"])
 elif args[:3] == ["rev-parse", "--verify", "--quiet"]:
-    if state.get("receipt_rev"):
-        print(state["receipt_rev"])
+    ref = args[3]
+    value = (
+        state.get("pending_rev")
+        if ref == "refs/cratedigger-deploy/cratedigger-src-pending"
+        else state.get("receipt_rev")
+    )
+    if value:
+        if (
+            state.get("fault") == "post_commit_rev_parse"
+            and state.get("pending_rev") in state["commits"]
+        ):
+            fail("fake post-commit rev-parse failed")
+        if state.get("fault") == "signal_after_commit" and value in state["commits"]:
+            save()
+            os.kill(os.getppid(), signal.SIGTERM)
+            time.sleep(0.1)
+            raise SystemExit(143)
+        print(value)
     else:
         save()
         raise SystemExit(1)
+elif args[:2] == ["rev-parse", "--verify"]:
+    ref = args[2]
+    value = state.get("pending_rev") if ref.endswith("-pending") else None
+    if not value:
+        fail(f"unknown fake ref: {ref}")
+    if state.get("fault") == "post_commit_rev_parse" and value in state["commits"]:
+        fail("fake post-commit rev-parse failed")
+    if state.get("fault") == "signal_after_commit" and value in state["commits"]:
+        save()
+        os.kill(os.getppid(), signal.SIGTERM)
+        time.sleep(0.1)
+        raise SystemExit(143)
+    print(value)
 elif args[:3] == ["worktree", "add", "--detach"]:
     worktree = Path(args[3])
     worktree.mkdir(parents=True)
@@ -105,6 +150,9 @@ elif args == ["status", "--porcelain"]:
     print(" M flake.lock")
 elif args == ["add", "flake.lock"]:
     state["events"].append(["add", "flake.lock"])
+elif args[:2] == ["symbolic-ref", "HEAD"]:
+    state["worktree_attached_ref"] = args[2]
+    state["events"].append(["symbolic-ref", args[2]])
 elif args[:2] == ["commit", "-m"]:
     state["commit_count"] += 1
     revision = f'{0xC000 + state["commit_count"]:040x}'
@@ -115,13 +163,27 @@ elif args[:2] == ["commit", "-m"]:
         "parent": state["worktree_base"],
         "target": target,
         "message": args[2],
+        "signature_good": state.get("fault") != "signature",
     }
     state["worktree_head"] = revision
+    if state.get("worktree_attached_ref") == (
+        "refs/cratedigger-deploy/cratedigger-src-pending"
+    ):
+        state["pending_rev"] = revision
     state["events"].append(["commit", revision])
 elif args == ["rev-parse", "HEAD"]:
+    if state.get("fault") == "post_commit_rev_parse":
+        fail("fake post-commit rev-parse failed")
+    if state.get("fault") == "signal_after_commit":
+        save()
+        os.kill(os.getppid(), signal.SIGTERM)
+        time.sleep(0.1)
+        raise SystemExit(143)
     print(state["worktree_head"])
 elif args[:3] == ["log", "-1", "--format=%G?"]:
     revision = args[3]
+    if state.get("fault") == "post_commit_verify":
+        fail("fake post-commit verification failed")
     if state.get("fault") == "signature" and revision == state.get("worktree_head"):
         print("B")
     else:
@@ -146,6 +208,13 @@ elif args[:2] == ["merge-base", "--is-ancestor"]:
     if descendant != state["remote_rev"] or ancestor not in state["remote_ancestors"]:
         save()
         raise SystemExit(1)
+elif args[:3] == ["show-ref", "--verify", "--hash"]:
+    value = state.get("pending_rev") if args[3].endswith("-pending") else None
+    if value:
+        print(value)
+    else:
+        save()
+        raise SystemExit(1)
 elif args[:4] == ["diff-tree", "--no-commit-id", "--name-only", "-r"]:
     print("flake.lock")
 elif args[:1] == ["show"] and args[1].endswith(":flake.lock"):
@@ -158,12 +227,34 @@ elif args[:1] == ["show"] and args[1].endswith(":flake.lock"):
         fail(f"unknown fake revision: {revision}")
     print(lock_payload(target), end="")
 elif args[:1] == ["update-ref"]:
+    if args[1] == "-d":
+        ref = args[2]
+        if ref == "refs/cratedigger-deploy/cratedigger-src-pending":
+            state["pending_rev"] = None
+        state["events"].append(["delete-ref", ref])
+        save()
+        raise SystemExit(0)
+    ref = args[1]
     expected_old = args[3] if len(args) == 4 else None
-    if expected_old is not None and (state.get("receipt_rev") or "") != expected_old:
+    current = (
+        state.get("pending_rev")
+        if ref == "refs/cratedigger-deploy/cratedigger-src-pending"
+        else state.get("receipt_rev")
+    )
+    if expected_old is not None and (current or "") != expected_old:
         fail("fake update-ref compare-and-swap failed")
-    state["receipt_rev"] = args[2]
-    state["events"].append(["update-ref", args[2]])
-elif args[:2] == ["push", "origin"]:
+    if (
+        ref == "refs/cratedigger-deploy/cratedigger-src"
+        and state.get("fault") == "post_commit_update_ref"
+        and args[2] in state["commits"]
+    ):
+        fail("fake receipt update-ref failed")
+    if ref == "refs/cratedigger-deploy/cratedigger-src-pending":
+        state["pending_rev"] = args[2]
+    else:
+        state["receipt_rev"] = args[2]
+    state["events"].append(["update-ref", ref, args[2]])
+elif args[:1] == ["push"]:
     revision = args[2].split(":", 1)[0]
     state["events"].append([
         "push", revision,
@@ -177,7 +268,7 @@ elif args[:2] == ["push", "origin"]:
     state["remote_rev"] = revision
     state["remote_target"] = commit["target"]
     state["remote_ancestors"] = [*state["remote_ancestors"], commit["parent"]]
-elif args == ["ls-remote", "origin", "refs/heads/master"]:
+elif args[:1] == ["ls-remote"] and args[-1] == "refs/heads/master":
     state["events"].append(["ls-remote"])
     print(f'{state["remote_rev"]}\trefs/heads/master')
 elif args[:2] == ["worktree", "remove"]:
@@ -224,6 +315,8 @@ class FakeDeployPinCommands:
             "events": [],
             "hostname": "proxmox-vm",
             "origin_url": "https://git.ablz.au/abl030/nixosconfig.git",
+            "fetch_urls": ["https://git.ablz.au/abl030/nixosconfig.git"],
+            "push_urls": ["https://git.ablz.au/abl030/nixosconfig.git"],
             "git_common_dir": str(self.repo / ".git"),
             "fault": None,
             "nix_delay_seconds": 0,
@@ -231,9 +324,11 @@ class FakeDeployPinCommands:
             "remote_target": self.OLD_TARGET,
             "remote_ancestors": [],
             "receipt_rev": None,
+            "pending_rev": None,
             "worktree": None,
             "worktree_base": None,
             "worktree_head": None,
+            "worktree_attached_ref": None,
             "commit_count": 0,
             "commits": {},
         })
@@ -255,8 +350,10 @@ class FakeDeployPinCommands:
     def clear_fault(self) -> None:
         self.update_state(fault=None)
 
-    def environment(self, target: str) -> dict[str, str]:
-        return {
+    def environment(
+        self, target: str, *, extra_env: dict[str, str] | None = None
+    ) -> dict[str, str]:
+        env = {
             **os.environ,
             "PATH": f"{self.fake_bin}:{os.environ['PATH']}",
             "HOME": str(self.home),
@@ -265,6 +362,8 @@ class FakeDeployPinCommands:
             "DEPLOY_PIN_FAKE_STATE": str(self.state_path),
             "DEPLOY_PIN_FAKE_TARGET": target,
         }
+        env.update(extra_env or {})
+        return env
 
     def popen(
         self,
@@ -272,11 +371,12 @@ class FakeDeployPinCommands:
         *,
         target: str | None = None,
         message: str = "cratedigger: test pin",
+        extra_env: dict[str, str] | None = None,
     ) -> subprocess.Popen[str]:
         target = target or self.TARGET_REV
         return subprocess.Popen(
             [str(script), target, message],
-            env=self.environment(target),
+            env=self.environment(target, extra_env=extra_env),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -288,11 +388,12 @@ class FakeDeployPinCommands:
         *,
         target: str | None = None,
         message: str = "cratedigger: test pin",
+        extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         target = target or self.TARGET_REV
         return subprocess.run(
             [str(script), target, message],
-            env=self.environment(target),
+            env=self.environment(target, extra_env=extra_env),
             capture_output=True,
             text=True,
             timeout=20,
