@@ -709,6 +709,219 @@ def test_worker():
 
         self.assertEqual(find_ineffective_default_patches(production, tests), ())
 
+    def test_definition_expressions_execute_under_the_enclosing_patch(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from helper import decorate
+from lib.worker import run
+
+def test_worker():
+    with {_PATCH_NAME}("lib.worker.send"):
+        @decorate(run())
+        def exercise(
+            value: (
+                run()
+            ) = run(),
+            *,
+            named=run(),
+        ) -> run():
+            pass
+""",
+        }
+
+        self.assertEqual(len(find_ineffective_default_patches(production, tests)), 5)
+
+    def test_future_annotations_are_not_evaluated_at_definition_time(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from __future__ import annotations
+
+from unittest.mock import {_PATCH_NAME}
+from lib.worker import run
+
+def test_worker():
+    with {_PATCH_NAME}("lib.worker.send"):
+        def exercise(value: run()) -> run():
+            pass
+""",
+        }
+
+        self.assertEqual(find_ineffective_default_patches(production, tests), ())
+
+    def test_lambda_default_is_immediate_but_escaping_body_is_deferred(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from lib.worker import run
+
+def test_worker():
+    with {_PATCH_NAME}("lib.worker.send"):
+        callback = lambda value=run(): (
+            run()
+        )
+    callback()
+""",
+        }
+
+        findings = find_ineffective_default_patches(production, tests)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].line, 7)
+
+    def test_escaping_lambda_body_does_not_inherit_definition_patch(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from lib.worker import run
+
+def test_worker():
+    with {_PATCH_NAME}("lib.worker.send"):
+        callback = lambda: (
+            run()
+        )
+    callback()
+""",
+        }
+
+        self.assertEqual(find_ineffective_default_patches(production, tests), ())
+
+    def test_local_call_arguments_rebind_patch_before_helper_body(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from helper import helper_patch
+from lib.worker import run
+
+def test_worker():
+    def exercise(value):
+        with {_PATCH_NAME}("lib.worker.send"):
+            run()
+    exercise(({_PATCH_NAME} := helper_patch))
+""",
+        }
+
+        self.assertEqual(find_ineffective_default_patches(production, tests), ())
+
+    def test_local_call_arguments_can_restore_patch_before_helper_body(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from helper import {_PATCH_NAME}
+from unittest.mock import {_PATCH_NAME} as canonical_patch
+from lib.worker import run
+
+def test_worker():
+    def exercise(value):
+        with {_PATCH_NAME}("lib.worker.send"):
+            run()
+    exercise(({_PATCH_NAME} := canonical_patch))
+""",
+        }
+
+        self.assertEqual(len(find_ineffective_default_patches(production, tests)), 1)
+
+    def test_local_call_argument_expression_is_visited_once_before_body(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from lib.worker import run
+
+def test_worker():
+    def exercise(value):
+        pass
+    with {_PATCH_NAME}("lib.worker.send"):
+        exercise(run())
+""",
+        }
+
+        self.assertEqual(len(find_ineffective_default_patches(production, tests)), 1)
+
+    def test_local_call_argument_alias_swap_is_applied_exactly_once(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from helper import {_PATCH_NAME}
+from unittest.mock import {_PATCH_NAME} as canonical_patch
+from lib.worker import run
+
+def test_worker():
+    def exercise(first, second, third):
+        with {_PATCH_NAME}("lib.worker.send"):
+            run()
+    exercise(
+        (temporary := {_PATCH_NAME}),
+        ({_PATCH_NAME} := canonical_patch),
+        (canonical_patch := temporary),
+    )
+    with {_PATCH_NAME}("lib.worker.send"):
+        run()
+""",
+        }
+
+        self.assertEqual(len(find_ineffective_default_patches(production, tests)), 2)
+
     def test_known_bad_checker_rejects_a_planted_omission(self) -> None:
         finding = DefaultPatchFinding(
             test_path="tests/test_bad.py",

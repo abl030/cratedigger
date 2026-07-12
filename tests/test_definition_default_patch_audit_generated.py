@@ -699,6 +699,163 @@ def _with_timing_worlds(draw):
     )
 
 
+@st.composite
+def _definition_expression_worlds(draw):
+    shape = draw(st.sampled_from((
+        "default",
+        "decorator",
+        "annotation",
+        "future_annotation",
+        "lambda_default",
+        "lambda_escape",
+    )))
+    imports = (
+        "from __future__ import annotations\n\n"
+        if shape == "future_annotation"
+        else ""
+    )
+    if shape == "default":
+        expression = "        def exercise(value=execute()):\n            pass\n"
+        expected_valid = False
+    elif shape == "decorator":
+        expression = (
+            "        @decorate(execute())\n"
+            "        def exercise():\n"
+            "            pass\n"
+        )
+        expected_valid = False
+    elif shape in {"annotation", "future_annotation"}:
+        expression = (
+            "        def exercise(value: execute()) -> execute():\n"
+            "            pass\n"
+        )
+        expected_valid = shape == "future_annotation"
+    elif shape == "lambda_default":
+        expression = (
+            "        callback = lambda value=execute(): (\n"
+            "            execute()\n"
+            "        )\n"
+            "    callback()\n"
+        )
+        expected_valid = False
+    else:
+        expression = (
+            "        callback = lambda: (\n"
+            "            execute()\n"
+            "        )\n"
+            "    callback()\n"
+        )
+        expected_valid = True
+    return _AuditWorld(
+        production={
+            "lib/subject.py": (
+                "from lib.dependencies import deliver\n\n"
+                "def execute(*, dependency_fn=deliver):\n"
+                "    return dependency_fn()\n"
+            ),
+        },
+        tests={
+            "tests/test_subject.py": (
+                imports
+                + f"from unittest.mock import {_PATCH_NAME}\n"
+                + "from helper import decorate\n"
+                + "from lib.subject import execute\n\n"
+                + "def test_subject():\n"
+                + f"    with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+                + expression
+            ),
+        },
+        expected_valid=expected_valid,
+        label=f"definition_expression/{shape}",
+    )
+
+
+@st.composite
+def _local_call_order_worlds(draw):
+    shape = draw(st.sampled_from((
+        "canonical_to_helper",
+        "helper_to_canonical",
+        "argument_call",
+        "single_traversal",
+    )))
+    if shape == "canonical_to_helper":
+        imports = (
+            f"from unittest.mock import {_PATCH_NAME}\n"
+            "from helper import helper_patch\n"
+        )
+        body = (
+            "def test_subject():\n"
+            "    def exercise(value):\n"
+            f"        with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            "            execute()\n"
+            f"    exercise(({_PATCH_NAME} := helper_patch))\n"
+        )
+        expected_count = 0
+    elif shape == "helper_to_canonical":
+        imports = (
+            f"from helper import {_PATCH_NAME}\n"
+            f"from unittest.mock import {_PATCH_NAME} as canonical_patch\n"
+        )
+        body = (
+            "def test_subject():\n"
+            "    def exercise(value):\n"
+            f"        with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            "            execute()\n"
+            f"    exercise(({_PATCH_NAME} := canonical_patch))\n"
+        )
+        expected_count = 1
+    elif shape == "argument_call":
+        imports = f"from unittest.mock import {_PATCH_NAME}\n"
+        body = (
+            "def test_subject():\n"
+            "    def exercise(value):\n"
+            "        pass\n"
+            f"    with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            "        exercise(execute())\n"
+        )
+        expected_count = 1
+    else:
+        imports = (
+            f"from helper import {_PATCH_NAME}\n"
+            f"from unittest.mock import {_PATCH_NAME} as canonical_patch\n"
+        )
+        body = (
+            "def test_subject():\n"
+            "    def exercise(first, second, third):\n"
+            f"        with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            "            execute()\n"
+            "    exercise(\n"
+            f"        (temporary := {_PATCH_NAME}),\n"
+            f"        ({_PATCH_NAME} := canonical_patch),\n"
+            "        (canonical_patch := temporary),\n"
+            "    )\n"
+            f"    with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            "        execute()\n"
+        )
+        expected_count = 2
+    return (
+        _AuditWorld(
+            production={
+                "lib/subject.py": (
+                    "from lib.dependencies import deliver\n\n"
+                    "def execute(*, dependency_fn=deliver):\n"
+                    "    return dependency_fn()\n"
+                ),
+            },
+            tests={
+                "tests/test_subject.py": (
+                    imports
+                    + "from lib.subject import execute\n\n"
+                    + body
+                ),
+            },
+            expected_valid=expected_count == 0,
+            label=f"local_call_order/{shape}",
+        ),
+        expected_count,
+    )
+
+
 class TestGeneratedDefinitionDefaultPatchAudit(unittest.TestCase):
     @given(world=_default_patch_worlds())
     @example(world=_OMITTED_CONSTRUCTOR)
@@ -757,6 +914,27 @@ class TestGeneratedDefinitionDefaultPatchAudit(unittest.TestCase):
     ) -> None:
         findings = find_ineffective_default_patches(world.production, world.tests)
         assert_default_patch_invariant(findings, expected_valid=world.expected_valid)
+
+    @given(world=_definition_expression_worlds())
+    def test_definition_expressions_follow_runtime_timing(
+        self,
+        world: _AuditWorld,
+    ) -> None:
+        findings = find_ineffective_default_patches(world.production, world.tests)
+        assert_default_patch_invariant(findings, expected_valid=world.expected_valid)
+
+    @given(world_and_count=_local_call_order_worlds())
+    def test_local_call_arguments_precede_one_body_traversal(
+        self,
+        world_and_count: tuple[_AuditWorld, int],
+    ) -> None:
+        world, expected_count = world_and_count
+        findings = find_ineffective_default_patches(world.production, world.tests)
+        self.assertEqual(
+            len(findings),
+            expected_count,
+            msg=f"world={world.label}: findings={findings!r}",
+        )
 
 
 if __name__ == "__main__":

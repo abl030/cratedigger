@@ -241,10 +241,12 @@ class _TestPatchVisitor(ast.NodeVisitor):
         test_path: str,
         captures: Mapping[str, tuple[_CapturedDefault, ...]],
         class_paths: frozenset[str],
+        annotations_deferred: bool,
     ) -> None:
         self.test_path = test_path
         self.captures = captures
         self.class_paths = class_paths
+        self.annotations_deferred = annotations_deferred
         self.aliases: dict[str, str] = {}
         self.instances: dict[str, str] = {}
         self.local_functions: dict[str, _LocalFunction] = {}
@@ -434,35 +436,81 @@ class _TestPatchVisitor(ast.NodeVisitor):
         self.comprehension_walrus_bindings = prior_comprehension_walrus_bindings
         self.active_patch_targets = prior_targets
 
+    def _visit_definition_expressions(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> tuple[str, ...]:
+        """Visit expressions evaluated when Python creates a function.
+
+        Python evaluates decorator expressions top-down, then positional and
+        keyword-only defaults, then annotations. Decorator application and the
+        function body are deferred from this expression pass.
+        """
+        decorator_targets: list[str] = []
+        for decorator in node.decorator_list:
+            target = self._patch_target(decorator)
+            self.visit(decorator)
+            if target is not None:
+                decorator_targets.append(target)
+        for default in node.args.defaults:
+            self.visit(default)
+        for default in node.args.kw_defaults:
+            if default is not None:
+                self.visit(default)
+        if not self.annotations_deferred:
+            arguments = [
+                *node.args.posonlyargs,
+                *node.args.args,
+            ]
+            if node.args.vararg is not None:
+                arguments.append(node.args.vararg)
+            arguments.extend(node.args.kwonlyargs)
+            if node.args.kwarg is not None:
+                arguments.append(node.args.kwarg)
+            for argument in arguments:
+                if argument.annotation is not None:
+                    self.visit(argument.annotation)
+            if node.returns is not None:
+                self.visit(node.returns)
+        return tuple(decorator_targets)
+
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        decorator_targets = self._visit_definition_expressions(node)
         if self.function_depth:
             self.local_functions[node.name] = _LocalFunction(
                 node=node,
-                decorator_targets=tuple(
-                    target
-                    for decorator in node.decorator_list
-                    if (target := self._patch_target(decorator)) is not None
-                ),
+                decorator_targets=decorator_targets,
             )
             self.aliases.pop(node.name, None)
             self.instances.pop(node.name, None)
             return
-        self._visit_function(node)
+        self._visit_function(
+            node,
+            definition_decorator_targets=decorator_targets,
+        )
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        decorator_targets = self._visit_definition_expressions(node)
         if self.function_depth:
             self.local_functions[node.name] = _LocalFunction(
                 node=node,
-                decorator_targets=tuple(
-                    target
-                    for decorator in node.decorator_list
-                    if (target := self._patch_target(decorator)) is not None
-                ),
+                decorator_targets=decorator_targets,
             )
             self.aliases.pop(node.name, None)
             self.instances.pop(node.name, None)
             return
-        self._visit_function(node)
+        self._visit_function(
+            node,
+            definition_decorator_targets=decorator_targets,
+        )
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        """Visit immediate defaults, leaving callback bodies uninterpreted."""
+        for default in node.args.defaults:
+            self.visit(default)
+        for default in node.args.kw_defaults:
+            if default is not None:
+                self.visit(default)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         for statement in node.body:
@@ -538,6 +586,21 @@ class _TestPatchVisitor(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:
         callable_path, call_access = self._resolved_call_target(node.func)
+        local_function = (
+            self.local_functions.get(node.func.id)
+            if isinstance(node.func, ast.Name)
+            else None
+        )
+        self.visit(node.func)
+        argument_expressions = [
+            *node.args,
+            *(keyword.value for keyword in node.keywords),
+        ]
+        for expression in sorted(
+            argument_expressions,
+            key=lambda item: (item.lineno, item.col_offset),
+        ):
+            self.visit(expression)
         if callable_path is not None and self.active_patch_targets:
             for capture in self.captures.get(callable_path, ()):
                 matching_targets = sorted(
@@ -560,16 +623,13 @@ class _TestPatchVisitor(ast.NodeVisitor):
                             injectable_keyword=capture.injectable_keyword,
                         ),
                     )
-        if isinstance(node.func, ast.Name):
-            local_function = self.local_functions.get(node.func.id)
+        if local_function is not None:
             function_id = (
-                id(local_function.node) if local_function is not None else None
+                id(local_function.node)
             )
             if (
-                local_function is not None
-                and function_id not in self.active_local_functions
+                function_id not in self.active_local_functions
             ):
-                assert function_id is not None
                 self.active_local_functions.add(function_id)
                 try:
                     self._visit_function(
@@ -582,7 +642,6 @@ class _TestPatchVisitor(ast.NodeVisitor):
                     )
                 finally:
                     self.active_local_functions.remove(function_id)
-        self.generic_visit(node)
 
     def visit_For(self, node: ast.For) -> None:
         self.visit(node.iter)
@@ -605,9 +664,23 @@ class _TestPatchVisitor(ast.NodeVisitor):
             self.visit(statement)
 
     def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        resolved_value = self._resolved_expression(node.value)
+        constructed_class = self._constructed_class(node.value)
+        local_function = (
+            self.local_functions.get(node.value.id)
+            if isinstance(node.value, ast.Name)
+            else None
+        )
         self.visit(node.value)
         names = _assigned_names(node.target)
         self._invalidate_binding(node.target)
+        if isinstance(node.target, ast.Name):
+            if resolved_value is not None:
+                self.aliases[node.target.id] = resolved_value
+            if constructed_class is not None:
+                self.instances[node.target.id] = constructed_class
+            if local_function is not None:
+                self.local_functions[node.target.id] = local_function
         for bindings in self.comprehension_walrus_bindings:
             bindings.update(names)
 
@@ -663,15 +736,24 @@ def find_ineffective_default_patches(
     by their local name, using patch state at that call site. Calls through
     returned, assigned, or passed callback aliases remain outside the bounded
     source-local analysis rather than inheriting definition-time patch state.
+    Lambda defaults are evaluated at their definition site, but lambda bodies
+    remain outside that callback analysis boundary even for direct calls.
     """
     captures, class_paths = _captured_defaults(production_sources)
     findings: list[DefaultPatchFinding] = []
     for test_path, source in test_sources.items():
         tree = ast.parse(source, filename=test_path)
+        annotations_deferred = any(
+            isinstance(statement, ast.ImportFrom)
+            and statement.module == "__future__"
+            and any(alias.name == "annotations" for alias in statement.names)
+            for statement in tree.body
+        )
         visitor = _TestPatchVisitor(
             test_path=test_path,
             captures=captures,
             class_paths=class_paths,
+            annotations_deferred=annotations_deferred,
         )
         visitor.visit(tree)
         findings.extend(visitor.findings)
