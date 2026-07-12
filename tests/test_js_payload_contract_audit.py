@@ -214,6 +214,47 @@ renderDownloadHistoryFixture({outcome: 'success', request_id: 1});
                     registered_module="./fixture.js",
                 )
 
+    def test_registration_rejects_mixed_default_import_and_shadowed_test(
+        self,
+    ) -> None:
+        mixed_import = """
+import historyDefault, {
+  renderDownloadHistoryItem as renderDownloadHistoryFixture,
+} from './fixture.js';
+renderDownloadHistoryFixture({outcome: 'success'});
+"""
+        shadowed_test = """
+import { __test__ } from './recents.js';
+function renderWithShadow(__test__) {
+  const { renderRecentsItems: renderRecentsFixture } = __test__;
+  return renderRecentsFixture([{outcome: 'success'}]);
+}
+"""
+        cases = (
+            (
+                mixed_import,
+                "renderDownloadHistoryFixture",
+                "renderDownloadHistoryItem",
+                "./fixture.js",
+            ),
+            (
+                shadowed_test,
+                "renderRecentsFixture",
+                "renderRecentsItems",
+                "./recents.js",
+            ),
+        )
+        for source, fixture, renderer, module in cases:
+            with self.subTest(source=source), self.assertRaisesRegex(
+                ValueError, "explicit registration"
+            ):
+                fixture_fields_for_call(
+                    source,
+                    fixture,
+                    registered_renderer=renderer,
+                    registered_module=module,
+                )
+
     def test_scanner_decodes_direct_escaped_renderer_identifier(self) -> None:
         self.assertEqual(
             fixture_fields_for_call(
@@ -456,6 +497,20 @@ const markup = `before ${renderDownloadHistoryItem({
             with self.assertRaisesRegex(
                 ValueError,
                 r"test_js_future\.mjs: JavaScript parse error",
+            ):
+                scan_js_payload_fixture_fields(tests_dir)
+
+    def test_corpus_semantic_error_names_the_scanned_js_module(self) -> None:
+        with tempfile.TemporaryDirectory() as tests_dir:
+            path = os.path.join(tests_dir, "test_js_bad_boundary.mjs")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "import * as historyModule from '../web/js/history.js';\n"
+                    "historyModule[selector]({ invented_client_only: 1 });\n"
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                r"test_js_bad_boundary\.mjs: .*explicit registration",
             ):
                 scan_js_payload_fixture_fields(tests_dir)
 

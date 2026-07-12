@@ -367,6 +367,16 @@ def _fixture_registration_nodes(
         return False
 
     imported_test_namespace = False
+
+    def top_level_declarator(node: Node) -> bool:
+        declaration = parents.get(_node_key(node))
+        return (
+            declaration is not None
+            and declaration.type == "lexical_declaration"
+            and (parent := parents.get(_node_key(declaration))) is not None
+            and parent.type == "program"
+        )
+
     for node in _walk(root):
         if node.type == "import_specifier":
             identifiers = [
@@ -394,8 +404,12 @@ def _fixture_registration_nodes(
                 )
             ):
                 imported_test_namespace = True
-        if node.type != "variable_declarator" or not _identifier_is(
-            node.child_by_field_name("value"), source_bytes, "__test__"
+        if (
+            node.type != "variable_declarator"
+            or not top_level_declarator(node)
+            or not _identifier_is(
+                node.child_by_field_name("value"), source_bytes, "__test__"
+            )
         ):
             continue
         pattern = node.child_by_field_name("name")
@@ -423,6 +437,7 @@ def _fixture_registration_nodes(
     )
     module_registration_valid = (
         len(module_imports) == 1
+        and not has_opaque_module_import
         and (
             registration_is_import
             or (imported_test_namespace and renderer_name == "renderRecentsItems")
@@ -702,25 +717,28 @@ def fixture_fields_for_call(
     """Return direct fields seeded in literal first args to ``call_name``."""
     source_bytes = source.encode("utf-8")
     tree = parse_javascript(source, origin=origin)
-    declaration_nodes = (
-        _fixture_registration_nodes(
+    try:
+        declaration_nodes = (
+            _fixture_registration_nodes(
+                tree.root_node,
+                source_bytes,
+                call_name,
+                registered_renderer,
+                registered_module or "",
+            )
+            if registered_renderer is not None and registered_module is not None
+            else set()
+        )
+        if declaration_nodes is None:
+            return set()
+        _validate_renderer_references(
             tree.root_node,
             source_bytes,
             call_name,
-            registered_renderer,
-            registered_module or "",
+            declaration_nodes=declaration_nodes,
         )
-        if registered_renderer is not None and registered_module is not None
-        else set()
-    )
-    if declaration_nodes is None:
-        return set()
-    _validate_renderer_references(
-        tree.root_node,
-        source_bytes,
-        call_name,
-        declaration_nodes=declaration_nodes,
-    )
+    except ValueError as exc:
+        raise ValueError(f"{origin}: {exc}") from None
     fields: set[str] = set()
     for node in _walk(tree.root_node):
         if node.type != "call_expression":
@@ -900,6 +918,21 @@ def _browser_global_identifier(node: Node | None, source_bytes: bytes) -> bool:
     return _identifier_value(node, source_bytes) in _BROWSER_GLOBALS
 
 
+def _direct_browser_global_reference(
+    node: Node | None, source_bytes: bytes
+) -> bool:
+    if node is None:
+        return False
+    if _browser_global_identifier(node, source_bytes):
+        return True
+    if node.type == "parenthesized_expression":
+        children = _semantic_named_children(node)
+        return len(children) == 1 and _direct_browser_global_reference(
+            children[0], source_bytes
+        )
+    return False
+
+
 def _browser_global_rooted(node: Node | None, source_bytes: bytes) -> bool:
     if node is None:
         return False
@@ -958,7 +991,52 @@ def _computed_object_callee(
     if node is None or node.type != "subscript_expression":
         return False
     object_node, _ = _subscript_parts(node)
-    return _identifier_is(object_node, source_bytes, "Object")
+    return _semantic_object_reference(object_node, source_bytes)
+
+
+def _semantic_object_reference(node: Node | None, source_bytes: bytes) -> bool:
+    if node is None:
+        return False
+    if node.type == "parenthesized_expression":
+        children = _semantic_named_children(node)
+        return len(children) == 1 and _semantic_object_reference(
+            children[0], source_bytes
+        )
+    if _identifier_is(node, source_bytes, "Object"):
+        return True
+    if node.type == "subscript_expression":
+        object_node, property_node = _subscript_parts(node)
+        return (
+            _direct_browser_global_reference(object_node, source_bytes)
+            and property_node is not None
+            and property_node.type == "string"
+            and _decode_js_string(property_node, source_bytes) == "Object"
+        )
+    return (
+        node.type == "member_expression"
+        and _direct_browser_global_reference(
+            node.child_by_field_name("object"), source_bytes
+        )
+        and _identifier_is(
+            node.child_by_field_name("property"), source_bytes, "Object"
+        )
+    )
+
+
+def _exact_window_binding_call(node: Node, source_bytes: bytes) -> bool:
+    if node.type != "call_expression" or not _direct_member_is(
+        node.child_by_field_name("function"),
+        source_bytes,
+        "Object",
+        "assign",
+        exact_spelling=True,
+    ):
+        return False
+    arguments = node.child_by_field_name("arguments")
+    args = _semantic_named_children(arguments) if arguments is not None else []
+    return bool(args) and _identifier_is(
+        args[0], source_bytes, "window", exact_spelling=True
+    )
 
 
 def _validated_window_assign_calls(
@@ -967,6 +1045,9 @@ def _validated_window_assign_calls(
     """Return exact binding calls after rejecting every bypassing reference."""
     calls: list[Node] = []
     allowed_assign_refs: set[tuple[str, int, int]] = set()
+    owns_window_binding = any(
+        _exact_window_binding_call(node, source_bytes) for node in _walk(root)
+    )
 
     for node in _walk(root):
         if node.type in {"assignment_expression", "augmented_assignment_expression"}:
@@ -1026,13 +1107,13 @@ def _validated_window_assign_calls(
             continue
         arguments = node.child_by_field_name("arguments")
         args = _semantic_named_children(arguments) if arguments is not None else []
+        if owns_window_binding and _computed_object_callee(function, source_bytes):
+            raise ValueError(
+                "computed Object calls in a window-binding owner are unsupported"
+            )
         targets_browser_global = bool(args) and _browser_global_rooted(
             args[0], source_bytes
         )
-        if _computed_object_callee(function, source_bytes) and targets_browser_global:
-            raise ValueError(
-                "computed Object calls targeting browser globals are unsupported"
-            )
         if not _semantic_object_assign_reference(function, source_bytes):
             continue
         if any(child.type == "optional_chain" for child in node.children) or any(

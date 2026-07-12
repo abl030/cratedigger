@@ -50,6 +50,9 @@ class PayloadLiteralWorld:
 class BoundaryWorld:
     payload_source: str
     payload_rejected: bool
+    payload_fixture: str
+    payload_renderer: str
+    payload_module: str
     window_source: str
     window_rejected: bool
 
@@ -236,8 +239,31 @@ def boundary_worlds(draw: st.DrawFn) -> BoundaryWorld:
     mutation = draw(st.sampled_from(("none", "before_target", "before_other", "after")))
     shadow = draw(st.booleans())
     unknown = draw(st.booleans())
-    sensitive_namespace = draw(st.booleans())
-    browser_global_root = draw(st.booleans())
+    registration_variant = draw(
+        st.sampled_from(("valid", "namespace", "default_alias", "shadowed_test"))
+    )
+    object_root = draw(
+        st.sampled_from(
+            (
+                "Object",
+                "(Object)",
+                "globalThis.Object",
+                'globalThis["Object"]',
+                "self['Object']",
+            )
+        )
+    )
+    target_expression = draw(
+        st.sampled_from(
+            (
+                "window",
+                "true ? window : {}",
+                "window || {}",
+                "target.nested",
+                "{nested: window}",
+            )
+        )
+    )
 
     target = _CALL_NAME
     initial_value = target if initial == "target" else "unrelated"
@@ -288,15 +314,37 @@ def boundary_worlds(draw: st.DrawFn) -> BoundaryWorld:
         if shadow
         else ""
     )
-    namespace = "historyModule" if sensitive_namespace else "helpers"
-    registration = (
-        "import * as historyModule from './fixture.js';"
-        if sensitive_namespace
-        else f"import {{ {_CALL_NAME} as {_FIXTURE_NAME} }} from './fixture.js';"
-    )
+    payload_fixture = _FIXTURE_NAME
+    payload_renderer = _CALL_NAME
+    payload_module = "./fixture.js"
+    if registration_variant == "namespace":
+        registration = "import * as historyModule from './fixture.js';"
+        payload_call = (
+            f"historyModule[{selector}]({{invented_client_only: 1}});"
+        )
+    elif registration_variant == "default_alias":
+        registration = (
+            f"import historyDefault, {{ {_CALL_NAME} as {_FIXTURE_NAME} }} "
+            "from './fixture.js';"
+        )
+        payload_call = f"{_FIXTURE_NAME}({{invented_client_only: 1}});"
+    elif registration_variant == "shadowed_test":
+        payload_fixture = "renderRecentsFixture"
+        payload_renderer = "renderRecentsItems"
+        payload_module = "./recents.js"
+        registration = "import { __test__ } from './recents.js';"
+        payload_call = (
+            "function renderWithShadow(__test__) {"
+            "const { renderRecentsItems: renderRecentsFixture } = __test__;"
+            "return renderRecentsFixture([{invented_client_only: 1}]);}"
+        )
+    else:
+        registration = (
+            f"import {{ {_CALL_NAME} as {_FIXTURE_NAME} }} from './fixture.js';"
+        )
+        payload_call = f"helpers[{selector}]({{invented_client_only: 1}});"
     payload_source = (
-        f"{registration}{setup}{shadow_block}{before}"
-        f"{namespace}[{selector}]({{invented_client_only: 1}});{after}"
+        f"{registration}{setup}{shadow_block}{before}{payload_call}{after}"
     )
 
     assign_initial = "assign" if initial == "target" else "unrelated"
@@ -305,17 +353,24 @@ def boundary_worlds(draw: st.DrawFn) -> BoundaryWorld:
     )
     window_before = before.replace(target, "assign")
     window_after = after.replace(target, "assign")
-    target_expression = "globalThis.window" if browser_global_root else "{window}"
+    target_setup = (
+        "const target = {nested: window};"
+        if "target." in target_expression
+        else ""
+    )
     window_source = (
-        f"{window_setup}{shadow_block}{window_before}"
+        f"{window_setup}{shadow_block}{window_before}{target_setup}"
         "Object.assign(window, { supported });"
-        f"Object[{selector}]({target_expression}, {{ fetch }});{window_after}"
+        f"{object_root}[{selector}]({target_expression}, {{ fetch }});{window_after}"
     )
     return BoundaryWorld(
         payload_source=payload_source,
-        payload_rejected=sensitive_namespace,
+        payload_rejected=registration_variant != "valid",
+        payload_fixture=payload_fixture,
+        payload_renderer=payload_renderer,
+        payload_module=payload_module,
         window_source=window_source,
-        window_rejected=browser_global_root,
+        window_rejected=True,
     )
 
 
@@ -405,10 +460,6 @@ _SUPPORTED_UNRELATED_COMPUTED_CALLS = st.sampled_from(
         'const key = "unrelated"; globalThis[key]();',
         'const label = "renderDownloadHistoryItem"; console.log(label);',
         "const key = getRuntimeName(); unrelatedNamespace[key]();",
-        (
-            'const key = "unrelated"; Object.assign(window, { supported }); '
-            "Object[key]({ nested: window }, { fetch });"
-        ),
     )
 )
 
@@ -456,9 +507,9 @@ class TestJsAstGenerated(unittest.TestCase):
         try:
             fields = fixture_fields_for_call(
                 world.payload_source,
-                _FIXTURE_NAME,
-                registered_renderer=_CALL_NAME,
-                registered_module="./fixture.js",
+                world.payload_fixture,
+                registered_renderer=world.payload_renderer,
+                registered_module=world.payload_module,
             )
         except ValueError:
             payload_rejected = True
@@ -633,11 +684,14 @@ class TestJsAstGenerated(unittest.TestCase):
                 "historyModule[names.current]({invented_client_only: 1});"
             ),
             payload_rejected=True,
+            payload_fixture=_FIXTURE_NAME,
+            payload_renderer=_CALL_NAME,
+            payload_module="./fixture.js",
             window_source=(
                 'const methods = {current: "unrelated"}; '
                 'methods.current = "assign"; '
                 "Object.assign(window, {}); "
-                "Object[methods.current](globalThis.window, {fetch});"
+                "Object[methods.current]({nested: window}, {fetch});"
             ),
             window_rejected=True,
         )
@@ -646,6 +700,30 @@ class TestJsAstGenerated(unittest.TestCase):
                 world,
                 payload_rejected=False,
                 window_rejected=False,
+            )
+
+    def test_known_bad_shadowed_registration_mutant_trips_checker(self) -> None:
+        world = BoundaryWorld(
+            payload_source=(
+                "import { __test__ } from './recents.js';"
+                "function run(__test__) {"
+                "const {renderRecentsItems: renderRecentsFixture} = __test__;"
+                "return renderRecentsFixture([{invented_client_only: 1}]);}"
+            ),
+            payload_rejected=True,
+            payload_fixture="renderRecentsFixture",
+            payload_renderer="renderRecentsItems",
+            payload_module="./recents.js",
+            window_source=(
+                "Object.assign(window, {}); Object[method]({}, {fetch});"
+            ),
+            window_rejected=True,
+        )
+        with self.assertRaisesRegex(AssertionError, "boundary diverged"):
+            assert_boundary_world(
+                world,
+                payload_rejected=False,
+                window_rejected=True,
             )
 
     def test_known_bad_fail_open_window_binding_trips_checker(self) -> None:
