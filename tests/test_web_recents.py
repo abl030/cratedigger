@@ -757,13 +757,13 @@ class TestClassifyVerdict(unittest.TestCase):
         self.assertIn("not", result.verdict.lower())
 
     def test_persisted_quality_downgrade_verdict_uses_import_result(self):
-        """Auto-import rows may store the quality-pipeline decision as the
-        scenario. Recents must still show the comparison, not bare
-        "downgrade".
+        """A successful validation headline cannot hide a later downgrade.
+
+        This is the post-validation-envelope shape that regressed in PR #623.
         """
         result = classify_log_entry(_entry(
             outcome="rejected",
-            beets_scenario="downgrade",
+            beets_scenario="strong_match",
             soulseek_username="CondosInQueens",
             import_result={
                 "version": 2,
@@ -1122,6 +1122,16 @@ class TestExceptionVerdicts(unittest.TestCase):
 
 class TestDownloadedLabel(unittest.TestCase):
 
+    def test_mixed_source_preserves_every_downloaded_codec(self):
+        """The Slow Club live row carried ``flac, ogg`` but rendered FLAC."""
+        result = classify_log_entry(_entry(
+            outcome="rejected",
+            actual_filetype="flac, ogg",
+            actual_min_bitrate=224,
+            import_result=ImportResult(decision="mixed_source").to_json(),
+        ))
+        self.assertEqual(result.downloaded_label, "FLAC + OGG")
+
     def test_mp3_download(self):
         """MP3 320 download gets a label."""
         result = classify_log_entry(_entry(
@@ -1162,6 +1172,33 @@ class TestDownloadedLabel(unittest.TestCase):
             bitrate=155000, actual_filetype="mp3"))
         self.assertTrue(hasattr(result, "downloaded_label"))
         self.assertIn("155", result.downloaded_label)
+
+
+class TestRejectedDecisionProjection(unittest.TestCase):
+
+    def test_mixed_source_decision_overrides_successful_validation_headline(self):
+        """Live row 36844 matched its pressing, then failed mixed-source policy."""
+        result = classify_log_entry(_entry(
+            outcome="rejected",
+            beets_scenario="strong_match",
+            actual_filetype="flac, ogg",
+            actual_min_bitrate=224,
+            import_result=ImportResult(decision="mixed_source").to_json(),
+        ))
+        self.assertEqual(result.verdict, "Mixed lossless+lossy source")
+        self.assertEqual(
+            result.summary,
+            "Mixed lossless+lossy source · testuser",
+        )
+
+    def test_non_reject_import_decision_does_not_hide_later_failure(self):
+        """A successful import-stage token cannot replace a later reject."""
+        result = classify_log_entry(_entry(
+            outcome="rejected",
+            beets_scenario="nested_layout",
+            import_result=ImportResult(decision="import").to_json(),
+        ))
+        self.assertIn("Nested folder layout", result.verdict)
 
 
 # ============================================================================
