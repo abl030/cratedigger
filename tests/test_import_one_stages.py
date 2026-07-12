@@ -59,6 +59,24 @@ class TestImportBootstrap(unittest.TestCase):
         self.assertIn("OK", proc.stdout)
 
 
+class TestExistingSpectralPathResolution(unittest.TestCase):
+    def test_lookup_exception_becomes_audit_error_instead_of_crashing(self):
+        from harness import import_one
+
+        class RaisingBeets(FakeBeetsDB):
+            def get_album_path(self, mb_release_id: str) -> str | None:
+                raise RuntimeError("beets path lookup failed")
+
+        path, failure = import_one._resolve_existing_spectral_path(
+            cast(Any, RaisingBeets()), "mbid-123", True)
+
+        self.assertIsNone(path)
+        self.assertIsNotNone(failure)
+        assert failure is not None
+        self.assertTrue(failure.attempted)
+        self.assertEqual(failure.error, "RuntimeError: beets path lookup failed")
+
+
 class TestPipelineDbUpdate(unittest.TestCase):
     @patch("harness.import_one.finalize_request")
     @patch("lib.pipeline_db.PipelineDB")

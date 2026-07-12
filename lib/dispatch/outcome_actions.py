@@ -432,6 +432,7 @@ def _record_preview_measurement_failed(
     payload: MeasurementFailure,
     denylist_username: str | None = None,
     denylist_reason: str | None = None,
+    import_result: ImportResult | None = None,
 ) -> int:
     """Preview-side measurement_failed entry point (U4).
 
@@ -472,6 +473,7 @@ def _record_preview_measurement_failed(
         "staged_path": payload.source_path or None,
         "error_message": None,
         "validation_result": validation_json,
+        "import_result": import_result.to_json() if import_result is not None else None,
     }
     job_result = msgspec.to_builtins(payload)
     assert isinstance(job_result, dict), \

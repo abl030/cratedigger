@@ -1698,6 +1698,48 @@ class TestImportPreviewWorker(unittest.TestCase):
             assert claimed_for_import is not None
             self.assertEqual(claimed_for_import.id, updated.id)
 
+    def test_evidence_readiness_fallback_preserves_collected_audit(self):
+        from scripts import import_preview_worker
+        from lib.quality import SpectralAnalysisDetail, SpectralDetail
+
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=42, status="downloading"))
+            db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                dedupe_key=manual_import_dedupe_key(42, source),
+                payload=manual_import_payload(failed_path=source),
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+            audit = SpectralDetail(
+                candidate=SpectralAnalysisDetail(
+                    attempted=True, grade="suspect", bitrate_kbps=128),
+                existing=SpectralAnalysisDetail(
+                    attempted=True, grade="genuine"),
+            )
+            preview_result = ImportPreviewResult(
+                mode="path",
+                verdict="evidence_ready",
+                decision="import",
+                source_path=source,
+                request_id=42,
+                import_result=ImportResult(spectral=audit),
+            )
+
+            updated = import_preview_worker.process_claimed_preview_job(
+                db, claimed,
+                preview_fn=lambda db, job: preview_result,
+            )
+
+        assert updated is not None
+        self.assertEqual(updated.preview_status, "measurement_failed")
+        logged = ImportResult.from_json(db.download_logs[-1].import_result)
+        self.assertEqual(logged.spectral, audit)
+
     def test_run_once_heartbeats_while_preview_is_running(self):
         from scripts import import_preview_worker
 
@@ -2096,6 +2138,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
     def test_force_job_valid_evidence_skips_measurement(self):
         """AE4 force/manual: matching snapshot + valid evidence → no measurement."""
         from scripts import import_preview_worker
+        from lib.quality import SpectralAnalysisDetail, SpectralDetail
 
         with tempfile.TemporaryDirectory() as source:
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
@@ -2118,21 +2161,36 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             # Seed download_log_candidate evidence — force/manual path uses it.
             self._seed_evidence_for_download_log(db, download_log_id, source)
 
+            audit_calls: list[tuple[str, str]] = []
+            audit = SpectralDetail(
+                candidate=SpectralAnalysisDetail(
+                    attempted=True, grade="genuine"),
+                existing=SpectralAnalysisDetail(attempted=False),
+            )
+
+            def collect_audit(
+                path: str, mb_release_id: str, cfg: Any,
+            ) -> SpectralDetail:
+                audit_calls.append((path, mb_release_id))
+                return audit
+
             with patch(
                 "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
             ) as preview, patch(
                 "lib.measurement.measure_preimport_state",
-            ) as preimport, patch(
-                "lib.spectral_check.analyze_album",
-            ) as spectral:
+            ) as preimport:
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,
                     claimed,
+                    spectral_audit_collector=collect_audit,
                 )
 
         preview.assert_not_called()
         preimport.assert_not_called()
-        spectral.assert_not_called()
+        self.assertEqual(
+            audit_calls,
+            [(source, f"mbid-frontgate-dl-{download_log_id}")],
+        )
         assert updated is not None
         self.assertEqual(updated.status, "queued")
         self.assertEqual(updated.preview_status, "evidence_ready")
@@ -2142,6 +2200,55 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             "reused",
         )
         self.assertIsNotNone(updated.importable_at)
+
+    def test_reused_evidence_audit_failure_is_fail_soft(self):
+        from scripts import import_preview_worker
+
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=42))
+            download_log_id = db.log_download(42, outcome="rejected")
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+            self._seed_evidence_for_download_log(db, download_log_id, source)
+
+            def raising_collector(*args: Any, **kwargs: Any):
+                raise RuntimeError("spectral backend unavailable")
+
+            updated = import_preview_worker.process_claimed_preview_job(
+                db,
+                claimed,
+                spectral_audit_collector=raising_collector,
+            )
+
+        assert updated is not None
+        self.assertEqual(updated.preview_status, "evidence_ready")
+        self.assertIsNotNone(updated.importable_at)
+        assert updated.preview_result is not None
+        result = ImportResult.from_dict(
+            cast(dict[str, Any], updated.preview_result["import_result"])
+        )
+        assert result.spectral.candidate is not None
+        assert result.spectral.existing is not None
+        self.assertTrue(result.spectral.candidate.attempted)
+        self.assertIn(
+            "spectral backend unavailable",
+            result.spectral.candidate.error or "",
+        )
+        self.assertFalse(result.spectral.existing.attempted)
+        self.assertIsNone(result.spectral.existing.error)
 
     def test_manual_job_valid_evidence_skips_measurement(self):
         """AE4 manual: matching snapshot + valid evidence → no measurement."""

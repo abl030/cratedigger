@@ -33,7 +33,13 @@ from lib.audio_hash import AudioHashError, hash_audio_content
 # wav/alac albums don't trip a per-track warning every validation cycle.
 _BAD_HASH_SUPPORTED_EXTS: frozenset[str] = frozenset({"flac", "mp3", "m4a", "aac", "ogg", "opus"})
 from lib.pipeline_db import RequestSpectralStateUpdate
-from lib.quality import SPECTRAL_TRANSCODE_GRADES, SpectralMeasurement
+from lib.quality import (
+    SPECTRAL_TRANSCODE_GRADES,
+    SpectralAnalysisDetail,
+    SpectralDetail,
+    SpectralMeasurement,
+    SpectralTrackDetail,
+)
 from lib.util import validate_audio
 
 if TYPE_CHECKING:
@@ -52,6 +58,96 @@ def spectral_analyze(folder: str, trim_seconds: int = 30) -> Any:
     """
     from lib.spectral_check import analyze_album
     return analyze_album(folder, trim_seconds=trim_seconds)
+
+
+def _spectral_analysis_detail(path: str) -> SpectralAnalysisDetail:
+    """Analyze one path into display-only attempt audit evidence."""
+    grade: str | None = None
+    bitrate_kbps: int | None = None
+    suspect_pct: float | None = None
+    per_track: list[SpectralTrackDetail] = []
+    try:
+        result = spectral_analyze(path, trim_seconds=30)
+        grade = result.grade
+        bitrate_kbps = result.estimated_bitrate_kbps
+        suspect_pct = result.suspect_pct
+        for track in result.tracks:
+            per_track.append(SpectralTrackDetail(
+                grade=track.grade,
+                hf_deficit_db=round(track.hf_deficit_db, 1),
+                cliff_detected=track.cliff_detected,
+                cliff_freq_hz=track.cliff_freq_hz,
+                estimated_bitrate_kbps=track.estimated_bitrate_kbps,
+                error=getattr(track, "error", None),
+            ))
+    except Exception as exc:
+        logger.exception("SPECTRAL AUDIT: failed for %s", path)
+        return SpectralAnalysisDetail(
+            attempted=True,
+            grade=grade,
+            bitrate_kbps=bitrate_kbps,
+            suspect_pct=suspect_pct,
+            per_track=per_track,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    return SpectralAnalysisDetail(
+        attempted=True,
+        grade=grade,
+        bitrate_kbps=bitrate_kbps,
+        suspect_pct=suspect_pct,
+        per_track=per_track,
+    )
+
+
+def collect_attempt_spectral_audit(
+    candidate_path: str,
+    existing_path: str | None,
+) -> SpectralDetail:
+    """Measure both sides independently for audit; never make a decision."""
+    candidate = _spectral_analysis_detail(candidate_path)
+    existing = (
+        _spectral_analysis_detail(existing_path)
+        if existing_path is not None
+        else SpectralAnalysisDetail(attempted=False)
+    )
+    return SpectralDetail(candidate=candidate, existing=existing)
+
+
+def _resolve_existing_album_path(
+    mb_release_id: str,
+    cfg: "CratediggerConfig",
+) -> tuple[str | None, SpectralAnalysisDetail | None]:
+    """Resolve exact-release files, preserving lookup failure as audit data."""
+    if not mb_release_id:
+        return None, None
+    from lib.beets_db import BeetsDB
+
+    try:
+        with BeetsDB(library_root=getattr(cfg, "beets_directory", "")) as beets:
+            path = beets.get_album_path(mb_release_id)
+        if path is not None and os.path.isdir(path):
+            return path, None
+    except Exception as exc:
+        logger.exception("SPECTRAL AUDIT: failed to resolve existing exact release")
+        return None, SpectralAnalysisDetail(
+            attempted=True,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    return None, None
+
+
+def collect_release_attempt_spectral_audit(
+    candidate_path: str,
+    mb_release_id: str,
+    cfg: "CratediggerConfig",
+) -> SpectralDetail:
+    """Collect attempt audit against the exact-release library copy."""
+    existing_path, lookup_failure = _resolve_existing_album_path(
+        mb_release_id, cfg)
+    audit = collect_attempt_spectral_audit(candidate_path, existing_path)
+    if lookup_failure is not None:
+        audit.existing = lookup_failure
+    return audit
 
 
 class PreimportMeasurement(msgspec.Struct, frozen=True):
@@ -81,6 +177,7 @@ class PreimportMeasurement(msgspec.Struct, frozen=True):
     filetype_band: str = ""
     min_bitrate_kbps: int | None = None
     is_vbr: bool | None = None
+    spectral_audit: SpectralDetail = msgspec.field(default_factory=SpectralDetail)
 
 
 AUDIO_EXTS = ("mp3", "flac", "alac", "m4a", "ogg", "opus", "wav", "aac")
@@ -213,11 +310,12 @@ def _needs_spectral_check(
 def _analyze_existing(
     mb_release_id: str,
     cfg: "CratediggerConfig",
-) -> tuple[int | None, SpectralMeasurement | None]:
+) -> tuple[int | None, SpectralMeasurement | None, SpectralAnalysisDetail]:
     """Look up existing beets album and spectral-analyze its files.
 
-    Returns ``(existing_min_bitrate_kbps, existing_spectral)``. Either or both
-    may be None if the album isn't in beets or the on-disk path is missing.
+    Returns ``(existing_min_bitrate_kbps, existing_spectral, audit)``. The
+    policy-facing values may be None if the album isn't in beets or the
+    on-disk path is missing; the audit records whether analysis was attempted.
     Exceptions are logged and swallowed so a missing existing copy never
     blocks a new import.
     """
@@ -225,6 +323,7 @@ def _analyze_existing(
 
     existing_min: int | None = None
     existing_spectral: SpectralMeasurement | None = None
+    audit = SpectralAnalysisDetail(attempted=False)
     try:
         with BeetsDB(library_root=getattr(cfg, "beets_directory", "")) as beets:
             existing_info = beets.get_album_info(
@@ -232,17 +331,16 @@ def _analyze_existing(
         if existing_info:
             existing_min = existing_info.min_bitrate_kbps
             if os.path.isdir(existing_info.album_path):
-                sp = spectral_analyze(existing_info.album_path,
-                                      trim_seconds=30)
+                audit = _spectral_analysis_detail(existing_info.album_path)
                 existing_spectral = SpectralMeasurement.from_parts(
-                    sp.grade, sp.estimated_bitrate_kbps)
+                    audit.grade, audit.bitrate_kbps)
                 logger.info(
-                    f"SPECTRAL: existing on disk: grade={sp.grade}, "
-                    f"estimated_bitrate={sp.estimated_bitrate_kbps}kbps, "
+                    f"SPECTRAL: existing on disk: grade={audit.grade}, "
+                    f"estimated_bitrate={audit.bitrate_kbps}kbps, "
                     f"beets_min={existing_min}kbps")
     except Exception:
         logger.exception("SPECTRAL: failed to check existing files")
-    return existing_min, existing_spectral
+    return existing_min, existing_spectral, audit
 
 
 def _persist_spectral_state(
@@ -422,6 +520,14 @@ def measure_preimport_state(
     check.
     """
     filetype_band = _filetype_band(download_filetype)
+    # This audit is intentionally separate from policy-facing
+    # download_spectral/existing_spectral below. Early measurement-only exits
+    # populate it here; MP3 policy analysis reuses its own result; normal
+    # harness-bound codecs populate it in import_one.py.
+    spectral_audit = SpectralDetail(
+        candidate=SpectralAnalysisDetail(attempted=False),
+        existing=SpectralAnalysisDetail(attempted=False),
+    )
 
     # --- Audio integrity gate ---
     corrupt_files: list[str] = []
@@ -434,6 +540,8 @@ def measure_preimport_state(
             logger.warning(
                 f"AUDIO CORRUPT: {label} "
                 f"({len(corrupt_files)} files failed ffmpeg decode)")
+            spectral_audit = collect_release_attempt_spectral_audit(
+                path, mb_release_id, cfg)
             return PreimportMeasurement(
                 corrupt_files=corrupt_files,
                 audio_corrupt=audio_corrupt,
@@ -447,6 +555,7 @@ def measure_preimport_state(
                     download_min_bitrate_bps
                 ),
                 is_vbr=download_is_vbr,
+                spectral_audit=spectral_audit,
             )
 
     # --- Bad-audio-hash gate (plan 2026-04-29-005 / U5) ---
@@ -473,6 +582,8 @@ def measure_preimport_state(
                 logger.warning(
                     f"BAD HASH MATCH: {label} "
                     f"hash_id={match.bad_hash_id} track={match.track_path}")
+                spectral_audit = collect_release_attempt_spectral_audit(
+                    path, mb_release_id, cfg)
                 return PreimportMeasurement(
                     corrupt_files=[],
                     audio_corrupt=False,
@@ -488,6 +599,7 @@ def measure_preimport_state(
                         download_min_bitrate_bps
                     ),
                     is_vbr=download_is_vbr,
+                    spectral_audit=spectral_audit,
                 )
 
     # --- Resolve VBR / min_bitrate / avg bitrate / layout via filesystem inspection ---
@@ -550,28 +662,37 @@ def measure_preimport_state(
         avg_bitrate_kbps=avg_bitrate_kbps,
         vbr_threshold_kbps=cfg.quality_ranks.mp3_vbr.excellent,
     ):
-        try:
-            dl_sp = spectral_analyze(path, trim_seconds=30)
-            dl_grade = dl_sp.grade
-            dl_cliff_bitrate = dl_sp.estimated_bitrate_kbps
-            dl_suspect_pct = dl_sp.suspect_pct
+        candidate_audit = _spectral_analysis_detail(path)
+        download_spectral = SpectralMeasurement.from_parts(
+            candidate_audit.grade, candidate_audit.bitrate_kbps)
+        if download_spectral is not None:
             cliff_count = sum(
-                1 for track in getattr(dl_sp, "tracks", [])
-                if getattr(track, "cliff_detected", False)
+                1 for track in candidate_audit.per_track
+                if track.cliff_detected
             )
-            download_spectral = SpectralMeasurement.from_parts(
-                dl_grade, dl_cliff_bitrate)
             logger.info(
-                f"SPECTRAL: {label} grade={dl_grade}, "
-                f"estimated_bitrate={dl_cliff_bitrate}kbps, "
-                f"suspect={dl_suspect_pct:.0f}%, cliffs={cliff_count}")
-        except Exception:
-            logger.exception(f"SPECTRAL: failed for {label}")
-            download_spectral = None
+                f"SPECTRAL: {label} grade={candidate_audit.grade}, "
+                f"estimated_bitrate={candidate_audit.bitrate_kbps}kbps, "
+                f"suspect={candidate_audit.suspect_pct or 0:.0f}%, "
+                f"cliffs={cliff_count}")
 
-        if download_spectral is not None and mb_release_id:
-            existing_min_bitrate, existing_spectral = _analyze_existing(
-                mb_release_id, cfg)
+        existing_audit = SpectralAnalysisDetail(attempted=False)
+        measured_existing_min: int | None = None
+        measured_existing: SpectralMeasurement | None = None
+        if mb_release_id:
+            measured_existing_min, measured_existing, existing_audit = (
+                _analyze_existing(mb_release_id, cfg)
+            )
+        # Preserve the old policy input: an existing spectral measurement was
+        # considered only when candidate spectral analysis succeeded. The
+        # independently gathered existing audit remains display-only.
+        if download_spectral is not None:
+            existing_min_bitrate = measured_existing_min
+            existing_spectral = measured_existing
+        spectral_audit = SpectralDetail(
+            candidate=candidate_audit,
+            existing=existing_audit,
+        )
 
         # --- Fall back to persisted spectral state when BeetsDB couldn't walk ---
         beets_knows_album = existing_min_bitrate is not None
@@ -597,6 +718,13 @@ def measure_preimport_state(
             except Exception:
                 logger.debug("failed to read persisted spectral state",
                              exc_info=True)
+
+    if (
+        not (spectral_audit.candidate and spectral_audit.candidate.attempted)
+        and (folder_layout == "nested" or audio_file_count == 0)
+    ):
+        spectral_audit = collect_release_attempt_spectral_audit(
+            path, mb_release_id, cfg)
 
     # --- Persist spectral state to DB (issue #90 propagation) ---
     # This MUST fire on every measurement where spectral was collected,
@@ -634,6 +762,5 @@ def measure_preimport_state(
         filetype_band=filetype_band,
         min_bitrate_kbps=min_bitrate_kbps,
         is_vbr=download_is_vbr,
+        spectral_audit=spectral_audit,
     )
-
-

@@ -14,7 +14,8 @@ import msgspec
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.quality import (
-    ImportResult, ConversionInfo, SpectralDetail, PostflightInfo,
+    ImportResult, ConversionInfo, SpectralAnalysisDetail, SpectralDetail,
+    SpectralTrackDetail, PostflightInfo,
     AudioQualityMeasurement, DuplicateRemoveCandidate,
     DuplicateRemoveGuardInfo,
     DownloadInfo, SpectralMeasurement, V0ProbeEvidence,
@@ -62,6 +63,32 @@ class TestImportResultConstruction(unittest.TestCase):
         self.assertEqual(s.suspect_pct, 0.0)
         self.assertEqual(s.per_track, [])
         self.assertEqual(s.existing_suspect_pct, 0.0)
+
+    def test_two_sided_spectral_audit_full_json_roundtrip(self):
+        candidate_track = SpectralTrackDetail(
+            grade="suspect", hf_deficit_db=64.2,
+            cliff_detected=True, cliff_freq_hz=17000,
+            estimated_bitrate_kbps=128,
+        )
+        existing_track = SpectralTrackDetail(
+            grade="marginal", hf_deficit_db=44.5,
+            cliff_detected=False, error="partial track warning",
+        )
+        original = ImportResult(spectral=SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True, grade="suspect", bitrate_kbps=128,
+                suspect_pct=75.0, per_track=[candidate_track],
+            ),
+            existing=SpectralAnalysisDetail(
+                attempted=True, grade="genuine", bitrate_kbps=None,
+                suspect_pct=25.0, per_track=[existing_track],
+                error="RuntimeError: one existing track failed",
+            ),
+        ))
+
+        decoded = ImportResult.from_json(original.to_json())
+
+        self.assertEqual(decoded.spectral, original.spectral)
 
     def test_measurement_defaults(self):
         m = AudioQualityMeasurement()

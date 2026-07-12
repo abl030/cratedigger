@@ -119,6 +119,13 @@ Browser → https://music.ablz.au
   attempt. Every bitrate says which statistic it is: the min-vs-min row is
   labelled "Min bitrate" and strip mins render as `min 216k` (request 8781:
   an unlabelled 216 beside an avg-labelled 255 read as a contradiction).
+  Spectral evidence is attempt-local and two-sided: `IN` is the candidate and
+  `HAVE` is the exact requested release's existing beets files, never a sibling
+  pressing or a copied candidate result. Both sides show grade plus floor when
+  measured. Historical rows remain explicitly unmeasured, or `ungraded` when
+  an old row has only an existing floor. A side that was attempted but could
+  not be decoded renders `analysis failed`; this is distinct from a legacy
+  row whose analysis was never attempted.
   V0 probes render for every candidate — research probes of lossy sources
   qualified "(from lossy)" — matching the Wrong Matches convention.
 - **Comparison basis rendering (request 6039)** — rows whose
