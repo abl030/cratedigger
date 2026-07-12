@@ -31,9 +31,16 @@ let
   #   - ruff: source-local unused-import gate (same script)
   #   - hypothesis: property-based generated tests (docs/generated-testing.md)
   #   - coverage: branch-coverage steering for the fuzz tier (same doc)
+  #   - tree-sitter + tree-sitter-javascript: pinned JS AST audit foundation
   testPythonEnv = pkgs.python3.withPackages (ps:
     cratedigger.pythonPackages ps
-    ++ [ ps.vulture ps.hypothesis ps.coverage ]
+    ++ [
+      ps.vulture
+      ps.hypothesis
+      ps.coverage
+      ps.tree-sitter
+      ps.tree-sitter-javascript
+    ]
   );
 in
 pkgs.mkShell {

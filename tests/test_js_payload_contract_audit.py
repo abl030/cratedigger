@@ -8,7 +8,7 @@ import unittest
 
 import msgspec
 
-from tests._js_payload_contract_scanner import (
+from tests.structural_audits.js_ast import (
     assert_fixture_fields_have_server_contract,
     fixture_fields_for_call,
     scan_js_payload_fixture_fields,
@@ -38,6 +38,16 @@ def _allowed_fields_by_surface() -> dict[str, set[str]]:
 
 
 class TestJsPayloadContractAudit(unittest.TestCase):
+    def test_scanner_uses_utf8_byte_offsets_for_unicode_prefixes(self) -> None:
+        source = '''
+const decoration = "é🎵";
+renderDownloadHistoryItem({outcome: "success", ["caf\\u00e9"]: 1});
+'''
+        self.assertEqual(
+            fixture_fields_for_call(source, "renderDownloadHistoryItem"),
+            {"outcome", "café"},
+        )
+
     def test_scanner_extracts_direct_fields_without_nested_payload_keys(self) -> None:
         source = """
 const outcome = 'success';
@@ -113,6 +123,13 @@ const markup = `before ${renderDownloadHistoryItem({
             )
             with self.subTest(source=source), self.assertRaises(ValueError):
                 fixture_fields_for_call(source, call_name)
+
+    def test_scanner_fails_closed_on_syntax_errors(self) -> None:
+        with self.assertRaisesRegex(ValueError, "JavaScript parse error"):
+            fixture_fields_for_call(
+                "renderDownloadHistoryItem({outcome: );",
+                "renderDownloadHistoryItem",
+            )
 
     def test_scanner_reaches_every_js_test_module(self) -> None:
         with tempfile.TemporaryDirectory() as tests_dir:
