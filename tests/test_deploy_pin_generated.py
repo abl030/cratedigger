@@ -33,6 +33,10 @@ def assert_deploy_lifecycle_invariants(
     if state["receipt_rev"] is not None:
         assert state["receipt_rev"] in state["commits"]
         assert state["commits"][state["receipt_rev"]]["target"] == target
+    pending_revision = state.get("pending_rev")
+    if pending_revision is not None:
+        assert pending_revision in state["commits"]
+        assert state["commits"][pending_revision]["signature_good"]
     signed_commits = [
         revision for revision in commits
         if state["commits"][revision].get("signature_good", True)
@@ -84,6 +88,18 @@ class TestDeployLifecycleCheckerKnownBad(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_deploy_lifecycle_invariants(bad, target="t")
 
+    def test_checker_rejects_persistently_invalid_pending_commit(self) -> None:
+        bad = {
+            "events": [["commit", "a"]],
+            "commits": {
+                "a": {"target": "t", "signature_good": False},
+            },
+            "receipt_rev": None,
+            "pending_rev": "a",
+        }
+        with self.assertRaises(AssertionError):
+            assert_deploy_lifecycle_invariants(bad, target="t")
+
     def test_checker_rejects_push_before_durable_receipt(self) -> None:
         bad = {
             "events": [
@@ -118,6 +134,7 @@ class TestGeneratedDeployPinLifecycle(unittest.TestCase):
                 "post_commit_verify",
                 "post_commit_update_ref",
                 "signal_after_commit",
+                "invalid_signature_signal_after_commit",
                 "push",
                 "cleanup",
             )

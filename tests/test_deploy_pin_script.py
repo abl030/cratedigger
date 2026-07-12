@@ -185,6 +185,12 @@ class TestDeployPinScript(unittest.TestCase):
         self.assertIsNotNone(pending)
         self.assertIn(pending, self.fake.state["commits"])
 
+        self.fake.update_state(fault="post_commit_verify")
+        transient_failure = self.fake.run(SCRIPT)
+        self.assertNotEqual(transient_failure.returncode, 0)
+        self.assertEqual(self.fake.state["pending_rev"], pending)
+        self.assertEqual(self.fake.state["commit_count"], 1)
+
         self.fake.clear_fault()
         second = self.fake.run(SCRIPT)
         state = self.fake.state
@@ -192,6 +198,33 @@ class TestDeployPinScript(unittest.TestCase):
         self.assertEqual(state["commit_count"], 1)
         self.assertEqual(state["receipt_rev"], pending)
         self.assertIsNone(state["pending_rev"])
+
+    def test_recovery_discards_persistently_invalid_pending_commit(self) -> None:
+        self.fake.update_state(fault="invalid_signature_signal_after_commit")
+        interrupted = self.fake.run(SCRIPT)
+        invalid = self.fake.state["pending_rev"]
+
+        self.assertNotEqual(interrupted.returncode, 0)
+        self.assertIsNotNone(invalid)
+        self.assertFalse(self.fake.state["commits"][invalid]["signature_good"])
+
+        self.fake.clear_fault()
+        rejected = self.fake.run(SCRIPT)
+        state_after_rejection = self.fake.state
+        self.assertEqual(rejected.returncode, 2, rejected.stderr)
+        self.assertIn("definitively invalid pending candidate", rejected.stderr)
+        self.assertIsNone(state_after_rejection["pending_rev"])
+        self.assertIsNone(state_after_rejection["receipt_rev"])
+        self.assertEqual(state_after_rejection["commit_count"], 1)
+
+        recovered = self.fake.run(SCRIPT)
+        final_state = self.fake.state
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(final_state["commit_count"], 2)
+        self.assertTrue(
+            final_state["commits"][final_state["receipt_rev"]]["signature_good"]
+        )
+        self.assertIsNone(final_state["pending_rev"])
 
     def test_cleanup_failure_reports_recoverable_remote_revision(self) -> None:
         self.fake.update_state(fault="cleanup")

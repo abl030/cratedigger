@@ -115,7 +115,10 @@ elif args[:3] == ["rev-parse", "--verify", "--quiet"]:
             and state.get("pending_rev") in state["commits"]
         ):
             fail("fake post-commit rev-parse failed")
-        if state.get("fault") == "signal_after_commit" and value in state["commits"]:
+        if state.get("fault") in {
+            "signal_after_commit",
+            "invalid_signature_signal_after_commit",
+        } and value in state["commits"]:
             save()
             os.kill(os.getppid(), signal.SIGTERM)
             time.sleep(0.1)
@@ -131,7 +134,10 @@ elif args[:2] == ["rev-parse", "--verify"]:
         fail(f"unknown fake ref: {ref}")
     if state.get("fault") == "post_commit_rev_parse" and value in state["commits"]:
         fail("fake post-commit rev-parse failed")
-    if state.get("fault") == "signal_after_commit" and value in state["commits"]:
+    if state.get("fault") in {
+        "signal_after_commit",
+        "invalid_signature_signal_after_commit",
+    } and value in state["commits"]:
         save()
         os.kill(os.getppid(), signal.SIGTERM)
         time.sleep(0.1)
@@ -163,7 +169,10 @@ elif args[:2] == ["commit", "-m"]:
         "parent": state["worktree_base"],
         "target": target,
         "message": args[2],
-        "signature_good": state.get("fault") != "signature",
+        "signature_good": state.get("fault") not in {
+            "signature",
+            "invalid_signature_signal_after_commit",
+        },
     }
     state["worktree_head"] = revision
     if state.get("worktree_attached_ref") == (
@@ -174,7 +183,10 @@ elif args[:2] == ["commit", "-m"]:
 elif args == ["rev-parse", "HEAD"]:
     if state.get("fault") == "post_commit_rev_parse":
         fail("fake post-commit rev-parse failed")
-    if state.get("fault") == "signal_after_commit":
+    if state.get("fault") in {
+        "signal_after_commit",
+        "invalid_signature_signal_after_commit",
+    }:
         save()
         os.kill(os.getppid(), signal.SIGTERM)
         time.sleep(0.1)
@@ -184,7 +196,8 @@ elif args[:3] == ["log", "-1", "--format=%G?"]:
     revision = args[3]
     if state.get("fault") == "post_commit_verify":
         fail("fake post-commit verification failed")
-    if state.get("fault") == "signature" and revision == state.get("worktree_head"):
+    commit = state["commits"].get(revision)
+    if commit is not None and not commit["signature_good"]:
         print("B")
     else:
         print("G")

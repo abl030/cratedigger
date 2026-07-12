@@ -281,7 +281,18 @@ main() {
     else
       printf 'recovering durable pending candidate: %s ref=%s\n' \
         "$pending_revision" "$PENDING_REF"
-      verify_pin_commit "$pending_revision"
+      if verify_pin_commit "$pending_revision"; then
+        :
+      else
+        verification_rc=$?
+        if ((verification_rc == 2)); then
+          git -C "$NIXOSCONFIG_REPO" update-ref -d \
+            "$PENDING_REF" "$pending_revision"
+          printf 'pin-nixosconfig: definitively invalid pending candidate discarded: revision=%s ref=%s\n' \
+            "$pending_revision" "$PENDING_REF" >&2
+        fi
+        return "$verification_rc"
+      fi
       [[ "$VERIFIED_TARGET" == "$target_revision" ]] \
         || die "different candidate is pending: requested=$target_revision pending_target=$VERIFIED_TARGET pending=$pending_revision ref=$PENDING_REF"
       previous_receipt=$receipt_revision
