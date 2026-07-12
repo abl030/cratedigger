@@ -13,7 +13,7 @@ from typing import Any, Optional
 import msgspec
 
 from lib.quality import (AudioQualityMeasurement, ImportResult,
-                         QualityComparisonBasis)
+                         QualityComparisonBasis, dispatch_action)
 from lib.validation_envelope import decode_validation_envelope
 
 # ---------------------------------------------------------------------------
@@ -618,6 +618,18 @@ def _entry_decision(entry: LogEntry) -> str | None:
     return entry.beets_scenario
 
 
+def _entry_rejection_decision(entry: LogEntry) -> str | None:
+    """Prefer an ImportResult only when it actually records a rejection."""
+    ir = _parse_import_result(entry)
+    if (
+        ir is not None
+        and ir.decision
+        and dispatch_action(ir.decision).record_rejection
+    ):
+        return ir.decision
+    return entry.beets_scenario
+
+
 def _entry_comparison_basis(entry: LogEntry) -> QualityComparisonBasis | None:
     ir = _parse_import_result(entry)
     if ir is None:
@@ -1056,7 +1068,13 @@ def _rejection_verdict(entry: LogEntry) -> str:
     LogEntry fields only when JSONB is unavailable — and never use
     spectral_bitrate as a proxy for actual file bitrate.
     """
-    scenario = entry.beets_scenario
+    # Validation and import decisions describe different stages. A candidate
+    # can be a strong pressing match and still be rejected by the importer
+    # (for example, a folder containing both FLAC and OGG tracks). The final
+    # ImportResult decision owns the rejection headline; beets_scenario is the
+    # fallback for validation-only rejects and remains available as forensic
+    # evidence in the row payload.
+    scenario = _entry_rejection_decision(entry)
 
     # Quality comparison scenarios — delegate to ImportResult when available
     if scenario in (
@@ -1121,6 +1139,9 @@ def _rejection_verdict(entry: LogEntry) -> str:
 
     if scenario == "audio_corrupt":
         return "Corrupt audio files detected"
+
+    if scenario == "mixed_source":
+        return "Mixed lossless+lossy source"
 
     if scenario == "duplicate_remove_guard_failed":
         ir = _parse_import_result(entry)
@@ -1203,6 +1224,15 @@ def _build_downloaded_label(entry: LogEntry) -> str:
     fmt = entry.actual_filetype or entry.filetype or ""
     if not fmt:
         return ""
+
+    # A comma-separated attempt format is a mixed-codec album, not one codec
+    # with a meaningful shared bitrate tier. Preserve every measured format so
+    # a mixed-source safety rejection can never render as an all-FLAC source.
+    formats = list(dict.fromkeys(
+        part.strip().upper() for part in fmt.split(",") if part.strip()
+    ))
+    if len(formats) > 1:
+        return " + ".join(formats)
 
     br_kbps = _downloaded_min_bitrate_kbps(entry) or 0
 

@@ -13,6 +13,7 @@ import unittest
 import msgspec
 from hypothesis import example, given, strategies as st
 
+from lib.quality import ImportResult, ValidationResult
 import tests._hypothesis_profiles  # noqa: F401
 from tests.helpers import make_request_row
 from tests.web._harness import _FakeDbWebServerCase
@@ -37,6 +38,26 @@ def assert_classified_fields_forwarded(
             "ClassifiedEntry projection drift: "
             f"pipeline_log_missing={sorted(missing_log)} "
             f"download_history_missing={sorted(missing_detail)}"
+        )
+
+
+def assert_mixed_source_projection_is_honest(
+    payload: Mapping[str, object],
+    expected_formats: tuple[str, str],
+) -> None:
+    """The terminal reject reason and every measured codec stay visible."""
+    expected_verdict = "Mixed lossless+lossy source"
+    if payload.get("verdict") != expected_verdict:
+        raise AssertionError(
+            "mixed-source verdict drift: "
+            f"expected={expected_verdict!r} actual={payload.get('verdict')!r}"
+        )
+    label = str(payload.get("downloaded_label") or "")
+    missing = [fmt.upper() for fmt in expected_formats if fmt.upper() not in label]
+    if missing:
+        raise AssertionError(
+            "mixed-source codec projection dropped formats: "
+            f"missing={missing!r} label={label!r}"
         )
 
 
@@ -71,6 +92,37 @@ class _ClassifiedEntryProjectionHarness(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         return response["log"][0], detail
 
+    def mixed_source_payload(
+        self,
+        *,
+        lossless_format: str,
+        lossy_format: str,
+        validation_scenario: str,
+    ) -> dict[str, object]:
+        self.db.delete_request(598)
+        self.db.seed_request(make_request_row(
+            id=598,
+            status="wanted",
+            mb_release_id="classified-entry-mixed-source",
+        ))
+        self.db.log_download(
+            598,
+            outcome="rejected",
+            soulseek_username="generated-peer",
+            filetype=f"{lossless_format}, {lossy_format}",
+            actual_filetype=f"{lossless_format}, {lossy_format}",
+            actual_min_bitrate=224,
+            import_result=ImportResult(decision="mixed_source").to_json(),
+            validation_result=ValidationResult(
+                valid=True,
+                distance=0.0928,
+                scenario=validation_scenario,
+            ).to_json(),
+        )
+        status, response = self._get("/api/pipeline/log?limit=1")
+        self.assertEqual(status, 200)
+        return response["log"][0]
+
 
 class TestClassifiedEntryProjectionPin(_ClassifiedEntryProjectionHarness):
     def test_every_classifier_field_reaches_both_outbound_surfaces(self) -> None:
@@ -95,6 +147,14 @@ class TestClassifiedEntryProjectionPin(_ClassifiedEntryProjectionHarness):
                 },
                 type=ClassifiedEntry,
             )
+
+    def test_slow_club_mixed_source_projection(self) -> None:
+        payload = self.mixed_source_payload(
+            lossless_format="flac",
+            lossy_format="ogg",
+            validation_scenario="strong_match",
+        )
+        assert_mixed_source_projection_is_honest(payload, ("flac", "ogg"))
 
 
 class TestGeneratedClassifiedEntryProjection(_ClassifiedEntryProjectionHarness):
@@ -124,6 +184,34 @@ class TestGeneratedClassifiedEntryProjection(_ClassifiedEntryProjectionHarness):
         )
         assert_classified_fields_forwarded(log_payload, detail_payload)
 
+    @given(
+        lossless_format=st.sampled_from(["flac", "alac", "wav", "aiff", "ape"]),
+        lossy_format=st.sampled_from(["mp3", "aac", "m4a", "ogg", "opus", "wma"]),
+        validation_scenario=st.sampled_from([
+            "strong_match", "medium_match", "validation_passed",
+        ]),
+    )
+    @example(
+        lossless_format="flac",
+        lossy_format="ogg",
+        validation_scenario="strong_match",
+    )
+    def test_terminal_mixed_source_decision_drives_every_projection_world(
+        self,
+        lossless_format: str,
+        lossy_format: str,
+        validation_scenario: str,
+    ) -> None:
+        payload = self.mixed_source_payload(
+            lossless_format=lossless_format,
+            lossy_format=lossy_format,
+            validation_scenario=validation_scenario,
+        )
+        assert_mixed_source_projection_is_honest(
+            payload,
+            (lossless_format, lossy_format),
+        )
+
 
 class TestClassifiedEntryProjectionCheckerTripsOnViolations(unittest.TestCase):
     def test_checker_rejects_a_missing_log_field(self) -> None:
@@ -139,6 +227,26 @@ class TestClassifiedEntryProjectionCheckerTripsOnViolations(unittest.TestCase):
         bad_detail.pop("summary")
         with self.assertRaisesRegex(AssertionError, "summary"):
             assert_classified_fields_forwarded(complete, bad_detail)
+
+    def test_mixed_source_checker_rejects_validation_scenario_as_verdict(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "verdict drift"):
+            assert_mixed_source_projection_is_honest(
+                {
+                    "verdict": "strong_match",
+                    "downloaded_label": "FLAC + OGG",
+                },
+                ("flac", "ogg"),
+            )
+
+    def test_mixed_source_checker_rejects_a_dropped_codec(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "dropped formats"):
+            assert_mixed_source_projection_is_honest(
+                {
+                    "verdict": "Mixed lossless+lossy source",
+                    "downloaded_label": "FLAC",
+                },
+                ("flac", "ogg"),
+            )
 
 
 if __name__ == "__main__":
