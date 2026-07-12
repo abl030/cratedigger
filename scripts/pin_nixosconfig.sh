@@ -178,7 +178,7 @@ forgejo_with_token() (
   unset GIT_CURL_VERBOSE
 
   [[ -r "$TOKEN_FILE" ]] || die "Forgejo token is not readable: $TOKEN_FILE"
-  IFS= read -r token < "$TOKEN_FILE"
+  token=$(<"$TOKEN_FILE")
   [[ -n "$token" ]] || die "Forgejo token is empty: $TOKEN_FILE"
   export GIT_CONFIG_COUNT=1
   export GIT_CONFIG_KEY_0='http.https://git.ablz.au.extraHeader'
