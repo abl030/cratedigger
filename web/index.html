@@ -352,7 +352,7 @@
   /* Failure prose can carry raw paths + quoted transport errors — clamp
      it to two lines; the full text stays in the hover title. */
   .r-summary { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-align: left; }
-  .p-actions { display: flex; gap: 6px; margin-top: 8px; }
+  .p-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   /* Manual-reason chip — small inline tag near the request title or status.
      Currently used for `search_exhausted` (red/amber) flips written by the
      variant ladder when all variants exhaust without finding a candidate. */
