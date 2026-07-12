@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 import unittest
 
@@ -9,6 +10,7 @@ from hypothesis import example, given, strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers suite/push/fuzz tiers
 from tests._definition_default_patch_audit import (
+    _TestPatchVisitor,
     assert_default_patch_invariant,
     find_ineffective_default_patches,
 )
@@ -1287,6 +1289,101 @@ def _class_test_prefix_worlds(draw):
     )
 
 
+@st.composite
+def _test_prefix_scope_worlds(draw):
+    shape = draw(st.sampled_from((
+        "test_changes_to_check",
+        "test_restores_to_test",
+        "method_changes_to_check",
+    )))
+    imports = (
+        f"from unittest.mock import {_PATCH_NAME}\n"
+        "from lib.subject import execute\n\n"
+    )
+    if shape == "test_changes_to_check":
+        body = (
+            "def test_changes_prefix():\n"
+            f"    {_PATCH_NAME}.TEST_PREFIX = \"check\"\n\n"
+            f"@{_PATCH_NAME}(\"lib.subject.deliver\")\n"
+            "class PrefixIsolation:\n"
+            "    def test_run(self, mock_dependency):\n"
+            "        execute()  # selected\n"
+            "    def check_run(self):\n"
+            "        execute()  # unselected\n"
+        )
+    elif shape == "test_restores_to_test":
+        body = (
+            f"{_PATCH_NAME}.TEST_PREFIX = \"check\"\n"
+            "def test_changes_prefix():\n"
+            f"    {_PATCH_NAME}.TEST_PREFIX = \"test\"\n\n"
+            f"@{_PATCH_NAME}(\"lib.subject.deliver\")\n"
+            "class PrefixIsolation:\n"
+            "    def test_run(self):\n"
+            "        execute()  # unselected\n"
+            "    def check_run(self, mock_dependency):\n"
+            "        execute()  # selected\n"
+        )
+    else:
+        body = (
+            f"@{_PATCH_NAME}(\"lib.subject.deliver\")\n"
+            "class First:\n"
+            "    def test_changes_prefix(self, mock_dependency):\n"
+            f"        {_PATCH_NAME}.TEST_PREFIX = \"check\"\n\n"
+            f"@{_PATCH_NAME}(\"lib.subject.deliver\")\n"
+            "class Second:\n"
+            "    def test_run(self, mock_dependency):\n"
+            "        execute()  # selected\n"
+            "    def check_run(self):\n"
+            "        execute()  # unselected\n"
+        )
+    source = imports + body
+    selected_lines = tuple(
+        line_number
+        for line_number, line in enumerate(source.splitlines(), start=1)
+        if "# selected" in line
+    )
+    return (
+        _AuditWorld(
+            production={
+                "lib/subject.py": (
+                    "from lib.dependencies import deliver\n\n"
+                    "def execute(*, dependency_fn=deliver):\n"
+                    "    return dependency_fn()\n"
+                ),
+            },
+            tests={"tests/test_subject.py": source},
+            expected_valid=False,
+            label=f"test_prefix_scope/{shape}",
+        ),
+        selected_lines,
+    )
+
+
+@st.composite
+def _star_import_worlds(draw):
+    shape = draw(st.sampled_from((
+        "canonical",
+        "absolute_shadow",
+        "relative_shadow",
+    )))
+    if shape == "canonical":
+        source = "from unittest.mock import *\n"
+        line = 1
+    elif shape == "absolute_shadow":
+        source = (
+            f"from unittest.mock import {_PATCH_NAME}\n"
+            "from helper import *\n"
+        )
+        line = 2
+    else:
+        source = (
+            f"from unittest.mock import {_PATCH_NAME}\n"
+            "from .helper import *\n"
+        )
+        line = 2
+    return source, line, shape
+
+
 class TestGeneratedDefinitionDefaultPatchAudit(unittest.TestCase):
     @given(world=_default_patch_worlds())
     @example(world=_OMITTED_CONSTRUCTOR)
@@ -1418,6 +1515,56 @@ class TestGeneratedDefinitionDefaultPatchAudit(unittest.TestCase):
             expected_lines,
             msg=f"world={world.label}: findings={findings!r}",
         )
+
+    @given(world_and_lines=_test_prefix_scope_worlds())
+    def test_independent_function_analysis_restores_test_prefix(
+        self,
+        world_and_lines: tuple[_AuditWorld, tuple[int, ...]],
+    ) -> None:
+        world, expected_lines = world_and_lines
+        findings = find_ineffective_default_patches(world.production, world.tests)
+        self.assertEqual(
+            tuple(finding.line for finding in findings),
+            expected_lines,
+            msg=f"world={world.label}: findings={findings!r}",
+        )
+
+    @given(prefix=st.sampled_from(("check", "verify", "case")))
+    def test_direct_local_helper_propagates_test_prefix(self, prefix: str) -> None:
+        visitor = _TestPatchVisitor(
+            test_path="tests/test_subject.py",
+            captures={},
+            class_paths=frozenset(),
+            annotations_deferred=False,
+        )
+        visitor.aliases[_PATCH_NAME] = "unittest.mock.patch"
+        visitor.patch_aliases[_PATCH_NAME] = "unittest.mock.patch"
+        tree = ast.parse(
+            "def change_prefix():\n"
+            f"    {_PATCH_NAME}.TEST_PREFIX = {prefix!r}\n"
+            "change_prefix()\n"
+        )
+        visitor.function_depth = 1
+        for statement in tree.body:
+            visitor.visit(statement)
+        self.assertEqual(visitor.patch_test_prefix, prefix)
+
+    @given(star_world=_star_import_worlds())
+    def test_star_imports_fail_closed(
+        self,
+        star_world: tuple[str, int, str],
+    ) -> None:
+        source, line, shape = star_world
+        with self.assertRaisesRegex(
+            ValueError,
+            rf"tests/test_subject\.py:{line}: unsupported star import in "
+            rf"definition-default patch audit",
+            msg=f"world=star_import/{shape}",
+        ):
+            find_ineffective_default_patches(
+                {},
+                {"tests/test_subject.py": source},
+            )
 
 
 if __name__ == "__main__":

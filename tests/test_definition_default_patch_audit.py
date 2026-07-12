@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 import unittest
 
 from tests._definition_default_patch_audit import (
     DefaultPatchFinding,
+    _TestPatchVisitor,
     assert_default_patch_invariant,
     find_ineffective_default_patches,
     repository_default_patch_findings,
@@ -1330,6 +1332,149 @@ helper.TEST_PREFIX = configure_prefix()
         }
 
         self.assertEqual(find_ineffective_default_patches(production, tests), ())
+
+    def test_test_body_prefix_mutation_does_not_precede_module_class(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from lib.worker import run
+
+def test_changes_prefix():
+    {_PATCH_NAME}.TEST_PREFIX = "check"
+
+@{_PATCH_NAME}("lib.worker.send")
+class PrefixIsolation:
+    def test_run(self, mock_send):
+        run()
+    def check_run(self):
+        run()
+""",
+        }
+
+        findings = find_ineffective_default_patches(production, tests)
+        self.assertEqual(tuple(finding.line for finding in findings), (11,))
+
+    def test_test_body_prefix_restore_does_not_override_module_prefix(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from lib.worker import run
+
+{_PATCH_NAME}.TEST_PREFIX = "check"
+def test_changes_prefix():
+    {_PATCH_NAME}.TEST_PREFIX = "test"
+
+@{_PATCH_NAME}("lib.worker.send")
+class PrefixIsolation:
+    def test_run(self):
+        run()
+    def check_run(self, mock_send):
+        run()
+""",
+        }
+
+        findings = find_ineffective_default_patches(production, tests)
+        self.assertEqual(tuple(finding.line for finding in findings), (14,))
+
+    def test_independently_analyzed_test_methods_restore_prefix(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from lib.worker import run
+
+@{_PATCH_NAME}("lib.worker.send")
+class First:
+    def test_changes_prefix(self, mock_send):
+        {_PATCH_NAME}.TEST_PREFIX = "check"
+
+@{_PATCH_NAME}("lib.worker.send")
+class Second:
+    def test_run(self, mock_send):
+        run()
+    def check_run(self):
+        run()
+""",
+        }
+
+        findings = find_ineffective_default_patches(production, tests)
+        self.assertEqual(tuple(finding.line for finding in findings), (13,))
+
+    def test_direct_local_helper_propagates_prefix_within_runtime_chain(self) -> None:
+        visitor = _TestPatchVisitor(
+            test_path="tests/test_worker.py",
+            captures={},
+            class_paths=frozenset(),
+            annotations_deferred=False,
+        )
+        visitor.aliases[_PATCH_NAME] = "unittest.mock.patch"
+        visitor.patch_aliases[_PATCH_NAME] = "unittest.mock.patch"
+        tree = ast.parse(
+            f"""
+def change_prefix():
+    {_PATCH_NAME}.TEST_PREFIX = "check"
+change_prefix()
+""",
+        )
+        visitor.function_depth = 1
+        for statement in tree.body:
+            visitor.visit(statement)
+
+        self.assertEqual(visitor.patch_test_prefix, "check")
+
+    def test_star_imports_fail_closed_with_source_location(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        canonical = {
+            "tests/test_worker.py": "from unittest.mock import *\n",
+        }
+        shadowing = {
+            "tests/test_worker.py": f"""from unittest.mock import {_PATCH_NAME}
+from helper import *
+""",
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"tests/test_worker\.py:1: unsupported star import in "
+            r"definition-default patch audit",
+        ):
+            find_ineffective_default_patches(production, canonical)
+        with self.assertRaisesRegex(
+            ValueError,
+            r"tests/test_worker\.py:2: unsupported star import in "
+            r"definition-default patch audit",
+        ):
+            find_ineffective_default_patches(production, shadowing)
 
     def test_known_bad_checker_rejects_a_planted_omission(self) -> None:
         finding = DefaultPatchFinding(

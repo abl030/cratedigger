@@ -429,6 +429,7 @@ class _TestPatchVisitor(ast.NodeVisitor):
         *,
         inherit_call_site_patches: bool = False,
         inherit_local_function_registry: bool = False,
+        propagate_patch_test_prefix: bool = False,
         definition_decorator_targets: tuple[str, ...] | None = None,
     ) -> None:
         decorator_targets = (
@@ -446,6 +447,7 @@ class _TestPatchVisitor(ast.NodeVisitor):
         prior_local_functions = self.local_functions
         prior_comprehension_walrus_bindings = self.comprehension_walrus_bindings
         prior_targets = self.active_patch_targets
+        prior_patch_test_prefix = self.patch_test_prefix
         self.aliases = dict(prior_aliases)
         self.patch_aliases = dict(prior_patch_aliases)
         self.instances = dict(prior_instances)
@@ -482,6 +484,8 @@ class _TestPatchVisitor(ast.NodeVisitor):
         self.local_functions = prior_local_functions
         self.comprehension_walrus_bindings = prior_comprehension_walrus_bindings
         self.active_patch_targets = prior_targets
+        if not propagate_patch_test_prefix:
+            self.patch_test_prefix = prior_patch_test_prefix
 
     def _visit_definition_expressions(
         self,
@@ -629,7 +633,10 @@ class _TestPatchVisitor(ast.NodeVisitor):
         module = node.module or ""
         for alias in node.names:
             if alias.name == "*":
-                continue
+                raise ValueError(
+                    f"{self.test_path}:{node.lineno}: unsupported star import "
+                    "in definition-default patch audit"
+                )
             bound = alias.asname or alias.name
             self._invalidate_binding(ast.Name(id=bound))
             if node.level != 0:
@@ -770,6 +777,7 @@ class _TestPatchVisitor(ast.NodeVisitor):
                         local_function.node,
                         inherit_call_site_patches=True,
                         inherit_local_function_registry=True,
+                        propagate_patch_test_prefix=True,
                         definition_decorator_targets=(
                             local_function.decorator_targets
                         ),
@@ -871,9 +879,12 @@ def find_ineffective_default_patches(
     state. Class construction expressions and bodies execute under enclosing
     patches; canonical class patch decorators apply afterward to methods using
     the current constant ``patch.TEST_PREFIX``. Dynamic canonical prefix
-    mutation fails closed with a source diagnostic. Every explicit import
-    binding replaces all same-name local provenance; unresolved relative
-    imports invalidate without inventing an absolute target.
+    mutation fails closed with a source diagnostic. Independently simulated
+    test functions and methods restore prefix state, while directly called
+    local helpers propagate it through their caller chain. Every explicit
+    import binding replaces all same-name local provenance; unresolved relative
+    imports invalidate without inventing an absolute target, and star imports
+    fail closed because their bindings cannot be resolved source-locally.
     Lambda defaults are evaluated at their definition site, but lambda bodies
     remain outside that callback analysis boundary even for direct calls.
     """
