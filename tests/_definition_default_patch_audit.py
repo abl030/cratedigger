@@ -37,6 +37,12 @@ class _CapturedDefault:
     descriptor_kind: _DescriptorKind
 
 
+@dataclass(frozen=True)
+class _LocalFunction:
+    node: ast.FunctionDef | ast.AsyncFunctionDef
+    decorator_targets: tuple[str, ...]
+
+
 _PRODUCTION_ROOTS = (
     "lib",
     "web",
@@ -241,10 +247,7 @@ class _TestPatchVisitor(ast.NodeVisitor):
         self.class_paths = class_paths
         self.aliases: dict[str, str] = {}
         self.instances: dict[str, str] = {}
-        self.local_functions: dict[
-            str,
-            ast.FunctionDef | ast.AsyncFunctionDef,
-        ] = {}
+        self.local_functions: dict[str, _LocalFunction] = {}
         self.function_depth = 0
         self.active_local_functions: set[int] = set()
         self.comprehension_walrus_bindings: list[set[str]] = []
@@ -380,11 +383,17 @@ class _TestPatchVisitor(ast.NodeVisitor):
         node: ast.FunctionDef | ast.AsyncFunctionDef,
         *,
         inherit_call_site_patches: bool = False,
+        inherit_local_function_registry: bool = False,
+        definition_decorator_targets: tuple[str, ...] | None = None,
     ) -> None:
-        decorator_targets = tuple(
-            target
-            for decorator in node.decorator_list
-            if (target := self._patch_target(decorator)) is not None
+        decorator_targets = (
+            definition_decorator_targets
+            if definition_decorator_targets is not None
+            else tuple(
+                target
+                for decorator in node.decorator_list
+                if (target := self._patch_target(decorator)) is not None
+            )
         )
         prior_aliases = self.aliases
         prior_instances = self.instances
@@ -393,7 +402,11 @@ class _TestPatchVisitor(ast.NodeVisitor):
         prior_targets = self.active_patch_targets
         self.aliases = dict(prior_aliases)
         self.instances = dict(prior_instances)
-        self.local_functions = {}
+        self.local_functions = (
+            dict(prior_local_functions)
+            if inherit_local_function_registry
+            else {}
+        )
         self.comprehension_walrus_bindings = []
         arguments = [
             *node.args.posonlyargs,
@@ -407,6 +420,7 @@ class _TestPatchVisitor(ast.NodeVisitor):
         for argument in arguments:
             self.aliases.pop(argument.arg, None)
             self.instances.pop(argument.arg, None)
+            self.local_functions.pop(argument.arg, None)
         self.active_patch_targets = (
             prior_targets if inherit_call_site_patches else ()
         ) + decorator_targets
@@ -422,7 +436,14 @@ class _TestPatchVisitor(ast.NodeVisitor):
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         if self.function_depth:
-            self.local_functions[node.name] = node
+            self.local_functions[node.name] = _LocalFunction(
+                node=node,
+                decorator_targets=tuple(
+                    target
+                    for decorator in node.decorator_list
+                    if (target := self._patch_target(decorator)) is not None
+                ),
+            )
             self.aliases.pop(node.name, None)
             self.instances.pop(node.name, None)
             return
@@ -430,7 +451,14 @@ class _TestPatchVisitor(ast.NodeVisitor):
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         if self.function_depth:
-            self.local_functions[node.name] = node
+            self.local_functions[node.name] = _LocalFunction(
+                node=node,
+                decorator_targets=tuple(
+                    target
+                    for decorator in node.decorator_list
+                    if (target := self._patch_target(decorator)) is not None
+                ),
+            )
             self.aliases.pop(node.name, None)
             self.instances.pop(node.name, None)
             return
@@ -458,33 +486,29 @@ class _TestPatchVisitor(ast.NodeVisitor):
             self.aliases[bound] = f"{module}.{alias.name}"
             self.instances.pop(bound, None)
 
-    def visit_With(self, node: ast.With) -> None:
-        targets: list[str] = []
-        for item in node.items:
+    def _visit_with_items(
+        self,
+        items: list[ast.withitem],
+        body: list[ast.stmt],
+    ) -> None:
+        """Evaluate context items in Python's nested-with order."""
+        prior_targets = self.active_patch_targets
+        for item in items:
             target = self._patch_target(item.context_expr)
+            self.visit(item.context_expr)
             if target is not None:
-                targets.append(target)
+                self.active_patch_targets += (target,)
             if item.optional_vars is not None:
                 self._invalidate_binding(item.optional_vars)
-        prior_targets = self.active_patch_targets
-        self.active_patch_targets += tuple(targets)
-        for statement in node.body:
+        for statement in body:
             self.visit(statement)
         self.active_patch_targets = prior_targets
 
+    def visit_With(self, node: ast.With) -> None:
+        self._visit_with_items(node.items, node.body)
+
     def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
-        targets: list[str] = []
-        for item in node.items:
-            target = self._patch_target(item.context_expr)
-            if target is not None:
-                targets.append(target)
-            if item.optional_vars is not None:
-                self._invalidate_binding(item.optional_vars)
-        prior_targets = self.active_patch_targets
-        self.active_patch_targets += tuple(targets)
-        for statement in node.body:
-            self.visit(statement)
-        self.active_patch_targets = prior_targets
+        self._visit_with_items(node.items, node.body)
 
     def visit_Assign(self, node: ast.Assign) -> None:
         self.visit(node.value)
@@ -538,7 +562,9 @@ class _TestPatchVisitor(ast.NodeVisitor):
                     )
         if isinstance(node.func, ast.Name):
             local_function = self.local_functions.get(node.func.id)
-            function_id = id(local_function) if local_function is not None else None
+            function_id = (
+                id(local_function.node) if local_function is not None else None
+            )
             if (
                 local_function is not None
                 and function_id not in self.active_local_functions
@@ -547,8 +573,12 @@ class _TestPatchVisitor(ast.NodeVisitor):
                 self.active_local_functions.add(function_id)
                 try:
                     self._visit_function(
-                        local_function,
+                        local_function.node,
                         inherit_call_site_patches=True,
+                        inherit_local_function_registry=True,
+                        definition_decorator_targets=(
+                            local_function.decorator_targets
+                        ),
                     )
                 finally:
                     self.active_local_functions.remove(function_id)

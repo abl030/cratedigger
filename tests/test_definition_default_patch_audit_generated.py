@@ -577,6 +577,128 @@ def _binder_worlds(draw):
     )
 
 
+@st.composite
+def _nested_registry_worlds(draw):
+    shape = draw(st.sampled_from((
+        "sibling_chain",
+        "canonical_then_helper",
+        "helper_then_canonical",
+    )))
+    if shape == "sibling_chain":
+        body = (
+            "def test_subject():\n"
+            "    def inner():\n"
+            "        execute()\n"
+            "    def outer():\n"
+            "        inner()\n"
+            f"    with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            "        outer()\n"
+        )
+        imports = f"from unittest.mock import {_PATCH_NAME}\n"
+        expected_valid = False
+    elif shape == "canonical_then_helper":
+        body = (
+            "def test_subject():\n"
+            f"    from unittest.mock import {_PATCH_NAME}\n"
+            f"    @{_PATCH_NAME}(\"lib.subject.deliver\")\n"
+            "    def exercise(mock_dependency):\n"
+            "        execute()\n"
+            f"    from helper import {_PATCH_NAME}\n"
+            "    exercise()\n"
+        )
+        imports = ""
+        expected_valid = False
+    else:
+        body = (
+            "def test_subject():\n"
+            f"    from helper import {_PATCH_NAME}\n"
+            f"    @{_PATCH_NAME}(\"lib.subject.deliver\")\n"
+            "    def exercise(mock_dependency):\n"
+            "        execute()\n"
+            f"    from unittest.mock import {_PATCH_NAME}\n"
+            "    exercise()\n"
+        )
+        imports = ""
+        expected_valid = True
+    return _AuditWorld(
+        production={
+            "lib/subject.py": (
+                "from lib.dependencies import deliver\n\n"
+                "def execute(*, dependency_fn=deliver):\n"
+                "    return dependency_fn()\n"
+            ),
+        },
+        tests={
+            "tests/test_subject.py": (
+                imports
+                + "from lib.subject import execute\n\n"
+                + body
+            ),
+        },
+        expected_valid=expected_valid,
+        label=f"nested_registry/{shape}",
+    )
+
+
+@st.composite
+def _with_timing_worlds(draw):
+    shape = draw(st.sampled_from((
+        "multi_item",
+        "outer_patch",
+        "context_walrus",
+        "async_multi_item",
+    )))
+    if shape == "multi_item":
+        body = (
+            "def test_subject():\n"
+            f"    with {_PATCH_NAME}(\"lib.subject.deliver\"), cm(execute()):\n"
+            "        pass\n"
+        )
+        expected_valid = False
+    elif shape == "outer_patch":
+        body = (
+            "def test_subject():\n"
+            f"    with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            "        with cm(execute()):\n"
+            "            pass\n"
+        )
+        expected_valid = False
+    elif shape == "async_multi_item":
+        body = (
+            "async def test_subject():\n"
+            f"    async with {_PATCH_NAME}(\"lib.subject.deliver\"), async_cm(execute()):\n"
+            "        pass\n"
+        )
+        expected_valid = False
+    else:
+        body = (
+            "def test_subject():\n"
+            f"    with cm(({_PATCH_NAME} := helper_patch)):\n"
+            f"        with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            "            execute()\n"
+        )
+        expected_valid = True
+    return _AuditWorld(
+        production={
+            "lib/subject.py": (
+                "from lib.dependencies import deliver\n\n"
+                "def execute(*, dependency_fn=deliver):\n"
+                "    return dependency_fn()\n"
+            ),
+        },
+        tests={
+            "tests/test_subject.py": (
+                f"from unittest.mock import {_PATCH_NAME}\n"
+                "from helper import async_cm, cm, helper_patch\n"
+                "from lib.subject import execute\n\n"
+                + body
+            ),
+        },
+        expected_valid=expected_valid,
+        label=f"with_timing/{shape}",
+    )
+
+
 class TestGeneratedDefinitionDefaultPatchAudit(unittest.TestCase):
     @given(world=_default_patch_worlds())
     @example(world=_OMITTED_CONSTRUCTOR)
@@ -614,6 +736,22 @@ class TestGeneratedDefinitionDefaultPatchAudit(unittest.TestCase):
 
     @given(world=_binder_worlds())
     def test_lexical_binders_control_patch_provenance(
+        self,
+        world: _AuditWorld,
+    ) -> None:
+        findings = find_ineffective_default_patches(world.production, world.tests)
+        assert_default_patch_invariant(findings, expected_valid=world.expected_valid)
+
+    @given(world=_nested_registry_worlds())
+    def test_nested_registry_and_decorator_timing(
+        self,
+        world: _AuditWorld,
+    ) -> None:
+        findings = find_ineffective_default_patches(world.production, world.tests)
+        assert_default_patch_invariant(findings, expected_valid=world.expected_valid)
+
+    @given(world=_with_timing_worlds())
+    def test_with_items_follow_sequential_evaluation(
         self,
         world: _AuditWorld,
     ) -> None:

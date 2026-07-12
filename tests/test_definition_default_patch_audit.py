@@ -558,6 +558,157 @@ def test_worker(values):
 
         self.assertEqual(find_ineffective_default_patches(production, tests), ())
 
+    def test_sibling_nested_helper_chain_uses_call_site_patch(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from lib.worker import run
+
+def test_worker():
+    def inner():
+        run()
+    def outer():
+        inner()
+    with {_PATCH_NAME}("lib.worker.send"):
+        outer()
+""",
+        }
+
+        self.assertEqual(len(find_ineffective_default_patches(production, tests)), 1)
+
+    def test_nested_decorator_uses_definition_time_canonical_binding(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from lib.worker import run
+
+def test_worker():
+    from unittest.mock import {_PATCH_NAME}
+    @{_PATCH_NAME}("lib.worker.send")
+    def exercise(mock_send):
+        run()
+    from helper import {_PATCH_NAME}
+    exercise()
+""",
+        }
+
+        self.assertEqual(len(find_ineffective_default_patches(production, tests)), 1)
+
+    def test_nested_decorator_keeps_definition_time_helper_binding(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from lib.worker import run
+
+def test_worker():
+    from helper import {_PATCH_NAME}
+    @{_PATCH_NAME}("lib.worker.send")
+    def exercise(mock_send):
+        run()
+    from unittest.mock import {_PATCH_NAME}
+    exercise()
+""",
+        }
+
+        self.assertEqual(find_ineffective_default_patches(production, tests), ())
+
+    def test_with_context_expressions_follow_python_item_timing(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from helper import cm
+from lib.worker import run
+
+def test_multi_item():
+    with {_PATCH_NAME}("lib.worker.send"), cm(run()):
+        pass
+
+def test_outer_patch():
+    with {_PATCH_NAME}("lib.worker.send"):
+        with cm(run()):
+            pass
+""",
+        }
+
+        self.assertEqual(len(find_ineffective_default_patches(production, tests)), 2)
+
+    def test_async_with_context_items_activate_sequentially(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from helper import async_cm
+from lib.worker import run
+
+async def test_worker():
+    async with {_PATCH_NAME}("lib.worker.send"), async_cm(run()):
+        pass
+""",
+        }
+
+        self.assertEqual(len(find_ineffective_default_patches(production, tests)), 1)
+
+    def test_with_context_walrus_rebinds_patch_before_body(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from helper import cm, helper_patch
+from lib.worker import run
+
+def test_worker():
+    with cm(({_PATCH_NAME} := helper_patch)):
+        with {_PATCH_NAME}("lib.worker.send"):
+            run()
+""",
+        }
+
+        self.assertEqual(find_ineffective_default_patches(production, tests), ())
+
     def test_known_bad_checker_rejects_a_planted_omission(self) -> None:
         finding = DefaultPatchFinding(
             test_path="tests/test_bad.py",
