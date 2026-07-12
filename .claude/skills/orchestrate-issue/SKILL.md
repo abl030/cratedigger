@@ -210,7 +210,8 @@ The release sequence is strict; do not reorder it:
 1. Confirm deployment and post-switch successor cycle evidence from section 8.
 2. On the exact final merge SHA in a clean worktree, run the full suite and
    retain its collision-free artifact directory. Verify that artifact against
-   the exact final merge with `scripts/test_artifact.py verify`.
+   the exact final merge with the `verify` subcommand of
+   `scripts/test_artifact.py`.
 3. Create an SSH-signed `vYYYY.MM.DD` tag, using `-N` for another same-day
    release, at that exact final merge SHA.
 4. Export the verified artifact path as `CRATEDIGGER_TEST_ARTIFACT` and push
