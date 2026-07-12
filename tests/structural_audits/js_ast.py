@@ -122,35 +122,244 @@ def _node_text(node: Node, source_bytes: bytes) -> str:
     return source_bytes[node.start_byte:node.end_byte].decode("utf-8")
 
 
-def _identifier_is(node: Node | None, source_bytes: bytes, name: str) -> bool:
+def _decode_js_identifier_text(raw: str) -> str:
+    """Decode Unicode escapes in an identifier as ECMAScript spells them."""
+    result: list[str] = []
+    i = 0
+    while i < len(raw):
+        if raw[i] != "\\":
+            result.append(raw[i])
+            i += 1
+            continue
+        if i + 1 >= len(raw) or raw[i + 1] != "u":
+            raise ValueError("unsupported JavaScript identifier escape")
+        i += 2
+        if i < len(raw) and raw[i] == "{":
+            end = raw.find("}", i + 1)
+            digits = raw[i + 1:end] if end >= 0 else ""
+            if (
+                end < 0
+                or not re.fullmatch(r"[0-9A-Fa-f]{1,6}", digits)
+                or int(digits, 16) > 0x10FFFF
+                or 0xD800 <= int(digits, 16) <= 0xDFFF
+            ):
+                raise ValueError("unsupported JavaScript identifier escape")
+            result.append(chr(int(digits, 16)))
+            i = end + 1
+            continue
+        digits = raw[i:i + 4]
+        if len(digits) != 4 or not re.fullmatch(r"[0-9A-Fa-f]{4}", digits):
+            raise ValueError("unsupported JavaScript identifier escape")
+        codepoint = int(digits, 16)
+        if 0xD800 <= codepoint <= 0xDFFF:
+            raise ValueError("unsupported JavaScript identifier escape")
+        result.append(chr(codepoint))
+        i += 4
+    return "".join(result)
+
+
+def _identifier_value(node: Node | None, source_bytes: bytes) -> str | None:
+    if node is None or node.type not in {
+        "identifier",
+        "property_identifier",
+        "shorthand_property_identifier",
+    }:
+        return None
+    return _decode_js_identifier_text(_node_text(node, source_bytes))
+
+
+def _identifier_is(
+    node: Node | None,
+    source_bytes: bytes,
+    name: str,
+    *,
+    exact_spelling: bool = False,
+) -> bool:
+    value = _identifier_value(node, source_bytes)
     return (
-        node is not None
-        and node.type in {"identifier", "property_identifier"}
-        and _node_text(node, source_bytes) == name
+        value == name
+        and (
+            not exact_spelling
+            or (node is not None and _node_text(node, source_bytes) == name)
+        )
     )
 
 
 def _direct_member_is(
-    node: Node | None, source_bytes: bytes, object_name: str, property_name: str
+    node: Node | None,
+    source_bytes: bytes,
+    object_name: str,
+    property_name: str,
+    *,
+    exact_spelling: bool = False,
 ) -> bool:
     if node is None or node.type != "member_expression":
         return False
     return _identifier_is(
-        node.child_by_field_name("object"), source_bytes, object_name
+        node.child_by_field_name("object"),
+        source_bytes,
+        object_name,
+        exact_spelling=exact_spelling,
     ) and _identifier_is(
-        node.child_by_field_name("property"), source_bytes, property_name
+        node.child_by_field_name("property"),
+        source_bytes,
+        property_name,
+        exact_spelling=exact_spelling,
     )
 
 
-def _payload_call_matches(node: Node, source_bytes: bytes, call_name: str) -> bool:
+def _same_node(left: Node | None, right: Node | None) -> bool:
+    return (
+        left is not None
+        and right is not None
+        and left.type == right.type
+        and left.start_byte == right.start_byte
+        and left.end_byte == right.end_byte
+    )
+
+
+def _node_key(node: Node) -> tuple[str, int, int]:
+    return (node.type, node.start_byte, node.end_byte)
+
+
+def _walk_with_parent(
+    node: Node, parent: Node | None = None
+) -> Iterator[tuple[Node, Node | None]]:
+    yield node, parent
+    for child in node.children:
+        yield from _walk_with_parent(child, node)
+
+
+def _callee_renderer_references(
+    node: Node, source_bytes: bytes, call_name: str
+) -> list[Node]:
+    references: list[Node] = []
+    for child, parent in _walk_with_parent(node):
+        if _identifier_is(child, source_bytes, call_name):
+            references.append(child)
+            continue
+        if (
+            child.type == "string"
+            and parent is not None
+            and parent.type == "subscript_expression"
+            and _decode_js_string(child, source_bytes) == call_name
+        ):
+            references.append(child)
+    return references
+
+
+def _payload_call_reference(
+    node: Node, source_bytes: bytes, call_name: str
+) -> Node | None:
     function = node.child_by_field_name("function")
-    return _identifier_is(function, source_bytes, call_name) or (
+    references = (
+        _callee_renderer_references(function, source_bytes, call_name)
+        if function is not None
+        else []
+    )
+    if not references:
+        return None
+    if any(child.type == "optional_chain" for child in node.children):
+        raise ValueError(f"unsupported optional audited renderer call: {call_name}")
+    if _identifier_is(function, source_bytes, call_name):
+        return function
+    if (
         function is not None
         and function.type == "member_expression"
         and _identifier_is(
+            function.child_by_field_name("object"), source_bytes, "__test__"
+        )
+        and _identifier_is(
             function.child_by_field_name("property"), source_bytes, call_name
         )
-    )
+    ):
+        return function.child_by_field_name("property")
+    raise ValueError(f"unsupported audited renderer callee form: {call_name}")
+
+
+def _validate_renderer_references(
+    root: Node, source_bytes: bytes, call_name: str
+) -> set[tuple[str, int, int]]:
+    """Allow only direct imports and direct renderer call references."""
+    allowed: set[tuple[str, int, int]] = set()
+    for node, parent in _walk_with_parent(root):
+        if node.type == "subscript_expression":
+            object_node = node.child_by_field_name("object")
+            index_node = node.child_by_field_name("index")
+            if object_node is None or index_node is None:
+                children = _semantic_named_children(node)
+                if len(children) == 2:
+                    object_node, index_node = children
+            if (
+                object_node is not None
+                and index_node is not None
+                and (
+                    _identifier_is(object_node, source_bytes, "__test__")
+                    or _identifier_is(object_node, source_bytes, "globalThis")
+                )
+                and index_node.type != "string"
+            ):
+                raise ValueError(
+                    f"unsupported dynamic audited renderer access: {call_name}"
+                )
+        if (
+            node.type == "string"
+            and _decode_js_string(node, source_bytes) == call_name
+            and parent is not None
+            and parent.type == "variable_declarator"
+            and _same_node(parent.child_by_field_name("value"), node)
+        ):
+            raise ValueError(
+                f"unsupported string alias for audited renderer: {call_name}"
+            )
+
+    for node in _walk(root):
+        if node.type == "call_expression":
+            reference = _payload_call_reference(node, source_bytes, call_name)
+            if reference is not None:
+                allowed.add(_node_key(reference))
+        elif node.type == "import_specifier":
+            identifiers = [
+                child
+                for child in _semantic_named_children(node)
+                if _identifier_value(child, source_bytes) is not None
+            ]
+            matching = [
+                child
+                for child in identifiers
+                if _identifier_is(child, source_bytes, call_name)
+            ]
+            if not matching:
+                continue
+            if len(identifiers) != 1:
+                raise ValueError(
+                    f"unsupported aliased audited renderer import: {call_name}"
+                )
+            allowed.add(_node_key(matching[0]))
+
+    for node, parent in _walk_with_parent(root):
+        if _identifier_is(node, source_bytes, call_name):
+            if _node_key(node) in allowed:
+                continue
+            if (
+                parent is not None
+                and parent.type == "pair"
+                and _same_node(parent.child_by_field_name("key"), node)
+            ):
+                continue
+            raise ValueError(
+                f"unsupported indirect/aliased audited renderer reference: {call_name}"
+            )
+        if (
+            node.type == "string"
+            and parent is not None
+            and parent.type == "subscript_expression"
+            and _decode_js_string(node, source_bytes) == call_name
+        ):
+            raise ValueError(
+                f"unsupported computed audited renderer reference: {call_name}"
+            )
+    return allowed
 
 
 def _decode_js_escapes(content: str) -> str:
@@ -178,7 +387,7 @@ def _decode_js_escapes(content: str) -> str:
             raise ValueError("unterminated JavaScript string escape")
         escaped = content[i]
         i += 1
-        if escaped in {"\n", "\r"}:
+        if escaped in {"\n", "\r", "\u2028", "\u2029"}:
             if escaped == "\r" and i < len(content) and content[i] == "\n":
                 i += 1
             continue
@@ -211,7 +420,6 @@ def _decode_js_escapes(content: str) -> str:
                     end < 0
                     or not re.fullmatch(r"[0-9A-Fa-f]{1,6}", digits)
                     or int(digits, 16) > 0x10FFFF
-                    or 0xD800 <= int(digits, 16) <= 0xDFFF
                 ):
                     raise ValueError("unsupported Unicode JavaScript string escape")
                 result.append(chr(int(digits, 16)))
@@ -224,15 +432,15 @@ def _decode_js_escapes(content: str) -> str:
             i += 4
             if 0xD800 <= codepoint <= 0xDBFF:
                 low_match = re.match(r"\\u([0-9A-Fa-f]{4})", content[i:])
-                if low_match is None:
-                    raise ValueError("unpaired high surrogate in JavaScript string")
-                low = int(low_match.group(1), 16)
-                if not 0xDC00 <= low <= 0xDFFF:
-                    raise ValueError("unpaired high surrogate in JavaScript string")
-                codepoint = 0x10000 + ((codepoint - 0xD800) << 10) + (low - 0xDC00)
-                i += 6
-            elif 0xDC00 <= codepoint <= 0xDFFF:
-                raise ValueError("unpaired low surrogate in JavaScript string")
+                if low_match is not None:
+                    low = int(low_match.group(1), 16)
+                    if 0xDC00 <= low <= 0xDFFF:
+                        codepoint = (
+                            0x10000
+                            + ((codepoint - 0xD800) << 10)
+                            + (low - 0xDC00)
+                        )
+                        i += 6
             result.append(chr(codepoint))
             continue
         # JavaScript identity escapes resolve to the escaped character.
@@ -249,7 +457,10 @@ def _decode_js_string(node: Node, source_bytes: bytes) -> str:
 
 def _static_object_key(node: Node, source_bytes: bytes) -> str:
     if node.type in {"property_identifier", "identifier"}:
-        return _node_text(node, source_bytes)
+        value = _identifier_value(node, source_bytes)
+        if value is None:
+            raise ValueError("fixture object key is not an identifier")
+        return value
     if node.type == "string":
         return _decode_js_string(node, source_bytes)
     if node.type == "computed_property_name":
@@ -268,7 +479,10 @@ def _direct_object_keys(node: Node, source_bytes: bytes) -> set[str]:
     keys: set[str] = set()
     for child in _semantic_named_children(node):
         if child.type == "shorthand_property_identifier":
-            keys.add(_node_text(child, source_bytes))
+            value = _identifier_value(child, source_bytes)
+            if value is None:
+                raise ValueError("fixture shorthand key is not an identifier")
+            keys.add(value)
             continue
         if child.type == "pair":
             key = child.child_by_field_name("key")
@@ -312,15 +526,18 @@ def _direct_array_elements(node: Node) -> list[Node]:
     return elements
 
 
-def fixture_fields_for_call(source: str, call_name: str) -> set[str]:
+def fixture_fields_for_call(
+    source: str, call_name: str, *, origin: str = "<javascript>"
+) -> set[str]:
     """Return direct fields seeded in literal first args to ``call_name``."""
     source_bytes = source.encode("utf-8")
-    tree = parse_javascript(source)
+    tree = parse_javascript(source, origin=origin)
+    _validate_renderer_references(tree.root_node, source_bytes, call_name)
     fields: set[str] = set()
     for node in _walk(tree.root_node):
-        if node.type != "call_expression" or not _payload_call_matches(
-            node, source_bytes, call_name
-        ):
+        if node.type != "call_expression":
+            continue
+        if _payload_call_reference(node, source_bytes, call_name) is None:
             continue
         arguments = node.child_by_field_name("arguments")
         args = _semantic_named_children(arguments) if arguments is not None else []
@@ -355,7 +572,9 @@ def scan_js_payload_fixture_fields(
             source = handle.read()
         for surface, call_names in _PAYLOAD_SURFACE_CALLS.items():
             for call_name in call_names:
-                result[surface].update(fixture_fields_for_call(source, call_name))
+                result[surface].update(
+                    fixture_fields_for_call(source, call_name, origin=path)
+                )
     return result
 
 
@@ -479,17 +698,162 @@ def emitted_window_handlers(
     )
 
 
+def _subtree_has_identifier(node: Node, source_bytes: bytes, name: str) -> bool:
+    return any(_identifier_is(child, source_bytes, name) for child in _walk(node))
+
+
+def _semantic_subscript_property_is(
+    node: Node | None, source_bytes: bytes, object_name: str, property_name: str
+) -> bool:
+    if node is None or node.type != "subscript_expression":
+        return False
+    object_node = node.child_by_field_name("object")
+    index_node = node.child_by_field_name("index")
+    if object_node is None or index_node is None:
+        children = _semantic_named_children(node)
+        if len(children) != 2:
+            return False
+        object_node, index_node = children
+    return (
+        _identifier_is(object_node, source_bytes, object_name)
+        and index_node.type == "string"
+        and _decode_js_string(index_node, source_bytes) == property_name
+    )
+
+
+def _semantic_object_assign_reference(node: Node, source_bytes: bytes) -> bool:
+    return _direct_member_is(
+        node, source_bytes, "Object", "assign"
+    ) or _semantic_subscript_property_is(
+        node, source_bytes, "Object", "assign"
+    )
+
+
+def _window_member_target(node: Node | None, source_bytes: bytes) -> bool:
+    if node is None or node.type not in {"member_expression", "subscript_expression"}:
+        return False
+    object_node = node.child_by_field_name("object")
+    return _identifier_is(object_node, source_bytes, "window") or (
+        object_node is not None
+        and object_node.type == "parenthesized_expression"
+        and _subtree_has_identifier(object_node, source_bytes, "window")
+    )
+
+
+def _validated_window_assign_calls(
+    root: Node, source_bytes: bytes
+) -> list[Node]:
+    """Return exact binding calls after rejecting every bypassing reference."""
+    calls: list[Node] = []
+    allowed_assign_refs: set[tuple[str, int, int]] = set()
+
+    for node in _walk(root):
+        if node.type in {"assignment_expression", "augmented_assignment_expression"}:
+            left = node.child_by_field_name("left")
+            right = node.child_by_field_name("right")
+            if _window_member_target(left, source_bytes):
+                raise ValueError("direct window mutations bypass Object.assign audit")
+            if right is not None and (
+                any(
+                    _semantic_object_assign_reference(child, source_bytes)
+                    for child in _walk(right)
+                )
+                or _identifier_is(right, source_bytes, "window")
+                or (
+                    _identifier_is(right, source_bytes, "Object")
+                    and left is not None
+                    and _subtree_has_identifier(left, source_bytes, "assign")
+                )
+            ):
+                raise ValueError("aliases for Object.assign/window are unsupported")
+        if node.type == "update_expression":
+            argument = node.child_by_field_name("argument")
+            if argument is None:
+                children = _semantic_named_children(node)
+                argument = children[0] if children else None
+            if _window_member_target(argument, source_bytes):
+                raise ValueError("direct window mutations bypass Object.assign audit")
+        if node.type == "variable_declarator":
+            name = node.child_by_field_name("name")
+            value = node.child_by_field_name("value")
+            if value is not None and (
+                any(
+                    _semantic_object_assign_reference(child, source_bytes)
+                    for child in _walk(value)
+                )
+                or _identifier_is(value, source_bytes, "window")
+                or (
+                    _identifier_is(value, source_bytes, "Object")
+                    and name is not None
+                    and _subtree_has_identifier(name, source_bytes, "assign")
+                )
+            ):
+                raise ValueError("aliases for Object.assign/window are unsupported")
+
+        if node.type != "call_expression":
+            continue
+        function = node.child_by_field_name("function")
+        if function is None:
+            continue
+        assign_refs = [
+            child
+            for child in _walk(function)
+            if _semantic_object_assign_reference(child, source_bytes)
+        ]
+        if not assign_refs:
+            continue
+        if any(child.type == "optional_chain" for child in node.children):
+            raise ValueError("optional Object.assign calls are unsupported")
+        arguments = node.child_by_field_name("arguments")
+        args = _semantic_named_children(arguments) if arguments is not None else []
+        targets_window = bool(args) and _subtree_has_identifier(
+            args[0], source_bytes, "window"
+        )
+        if not _semantic_object_assign_reference(function, source_bytes):
+            raise ValueError("unsupported indirect Object.assign call")
+        if not _direct_member_is(
+            function,
+            source_bytes,
+            "Object",
+            "assign",
+            exact_spelling=True,
+        ):
+            raise ValueError("computed/escaped Object.assign calls are unsupported")
+        allowed_assign_refs.add(_node_key(function))
+        if not targets_window:
+            continue
+        if not args or not _identifier_is(
+            args[0], source_bytes, "window", exact_spelling=True
+        ):
+            raise ValueError("Object.assign window target must be the direct identifier")
+        calls.append(node)
+
+    for node in _walk(root):
+        if (
+            _semantic_object_assign_reference(node, source_bytes)
+            and _node_key(node) not in allowed_assign_refs
+        ):
+            raise ValueError("unsupported aliased Object.assign reference")
+    return calls
+
+
 def _window_binding_keys(object_node: Node, source_bytes: bytes) -> set[str]:
     bindings: set[str] = set()
     for child in _semantic_named_children(object_node):
         if child.type == "shorthand_property_identifier":
-            bindings.add(_node_text(child, source_bytes))
+            value = _identifier_value(child, source_bytes)
+            if value is None:
+                raise ValueError("unsupported window shorthand binding")
+            bindings.add(value)
             continue
         if child.type == "pair":
             key = child.child_by_field_name("key")
             if key is None or key.type != "property_identifier":
                 raise ValueError("unsupported Object.assign window binding key")
-            bindings.add(_node_text(key, source_bytes))
+            value = _identifier_value(key, source_bytes)
+            if value is None:
+                raise ValueError("unsupported Object.assign window binding key")
+            bindings.add(value)
             continue
         raise ValueError(
             f"unsupported Object.assign window binding entry: {child.type}"
@@ -502,24 +866,17 @@ def exposed_window_bindings(main_source: str) -> set[str]:
     source_bytes = main_source.encode("utf-8")
     tree = parse_javascript(main_source, origin="main.js")
     bindings: set[str] = set()
-    found = False
-    for node in _walk(tree.root_node):
-        if node.type != "call_expression" or not _direct_member_is(
-            node.child_by_field_name("function"), source_bytes, "Object", "assign"
-        ):
-            continue
+    calls = _validated_window_assign_calls(tree.root_node, source_bytes)
+    for node in calls:
         arguments = node.child_by_field_name("arguments")
         args = _semantic_named_children(arguments) if arguments is not None else []
-        if not args or not _identifier_is(args[0], source_bytes, "window"):
-            continue
-        found = True
         if len(args) != 2 or args[1].type != "object":
             raise ValueError(
                 "Object.assign(window, ...) bindings require exactly one direct "
                 "object literal source"
             )
         bindings.update(_window_binding_keys(args[1], source_bytes))
-    if not found:
+    if not calls:
         raise ValueError("main.js has no Object.assign(window, {...}) binding block")
     return bindings
 

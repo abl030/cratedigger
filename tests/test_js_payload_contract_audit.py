@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import json
+import subprocess
 import tempfile
 import unittest
 
@@ -38,6 +40,99 @@ def _allowed_fields_by_surface() -> dict[str, set[str]]:
 
 
 class TestJsPayloadContractAudit(unittest.TestCase):
+    def test_node_confirms_reviewer_renderer_callee_forms_execute(self) -> None:
+        script = r'''
+const renderDownloadHistoryItem = value => Object.keys(value);
+globalThis.renderDownloadHistoryItem = renderDownloadHistoryItem;
+const rendererName = "renderDownloadHistoryItem";
+const results = [
+  renderDownloadHistory\u0049tem({invented_client_only: 1}),
+  globalThis["renderDownloadHistoryItem"]({invented_client_only: 1}),
+  (0, renderDownloadHistoryItem)({invented_client_only: 1}),
+  renderDownloadHistoryItem.call(null, {invented_client_only: 1}),
+  renderDownloadHistoryItem?.({invented_client_only: 1}),
+  globalThis[rendererName]({invented_client_only: 1}),
+];
+console.log(JSON.stringify(results));
+'''
+        result = subprocess.run(
+            ["node", "--input-type=module", "--eval", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            json.loads(result.stdout),
+            [["invented_client_only"]] * 6,
+        )
+
+    def test_scanner_decodes_direct_escaped_renderer_identifier(self) -> None:
+        self.assertEqual(
+            fixture_fields_for_call(
+                r"renderDownloadHistory\u0049tem({invented_client_only: 1});",
+                "renderDownloadHistoryItem",
+            ),
+            {"invented_client_only"},
+        )
+
+    def test_escaped_identifier_keys_match_node_object_key_semantics(self) -> None:
+        object_source = r"{invented\u005fclient: 1, out\u0063ome: 2}"
+        result = subprocess.run(
+            [
+                "node",
+                "--input-type=module",
+                "--eval",
+                f"console.log(JSON.stringify(Object.keys({object_source})));",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            json.loads(result.stdout), ["invented_client", "outcome"]
+        )
+        self.assertEqual(
+            fixture_fields_for_call(
+                f"renderDownloadHistoryItem({object_source});",
+                "renderDownloadHistoryItem",
+            ),
+            {"invented_client", "outcome"},
+        )
+
+    def test_scanner_rejects_unsupported_renderer_reference_forms(self) -> None:
+        cases = (
+            'globalThis["renderDownloadHistoryItem"]({invented_client_only: 1});',
+            (
+                'const name = "renderDownloadHistoryItem"; '
+                "__test__[name]({invented_client_only: 1});"
+            ),
+            "(0, renderDownloadHistoryItem)({invented_client_only: 1});",
+            "renderDownloadHistoryItem.call(null, {invented_client_only: 1});",
+            "renderDownloadHistoryItem?.({invented_client_only: 1});",
+            "const render = renderDownloadHistoryItem; render({invented_client_only: 1});",
+            (
+                "let render; render = renderDownloadHistoryItem; "
+                "render({invented_client_only: 1});"
+            ),
+            (
+                "const {renderDownloadHistoryItem: render} = helpers; "
+                "render({invented_client_only: 1});"
+            ),
+            (
+                "let render; ({renderDownloadHistoryItem: render} = helpers); "
+                "render({invented_client_only: 1});"
+            ),
+            (
+                "import {renderDownloadHistoryItem as render} from './fixture.js'; "
+                "render({invented_client_only: 1});"
+            ),
+        )
+        for source in cases:
+            with self.subTest(source=source), self.assertRaisesRegex(
+                ValueError, "audited renderer"
+            ):
+                fixture_fields_for_call(source, "renderDownloadHistoryItem")
+
     def test_scanner_uses_utf8_byte_offsets_for_unicode_prefixes(self) -> None:
         source = '''
 const decoration = "é🎵";
@@ -141,6 +236,17 @@ const markup = `before ${renderDownloadHistoryItem({
                 handle.write("renderEvidenceStrip({ future_field: 1 });\n")
             scanned = scan_js_payload_fixture_fields(tests_dir)
         self.assertEqual(scanned["download_history"], {"future_field"})
+
+    def test_corpus_parse_error_names_the_scanned_js_module(self) -> None:
+        with tempfile.TemporaryDirectory() as tests_dir:
+            path = os.path.join(tests_dir, "test_js_future.mjs")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("const broken = ;\n")
+            with self.assertRaisesRegex(
+                ValueError,
+                r"test_js_future\.mjs: JavaScript parse error",
+            ):
+                scan_js_payload_fixture_fields(tests_dir)
 
     def test_every_seeded_download_field_has_a_server_contract(self) -> None:
         assert_fixture_fields_have_server_contract(

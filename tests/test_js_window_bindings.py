@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
+import subprocess
 import unittest
 
 from tests.structural_audits.js_ast import (
@@ -121,6 +123,48 @@ const templated = `window.\x62ar()`;
         )
         self.assertEqual(discovery.handlers, {"foo", "bar"})
 
+    def test_ecmascript_unicode_line_continuations_are_cooked(self) -> None:
+        for separator in ("\u2028", "\u2029"):
+            for delimiter in ("'", "`"):
+                literal = (
+                    f"{delimiter}window.hidden\\{separator}Handler()"
+                    f"{delimiter}"
+                )
+                script = (
+                    f"const value = {literal}; "
+                    "console.log(JSON.stringify(value));"
+                )
+                result = subprocess.run(
+                    ["node", "--input-type=module", "--eval", script],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(
+                    json.loads(result.stdout), "window.hiddenHandler()"
+                )
+                discovery = emitted_window_handlers(
+                    {"continuation.js": f"const value = {literal};"}, ""
+                )
+                self.assertEqual(discovery.handlers, {"hiddenHandler"})
+
+    def test_valid_lone_and_braced_surrogate_escapes_are_not_rejected(self) -> None:
+        source = r'''
+const values = ['\uD800', '\uDC00', '\u{D800}', '\u{DC00}', `\uD800`, `\u{D800}`];
+console.log(JSON.stringify(values.map(value => value.length)));
+'''
+        result = subprocess.run(
+            ["node", "--input-type=module", "--eval", source],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(json.loads(result.stdout), [1, 1, 1, 1, 1, 1])
+        self.assertEqual(
+            emitted_window_handlers({"surrogates.js": source}, "").handlers,
+            set(),
+        )
+
     def test_missing_static_handler_known_bad_trips(self) -> None:
         js_sources = {
             "bad.js": "const html = '<button onclick=\"window.unboundStaticHandler()\">x</button>';"
@@ -175,10 +219,70 @@ const templated = `window.\x62ar()`;
             'Object.assign(window, { [name]: handler });',
             'Object.assign(window, { "quoted": handler });',
             "Object.assign(window, { direct }, extraBindings);",
+            (
+                "Object.assign(window, { supported }); "
+                "Object['assign'](window, { fetch });"
+            ),
+            (
+                "Object.assign(window, { supported }); "
+                "Object.assign((window), { fetch });"
+            ),
+            (
+                "Object.assign(window, { supported }); "
+                r"Object.\u0061ssign(window, { fetch });"
+            ),
+            (
+                "Object.assign(window, { supported }); "
+                "Object.assign?.(window, { fetch });"
+            ),
+            (
+                "const assignWindow = Object.assign; "
+                "Object.assign(window, { supported }); "
+                "assignWindow(window, { fetch });"
+            ),
+            (
+                "const {assign: assignWindow} = Object; "
+                "Object.assign(window, { supported }); "
+                "assignWindow(window, { fetch });"
+            ),
+            (
+                "let assignWindow; assignWindow = Object.assign; "
+                "Object.assign(window, { supported }); "
+                "assignWindow(window, { fetch });"
+            ),
+            (
+                "const targetWindow = window; "
+                "Object.assign(window, { supported }); "
+                "Object.assign(targetWindow, { fetch });"
+            ),
+            "Object.assign(window, { supported }); (window).fetch = localFetch;",
             "Object.assign(window, { broken: });",
         ):
             with self.subTest(source=source), self.assertRaises(ValueError):
                 exposed_window_bindings(source)
+
+    def test_escaped_binding_key_is_normalized_before_native_collision(self) -> None:
+        source = r"Object.assign(window, { f\u0065tch });"
+        self.assertEqual(exposed_window_bindings(source), {"fetch"})
+        audit = audit_window_bindings({}, "", source)
+        self.assertEqual(audit.native_collisions, {"fetch"})
+        with self.assertRaisesRegex(ValueError, "reserved native window names: fetch"):
+            assert_window_bindings({}, "", source)
+
+    def test_node_confirms_computed_assign_and_escaped_key_mutate_target(self) -> None:
+        script = r'''
+const target = {};
+const f\u0065tch = 1;
+Object["assign"](target, {f\u0065tch});
+console.log(JSON.stringify(Object.keys(target)));
+'''
+        result = subprocess.run(
+            ["node", "--input-type=module", "--eval", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(json.loads(result.stdout), ["fetch"])
 
     def test_production_corpus_has_every_conservative_handler_bound(self) -> None:
         audit = assert_window_bindings(
