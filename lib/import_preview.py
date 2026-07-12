@@ -70,6 +70,26 @@ def _prefer_successful_spectral_detail(
     return harness
 
 
+def compose_attempt_spectral_audit(
+    measured: SpectralDetail,
+    harness: SpectralDetail,
+) -> SpectralDetail:
+    """Compose WANT from the best scan and HAVE from persisted provenance."""
+    candidate = _prefer_successful_spectral_detail(
+        measured.candidate, harness.candidate)
+    existing = measured.existing
+    return SpectralDetail(
+        cliff_freq_hz=harness.cliff_freq_hz,
+        suspect_pct=(candidate.suspect_pct or 0.0) if candidate else 0.0,
+        per_track=list(candidate.per_track) if candidate else [],
+        existing_suspect_pct=(
+            existing.suspect_pct or 0.0 if existing else 0.0
+        ),
+        candidate=candidate,
+        existing=existing,
+    )
+
+
 @runtime_checkable
 class ImportPreviewDB(QualityEvidenceDB, Protocol):
     """The PipelineDB surface the preview entry points use (#409).
@@ -82,48 +102,62 @@ class ImportPreviewDB(QualityEvidenceDB, Protocol):
     def get_download_log_entry(self, log_id: int) -> dict[str, Any] | None: ...
 
 
-def _load_current_evidence_by_request(
-    db: ImportPreviewDB, request_id: int
-) -> Any:
-    """U3 FK reader: load current evidence via ``album_requests.current_evidence_id``.
-
-    Replaces the old ``db.load_album_quality_evidence(request_current_owner(rid))``
-    pattern which queried by ``(owner_type, owner_id)`` before the U2 rekey
-    removed those columns. The post-rekey addressing path is
-    ``album_requests.current_evidence_id → album_quality_evidence.id``.
-    """
-    evidence_id = db.get_request_current_evidence_id(request_id)
-    if evidence_id is None:
-        return None
-    return db.load_album_quality_evidence_by_id(evidence_id)
-
-
-def _load_persisted_existing_spectral(
+def load_persisted_existing_spectral(
     db: ImportPreviewDB,
     request_id: int,
     req: dict[str, Any],
-) -> tuple[Any, SpectralAnalysisDetail]:
-    """Load HAVE from durable source evidence, never the installed derivative."""
-    current_evidence = None
+) -> tuple[Any, SpectralAnalysisDetail, bool]:
+    """Load HAVE from durable source evidence, never the installed derivative.
+
+    Once ``current_evidence_id`` exists, that row is authoritative even when
+    it deliberately carries no spectral fields. The request scalar columns are
+    a legacy fallback only for requests that have never been linked to current
+    evidence; using them after an empty or unreadable linked row could resurrect
+    stale pre-reset provenance.
+    """
     try:
-        current_evidence = _load_current_evidence_by_request(db, request_id)
+        evidence_id = db.get_request_current_evidence_id(request_id)
     except Exception:
         logger.warning(
-            "Unable to load current spectral evidence for request %s",
+            "Unable to resolve current spectral evidence for request %s",
             request_id,
             exc_info=True,
         )
-    if current_evidence is not None:
-        measurement = current_evidence.measurement
-        detail = spectral_detail_from_persisted_source(
+        return None, SpectralAnalysisDetail(attempted=False), True
+    if evidence_id is None:
+        return (
+            None,
+            spectral_detail_from_persisted_source(
+                req.get("current_spectral_grade"),
+                req.get("current_spectral_bitrate"),
+            ),
+            False,
+        )
+    try:
+        current_evidence = db.load_album_quality_evidence_by_id(evidence_id)
+    except Exception:
+        logger.warning(
+            "Unable to load current spectral evidence %s for request %s",
+            evidence_id,
+            request_id,
+            exc_info=True,
+        )
+        return None, SpectralAnalysisDetail(attempted=False), True
+    if current_evidence is None:
+        logger.warning(
+            "Current spectral evidence %s is missing for request %s",
+            evidence_id,
+            request_id,
+        )
+        return None, SpectralAnalysisDetail(attempted=False), True
+    measurement = current_evidence.measurement
+    return (
+        current_evidence,
+        spectral_detail_from_persisted_source(
             measurement.spectral_grade,
             measurement.spectral_bitrate_kbps,
-        )
-        if detail.attempted:
-            return current_evidence, detail
-    return current_evidence, spectral_detail_from_persisted_source(
-        req.get("current_spectral_grade"),
-        req.get("current_spectral_bitrate"),
+        ),
+        True,
     )
 
 
@@ -619,9 +653,11 @@ def measure_and_persist_candidate_evidence(
         )
 
     cfg = read_runtime_config()
-    current_evidence, existing_spectral_evidence = (
-        _load_persisted_existing_spectral(db, request_id, req)
-    )
+    (
+        current_evidence,
+        existing_spectral_evidence,
+        current_evidence_authoritative,
+    ) = load_persisted_existing_spectral(db, request_id, req)
 
     temp_root = tempfile.mkdtemp(prefix="cratedigger-import-preview-")
     try:
@@ -750,7 +786,7 @@ def measure_and_persist_candidate_evidence(
 
         # --- Harness path: measurement allows continuing ---
         existing_v0_probe = legacy_current_lossless_v0_probe_from_request(req)
-        if current_evidence is None:
+        if current_evidence is None and not current_evidence_authoritative:
             try:
                 current_result = load_or_backfill_current_evidence(
                     db,
@@ -832,24 +868,9 @@ def measure_and_persist_candidate_evidence(
         # record. Keep it separate from decision measurements and replace the
         # harness-local spectral detail with the best successful evidence from
         # either pass, retaining an error only when neither pass succeeded.
-        measured_audit = measurement.spectral_audit
-        harness_audit = run.import_result.spectral
-        measured_candidate = measured_audit.candidate
-        measured_existing = measured_audit.existing
-        candidate = _prefer_successful_spectral_detail(
-            measured_candidate, harness_audit.candidate)
-        # HAVE is durable pre-conversion provenance. Never replace an
-        # explicitly unmeasured stored side with a scan of installed files.
-        existing = measured_existing
-        run.import_result.spectral = SpectralDetail(
-            cliff_freq_hz=harness_audit.cliff_freq_hz,
-            suspect_pct=(candidate.suspect_pct or 0.0) if candidate else 0.0,
-            per_track=list(candidate.per_track) if candidate else [],
-            existing_suspect_pct=(
-                existing.suspect_pct or 0.0 if existing else 0.0
-            ),
-            candidate=candidate,
-            existing=existing,
+        run.import_result.spectral = compose_attempt_spectral_audit(
+            measurement.spectral_audit,
+            run.import_result.spectral,
         )
         if run.import_result.decision in (
             "conversion_failed",
@@ -1028,6 +1049,11 @@ def preview_import_from_path(
     from lib.config import read_runtime_config
 
     cfg = read_runtime_config()
+    (
+        current_evidence,
+        existing_spectral_evidence,
+        current_evidence_authoritative,
+    ) = load_persisted_existing_spectral(db, request_id, req)
 
     # --- Source cleanup BEFORE snapshot ---
     # mp3val runs once on the source so the snapshot captures the
@@ -1112,7 +1138,7 @@ def preview_import_from_path(
             db=None,
             request_id=None,
             existing_spectral_evidence=(
-                _load_persisted_existing_spectral(db, request_id, req)[1]
+                existing_spectral_evidence
             ),
             propagate_download_to_existing=False,
             precomputed_inspection=inspection,
@@ -1160,20 +1186,17 @@ def preview_import_from_path(
             )
 
         existing_spectral = measurement.existing_spectral
-        existing_grade = existing_spectral.grade if existing_spectral else req.get("current_spectral_grade")
+        existing_grade = existing_spectral.grade if existing_spectral else None
         existing_bitrate = (
             existing_spectral.bitrate_kbps
             if existing_spectral is not None
-            else req.get("current_spectral_bitrate")
+            else None
         )
-        current_evidence = None
-        try:
-            current_evidence = _load_current_evidence_by_request(
-                db, request_id
-            )
-        except Exception:
-            current_evidence = None
-        if persist_candidate_evidence and current_evidence is None:
+        if (
+            persist_candidate_evidence
+            and current_evidence is None
+            and not current_evidence_authoritative
+        ):
             try:
                 current_result = load_or_backfill_current_evidence(
                     db,
@@ -1219,6 +1242,11 @@ def preview_import_from_path(
             quality_rank_config_json=cfg.quality_ranks.to_json(),
             existing_v0_probe=existing_v0_probe,
         )
+        if run.import_result is not None:
+            run.import_result.spectral = compose_attempt_spectral_audit(
+                measurement.spectral_audit,
+                run.import_result.spectral,
+            )
         verdict, cleanup_eligible, reason, chain = _classify_import_result(
             run.import_result,
             cfg=cfg.quality_ranks,

@@ -51,6 +51,23 @@ def _have_preserves_persisted_source(
     )
 
 
+def _authoritative_have_matches(detail, grade, bitrate) -> bool:
+    return (
+        detail.attempted == (grade is not None or bitrate is not None)
+        and detail.grade == grade
+        and detail.bitrate_kbps == bitrate
+    )
+
+
+def _stale_scalar_fallback_mutant(req):
+    """Known-bad model: revives request scalars after empty current evidence."""
+    from lib.measurement import spectral_detail_from_persisted_source
+    return spectral_detail_from_persisted_source(
+        req.get("current_spectral_grade"),
+        req.get("current_spectral_bitrate"),
+    )
+
+
 def _persisted_attempt_has_exact_audit(
     import_result_json: str | None,
     expected_audit,
@@ -231,6 +248,79 @@ class TestAttemptAuditCheckerQualification(unittest.TestCase):
 
 
 class TestAttemptAuditGenerated(unittest.TestCase):
+    def test_authoritative_evidence_checker_rejects_scalar_fallback_mutant(self):
+        req = {
+            "current_spectral_grade": "likely_transcode",
+            "current_spectral_bitrate": 224,
+        }
+
+        self.assertFalse(_authoritative_have_matches(
+            _stale_scalar_fallback_mutant(req),
+            None,
+            None,
+        ))
+
+    @given(
+        authoritative_grade=st.one_of(
+            st.none(),
+            st.sampled_from(("genuine", "suspect", "likely_transcode")),
+        ),
+        authoritative_bitrate=st.one_of(
+            st.none(), st.integers(min_value=32, max_value=400)),
+        stale_grade=st.sampled_from(
+            ("genuine", "suspect", "likely_transcode")),
+        stale_bitrate=st.integers(min_value=32, max_value=400),
+    )
+    def test_current_evidence_dominates_stale_request_scalars(
+        self,
+        authoritative_grade,
+        authoritative_bitrate,
+        stale_grade,
+        stale_bitrate,
+    ):
+        from lib.import_preview import load_persisted_existing_spectral
+        from lib.quality import AudioQualityMeasurement
+        from tests.fakes import FakePipelineDB
+        from tests.helpers import make_album_quality_evidence, make_request_row
+
+        db = FakePipelineDB()
+        req = make_request_row(
+            id=42,
+            current_spectral_grade=stale_grade,
+            current_spectral_bitrate=stale_bitrate,
+        )
+        db.seed_request(req)
+        evidence = make_album_quality_evidence(
+            mb_release_id=req["mb_release_id"],
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=122,
+                avg_bitrate_kbps=127,
+                median_bitrate_kbps=127,
+                format="Opus",
+                spectral_grade=authoritative_grade,
+                spectral_bitrate_kbps=authoritative_bitrate,
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_request_current_evidence(42, persisted.id)
+
+        _, detail, authoritative = load_persisted_existing_spectral(db, 42, req)
+
+        self.assertTrue(authoritative)
+        self.assertTrue(_authoritative_have_matches(
+            detail,
+            authoritative_grade,
+            authoritative_bitrate,
+        ))
+
     @given(
         persisted_grade=st.sampled_from((
             "genuine", "suspect", "likely_transcode",

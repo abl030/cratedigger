@@ -11,6 +11,8 @@ from lib.config import CratediggerConfig
 from lib.import_preview import (
     ImportPreviewValues,
     _prefer_successful_spectral_detail,
+    compose_attempt_spectral_audit,
+    load_persisted_existing_spectral,
     measure_and_persist_candidate_evidence,
     preview_import_from_path,
     preview_import_from_values,
@@ -25,7 +27,7 @@ from lib.quality import (
 )
 
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import make_album_quality_evidence, make_request_row
 
 
 class TestSpectralAuditMerge(unittest.TestCase):
@@ -37,6 +39,100 @@ class TestSpectralAuditMerge(unittest.TestCase):
 
         self.assertIs(
             _prefer_successful_spectral_detail(measured, harness), harness)
+
+    def test_composition_keeps_persisted_have_over_harness_derivative(self):
+        measured = SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True, grade="likely_transcode", bitrate_kbps=224),
+            existing=SpectralAnalysisDetail(
+                attempted=True, grade="likely_transcode", bitrate_kbps=224),
+        )
+        harness = SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True, grade="genuine", bitrate_kbps=228),
+            existing=SpectralAnalysisDetail(
+                attempted=True, grade="genuine", bitrate_kbps=122),
+        )
+
+        composed = compose_attempt_spectral_audit(measured, harness)
+
+        assert composed.existing is not None
+        self.assertEqual(composed.existing.grade, "likely_transcode")
+        self.assertEqual(composed.existing.bitrate_kbps, 224)
+
+    def test_authoritative_empty_evidence_does_not_revive_stale_scalars(self):
+        db = FakePipelineDB()
+        req = make_request_row(
+            id=42,
+            current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=224,
+        )
+        db.seed_request(req)
+        evidence = make_album_quality_evidence(
+            mb_release_id=req["mb_release_id"],
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=122,
+                avg_bitrate_kbps=127,
+                median_bitrate_kbps=127,
+                format="Opus",
+                spectral_grade=None,
+                spectral_bitrate_kbps=None,
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_request_current_evidence(42, persisted.id)
+
+        loaded, detail, authoritative = load_persisted_existing_spectral(
+            db, 42, req)
+
+        self.assertIsNotNone(loaded)
+        self.assertTrue(authoritative)
+        self.assertFalse(detail.attempted)
+        self.assertIsNone(detail.grade)
+        self.assertIsNone(detail.bitrate_kbps)
+
+    def test_linked_missing_or_unreadable_evidence_does_not_use_scalars(self):
+        req = make_request_row(
+            id=42,
+            current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=224,
+        )
+        for load_side_effect in (None, RuntimeError("evidence unavailable")):
+            with self.subTest(load_side_effect=load_side_effect):
+                db = FakePipelineDB()
+                db.seed_request(req)
+                db.set_request_current_evidence(42, 999)
+                context = (
+                    patch.object(
+                        db,
+                        "load_album_quality_evidence_by_id",
+                        side_effect=load_side_effect,
+                    )
+                    if load_side_effect is not None
+                    else patch.object(
+                        db,
+                        "load_album_quality_evidence_by_id",
+                        return_value=None,
+                    )
+                )
+                with context:
+                    loaded, detail, authoritative = (
+                        load_persisted_existing_spectral(db, 42, req)
+                    )
+
+                self.assertIsNone(loaded)
+                self.assertTrue(authoritative)
+                self.assertFalse(detail.attempted)
+                self.assertIsNone(detail.grade)
+                self.assertIsNone(detail.bitrate_kbps)
 
     def test_existing_measured_error_yields_to_harness_success(self):
         measured = SpectralAnalysisDetail(
@@ -280,6 +376,18 @@ class TestImportPreviewPath(unittest.TestCase):
                        return_value=PreimportMeasurement(
                            folder_layout="flat",
                            audio_file_count=1,
+                           spectral_audit=SpectralDetail(
+                               candidate=SpectralAnalysisDetail(
+                                   attempted=True,
+                                   grade="likely_transcode",
+                                   bitrate_kbps=224,
+                               ),
+                               existing=SpectralAnalysisDetail(
+                                   attempted=True,
+                                   grade="likely_transcode",
+                                   bitrate_kbps=224,
+                               ),
+                           ),
                        )), \
                  patch("lib.import_preview.run_import_one",
                        return_value=SimpleNamespace(
@@ -290,6 +398,18 @@ class TestImportPreviewPath(unittest.TestCase):
                                    avg_bitrate_kbps=245,
                                    median_bitrate_kbps=245,
                                    format="mp3 v0",
+                               ),
+                               spectral=SpectralDetail(
+                                   candidate=SpectralAnalysisDetail(
+                                       attempted=True,
+                                       grade="genuine",
+                                       bitrate_kbps=228,
+                                   ),
+                                   existing=SpectralAnalysisDetail(
+                                       attempted=True,
+                                       grade="genuine",
+                                       bitrate_kbps=122,
+                                   ),
                                ),
                            )
                        )) as mock_run:
@@ -306,6 +426,16 @@ class TestImportPreviewPath(unittest.TestCase):
             self.assertTrue(mock_run.call_args.kwargs["dry_run"])
             self.assertIsNone(mock_run.call_args.kwargs["request_id"])
             self.assertNotIn("beets_library_root", mock_run.call_args.kwargs)
+            assert preview.import_result is not None
+            assert preview.import_result.spectral.existing is not None
+            self.assertEqual(
+                preview.import_result.spectral.existing.grade,
+                "likely_transcode",
+            )
+            self.assertEqual(
+                preview.import_result.spectral.existing.bitrate_kbps,
+                224,
+            )
             self.assertEqual(
                 mock_run.call_args.kwargs["existing_v0_probe"].avg_bitrate_kbps,
                 171,

@@ -2231,6 +2231,68 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         )
         self.assertIsNotNone(updated.importable_at)
 
+    def test_have_lookup_failure_still_analyzes_candidate(self):
+        """A DB failure on HAVE provenance must not suppress the WANT scan."""
+        from scripts import import_preview_worker
+        from lib.quality import SpectralAnalysisDetail, SpectralDetail
+
+        class HaveLookupFailureDB(FakePipelineDB):
+            def get_request_current_evidence_id(self, request_id: int):
+                del request_id
+                raise RuntimeError("current evidence unavailable")
+
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db = HaveLookupFailureDB()
+            db.seed_request(make_request_row(id=42))
+            download_log_id = db.log_download(42, outcome="rejected")
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+            self._seed_evidence_for_download_log(db, download_log_id, source)
+            calls: list[str] = []
+
+            def collect_audit(path, existing):
+                calls.append(path)
+                self.assertFalse(existing.attempted)
+                return SpectralDetail(
+                    candidate=SpectralAnalysisDetail(
+                        attempted=True, grade="likely_transcode"),
+                    existing=existing,
+                )
+
+            updated = import_preview_worker.process_claimed_preview_job(
+                db,
+                claimed,
+                spectral_audit_collector=collect_audit,
+            )
+
+        self.assertEqual(calls, [source])
+        assert updated is not None
+        assert updated.preview_result is not None
+        import_result = ImportResult.from_dict(cast(
+            dict[str, Any],
+            updated.preview_result["import_result"],
+        ))
+        assert import_result.spectral.candidate is not None
+        self.assertEqual(
+            import_result.spectral.candidate.grade,
+            "likely_transcode",
+        )
+        self.assertEqual(updated.status, "queued")
+        self.assertEqual(updated.preview_status, "evidence_ready")
+        self.assertIsNotNone(updated.importable_at)
+
     def test_reused_evidence_audit_failure_is_fail_soft(self):
         from scripts import import_preview_worker
 

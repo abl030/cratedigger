@@ -27,6 +27,12 @@ sys.path.insert(0, ROOT_DIR)
 from tests.fakes import FakeBeetsDB, FakePipelineDB  # noqa: E402
 
 
+def _spectral_collection_precedes_conversion(source: str) -> bool:
+    collect_at = source.index("collect_attempt_spectral_audit(work_path, None)")
+    first_conversion_at = source.index("convert_lossless(")
+    return collect_at < first_conversion_at
+
+
 class TestImportBootstrap(unittest.TestCase):
     """Standalone harness imports should bootstrap the repo root so lib.* resolves.
 
@@ -58,6 +64,23 @@ class TestImportBootstrap(unittest.TestCase):
             f"Standalone import_one import failed:\nstdout:{proc.stdout}\nstderr:{proc.stderr}"
         )
         self.assertIn("OK", proc.stdout)
+
+    def test_candidate_spectral_collection_precedes_any_conversion(self):
+        """The harness must inspect source audio before it creates derivatives."""
+        import inspect
+        from harness import import_one
+
+        source = inspect.getsource(import_one.main)
+        self.assertTrue(_spectral_collection_precedes_conversion(source))
+
+    def test_ordering_checker_rejects_conversion_first_mutant(self):
+        mutant = (
+            "convert_lossless(work_path, V0_SPEC)\n"
+            "collect_attempt_spectral_audit(work_path, None)\n"
+            "convert_lossless(work_path, V0_SPEC)"
+        )
+
+        self.assertFalse(_spectral_collection_precedes_conversion(mutant))
 
 
 class TestPipelineDbUpdate(unittest.TestCase):

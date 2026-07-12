@@ -26,6 +26,7 @@ from lib.import_preview import (
     PREVIEW_VERDICT_EVIDENCE_READY,
     PREVIEW_VERDICT_MEASUREMENT_FAILED,
     ImportPreviewResult,
+    load_persisted_existing_spectral,
     measure_and_persist_candidate_evidence,
 )
 from lib.import_evidence import (
@@ -42,7 +43,6 @@ from lib.import_queue import (
 from lib.pipeline_db import DEFAULT_DSN, PipelineDB
 from lib.measurement import (
     collect_attempt_spectral_audit,
-    spectral_detail_from_persisted_source,
 )
 from lib.quality import (
     ActiveDownloadState,
@@ -460,22 +460,18 @@ def _collect_reused_evidence_spectral_audit(
 ) -> SpectralDetail:
     """Pair a candidate scan with the installed release's source evidence."""
     existing = SpectralAnalysisDetail(attempted=False)
-    try:
-        evidence = None
-        if request_id is not None:
-            evidence_id = db.get_request_current_evidence_id(request_id)
-            evidence = db.load_album_quality_evidence_by_id(evidence_id)
-        if evidence is not None:
-            existing = spectral_detail_from_persisted_source(
-                evidence.measurement.spectral_grade,
-                evidence.measurement.spectral_bitrate_kbps,
-            )
-        if not existing.attempted and request_id is not None:
+    if request_id is not None:
+        try:
             req = db.get_request(request_id) or {}
-            existing = spectral_detail_from_persisted_source(
-                req.get("current_spectral_grade"),
-                req.get("current_spectral_bitrate"),
+            _, existing, _ = load_persisted_existing_spectral(
+                db, request_id, req,
             )
+        except Exception:
+            logger.exception(
+                "Unable to load reused HAVE provenance for request %s",
+                request_id,
+            )
+    try:
         return collector(source_path, existing)
     except Exception as exc:
         logger.exception(
