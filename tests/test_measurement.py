@@ -9,12 +9,245 @@ hashing-error / DB-error fall-through behavior of the gate.
 from __future__ import annotations
 
 import unittest
+import tempfile
+from types import SimpleNamespace
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
 from lib.measurement import _check_bad_audio_hashes, _iter_audio_files
 from tests.fakes import FakePipelineDB
+
+
+class TestAttemptSpectralAudit(unittest.TestCase):
+    """Attempt audit always tries candidate and existing independently."""
+
+    def test_candidate_failure_does_not_hide_existing_measurement(self):
+        from lib.measurement import collect_attempt_spectral_audit
+
+        existing = SimpleNamespace(
+            grade="suspect", estimated_bitrate_kbps=128, suspect_pct=60.0,
+            tracks=[SimpleNamespace(
+                grade="suspect", hf_deficit_db=64.2,
+                cliff_detected=False, cliff_freq_hz=None,
+                estimated_bitrate_kbps=None, error=None,
+            )],
+        )
+
+        def analyze(path: str, trim_seconds: int = 30):
+            if path == "/candidate":
+                raise RuntimeError("candidate decode failed")
+            return existing
+
+        with patch("lib.measurement.spectral_analyze", side_effect=analyze):
+            audit = collect_attempt_spectral_audit("/candidate", "/existing")
+
+        assert audit.candidate is not None
+        assert audit.existing is not None
+        self.assertEqual(audit.candidate.error, "RuntimeError: candidate decode failed")
+        self.assertEqual(audit.existing.grade, "suspect")
+        self.assertEqual(audit.existing.suspect_pct, 60.0)
+        self.assertEqual(audit.existing.per_track[0].hf_deficit_db, 64.2)
+
+    def test_existing_failure_does_not_hide_candidate_measurement(self):
+        from lib.measurement import collect_attempt_spectral_audit
+
+        candidate = SimpleNamespace(
+            grade="genuine", estimated_bitrate_kbps=None, suspect_pct=0.0,
+            tracks=[],
+        )
+
+        def analyze(path: str, trim_seconds: int = 30):
+            if path == "/existing":
+                raise RuntimeError("existing decode failed")
+            return candidate
+
+        with patch("lib.measurement.spectral_analyze", side_effect=analyze):
+            audit = collect_attempt_spectral_audit("/candidate", "/existing")
+
+        assert audit.candidate is not None
+        assert audit.existing is not None
+        self.assertEqual(audit.candidate.grade, "genuine")
+        self.assertEqual(audit.existing.error, "RuntimeError: existing decode failed")
+
+    def test_normal_harness_collector_calls_each_side_exactly_once(self):
+        from lib.measurement import collect_attempt_spectral_audit
+
+        result = SimpleNamespace(
+            grade="genuine", estimated_bitrate_kbps=None,
+            suspect_pct=0.0, tracks=[],
+        )
+        calls: list[str] = []
+
+        def analyze(path: str, trim_seconds: int = 30):
+            calls.append(path)
+            return result
+
+        with patch("lib.measurement.spectral_analyze", side_effect=analyze):
+            collect_attempt_spectral_audit("/candidate", "/existing")
+        self.assertEqual(calls, ["/candidate", "/existing"])
+
+    def test_malformed_track_preserves_album_facts_and_prior_track_detail(self):
+        from lib.config import CratediggerConfig
+        from lib.measurement import _spectral_analysis_detail, measure_preimport_state
+
+        result = SimpleNamespace(
+            grade="suspect", estimated_bitrate_kbps=160,
+            suspect_pct=75.0,
+            tracks=[
+                SimpleNamespace(
+                    grade="genuine", hf_deficit_db=20.0,
+                    cliff_detected=False, cliff_freq_hz=None,
+                    estimated_bitrate_kbps=None, error=None,
+                ),
+                SimpleNamespace(
+                    grade="suspect", hf_deficit_db="malformed",
+                    cliff_detected=True, cliff_freq_hz=17000,
+                    estimated_bitrate_kbps=128, error=None,
+                ),
+            ],
+        )
+        with patch("lib.measurement.spectral_analyze", return_value=result):
+            detail = _spectral_analysis_detail("/candidate")
+
+        self.assertEqual(detail.grade, "suspect")
+        self.assertEqual(detail.bitrate_kbps, 160)
+        self.assertEqual(detail.suspect_pct, 75.0)
+        self.assertEqual(len(detail.per_track), 1)
+        self.assertIn("TypeError", detail.error or "")
+
+        with tempfile.TemporaryDirectory() as candidate:
+            Path(candidate, "01.mp3").write_bytes(b"candidate")
+            with patch("lib.measurement.spectral_analyze", return_value=result):
+                measured = measure_preimport_state(
+                    path=candidate, mb_release_id="", label="test",
+                    download_filetype="mp3", download_min_bitrate_bps=320_000,
+                    download_is_vbr=False,
+                    cfg=CratediggerConfig(audio_check_mode="off"),
+                )
+        self.assertIsNotNone(measured.download_spectral)
+        assert measured.download_spectral is not None
+        self.assertEqual(measured.download_spectral.grade, "suspect")
+        self.assertEqual(measured.download_spectral.bitrate_kbps, 160)
+        assert measured.spectral_audit.candidate is not None
+        self.assertIn(
+            "TypeError", measured.spectral_audit.candidate.error or "")
+
+    def test_release_lookup_failure_is_preserved_as_existing_audit_error(self):
+        from lib.config import CratediggerConfig
+        from lib.measurement import collect_release_attempt_spectral_audit
+        from tests.fakes import FakeBeetsDB
+
+        class RaisingBeets(FakeBeetsDB):
+            def get_album_path(self, mb_release_id: str) -> str | None:
+                raise RuntimeError("existing lookup failed")
+
+        result = SimpleNamespace(
+            grade="genuine", estimated_bitrate_kbps=None,
+            suspect_pct=0.0, tracks=[],
+        )
+        with patch("lib.beets_db.BeetsDB", return_value=RaisingBeets()), \
+             patch("lib.measurement.spectral_analyze", return_value=result):
+            audit = collect_release_attempt_spectral_audit(
+                "/candidate", "mbid", CratediggerConfig(audio_check_mode="off"))
+
+        assert audit.candidate is not None
+        assert audit.existing is not None
+        self.assertEqual(audit.candidate.grade, "genuine")
+        self.assertTrue(audit.existing.attempted)
+        self.assertEqual(
+            audit.existing.error, "RuntimeError: existing lookup failed")
+
+    def test_release_audit_uses_exact_path_without_quality_info(self):
+        from lib.config import CratediggerConfig
+        from lib.measurement import collect_release_attempt_spectral_audit
+        from tests.fakes import FakeBeetsDB
+
+        with tempfile.TemporaryDirectory() as candidate, \
+             tempfile.TemporaryDirectory() as existing:
+            beets = FakeBeetsDB()
+            beets.set_album_info(
+                "mbid", SimpleNamespace(album_path=existing))
+            result = SimpleNamespace(
+                grade="genuine", estimated_bitrate_kbps=None,
+                suspect_pct=0.0, tracks=[],
+            )
+            with patch("lib.beets_db.BeetsDB", return_value=beets), \
+                 patch("lib.measurement.spectral_analyze", return_value=result):
+                audit = collect_release_attempt_spectral_audit(
+                    candidate, "mbid",
+                    CratediggerConfig(audio_check_mode="off"),
+                )
+
+        self.assertEqual(beets.get_album_path_calls, ["mbid"])
+        self.assertEqual(beets.get_album_info_calls, [])
+        assert audit.existing is not None
+        self.assertTrue(audit.existing.attempted)
+        self.assertEqual(audit.existing.grade, "genuine")
+
+    def test_candidate_audit_failure_does_not_add_existing_decision_inputs(self):
+        from lib.beets_db import AlbumInfo
+        from lib.config import CratediggerConfig
+        from lib.measurement import measure_preimport_state
+        from tests.fakes import FakeBeetsDB
+
+        with tempfile.TemporaryDirectory() as candidate, \
+             tempfile.TemporaryDirectory() as existing:
+            Path(candidate, "01.mp3").write_bytes(b"candidate")
+            Path(existing, "01.mp3").write_bytes(b"existing")
+            beets = FakeBeetsDB()
+            beets.set_album_info("mbid", AlbumInfo(
+                album_id=1, track_count=1, min_bitrate_kbps=320,
+                is_cbr=True, album_path=existing, format="MP3",
+            ))
+            existing_result = SimpleNamespace(
+                grade="suspect", estimated_bitrate_kbps=128,
+                suspect_pct=100.0, tracks=[],
+            )
+
+            def analyze(path: str, trim_seconds: int = 30):
+                if path == candidate:
+                    raise RuntimeError("candidate failed")
+                return existing_result
+
+            with patch("lib.beets_db.BeetsDB", return_value=beets), \
+                 patch("lib.measurement.spectral_analyze", side_effect=analyze):
+                measured = measure_preimport_state(
+                    path=candidate, mb_release_id="mbid", label="test",
+                    download_filetype="mp3", download_min_bitrate_bps=320_000,
+                    download_is_vbr=False,
+                    cfg=CratediggerConfig(audio_check_mode="off"),
+                )
+
+        self.assertIsNone(measured.download_spectral)
+        self.assertIsNone(measured.existing_min_bitrate)
+        self.assertIsNone(measured.existing_spectral)
+        assert measured.spectral_audit.existing is not None
+        self.assertEqual(measured.spectral_audit.existing.grade, "suspect")
+
+    def test_attempt_audit_is_not_a_quality_decision_input(self):
+        from lib.measurement import collect_attempt_spectral_audit
+        from lib.quality import full_pipeline_decision
+
+        def decide():
+            return full_pipeline_decision(
+                is_flac=False, min_bitrate=320, is_cbr=True, is_vbr=False,
+                avg_bitrate=320, spectral_grade="genuine",
+                spectral_bitrate=None, existing_min_bitrate=256,
+                existing_spectral_grade="genuine",
+                existing_spectral_bitrate=None, existing_format="mp3",
+                new_format="mp3",
+            )
+
+        before = decide()
+        result = SimpleNamespace(
+            grade="suspect", estimated_bitrate_kbps=128,
+            suspect_pct=100.0, tracks=[],
+        )
+        with patch("lib.measurement.spectral_analyze", return_value=result):
+            collect_attempt_spectral_audit("/candidate", "/existing")
+        after = decide()
+        self.assertEqual(before, after)
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "audio_hash"

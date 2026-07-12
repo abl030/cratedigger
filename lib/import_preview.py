@@ -12,16 +12,19 @@ import logging
 import os
 import shutil
 import tempfile
+from collections.abc import Callable
 from typing import Any, Protocol, runtime_checkable
 
 import msgspec
 
 from lib.dispatch import run_import_one
+from lib.dispatch.types import ImportOneRun
 from lib.measurement import (
     inspect_local_files,
     measure_preimport_state,
 )
 from lib.quality_evidence import (
+    EvidenceBuildResult,
     QualityEvidenceDB,
     audio_snapshot_matches,
     legacy_current_lossless_v0_probe_from_request,
@@ -38,6 +41,8 @@ from lib.quality import (
     MeasurementFailureReason,
     QUALITY_DECISION_IMPORT_STAGE_DECISIONS,
     QualityRankConfig,
+    SpectralAnalysisDetail,
+    SpectralDetail,
     classify_full_pipeline_decision,
     classify_quality_import_stages,
     compute_effective_override_bitrate,
@@ -48,6 +53,20 @@ from lib.util import repair_mp3_headers, resolve_failed_path
 from lib.validation_envelope import decode_validation_envelope
 
 logger = logging.getLogger("cratedigger")
+
+
+def _prefer_successful_spectral_detail(
+    measured: SpectralAnalysisDetail | None,
+    harness: SpectralAnalysisDetail | None,
+) -> SpectralAnalysisDetail | None:
+    """Prefer successful audit evidence; retain an error only as fallback."""
+    if measured is not None and measured.attempted and measured.error is None:
+        return measured
+    if harness is not None and harness.attempted and harness.error is None:
+        return harness
+    if measured is not None and measured.attempted:
+        return measured
+    return harness
 
 
 @runtime_checkable
@@ -458,6 +477,8 @@ def measure_and_persist_candidate_evidence(
     force: bool = True,
     download_log_id: int | None = None,
     import_job_id: int | None = None,
+    persist_measurement_fn: Callable[..., EvidenceBuildResult] | None = None,
+    run_import_fn: Callable[..., ImportOneRun] | None = None,
 ) -> ImportPreviewResult:
     """Measure a source folder and persist candidate evidence; never decide.
 
@@ -631,6 +652,7 @@ def measure_and_persist_candidate_evidence(
             or measurement.folder_layout == "nested"
             or (measurement.audio_file_count == 0 and not source_snapshot)
         )
+        audit_result = ImportResult(spectral=measurement.spectral_audit)
         if measurement_rejecting:
             if not audio_snapshot_matches(path, source_snapshot):
                 return _measurement_failed_result(
@@ -641,9 +663,13 @@ def measure_and_persist_candidate_evidence(
                     request_id=request_id,
                     download_log_id=download_log_id,
                     source_path=path,
+                    import_result=audit_result,
                 )
             try:
-                evidence_result = persist_candidate_evidence_from_measurement(
+                evidence_result = (
+                    persist_measurement_fn
+                    or persist_candidate_evidence_from_measurement
+                )(
                     db,
                     mb_release_id=mbid,
                     source_path=path,
@@ -662,6 +688,7 @@ def measure_and_persist_candidate_evidence(
                     request_id=request_id,
                     download_log_id=download_log_id,
                     source_path=path,
+                    import_result=audit_result,
                 )
             if evidence_result.status != "ready":
                 return _measurement_failed_result(
@@ -672,6 +699,7 @@ def measure_and_persist_candidate_evidence(
                     request_id=request_id,
                     download_log_id=download_log_id,
                     source_path=path,
+                    import_result=audit_result,
                 )
             decision_hint = _measurement_decision_hint(measurement)
             return _evidence_ready_result(
@@ -683,6 +711,7 @@ def measure_and_persist_candidate_evidence(
                 request_id=request_id,
                 download_log_id=download_log_id,
                 source_path=path,
+                import_result=ImportResult(spectral=measurement.spectral_audit),
             )
 
         # --- Harness path: measurement allows continuing ---
@@ -734,7 +763,7 @@ def measure_and_persist_candidate_evidence(
         )
 
         try:
-            run = run_import_one(
+            run = (run_import_fn or run_import_one)(
                 path=preview_path,
                 mb_release_id=mbid,
                 request_id=None,
@@ -757,6 +786,7 @@ def measure_and_persist_candidate_evidence(
                 request_id=request_id,
                 download_log_id=download_log_id,
                 source_path=path,
+                import_result=audit_result,
             )
 
         if run.import_result is None:
@@ -768,9 +798,31 @@ def measure_and_persist_candidate_evidence(
                 request_id=request_id,
                 download_log_id=download_log_id,
                 source_path=path,
-                import_result=run.import_result,
+                import_result=audit_result,
                 subprocess_stderr=run.stderr,
             )
+        # The preview worker's independent two-sided audit is the attempt
+        # record. Keep it separate from decision measurements and replace the
+        # harness-local spectral detail with the best successful evidence from
+        # either pass, retaining an error only when neither pass succeeded.
+        measured_audit = measurement.spectral_audit
+        harness_audit = run.import_result.spectral
+        measured_candidate = measured_audit.candidate
+        measured_existing = measured_audit.existing
+        candidate = _prefer_successful_spectral_detail(
+            measured_candidate, harness_audit.candidate)
+        existing = _prefer_successful_spectral_detail(
+            measured_existing, harness_audit.existing)
+        run.import_result.spectral = SpectralDetail(
+            cliff_freq_hz=harness_audit.cliff_freq_hz,
+            suspect_pct=(candidate.suspect_pct or 0.0) if candidate else 0.0,
+            per_track=list(candidate.per_track) if candidate else [],
+            existing_suspect_pct=(
+                existing.suspect_pct or 0.0 if existing else 0.0
+            ),
+            candidate=candidate,
+            existing=existing,
+        )
         if run.import_result.decision in (
             "conversion_failed",
             "target_conversion_failed",

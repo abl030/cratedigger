@@ -43,6 +43,28 @@ class ConversionInfo(msgspec.Struct):
     source_channels: Optional[int] = None
 
 
+class SpectralTrackDetail(msgspec.Struct, frozen=True):
+    """One track from an attempt-local spectral analysis."""
+
+    grade: str
+    hf_deficit_db: float = 0.0
+    cliff_detected: bool = False
+    cliff_freq_hz: Optional[int] = None
+    estimated_bitrate_kbps: Optional[int] = None
+    error: Optional[str] = None
+
+
+class SpectralAnalysisDetail(msgspec.Struct, frozen=True):
+    """Complete audit result for one side of an import attempt."""
+
+    attempted: bool = False
+    grade: Optional[str] = None
+    bitrate_kbps: Optional[int] = None
+    suspect_pct: Optional[float] = None
+    per_track: list[SpectralTrackDetail] = msgspec.field(default_factory=list)
+    error: Optional[str] = None
+
+
 class SpectralDetail(msgspec.Struct):
     """Per-track spectral analysis detail.
 
@@ -53,8 +75,12 @@ class SpectralDetail(msgspec.Struct):
     """
     cliff_freq_hz: Optional[int] = None
     suspect_pct: float = 0.0
-    per_track: list[dict] = []  # per-track grade/hf_deficit/cliff
+    per_track: list[SpectralTrackDetail] = []
     existing_suspect_pct: float = 0.0
+    # Attempt-local display audit. These are deliberately disjoint from
+    # new_measurement/existing_measurement, which remain the decision inputs.
+    candidate: Optional[SpectralAnalysisDetail] = None
+    existing: Optional[SpectralAnalysisDetail] = None
 
 
 # Issue #133: ``DisambiguationFailure`` / ``SelectorFailure`` were two

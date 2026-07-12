@@ -1333,6 +1333,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
     def test_no_json_marks_failed_and_requeues(self):
         """No __IMPORT_RESULT__ in stdout → scenario=no_json_result, requeue."""
         from lib.dispatch import dispatch_import_core
+        from lib.quality import SpectralAnalysisDetail, SpectralDetail
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -1343,6 +1344,12 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         )
 
         tmpdir = tempfile.mkdtemp()
+        audit = SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True, grade="suspect", bitrate_kbps=128),
+            existing=SpectralAnalysisDetail(
+                attempted=True, grade="genuine"),
+        )
         try:
             with patch_dispatch_externals() as ext, \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db(None)):
@@ -1357,6 +1364,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                     db=db,  # type: ignore[arg-type]
                     dl_info=DownloadInfo(username="user1"),
                     cfg=cfg,
+                    attempt_spectral_audit=audit,
                 )
         finally:
             import shutil
@@ -1366,6 +1374,89 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         self.assertEqual(row["status"], "wanted")
         self.assertEqual(len(db.download_logs), 1)
         db.assert_log(self, 0, outcome="failed")
+        logged = ImportResult.from_json(db.download_logs[0].import_result)
+        self.assertEqual(logged.spectral, audit)
+
+    def test_timeout_preserves_attempt_spectral_audit(self):
+        import subprocess as sp
+        from lib.dispatch import dispatch_import_core
+        from lib.dispatch.types import ImportOneRun
+        from lib.quality import SpectralAnalysisDetail, SpectralDetail
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS, pipeline_db_enabled=True)
+        audit = SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True, error="candidate decode failed"),
+            existing=SpectralAnalysisDetail(
+                attempted=True, grade="genuine"),
+        )
+        tmpdir = tempfile.mkdtemp()
+        try:
+            def timeout_import(*args: Any, **kwargs: Any) -> ImportOneRun:
+                raise sp.TimeoutExpired("import_one", 300)
+
+            with patch("lib.beets_db.BeetsDB", _mock_beets_db(None)):
+                dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="mbid-123",
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=DownloadInfo(username="user1"),
+                    cfg=cfg,
+                    attempt_spectral_audit=audit,
+                    run_import_fn=timeout_import,
+                )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        logged = ImportResult.from_json(db.download_logs[0].import_result)
+        self.assertEqual(logged.spectral, audit)
+
+    def test_exception_preserves_attempt_spectral_audit(self):
+        from lib.dispatch import dispatch_import_core
+        from lib.dispatch.types import ImportOneRun
+        from lib.quality import SpectralAnalysisDetail, SpectralDetail
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS, pipeline_db_enabled=True)
+        audit = SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True, grade="suspect", bitrate_kbps=128),
+            existing=SpectralAnalysisDetail(attempted=False),
+        )
+
+        def failed_import(*args: Any, **kwargs: Any) -> ImportOneRun:
+            raise RuntimeError("subprocess setup failed")
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch("lib.beets_db.BeetsDB", _mock_beets_db(None)):
+                dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="mbid-123",
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=DownloadInfo(username="user1"),
+                    cfg=cfg,
+                    attempt_spectral_audit=audit,
+                    run_import_fn=failed_import,
+                )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        logged_raw = db.download_logs[0].import_result
+        assert logged_raw is not None
+        logged = ImportResult.from_json(logged_raw)
+        self.assertEqual(logged.spectral, audit)
 
 
 class TestForceImportSlice(unittest.TestCase):
@@ -5316,12 +5407,16 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             force_import_payload,
         )
         from scripts import import_preview_worker
+        from lib.dispatch import dispatch_import_from_db
+        from lib.quality import SpectralAnalysisDetail, SpectralDetail
+        from tests.helpers import noop_quality_gate
 
         with tempfile.TemporaryDirectory() as source:
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             db = FakePipelineDB()
             db.seed_request(make_request_row(id=42))
+            db.set_tracks(42, [{"track_number": 1, "title": "Track"}])
             log_id = db.log_download(42, outcome="rejected")
             db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
@@ -5341,6 +5436,12 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 "preview_called": False,
                 "measure_called": False,
             }
+            audit = SpectralDetail(
+                candidate=SpectralAnalysisDetail(
+                    attempted=True, grade="suspect", bitrate_kbps=160),
+                existing=SpectralAnalysisDetail(
+                    attempted=True, grade="genuine", bitrate_kbps=None),
+            )
 
             def _sentinel_preview(*args, **kwargs):
                 sentinels["preview_called"] = True
@@ -5354,6 +5455,14 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                     "measure_preimport_state must not be called when evidence is valid"
                 )
 
+            audit_calls: list[tuple[str, str]] = []
+
+            def collect_audit(
+                path: str, mb_release_id: str, cfg: Any,
+            ) -> SpectralDetail:
+                audit_calls.append((path, mb_release_id))
+                return audit
+
             with patch(
                 "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
                 side_effect=_sentinel_preview,
@@ -5364,7 +5473,37 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 updated = import_preview_worker.process_claimed_preview_job(
                     cast(Any, db),
                     claimed,
+                    spectral_audit_collector=collect_audit,
                 )
+
+            self.assertEqual(len(audit_calls), 1)
+            assert updated is not None
+            assert updated.preview_result is not None
+            preview_ir = ImportResult.from_dict(
+                cast(dict[str, Any], updated.preview_result["import_result"])
+            )
+            self.assertEqual(preview_ir.spectral, audit)
+
+            ir = make_import_result(decision="import", new_min_bitrate=245)
+            with patch_dispatch_externals(), patch(
+                "lib.dispatch.subprocess_runner.parse_import_result",
+                return_value=ir,
+            ), patch(
+                "lib.beets_db.BeetsDB", _mock_beets_db(None),
+            ), patch(
+                "lib.config.read_runtime_config",
+                return_value=CratediggerConfig(
+                    beets_harness_path=_HARNESS, pipeline_db_enabled=True),
+            ):
+                outcome = dispatch_import_from_db(
+                    cast(Any, db), 42, source, force=True,
+                    source_username="alice", import_job_id=claimed.id,
+                    download_log_id=log_id,
+                    quality_gate_fn=noop_quality_gate,
+                )
+            self.assertTrue(outcome.success)
+            logged_ir = ImportResult.from_json(db.download_logs[-1].import_result)
+            self.assertEqual(logged_ir.spectral, audit)
 
         self.assertFalse(sentinels["preview_called"])
         self.assertFalse(sentinels["measure_called"])
@@ -5383,6 +5522,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             automation_import_dedupe_key,
         )
         from scripts import import_preview_worker
+        from lib.quality import SpectralAnalysisDetail, SpectralDetail
 
         with tempfile.TemporaryDirectory() as staged:
             with open(os.path.join(staged, "01.flac"), "wb") as handle:
@@ -5437,6 +5577,20 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                     "_materialize_processing_dir must not be called when evidence is valid"
                 )
 
+            audit = SpectralDetail(
+                candidate=SpectralAnalysisDetail(
+                    attempted=True, grade="genuine"),
+                existing=SpectralAnalysisDetail(attempted=False),
+            )
+
+            audit_calls: list[tuple[str, str]] = []
+
+            def collect_audit(
+                path: str, mb_release_id: str, cfg: Any,
+            ) -> SpectralDetail:
+                audit_calls.append((path, mb_release_id))
+                return audit
+
             with patch(
                 "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
                 side_effect=_sentinel_preview,
@@ -5450,7 +5604,10 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 updated = import_preview_worker.process_claimed_preview_job(
                     cast(Any, db),
                     claimed,
+                    spectral_audit_collector=collect_audit,
                 )
+
+            self.assertEqual(len(audit_calls), 1)
 
         self.assertFalse(sentinels["preview_called"])
         self.assertFalse(sentinels["measure_called"])

@@ -9,6 +9,7 @@ import os
 import socket
 import sys
 import threading
+from collections.abc import Callable
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, cast
@@ -39,10 +40,14 @@ from lib.import_queue import (
     ImportJob,
 )
 from lib.pipeline_db import DEFAULT_DSN, PipelineDB
+from lib.measurement import collect_release_attempt_spectral_audit
 from lib.quality import (
     ActiveDownloadState,
     AlbumQualityEvidence,
     MeasurementFailure,
+    ImportResult,
+    SpectralAnalysisDetail,
+    SpectralDetail,
 )
 from lib.quality_evidence import (
     EvidenceBuildResult,
@@ -214,6 +219,7 @@ def _reused_evidence_preview_payload(
     job: ImportJob,
     evidence: AlbumQualityEvidence,
     source_path: str,
+    import_result: ImportResult,
 ) -> dict[str, Any]:
     """Synthesize a preview_result payload for the reused-evidence branch.
 
@@ -234,6 +240,7 @@ def _reused_evidence_preview_payload(
         request_id=job.request_id,
         download_log_id=_download_log_id_from_job(job),
         source_path=source_path,
+        import_result=import_result,
     ))
     assert isinstance(payload, dict)
     payload["candidate_status"] = CANDIDATE_STATUS_REUSED
@@ -414,6 +421,7 @@ def _handle_measurement_failed(
             request_id=job.request_id,
             import_job_id=job.id,
             payload=payload,
+            import_result=result.import_result,
         )
     except Exception:
         logger.exception(
@@ -434,7 +442,40 @@ def _handle_measurement_failed(
     return None
 
 
-def process_claimed_preview_job(db: Any, job: ImportJob) -> ImportJob | None:
+SpectralAuditCollector = Callable[[str, str, Any], SpectralDetail]
+PreviewFn = Callable[[Any, ImportJob], ImportPreviewResult]
+
+
+def _collect_reused_evidence_spectral_audit(
+    source_path: str,
+    mb_release_id: str,
+    collector: SpectralAuditCollector,
+) -> SpectralDetail:
+    """Gather display-only audit without changing evidence-ready outcome."""
+    try:
+        from lib.config import read_runtime_config
+        return collector(source_path, mb_release_id, read_runtime_config())
+    except Exception as exc:
+        logger.exception(
+            "Reused-evidence spectral audit failed for %s", source_path)
+        error = f"{type(exc).__name__}: {exc}"
+        return SpectralDetail(
+            candidate=SpectralAnalysisDetail(attempted=True, error=error),
+            # The collector failed before it could resolve whether an exact
+            # HAVE copy exists. Do not fabricate an existing-side attempt.
+            existing=SpectralAnalysisDetail(attempted=False),
+        )
+
+
+def process_claimed_preview_job(
+    db: Any,
+    job: ImportJob,
+    *,
+    spectral_audit_collector: SpectralAuditCollector = (
+        collect_release_attempt_spectral_audit
+    ),
+    preview_fn: PreviewFn | None = None,
+) -> ImportJob | None:
     # Front-gate: if stored candidate evidence already passes the cheap
     # snapshot guard, mark the job importable without invoking measurement.
     # The post-measurement gate below remains as belt-and-braces for the
@@ -446,10 +487,16 @@ def process_claimed_preview_job(db: Any, job: ImportJob) -> ImportJob | None:
         and front_gate_result.evidence is not None
         and front_gate_source is not None
     ):
+        audit = _collect_reused_evidence_spectral_audit(
+            front_gate_source,
+            front_gate_result.evidence.mb_release_id,
+            spectral_audit_collector,
+        )
         reused_payload = _reused_evidence_preview_payload(
             job,
             front_gate_result.evidence,
             front_gate_source,
+            ImportResult(spectral=audit),
         )
         logger.info(
             "Reused candidate evidence for import job %s; skipping preview measurement",
@@ -462,7 +509,7 @@ def process_claimed_preview_job(db: Any, job: ImportJob) -> ImportJob | None:
         )
 
     try:
-        result = execute_preview_job(db, job)
+        result = (preview_fn or execute_preview_job)(db, job)
     except Exception as exc:
         logger.exception("Import job %s preview crashed", job.id)
         # Worker-mode preview should not raise — but if it does, route the
@@ -519,6 +566,7 @@ def process_claimed_preview_job(db: Any, job: ImportJob) -> ImportJob | None:
             source_path=result.source_path,
             request_id=result.request_id,
             download_log_id=result.download_log_id,
+            import_result=result.import_result,
             failure=fallback_payload,
         )
         return _handle_measurement_failed(db, job, fallback_result)
@@ -545,6 +593,7 @@ def process_claimed_preview_job(db: Any, job: ImportJob) -> ImportJob | None:
         source_path=result.source_path,
         request_id=result.request_id,
         download_log_id=result.download_log_id,
+        import_result=result.import_result,
         failure=fallback_payload,
     )
     return _handle_measurement_failed(db, job, fallback_result)

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import subprocess as sp
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Sequence, TYPE_CHECKING
 
@@ -35,7 +36,7 @@ from lib.quality_evidence import (audit_v0_probe_from_metric,
 from lib.util import cleanup_disambiguation_orphans, trigger_meelo_clean
 
 from lib.dispatch.types import (DispatchOutcome, FORCE_MANUAL_SCENARIOS,
-                                QualityGateFn)
+                                ImportOneRun, QualityGateFn)
 from lib.dispatch.subprocess_runner import run_import_one
 from lib.dispatch.helpers import (_cleanup_staged_dir, _guard_failure_detail,
                                   _log_postflight_bad_extensions,
@@ -59,8 +60,19 @@ if TYPE_CHECKING:
     from lib.config import CratediggerConfig
     from lib.import_evidence import CandidateEvidenceActionResult
     from lib.pipeline_db import DownloadLogOutcome, PipelineDB
+    from lib.quality import SpectralDetail
 
 logger = logging.getLogger("cratedigger")
+
+
+def _attach_attempt_spectral_audit(
+    import_result: ImportResult,
+    audit: "SpectralDetail | None",
+) -> ImportResult:
+    """Attach display-only audit without touching policy-facing fields."""
+    if audit is not None:
+        import_result.spectral = audit
+    return import_result
 
 
 def dispatch_import_core(
@@ -85,9 +97,11 @@ def dispatch_import_core(
     cooled_down_users: set[str] | None = None,
     source_dirs: list[str] | None = None,
     candidate_import_job_id: int | None = None,
+    attempt_spectral_audit: "SpectralDetail | None" = None,
     candidate_download_log_id: int | None = None,
     prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
     quality_gate_fn: QualityGateFn = _check_quality_gate_core,
+    run_import_fn: Callable[..., ImportOneRun] | None = None,
 ) -> "DispatchOutcome":
     """Core import dispatch — takes plain params + PipelineDB directly.
 
@@ -111,6 +125,23 @@ def dispatch_import_core(
     dist_label = f"{distance:.4f}" if distance is not None else "unmeasured"
     logger.info(f"{mode}: {label} "
                 f"(source=request, dist={dist_label})")
+
+    if attempt_spectral_audit is None and candidate_import_job_id is not None:
+        try:
+            job = db.get_import_job(candidate_import_job_id)
+            raw = (
+                job.preview_result.get("import_result")
+                if job is not None and job.preview_result is not None
+                else None
+            )
+            if isinstance(raw, dict):
+                attempt_spectral_audit = ImportResult.from_dict(raw).spectral
+        except Exception:
+            logger.warning(
+                "Unable to decode preview spectral audit for import job %s",
+                candidate_import_job_id,
+                exc_info=True,
+            )
 
     outcome_success = False
     outcome_message = ""
@@ -309,6 +340,9 @@ def dispatch_import_core(
                         comparison_basis=comparison_basis_from_decision(
                             evidence_decision
                         ),
+                        spectral=(attempt_spectral_audit
+                                  if attempt_spectral_audit is not None
+                                  else ImportResult().spectral),
                     )
                     return _reject_import_from_evidence_decision(
                         db=db,
@@ -363,7 +397,7 @@ def dispatch_import_core(
             # downgrade/transcode_downgrade verdicts we exit before deletion so
             # the user's FLACs survive (#111). Auto-import stages to disposable
             # /Incoming and does not need the flag.
-            run = run_import_one(
+            run = (run_import_fn or run_import_one)(
                 path=path,
                 mb_release_id=mb_release_id,
                 request_id=request_id,
@@ -386,7 +420,13 @@ def dispatch_import_core(
                     logger.info(f"  [import] {line}")
 
             ir = run.import_result
+            if ir is not None:
+                ir = _attach_attempt_spectral_audit(
+                    ir, attempt_spectral_audit)
             if ir is None:
+                if attempt_spectral_audit is not None:
+                    dl_info.import_result = _attach_attempt_spectral_audit(
+                        ImportResult(), attempt_spectral_audit).to_json()
                 logger.error(
                     f"{mode} FAILED (no JSON, rc={run.returncode}): {label}")
                 for line in run.stdout.strip().split("\n"):
@@ -779,6 +819,9 @@ def dispatch_import_core(
                         trigger_meelo_clean(cfg)
         except sp.TimeoutExpired:
             logger.error(f"{mode} TIMEOUT: {label}")
+            if attempt_spectral_audit is not None:
+                dl_info.import_result = _attach_attempt_spectral_audit(
+                    ImportResult(), attempt_spectral_audit).to_json()
             _record_rejection_and_maybe_requeue(
                 db, request_id, dl_info,
                 detail="import_one.py timed out", error="timeout",
@@ -794,6 +837,9 @@ def dispatch_import_core(
             outcome_message = "Import timed out"
         except Exception:
             logger.exception(f"{mode} ERROR: {label}")
+            if attempt_spectral_audit is not None:
+                dl_info.import_result = _attach_attempt_spectral_audit(
+                    ImportResult(), attempt_spectral_audit).to_json()
             _record_rejection_and_maybe_requeue(
                 db, request_id, dl_info,
                 detail="unhandled exception in auto-import", error="exception",
