@@ -15,7 +15,8 @@ from typing import TYPE_CHECKING
 from lib.processing_paths import normalize_source_dirs
 from lib.import_evidence import ensure_candidate_evidence_for_action
 
-from lib.dispatch.types import DISPATCH_CODE_BAD_REQUEST, DispatchOutcome
+from lib.dispatch.types import (DISPATCH_CODE_BAD_REQUEST, DispatchOutcome,
+                                ImportAttemptResult)
 from lib.dispatch.manifest_guard import _guard_force_manual_audio_manifest
 from lib.dispatch.evidence_gate import (_download_info_from_candidate_evidence,
                                         _requeue_import_job_to_preview)
@@ -157,12 +158,14 @@ def _dispatch_import_from_db_locked(
     if not os.path.isdir(failed_path):
         return DispatchOutcome(success=False, message=f"Path not found: {failed_path}")
 
+    attempt_result = ImportAttemptResult.from_import_job(db, import_job_id)
     manifest_reject = _guard_force_manual_audio_manifest(
         db,
         request_id=request_id,
         failed_path=failed_path,
         download_log_id=download_log_id,
         source_username=source_username,
+        attempt_result=attempt_result,
     )
     if manifest_reject is not None:
         return manifest_reject
@@ -228,6 +231,7 @@ def _dispatch_import_from_db_locked(
         requeue_on_failure=False,
         source_dirs=source_dirs,
         candidate_import_job_id=import_job_id,
+        attempt_result=attempt_result,
         candidate_download_log_id=download_log_id,
         prevalidated_candidate_result=candidate_result,
         quality_gate_fn=resolved_quality_gate_fn,

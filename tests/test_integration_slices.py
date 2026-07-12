@@ -1330,6 +1330,86 @@ class TestLosslessSourceLockedSlice(unittest.TestCase):
 class TestDispatchNoJsonResult(unittest.TestCase):
     """Integration slice: sp.run returns no sentinel -> record rejection."""
 
+    def test_success_preserves_full_import_result_and_exact_attempt_audit(self):
+        from lib.dispatch import dispatch_import_core
+        from lib.dispatch.types import ImportOneRun
+        from lib.quality import (
+            QualityEvidenceActionProvenance,
+            QualityComparisonBasis,
+            SpectralAnalysisDetail,
+            SpectralDetail,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS, pipeline_db_enabled=True)
+        audit = SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True, grade="suspect", bitrate_kbps=128),
+            existing=SpectralAnalysisDetail(
+                attempted=True, grade="genuine", bitrate_kbps=245),
+        )
+        result = make_import_result(
+            decision="import",
+            new_min_bitrate=245,
+            prev_min_bitrate=128,
+            was_converted=True,
+            original_filetype="flac",
+            target_filetype="opus",
+            imported_path="/Beets/Artist/Album",
+            disambiguated=True,
+            final_format="opus 128",
+        )
+        result.postflight.beets_id = 77
+        result.postflight.track_count = 9
+        result.comparison_basis = QualityComparisonBasis(
+            verdict="better", branch="rank", new_rank="mp3_v0",
+            existing_rank="mp3_v2", new_value_kbps=245,
+            existing_value_kbps=128,
+        )
+        result.quality_evidence_provenance = QualityEvidenceActionProvenance(
+            candidate_status="ready",
+            current_status="ready",
+            snapshot_status="matched",
+        )
+
+        def parsed_import(*args: Any, **kwargs: Any) -> ImportOneRun:
+            return ImportOneRun(
+                command=("import_one",), returncode=0,
+                stdout="", stderr="", import_result=result)
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch_dispatch_externals():
+                dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="mbid-123",
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=DownloadInfo(username="user1"),
+                    cfg=cfg,
+                    attempt_spectral_audit=audit,
+                    run_import_fn=parsed_import,
+                    quality_gate_fn=lambda **kwargs: None,
+                )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        logged_raw = db.download_logs[0].import_result
+        assert logged_raw is not None
+        logged = ImportResult.from_json(logged_raw)
+        self.assertEqual(logged, result)
+        self.assertEqual(logged.spectral, audit)
+        self.assertEqual(logged.decision, "import")
+        self.assertIsNotNone(logged.new_measurement)
+        self.assertIsNotNone(logged.existing_measurement)
+        self.assertTrue(logged.conversion.was_converted)
+        self.assertEqual(logged.postflight.beets_id, 77)
+        self.assertIsNotNone(logged.comparison_basis)
+
     def test_no_json_marks_failed_and_requeues(self):
         """No __IMPORT_RESULT__ in stdout → scenario=no_json_result, requeue."""
         from lib.dispatch import dispatch_import_core
@@ -6474,6 +6554,8 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         """AE2: candidate evidence with audio_corrupt=True → preimport_decide
         rejects → request → wanted, download_log carries audio_corrupt scenario,
         beets (sp.run) is never invoked."""
+        import msgspec
+        from lib.quality import SpectralAnalysisDetail, SpectralDetail
         from lib.quality_evidence import snapshot_audio_files
 
         db = FakePipelineDB()
@@ -6517,6 +6599,18 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
                     audio_corrupt=True,
                 ),
             )
+            audit = SpectralDetail(
+                candidate=SpectralAnalysisDetail(
+                    attempted=True, grade="suspect", bitrate_kbps=96),
+                existing=SpectralAnalysisDetail(
+                    attempted=True, grade="genuine", bitrate_kbps=128),
+            )
+            preview_result = msgspec.to_builtins(ImportResult(spectral=audit))
+            assert isinstance(preview_result, dict)
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"import_result": preview_result},
+            )
             self._wire_current(db, 42, self._build_current_evidence(owner_id=42))
 
             result, ext = self._drive_dispatch(
@@ -6537,6 +6631,15 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         # download_log row records the rejection scenario.
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
         self.assertIn(("rejected", "audio_corrupt"), outcomes)
+        rejection = next(
+            log for log in db.download_logs
+            if log.outcome == "rejected" and log.beets_scenario == "audio_corrupt"
+        )
+        assert rejection.import_result is not None
+        self.assertEqual(
+            ImportResult.from_json(rejection.import_result).spectral,
+            audit,
+        )
 
     def test_nested_layout_evidence_routes_through_self_heal(self):
         """AE3: folder_layout='nested' → preimport_decide rejects → self-heal."""

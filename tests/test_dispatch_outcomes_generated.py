@@ -55,7 +55,7 @@ from hypothesis import strategies as st
 
 from lib.config import CratediggerConfig
 from lib.dispatch import DispatchOutcome
-from lib.dispatch.types import _PREIMPORT_FACT_REJECT_DECISIONS
+from lib.dispatch.types import ImportAttemptResult, _PREIMPORT_FACT_REJECT_DECISIONS
 from lib.quality import (
     QUALITY_DECISION_IMPORT_STAGE_DECISIONS,
     QUALITY_DECISION_REJECT_STAGE_DECISIONS,
@@ -229,12 +229,14 @@ def _reject_via_evidence_decision(
         id=42, status="downloading", mb_release_id="test-mbid"))
     dl_info = DownloadInfo(filetype="mp3", username=source_username)
     ir = make_import_result(decision=decision, new_min_bitrate=new_min_bitrate)
+    attempt_result = ImportAttemptResult(None)
+    attempt_result.merge(ir)
     with patch_dispatch_externals():
         _reject_import_from_evidence_decision(
             db=db,  # type: ignore[arg-type]
             request_id=42,
             dl_info=dl_info,
-            import_result=ir,
+            attempt_result=attempt_result,
             distance=distance,
             decision=decision,
             detail=f"generated {decision}",
@@ -283,15 +285,18 @@ def _run_rejection_writer(
     if writer == "evidence_decision":
         from lib.dispatch import _reject_import_from_evidence_decision
 
+        attempt_result = ImportAttemptResult(None)
+        attempt_result.merge(make_import_result(
+            decision="downgrade",
+            new_min_bitrate=128,
+        ))
+
         with patch_dispatch_externals():
             _reject_import_from_evidence_decision(
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
                 dl_info=DownloadInfo(username="generated-user"),
-                import_result=make_import_result(
-                    decision="downgrade",
-                    new_min_bitrate=128,
-                ),
+                attempt_result=attempt_result,
                 distance=distance,
                 decision="downgrade",
                 detail="generated reject",

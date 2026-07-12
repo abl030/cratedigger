@@ -36,7 +36,7 @@ from lib.quality_evidence import (audit_v0_probe_from_metric,
 from lib.util import cleanup_disambiguation_orphans, trigger_meelo_clean
 
 from lib.dispatch.types import (DispatchOutcome, FORCE_MANUAL_SCENARIOS,
-                                ImportOneRun, QualityGateFn)
+                                ImportAttemptResult, ImportOneRun, QualityGateFn)
 from lib.dispatch.subprocess_runner import run_import_one
 from lib.dispatch.helpers import (_cleanup_staged_dir, _guard_failure_detail,
                                   _log_postflight_bad_extensions,
@@ -65,16 +65,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cratedigger")
 
 
-def _attach_attempt_spectral_audit(
-    import_result: ImportResult,
-    audit: "SpectralDetail | None",
-) -> ImportResult:
-    """Attach display-only audit without touching policy-facing fields."""
-    if audit is not None:
-        import_result.spectral = audit
-    return import_result
-
-
 def dispatch_import_core(
     *,
     path: str,
@@ -98,6 +88,7 @@ def dispatch_import_core(
     source_dirs: list[str] | None = None,
     candidate_import_job_id: int | None = None,
     attempt_spectral_audit: "SpectralDetail | None" = None,
+    attempt_result: ImportAttemptResult | None = None,
     candidate_download_log_id: int | None = None,
     prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
     quality_gate_fn: QualityGateFn = _check_quality_gate_core,
@@ -126,22 +117,12 @@ def dispatch_import_core(
     logger.info(f"{mode}: {label} "
                 f"(source=request, dist={dist_label})")
 
-    if attempt_spectral_audit is None and candidate_import_job_id is not None:
-        try:
-            job = db.get_import_job(candidate_import_job_id)
-            raw = (
-                job.preview_result.get("import_result")
-                if job is not None and job.preview_result is not None
-                else None
-            )
-            if isinstance(raw, dict):
-                attempt_spectral_audit = ImportResult.from_dict(raw).spectral
-        except Exception:
-            logger.warning(
-                "Unable to decode preview spectral audit for import job %s",
-                candidate_import_job_id,
-                exc_info=True,
-            )
+    if attempt_result is None:
+        attempt_result = ImportAttemptResult.from_import_job(
+            db,
+            candidate_import_job_id,
+            attempt_spectral_audit,
+        )
 
     outcome_success = False
     outcome_message = ""
@@ -325,7 +306,7 @@ def dispatch_import_core(
                         "import-time persisted evidence rejected candidate "
                         f"(decision={decision})"
                     )
-                    evidence_import_result = ImportResult(
+                    attempt_result.merge(ImportResult(
                         decision=decision,
                         new_measurement=evidence_gate.candidate.measurement,
                         existing_measurement=(
@@ -340,15 +321,12 @@ def dispatch_import_core(
                         comparison_basis=comparison_basis_from_decision(
                             evidence_decision
                         ),
-                        spectral=(attempt_spectral_audit
-                                  if attempt_spectral_audit is not None
-                                  else ImportResult().spectral),
-                    )
+                    ))
                     return _reject_import_from_evidence_decision(
                         db=db,
                         request_id=request_id,
                         dl_info=dl_info,
-                        import_result=evidence_import_result,
+                        attempt_result=attempt_result,
                         distance=distance,
                         decision=decision,
                         detail=detail,
@@ -424,12 +402,8 @@ def dispatch_import_core(
 
             ir = run.import_result
             if ir is not None:
-                ir = _attach_attempt_spectral_audit(
-                    ir, attempt_spectral_audit)
+                ir = attempt_result.merge(ir)
             if ir is None:
-                if attempt_spectral_audit is not None:
-                    dl_info.import_result = _attach_attempt_spectral_audit(
-                        ImportResult(), attempt_spectral_audit).to_json()
                 logger.error(
                     f"{mode} FAILED (no JSON, rc={run.returncode}): {label}")
                 for line in run.stdout.strip().split("\n"):
@@ -447,7 +421,8 @@ def dispatch_import_core(
                         error=f"rc={run.returncode}",
                         source_dirs=source_dirs,
                     ).to_json(),
-                    staged_path=path)
+                    staged_path=path,
+                    attempt_result=attempt_result)
                 outcome_message = f"No JSON result (rc={run.returncode})"
             else:
                 _populate_dl_info_from_import_result(dl_info, ir)
@@ -484,7 +459,8 @@ def dispatch_import_core(
                         imported_path=ir.postflight.imported_path,
                         clear_stale_v0_probe=(
                             decision != "preflight_existing"
-                        ))
+                        ),
+                        attempt_result=attempt_result)
                     try:
                         _refresh_current_evidence_after_import(
                             db,
@@ -589,13 +565,14 @@ def dispatch_import_core(
                     elif decision == "duplicate_remove_guard_failed":
                         fail_scenario = "duplicate_remove_guard_failed"
                         fail_detail = _guard_failure_detail(ir)
-                        _quarantine_duplicate_remove_guard_source(
-                            ir=ir,
-                            path=path,
-                            request_id=request_id,
-                            cfg=cfg,
+                        attempt_result.apply(
+                            lambda result: _quarantine_duplicate_remove_guard_source(
+                                ir=result,
+                                path=path,
+                                request_id=request_id,
+                                cfg=cfg,
+                            )
                         )
-                        dl_info.import_result = ir.to_json()
                         guard = ir.postflight.duplicate_remove_guard
                         if guard is not None:
                             logger.error(
@@ -703,7 +680,8 @@ def dispatch_import_core(
                                                error=fail_error,
                                                source_dirs=source_dirs,
                                            ).to_json()),
-                        staged_path=path)
+                        staged_path=path,
+                        attempt_result=attempt_result)
                     if narrowed_override is not None:
                         logger.info(
                             f"  Narrowed search_filetype_override '{current_override}'"
@@ -822,10 +800,6 @@ def dispatch_import_core(
                         trigger_meelo_clean(cfg)
         except sp.TimeoutExpired:
             logger.error(f"{mode} TIMEOUT: {label}")
-            if (attempt_spectral_audit is not None
-                    and dl_info.import_result is None):
-                dl_info.import_result = _attach_attempt_spectral_audit(
-                    ImportResult(), attempt_spectral_audit).to_json()
             _record_rejection_and_maybe_requeue(
                 db, request_id, dl_info,
                 detail="import_one.py timed out", error="timeout",
@@ -837,14 +811,11 @@ def dispatch_import_core(
                     error="timeout",
                     source_dirs=source_dirs,
                 ).to_json(),
-                staged_path=path)
+                staged_path=path,
+                attempt_result=attempt_result)
             outcome_message = "Import timed out"
         except Exception:
             logger.exception(f"{mode} ERROR: {label}")
-            if (attempt_spectral_audit is not None
-                    and dl_info.import_result is None):
-                dl_info.import_result = _attach_attempt_spectral_audit(
-                    ImportResult(), attempt_spectral_audit).to_json()
             _record_rejection_and_maybe_requeue(
                 db, request_id, dl_info,
                 detail="unhandled exception in auto-import", error="exception",
@@ -856,7 +827,8 @@ def dispatch_import_core(
                     error="exception",
                     source_dirs=source_dirs,
                 ).to_json(),
-                staged_path=path)
+                staged_path=path,
+                attempt_result=attempt_result)
             outcome_message = "Unhandled exception"
         finally:
             _remove_quality_evidence_action_file(quality_evidence_action_file)

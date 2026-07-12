@@ -103,6 +103,10 @@ class TestImportManifest(unittest.TestCase):
 
 class TestForceImportManifestGuard(unittest.TestCase):
     def test_force_import_rejects_audio_not_in_origin_manifest(self):
+        import msgspec
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+        from lib.quality import ImportResult, SpectralAnalysisDetail, SpectralDetail
+
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42,
@@ -122,13 +126,35 @@ class TestForceImportManifestGuard(unittest.TestCase):
                     "items": [{"path": os.path.join(root, "01 Perth.flac")}],
                 },
             )
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=root,
+                    source_username="alice",
+                ),
+            )
+            audit = SpectralDetail(
+                candidate=SpectralAnalysisDetail(
+                    attempted=True, grade="suspect", bitrate_kbps=96),
+                existing=SpectralAnalysisDetail(
+                    attempted=True, grade="genuine", bitrate_kbps=245),
+            )
+            preview_import_result = msgspec.to_builtins(
+                ImportResult(spectral=audit))
+            assert isinstance(preview_import_result, dict)
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"import_result": preview_import_result},
+            )
 
             outcome = dispatch_import_from_db(
                 cast(Any, db),
                 request_id=42,
                 failed_path=root,
                 force=True,
-                import_job_id=99,
+                import_job_id=job.id,
                 download_log_id=log_id,
             )
 
@@ -143,6 +169,16 @@ class TestForceImportManifestGuard(unittest.TestCase):
         self.assertEqual(db.request(42)["status"], "wanted")
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
         self.assertIn(("rejected", "untracked_audio"), outcomes)
+        rejection = next(
+            log for log in db.download_logs
+            if log.outcome == "rejected" and log.beets_scenario == "untracked_audio"
+        )
+        self.assertIsNotNone(rejection.import_result)
+        assert rejection.import_result is not None
+        self.assertEqual(
+            ImportResult.from_json(rejection.import_result).spectral,
+            audit,
+        )
         # Operator's folder choice, not the peer's fault — never denylist.
         self.assertEqual(len(db.denylist), 0)
 

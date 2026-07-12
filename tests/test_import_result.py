@@ -1222,7 +1222,7 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
         assert dl.current_spectral is not None
         self.assertEqual(dl.current_spectral.bitrate_kbps, 128)
         self.assertTrue(dl.verified_lossless_override)
-        self.assertIsNotNone(dl.import_result)
+        self.assertIsNone(dl.import_result)
 
     def test_no_conversion(self) -> None:
         dl = DownloadInfo(filetype="mp3", bitrate=320000)
@@ -1236,6 +1236,94 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
         self.assertEqual(dl.slskd_filetype, "mp3")
         self.assertEqual(dl.actual_filetype, "mp3")
         self.assertEqual(dl.bitrate, 320000)
+
+
+class TestImportAttemptResult(unittest.TestCase):
+    """The dispatch-owned accumulator is the sole persistence owner."""
+
+    def test_merge_preserves_rich_result_and_exact_preview_audit(self):
+        from lib.dispatch.types import ImportAttemptResult
+        from lib.quality import (
+            QualityEvidenceActionProvenance,
+            QualityComparisonBasis,
+            SpectralAnalysisDetail,
+            SpectralDetail,
+        )
+        from tests.helpers import make_import_result
+
+        audit = SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True, grade="suspect", bitrate_kbps=128),
+            existing=SpectralAnalysisDetail(
+                attempted=True, grade="genuine", bitrate_kbps=245),
+        )
+        harness_result = make_import_result(
+            decision="import",
+            new_min_bitrate=245,
+            prev_min_bitrate=128,
+            was_converted=True,
+            original_filetype="flac",
+            target_filetype="opus",
+            imported_path="/Beets/Artist/Album",
+            disambiguated=True,
+            final_format="opus 128",
+        )
+        harness_result.postflight.beets_id = 77
+        harness_result.postflight.track_count = 9
+        harness_result.comparison_basis = QualityComparisonBasis(
+            verdict="better", branch="rank", new_rank="mp3_v0",
+            existing_rank="mp3_v2", new_value_kbps=245,
+            existing_value_kbps=128,
+        )
+        harness_result.quality_evidence_provenance = QualityEvidenceActionProvenance(
+            candidate_status="ready",
+            current_status="ready",
+            snapshot_status="matched",
+        )
+        owner = ImportAttemptResult(audit)
+
+        merged = owner.merge(harness_result)
+
+        self.assertIs(merged, harness_result)
+        self.assertEqual(merged.spectral, audit)
+        self.assertEqual(merged.decision, "import")
+        self.assertIsNotNone(merged.new_measurement)
+        self.assertIsNotNone(merged.existing_measurement)
+        self.assertTrue(merged.conversion.was_converted)
+        self.assertEqual(merged.postflight.beets_id, 77)
+        self.assertIsNotNone(merged.comparison_basis)
+        self.assertEqual(
+            merged.quality_evidence_provenance.candidate_status, "ready")
+
+    def test_result_cannot_be_seeded_without_merge(self):
+        from lib.dispatch.types import ImportAttemptResult
+        from lib.quality import ImportResult
+
+        with self.assertRaises(TypeError):
+            ImportAttemptResult(None, ImportResult())  # type: ignore[call-arg]
+
+    def test_apply_mutation_is_included_only_when_owner_finalizes(self):
+        from lib.dispatch.types import ImportAttemptResult
+        from lib.quality import DownloadInfo, DuplicateRemoveGuardInfo, ImportResult
+
+        owner = ImportAttemptResult(None)
+        owner.merge(ImportResult(decision="duplicate_remove_guard_failed"))
+        owner.apply(lambda result: setattr(
+            result.postflight,
+            "duplicate_remove_guard",
+            DuplicateRemoveGuardInfo(quarantine_path="/failed/quarantine"),
+        ))
+        dl_info = DownloadInfo()
+
+        owner.finalize_into(dl_info)
+
+        assert dl_info.import_result is not None
+        persisted = ImportResult.from_json(dl_info.import_result)
+        assert persisted.postflight.duplicate_remove_guard is not None
+        self.assertEqual(
+            persisted.postflight.duplicate_remove_guard.quarantine_path,
+            "/failed/quarantine",
+        )
 
 
 class TestActiveDownloadState(unittest.TestCase):

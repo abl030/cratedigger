@@ -20,7 +20,7 @@ from lib.validation_envelope import decode_validation_envelope
 from lib.quality import ValidationResult
 
 from lib.dispatch.types import (DISPATCH_CODE_IMPORT_MANIFEST_REJECTED,
-                                DispatchOutcome)
+                                DispatchOutcome, ImportAttemptResult)
 from lib.dispatch.outcome_actions import _record_rejection_and_maybe_requeue
 
 if TYPE_CHECKING:
@@ -61,6 +61,7 @@ def _guard_reject(
     request_id: int,
     failed_path: str,
     source_username: str | None,
+    attempt_result: ImportAttemptResult,
     detail: str,
     scenario: str,
 ) -> DispatchOutcome:
@@ -112,6 +113,7 @@ def _guard_reject(
         requeue=True,
         outcome_label="rejected",
         staged_path=failed_path,
+        attempt_result=attempt_result,
     )
     return DispatchOutcome(
         success=False,
@@ -127,6 +129,7 @@ def _guard_force_manual_audio_manifest(
     failed_path: str,
     download_log_id: int | None,
     source_username: str | None,
+    attempt_result: ImportAttemptResult,
 ) -> DispatchOutcome | None:
     """Reconcile the staged source against its validated audio reference.
 
@@ -164,13 +167,13 @@ def _guard_force_manual_audio_manifest(
         return _guard_reject(
             db, request_id=request_id, failed_path=failed_path,
             source_username=source_username, detail=detail,
-            scenario="incomplete_fileset")
+            scenario="incomplete_fileset", attempt_result=attempt_result)
 
     def extra(detail: str, *, scenario: str = "untracked_audio") -> DispatchOutcome:
         return _guard_reject(
             db, request_id=request_id, failed_path=failed_path,
             source_username=source_username, detail=detail,
-            scenario=scenario)
+            scenario=scenario, attempt_result=attempt_result)
 
     # Empty source: the canonical empty_fileset early-exit in the evidence
     # pipeline self-heals this. Returning None lets the import flow reach it.

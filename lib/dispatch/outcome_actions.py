@@ -24,7 +24,7 @@ from lib.quality import (DownloadInfo, ValidationResult, dispatch_action, extrac
                          is_comparable_lossless_source_probe)
 
 from lib.dispatch.types import (DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
-                                DispatchOutcome,
+                                DispatchOutcome, ImportAttemptResult,
                                 _PREIMPORT_FACT_REJECT_DECISIONS)
 from lib.dispatch.helpers import (_cleanup_staged_dir,
                                   _populate_dl_info_from_import_result,
@@ -42,7 +42,7 @@ def _reject_import_from_evidence_decision(
     db: "PipelineDB",
     request_id: int,
     dl_info: DownloadInfo,
-    import_result: ImportResult,
+    attempt_result: ImportAttemptResult,
     distance: float | None,
     decision: str,
     detail: str,
@@ -63,7 +63,8 @@ def _reject_import_from_evidence_decision(
     ``_route_preimport_decision_reject``). One decision function, one
     rejection helper, one denylist policy.
 
-    Threads ``import_result`` through ``_populate_dl_info_from_import_result``
+    Reads the owner's richest result through
+    ``_populate_dl_info_from_import_result``
     so the same top-level ``download_log`` columns the post-import reject
     path populates (``bitrate``, ``actual_filetype``, ``spectral_grade``,
     ``existing_min_bitrate``, ``v0_probe_*``, etc.) get filled here too.
@@ -82,6 +83,9 @@ def _reject_import_from_evidence_decision(
     because the operator already chose to act on this source).
     """
 
+    import_result = attempt_result.result
+    if import_result is None:
+        raise RuntimeError("persisted-evidence rejection requires an import result")
     _populate_dl_info_from_import_result(dl_info, import_result)
     action = dispatch_action(decision)
     # U11: force requeue on folder/audio-integrity rejects (formerly the
@@ -102,6 +106,7 @@ def _reject_import_from_evidence_decision(
         outcome_label="rejected",
         validation_result=rejection_validation,
         staged_path=staged_path,
+        attempt_result=attempt_result,
     )
     if action.denylist:
         usernames = extract_usernames(files or [])
@@ -152,6 +157,7 @@ def _do_mark_done(
     detail: str | None = None,
     imported_path: str | None = None,
     clear_stale_v0_probe: bool = True,
+    attempt_result: ImportAttemptResult | None = None,
 ) -> int | None:
     """Mark album as imported — standalone version of DatabaseSource.mark_done.
 
@@ -225,6 +231,8 @@ def _do_mark_done(
         scenario=scenario,
         detail=detail,
     ).to_json()
+    if attempt_result is not None:
+        attempt_result.finalize_into(dl_info)
     return db.log_download(
         request_id=request_id,
         soulseek_username=dl_info.username,
@@ -362,6 +370,7 @@ def _record_rejection_and_maybe_requeue(
     outcome_label: DownloadLogOutcome = "rejected",
     search_filetype_override: str | None = None,
     staged_path: str | None = None,
+    attempt_result: ImportAttemptResult | None = None,
 ) -> int:
     """Importer-side rejection entry point.
 
@@ -384,6 +393,8 @@ def _record_rejection_and_maybe_requeue(
     input for the audit row. ``PipelineDB.log_download`` derives its
     denormalized query columns from that envelope.
     """
+    if attempt_result is not None:
+        attempt_result.finalize_into(dl_info)
     log_download_kwargs: dict[str, Any] = {
         "soulseek_username": dl_info.username,
         "filetype": dl_info.filetype,
