@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Literal, Mapping
 
 
+_DescriptorKind = Literal["module", "instance", "class", "static"]
+_CallAccess = Literal["module", "constructor", "class", "instance"]
+
+
 @dataclass(frozen=True, order=True)
 class DefaultPatchFinding:
     """One call made under an ineffective patch of its captured default."""
@@ -30,7 +34,7 @@ class _CapturedDefault:
         "keyword_only",
     ]
     positional_index: int | None
-    bound_receiver: bool
+    descriptor_kind: _DescriptorKind
 
 
 _PRODUCTION_ROOTS = (
@@ -103,7 +107,7 @@ def _definition_captures(
     callable_path: str,
     module: str,
     aliases: Mapping[str, str],
-    bound_receiver: bool,
+    descriptor_kind: _DescriptorKind,
 ) -> tuple[_CapturedDefault, ...]:
     captures: list[_CapturedDefault] = []
     positional = [*definition.args.posonlyargs, *definition.args.args]
@@ -125,7 +129,7 @@ def _definition_captures(
                     targets,
                     parameter_kind,
                     positional_index,
-                    bound_receiver,
+                    descriptor_kind,
                 ),
             )
     for argument, default in zip(
@@ -143,7 +147,7 @@ def _definition_captures(
                     targets,
                     "keyword_only",
                     None,
-                    bound_receiver,
+                    descriptor_kind,
                 ),
             )
     return tuple(captures)
@@ -161,31 +165,46 @@ def _captured_defaults(
         tree = ast.parse(source, filename=relative_path)
         aliases = _import_aliases(tree)
         for statement in tree.body:
+            definitions: tuple[
+                tuple[
+                    ast.FunctionDef | ast.AsyncFunctionDef,
+                    str,
+                    _DescriptorKind,
+                ],
+                ...,
+            ]
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                definitions = ((statement, f"{module}.{statement.name}", False),)
+                definitions = ((statement, f"{module}.{statement.name}", "module"),)
             elif isinstance(statement, ast.ClassDef):
                 class_paths.add(f"{module}.{statement.name}")
                 definitions = tuple(
                     (
                         member,
                         f"{module}.{statement.name}.{member.name}",
-                        not any(
+                        "static"
+                        if any(
                             _dotted_name(decorator) == "staticmethod"
                             for decorator in member.decorator_list
-                        ),
+                        )
+                        else "class"
+                        if any(
+                            _dotted_name(decorator) == "classmethod"
+                            for decorator in member.decorator_list
+                        )
+                        else "instance",
                     )
                     for member in statement.body
                     if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
                 )
             else:
                 continue
-            for definition, callable_path, bound_receiver in definitions:
+            for definition, callable_path, descriptor_kind in definitions:
                 for capture in _definition_captures(
                     definition,
                     callable_path=callable_path,
                     module=module,
                     aliases=aliases,
-                    bound_receiver=bound_receiver,
+                    descriptor_kind=descriptor_kind,
                 ):
                     captures_by_callable.setdefault(callable_path, []).append(capture)
     return (
@@ -222,6 +241,13 @@ class _TestPatchVisitor(ast.NodeVisitor):
         self.class_paths = class_paths
         self.aliases: dict[str, str] = {}
         self.instances: dict[str, str] = {}
+        self.local_functions: dict[
+            str,
+            ast.FunctionDef | ast.AsyncFunctionDef,
+        ] = {}
+        self.function_depth = 0
+        self.active_local_functions: set[int] = set()
+        self.comprehension_walrus_bindings: list[set[str]] = []
         self.active_patch_targets: tuple[str, ...] = ()
         self.findings: list[DefaultPatchFinding] = []
 
@@ -259,7 +285,7 @@ class _TestPatchVisitor(ast.NodeVisitor):
         call: ast.Call,
         capture: _CapturedDefault,
         *,
-        bound_call: bool,
+        call_access: _CallAccess,
     ) -> bool:
         for argument in call.keywords:
             if (
@@ -286,7 +312,14 @@ class _TestPatchVisitor(ast.NodeVisitor):
                 break
             explicit_prefix += 1
         supplied = explicit_prefix
-        if bound_call and capture.bound_receiver:
+        if call_access == "constructor":
+            supplied += 1
+        elif capture.descriptor_kind == "instance" and call_access == "instance":
+            supplied += 1
+        elif (
+            capture.descriptor_kind == "class"
+            and call_access in {"class", "instance"}
+        ):
             supplied += 1
         assert capture.positional_index is not None
         if supplied > capture.positional_index:
@@ -299,7 +332,13 @@ class _TestPatchVisitor(ast.NodeVisitor):
         target = self._resolved_expression(node.func)
         return target if target in self.class_paths else None
 
-    def _resolved_call_target(self, node: ast.expr) -> tuple[str | None, bool]:
+    def _resolved_call_target(
+        self,
+        node: ast.expr,
+    ) -> tuple[
+        str | None,
+        _CallAccess,
+    ]:
         """Resolve calls without interprocedural type inference.
 
         The source-local instance boundary is deliberately explicit: a bound
@@ -309,24 +348,38 @@ class _TestPatchVisitor(ast.NodeVisitor):
         remain unresolved rather than guessed.
         """
         direct = self._resolved_expression(node)
-        if direct in self.captures:
-            return direct, False
-        if direct in self.class_paths:
+        if direct is not None and direct in self.captures:
+            captures = self.captures[direct]
+            access: Literal["module", "class"] = (
+                "module"
+                if captures[0].descriptor_kind == "module"
+                else "class"
+            )
+            return direct, access
+        if direct is not None and direct in self.class_paths:
             constructor = f"{direct}.__init__"
-            return constructor, True
+            return constructor, "constructor"
         if isinstance(node, ast.Attribute):
             if isinstance(node.value, ast.Name):
                 instance_class = self.instances.get(node.value.id)
                 if instance_class is not None:
-                    return f"{instance_class}.{node.attr}", True
+                    return f"{instance_class}.{node.attr}", "instance"
             instance_class = self._constructed_class(node.value)
             if instance_class is not None:
-                return f"{instance_class}.{node.attr}", True
-        return direct, False
+                return f"{instance_class}.{node.attr}", "instance"
+        return direct, "module"
+
+    def _invalidate_binding(self, target: ast.expr) -> None:
+        for name in _assigned_names(target):
+            self.aliases.pop(name, None)
+            self.instances.pop(name, None)
+            self.local_functions.pop(name, None)
 
     def _visit_function(
         self,
         node: ast.FunctionDef | ast.AsyncFunctionDef,
+        *,
+        inherit_call_site_patches: bool = False,
     ) -> None:
         decorator_targets = tuple(
             target
@@ -335,9 +388,13 @@ class _TestPatchVisitor(ast.NodeVisitor):
         )
         prior_aliases = self.aliases
         prior_instances = self.instances
+        prior_local_functions = self.local_functions
+        prior_comprehension_walrus_bindings = self.comprehension_walrus_bindings
         prior_targets = self.active_patch_targets
         self.aliases = dict(prior_aliases)
         self.instances = dict(prior_instances)
+        self.local_functions = {}
+        self.comprehension_walrus_bindings = []
         arguments = [
             *node.args.posonlyargs,
             *node.args.args,
@@ -350,17 +407,33 @@ class _TestPatchVisitor(ast.NodeVisitor):
         for argument in arguments:
             self.aliases.pop(argument.arg, None)
             self.instances.pop(argument.arg, None)
-        self.active_patch_targets = decorator_targets
+        self.active_patch_targets = (
+            prior_targets if inherit_call_site_patches else ()
+        ) + decorator_targets
+        self.function_depth += 1
         for statement in node.body:
             self.visit(statement)
+        self.function_depth -= 1
         self.aliases = prior_aliases
         self.instances = prior_instances
+        self.local_functions = prior_local_functions
+        self.comprehension_walrus_bindings = prior_comprehension_walrus_bindings
         self.active_patch_targets = prior_targets
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        if self.function_depth:
+            self.local_functions[node.name] = node
+            self.aliases.pop(node.name, None)
+            self.instances.pop(node.name, None)
+            return
         self._visit_function(node)
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        if self.function_depth:
+            self.local_functions[node.name] = node
+            self.aliases.pop(node.name, None)
+            self.instances.pop(node.name, None)
+            return
         self._visit_function(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
@@ -386,25 +459,29 @@ class _TestPatchVisitor(ast.NodeVisitor):
             self.instances.pop(bound, None)
 
     def visit_With(self, node: ast.With) -> None:
-        targets = tuple(
-            target
-            for item in node.items
-            if (target := self._patch_target(item.context_expr)) is not None
-        )
+        targets: list[str] = []
+        for item in node.items:
+            target = self._patch_target(item.context_expr)
+            if target is not None:
+                targets.append(target)
+            if item.optional_vars is not None:
+                self._invalidate_binding(item.optional_vars)
         prior_targets = self.active_patch_targets
-        self.active_patch_targets += targets
+        self.active_patch_targets += tuple(targets)
         for statement in node.body:
             self.visit(statement)
         self.active_patch_targets = prior_targets
 
     def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
-        targets = tuple(
-            target
-            for item in node.items
-            if (target := self._patch_target(item.context_expr)) is not None
-        )
+        targets: list[str] = []
+        for item in node.items:
+            target = self._patch_target(item.context_expr)
+            if target is not None:
+                targets.append(target)
+            if item.optional_vars is not None:
+                self._invalidate_binding(item.optional_vars)
         prior_targets = self.active_patch_targets
-        self.active_patch_targets += targets
+        self.active_patch_targets += tuple(targets)
         for statement in node.body:
             self.visit(statement)
         self.active_patch_targets = prior_targets
@@ -415,6 +492,7 @@ class _TestPatchVisitor(ast.NodeVisitor):
         for target in node.targets:
             for name in _assigned_names(target):
                 self.aliases.pop(name, None)
+                self.local_functions.pop(name, None)
                 if constructed_class is None:
                     self.instances.pop(name, None)
                 else:
@@ -428,13 +506,14 @@ class _TestPatchVisitor(ast.NodeVisitor):
         )
         for name in _assigned_names(node.target):
             self.aliases.pop(name, None)
+            self.local_functions.pop(name, None)
             if constructed_class is None:
                 self.instances.pop(name, None)
             else:
                 self.instances[name] = constructed_class
 
     def visit_Call(self, node: ast.Call) -> None:
-        callable_path, bound_call = self._resolved_call_target(node.func)
+        callable_path, call_access = self._resolved_call_target(node.func)
         if callable_path is not None and self.active_patch_targets:
             for capture in self.captures.get(callable_path, ()):
                 matching_targets = sorted(
@@ -445,7 +524,7 @@ class _TestPatchVisitor(ast.NodeVisitor):
                     and not self._dependency_is_injected(
                         node,
                         capture,
-                        bound_call=bound_call,
+                        call_access=call_access,
                     )
                 ):
                     self.findings.append(
@@ -457,7 +536,88 @@ class _TestPatchVisitor(ast.NodeVisitor):
                             injectable_keyword=capture.injectable_keyword,
                         ),
                     )
+        if isinstance(node.func, ast.Name):
+            local_function = self.local_functions.get(node.func.id)
+            function_id = id(local_function) if local_function is not None else None
+            if (
+                local_function is not None
+                and function_id not in self.active_local_functions
+            ):
+                assert function_id is not None
+                self.active_local_functions.add(function_id)
+                try:
+                    self._visit_function(
+                        local_function,
+                        inherit_call_site_patches=True,
+                    )
+                finally:
+                    self.active_local_functions.remove(function_id)
         self.generic_visit(node)
+
+    def visit_For(self, node: ast.For) -> None:
+        self.visit(node.iter)
+        self._invalidate_binding(node.target)
+        for statement in [*node.body, *node.orelse]:
+            self.visit(statement)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self.visit(node.iter)
+        self._invalidate_binding(node.target)
+        for statement in [*node.body, *node.orelse]:
+            self.visit(statement)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.type is not None:
+            self.visit(node.type)
+        if node.name is not None:
+            self._invalidate_binding(ast.Name(id=node.name))
+        for statement in node.body:
+            self.visit(statement)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self.visit(node.value)
+        names = _assigned_names(node.target)
+        self._invalidate_binding(node.target)
+        for bindings in self.comprehension_walrus_bindings:
+            bindings.update(names)
+
+    def _visit_comprehension(
+        self,
+        generators: list[ast.comprehension],
+        values: tuple[ast.expr, ...],
+    ) -> None:
+        prior_aliases = self.aliases
+        prior_instances = self.instances
+        prior_local_functions = self.local_functions
+        self.aliases = dict(prior_aliases)
+        self.instances = dict(prior_instances)
+        self.local_functions = dict(prior_local_functions)
+        self.comprehension_walrus_bindings.append(set())
+        for generator in generators:
+            self.visit(generator.iter)
+            self._invalidate_binding(generator.target)
+            for condition in generator.ifs:
+                self.visit(condition)
+        for value in values:
+            self.visit(value)
+        persistent_bindings = self.comprehension_walrus_bindings.pop()
+        self.aliases = prior_aliases
+        self.instances = prior_instances
+        self.local_functions = prior_local_functions
+        for name in persistent_bindings:
+            self._invalidate_binding(ast.Name(id=name))
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension(node.generators, (node.elt,))
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension(node.generators, (node.elt,))
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self._visit_comprehension(node.generators, (node.elt,))
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension(node.generators, (node.key, node.value))
 
 
 def find_ineffective_default_patches(
@@ -469,7 +629,10 @@ def find_ineffective_default_patches(
     Patch context managers/decorators count only when their binding resolves
     exactly to ``unittest.mock.patch`` or ``unittest.mock.patch.object``.
     Same-named helpers, parameters, and object attributes are not inferred to
-    be mocks.
+    be mocks. Nested local functions are evaluated only when called directly
+    by their local name, using patch state at that call site. Calls through
+    returned, assigned, or passed callback aliases remain outside the bounded
+    source-local analysis rather than inheriting definition-time patch state.
     """
     captures, class_paths = _captured_defaults(production_sources)
     findings: list[DefaultPatchFinding] = []

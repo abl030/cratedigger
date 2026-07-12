@@ -350,6 +350,233 @@ _OMITTED_CONSTRUCTOR = _AuditWorld(
 )
 
 
+@st.composite
+def _nested_call_worlds(draw):
+    patch_shape = draw(st.sampled_from(("with", "decorator")))
+    call_site = draw(
+        st.sampled_from(("inside", "outside"))
+        if patch_shape == "with"
+        else st.just("inside")
+    )
+    production = {
+        "lib/subject.py": (
+            "from lib.dependencies import deliver\n\n"
+            "def execute(*, dependency_fn=deliver):\n"
+            "    return dependency_fn()\n"
+        ),
+    }
+    if patch_shape == "decorator":
+        body = (
+            f"@{_PATCH_NAME}(\"lib.subject.deliver\")\n"
+            "def test_subject(mock_dependency):\n"
+            "    def exercise():\n"
+            "        execute()\n"
+            "    exercise()\n"
+        )
+        expected_valid = False
+    elif call_site == "inside":
+        body = (
+            "def test_subject():\n"
+            "    def exercise():\n"
+            "        execute()\n"
+            f"    with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            "        exercise()\n"
+        )
+        expected_valid = False
+    else:
+        body = (
+            "def test_subject():\n"
+            f"    with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            "        def exercise():\n"
+            "            execute()\n"
+            "        callback = exercise\n"
+            "    callback()\n"
+        )
+        expected_valid = True
+    return _AuditWorld(
+        production=production,
+        tests={
+            "tests/test_subject.py": (
+                f"from unittest.mock import {_PATCH_NAME}\n"
+                "from lib.subject import execute\n\n"
+                + body
+            ),
+        },
+        expected_valid=expected_valid,
+        label=f"nested/{patch_shape}/{call_site}",
+    )
+
+
+@st.composite
+def _descriptor_worlds(draw):
+    descriptor = draw(st.sampled_from(("instance", "class", "static")))
+    access = draw(st.sampled_from(("class", "instance")))
+    relation = draw(st.sampled_from(("omitted", "positional")))
+    decorator = {
+        "instance": "",
+        "class": "    @classmethod\n",
+        "static": "    @staticmethod\n",
+    }[descriptor]
+    receiver = {"instance": "self", "class": "cls", "static": None}[descriptor]
+    parameters = "value, dependency_fn=deliver"
+    if receiver is not None:
+        parameters = f"{receiver}, {parameters}"
+    production = {
+        "lib/subject.py": (
+            "from lib.dependencies import deliver\n\n"
+            "class Worker:\n"
+            + decorator
+            + f"    def run({parameters}):\n"
+            + "        return dependency_fn(value)\n"
+        ),
+    }
+    arguments = ['"payload"']
+    if descriptor == "instance" and access == "class":
+        arguments.insert(0, "worker")
+    if relation == "positional":
+        arguments.append("object()")
+    target = "Worker.run" if access == "class" else "worker.run"
+    tests = {
+        "tests/test_subject.py": (
+            f"from unittest.mock import {_PATCH_NAME}\n"
+            "from lib.subject import Worker\n\n"
+            "def test_subject():\n"
+            "    worker = Worker()\n"
+            f"    with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            + f"        {target}({', '.join(arguments)})\n"
+        ),
+    }
+    return _AuditWorld(
+        production=production,
+        tests=tests,
+        expected_valid=relation == "positional",
+        label=f"descriptor/{descriptor}/{access}/{relation}",
+    )
+
+
+@st.composite
+def _binder_worlds(draw):
+    binder = draw(st.sampled_from((
+        "for",
+        "async_for",
+        "with",
+        "except",
+        "walrus",
+        "comprehension",
+        "comprehension_instance",
+        "comprehension_walrus",
+    )))
+    if binder == "comprehension_instance":
+        return _AuditWorld(
+            production={
+                "lib/subject.py": (
+                    "from lib.dependencies import deliver\n\n"
+                    "class Worker:\n"
+                    "    def run(self, *, dependency_fn=deliver):\n"
+                    "        return dependency_fn()\n"
+                ),
+            },
+            tests={
+                "tests/test_subject.py": (
+                    f"from unittest.mock import {_PATCH_NAME}\n"
+                    "from lib.subject import Worker\n\n"
+                    "def test_subject(foreign_workers):\n"
+                    "    worker = Worker()\n"
+                    f"    with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+                    "        values = [worker.run() for worker in foreign_workers]\n"
+                ),
+            },
+            expected_valid=True,
+            label="binder/comprehension_instance",
+        )
+    if binder == "comprehension_walrus":
+        return _AuditWorld(
+            production={
+                "lib/subject.py": (
+                    "from lib.dependencies import deliver\n\n"
+                    "def execute(*, dependency_fn=deliver):\n"
+                    "    return dependency_fn()\n"
+                ),
+            },
+            tests={
+                "tests/test_subject.py": (
+                    f"from unittest.mock import {_PATCH_NAME}\n"
+                    "from helper import helper_patch\n"
+                    "from lib.subject import execute\n\n"
+                    "def test_subject(values):\n"
+                    f"    bound = [({_PATCH_NAME} := helper_patch) for value in values]\n"
+                    f"    with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+                    "        execute()\n"
+                ),
+            },
+            expected_valid=True,
+            label="binder/comprehension_walrus",
+        )
+    if binder == "for":
+        body = (
+            "def test_subject():\n"
+            f"    for {_PATCH_NAME} in [helper_patch]:\n"
+            f"        with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            "            execute()\n"
+        )
+    elif binder == "async_for":
+        body = (
+            "async def test_subject(values):\n"
+            f"    async for {_PATCH_NAME} in values:\n"
+            f"        with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            "            execute()\n"
+        )
+    elif binder == "with":
+        body = (
+            "def test_subject():\n"
+            f"    with provider() as {_PATCH_NAME}:\n"
+            f"        with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            "            execute()\n"
+        )
+    elif binder == "except":
+        body = (
+            "def test_subject():\n"
+            "    try:\n"
+            "        raise RuntimeError\n"
+            f"    except RuntimeError as {_PATCH_NAME}:\n"
+            f"        with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            "            execute()\n"
+        )
+    elif binder == "walrus":
+        body = (
+            "def test_subject():\n"
+            f"    if ({_PATCH_NAME} := helper_patch):\n"
+            f"        with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            "            execute()\n"
+        )
+    else:
+        body = (
+            "def test_subject(helpers):\n"
+            f"    values = [{_PATCH_NAME} for {_PATCH_NAME} in helpers]\n"
+            f"    with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            "        execute()\n"
+        )
+    return _AuditWorld(
+        production={
+            "lib/subject.py": (
+                "from lib.dependencies import deliver\n\n"
+                "def execute(*, dependency_fn=deliver):\n"
+                "    return dependency_fn()\n"
+            ),
+        },
+        tests={
+            "tests/test_subject.py": (
+                f"from unittest.mock import {_PATCH_NAME}\n"
+                "from helper import helper_patch, provider\n"
+                "from lib.subject import execute\n\n"
+                + body
+            ),
+        },
+        expected_valid=binder != "comprehension",
+        label=f"binder/{binder}",
+    )
+
+
 class TestGeneratedDefinitionDefaultPatchAudit(unittest.TestCase):
     @given(world=_default_patch_worlds())
     @example(world=_OMITTED_CONSTRUCTOR)
@@ -371,6 +598,27 @@ class TestGeneratedDefinitionDefaultPatchAudit(unittest.TestCase):
 
         with self.assertRaises(AssertionError):
             assert_default_patch_invariant(findings, expected_valid=True)
+
+    @given(world=_nested_call_worlds())
+    def test_nested_helpers_use_direct_call_site_patch_state(
+        self,
+        world: _AuditWorld,
+    ) -> None:
+        findings = find_ineffective_default_patches(world.production, world.tests)
+        assert_default_patch_invariant(findings, expected_valid=world.expected_valid)
+
+    @given(world=_descriptor_worlds())
+    def test_descriptor_binding_matches_python(self, world: _AuditWorld) -> None:
+        findings = find_ineffective_default_patches(world.production, world.tests)
+        assert_default_patch_invariant(findings, expected_valid=world.expected_valid)
+
+    @given(world=_binder_worlds())
+    def test_lexical_binders_control_patch_provenance(
+        self,
+        world: _AuditWorld,
+    ) -> None:
+        findings = find_ineffective_default_patches(world.production, world.tests)
+        assert_default_patch_invariant(findings, expected_valid=world.expected_valid)
 
 
 if __name__ == "__main__":

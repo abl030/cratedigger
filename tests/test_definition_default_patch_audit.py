@@ -309,6 +309,255 @@ def test_worker():
 
         self.assertEqual(len(find_ineffective_default_patches(production, tests)), 1)
 
+    def test_nested_helper_inherits_enclosing_with_patch_at_direct_call(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from lib.worker import run
+
+def test_worker():
+    def exercise():
+        run()
+    with {_PATCH_NAME}("lib.worker.send"):
+        exercise()
+""",
+        }
+
+        self.assertEqual(len(find_ineffective_default_patches(production, tests)), 1)
+
+    def test_nested_helper_inherits_outer_patch_decorator_at_call(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from lib.worker import run
+
+@{_PATCH_NAME}("lib.worker.send")
+def test_worker(mock_send):
+    def exercise():
+        run()
+    exercise()
+""",
+        }
+
+        self.assertEqual(len(find_ineffective_default_patches(production, tests)), 1)
+
+    def test_nested_helper_called_after_patch_exit_is_accepted(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from lib.worker import run
+
+def test_worker():
+    with {_PATCH_NAME}("lib.worker.send"):
+        def exercise():
+            run()
+        callback = exercise
+    callback()
+""",
+        }
+
+        self.assertEqual(find_ineffective_default_patches(production, tests), ())
+
+    def test_descriptor_positional_binding_matches_python(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+class Worker:
+    def instance_run(self, value, sender=send):
+        return sender(value)
+
+    @classmethod
+    def class_run(cls, value, sender=send):
+        return sender(value)
+
+    @staticmethod
+    def static_run(value, sender=send):
+        return sender(value)
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from lib.worker import Worker
+
+def test_descriptors():
+    worker = Worker()
+    with {_PATCH_NAME}("lib.worker.send"):
+        worker.instance_run("payload", object())
+        Worker.instance_run(worker, "payload", object())
+        Worker.class_run("payload", object())
+        worker.class_run("payload", object())
+        Worker.static_run("payload", object())
+        worker.static_run("payload", object())
+""",
+        }
+
+        self.assertEqual(find_ineffective_default_patches(production, tests), ())
+
+    def test_non_assignment_binders_shadow_patch_provenance(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from helper import helper_patch, provider
+from lib.worker import run
+
+def test_for_shadow():
+    for {_PATCH_NAME} in [helper_patch]:
+        with {_PATCH_NAME}("lib.worker.send"):
+            run()
+
+async def test_async_for_shadow(values):
+    async for {_PATCH_NAME} in values:
+        with {_PATCH_NAME}("lib.worker.send"):
+            run()
+
+def test_with_shadow():
+    with provider() as {_PATCH_NAME}:
+        with {_PATCH_NAME}("lib.worker.send"):
+            run()
+
+def test_except_shadow():
+    try:
+        raise RuntimeError
+    except RuntimeError as {_PATCH_NAME}:
+        with {_PATCH_NAME}("lib.worker.send"):
+            run()
+
+def test_walrus_shadow():
+    if ({_PATCH_NAME} := helper_patch):
+        with {_PATCH_NAME}("lib.worker.send"):
+            run()
+""",
+        }
+
+        self.assertEqual(find_ineffective_default_patches(production, tests), ())
+
+    def test_comprehension_target_does_not_shadow_later_canonical_patch(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from lib.worker import run
+
+def test_comprehension(helpers):
+    values = [{_PATCH_NAME} for {_PATCH_NAME} in helpers]
+    with {_PATCH_NAME}("lib.worker.send"):
+        run()
+""",
+        }
+
+        self.assertEqual(len(find_ineffective_default_patches(production, tests)), 1)
+
+    def test_comprehension_target_shadows_outer_instance_binding_inside(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+class Worker:
+    def run(self, *, sender=send):
+        return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from lib.worker import Worker
+
+def test_comprehension(foreign_workers):
+    worker = Worker()
+    with {_PATCH_NAME}("lib.worker.send"):
+        values = [worker.run() for worker in foreign_workers]
+""",
+        }
+
+        self.assertEqual(find_ineffective_default_patches(production, tests), ())
+
+    def test_canonical_patch_remains_active_when_as_target_shadows_name(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from lib.worker import run
+
+def test_worker():
+    with {_PATCH_NAME}("lib.worker.send") as {_PATCH_NAME}:
+        run()
+""",
+        }
+
+        self.assertEqual(len(find_ineffective_default_patches(production, tests)), 1)
+
+    def test_comprehension_walrus_invalidates_outer_patch_binding(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from helper import helper_patch
+from lib.worker import run
+
+def test_worker(values):
+    bound = [({_PATCH_NAME} := helper_patch) for value in values]
+    with {_PATCH_NAME}("lib.worker.send"):
+        run()
+""",
+        }
+
+        self.assertEqual(find_ineffective_default_patches(production, tests), ())
+
     def test_known_bad_checker_rejects_a_planted_omission(self) -> None:
         finding = DefaultPatchFinding(
             test_path="tests/test_bad.py",
