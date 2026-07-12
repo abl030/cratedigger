@@ -29,7 +29,7 @@ Meelo has three APIs, each with different auth:
 
 ### Credentials
 
-- **Web UI login**: username `abl030`, password `billand1`
+- **Web UI login**: username `abl030`, password redacted (was committed in plaintext; rotate it — see `docs/security-audit-2026-07-12.md`, CD-SEC-01)
 - **API key** (for server API): stored in `API_KEYS` env var in sops-encrypted `meelo.env`. Retrieve at runtime: `sudo podman exec meelo-server printenv API_KEYS`
 - **JWT** (for scanner API): obtain via login endpoint, valid for ~100 days
 
@@ -44,7 +44,7 @@ curl -s "http://localhost:5001/api/albums?query=search+term" -H "x-api-key: $API
 # Scanner API — uses JWT from login
 JWT=$(curl -s -X POST "http://localhost:5001/api/auth/login" \
   -H "Content-Type: application/json" \
-  -d '{"username":"abl030","password":"billand1"}' \
+  -d '{"username":"abl030","password":"<redacted>"}' \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 curl -s -X POST "http://localhost:5001/scanner/refresh?album=<slug>&force=true" \
   -H "Authorization: Bearer $JWT"
@@ -488,7 +488,7 @@ sudo systemctl start podman-meelo-nginx.service
 ```bash
 JWT=$(curl -s -X POST "http://localhost:5001/api/auth/login" \
   -H "Content-Type: application/json" \
-  -d '{"username":"abl030","password":"billand1"}' \
+  -d '{"username":"abl030","password":"<redacted>"}' \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 curl -s "http://localhost:5001/api/releases/<slug>?with=illustration" \
   -H "Authorization: Bearer $JWT" | python3 -m json.tool
@@ -574,7 +574,7 @@ How to force refresh:
 # Get a JWT token
 JWT=$(curl -s -X POST "http://localhost:5001/api/auth/login" \
   -H "Content-Type: application/json" \
-  -d '{"username":"abl030","password":"billand1"}' \
+  -d '{"username":"abl030","password":"<redacted>"}' \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 
 # Force refresh a SINGLE ALBUM (use album slug from DB or URL)
