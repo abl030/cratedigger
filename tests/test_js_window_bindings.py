@@ -236,6 +236,16 @@ console.log(JSON.stringify(values.map(value => value.length)));
                 "Object.assign?.(window, { fetch });"
             ),
             (
+                'const method = "assign"; '
+                "Object.assign(window, { supported }); "
+                "Object[method](window, { fetch });"
+            ),
+            "Object.assign(window, { supported }); Object.assign(globalThis, { fetch });",
+            "Object.assign(window, { supported }); Object.assign(self, { fetch });",
+            "Object.assign(window, { supported }); globalThis.fetch = localFetch;",
+            "Object.assign(window, { supported }); self['fetch'] = localFetch;",
+            "Object.assign(window, { supported }); Object?.assign(window, { fetch });",
+            (
                 "const assignWindow = Object.assign; "
                 "Object.assign(window, { supported }); "
                 "assignWindow(window, { fetch });"
@@ -261,6 +271,14 @@ console.log(JSON.stringify(values.map(value => value.length)));
             with self.subTest(source=source), self.assertRaises(ValueError):
                 exposed_window_bindings(source)
 
+    def test_unrelated_computed_object_call_does_not_trip_binding_audit(self) -> None:
+        source = (
+            'const method = "unrelated"; '
+            "Object.assign(window, { supported }); "
+            "Object[method](window, { fetch });"
+        )
+        self.assertEqual(exposed_window_bindings(source), {"supported"})
+
     def test_escaped_binding_key_is_normalized_before_native_collision(self) -> None:
         source = r"Object.assign(window, { f\u0065tch });"
         self.assertEqual(exposed_window_bindings(source), {"fetch"})
@@ -269,12 +287,15 @@ console.log(JSON.stringify(values.map(value => value.length)));
         with self.assertRaisesRegex(ValueError, "reserved native window names: fetch"):
             assert_window_bindings({}, "", source)
 
-    def test_node_confirms_computed_assign_and_escaped_key_mutate_target(self) -> None:
+    def test_node_confirms_dynamic_assign_and_global_mutations_execute(self) -> None:
         script = r'''
 const target = {};
 const f\u0065tch = 1;
-Object["assign"](target, {f\u0065tch});
-console.log(JSON.stringify(Object.keys(target)));
+const method = "assign";
+Object[method](target, {f\u0065tch});
+globalThis.reviewProbe = 2;
+console.log(JSON.stringify([Object.keys(target), globalThis.reviewProbe]));
+delete globalThis.reviewProbe;
 '''
         result = subprocess.run(
             ["node", "--input-type=module", "--eval", script],
@@ -282,7 +303,7 @@ console.log(JSON.stringify(Object.keys(target)));
             capture_output=True,
             text=True,
         )
-        self.assertEqual(json.loads(result.stdout), ["fetch"])
+        self.assertEqual(json.loads(result.stdout), [["fetch"], 2])
 
     def test_production_corpus_has_every_conservative_handler_bound(self) -> None:
         audit = assert_window_bindings(

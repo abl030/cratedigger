@@ -226,6 +226,27 @@ _UNSUPPORTED_RENDERER_REFERENCES = st.sampled_from(
             f'const name = "{_CALL_NAME}"; '
             "__test__[name]({invented_client_only: 1});"
         ),
+        (
+            f'const getName = () => "{_CALL_NAME}"; '
+            "helpers[getName()]({invented_client_only: 1});"
+        ),
+        (
+            f'const names = ["{_CALL_NAME}"]; '
+            "helpers[names[0]]({invented_client_only: 1});"
+        ),
+        (
+            f'const names = {{history: "{_CALL_NAME}"}}; '
+            "helpers[names.history]({invented_client_only: 1});"
+        ),
+        (
+            'const prefix = "renderDownloadHistory"; '
+            'helpers[prefix + "Item"]({invented_client_only: 1});'
+        ),
+        (
+            'const prefix = "renderDownloadHistory"; '
+            'helpers[`${prefix}Item`]({invented_client_only: 1});'
+        ),
+        f"__test__?.{_CALL_NAME}({{invented_client_only: 1}});",
         f"(0, {_CALL_NAME})({{invented_client_only: 1}});",
         f"{_CALL_NAME}.call(null, {{invented_client_only: 1}});",
         f"{_CALL_NAME}?.({{invented_client_only: 1}});",
@@ -252,6 +273,14 @@ _UNSUPPORTED_WINDOW_BINDINGS = st.sampled_from(
         r"Object.assign(window, { supported }); Object.\u0061ssign(window, { fetch });",
         "Object.assign(window, { supported }); Object.assign?.(window, { fetch });",
         (
+            'const method = "assign"; '
+            "Object.assign(window, { supported }); Object[method](window, { fetch });"
+        ),
+        "Object.assign(window, { supported }); Object.assign(globalThis, { fetch });",
+        "Object.assign(window, { supported }); Object.assign(self, { fetch });",
+        "Object.assign(window, { supported }); globalThis.fetch = localFetch;",
+        "Object.assign(window, { supported }); Object?.assign(window, { fetch });",
+        (
             "const alias = Object.assign; "
             "Object.assign(window, { supported }); alias(window, { fetch });"
         ),
@@ -264,6 +293,18 @@ _UNSUPPORTED_WINDOW_BINDINGS = st.sampled_from(
             "Object.assign(target, { fetch });"
         ),
         "Object.assign(window, { supported }); (window).fetch = localFetch;",
+    )
+)
+
+_SUPPORTED_UNRELATED_COMPUTED_CALLS = st.sampled_from(
+    (
+        'const key = "unrelated"; globalThis[key]();',
+        'const label = "renderDownloadHistoryItem"; console.log(label);',
+        "const key = getRuntimeName(); unrelatedNamespace[key]();",
+        (
+            'const key = "unrelated"; Object.assign(window, { supported }); '
+            "Object[key](window, { fetch });"
+        ),
     )
 )
 
@@ -294,6 +335,15 @@ class TestJsAstGenerated(unittest.TestCase):
         self, source: str
     ) -> None:
         assert_unsupported_window_binding_is_rejected(source)
+
+    @given(_SUPPORTED_UNRELATED_COMPUTED_CALLS)
+    def test_unrelated_computed_calls_and_inert_strings_remain_supported(
+        self, source: str
+    ) -> None:
+        if "Object.assign" in source:
+            self.assertEqual(exposed_window_bindings(source), {"supported"})
+        else:
+            self.assertEqual(fixture_fields_for_call(source, _CALL_NAME), set())
 
     @given(
         st.sampled_from(("'", "`")),
@@ -443,7 +493,10 @@ class TestJsAstGenerated(unittest.TestCase):
             assert_window_world(audit, required={"needed"}, exposed=set())
 
     def test_known_bad_fail_open_renderer_reference_trips_checker(self) -> None:
-        source = f"(0, {_CALL_NAME})({{invented_client_only: 1}});"
+        source = (
+            f'const getName = () => "{_CALL_NAME}"; '
+            "helpers[getName()]({invented_client_only: 1});"
+        )
         with self.assertRaisesRegex(AssertionError, "unsupported audited renderer"):
             assert_unsupported_renderer_reference_is_rejected(
                 source, extractor=lambda _source, _name: set()

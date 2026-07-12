@@ -50,6 +50,8 @@ _NON_HANDLER_BARE_CALLS = _RESERVED_NATIVE_WINDOW_CALLS | {
     "switch",
     "while",
 }
+_BROWSER_GLOBALS = frozenset({"window", "globalThis", "self"})
+_STATIC_RESOLUTION_LIMIT = 24
 
 _STATIC_WINDOW_CALL_RE = re.compile(r"\bwindow\.([A-Za-z_$][\w$]*)\s*\(")
 _COMPUTED_WINDOW_RE = re.compile(r"\bwindow\s*\[")
@@ -230,6 +232,249 @@ def _walk_with_parent(
         yield from _walk_with_parent(child, node)
 
 
+@dataclass(frozen=True)
+class _StaticArray:
+    values: tuple[object, ...]
+
+
+@dataclass(frozen=True)
+class _StaticObject:
+    values: tuple[tuple[str, object], ...]
+
+
+@dataclass(frozen=True)
+class _StaticFunction:
+    body: Node
+
+
+class _UnknownStaticValue:
+    pass
+
+
+_UNKNOWN_STATIC = _UnknownStaticValue()
+
+
+def _subscript_parts(node: Node) -> tuple[Node | None, Node | None]:
+    object_node = node.child_by_field_name("object")
+    index_node = node.child_by_field_name("index")
+    if object_node is None or index_node is None:
+        children = _semantic_named_children(node)
+        if len(children) == 2:
+            return children[0], children[1]
+    return object_node, index_node
+
+
+class _StaticValueResolver:
+    """Resolve a deliberately bounded, pure subset of JavaScript values."""
+
+    def __init__(self, root: Node, source_bytes: bytes) -> None:
+        self._source_bytes = source_bytes
+        self._bindings: dict[str, Node] = {}
+        self._functions: dict[str, Node] = {}
+        duplicate_names: set[str] = set()
+        mutated_names: set[str] = set()
+
+        for node, parent in _walk_with_parent(root):
+            if node.type == "variable_declarator" and parent is not None:
+                name = node.child_by_field_name("name")
+                value = node.child_by_field_name("value")
+                identifier = _identifier_value(name, source_bytes)
+                if (
+                    parent.type == "lexical_declaration"
+                    and _node_text(parent, source_bytes).lstrip().startswith("const")
+                    and identifier is not None
+                    and value is not None
+                ):
+                    if identifier in self._bindings or identifier in self._functions:
+                        duplicate_names.add(identifier)
+                    else:
+                        self._bindings[identifier] = value
+            elif node.type == "function_declaration":
+                name = node.child_by_field_name("name")
+                identifier = _identifier_value(name, source_bytes)
+                if identifier is not None:
+                    if identifier in self._bindings or identifier in self._functions:
+                        duplicate_names.add(identifier)
+                    else:
+                        self._functions[identifier] = node
+            elif node.type in {
+                "assignment_expression",
+                "augmented_assignment_expression",
+            }:
+                left = node.child_by_field_name("left")
+                identifier = _identifier_value(left, source_bytes)
+                if identifier is not None:
+                    mutated_names.add(identifier)
+            elif node.type == "update_expression":
+                argument = node.child_by_field_name("argument")
+                if argument is None:
+                    children = _semantic_named_children(node)
+                    argument = children[0] if children else None
+                identifier = _identifier_value(argument, source_bytes)
+                if identifier is not None:
+                    mutated_names.add(identifier)
+
+        for name in duplicate_names | mutated_names:
+            self._bindings.pop(name, None)
+            self._functions.pop(name, None)
+
+    def resolve(self, node: Node | None) -> object:
+        return self._resolve(node, frozenset(), 0)
+
+    def _resolve(
+        self, node: Node | None, seen: frozenset[str], depth: int
+    ) -> object:
+        if node is None or depth >= _STATIC_RESOLUTION_LIMIT:
+            return _UNKNOWN_STATIC
+        if node.type == "string":
+            return _decode_js_string(node, self._source_bytes)
+        if node.type == "number":
+            raw = _node_text(node, self._source_bytes)
+            try:
+                return int(raw, 0)
+            except ValueError:
+                return _UNKNOWN_STATIC
+        if node.type == "identifier":
+            name = _identifier_value(node, self._source_bytes)
+            if name is None or name in seen:
+                return _UNKNOWN_STATIC
+            target = self._bindings.get(name)
+            if target is not None:
+                return self._resolve(target, seen | {name}, depth + 1)
+            function = self._functions.get(name)
+            return _StaticFunction(function) if function is not None else _UNKNOWN_STATIC
+        if node.type == "parenthesized_expression":
+            children = _semantic_named_children(node)
+            if len(children) == 1:
+                return self._resolve(children[0], seen, depth + 1)
+            return _UNKNOWN_STATIC
+        if node.type in {"arrow_function", "function_expression"}:
+            return _StaticFunction(node)
+        if node.type == "call_expression":
+            arguments = node.child_by_field_name("arguments")
+            if arguments is None or _semantic_named_children(arguments):
+                return _UNKNOWN_STATIC
+            function = self._resolve(
+                node.child_by_field_name("function"), seen, depth + 1
+            )
+            if not isinstance(function, _StaticFunction):
+                return _UNKNOWN_STATIC
+            body = function.body.child_by_field_name("body")
+            if body is None and function.body.type == "arrow_function":
+                named = _semantic_named_children(function.body)
+                body = named[-1] if named else None
+            return self._resolve_function_body(body, seen, depth + 1)
+        if node.type == "array":
+            try:
+                elements = _direct_array_elements(node)
+            except ValueError:
+                return _UNKNOWN_STATIC
+            values = tuple(
+                self._resolve(element, seen, depth + 1) for element in elements
+            )
+            return _StaticArray(values)
+        if node.type == "object":
+            entries: list[tuple[str, object]] = []
+            for child in _semantic_named_children(node):
+                if child.type == "pair":
+                    key = child.child_by_field_name("key")
+                    value = child.child_by_field_name("value")
+                    if key is None or value is None:
+                        return _UNKNOWN_STATIC
+                    try:
+                        static_key = _static_object_key(key, self._source_bytes)
+                    except ValueError:
+                        return _UNKNOWN_STATIC
+                    entries.append(
+                        (static_key, self._resolve(value, seen, depth + 1))
+                    )
+                elif child.type == "shorthand_property_identifier":
+                    key = _identifier_value(child, self._source_bytes)
+                    if key is None:
+                        return _UNKNOWN_STATIC
+                    entries.append((key, self._resolve(child, seen, depth + 1)))
+                else:
+                    return _UNKNOWN_STATIC
+            return _StaticObject(tuple(entries))
+        if node.type == "subscript_expression":
+            object_node, index_node = _subscript_parts(node)
+            container = self._resolve(object_node, seen, depth + 1)
+            index = self._resolve(index_node, seen, depth + 1)
+            return self._lookup(container, index)
+        if node.type == "member_expression":
+            container = self._resolve(
+                node.child_by_field_name("object"), seen, depth + 1
+            )
+            key = _identifier_value(
+                node.child_by_field_name("property"), self._source_bytes
+            )
+            return self._lookup(container, key)
+        if node.type == "binary_expression":
+            operator = node.child_by_field_name("operator")
+            if operator is None:
+                operator = next(
+                    (child for child in node.children if child.type == "+"), None
+                )
+            if operator is None or _node_text(operator, self._source_bytes) != "+":
+                return _UNKNOWN_STATIC
+            left = self._resolve(node.child_by_field_name("left"), seen, depth + 1)
+            right = self._resolve(
+                node.child_by_field_name("right"), seen, depth + 1
+            )
+            if isinstance(left, (str, int)) and isinstance(right, (str, int)):
+                if isinstance(left, str) or isinstance(right, str):
+                    return f"{left}{right}"
+                return left + right
+            return _UNKNOWN_STATIC
+        if node.type == "template_string":
+            pieces: list[str] = []
+            for child in _semantic_named_children(node):
+                if child.type in {"string_fragment", "escape_sequence"}:
+                    pieces.append(
+                        _decode_js_escapes(_node_text(child, self._source_bytes))
+                    )
+                elif child.type == "template_substitution":
+                    values = _semantic_named_children(child)
+                    value = (
+                        self._resolve(values[0], seen, depth + 1)
+                        if len(values) == 1
+                        else _UNKNOWN_STATIC
+                    )
+                    if not isinstance(value, (str, int)):
+                        return _UNKNOWN_STATIC
+                    pieces.append(str(value))
+                else:
+                    return _UNKNOWN_STATIC
+            return "".join(pieces)
+        return _UNKNOWN_STATIC
+
+    def _resolve_function_body(
+        self, body: Node | None, seen: frozenset[str], depth: int
+    ) -> object:
+        if body is None:
+            return _UNKNOWN_STATIC
+        if body.type != "statement_block":
+            return self._resolve(body, seen, depth + 1)
+        statements = _semantic_named_children(body)
+        if len(statements) != 1 or statements[0].type != "return_statement":
+            return _UNKNOWN_STATIC
+        values = _semantic_named_children(statements[0])
+        if len(values) != 1:
+            return _UNKNOWN_STATIC
+        return self._resolve(values[0], seen, depth + 1)
+
+    @staticmethod
+    def _lookup(container: object, key: object) -> object:
+        if isinstance(container, _StaticArray) and isinstance(key, int):
+            if 0 <= key < len(container.values):
+                return container.values[key]
+        if isinstance(container, _StaticObject) and isinstance(key, str):
+            matches = [value for name, value in container.values if name == key]
+            if len(matches) == 1:
+                return matches[0]
+        return _UNKNOWN_STATIC
+
+
 def _callee_renderer_references(
     node: Node, source_bytes: bytes, call_name: str
 ) -> list[Node]:
@@ -259,7 +504,10 @@ def _payload_call_reference(
     )
     if not references:
         return None
-    if any(child.type == "optional_chain" for child in node.children):
+    if any(child.type == "optional_chain" for child in node.children) or (
+        function is not None
+        and any(child.type == "optional_chain" for child in _walk(function))
+    ):
         raise ValueError(f"unsupported optional audited renderer call: {call_name}")
     if _identifier_is(function, source_bytes, call_name):
         return function
@@ -282,35 +530,17 @@ def _validate_renderer_references(
 ) -> set[tuple[str, int, int]]:
     """Allow only direct imports and direct renderer call references."""
     allowed: set[tuple[str, int, int]] = set()
-    for node, parent in _walk_with_parent(root):
-        if node.type == "subscript_expression":
-            object_node = node.child_by_field_name("object")
-            index_node = node.child_by_field_name("index")
-            if object_node is None or index_node is None:
-                children = _semantic_named_children(node)
-                if len(children) == 2:
-                    object_node, index_node = children
-            if (
-                object_node is not None
-                and index_node is not None
-                and (
-                    _identifier_is(object_node, source_bytes, "__test__")
-                    or _identifier_is(object_node, source_bytes, "globalThis")
-                )
-                and index_node.type != "string"
-            ):
-                raise ValueError(
-                    f"unsupported dynamic audited renderer access: {call_name}"
-                )
-        if (
-            node.type == "string"
-            and _decode_js_string(node, source_bytes) == call_name
-            and parent is not None
-            and parent.type == "variable_declarator"
-            and _same_node(parent.child_by_field_name("value"), node)
-        ):
+    resolver = _StaticValueResolver(root, source_bytes)
+    for node in _walk(root):
+        if node.type != "call_expression":
+            continue
+        function = node.child_by_field_name("function")
+        if function is None or function.type != "subscript_expression":
+            continue
+        _, selector = _subscript_parts(function)
+        if resolver.resolve(selector) == call_name:
             raise ValueError(
-                f"unsupported string alias for audited renderer: {call_name}"
+                f"unsupported computed audited renderer call: {call_name}"
             )
 
     for node in _walk(root):
@@ -702,6 +932,17 @@ def _subtree_has_identifier(node: Node, source_bytes: bytes, name: str) -> bool:
     return any(_identifier_is(child, source_bytes, name) for child in _walk(node))
 
 
+def _subtree_has_browser_global(node: Node, source_bytes: bytes) -> bool:
+    return any(
+        _identifier_value(child, source_bytes) in _BROWSER_GLOBALS
+        for child in _walk(node)
+    )
+
+
+def _browser_global_identifier(node: Node | None, source_bytes: bytes) -> bool:
+    return _identifier_value(node, source_bytes) in _BROWSER_GLOBALS
+
+
 def _semantic_subscript_property_is(
     node: Node | None, source_bytes: bytes, object_name: str, property_name: str
 ) -> bool:
@@ -729,14 +970,29 @@ def _semantic_object_assign_reference(node: Node, source_bytes: bytes) -> bool:
     )
 
 
-def _window_member_target(node: Node | None, source_bytes: bytes) -> bool:
+def _browser_global_member_target(node: Node | None, source_bytes: bytes) -> bool:
     if node is None or node.type not in {"member_expression", "subscript_expression"}:
         return False
     object_node = node.child_by_field_name("object")
-    return _identifier_is(object_node, source_bytes, "window") or (
+    return _browser_global_identifier(object_node, source_bytes) or (
         object_node is not None
         and object_node.type == "parenthesized_expression"
-        and _subtree_has_identifier(object_node, source_bytes, "window")
+        and _subtree_has_browser_global(object_node, source_bytes)
+    )
+
+
+def _resolved_object_assign_reference(
+    node: Node | None, source_bytes: bytes, resolver: _StaticValueResolver
+) -> bool:
+    if node is None:
+        return False
+    if _semantic_object_assign_reference(node, source_bytes):
+        return True
+    if node.type != "subscript_expression":
+        return False
+    object_node, selector = _subscript_parts(node)
+    return _identifier_is(object_node, source_bytes, "Object") and (
+        resolver.resolve(selector) == "assign"
     )
 
 
@@ -746,33 +1002,40 @@ def _validated_window_assign_calls(
     """Return exact binding calls after rejecting every bypassing reference."""
     calls: list[Node] = []
     allowed_assign_refs: set[tuple[str, int, int]] = set()
+    resolver = _StaticValueResolver(root, source_bytes)
 
     for node in _walk(root):
         if node.type in {"assignment_expression", "augmented_assignment_expression"}:
             left = node.child_by_field_name("left")
             right = node.child_by_field_name("right")
-            if _window_member_target(left, source_bytes):
-                raise ValueError("direct window mutations bypass Object.assign audit")
+            if _browser_global_member_target(left, source_bytes):
+                raise ValueError(
+                    "direct browser-global mutations bypass Object.assign audit"
+                )
             if right is not None and (
                 any(
                     _semantic_object_assign_reference(child, source_bytes)
                     for child in _walk(right)
                 )
-                or _identifier_is(right, source_bytes, "window")
+                or _browser_global_identifier(right, source_bytes)
                 or (
                     _identifier_is(right, source_bytes, "Object")
                     and left is not None
                     and _subtree_has_identifier(left, source_bytes, "assign")
                 )
             ):
-                raise ValueError("aliases for Object.assign/window are unsupported")
+                raise ValueError(
+                    "aliases for Object.assign/browser globals are unsupported"
+                )
         if node.type == "update_expression":
             argument = node.child_by_field_name("argument")
             if argument is None:
                 children = _semantic_named_children(node)
                 argument = children[0] if children else None
-            if _window_member_target(argument, source_bytes):
-                raise ValueError("direct window mutations bypass Object.assign audit")
+            if _browser_global_member_target(argument, source_bytes):
+                raise ValueError(
+                    "direct browser-global mutations bypass Object.assign audit"
+                )
         if node.type == "variable_declarator":
             name = node.child_by_field_name("name")
             value = node.child_by_field_name("value")
@@ -781,33 +1044,32 @@ def _validated_window_assign_calls(
                     _semantic_object_assign_reference(child, source_bytes)
                     for child in _walk(value)
                 )
-                or _identifier_is(value, source_bytes, "window")
+                or _browser_global_identifier(value, source_bytes)
                 or (
                     _identifier_is(value, source_bytes, "Object")
                     and name is not None
                     and _subtree_has_identifier(name, source_bytes, "assign")
                 )
             ):
-                raise ValueError("aliases for Object.assign/window are unsupported")
+                raise ValueError(
+                    "aliases for Object.assign/browser globals are unsupported"
+                )
 
         if node.type != "call_expression":
             continue
         function = node.child_by_field_name("function")
         if function is None:
             continue
-        assign_refs = [
-            child
-            for child in _walk(function)
-            if _semantic_object_assign_reference(child, source_bytes)
-        ]
-        if not assign_refs:
+        if not _resolved_object_assign_reference(function, source_bytes, resolver):
             continue
-        if any(child.type == "optional_chain" for child in node.children):
+        if any(child.type == "optional_chain" for child in node.children) or any(
+            child.type == "optional_chain" for child in _walk(function)
+        ):
             raise ValueError("optional Object.assign calls are unsupported")
         arguments = node.child_by_field_name("arguments")
         args = _semantic_named_children(arguments) if arguments is not None else []
-        targets_window = bool(args) and _subtree_has_identifier(
-            args[0], source_bytes, "window"
+        targets_browser_global = bool(args) and _subtree_has_browser_global(
+            args[0], source_bytes
         )
         if not _semantic_object_assign_reference(function, source_bytes):
             raise ValueError("unsupported indirect Object.assign call")
@@ -820,7 +1082,7 @@ def _validated_window_assign_calls(
         ):
             raise ValueError("computed/escaped Object.assign calls are unsupported")
         allowed_assign_refs.add(_node_key(function))
-        if not targets_window:
+        if not targets_browser_global:
             continue
         if not args or not _identifier_is(
             args[0], source_bytes, "window", exact_spelling=True

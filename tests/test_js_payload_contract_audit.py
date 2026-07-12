@@ -66,6 +66,32 @@ console.log(JSON.stringify(results));
             [["invented_client_only"]] * 6,
         )
 
+    def test_node_confirms_static_selector_dataflows_execute_renderer(self) -> None:
+        script = r'''
+const helpers = {renderDownloadHistoryItem: value => Object.keys(value)};
+const getName = () => "renderDownloadHistoryItem";
+const names = ["renderDownloadHistoryItem"];
+const lookup = {history: "renderDownloadHistoryItem"};
+const prefix = "renderDownloadHistory";
+const results = [
+  helpers[getName()]({invented_client_only: 1}),
+  helpers[names[0]]({invented_client_only: 1}),
+  helpers[lookup.history]({invented_client_only: 1}),
+  helpers[prefix + "Item"]({invented_client_only: 1}),
+  helpers[`${prefix}Item`]({invented_client_only: 1}),
+];
+console.log(JSON.stringify(results));
+'''
+        result = subprocess.run(
+            ["node", "--input-type=module", "--eval", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            json.loads(result.stdout), [["invented_client_only"]] * 5
+        )
+
     def test_scanner_decodes_direct_escaped_renderer_identifier(self) -> None:
         self.assertEqual(
             fixture_fields_for_call(
@@ -106,6 +132,27 @@ console.log(JSON.stringify(results));
                 'const name = "renderDownloadHistoryItem"; '
                 "__test__[name]({invented_client_only: 1});"
             ),
+            (
+                'const getName = () => "renderDownloadHistoryItem"; '
+                "helpers[getName()]({invented_client_only: 1});"
+            ),
+            (
+                'const names = ["renderDownloadHistoryItem"]; '
+                "helpers[names[0]]({invented_client_only: 1});"
+            ),
+            (
+                'const names = {history: "renderDownloadHistoryItem"}; '
+                "helpers[names.history]({invented_client_only: 1});"
+            ),
+            (
+                'const prefix = "renderDownloadHistory"; '
+                'helpers[prefix + "Item"]({invented_client_only: 1});'
+            ),
+            (
+                'const prefix = "renderDownloadHistory"; '
+                'helpers[`${prefix}Item`]({invented_client_only: 1});'
+            ),
+            "__test__?.renderDownloadHistoryItem({invented_client_only: 1});",
             "(0, renderDownloadHistoryItem)({invented_client_only: 1});",
             "renderDownloadHistoryItem.call(null, {invented_client_only: 1});",
             "renderDownloadHistoryItem?.({invented_client_only: 1});",
@@ -132,6 +179,25 @@ console.log(JSON.stringify(results));
                 ValueError, "audited renderer"
             ):
                 fixture_fields_for_call(source, "renderDownloadHistoryItem")
+
+    def test_inert_strings_and_unrelated_computed_calls_remain_supported(self) -> None:
+        cases = (
+            (
+                'const key = "unrelated"; globalThis[key]();',
+                "renderDownloadHistoryItem",
+            ),
+            (
+                'const label = "renderDownloadHistoryItem"; console.log(label);',
+                "renderDownloadHistoryItem",
+            ),
+            (
+                "const key = getRuntimeName(); unrelatedNamespace[key]();",
+                "renderDownloadHistoryItem",
+            ),
+        )
+        for source, call_name in cases:
+            with self.subTest(source=source):
+                self.assertEqual(fixture_fields_for_call(source, call_name), set())
 
     def test_scanner_uses_utf8_byte_offsets_for_unicode_prefixes(self) -> None:
         source = '''
