@@ -68,6 +68,29 @@ class TestDeployPinScript(unittest.TestCase):
             self.assertNotIn("test-secret-token", " ".join(call))
             self.assertNotIn("Authorization:", " ".join(call))
 
+    def test_no_newline_token_fixture_matches_production_and_succeeds(self) -> None:
+        token_bytes = self.fake.token_file.read_bytes()
+        self.assertEqual(token_bytes, self.fake.TOKEN_BYTES)
+        self.assertEqual(len(token_bytes), 40)
+        self.assertFalse(token_bytes.endswith(b"\n"))
+
+        proc = self.fake.run(SCRIPT)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.fake.state["remote_rev"],
+                         self.fake.state["receipt_rev"])
+
+    def test_empty_token_is_rejected_before_authenticated_git(self) -> None:
+        self.fake.token_file.write_bytes(b"")
+
+        proc = self.fake.run(SCRIPT)
+        state = self.fake.state
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("Forgejo token is empty", proc.stderr)
+        self.assertFalse(any(event[0] in {"push", "ls-remote"}
+                             for event in state["events"]))
+
     def test_inherited_xtrace_never_prints_token(self) -> None:
         proc = self.fake.run(
             SCRIPT,
