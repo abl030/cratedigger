@@ -390,9 +390,6 @@ def dispatch_import_core(
                 ),
                 existing_v0_probe=existing_v0_probe,
                 quality_evidence_action_file=quality_evidence_action_file,
-                beets_library_root=(
-                    cfg.beets_directory if cfg is not None else ""
-                ),
             )
             _remove_quality_evidence_action_file(quality_evidence_action_file)
             quality_evidence_action_file = None

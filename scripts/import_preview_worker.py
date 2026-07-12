@@ -26,6 +26,7 @@ from lib.import_preview import (
     PREVIEW_VERDICT_EVIDENCE_READY,
     PREVIEW_VERDICT_MEASUREMENT_FAILED,
     ImportPreviewResult,
+    load_persisted_existing_spectral,
     measure_and_persist_candidate_evidence,
 )
 from lib.import_evidence import (
@@ -40,7 +41,9 @@ from lib.import_queue import (
     ImportJob,
 )
 from lib.pipeline_db import DEFAULT_DSN, PipelineDB
-from lib.measurement import collect_release_attempt_spectral_audit
+from lib.measurement import (
+    collect_attempt_spectral_audit,
+)
 from lib.quality import (
     ActiveDownloadState,
     AlbumQualityEvidence,
@@ -442,28 +445,41 @@ def _handle_measurement_failed(
     return None
 
 
-SpectralAuditCollector = Callable[[str, str, Any], SpectralDetail]
+SpectralAuditCollector = Callable[
+    [str, SpectralAnalysisDetail | None],
+    SpectralDetail,
+]
 PreviewFn = Callable[[Any, ImportJob], ImportPreviewResult]
 
 
 def _collect_reused_evidence_spectral_audit(
+    db: Any,
+    request_id: int | None,
     source_path: str,
-    mb_release_id: str,
     collector: SpectralAuditCollector,
 ) -> SpectralDetail:
-    """Gather display-only audit without changing evidence-ready outcome."""
+    """Pair a candidate scan with the installed release's source evidence."""
+    existing = SpectralAnalysisDetail(attempted=False)
+    if request_id is not None:
+        try:
+            req = db.get_request(request_id) or {}
+            _, existing, _ = load_persisted_existing_spectral(
+                db, request_id, req,
+            )
+        except Exception:
+            logger.exception(
+                "Unable to load reused HAVE provenance for request %s",
+                request_id,
+            )
     try:
-        from lib.config import read_runtime_config
-        return collector(source_path, mb_release_id, read_runtime_config())
+        return collector(source_path, existing)
     except Exception as exc:
         logger.exception(
             "Reused-evidence spectral audit failed for %s", source_path)
         error = f"{type(exc).__name__}: {exc}"
         return SpectralDetail(
             candidate=SpectralAnalysisDetail(attempted=True, error=error),
-            # The collector failed before it could resolve whether an exact
-            # HAVE copy exists. Do not fabricate an existing-side attempt.
-            existing=SpectralAnalysisDetail(attempted=False),
+            existing=existing,
         )
 
 
@@ -472,7 +488,7 @@ def process_claimed_preview_job(
     job: ImportJob,
     *,
     spectral_audit_collector: SpectralAuditCollector = (
-        collect_release_attempt_spectral_audit
+        collect_attempt_spectral_audit
     ),
     preview_fn: PreviewFn | None = None,
 ) -> ImportJob | None:
@@ -488,8 +504,9 @@ def process_claimed_preview_job(
         and front_gate_source is not None
     ):
         audit = _collect_reused_evidence_spectral_audit(
+            db,
+            job.request_id,
             front_gate_source,
-            front_gate_result.evidence.mb_release_id,
             spectral_audit_collector,
         )
         reused_payload = _reused_evidence_preview_payload(

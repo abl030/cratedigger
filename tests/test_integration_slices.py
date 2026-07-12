@@ -915,10 +915,10 @@ class TestSpectralPropagationSlice(unittest.TestCase):
     """
 
     def test_suspect_download_persists_existing_spectral_state(self):
-        """Issue #90: when measure_preimport_state measures spectral on both
-        the download and the existing album, it must persist the *existing*
-        spectral state to ``album_requests.current_spectral_*`` so subsequent
-        attempts can compare evidence-to-evidence.
+        """Issue #90: candidate measurement must preserve the installed
+        release's persisted source spectral state in
+        ``album_requests.current_spectral_*`` so subsequent attempts compare
+        evidence-to-evidence without scanning a derivative.
 
         Spectral comparison itself is owned by the importer's evidence
         pipeline (``full_pipeline_decision_from_evidence``) — preimport just
@@ -927,6 +927,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         """
         from lib.config import CratediggerConfig
         from lib.measurement import measure_preimport_state
+        from lib.quality import SpectralAnalysisDetail
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -943,20 +944,12 @@ class TestSpectralPropagationSlice(unittest.TestCase):
 
         with patch(
             "lib.measurement.spectral_analyze",
-            side_effect=[
-                SimpleNamespace(
-                    grade="suspect",
-                    estimated_bitrate_kbps=128,
-                    suspect_pct=90.0,
-                    tracks=[],
-                ),
-                SimpleNamespace(
-                    grade="genuine",
-                    estimated_bitrate_kbps=320,
-                    suspect_pct=0.0,
-                    tracks=[],
-                ),
-            ],
+            return_value=SimpleNamespace(
+                grade="suspect",
+                estimated_bitrate_kbps=128,
+                suspect_pct=90.0,
+                tracks=[],
+            ),
         ), patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
              patch("os.path.isdir", return_value=True):
             measurement = measure_preimport_state(
@@ -969,6 +962,11 @@ class TestSpectralPropagationSlice(unittest.TestCase):
                 cfg=cfg,
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
+                existing_spectral_evidence=SpectralAnalysisDetail(
+                    attempted=True,
+                    grade="genuine",
+                    bitrate_kbps=320,
+                ),
             )
 
         # Measurement is fact-only: no audio-corrupt, no bad-hash → the
@@ -1134,6 +1132,7 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
         """Accept (suspect grade but bitrate upgrades existing) → spectral state still propagates."""
         from lib.config import CratediggerConfig
         from lib.measurement import measure_preimport_state
+        from lib.quality import SpectralAnalysisDetail
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1153,22 +1152,12 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
 
         with patch(
             "lib.measurement.spectral_analyze",
-            side_effect=[
-                # download: suspect at 256 (upgrade over existing at 96)
-                SimpleNamespace(
-                    grade="suspect",
-                    estimated_bitrate_kbps=256,
-                    suspect_pct=70.0,
-                    tracks=[],
-                ),
-                # existing: likely_transcode at 96 (worse — upgrade is justified)
-                SimpleNamespace(
-                    grade="likely_transcode",
-                    estimated_bitrate_kbps=96,
-                    suspect_pct=95.0,
-                    tracks=[],
-                ),
-            ],
+            return_value=SimpleNamespace(
+                grade="suspect",
+                estimated_bitrate_kbps=256,
+                suspect_pct=70.0,
+                tracks=[],
+            ),
         ), patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
              patch("os.path.isdir", return_value=True):
             measurement = measure_preimport_state(
@@ -1181,6 +1170,11 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
                 cfg=cfg,
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
+                existing_spectral_evidence=SpectralAnalysisDetail(
+                    attempted=True,
+                    grade="likely_transcode",
+                    bitrate_kbps=96,
+                ),
             )
 
         # Measurement is fact-only; the importer's evidence pipeline owns
@@ -5616,12 +5610,15 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                     "measure_preimport_state must not be called when evidence is valid"
                 )
 
-            audit_calls: list[tuple[str, str]] = []
+            audit_calls: list[
+                tuple[str, SpectralAnalysisDetail | None]
+            ] = []
 
             def collect_audit(
-                path: str, mb_release_id: str, cfg: Any,
+                path: str,
+                existing: SpectralAnalysisDetail | None,
             ) -> SpectralDetail:
-                audit_calls.append((path, mb_release_id))
+                audit_calls.append((path, existing))
                 return audit
 
             with patch(
@@ -5744,12 +5741,15 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 existing=SpectralAnalysisDetail(attempted=False),
             )
 
-            audit_calls: list[tuple[str, str]] = []
+            audit_calls: list[
+                tuple[str, SpectralAnalysisDetail | None]
+            ] = []
 
             def collect_audit(
-                path: str, mb_release_id: str, cfg: Any,
+                path: str,
+                existing: SpectralAnalysisDetail | None,
             ) -> SpectralDetail:
-                audit_calls.append((path, mb_release_id))
+                audit_calls.append((path, existing))
                 return audit
 
             with patch(
