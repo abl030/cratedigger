@@ -776,6 +776,7 @@ def measure_and_persist_candidate_evidence(
                 beets_harness_path=cfg.beets_harness_path,
                 quality_rank_config_json=cfg.quality_ranks.to_json(),
                 existing_v0_probe=existing_v0_probe,
+                beets_library_root=cfg.beets_directory,
             )
         except Exception as exc:
             return _measurement_failed_result(
@@ -1187,6 +1188,7 @@ def preview_import_from_path(
             beets_harness_path=cfg.beets_harness_path,
             quality_rank_config_json=cfg.quality_ranks.to_json(),
             existing_v0_probe=existing_v0_probe,
+            beets_library_root=cfg.beets_directory,
         )
         verdict, cleanup_eligible, reason, chain = _classify_import_result(
             run.import_result,

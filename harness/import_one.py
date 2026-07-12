@@ -90,24 +90,62 @@ _preview_temp_root: str | None = None
 _import_total_start: float | None = None
 
 
+@dataclass(frozen=True)
+class ExistingSpectralPathResolution:
+    """Existing path split between audit reachability and legacy policy."""
+
+    audit_path: str | None = None
+    legacy_policy_path_usable: bool = False
+    failure: SpectralAnalysisDetail | None = None
+
+
 def _resolve_existing_spectral_path(
     beets: BeetsDB,
     mbid: str,
     already_in_beets: bool,
-) -> tuple[str | None, SpectralAnalysisDetail | None]:
+    beets_library_root: str = "",
+) -> ExistingSpectralPathResolution:
     """Resolve existing files without allowing audit lookup to abort import."""
     if not already_in_beets:
-        return None, None
+        return ExistingSpectralPathResolution()
     try:
-        path = beets.get_album_path(mbid)
+        raw_path = beets.get_album_path(mbid)
     except Exception as exc:
-        return None, SpectralAnalysisDetail(
-            attempted=True,
-            error=f"{type(exc).__name__}: {exc}",
+        return ExistingSpectralPathResolution(
+            failure=SpectralAnalysisDetail(
+                attempted=True,
+                error=f"{type(exc).__name__}: {exc}",
+            ),
         )
-    if path and os.path.isdir(path):
-        return path, None
-    return None, None
+    legacy_policy_path_usable = bool(raw_path and os.path.isdir(raw_path))
+    audit_path = raw_path
+    if audit_path and not os.path.isabs(audit_path) and beets_library_root:
+        audit_path = os.path.join(beets_library_root, audit_path)
+    if audit_path and os.path.isdir(audit_path):
+        return ExistingSpectralPathResolution(
+            audit_path=audit_path,
+            legacy_policy_path_usable=legacy_policy_path_usable,
+        )
+    return ExistingSpectralPathResolution(
+        legacy_policy_path_usable=legacy_policy_path_usable,
+    )
+
+
+def _existing_spectral_policy_inputs(
+    resolution: ExistingSpectralPathResolution,
+    audit: SpectralAnalysisDetail | None,
+    *,
+    candidate_spectral_ok: bool,
+) -> tuple[str | None, int | None]:
+    """Preserve the pre-audit existing-side inputs used by quality policy."""
+    if (
+        not candidate_spectral_ok
+        or not resolution.legacy_policy_path_usable
+        or audit is None
+        or not audit.attempted
+    ):
+        return None, None
+    return audit.grade, audit.bitrate_kbps
 
 # Rank config for BeetsDB.get_album_info() mixed-format reduction + (commit 5)
 # quality_rank() / compare_quality() / quality_gate_decision(). main() replaces
@@ -1583,6 +1621,9 @@ def main():
     parser.add_argument("--quality-evidence-action-file", default=None,
                         help="Action-time quality evidence payload authorizing "
                              "mutation without candidate remeasurement.")
+    parser.add_argument("--beets-library-root", default="",
+                        help="Library root used only to resolve relative Beets "
+                             "paths for existing-side spectral audit.")
     parser.add_argument("--existing-v0-probe-min-bitrate", type=int, default=None,
                         help="Current comparable lossless-source V0 probe min bitrate")
     parser.add_argument("--existing-v0-probe-avg-bitrate", type=int, default=None,
@@ -1689,11 +1730,16 @@ def main():
     existing_spectral_bitrate: int | None = None
     stage_start = time.monotonic()
     from lib.measurement import collect_attempt_spectral_audit
-    existing_path, existing_lookup_failure = _resolve_existing_spectral_path(
-        beets, mbid, already_in_beets)
-    r.spectral = collect_attempt_spectral_audit(work_path, existing_path)
-    if existing_lookup_failure is not None:
-        r.spectral.existing = existing_lookup_failure
+    existing_path_resolution = _resolve_existing_spectral_path(
+        beets,
+        mbid,
+        already_in_beets,
+        beets_library_root=args.beets_library_root,
+    )
+    r.spectral = collect_attempt_spectral_audit(
+        work_path, existing_path_resolution.audit_path)
+    if existing_path_resolution.failure is not None:
+        r.spectral.existing = existing_path_resolution.failure
     candidate_audit = r.spectral.candidate
     existing_audit = r.spectral.existing
     candidate_spectral_ok = (
@@ -1716,12 +1762,17 @@ def main():
             _log(f"  [SPECTRAL candidate] error: {candidate_audit.error}")
 
     # Existing-side audit is an independent attempt. Only feed it to the
-    # legacy decision variables when candidate analysis succeeded, preserving
-    # the exact pre-audit decision inputs on candidate failure.
+    # legacy decision variables when candidate analysis succeeded AND the raw
+    # Beets path passed the same isdir gate used before audit-only root
+    # resolution. Root resolution expands evidence without changing policy.
+    existing_spectral_grade, existing_spectral_bitrate = (
+        _existing_spectral_policy_inputs(
+            existing_path_resolution,
+            existing_audit,
+            candidate_spectral_ok=candidate_spectral_ok,
+        )
+    )
     if existing_audit is not None and existing_audit.attempted:
-        if candidate_spectral_ok:
-            existing_spectral_grade = existing_audit.grade
-            existing_spectral_bitrate = existing_audit.bitrate_kbps
         r.spectral.existing_suspect_pct = existing_audit.suspect_pct or 0.0
         _log(f"  existing_spectral_grade={existing_audit.grade}")
         if existing_audit.bitrate_kbps is not None:
