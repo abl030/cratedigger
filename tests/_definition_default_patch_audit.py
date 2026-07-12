@@ -256,6 +256,7 @@ class _TestPatchVisitor(ast.NodeVisitor):
         self.active_local_functions: set[int] = set()
         self.comprehension_walrus_bindings: list[set[str]] = []
         self.active_patch_targets: tuple[str, ...] = ()
+        self.patch_test_prefix = "test"
         self.findings: list[DefaultPatchFinding] = []
 
     def _resolved_expression(self, node: ast.expr) -> str | None:
@@ -390,6 +391,37 @@ class _TestPatchVisitor(ast.NodeVisitor):
             self.patch_aliases.pop(name, None)
             self.instances.pop(name, None)
             self.local_functions.pop(name, None)
+
+    def _assign_patch_test_prefix(
+        self,
+        target: ast.expr,
+        value: ast.expr,
+    ) -> bool:
+        if not (
+            isinstance(target, ast.Attribute)
+            and target.attr == "TEST_PREFIX"
+            and self._resolved_patch_expression(target.value)
+            == "unittest.mock.patch"
+        ):
+            return False
+        if not (
+            isinstance(value, ast.Constant)
+            and isinstance(value.value, str)
+        ):
+            raise ValueError(
+                f"{self.test_path}:{target.lineno}: unsupported dynamic "
+                "unittest.mock.patch.TEST_PREFIX assignment"
+            )
+        self.patch_test_prefix = value.value
+        return True
+
+    def _is_patch_test_prefix(self, target: ast.expr) -> bool:
+        return (
+            isinstance(target, ast.Attribute)
+            and target.attr == "TEST_PREFIX"
+            and self._resolved_patch_expression(target.value)
+            == "unittest.mock.patch"
+        )
 
     def _visit_function(
         self,
@@ -570,10 +602,11 @@ class _TestPatchVisitor(ast.NodeVisitor):
         self._invalidate_binding(ast.Name(id=node.name))
 
         if self.function_depth == 0 and prior_class_depth == 0:
+            test_prefix = self.patch_test_prefix
             for method, method_targets in methods:
                 inherited_class_targets = (
                     tuple(decorator_targets)
-                    if method.name.startswith("test")
+                    if method.name.startswith(test_prefix)
                     else ()
                 )
                 self._visit_function(
@@ -586,19 +619,21 @@ class _TestPatchVisitor(ast.NodeVisitor):
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
             bound = alias.asname or alias.name.split(".")[0]
+            self._invalidate_binding(ast.Name(id=bound))
             resolved = alias.name if alias.asname else bound
             self.aliases[bound] = resolved
             self.patch_aliases[bound] = resolved
             self.instances.pop(bound, None)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        if node.level != 0:
-            return
         module = node.module or ""
         for alias in node.names:
             if alias.name == "*":
                 continue
             bound = alias.asname or alias.name
+            self._invalidate_binding(ast.Name(id=bound))
+            if node.level != 0:
+                continue
             resolved = f"{module}.{alias.name}"
             self.aliases[bound] = resolved
             self.patch_aliases[bound] = resolved
@@ -633,6 +668,8 @@ class _TestPatchVisitor(ast.NodeVisitor):
         self.visit(node.value)
         constructed_class = self._constructed_class(node.value)
         for target in node.targets:
+            if self._assign_patch_test_prefix(target, node.value):
+                continue
             self._invalidate_binding(target)
             if isinstance(target, ast.Name):
                 if resolved_patch is not None:
@@ -651,12 +688,35 @@ class _TestPatchVisitor(ast.NodeVisitor):
         constructed_class = (
             self._constructed_class(node.value) if node.value is not None else None
         )
+        if (
+            node.value is not None
+            and self._assign_patch_test_prefix(node.target, node.value)
+        ):
+            return
         self._invalidate_binding(node.target)
         if isinstance(node.target, ast.Name):
             if resolved_patch is not None:
                 self.patch_aliases[node.target.id] = resolved_patch
             if constructed_class is not None:
                 self.instances[node.target.id] = constructed_class
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        if self._is_patch_test_prefix(node.target):
+            raise ValueError(
+                f"{self.test_path}:{node.target.lineno}: unsupported dynamic "
+                "unittest.mock.patch.TEST_PREFIX assignment"
+            )
+        self.visit(node.target)
+        self.visit(node.value)
+
+    def visit_Delete(self, node: ast.Delete) -> None:
+        for target in node.targets:
+            if self._is_patch_test_prefix(target):
+                raise ValueError(
+                    f"{self.test_path}:{target.lineno}: unsupported dynamic "
+                    "unittest.mock.patch.TEST_PREFIX deletion"
+                )
+            self.visit(target)
 
     def visit_Call(self, node: ast.Call) -> None:
         callable_path, call_access = self._resolved_call_target(node.func)
@@ -809,8 +869,11 @@ def find_ineffective_default_patches(
     through returned, assigned, or passed callback aliases remain outside the
     bounded source-local analysis rather than inheriting definition-time patch
     state. Class construction expressions and bodies execute under enclosing
-    patches; canonical class patch decorators apply afterward to ``test*``
-    methods only.
+    patches; canonical class patch decorators apply afterward to methods using
+    the current constant ``patch.TEST_PREFIX``. Dynamic canonical prefix
+    mutation fails closed with a source diagnostic. Every explicit import
+    binding replaces all same-name local provenance; unresolved relative
+    imports invalidate without inventing an absolute target.
     Lambda defaults are evaluated at their definition site, but lambda bodies
     remain outside that callback analysis boundary even for direct calls.
     """

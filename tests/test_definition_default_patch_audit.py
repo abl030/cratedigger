@@ -1141,6 +1141,196 @@ def test_worker():
 
         self.assertEqual(find_ineffective_default_patches(production, tests), ())
 
+    def test_absolute_import_overwrites_same_name_local_helper(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME} as outer_patch
+from lib.worker import run
+
+def test_worker():
+    def {_PATCH_NAME}(*args):
+        run()
+    with outer_patch("lib.worker.send"):
+        from unittest.mock import {_PATCH_NAME}
+        with {_PATCH_NAME}("lib.worker.unrelated"):
+            pass
+""",
+        }
+
+        self.assertEqual(find_ineffective_default_patches(production, tests), ())
+
+    def test_relative_import_invalidates_canonical_patch_provenance(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from lib.worker import run
+
+def test_worker():
+    from .helper import {_PATCH_NAME}
+    with {_PATCH_NAME}("lib.worker.send"):
+        run()
+""",
+        }
+
+        self.assertEqual(find_ineffective_default_patches(production, tests), ())
+
+    def test_import_overwrites_constructed_instance_binding(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+class Worker:
+    def run(self, *, sender=send):
+        return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from lib.worker import Worker
+
+def test_worker():
+    worker = Worker()
+    import helper as worker
+    with {_PATCH_NAME}("lib.worker.send"):
+        worker.run()
+""",
+        }
+
+        self.assertEqual(find_ineffective_default_patches(production, tests), ())
+
+    def test_class_patch_uses_changed_and_restored_test_prefix(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from lib.worker import run
+
+{_PATCH_NAME}.TEST_PREFIX = "check"
+@{_PATCH_NAME}("lib.worker.send")
+class ChangedPrefix:
+    def check_run(self, mock_send):
+        run()
+    def test_run(self):
+        run()
+
+{_PATCH_NAME}.TEST_PREFIX = "test"
+@{_PATCH_NAME}("lib.worker.send")
+class RestoredPrefix:
+    def check_run(self):
+        run()
+    def test_run(self, mock_send):
+        run()
+""",
+        }
+
+        findings = find_ineffective_default_patches(production, tests)
+        self.assertEqual(tuple(finding.line for finding in findings), (9, 19))
+
+    def test_alias_and_qualified_patch_prefix_assignments_are_tracked(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME} as replace
+import unittest.mock as mock
+from lib.worker import run
+
+replace.TEST_PREFIX = "verify"
+@replace("lib.worker.send")
+class AliasedPrefix:
+    def verify_run(self, mock_send):
+        run()
+    def test_run(self):
+        run()
+
+mock.{_PATCH_NAME}.TEST_PREFIX = "check"
+@mock.{_PATCH_NAME}("lib.worker.send")
+class QualifiedPrefix:
+    def check_run(self, mock_send):
+        run()
+    def verify_run(self):
+        run()
+""",
+        }
+
+        findings = find_ineffective_default_patches(production, tests)
+        self.assertEqual(tuple(finding.line for finding in findings), (10, 18))
+
+    def test_dynamic_patch_test_prefix_assignment_fails_closed(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": f"""
+from unittest.mock import {_PATCH_NAME}
+from lib.worker import run
+
+def configure(prefix):
+    {_PATCH_NAME}.TEST_PREFIX = prefix
+""",
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"tests/test_worker\.py:6: unsupported dynamic "
+            r"unittest\.mock\.patch\.TEST_PREFIX assignment",
+        ):
+            find_ineffective_default_patches(production, tests)
+
+    def test_unrelated_test_prefix_attribute_is_accepted(self) -> None:
+        production = {
+            "lib/worker.py": """
+from lib.gateway import send
+
+def run(*, sender=send):
+    return sender()
+""",
+        }
+        tests = {
+            "tests/test_worker.py": """
+import helper
+
+helper.TEST_PREFIX = configure_prefix()
+""",
+        }
+
+        self.assertEqual(find_ineffective_default_patches(production, tests), ())
+
     def test_known_bad_checker_rejects_a_planted_omission(self) -> None:
         finding = DefaultPatchFinding(
             test_path="tests/test_bad.py",

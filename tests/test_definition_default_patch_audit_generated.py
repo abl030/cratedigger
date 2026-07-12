@@ -1087,6 +1087,206 @@ def _declaration_shadow_worlds(draw):
     )
 
 
+@st.composite
+def _import_binding_worlds(draw):
+    shape = draw(st.sampled_from((
+        "absolute_overwrites_helper",
+        "relative_shadows_canonical",
+        "import_overwrites_instance",
+        "absolute_canonical_control",
+    )))
+    if shape == "absolute_overwrites_helper":
+        production = {
+            "lib/subject.py": (
+                "from lib.dependencies import deliver\n\n"
+                "def execute(*, dependency_fn=deliver):\n"
+                "    return dependency_fn()\n"
+            ),
+        }
+        imports = (
+            f"from unittest.mock import {_PATCH_NAME} as outer_patch\n"
+            "from lib.subject import execute\n"
+        )
+        body = (
+            "def test_subject():\n"
+            f"    def {_PATCH_NAME}(*args):\n"
+            "        execute()\n"
+            "    with outer_patch(\"lib.subject.deliver\"):\n"
+            f"        from unittest.mock import {_PATCH_NAME}\n"
+            f"        with {_PATCH_NAME}(\"lib.subject.unrelated\"):\n"
+            "            pass\n"
+        )
+        expected_valid = True
+    elif shape == "relative_shadows_canonical":
+        production = {
+            "lib/subject.py": (
+                "from lib.dependencies import deliver\n\n"
+                "def execute(*, dependency_fn=deliver):\n"
+                "    return dependency_fn()\n"
+            ),
+        }
+        imports = (
+            f"from unittest.mock import {_PATCH_NAME}\n"
+            "from lib.subject import execute\n"
+        )
+        body = (
+            "def test_subject():\n"
+            f"    from .helper import {_PATCH_NAME}\n"
+            f"    with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            "        execute()\n"
+        )
+        expected_valid = True
+    elif shape == "import_overwrites_instance":
+        production = {
+            "lib/subject.py": (
+                "from lib.dependencies import deliver\n\n"
+                "class Worker:\n"
+                "    def run(self, *, dependency_fn=deliver):\n"
+                "        return dependency_fn()\n"
+            ),
+        }
+        imports = (
+            f"from unittest.mock import {_PATCH_NAME}\n"
+            "from lib.subject import Worker\n"
+        )
+        body = (
+            "def test_subject():\n"
+            "    worker = Worker()\n"
+            "    import helper as worker\n"
+            f"    with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            "        worker.run()\n"
+        )
+        expected_valid = True
+    else:
+        production = {
+            "lib/subject.py": (
+                "from lib.dependencies import deliver\n\n"
+                "def execute(*, dependency_fn=deliver):\n"
+                "    return dependency_fn()\n"
+            ),
+        }
+        imports = "from lib.subject import execute\n"
+        body = (
+            "def test_subject():\n"
+            f"    from unittest.mock import {_PATCH_NAME}\n"
+            f"    with {_PATCH_NAME}(\"lib.subject.deliver\"):\n"
+            "        execute()\n"
+        )
+        expected_valid = False
+    return _AuditWorld(
+        production=production,
+        tests={
+            "tests/test_subject.py": imports + "\n" + body,
+        },
+        expected_valid=expected_valid,
+        label=f"import_binding/{shape}",
+    )
+
+
+@st.composite
+def _class_test_prefix_worlds(draw):
+    shape = draw(st.sampled_from((
+        "default",
+        "changed",
+        "restored",
+        "alias",
+        "qualified",
+        "dynamic",
+        "unrelated",
+    )))
+    imports = (
+        f"from unittest.mock import {_PATCH_NAME}\n"
+        "from lib.subject import execute\n"
+    )
+    if shape == "default":
+        body = (
+            f"@{_PATCH_NAME}(\"lib.subject.deliver\")\n"
+            "class SubjectTests:\n"
+            "    def test_run(self, mock_dependency):\n"
+            "        execute()  # selected\n"
+            "    def check_run(self):\n"
+            "        execute()  # unselected\n"
+        )
+    elif shape == "changed":
+        body = (
+            f"{_PATCH_NAME}.TEST_PREFIX = \"check\"\n"
+            f"@{_PATCH_NAME}(\"lib.subject.deliver\")\n"
+            "class SubjectTests:\n"
+            "    def test_run(self):\n"
+            "        execute()  # unselected\n"
+            "    def check_run(self, mock_dependency):\n"
+            "        execute()  # selected\n"
+        )
+    elif shape == "restored":
+        body = (
+            f"{_PATCH_NAME}.TEST_PREFIX = \"check\"\n"
+            f"{_PATCH_NAME}.TEST_PREFIX = \"test\"\n"
+            f"@{_PATCH_NAME}(\"lib.subject.deliver\")\n"
+            "class SubjectTests:\n"
+            "    def test_run(self, mock_dependency):\n"
+            "        execute()  # selected\n"
+            "    def check_run(self):\n"
+            "        execute()  # unselected\n"
+        )
+    elif shape == "alias":
+        imports = (
+            f"from unittest.mock import {_PATCH_NAME} as replace\n"
+            "from lib.subject import execute\n"
+        )
+        body = (
+            "replace.TEST_PREFIX = \"verify\"\n"
+            "@replace(\"lib.subject.deliver\")\n"
+            "class SubjectTests:\n"
+            "    def verify_run(self, mock_dependency):\n"
+            "        execute()  # selected\n"
+            "    def test_run(self):\n"
+            "        execute()  # unselected\n"
+        )
+    elif shape == "qualified":
+        imports = (
+            "import unittest.mock as mock\n"
+            "from lib.subject import execute\n"
+        )
+        body = (
+            "mock.patch.TEST_PREFIX = \"verify\"\n"
+            "@mock.patch(\"lib.subject.deliver\")\n"
+            "class SubjectTests:\n"
+            "    def verify_run(self, mock_dependency):\n"
+            "        execute()  # selected\n"
+            "    def test_run(self):\n"
+            "        execute()  # unselected\n"
+        )
+    elif shape == "dynamic":
+        body = (
+            "def configure(prefix):\n"
+            f"    {_PATCH_NAME}.TEST_PREFIX = prefix\n"
+        )
+    else:
+        imports = "import helper\n"
+        body = "helper.TEST_PREFIX = dynamic_prefix()\n"
+    source = imports + "\n" + body
+    selected_lines = tuple(
+        line_number
+        for line_number, line in enumerate(source.splitlines(), start=1)
+        if "# selected" in line
+    )
+    return (
+        _AuditWorld(
+            production={
+                "lib/subject.py": (
+                    "from lib.dependencies import deliver\n\n"
+                    "def execute(*, dependency_fn=deliver):\n"
+                    "    return dependency_fn()\n"
+                ),
+            },
+            tests={"tests/test_subject.py": source},
+            expected_valid=not selected_lines,
+            label=f"class_test_prefix/{shape}",
+        ),
+        None if shape == "dynamic" else selected_lines,
+    )
+
+
 class TestGeneratedDefinitionDefaultPatchAudit(unittest.TestCase):
     @given(world=_default_patch_worlds())
     @example(world=_OMITTED_CONSTRUCTOR)
@@ -1190,6 +1390,34 @@ class TestGeneratedDefinitionDefaultPatchAudit(unittest.TestCase):
     ) -> None:
         findings = find_ineffective_default_patches(world.production, world.tests)
         assert_default_patch_invariant(findings, expected_valid=world.expected_valid)
+
+    @given(world=_import_binding_worlds())
+    def test_imports_replace_every_prior_binding(
+        self,
+        world: _AuditWorld,
+    ) -> None:
+        findings = find_ineffective_default_patches(world.production, world.tests)
+        assert_default_patch_invariant(findings, expected_valid=world.expected_valid)
+
+    @given(world_and_lines=_class_test_prefix_worlds())
+    def test_class_patch_uses_current_test_prefix(
+        self,
+        world_and_lines: tuple[_AuditWorld, tuple[int, ...] | None],
+    ) -> None:
+        world, expected_lines = world_and_lines
+        if expected_lines is None:
+            with self.assertRaisesRegex(
+                ValueError,
+                r"unsupported dynamic unittest\.mock\.patch\.TEST_PREFIX",
+            ):
+                find_ineffective_default_patches(world.production, world.tests)
+            return
+        findings = find_ineffective_default_patches(world.production, world.tests)
+        self.assertEqual(
+            tuple(finding.line for finding in findings),
+            expected_lines,
+            msg=f"world={world.label}: findings={findings!r}",
+        )
 
 
 if __name__ == "__main__":
