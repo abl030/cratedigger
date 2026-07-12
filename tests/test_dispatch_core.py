@@ -894,12 +894,6 @@ class TestDispatchCoreSeams(unittest.TestCase):
         idx = cmd.index("--target-format")
         self.assertEqual(cmd[idx + 1], "flac")
 
-    def test_dispatch_threads_beets_library_root_to_harness(self):
-        cmd = self._get_cmd(beets_directory="/srv/music/Beets")
-
-        idx = cmd.index("--beets-library-root")
-        self.assertEqual(cmd[idx + 1], "/srv/music/Beets")
-
     def test_shared_import_one_command_supports_preview_without_request_id(self):
         from lib.dispatch import build_import_one_command
 
@@ -914,18 +908,6 @@ class TestDispatchCoreSeams(unittest.TestCase):
         self.assertIn("--dry-run", cmd)
         self.assertIn("--preserve-source", cmd)
         self.assertNotIn("--request-id", cmd)
-
-    def test_shared_import_one_command_omits_empty_beets_library_root(self):
-        from lib.dispatch import build_import_one_command
-
-        cmd = build_import_one_command(
-            path="/tmp/album",
-            mb_release_id="mbid-123",
-            beets_harness_path=_HARNESS,
-            beets_library_root="",
-        )
-
-        self.assertNotIn("--beets-library-root", cmd)
 
     def test_shared_import_one_command_does_not_accept_preview_result_file(self):
         from lib.dispatch import build_import_one_command

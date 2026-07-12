@@ -91,7 +91,7 @@ Mountain Goats only. Both fixes deployed:
 
 2. **CBR 320 spectral check runs in cratedigger.py, not import_one.py** — Because CBR 320 downloads don't go through FLAC→V0 conversion, they need spectral checking at the cratedigger level before staging/import.
 
-3. **FLAC spectral check runs in import_one.py** — Informational alongside the V0 conversion. The V0 bitrate is still the primary gate for FLACs. Spectral on existing beets files reveals the "truth" about what's on disk for comparison.
+3. **FLAC spectral check runs before conversion in import_one.py** — Informational alongside the V0 conversion. The V0 bitrate is still the primary gate for FLACs. HAVE comparisons use persisted pre-conversion source evidence; scanning an installed lossy derivative can produce a misleading spectral grade.
 
 4. **Pipeline DB `min_bitrate` overrides beets bitrate for downgrade check** — When we queue an album for upgrade because we know its files are garbage (e.g. `min_bitrate=0`), the downgrade check in import_one.py must use the pipeline's assessment, not beets' nominal bitrate.
 

@@ -450,30 +450,6 @@ class BeetsDB:
         ).fetchall()
         return [(r[0], self._resolve_path(r[1])) for r in rows]
 
-    def get_album_path(self, mb_release_id: str) -> Optional[str]:
-        """Get the directory path for an album's tracks. Returns None if not found."""
-        album_id = self._lookup_album_id(mb_release_id)
-        if album_id is None:
-            return None
-        return self.get_album_path_by_id(album_id)
-
-    def get_album_path_by_id(self, album_id: int) -> Optional[str]:
-        """Get an album's directory by beets numeric id. Returns None if not found.
-
-        Used for album-id path lookups where the caller has the
-        album's PK but not its MBID. The old sibling canonicalization
-        state machine originally needed this after ``beet move``;
-        the helper remains useful for ID-based Beets diagnostics and
-        compatibility tests.
-        """
-        row = self._conn.execute(
-            "SELECT path FROM items WHERE album_id = ? LIMIT 1",
-            (album_id,)
-        ).fetchone()
-        if not row or not row[0]:
-            return None
-        return os.path.dirname(self._resolve_path(row[0]))
-
     # ── Web UI query methods ────────────────────────────────────────
 
     def check_mbids(self, mbids: list[str]) -> set[str]:

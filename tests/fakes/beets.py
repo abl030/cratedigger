@@ -34,7 +34,6 @@ class FakeBeetsDB:
         self._album_ids_for_release: dict[str, list[int]] = {}
         self._album_info: dict[str, Any] = {}
         self._item_paths: dict[str, list[tuple[int, str]]] = {}
-        self._album_path_by_id: dict[int, str | None] = {}
         self._release_identities: list[dict[str, Any]] = []
         # Default return values for unseeded keys — match the real
         # BeetsDB's "no row" shapes so tests don't crash on missing
@@ -42,14 +41,11 @@ class FakeBeetsDB:
         self._album_exists_default = False
         self._album_ids_default: list[int] = []
         self._album_info_default: Any = None
-        self._album_path_by_id_default: str | None = None
         self._item_paths_default: list[tuple[int, str]] = []
         self.close_calls: int = 0
         self.album_exists_calls: list[str] = []
         self.get_album_info_calls: list[str] = []
-        self.get_album_path_calls: list[str] = []
         self.get_all_album_ids_for_release_calls: list[str] = []
-        self.get_album_path_by_id_calls: list[int] = []
         self.get_item_paths_calls: list[str] = []
         self.check_mbids_calls: list[list[str]] = []
         self.check_mbids_detail_calls: list[list[str]] = []
@@ -93,9 +89,6 @@ class FakeBeetsDB:
         self, release_id: str, paths: list[tuple[int, str]],
     ) -> None:
         self._item_paths[release_id] = list(paths)
-
-    def set_album_path_by_id(self, album_id: int, path: str | None) -> None:
-        self._album_path_by_id[album_id] = path
 
     def set_release_identities(self, rows: list[dict[str, Any]]) -> None:
         self._release_identities = [copy.deepcopy(r) for r in rows]
@@ -317,20 +310,10 @@ class FakeBeetsDB:
         self.get_album_info_calls.append(mb_release_id)
         return self._album_info.get(mb_release_id, self._album_info_default)
 
-    def get_album_path(self, mb_release_id: str) -> str | None:
-        self.get_album_path_calls.append(mb_release_id)
-        info = self._album_info.get(mb_release_id, self._album_info_default)
-        return getattr(info, "album_path", None)
-
     def get_item_paths(self, release_id: str) -> list[tuple[int, str]]:
         self.get_item_paths_calls.append(release_id)
         return self._item_paths.get(
             release_id, list(self._item_paths_default))
-
-    def get_album_path_by_id(self, album_id: int) -> str | None:
-        self.get_album_path_by_id_calls.append(album_id)
-        return self._album_path_by_id.get(
-            album_id, self._album_path_by_id_default)
 
     def close(self) -> None:
         self.close_calls += 1
