@@ -157,14 +157,14 @@ Schema lives in `migrations/NNN_name.sql`; the migrate oneshot runs them on ever
 
 ```bash
 nix-shell --run "bash scripts/run_tests.sh"    # prints its unique artifact directory
-# Set ARTIFACT to the directory printed by that invocation.
+export ARTIFACT=/tmp/cratedigger-...            # copy the directory printed above
 grep "^FAIL\|^ERROR" "$ARTIFACT/output.log"
 nix-shell --run 'python3 scripts/test_artifact.py verify --artifact \
   "$ARTIFACT" --expected-head "$(git rev-parse HEAD)"'
 nix-shell --run "python3 -m unittest tests.test_X -v"
 ```
 
-Set `ARTIFACT` to the directory printed at the start and completion of that
+Export `ARTIFACT` as the directory printed at the start and completion of that
 invocation. It contains the full gate stream in `output.log` and exact
 worktree/HEAD/count provenance plus the completed output's byte count and
 SHA-256 in `summary.json`; there is deliberately no global "latest output"

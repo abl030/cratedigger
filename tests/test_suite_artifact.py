@@ -7,6 +7,7 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -343,6 +344,79 @@ class TestSuiteArtifact(unittest.TestCase):
                 text = path.read_text()
                 self.assertNotIn("/tmp/cratedigger-test-output.txt", text)
                 self.assertIn("output.log", text)
+
+    def test_documented_artifact_export_reaches_inner_nix_shell(self) -> None:
+        validation = self.root / "documented-verifier-worktree"
+        self._git(
+            REPO_ROOT,
+            "worktree",
+            "add",
+            "--detach",
+            "-q",
+            str(validation),
+            "HEAD",
+        )
+        self.addCleanup(
+            self._git,
+            REPO_ROOT,
+            "worktree",
+            "remove",
+            "--force",
+            str(validation),
+        )
+        artifact = create_artifact(validation, self.artifact_root)
+        (artifact / "output.log").write_text("Ran 1 test\nOK\n")
+        finalize_artifact(
+            artifact,
+            validation,
+            gate_exit_code=0,
+            capture_exit_code=0,
+            discovered_tests=1,
+            run_tests=1,
+        )
+
+        docs = (
+            REPO_ROOT / "CLAUDE.md",
+            REPO_ROOT / ".claude/skills/check/SKILL.md",
+        )
+        verifier_pattern = re.compile(
+            r"nix-shell --run 'python3 scripts/test_artifact\.py verify "
+            r"--artifact \\\n  \"\$ARTIFACT\" --expected-head "
+            r"\"\$\(git rev-parse HEAD\)\"'"
+        )
+        for path in docs:
+            with self.subTest(path=path.relative_to(REPO_ROOT)):
+                blocks = re.findall(
+                    r"```bash\n(.*?)\n```", path.read_text(), re.DOTALL
+                )
+                verifier_blocks = [
+                    block for block in blocks
+                    if "scripts/test_artifact.py verify" in block
+                ]
+                self.assertEqual(len(verifier_blocks), 1)
+                block = verifier_blocks[0]
+                exports = re.findall(
+                    r"^export ARTIFACT=.*$", block, re.MULTILINE
+                )
+                self.assertEqual(
+                    len(exports),
+                    1,
+                    f"{path} must export ARTIFACT in its verifier block",
+                )
+                verifier = verifier_pattern.search(block)
+                self.assertIsNotNone(verifier)
+                assert verifier is not None
+                documented_export = exports[0].split("#", 1)[0].strip()
+                export_lhs = documented_export.split("=", 1)[0]
+                export = f"{export_lhs}={shlex.quote(str(artifact))}"
+                result = subprocess.run(
+                    ["bash", "-c", f"{export}\n{verifier.group(0)}"],
+                    cwd=validation,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Verified suite artifact", result.stdout)
 
     def test_ephemeral_tmpdir_does_not_control_default_artifact_root(self) -> None:
         hostile_tmpdir = self.root / "nix-shell-ephemeral"

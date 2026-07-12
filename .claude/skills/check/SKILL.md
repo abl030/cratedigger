@@ -30,7 +30,7 @@ nix-shell --run "bash scripts/run_tests.sh"
 
 4. Check results:
 ```bash
-# Set ARTIFACT to the unique directory printed by that run.
+export ARTIFACT=/tmp/cratedigger-...  # copy the directory printed by that run
 grep -E "^Ran |^OK|^FAILED" "$ARTIFACT/output.log"
 grep "^FAIL:\|^ERROR:" "$ARTIFACT/output.log"
 ```
@@ -40,6 +40,7 @@ chat-era "known issue" exemption forward without current repository evidence.
 For a clean committed target, verify exact provenance with:
 
 ```bash
+export ARTIFACT=/tmp/cratedigger-...  # if starting in a fresh shell
 nix-shell --run 'python3 scripts/test_artifact.py verify --artifact \
   "$ARTIFACT" --expected-head "$(git rev-parse HEAD)"'
 ```
