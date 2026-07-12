@@ -267,6 +267,7 @@ class TestImportPreviewPath(unittest.TestCase):
             with patch("lib.config.read_runtime_config",
                        return_value=CratediggerConfig(
                            beets_harness_path="/fake/harness/run_beets_harness.sh",
+                           beets_directory="/srv/music/Beets",
                            pipeline_db_enabled=True,
                        )), \
                  patch("lib.import_preview.inspect_local_files",
@@ -304,6 +305,10 @@ class TestImportPreviewPath(unittest.TestCase):
             self.assertEqual(db.denylist, [])
             self.assertTrue(mock_run.call_args.kwargs["dry_run"])
             self.assertIsNone(mock_run.call_args.kwargs["request_id"])
+            self.assertEqual(
+                mock_run.call_args.kwargs["beets_library_root"],
+                "/srv/music/Beets",
+            )
             self.assertEqual(
                 mock_run.call_args.kwargs["existing_v0_probe"].avg_bitrate_kbps,
                 171,
@@ -515,6 +520,51 @@ class TestImportPreviewPath(unittest.TestCase):
                 self.assertEqual(preview.decision, decision)
                 assert preview.import_result is not None
                 self.assertEqual(preview.import_result.spectral, audit)
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_measurement_preview_threads_beets_library_root_to_harness(self):
+        from lib.dispatch.types import ImportOneRun
+
+        db = self._db()
+        source = self._source_dir()
+        captured: dict[str, Any] = {}
+
+        def run_import(*args: Any, **kwargs: Any) -> ImportOneRun:
+            captured.update(kwargs)
+            return ImportOneRun(
+                command=(), returncode=1, stdout="", stderr="no sentinel",
+                import_result=None,
+            )
+
+        try:
+            with patch(
+                "lib.config.read_runtime_config",
+                return_value=CratediggerConfig(
+                    beets_harness_path="/fake/harness/run_beets_harness.sh",
+                    beets_directory="/srv/music/Beets",
+                    pipeline_db_enabled=True,
+                ),
+            ), patch(
+                "lib.import_preview.inspect_local_files",
+                return_value=LocalFileInspection(filetype="mp3"),
+            ), patch(
+                "lib.import_preview.measure_preimport_state",
+                return_value=PreimportMeasurement(
+                    folder_layout="flat", audio_file_count=1,
+                ),
+            ):
+                measure_and_persist_candidate_evidence(
+                    db,
+                    request_id=42,
+                    path=source,
+                    run_import_fn=run_import,
+                )
+
+            self.assertEqual(
+                captured["beets_library_root"], "/srv/music/Beets"
+            )
         finally:
             import shutil
             shutil.rmtree(source, ignore_errors=True)

@@ -41,6 +41,7 @@ def build_import_one_command(
     quality_rank_config_json: str | None = None,
     existing_v0_probe: V0ProbeEvidence | None = None,
     quality_evidence_action_file: str | None = None,
+    beets_library_root: str = "",
 ) -> list[str]:
     """Build the single shared import_one.py command line."""
     cmd = [
@@ -67,6 +68,8 @@ def build_import_one_command(
         cmd.extend(["--quality-rank-config", quality_rank_config_json])
     if quality_evidence_action_file:
         cmd.extend(["--quality-evidence-action-file", quality_evidence_action_file])
+    if beets_library_root:
+        cmd.extend(["--beets-library-root", beets_library_root])
     if existing_v0_probe is not None:
         if existing_v0_probe.min_bitrate_kbps is not None:
             cmd.extend([
@@ -101,6 +104,7 @@ def run_import_one(
     quality_rank_config_json: str | None = None,
     existing_v0_probe: V0ProbeEvidence | None = None,
     quality_evidence_action_file: str | None = None,
+    beets_library_root: str = "",
     timeout: int = 1800,
 ) -> ImportOneRun:
     """Run import_one.py and parse its ImportResult sentinel."""
@@ -118,6 +122,7 @@ def run_import_one(
         quality_rank_config_json=quality_rank_config_json,
         existing_v0_probe=existing_v0_probe,
         quality_evidence_action_file=quality_evidence_action_file,
+        beets_library_root=beets_library_root,
     )
     result = sp.run(
         cmd,

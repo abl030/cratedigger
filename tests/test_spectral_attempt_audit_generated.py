@@ -1,10 +1,15 @@
 """Generated invariant for independent two-sided spectral attempt audit."""
 
+import os
+import tempfile
 import unittest
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import patch
 
 from hypothesis import given, strategies as st
+
+from tests.fakes import FakeBeetsDB
 
 
 def _both_sides_attempted(calls: list[str]) -> bool:
@@ -19,12 +24,103 @@ def _policy_snapshot_unchanged(before, after) -> bool:
     return _policy_snapshot(after) == before
 
 
+def _relative_path_resolved(path: str | None, expected: str) -> bool:
+    return path is not None and path == expected and os.path.isabs(path)
+
+
+def _audit_only_policy_inputs_unchanged(
+    inputs: tuple[str | None, int | None],
+) -> bool:
+    return inputs == (None, None)
+
+
 class TestAttemptAuditCheckerQualification(unittest.TestCase):
     def test_checker_rejects_short_circuiting_known_bad_trace(self):
         self.assertFalse(_both_sides_attempted(["candidate"]))
 
+    def test_relative_path_checker_rejects_unresolved_known_bad_path(self):
+        self.assertFalse(
+            _relative_path_resolved("Artist/Album", "/library/Artist/Album")
+        )
+
+    def test_audit_only_policy_checker_rejects_known_bad_inputs(self):
+        self.assertFalse(
+            _audit_only_policy_inputs_unchanged(("suspect", 96))
+        )
+
 
 class TestAttemptAuditGenerated(unittest.TestCase):
+    @given(
+        artist=st.text(
+            alphabet=st.characters(whitelist_categories=("Ll", "Lu", "Nd")),
+            min_size=1,
+            max_size=12,
+        ),
+        album=st.text(
+            alphabet=st.characters(whitelist_categories=("Ll", "Lu", "Nd")),
+            min_size=1,
+            max_size=12,
+        ),
+    )
+    def test_relative_existing_path_resolves_under_explicit_library_root(
+        self, artist: str, album: str,
+    ):
+        from harness import import_one
+
+        relative_path = os.path.join(artist, album)
+
+        class RelativePathBeets(FakeBeetsDB):
+            def get_album_path(self, mb_release_id: str) -> str | None:
+                return relative_path
+
+        with tempfile.TemporaryDirectory() as library_root:
+            expected = os.path.join(library_root, relative_path)
+            os.makedirs(expected)
+            resolution = import_one._resolve_existing_spectral_path(
+                cast(Any, RelativePathBeets()),
+                "mbid-generated",
+                True,
+                beets_library_root=library_root,
+            )
+
+            self.assertTrue(
+                _relative_path_resolved(resolution.audit_path, expected)
+            )
+            self.assertFalse(resolution.legacy_policy_path_usable)
+            self.assertIsNone(resolution.failure)
+
+    @given(
+        grade=st.sampled_from(["genuine", "suspect", "likely_transcode"]),
+        bitrate=st.one_of(st.none(), st.integers(min_value=32, max_value=400)),
+        candidate_spectral_ok=st.booleans(),
+    )
+    def test_root_resolved_audit_never_becomes_legacy_policy_input(
+        self,
+        grade: str,
+        bitrate: int | None,
+        candidate_spectral_ok: bool,
+    ):
+        from harness import import_one
+        from lib.quality import SpectralAnalysisDetail
+
+        resolution = import_one.ExistingSpectralPathResolution(
+            audit_path="/library/Artist/Album",
+            legacy_policy_path_usable=False,
+        )
+        audit = SpectralAnalysisDetail(
+            attempted=True,
+            grade=grade,
+            bitrate_kbps=bitrate,
+        )
+
+        inputs = import_one._existing_spectral_policy_inputs(
+            resolution,
+            audit,
+            candidate_spectral_ok=candidate_spectral_ok,
+        )
+
+        self.assertTrue(_audit_only_policy_inputs_unchanged(inputs))
+
     @given(
         candidate_fails=st.booleans(),
         existing_fails=st.booleans(),
