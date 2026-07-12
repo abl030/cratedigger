@@ -281,6 +281,10 @@ console.log(JSON.stringify(values.map(value => value.length)));
             "globalThis.Object[method](window, { fetch });",
             'const method = "unrelated"; Object.assign(window, { supported }); '
             "globalThis['Object'][method](window, { fetch });",
+            'const method = "unrelated"; Object.assign(window, { supported }); '
+            "globalThis.window.Object[method](window, { fetch });",
+            'const method = "unrelated"; Object.assign(window, { supported }); '
+            "globalThis['window']['Object'][method](window, { fetch });",
         ):
             with self.subTest(source=source), self.assertRaises(ValueError):
                 exposed_window_bindings(source)
@@ -441,6 +445,25 @@ delete globalThis.window;
             json.loads(result.stdout),
             {"conditional": 1, "logical": 2, "member": 3},
         )
+
+    def test_node_confirms_full_global_object_chains_mutate_window(self) -> None:
+        script = r'''
+globalThis.window = globalThis;
+const method = "assign";
+globalThis.window.Object[method](window, {dotChain: 1});
+globalThis['window']['Object'][method](window, {subscriptChain: 2});
+console.log(JSON.stringify([window.dotChain, window.subscriptChain]));
+delete globalThis.dotChain;
+delete globalThis.subscriptChain;
+delete globalThis.window;
+'''
+        result = subprocess.run(
+            ["node", "--input-type=module", "--eval", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(json.loads(result.stdout), [1, 2])
 
     def test_production_corpus_has_every_conservative_handler_bound(self) -> None:
         audit = assert_window_bindings(

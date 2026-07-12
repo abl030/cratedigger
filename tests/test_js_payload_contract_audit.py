@@ -428,6 +428,22 @@ const markup = `before ${renderDownloadHistoryItem({
             with self.subTest(source=source), self.assertRaises(ValueError):
                 fixture_fields_for_call(source, call_name)
 
+    def test_payload_shape_error_includes_supplied_origin(self) -> None:
+        source = """
+import { renderDownloadHistoryItem as renderDownloadHistoryFixture } from './fixture.js';
+renderDownloadHistoryFixture(fixture);
+"""
+        with self.assertRaisesRegex(
+            ValueError, r"shape\.mjs: .*direct object/array literal"
+        ):
+            fixture_fields_for_call(
+                source,
+                "renderDownloadHistoryFixture",
+                origin="shape.mjs",
+                registered_renderer="renderDownloadHistoryItem",
+                registered_module="./fixture.js",
+            )
+
     def test_scanner_fails_closed_on_syntax_errors(self) -> None:
         with self.assertRaisesRegex(ValueError, "JavaScript parse error"):
             fixture_fields_for_call(

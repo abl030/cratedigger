@@ -250,6 +250,8 @@ def boundary_worlds(draw: st.DrawFn) -> BoundaryWorld:
                 "globalThis.Object",
                 'globalThis["Object"]',
                 "self['Object']",
+                "globalThis.window.Object",
+                "globalThis['window']['Object']",
             )
         )
     )

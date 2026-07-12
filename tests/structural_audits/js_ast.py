@@ -737,35 +737,42 @@ def fixture_fields_for_call(
             call_name,
             declaration_nodes=declaration_nodes,
         )
-    except ValueError as exc:
-        raise ValueError(f"{origin}: {exc}") from None
-    fields: set[str] = set()
-    for node in _walk(tree.root_node):
-        if node.type != "call_expression":
-            continue
-        if _payload_call_reference(node, source_bytes, call_name) is None:
-            continue
-        arguments = node.child_by_field_name("arguments")
-        args = _semantic_named_children(arguments) if arguments is not None else []
-        first = args[0] if args else None
-        if first is None:
-            raise ValueError(f"{call_name} fixture has no first argument")
-        if first.type == "object":
-            fields.update(_direct_object_keys(first, source_bytes))
-            continue
-        if first.type != "array":
-            raise ValueError(
-                f"{call_name} fixture must use a direct object/array literal; "
-                "indirection hides seeded payload fields"
+        fields: set[str] = set()
+        for node in _walk(tree.root_node):
+            if node.type != "call_expression":
+                continue
+            if _payload_call_reference(node, source_bytes, call_name) is None:
+                continue
+            arguments = node.child_by_field_name("arguments")
+            args = (
+                _semantic_named_children(arguments)
+                if arguments is not None
+                else []
             )
-        for element in _direct_array_elements(first):
-            if element.type != "object":
+            first = args[0] if args else None
+            if first is None:
+                raise ValueError(f"{call_name} fixture has no first argument")
+            if first.type == "object":
+                fields.update(_direct_object_keys(first, source_bytes))
+                continue
+            if first.type != "array":
                 raise ValueError(
-                    f"{call_name} array fixtures must contain direct object "
-                    "literals only; spread/indirect elements hide seeded fields"
+                    f"{call_name} fixture must use a direct object/array literal; "
+                    "indirection hides seeded payload fields"
                 )
-            fields.update(_direct_object_keys(element, source_bytes))
-    return fields
+            for element in _direct_array_elements(first):
+                if element.type != "object":
+                    raise ValueError(
+                        f"{call_name} array fixtures must contain direct object "
+                        "literals only; spread/indirect elements hide seeded fields"
+                    )
+                fields.update(_direct_object_keys(element, source_bytes))
+        return fields
+    except ValueError as exc:
+        prefix = f"{origin}: "
+        if str(exc).startswith(prefix):
+            raise
+        raise ValueError(f"{prefix}{exc}") from None
 
 
 def scan_js_payload_fixture_fields(
@@ -918,21 +925,6 @@ def _browser_global_identifier(node: Node | None, source_bytes: bytes) -> bool:
     return _identifier_value(node, source_bytes) in _BROWSER_GLOBALS
 
 
-def _direct_browser_global_reference(
-    node: Node | None, source_bytes: bytes
-) -> bool:
-    if node is None:
-        return False
-    if _browser_global_identifier(node, source_bytes):
-        return True
-    if node.type == "parenthesized_expression":
-        children = _semantic_named_children(node)
-        return len(children) == 1 and _direct_browser_global_reference(
-            children[0], source_bytes
-        )
-    return False
-
-
 def _browser_global_rooted(node: Node | None, source_bytes: bytes) -> bool:
     if node is None:
         return False
@@ -1007,14 +999,14 @@ def _semantic_object_reference(node: Node | None, source_bytes: bytes) -> bool:
     if node.type == "subscript_expression":
         object_node, property_node = _subscript_parts(node)
         return (
-            _direct_browser_global_reference(object_node, source_bytes)
+            _browser_global_rooted(object_node, source_bytes)
             and property_node is not None
             and property_node.type == "string"
             and _decode_js_string(property_node, source_bytes) == "Object"
         )
     return (
         node.type == "member_expression"
-        and _direct_browser_global_reference(
+        and _browser_global_rooted(
             node.child_by_field_name("object"), source_bytes
         )
         and _identifier_is(
