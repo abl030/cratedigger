@@ -244,31 +244,28 @@ class TestCmdForceImport(unittest.TestCase):
 class TestResolveFailedPath(unittest.TestCase):
     def test_absolute_path_exists(self) -> None:
         """Absolute path that exists should be returned as-is."""
-        from scripts import pipeline_cli
+        import scripts.pipeline_cli.imports as pipeline_cli_imports
         import tempfile
         with tempfile.TemporaryDirectory() as d:
-            result = pipeline_cli._resolve_failed_path(d)
+            result = pipeline_cli_imports._resolve_failed_path(d)
             self.assertEqual(result, d)
 
     def test_nonexistent_path_returns_none(self) -> None:
         """Path that doesn't exist anywhere should return None."""
-        from scripts import pipeline_cli
-        result = pipeline_cli._resolve_failed_path("/nonexistent/path/xyz")
+        import scripts.pipeline_cli.imports as pipeline_cli_imports
+        result = pipeline_cli_imports._resolve_failed_path("/nonexistent/path/xyz")
         self.assertIsNone(result)
 
     def test_relative_path_resolved(self) -> None:
         """Relative path should be resolved against SLSKD_DOWNLOAD_DIRS."""
-        from scripts.pipeline_cli import imports as pipeline_cli_imports
+        import scripts.pipeline_cli.imports as pipeline_cli_imports
         import tempfile
         with tempfile.TemporaryDirectory() as base:
             # Create a subdir to simulate failed_imports/Album
             subdir = os.path.join(base, "failed_imports", "Test Album")
             os.makedirs(subdir)
-            # Temporarily override SLSKD_DOWNLOAD_DIRS. Mutate on the
-            # defining submodule (``imports.py``, where ``_resolve_failed_path``
-            # reads the name from its own module globals) — the top-level
-            # ``pipeline_cli`` re-export is a separate namespace, so assigning
-            # there wouldn't be visible to the function (#495 package split).
+            # Temporarily override SLSKD_DOWNLOAD_DIRS on the defining module,
+            # where ``_resolve_failed_path`` reads its globals.
             old = pipeline_cli_imports.SLSKD_DOWNLOAD_DIRS
             pipeline_cli_imports.SLSKD_DOWNLOAD_DIRS = [base]
             try:
