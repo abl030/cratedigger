@@ -66,7 +66,9 @@ console.log(JSON.stringify(results));
             [["invented_client_only"]] * 6,
         )
 
-    def test_node_confirms_static_selector_dataflows_execute_renderer(self) -> None:
+    def test_node_confirms_dataflow_calls_motivate_explicit_fixture_boundary(
+        self,
+    ) -> None:
         script = r'''
 const helpers = {renderDownloadHistoryItem: value => Object.keys(value)};
 const getName = () => "renderDownloadHistoryItem";
@@ -91,6 +93,126 @@ console.log(JSON.stringify(results));
         self.assertEqual(
             json.loads(result.stdout), [["invented_client_only"]] * 5
         )
+        with self.assertRaisesRegex(ValueError, "raw renderer"):
+            fixture_fields_for_call(
+                "import { renderDownloadHistoryItem as "
+                "renderDownloadHistoryFixture } from './fixture.js';\n" + script,
+                "renderDownloadHistoryFixture",
+                registered_renderer="renderDownloadHistoryItem",
+                registered_module="./fixture.js",
+            )
+
+    def test_node_confirms_lexical_and_mutable_selectors_execute_renderer(
+        self,
+    ) -> None:
+        script = r'''
+const helpers = {renderDownloadHistoryItem: value => Object.keys(value)};
+const shadowed = "renderDownloadHistoryItem";
+{ const shadowed = "unrelated"; void shadowed; }
+const mutated = {history: "unrelated"};
+mutated.history = "renderDownloadHistoryItem";
+const duplicated = {history: "unrelated", history: "renderDownloadHistoryItem"};
+let mutable = "renderDownloadHistoryItem";
+const runtime = JSON.parse('"renderDownloadHistoryItem"');
+const results = [
+  helpers[shadowed]({shadowed: 1}),
+  helpers[mutated.history]({mutated: 1}),
+  helpers[duplicated.history]({duplicated: 1}),
+  helpers[mutable]({mutable: 1}),
+  helpers[runtime]({runtime: 1}),
+];
+console.log(JSON.stringify(results));
+'''
+        result = subprocess.run(
+            ["node", "--input-type=module", "--eval", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            json.loads(result.stdout),
+            [["shadowed"], ["mutated"], ["duplicated"], ["mutable"], ["runtime"]],
+        )
+        with self.assertRaisesRegex(ValueError, "raw renderer"):
+            fixture_fields_for_call(
+                "import { renderDownloadHistoryItem as "
+                "renderDownloadHistoryFixture } from './fixture.js';\n" + script,
+                "renderDownloadHistoryFixture",
+                registered_renderer="renderDownloadHistoryItem",
+                registered_module="./fixture.js",
+            )
+
+    def test_explicit_fixture_boundary_rejects_raw_renderer_dataflow(self) -> None:
+        registration = "import * as historyModule from './fixture.js'; "
+        raw_renderer_uses = (
+            (
+                'const name = "renderDownloadHistoryItem"; '
+                '{ const name = "unrelated"; void name; } '
+                "historyModule[name]({invented_client_only: 1});"
+            ),
+            (
+                'const names = {history: "unrelated"}; '
+                'names.history = "renderDownloadHistoryItem"; '
+                "historyModule[names.history]({invented_client_only: 1});"
+            ),
+            (
+                'const names = {history: "unrelated", '
+                'history: "renderDownloadHistoryItem"}; '
+                "historyModule[names.history]({invented_client_only: 1});"
+            ),
+            (
+                'let name = "renderDownloadHistoryItem"; '
+                "historyModule[name]({invented_client_only: 1});"
+            ),
+            (
+                'const names = {history: "renderDownloadHistoryItem"}; '
+                'names.history = "unrelated"; '
+                "historyModule[names.history]();"
+            ),
+        )
+        for source in raw_renderer_uses:
+            with self.subTest(source=source), self.assertRaisesRegex(
+                ValueError, "explicit registration"
+            ):
+                fixture_fields_for_call(
+                    registration + source,
+                    "renderDownloadHistoryFixture",
+                    registered_renderer="renderDownloadHistoryItem",
+                    registered_module="./fixture.js",
+                )
+
+    def test_explicit_fixture_registration_audits_only_local_alias_calls(
+        self,
+    ) -> None:
+        source = """
+import { renderDownloadHistoryItem as renderDownloadHistoryFixture } from './fixture.js';
+console.log('renderDownloadHistoryItem() behavior');
+renderDownloadHistoryFixture({outcome: 'success', request_id: 1});
+"""
+        self.assertEqual(
+            fixture_fields_for_call(
+                source,
+                "renderDownloadHistoryFixture",
+                registered_renderer="renderDownloadHistoryItem",
+                registered_module="./fixture.js",
+            ),
+            {"outcome", "request_id"},
+        )
+        for bypass in (
+            "renderDownloadHistoryItem({invented_client_only: 1});",
+            "import * as historyModule from './fixture.js'; "
+            'const name = "renderDownloadHistoryItem"; '
+            "historyModule[name]({invented_client_only: 1});",
+            'helpers["renderDownloadHistoryFixture"]({invented_client_only: 1});',
+            "__test__.renderDownloadHistoryFixture({invented_client_only: 1});",
+        ):
+            with self.subTest(bypass=bypass), self.assertRaises(ValueError):
+                fixture_fields_for_call(
+                    source + bypass,
+                    "renderDownloadHistoryFixture",
+                    registered_renderer="renderDownloadHistoryItem",
+                    registered_module="./fixture.js",
+                )
 
     def test_scanner_decodes_direct_escaped_renderer_identifier(self) -> None:
         self.assertEqual(
@@ -131,26 +253,6 @@ console.log(JSON.stringify(results));
             (
                 'const name = "renderDownloadHistoryItem"; '
                 "__test__[name]({invented_client_only: 1});"
-            ),
-            (
-                'const getName = () => "renderDownloadHistoryItem"; '
-                "helpers[getName()]({invented_client_only: 1});"
-            ),
-            (
-                'const names = ["renderDownloadHistoryItem"]; '
-                "helpers[names[0]]({invented_client_only: 1});"
-            ),
-            (
-                'const names = {history: "renderDownloadHistoryItem"}; '
-                "helpers[names.history]({invented_client_only: 1});"
-            ),
-            (
-                'const prefix = "renderDownloadHistory"; '
-                'helpers[prefix + "Item"]({invented_client_only: 1});'
-            ),
-            (
-                'const prefix = "renderDownloadHistory"; '
-                'helpers[`${prefix}Item`]({invented_client_only: 1});'
             ),
             "__test__?.renderDownloadHistoryItem({invented_client_only: 1});",
             "(0, renderDownloadHistoryItem)({invented_client_only: 1});",
@@ -299,9 +401,52 @@ const markup = `before ${renderDownloadHistoryItem({
                 "w",
                 encoding="utf-8",
             ) as handle:
-                handle.write("renderEvidenceStrip({ future_field: 1 });\n")
+                handle.write(
+                    "import { renderEvidenceStrip as renderEvidenceFixture } "
+                    "from '../web/js/history.js';\n"
+                    "renderEvidenceFixture({ future_field: 1 });\n"
+                )
             scanned = scan_js_payload_fixture_fields(tests_dir)
         self.assertEqual(scanned["download_history"], {"future_field"})
+
+    def test_corpus_registration_is_optional_only_without_boundary_references(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tests_dir:
+            path = os.path.join(tests_dir, "test_js_unrelated.mjs")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "const value = unrelatedNamespace[key]();\n"
+                    "console.log('renderDownloadHistoryItem is only prose');\n"
+                )
+            self.assertEqual(
+                scan_js_payload_fixture_fields(tests_dir),
+                {"pipeline_log": set(), "download_history": set()},
+            )
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "import { unrelated } from '../web/js/history.js';\n"
+                    "console.log('renderDownloadHistoryItem is still prose');\n"
+                )
+            self.assertEqual(
+                scan_js_payload_fixture_fields(tests_dir),
+                {"pipeline_log": set(), "download_history": set()},
+            )
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "import * as historyModule from '../web/js/history.js';\n"
+                    'const name = "renderDownloadHistoryItem"; '
+                    "historyModule[name]({ invented_client_only: 1 });\n"
+                )
+            with self.assertRaisesRegex(ValueError, "explicit registration"):
+                scan_js_payload_fixture_fields(tests_dir)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "import historyModule from '../web/js/history.js';\n"
+                    "historyModule[selector]({ invented_client_only: 1 });\n"
+                )
+            with self.assertRaisesRegex(ValueError, "explicit registration"):
+                scan_js_payload_fixture_fields(tests_dir)
 
     def test_corpus_parse_error_names_the_scanned_js_module(self) -> None:
         with tempfile.TemporaryDirectory() as tests_dir:

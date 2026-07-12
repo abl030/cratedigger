@@ -271,13 +271,68 @@ console.log(JSON.stringify(values.map(value => value.length)));
             with self.subTest(source=source), self.assertRaises(ValueError):
                 exposed_window_bindings(source)
 
-    def test_unrelated_computed_object_call_does_not_trip_binding_audit(self) -> None:
+    def test_computed_object_call_only_fails_for_browser_global_root(self) -> None:
         source = (
             'const method = "unrelated"; '
             "Object.assign(window, { supported }); "
-            "Object[method](window, { fetch });"
+            "Object[method]({ nested: window }, { fetch });"
         )
         self.assertEqual(exposed_window_bindings(source), {"supported"})
+        self.assertEqual(
+            exposed_window_bindings(
+                "Object.assign(window, { supported }); Object.keys(window);"
+            ),
+            {"supported"},
+        )
+
+    def test_binding_audit_rejects_computed_calls_and_nested_global_roots(
+        self,
+    ) -> None:
+        rejected = (
+            (
+                'let method = "assign"; Object.assign(window, { supported }); '
+                "Object[method](window, { fetch });"
+            ),
+            (
+                'const methods = {current: "unrelated"}; '
+                'methods.current = "assign"; '
+                "Object.assign(window, { supported }); "
+                "Object[methods.current](window, { fetch });"
+            ),
+            (
+                'const methods = {current: "unrelated", current: "assign"}; '
+                "Object.assign(window, { supported }); "
+                "Object[methods.current](window, { fetch });"
+            ),
+            (
+                'const method = "assign"; '
+                '{ const method = "unrelated"; void method; } '
+                "Object.assign(window, { supported }); "
+                "Object[method](window, { fetch });"
+            ),
+            (
+                "const method = JSON.parse('\"assign\"'); "
+                "Object.assign(window, { supported }); "
+                "Object[method](window, { fetch });"
+            ),
+            (
+                "Object.assign(window, { supported }); "
+                "globalThis.window.fetch = localFetch;"
+            ),
+        )
+        for source in rejected:
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                exposed_window_bindings(source)
+
+        non_root_target = (
+            'const methods = {current: "assign"}; '
+            'methods.current = "unrelated"; '
+            "Object.assign(window, { supported }); "
+            "Object[methods.current]({ nested: window }, { fetch });"
+        )
+        self.assertEqual(
+            exposed_window_bindings(non_root_target), {"supported"}
+        )
 
     def test_escaped_binding_key_is_normalized_before_native_collision(self) -> None:
         source = r"Object.assign(window, { f\u0065tch });"
@@ -304,6 +359,32 @@ delete globalThis.reviewProbe;
             text=True,
         )
         self.assertEqual(json.loads(result.stdout), [["fetch"], 2])
+
+    def test_node_confirms_mutable_assign_and_nested_global_mutations_execute(
+        self,
+    ) -> None:
+        script = r'''
+const target = {};
+let method = "assign";
+Object[method](target, {viaLet: 1});
+const methods = {current: "unrelated"};
+methods.current = "assign";
+Object[methods.current](target, {viaMember: 2});
+globalThis.window = {};
+globalThis.window.fetch = 3;
+console.log(JSON.stringify([target, globalThis.window]));
+delete globalThis.window;
+'''
+        result = subprocess.run(
+            ["node", "--input-type=module", "--eval", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            json.loads(result.stdout),
+            [{"viaLet": 1, "viaMember": 2}, {"fetch": 3}],
+        )
 
     def test_production_corpus_has_every_conservative_handler_bound(self) -> None:
         audit = assert_window_bindings(

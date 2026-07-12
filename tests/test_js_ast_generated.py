@@ -21,6 +21,7 @@ from tests.structural_audits.js_ast import (
 
 
 _CALL_NAME = "renderDownloadHistoryItem"
+_FIXTURE_NAME = "renderDownloadHistoryFixture"
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 _KEYS = (
     "outcome",
@@ -43,6 +44,14 @@ _KEYS = (
 class PayloadLiteralWorld:
     source: str
     expected_fields: frozenset[str]
+
+
+@dataclass(frozen=True)
+class BoundaryWorld:
+    payload_source: str
+    payload_rejected: bool
+    window_source: str
+    window_rejected: bool
 
 
 def assert_exact_fixture_fields(
@@ -72,6 +81,20 @@ def assert_window_world(
         raise AssertionError(
             "window audit diverged from authored handler/binding oracle"
         )
+
+
+def assert_boundary_world(
+    world: BoundaryWorld,
+    *,
+    payload_rejected: bool,
+    window_rejected: bool,
+) -> None:
+    """Independent oracle for the two explicit supported-callee grammars."""
+    if (
+        payload_rejected != world.payload_rejected
+        or window_rejected != world.window_rejected
+    ):
+        raise AssertionError("explicit fixture/window boundary diverged from oracle")
 
 
 def assert_unsupported_renderer_reference_is_rejected(
@@ -205,6 +228,97 @@ def payload_literal_worlds(draw: st.DrawFn) -> PayloadLiteralWorld:
     )
 
 
+@st.composite
+def boundary_worlds(draw: st.DrawFn) -> BoundaryWorld:
+    declaration = draw(st.sampled_from(("let", "const")))
+    shape = draw(st.sampled_from(("scalar", "array", "object", "duplicate")))
+    initial = draw(st.sampled_from(("target", "unrelated")))
+    mutation = draw(st.sampled_from(("none", "before_target", "before_other", "after")))
+    shadow = draw(st.booleans())
+    unknown = draw(st.booleans())
+    sensitive_namespace = draw(st.booleans())
+    browser_global_root = draw(st.booleans())
+
+    target = _CALL_NAME
+    initial_value = target if initial == "target" else "unrelated"
+    final_value = target if mutation == "before_target" else "unrelated"
+    if unknown:
+        setup = (
+            f"{declaration} selector = JSON.parse('\"{initial_value}\"');"
+        )
+        selector = "selector"
+        before = ""
+        after = ""
+        shadow_name = "selector"
+    elif shape == "scalar":
+        setup = f'{declaration} selector = "{initial_value}";'
+        selector = "selector"
+        before = (
+            f'selector = "{final_value}";'
+            if mutation.startswith("before") and declaration == "let"
+            else ""
+        )
+        after = (
+            'selector = "unrelated";'
+            if mutation == "after" and declaration == "let"
+            else ""
+        )
+        shadow_name = "selector"
+    else:
+        opener = "[" if shape == "array" else "{current: "
+        closer = "]" if shape == "array" else "}"
+        if shape == "duplicate":
+            literal = f'{{current: "unrelated", current: "{initial_value}"}}'
+        else:
+            literal = f'{opener}"{initial_value}"{closer}'
+        setup = f"{declaration} selectors = {literal};"
+        selector = "selectors[0]" if shape == "array" else "selectors.current"
+        before = (
+            f'{selector} = "{final_value}";'
+            if mutation.startswith("before")
+            else ""
+        )
+        after = (
+            f'{selector} = "unrelated";' if mutation == "after" else ""
+        )
+        shadow_name = "selectors"
+
+    shadow_block = (
+        f'{{ const {shadow_name} = "shadow-only"; void {shadow_name}; }}'
+        if shadow
+        else ""
+    )
+    namespace = "historyModule" if sensitive_namespace else "helpers"
+    registration = (
+        "import * as historyModule from './fixture.js';"
+        if sensitive_namespace
+        else f"import {{ {_CALL_NAME} as {_FIXTURE_NAME} }} from './fixture.js';"
+    )
+    payload_source = (
+        f"{registration}{setup}{shadow_block}{before}"
+        f"{namespace}[{selector}]({{invented_client_only: 1}});{after}"
+    )
+
+    assign_initial = "assign" if initial == "target" else "unrelated"
+    window_setup = setup.replace(target, "assign").replace(
+        initial_value, assign_initial
+    )
+    window_before = before.replace(target, "assign")
+    window_after = after.replace(target, "assign")
+    target_expression = "globalThis.window" if browser_global_root else "{window}"
+    window_source = (
+        f"{window_setup}{shadow_block}{window_before}"
+        "Object.assign(window, { supported });"
+        f"Object[{selector}]({target_expression}, {{ fetch }});{window_after}"
+    )
+    return BoundaryWorld(
+        payload_source=payload_source,
+        payload_rejected=sensitive_namespace,
+        window_source=window_source,
+        window_rejected=browser_global_root,
+    )
+
+
 _UNSUPPORTED_PAYLOADS = st.sampled_from(
     (
         f"{_CALL_NAME}({{[fieldName]: 1}});",
@@ -225,26 +339,6 @@ _UNSUPPORTED_RENDERER_REFERENCES = st.sampled_from(
         (
             f'const name = "{_CALL_NAME}"; '
             "__test__[name]({invented_client_only: 1});"
-        ),
-        (
-            f'const getName = () => "{_CALL_NAME}"; '
-            "helpers[getName()]({invented_client_only: 1});"
-        ),
-        (
-            f'const names = ["{_CALL_NAME}"]; '
-            "helpers[names[0]]({invented_client_only: 1});"
-        ),
-        (
-            f'const names = {{history: "{_CALL_NAME}"}}; '
-            "helpers[names.history]({invented_client_only: 1});"
-        ),
-        (
-            'const prefix = "renderDownloadHistory"; '
-            'helpers[prefix + "Item"]({invented_client_only: 1});'
-        ),
-        (
-            'const prefix = "renderDownloadHistory"; '
-            'helpers[`${prefix}Item`]({invented_client_only: 1});'
         ),
         f"__test__?.{_CALL_NAME}({{invented_client_only: 1}});",
         f"(0, {_CALL_NAME})({{invented_client_only: 1}});",
@@ -279,7 +373,17 @@ _UNSUPPORTED_WINDOW_BINDINGS = st.sampled_from(
         "Object.assign(window, { supported }); Object.assign(globalThis, { fetch });",
         "Object.assign(window, { supported }); Object.assign(self, { fetch });",
         "Object.assign(window, { supported }); globalThis.fetch = localFetch;",
+        "Object.assign(window, { supported }); globalThis.window.fetch = localFetch;",
         "Object.assign(window, { supported }); Object?.assign(window, { fetch });",
+        (
+            'let method = "assign"; Object.assign(window, { supported }); '
+            "Object[method](window, { fetch });"
+        ),
+        (
+            'const methods = {current: "unrelated"}; methods.current = "assign"; '
+            "Object.assign(window, { supported }); "
+            "Object[methods.current](window, { fetch });"
+        ),
         (
             "const alias = Object.assign; "
             "Object.assign(window, { supported }); alias(window, { fetch });"
@@ -303,7 +407,7 @@ _SUPPORTED_UNRELATED_COMPUTED_CALLS = st.sampled_from(
         "const key = getRuntimeName(); unrelatedNamespace[key]();",
         (
             'const key = "unrelated"; Object.assign(window, { supported }); '
-            "Object[key](window, { fetch });"
+            "Object[key]({ nested: window }, { fetch });"
         ),
     )
 )
@@ -344,6 +448,34 @@ class TestJsAstGenerated(unittest.TestCase):
             self.assertEqual(exposed_window_bindings(source), {"supported"})
         else:
             self.assertEqual(fixture_fields_for_call(source, _CALL_NAME), set())
+
+    @given(boundary_worlds())
+    def test_explicit_boundaries_match_independent_state_world_oracle(
+        self, world: BoundaryWorld
+    ) -> None:
+        try:
+            fields = fixture_fields_for_call(
+                world.payload_source,
+                _FIXTURE_NAME,
+                registered_renderer=_CALL_NAME,
+                registered_module="./fixture.js",
+            )
+        except ValueError:
+            payload_rejected = True
+        else:
+            payload_rejected = False
+            self.assertEqual(fields, set())
+        try:
+            exposed_window_bindings(world.window_source)
+        except ValueError:
+            window_rejected = True
+        else:
+            window_rejected = False
+        assert_boundary_world(
+            world,
+            payload_rejected=payload_rejected,
+            window_rejected=window_rejected,
+        )
 
     @given(
         st.sampled_from(("'", "`")),
@@ -493,13 +625,27 @@ class TestJsAstGenerated(unittest.TestCase):
             assert_window_world(audit, required={"needed"}, exposed=set())
 
     def test_known_bad_fail_open_renderer_reference_trips_checker(self) -> None:
-        source = (
-            f'const getName = () => "{_CALL_NAME}"; '
-            "helpers[getName()]({invented_client_only: 1});"
+        world = BoundaryWorld(
+            payload_source=(
+                "import * as historyModule from './fixture.js';"
+                f'const names = {{current: "{_CALL_NAME}"}}; '
+                'names.current = "unrelated"; '
+                "historyModule[names.current]({invented_client_only: 1});"
+            ),
+            payload_rejected=True,
+            window_source=(
+                'const methods = {current: "unrelated"}; '
+                'methods.current = "assign"; '
+                "Object.assign(window, {}); "
+                "Object[methods.current](globalThis.window, {fetch});"
+            ),
+            window_rejected=True,
         )
-        with self.assertRaisesRegex(AssertionError, "unsupported audited renderer"):
-            assert_unsupported_renderer_reference_is_rejected(
-                source, extractor=lambda _source, _name: set()
+        with self.assertRaisesRegex(AssertionError, "boundary diverged"):
+            assert_boundary_world(
+                world,
+                payload_rejected=False,
+                window_rejected=False,
             )
 
     def test_known_bad_fail_open_window_binding_trips_checker(self) -> None:

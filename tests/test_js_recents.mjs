@@ -6,6 +6,8 @@
 import { __test__ } from '../web/js/recents.js';
 import { state } from '../web/js/state.js';
 
+const { renderRecentsItems: renderRecentsFixture } = __test__;
+
 let passed = 0;
 let failed = 0;
 
@@ -99,7 +101,7 @@ console.log('triageLabelText() restores the old recents label wording');
 
 console.log('renderRecentsItems() shows match rates beside the first date header');
 {
-  const html = __test__.renderRecentsItems([
+  const html = renderRecentsFixture([
     {
       id: 10,
       request_id: 20,
@@ -297,7 +299,7 @@ console.log('renderDownloadingItems() shows active YouTube ingest rows');
 
 console.log('renderRecentsItems() shows bad-extension postflight warning chip');
 {
-  const html = __test__.renderRecentsItems([{
+  const html = renderRecentsFixture([{
     id: 584,
     request_id: 604,
     created_at: '2026-04-02T12:55:41+00:00',
@@ -316,7 +318,7 @@ console.log('renderRecentsItems() shows bad-extension postflight warning chip');
 
 console.log('renderRecentsItems() shows wrong-match triage audit chip');
 {
-  const html = __test__.renderRecentsItems([{
+  const html = renderRecentsFixture([{
     id: 725,
     request_id: 801,
     created_at: '2026-04-25T23:25:00+00:00',
@@ -341,7 +343,7 @@ console.log('renderRecentsItems() shows wrong-match triage audit chip');
 
 console.log('renderRecentsItems() escapes wrong-match triage chip fields');
 {
-  const html = __test__.renderRecentsItems([{
+  const html = renderRecentsFixture([{
     id: 726,
     request_id: 802,
     created_at: '2026-04-25T23:25:00+00:00',
@@ -364,7 +366,7 @@ console.log('renderRecentsItems() escapes wrong-match triage chip fields');
 
 console.log('renderRecentsItems() does not mark rejected history as cleared wrong-matches');
 {
-  const html = __test__.renderRecentsItems([{
+  const html = renderRecentsFixture([{
     id: 15838,
     request_id: 2762,
     outcome: 'rejected',
@@ -383,7 +385,7 @@ console.log('renderRecentsItems() does not mark rejected history as cleared wron
 
 console.log('renderRecentsItems() does not mark visible wrong-match rows as cleared');
 {
-  const html = __test__.renderRecentsItems([{
+  const html = renderRecentsFixture([{
     id: 14534,
     request_id: 2762,
     outcome: 'rejected',
@@ -404,7 +406,7 @@ console.log('renderRecentsItems() does not mark visible wrong-match rows as clea
 
 console.log('renderRecentsItems() shows the compact IN/HAVE evidence strip on quality rows');
 {
-  const html = __test__.renderRecentsItems([{
+  const html = renderRecentsFixture([{
     id: 900,
     request_id: 901,
     created_at: '2026-07-10T07:18:00+00:00',
@@ -427,7 +429,7 @@ console.log('renderRecentsItems() shows the compact IN/HAVE evidence strip on qu
 
 console.log('renderRecentsItems() omits the evidence strip when a row has no measurements');
 {
-  const html = __test__.renderRecentsItems([{
+  const html = renderRecentsFixture([{
     id: 902,
     request_id: 903,
     created_at: '2026-07-10T06:37:00+00:00',
