@@ -3,7 +3,11 @@
  * Run with: node tests/test_js_history.mjs
  */
 
-import { renderDownloadHistoryItem, renderEvidenceStrip, __test__ } from '../web/js/history.js';
+import {
+  renderDownloadHistoryItem as renderDownloadHistoryFixture,
+  renderEvidenceStrip as renderEvidenceFixture,
+  __test__,
+} from '../web/js/history.js';
 const { formatV0Probe, formatSpectral, withWas } = __test__;
 
 let passed = 0;
@@ -29,7 +33,7 @@ function assertExcludes(haystack, needle, msg) {
 
 console.log('renderDownloadHistoryItem() shows wrong-match triage audit rows');
 {
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
     soulseek_username: 'moundsofass',
     created_at: '2026-04-25T23:25:00+00:00',
@@ -55,7 +59,7 @@ console.log('renderDownloadHistoryItem() shows wrong-match triage audit rows');
 
 console.log('renderDownloadHistoryItem() omits empty triage rows');
 {
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'success',
     soulseek_username: 'testuser',
     created_at: '2026-04-25T23:25:00+00:00',
@@ -70,7 +74,7 @@ console.log('renderDownloadHistoryItem() omits empty triage rows');
 
 console.log('renderDownloadHistoryItem() escapes wrong-match triage audit values');
 {
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
     soulseek_username: 'testuser',
     created_at: '2026-04-25T23:25:00+00:00',
@@ -89,7 +93,7 @@ console.log('renderDownloadHistoryItem() escapes wrong-match triage audit values
 
 console.log('renderDownloadHistoryItem() shows Bitrate row with inline (was X) comparison');
 {
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
     soulseek_username: 'testuser',
     created_at: '2026-04-25T23:25:00+00:00',
@@ -119,7 +123,7 @@ console.log('renderDownloadHistoryItem() shows Bitrate row with inline (was X) c
 
 console.log('renderDownloadHistoryItem() omits the (was X) suffix when no existing data');
 {
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
     soulseek_username: 'testuser',
     created_at: '2026-04-25T23:25:00+00:00',
@@ -134,7 +138,7 @@ console.log('renderDownloadHistoryItem() omits the (was X) suffix when no existi
 
 console.log('two-sided spectral failures remain distinct from legacy unmeasured rows');
 {
-  const failedHtml = renderDownloadHistoryItem({
+  const failedHtml = renderDownloadHistoryFixture({
     outcome: 'rejected', created_at: '2026-07-12T00:00:00+00:00',
     spectral_attempted: true,
     spectral_error: 'RuntimeError: decode failed',
@@ -146,13 +150,13 @@ console.log('two-sided spectral failures remain distinct from legacy unmeasured 
     'spectral errors are reachable in focusable forensics');
   assertContains(failedHtml, 'Spectral IN error',
     'candidate error has a labelled forensic row');
-  const strip = renderEvidenceStrip({
+  const strip = renderEvidenceFixture({
     spectral_attempted: true, spectral_error: 'candidate failed',
     existing_spectral_attempted: true, existing_spectral_error: 'existing failed',
   });
   assertContains(strip, 'IN', 'failure-only audit still renders in Recents');
   assertContains(strip, 'spectral failed', 'Recents keeps failure state compact');
-  const legacyHtml = renderDownloadHistoryItem({
+  const legacyHtml = renderDownloadHistoryFixture({
     outcome: 'rejected', created_at: '2026-07-12T00:00:00+00:00',
   });
   assertExcludes(legacyHtml, 'analysis failed', 'legacy row stays unmeasured');
@@ -160,14 +164,14 @@ console.log('two-sided spectral failures remain distinct from legacy unmeasured 
 
 console.log('legacy existing floor-only Recents labels the missing grade');
 {
-  const strip = renderEvidenceStrip({ existing_spectral_bitrate: 128 });
+  const strip = renderEvidenceFixture({ existing_spectral_bitrate: 128 });
   assertContains(strip, 'ungraded (~128k)',
     'legacy HAVE floor cannot read like a complete spectral grade');
 }
 
 console.log('renderDownloadHistoryItem() renders lossless V0 probe with inline (was X) comparison');
 {
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'success',
     soulseek_username: 'testuser',
     created_at: '2026-04-25T23:25:00+00:00',
@@ -197,7 +201,7 @@ console.log('renderDownloadHistoryItem() omits the V0 probe (was X) suffix when 
   // a fake upgrade ("260kbps avg (was 192kbps)" mixes two metrics). The
   // min-vs-min comparison still renders on the Bitrate row, so nothing is
   // lost.
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'success',
     soulseek_username: 'awellregulatedabbey',
     created_at: '2026-05-19T13:43:00+00:00',
@@ -231,7 +235,7 @@ console.log('renderDownloadHistoryItem() renders the V0 probe row for research p
   // the gold-standard lossless-source probes distinguishable. Note the
   // probe (247) is an independent measurement, NOT the container bitrate
   // (232) — the old "redundant with Bitrate" rationale was stale.
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
     soulseek_username: 'testuser',
     created_at: '2026-04-25T23:25:00+00:00',
@@ -255,7 +259,7 @@ console.log('renderDownloadHistoryItem() V0 was-suffix is kind-aware');
   // dl 36660: lossless-source candidate probe (255) vs the library
   // album's native-lossy research probe (250). Both render — the
   // qualifier says which is which instead of hiding the comparison.
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
     soulseek_username: 'tunnik',
     created_at: '2026-07-10T23:19:10+00:00',
@@ -274,7 +278,7 @@ console.log('renderDownloadHistoryItem() keeps a consistent row vocabulary acros
   // Same renderer, two very different rows — both should expose
   // Source, Spectral, Bitrate as the consistent vocabulary so the
   // download history reads as a uniform table.
-  const losslessHtml = renderDownloadHistoryItem({
+  const losslessHtml = renderDownloadHistoryFixture({
     outcome: 'success',
     soulseek_username: 'testuser',
     created_at: '2026-04-25T23:25:00+00:00',
@@ -286,7 +290,7 @@ console.log('renderDownloadHistoryItem() keeps a consistent row vocabulary acros
     existing_min_bitrate: 192,
     final_format: 'opus 128',
   });
-  const lossyHtml = renderDownloadHistoryItem({
+  const lossyHtml = renderDownloadHistoryFixture({
     outcome: 'rejected',
     soulseek_username: 'testuser',
     created_at: '2026-04-25T23:25:00+00:00',
@@ -352,7 +356,7 @@ console.log('formatSpectral() helper colors grades and prefixes the floor');
 
 console.log('renderEvidenceStrip() humanizes spectral tokens on both sides');
 {
-  const html = renderEvidenceStrip({
+  const html = renderEvidenceFixture({
     spectral_grade: 'likely_transcode', spectral_bitrate: 160,
     existing_spectral_grade: 'likely_transcode', existing_spectral_bitrate: 128,
   });
@@ -389,7 +393,7 @@ console.log('formatV0Probe() helper picks the right kind suffix per source linea
 
 console.log('renderDownloadHistoryItem() shows "overridden" instead of the fake 0.000 distance on force imports');
 {
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'force_import',
     soulseek_username: 'pimpek1977',
     created_at: '2026-07-10T07:03:00+00:00',
@@ -409,7 +413,7 @@ console.log('renderDownloadHistoryItem() always renders the core row vocabulary 
   // A timeout row with no measurements still shows the fixed schema —
   // Source / Spectral / Bitrate / Distance — so adjacent entries stop
   // jumping shape.
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'timeout',
     soulseek_username: 'griot_not_riot',
     created_at: '2026-07-07T21:22:00+00:00',
@@ -425,7 +429,7 @@ console.log('renderDownloadHistoryItem() always renders the core row vocabulary 
 
 console.log('renderDownloadHistoryItem() header uses the server badge vocabulary');
 {
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'timeout',
     badge: 'Failed',
     badge_class: 'badge-failed',
@@ -442,7 +446,7 @@ console.log('renderDownloadHistoryItem() header uses the server badge vocabulary
 
 console.log('renderDownloadHistoryItem() header falls back to outcome when badge fields absent');
 {
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
     soulseek_username: 'testuser',
     created_at: '2026-07-07T21:22:00+00:00',
@@ -452,7 +456,7 @@ console.log('renderDownloadHistoryItem() header falls back to outcome when badge
 
 console.log('renderDownloadHistoryItem() tucks debug forensics behind a details toggle');
 {
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
     soulseek_username: 'testuser',
     created_at: '2026-04-25T23:25:00+00:00',
@@ -487,7 +491,7 @@ console.log('renderDownloadHistoryItem() tucks debug forensics behind a details 
 
 console.log('renderEvidenceStrip() builds the compact IN/HAVE comparison');
 {
-  const strip = renderEvidenceStrip({
+  const strip = renderEvidenceFixture({
     downloaded_label: 'MP3 320',
     actual_min_bitrate: 245,
     spectral_grade: 'likely_transcode',
@@ -505,7 +509,7 @@ console.log('renderEvidenceStrip() builds the compact IN/HAVE comparison');
 
 console.log('renderEvidenceStrip() returns empty string when no evidence exists');
 {
-  const strip = renderEvidenceStrip({
+  const strip = renderEvidenceFixture({
     outcome: 'timeout',
     error_message: 'remote_queue_timeout 3600s exceeded',
   });
@@ -520,7 +524,7 @@ console.log('renderEvidenceStrip() requires a number — a codec label alone is 
   // Failed downloads carry downloaded_label (from slskd filetype) but no
   // measurements; a label-only strip would spam "IN MP3 HAVE —" on every
   // failure row in the list.
-  const strip = renderEvidenceStrip({
+  const strip = renderEvidenceFixture({
     outcome: 'timeout',
     downloaded_label: 'MP3',
   });
@@ -535,7 +539,7 @@ console.log('renderEvidenceStrip() shows the on-disk format on the HAVE side');
   // The Mothertongue case (#575): AAC 256 replacing unverified MP3 256.
   // Without the format, "IN M4A V0 · 256k HAVE 256k" reads as a
   // pointless re-download; the codec class WAS the upgrade.
-  const strip = renderEvidenceStrip({
+  const strip = renderEvidenceFixture({
     downloaded_label: 'M4A V0',
     actual_min_bitrate: 256,
     spectral_grade: 'genuine',
@@ -547,7 +551,7 @@ console.log('renderEvidenceStrip() shows the on-disk format on the HAVE side');
 
 console.log('renderDownloadHistoryItem() includes the on-disk format in the Bitrate (was X) suffix');
 {
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'success',
     soulseek_username: 'japanman797',
     created_at: '2026-07-10T10:30:00+00:00',
@@ -562,7 +566,7 @@ console.log('renderDownloadHistoryItem() includes the on-disk format in the Bitr
 
 console.log('renderDownloadHistoryItem() keeps the bare (was X) when existing format unknown');
 {
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'success',
     soulseek_username: 'testuser',
     created_at: '2026-07-10T10:30:00+00:00',
@@ -576,7 +580,7 @@ console.log('renderEvidenceStrip() shows research V0 probes with the from-lossy 
 {
   // V0 runs on everything; the strip shows whichever probe each side has,
   // qualified so research probes never read as lossless-source proof.
-  const strip = renderEvidenceStrip({
+  const strip = renderEvidenceFixture({
     downloaded_label: 'MP3 V0',
     actual_min_bitrate: 232,
     v0_probe_kind: 'native_lossy_research_v0',
@@ -592,7 +596,7 @@ console.log('renderEvidenceStrip() shows research V0 probes with the from-lossy 
 
 console.log('renderEvidenceStrip() escapes injected values');
 {
-  const strip = renderEvidenceStrip({
+  const strip = renderEvidenceFixture({
     downloaded_label: '<img src=x>',
     actual_min_bitrate: 200,
   });
@@ -604,7 +608,7 @@ console.log('renderEvidenceStrip() renders the persisted comparison basis when p
 {
   // Request 6039: avg 196->288 rank upgrade; min 194 on BOTH sides made the
   // legacy strip a tautology ("IN MP3 V2 . 194k HAVE MP3 194k").
-  const strip = renderEvidenceStrip({
+  const strip = renderEvidenceFixture({
     downloaded_label: 'MP3 V2',
     actual_min_bitrate: 194,
     spectral_grade: 'genuine',
@@ -633,7 +637,7 @@ console.log('renderEvidenceStrip() renders the persisted comparison basis when p
 
 console.log('renderEvidenceStrip() marks spectral-clamped rank values with ~');
 {
-  const strip = renderEvidenceStrip({
+  const strip = renderEvidenceFixture({
     actual_min_bitrate: 194,
     comparison_basis: {
       verdict: 'better', branch: 'rank',
@@ -651,7 +655,7 @@ console.log('renderEvidenceStrip() marks spectral-clamped rank values with ~');
 
 console.log('renderEvidenceStrip() escapes basis strings');
 {
-  const strip = renderEvidenceStrip({
+  const strip = renderEvidenceFixture({
     actual_min_bitrate: 194,
     comparison_basis: {
       verdict: 'better', branch: 'rank',
@@ -669,7 +673,7 @@ console.log('renderEvidenceStrip() escapes basis strings');
 
 console.log('renderDownloadHistoryItem() renders a Compared row from the basis');
 {
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'success',
     soulseek_username: 'dbqs',
     created_at: '2026-07-10T14:46:05+00:00',
@@ -693,7 +697,7 @@ console.log('renderDownloadHistoryItem() renders a Compared row from the basis')
 
 console.log('renderDownloadHistoryItem() Compared row notes the verified-lossless bypass');
 {
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'success',
     soulseek_username: 'dbqs',
     created_at: '2026-07-10T14:46:05+00:00',
@@ -712,7 +716,7 @@ console.log('renderDownloadHistoryItem() Compared row notes the verified-lossles
 
 console.log('renderDownloadHistoryItem() omits the Compared row without a basis');
 {
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'success',
     soulseek_username: 'dbqs',
     created_at: '2026-07-10T14:46:05+00:00',
@@ -729,7 +733,7 @@ console.log('renderDownloadHistoryItem() leads with the verdict, red on rejectio
   // as a dim line BELOW the grid — the detail view told a quality story
   // for a match failure. The verdict now renders directly under the
   // header, before the evidence grid, in the reject colour.
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
     badge: 'Rejected',
     badge_class: 'badge-rejected',
@@ -763,7 +767,7 @@ console.log('renderDownloadHistoryItem() leads with the verdict, red on rejectio
 console.log('renderDownloadHistoryItem() colors the verdict red across the failure family');
 {
   for (const outcome of ['rejected', 'failed', 'timeout', 'user_offline', 'curator_ban']) {
-    const html = renderDownloadHistoryItem({
+    const html = renderDownloadHistoryFixture({
       outcome,
       soulseek_username: 'testuser',
       created_at: '2026-07-10T23:19:10+00:00',
@@ -775,7 +779,7 @@ console.log('renderDownloadHistoryItem() colors the verdict red across the failu
 
 console.log('renderDownloadHistoryItem() keeps success verdicts unstyled and above the grid');
 {
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'success',
     soulseek_username: 'dbqs',
     created_at: '2026-07-10T14:46:05+00:00',
@@ -798,7 +802,7 @@ console.log('renderDownloadHistoryItem() surfaces beets_detail behind the forens
 {
   // mbid_not_found rows carry the explanation ("Target MBID X not in
   // candidates") in beets_detail — previously dropped on the floor.
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
     soulseek_username: 'tunnik',
     created_at: '2026-07-10T22:28:12+00:00',
@@ -821,7 +825,7 @@ console.log('renderDownloadHistoryItem() surfaces beets_detail behind the forens
 
 console.log('renderDownloadHistoryItem() omits the forensics Detail row when beets_detail repeats the verdict');
 {
-  const html = renderDownloadHistoryItem({
+  const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
     soulseek_username: 'testuser',
     created_at: '2026-07-10T22:28:12+00:00',
