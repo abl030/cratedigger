@@ -23,6 +23,7 @@ set -euo pipefail
 # script. Repository operations use that active worktree while expensive
 # gates run in temporary detached worktrees.
 REPO_ROOT="$(git rev-parse --show-toplevel)"
+ARTIFACT_TOOL="$(cd "$(dirname "$0")" && pwd)/test_artifact.py"
 
 declare -a TARGET_COMMITS=()
 declare -A TARGET_REFS=()
@@ -79,6 +80,23 @@ cleanup_on_exit() {
   trap - EXIT
   cleanup_validation_trees
   exit "$status"
+}
+
+verify_cited_artifact() {
+  local artifact=${CRATEDIGGER_TEST_ARTIFACT:-}
+  local commit
+
+  [[ -n "$artifact" ]] || return 0
+  for commit in "${TARGET_COMMITS[@]}"; do
+    echo "pre-push: $commit: verifying cited suite artifact $artifact..." >&2
+    CRATEDIGGER_ARTIFACT_TOOL="$ARTIFACT_TOOL" \
+    CRATEDIGGER_TEST_ARTIFACT="$artifact" \
+    CRATEDIGGER_EXPECTED_HEAD="$commit" \
+      nix-shell --run 'python3 "$CRATEDIGGER_ARTIFACT_TOOL" verify \
+        --artifact "$CRATEDIGGER_TEST_ARTIFACT" \
+        --expected-head "$CRATEDIGGER_EXPECTED_HEAD"'
+    echo "pre-push: $commit: suite artifact verified: $artifact" >&2
+  done
 }
 
 run_gates() {
@@ -138,6 +156,11 @@ main() {
     echo "pre-push: no non-deletion refs to validate" >&2
     return 0
   fi
+
+  # Optional exact-suite citation. Release/tag callers set this to the
+  # directory printed by scripts/run_tests.sh; every distinct peeled target
+  # commit must match the artifact's clean start/end HEAD and coherent counts.
+  verify_cited_artifact
 
   VALIDATION_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/cratedigger-pre-push.XXXXXX")
   trap cleanup_on_exit EXIT
