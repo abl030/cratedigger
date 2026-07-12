@@ -22,6 +22,7 @@ from lib.dispatch.types import ImportOneRun
 from lib.measurement import (
     inspect_local_files,
     measure_preimport_state,
+    spectral_detail_from_persisted_source,
 )
 from lib.quality_evidence import (
     EvidenceBuildResult,
@@ -95,6 +96,35 @@ def _load_current_evidence_by_request(
     if evidence_id is None:
         return None
     return db.load_album_quality_evidence_by_id(evidence_id)
+
+
+def _load_persisted_existing_spectral(
+    db: ImportPreviewDB,
+    request_id: int,
+    req: dict[str, Any],
+) -> tuple[Any, SpectralAnalysisDetail]:
+    """Load HAVE from durable source evidence, never the installed derivative."""
+    current_evidence = None
+    try:
+        current_evidence = _load_current_evidence_by_request(db, request_id)
+    except Exception:
+        logger.warning(
+            "Unable to load current spectral evidence for request %s",
+            request_id,
+            exc_info=True,
+        )
+    if current_evidence is not None:
+        measurement = current_evidence.measurement
+        detail = spectral_detail_from_persisted_source(
+            measurement.spectral_grade,
+            measurement.spectral_bitrate_kbps,
+        )
+        if detail.attempted:
+            return current_evidence, detail
+    return current_evidence, spectral_detail_from_persisted_source(
+        req.get("current_spectral_grade"),
+        req.get("current_spectral_bitrate"),
+    )
 
 
 # Verdict values for `ImportPreviewResult.verdict`. After U5 the
@@ -589,6 +619,9 @@ def measure_and_persist_candidate_evidence(
         )
 
     cfg = read_runtime_config()
+    current_evidence, existing_spectral_evidence = (
+        _load_persisted_existing_spectral(db, request_id, req)
+    )
 
     temp_root = tempfile.mkdtemp(prefix="cratedigger-import-preview-")
     try:
@@ -625,6 +658,7 @@ def measure_and_persist_candidate_evidence(
                 # importer reads. Preview is now a pure measurement surface.
                 db=None,
                 request_id=None,
+                existing_spectral_evidence=existing_spectral_evidence,
                 propagate_download_to_existing=False,
                 precomputed_inspection=inspection,
             )
@@ -716,13 +750,6 @@ def measure_and_persist_candidate_evidence(
 
         # --- Harness path: measurement allows continuing ---
         existing_v0_probe = legacy_current_lossless_v0_probe_from_request(req)
-        current_evidence = None
-        try:
-            current_evidence = _load_current_evidence_by_request(
-                db, request_id
-            )
-        except Exception:
-            current_evidence = None
         if current_evidence is None:
             try:
                 current_result = load_or_backfill_current_evidence(
@@ -776,7 +803,6 @@ def measure_and_persist_candidate_evidence(
                 beets_harness_path=cfg.beets_harness_path,
                 quality_rank_config_json=cfg.quality_ranks.to_json(),
                 existing_v0_probe=existing_v0_probe,
-                beets_library_root=cfg.beets_directory,
             )
         except Exception as exc:
             return _measurement_failed_result(
@@ -812,8 +838,9 @@ def measure_and_persist_candidate_evidence(
         measured_existing = measured_audit.existing
         candidate = _prefer_successful_spectral_detail(
             measured_candidate, harness_audit.candidate)
-        existing = _prefer_successful_spectral_detail(
-            measured_existing, harness_audit.existing)
+        # HAVE is durable pre-conversion provenance. Never replace an
+        # explicitly unmeasured stored side with a scan of installed files.
+        existing = measured_existing
         run.import_result.spectral = SpectralDetail(
             cliff_freq_hz=harness_audit.cliff_freq_hz,
             suspect_pct=(candidate.suspect_pct or 0.0) if candidate else 0.0,
@@ -1084,6 +1111,9 @@ def preview_import_from_path(
             cfg=cfg,
             db=None,
             request_id=None,
+            existing_spectral_evidence=(
+                _load_persisted_existing_spectral(db, request_id, req)[1]
+            ),
             propagate_download_to_existing=False,
             precomputed_inspection=inspection,
         )
@@ -1188,7 +1218,6 @@ def preview_import_from_path(
             beets_harness_path=cfg.beets_harness_path,
             quality_rank_config_json=cfg.quality_ranks.to_json(),
             existing_v0_probe=existing_v0_probe,
-            beets_library_root=cfg.beets_directory,
         )
         verdict, cleanup_eligible, reason, chain = _classify_import_result(
             run.import_result,

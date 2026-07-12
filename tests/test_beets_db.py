@@ -197,7 +197,7 @@ class TestLocate(unittest.TestCase):
     """Single seam: ``BeetsDB.locate`` answers 'is this release on disk?'.
 
     Every existing ``album_exists`` / ``get_album_info`` / ``get_min_bitrate``
-    / ``get_item_paths`` / ``get_album_path`` / ``get_tracks_by_mb_release_id``
+    / ``get_item_paths`` / ``get_tracks_by_mb_release_id``
     / ``get_avg_bitrate_kbps`` / ``check_mbids`` caller must route through
     this — see issue #121. Four outcomes:
 
@@ -564,7 +564,7 @@ class TestBatchLookupAlbumIds(unittest.TestCase):
 class TestPostflightLookupsSupportDiscogs(unittest.TestCase):
     """Regression guard: ``album_exists`` understands Discogs IDs, so the
     postflight lookups called during import (``get_album_info``,
-    ``get_min_bitrate``, ``get_album_path``, ``get_item_paths``) must
+    ``get_min_bitrate``, ``get_item_paths``) must
     agree — otherwise ``import_dispatch`` sees a preflight hit with an
     empty postflight, marks the import successful against vanished
     metadata, and persists a stale ``imported_path``.
@@ -591,11 +591,6 @@ class TestPostflightLookupsSupportDiscogs(unittest.TestCase):
         with BeetsDB(self.db_path) as db:
             self.assertEqual(db.get_min_bitrate("12856590"), 256)
             self.assertEqual(db.get_min_bitrate("5555555"), 1411)
-
-    def test_get_album_path_resolves_discogs(self) -> None:
-        with BeetsDB(self.db_path) as db:
-            self.assertEqual(db.get_album_path("12856590"), "/m/disc")
-            self.assertEqual(db.get_album_path("5555555"), "/m/legacy")
 
     def test_get_item_paths_resolves_discogs(self) -> None:
         with BeetsDB(self.db_path) as db:
@@ -945,7 +940,6 @@ class TestGetItemPaths(unittest.TestCase):
         library_root = "/mnt/virtio/Music/Beets"
         with BeetsDB(self.db_path, library_root=library_root) as db:
             paths = db.get_item_paths("rolling-stones-release")
-            album_path = db.get_album_path_by_id(1)
 
         expected_album = os.path.join(
             library_root,
@@ -955,7 +949,6 @@ class TestGetItemPaths(unittest.TestCase):
             paths,
             [(1, os.path.join(expected_album, "01 Not Fade Away.opus"))],
         )
-        self.assertEqual(album_path, expected_album)
 
     def test_absolute_item_paths_pass_through_with_library_root(self) -> None:
         _insert_album(self.db_path, 1, "absolute-release", [
@@ -966,10 +959,8 @@ class TestGetItemPaths(unittest.TestCase):
             library_root="/mnt/virtio/Music/Beets",
         ) as db:
             paths = db.get_item_paths("absolute-release")
-            album_path = db.get_album_path_by_id(1)
 
         self.assertEqual(paths, [(1, "/other/library/Artist/Album/01.flac")])
-        self.assertEqual(album_path, "/other/library/Artist/Album")
 
     def test_not_found(self) -> None:
         with BeetsDB(self.db_path) as db:
