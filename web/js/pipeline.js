@@ -1,25 +1,57 @@
 // @ts-check
 import { state, API, toast } from './state.js';
-import { esc, awstDate, qualityLabel, manualReasonLabel, renderForensicBlock } from './util.js';
+import { esc, qualityLabel, manualReasonLabel, renderForensicBlock } from './util.js';
 import { renderDownloadHistoryItem } from './history.js';
 import {
   renderBeetsTrackRow, renderExpectedTrackRow, renderDetailRow, renderExternalLinkRow, toggleExpand,
 } from './render_primitives.js';
 import { renderBadRipButton, renderReplaceButton } from './release_actions.js';
-import { renderSearchPlanButton, renderSearchPlanDetail } from './search_plan.js';
+import { renderSearchPlanDetail } from './search_plan.js';
 import { loadLongTail, renderLongTailBody } from './long_tail.js';
 import { restoreLongTailConsoles } from './long_tail_console.js';
 import { renderPipelineDashboard as renderDashboardCards } from './pipeline_dashboard.js';
+
+const VISIBLE_HISTORY_ATTEMPTS = 10;
+
+/**
+ * Render the evidence-heavy sections of a request detail panel.
+ *
+ * The newest attempts stay visible because they explain the current outcome.
+ * Older attempts and track inventories are useful audit context, but neither
+ * should push the decision story multiple screens below the click target.
+ *
+ * @param {Array<Object>} history
+ * @param {Array<Object>} beetsTracks
+ * @param {Array<Object>} expectedTracks
+ * @returns {string}
+ */
+export function renderRequestEvidenceSections(history, beetsTracks, expectedTracks) {
+  let html = '';
+  if (history.length > 0) {
+    const visible = history.slice(0, VISIBLE_HISTORY_ATTEMPTS);
+    const older = history.slice(VISIBLE_HISTORY_ATTEMPTS);
+    html += `<div class="p-history"><div class="p-detail-label" style="margin-bottom:4px;">Download History (${history.length})</div>`;
+    html += visible.map(renderDownloadHistoryItem).join('');
+    if (older.length > 0) {
+      const noun = older.length === 1 ? 'attempt' : 'attempts';
+      html += `<details class="p-history-older"><summary>Show ${older.length} older ${noun}</summary>${older.map(renderDownloadHistoryItem).join('')}</details>`;
+    }
+    html += '</div>';
+  }
+
+  if (beetsTracks.length > 0) {
+    html += `<details class="p-tracks"><summary class="p-detail-label">In Library (${beetsTracks.length} tracks)</summary>${beetsTracks.map(renderBeetsTrackRow).join('')}</details>`;
+  } else if (expectedTracks.length > 0) {
+    html += `<details class="p-tracks"><summary class="p-detail-label">Expected Tracks from MusicBrainz (${expectedTracks.length})</summary>${expectedTracks.map(renderExpectedTrackRow).join('')}</details>`;
+  }
+  return html;
+}
 
 /**
  * Load pipeline data from API and render.
  * @returns {Promise<void>}
  */
 export async function loadPipeline() {
-  if (state.pipelineView === 'dashboard') {
-    await loadPipelineDashboard();
-    return;
-  }
   if (state.pipelineView === 'long-tail') {
     // U3: the long-tail worklist owns its own fetch lifecycle. It paints
     // a loading affordance, fetches the banded cohort, then routes back
@@ -30,42 +62,22 @@ export async function loadPipeline() {
   if (state.pipelineView === 'search-plan-detail') {
     // U4: detail subview owns its own render lifecycle; openSearchPlanDetail
     // already kicked off the fetch when the subview was entered. Don't
-    // clobber it with a queue-list paint.
+    // clobber it with a dashboard paint.
     const ctx = state.searchPlanDetailContext;
     if (ctx && ctx.requestId) {
       await renderSearchPlanDetail(ctx.requestId);
     }
     return;
   }
-  const el = document.getElementById('pipeline-content');
-  el.innerHTML = `${renderPipelineNav()}<div class="loading">Loading...</div>`;
-  try {
-    // U10: opt-in toggle persists in localStorage. Default: filtered.
-    const includeReplaced = localStorage.getItem('pipeline.includeReplaced') === 'true';
-    clearPipelineSearch();
-    const url = `${API}/api/pipeline/all${includeReplaced ? '?include_replaced=true' : ''}`;
-    const r = await fetch(url);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    state.pipelineData = await r.json();
-    renderPipeline();
-  } catch (e) { el.innerHTML = `${renderPipelineNav()}<div class="loading">Failed to load pipeline</div>`; }
+  state.pipelineView = 'dashboard';
+  await loadPipelineDashboard();
 }
 
 /**
- * Toggle "show replaced" filter (U10). Pipeline + Wrong Matches tabs
- * persist this preference independently in localStorage.
- */
-export function togglePipelineReplacedFilter() {
-  const current = localStorage.getItem('pipeline.includeReplaced') === 'true';
-  localStorage.setItem('pipeline.includeReplaced', String(!current));
-  loadPipeline();
-}
-
-/**
- * Switch between the Pipeline subviews — queue, dashboard, or
- * search-plan-detail. The third value is the per-request inspector,
+ * Switch between the operational Pipeline subviews — dashboard, long-tail,
+ * or search-plan-detail. The third value is the per-request inspector,
  * dispatched into `#pipeline-content` via `renderSearchPlanDetail`.
- * Unknown values fall back to `'queue'`.
+ * Unknown values fall back to `'dashboard'`.
  *
  * @param {string} view
  * @returns {void}
@@ -95,12 +107,8 @@ export function setPipelineView(view) {
     }
     return;
   }
-  state.pipelineView = 'queue';
-  if (state.pipelineData) {
-    renderPipeline();
-  } else {
-    loadPipeline();
-  }
+  state.pipelineView = 'dashboard';
+  loadPipelineDashboard();
 }
 
 export function toggleCoverageMatchGraph(scope = 'hourly') {
@@ -131,35 +139,10 @@ export async function loadPipelineDashboard() {
 }
 
 /**
- * Set the pipeline filter and re-render.
- * @param {string} f
- */
-export function setFilter(f) {
-  state.pipelineFilter = f;
-  // Filter and search are mutually exclusive: clicking a count card
-  // abandons the active search so the clicked filter actually shows.
-  clearPipelineSearch();
-  renderPipeline();
-}
-
-/**
- * Reset the server-side search state (input text + results). Bumps the
- * in-flight token so a fetch resolving late discards itself.
- * @returns {void}
- */
-export function clearPipelineSearch() {
-  state.pipelineSearchQuery = '';
-  state.pipelineSearchResults = null;
-  pipelineSearchToken += 1;
-  if (pipelineSearchTimer != null) clearTimeout(pipelineSearchTimer);
-}
-
-/**
  * Render the pipeline view from cached data.
  *
  * Dispatches on `state.pipelineView`:
- *   * `'queue'` (default)  → list of pipeline rows
- *   * `'dashboard'`        → metrics dashboard
+ *   * `'dashboard'` (default) → metrics dashboard
  *   * `'long-tail'`        → banded long-tail triage worklist
  *   * `'search-plan-detail'` → per-request inspector (U4)
  */
@@ -182,149 +165,15 @@ export function renderPipeline() {
     if (ctx && ctx.requestId) {
       void renderSearchPlanDetail(ctx.requestId);
     } else if (el) {
-      // Defensive: subview entered without a context. Fall back to
-      // queue so the operator is never stranded.
-      state.pipelineView = 'queue';
+      // Defensive: subview entered without a context. Fall back to the
+      // dashboard so the operator is never stranded.
+      state.pipelineView = 'dashboard';
+      void loadPipelineDashboard();
     }
     return;
   }
-  const data = state.pipelineData;
-  if (!data) return;
-  const counts = data.counts || {};
-  const total = Object.values(counts).reduce((a, b) => a + b, 0);
-
-  // Wanted bucket includes downloading — mid-acquisition is a sub-state
-  // of wanted. The status badge on each row keeps them visually distinct.
-  const wantedTotal = (counts.wanted || 0) + (counts.downloading || 0);
-  el.innerHTML = `
-    ${renderPipelineNav()}
-    <div class="status-card">
-      <div class="status-counts">
-        <div class="count ${state.pipelineFilter === 'wanted' ? 'active' : ''}" onclick="window.setFilter('wanted')">
-          <div class="count-num">${wantedTotal}</div><div class="count-label">Wanted</div>
-        </div>
-        <div class="count ${state.pipelineFilter === 'manual' ? 'active' : ''}" onclick="window.setFilter('manual')">
-          <div class="count-num">${counts.manual || 0}</div><div class="count-label">Manual</div>
-        </div>
-        <div class="count ${state.pipelineFilter === 'imported' ? 'active' : ''}" onclick="window.setFilter('imported')">
-          <div class="count-num">${counts.imported || 0}</div><div class="count-label">Imported</div>
-        </div>
-        <div class="count ${state.pipelineFilter === 'all' ? 'active' : ''}" onclick="window.setFilter('all')">
-          <div class="count-num">${total}</div><div class="count-label">All</div>
-        </div>
-      </div>
-    </div>
-    <div class="lt-search">
-      <input type="text" id="pipeline-search-input" class="lt-search-input"
-        placeholder="Search every request by artist or album…"
-        value="${esc(state.pipelineSearchQuery || '')}"
-        oninput="window.onPipelineSearchInput(this.value)">
-    </div>
-    <div id="pipeline-list">${renderPipelineListBody()}</div>
-  `;
-}
-
-/**
- * Build the artist-grouped list body for the current filter (or the
- * active server-side search results). Kept separate from
- * renderPipeline so a search keystroke can repaint only #pipeline-list
- * and the input keeps focus/caret.
- *
- * @returns {string}
- */
-function renderPipelineListBody() {
-  const data = state.pipelineData || {};
-  const searching = state.pipelineSearchResults != null;
-
-  let items = [];
-  if (searching) {
-    items = state.pipelineSearchResults || [];
-  } else if (state.pipelineFilter === 'all') {
-    items = [...(data.wanted || []), ...(data.downloading || []), ...(data.imported || []), ...(data.manual || [])];
-  } else if (state.pipelineFilter === 'wanted') {
-    // Downloading is a sub-state of wanted — same album, mid-acquisition.
-    // The status badge on each row still distinguishes them visually.
-    items = [...(data.wanted || []), ...(data.downloading || [])];
-  } else {
-    items = data[state.pipelineFilter] || [];
-  }
-
-  // The imported bucket is a recency window (#426); say so whenever the
-  // truncated bucket is part of the current view.
-  const showsImported = !searching
-    && (state.pipelineFilter === 'imported' || state.pipelineFilter === 'all');
-  const truncationNote = showsImported && data.imported_truncated
-    ? `<div class="loading">Showing the ${(data.imported || []).length} most recent of ${data.imported_total} imported — search above to find the rest.</div>`
-    : '';
-
-  // Group by artist
-  const byArtist = {};
-  for (const item of items) {
-    const artist = item.artist_name || 'Unknown';
-    if (!byArtist[artist]) byArtist[artist] = [];
-    byArtist[artist].push(item);
-  }
-  // Sort artists alphabetically, albums by year within each
-  const artists = Object.keys(byArtist).sort((a, b) => a.localeCompare(b));
-  for (const a of artists) {
-    byArtist[a].sort((x, y) => (x.year || 0) - (y.year || 0));
-  }
-
-  return `
-    ${truncationNote}
-    ${artists.map(artist => `
-      <div class="p-group-header" onclick="this.nextElementSibling.classList.toggle('collapsed')">
-        ${esc(artist)} <span style="color:#555;font-weight:400;">${byArtist[artist].length}</span>
-      </div>
-      <div class="p-group-body">
-        ${byArtist[artist].map(item => renderPipelineItem(item)).join('')}
-      </div>
-    `).join('')}
-    ${artists.length === 0 ? `<div class="loading">${searching ? 'No matches' : 'No items'}</div>` : ''}
-  `;
-}
-
-// Module-scoped debounce + stale-response token for the server-side
-// pipeline search (#426). web.md: fetch-on-input UIs must stamp
-// requests and discard stale responses before rendering.
-let pipelineSearchTimer = null;
-let pipelineSearchToken = 0;
-const PIPELINE_SEARCH_DEBOUNCE_MS = 250;
-
-/**
- * Handle a keystroke in the pipeline search box: debounce, fetch
- * server-side results across every status, repaint only the list body.
- * @param {string} value
- * @returns {void}
- */
-export function onPipelineSearchInput(value) {
-  const q = String(value == null ? '' : value);
-  state.pipelineSearchQuery = q;
-  if (pipelineSearchTimer != null) clearTimeout(pipelineSearchTimer);
-  const repaint = () => {
-    const listEl = document.getElementById('pipeline-list');
-    if (listEl) listEl.innerHTML = renderPipelineListBody();
-  };
-  if (q.trim().length < 2) {
-    state.pipelineSearchResults = null;
-    repaint();
-    return;
-  }
-  pipelineSearchTimer = /** @type {any} */ (setTimeout(async () => {
-    const token = ++pipelineSearchToken;
-    try {
-      const r = await fetch(`${API}/api/pipeline/search?q=${encodeURIComponent(q.trim())}`);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json();
-      if (token !== pipelineSearchToken) return;
-      state.pipelineSearchResults = data.items || [];
-      repaint();
-    } catch (e) {
-      if (token !== pipelineSearchToken) return;
-      state.pipelineSearchResults = [];
-      repaint();
-    }
-  }, PIPELINE_SEARCH_DEBOUNCE_MS));
+  state.pipelineView = 'dashboard';
+  void loadPipelineDashboard();
 }
 
 function renderPipelineNav() {
@@ -336,61 +185,10 @@ function renderPipelineNav() {
 
   return `
     <div class="pipeline-subtabs">
-      <button class="p-btn ${state.pipelineView === 'queue' ? 'active-status' : ''}" onclick="window.setPipelineView('queue')">Queue</button>
       <button class="p-btn ${state.pipelineView === 'dashboard' ? 'active-status' : ''}" onclick="window.setPipelineView('dashboard')">Dashboard</button>
       <button class="p-btn ${state.pipelineView === 'long-tail' ? 'active-status' : ''}" onclick="window.setPipelineView('long-tail')">Long Tail</button>
       <button class="p-btn subtab-refresh" onclick="${refreshAction}">Refresh</button>
     </div>
-  `;
-}
-
-export function renderPipelineItem(item) {
-  const statusBadge = item.status === 'wanted' ? '<span class="badge badge-wanted">wanted</span>'
-    : item.status === 'downloading' ? '<span class="badge badge-downloading">downloading</span>'
-    : item.status === 'imported' ? '<span class="badge badge-imported">imported</span>'
-    : '<span class="badge badge-manual">manual</span>';
-  const srcClass = 'src-' + (item.source || 'request');
-  const year = item.year || '?';
-  const fmt = item.format || '?';
-  const country = item.country || '';
-  const date = awstDate(item.created_at || '');
-  const attempts = [];
-  if (item.search_attempts) attempts.push(`${item.search_attempts} search`);
-  if (item.download_attempts) attempts.push(`${item.download_attempts} dl`);
-  if (item.validation_attempts) attempts.push(`${item.validation_attempts} val`);
-  const attemptStr = attempts.length ? attempts.join(', ') : '';
-  const dist = item.beets_distance != null ? `dist ${item.beets_distance.toFixed(3)}` : '';
-  // Last download verdict for context (e.g. why a wanted album is stuck)
-  const lastVerdict = item.last_verdict || '';
-  const lastColor = item.last_outcome === 'success' || item.last_outcome === 'force_import'
-    ? '#6d6' : item.last_outcome === 'rejected' ? '#d88' : '#aa8';
-
-  // Search-plan inspector button — Pipeline rows always have a request
-  // id by construction, so the conditional in renderSearchPlanButton is
-  // a no-op here, but routing through the same helper keeps the toolbar
-  // wiring consistent across Browse / Pipeline / Recents.
-  const spBtn = renderSearchPlanButton({ pipelineId: item.id });
-
-  return `
-    <div class="p-item ${srcClass}" onclick="window.toggleDetail(${item.id})">
-      <div class="p-top">
-        <div>
-          <div class="p-title">${esc(item.album_title)}${statusBadge}</div>
-        </div>
-        <div class="p-row-actions">${spBtn}<span style="font-size:0.75em;color:#666;">#${item.id}</span></div>
-      </div>
-      <div class="p-meta">
-        <span>${year}</span>
-        <span>${fmt}</span>
-        ${country ? `<span>${country}</span>` : ''}
-        <span>${item.source}</span>
-        <span>${date}</span>
-        ${attemptStr ? `<span>${attemptStr}</span>` : ''}
-        ${dist ? `<span>${dist}</span>` : ''}
-      </div>
-      ${lastVerdict ? `<div class="p-meta" style="margin-top:2px;"><span style="color:${lastColor};">last: ${esc(lastVerdict)}</span>${item.download_count > 1 ? `<span>(${item.download_count} attempts)</span>` : ''}</div>` : ''}
-    </div>
-    <div class="p-detail" id="detail-${item.id}"></div>
   `;
 }
 
@@ -430,27 +228,7 @@ export async function toggleDetail(elId, requestId) {
     const beetsTracks = data.beets_tracks || [];
     html += renderCurrentQualityRow(req, beetsTracks);
 
-    // Download history — before the track list. The history is why the
-    // operator expanded the row (a Recents card IS a download event); on
-    // mobile a 14-track library listing pushed a rejection's story three
-    // screens down, so the detail read as a healthy library album
-    // (request 8781: mbid_missing invisible without scrolling).
-    if (history.length > 0) {
-      html += '<div class="p-history"><div class="p-detail-label" style="margin-bottom:4px;">Download History (' + history.length + ')</div>';
-      html += history.map(renderDownloadHistoryItem).join('');
-      html += '</div>';
-    }
-
-    // Tracks — labeled to clarify what we're looking at
-    if (beetsTracks.length > 0) {
-      html += '<div class="p-tracks"><div class="p-detail-label" style="margin-bottom:4px;">In Library (' + beetsTracks.length + ' tracks)</div>';
-      html += beetsTracks.map(renderBeetsTrackRow).join('');
-      html += '</div>';
-    } else if (tracks.length > 0) {
-      html += '<div class="p-tracks"><div class="p-detail-label" style="margin-bottom:4px;">Expected Tracks from MusicBrainz (' + tracks.length + ')</div>';
-      html += tracks.map(renderExpectedTrackRow).join('');
-      html += '</div>';
-    }
+    html += renderRequestEvidenceSections(history, beetsTracks, tracks);
 
     // Search forensics (last_search) — variant tag + top-3 candidates from
     // the most recent search_log row. Collapsed by default; click expands.
@@ -580,8 +358,7 @@ export async function updateStatus(id, newStatus) {
 }
 
 export const __test__ = {
-  renderPipelineListBody,
-  clearPipelineSearch,
   renderPipelineNav,
   renderCurrentQualityRow,
+  renderRequestEvidenceSections,
 };

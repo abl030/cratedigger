@@ -49,7 +49,7 @@ Browser → https://music.ablz.au
 | `/api/wrong-matches/converge` | POST | Queue every wrong-match candidate within a release's loosen threshold and delete the rest |
 | `/api/wrong-matches/triage` | POST | Evidence-only full-queue Wrong Matches cleanup; requires `{"confirm_all_wrong_matches": true}` |
 | `/api/import-jobs` | GET | List recent import queue jobs |
-| `/api/import-jobs/timeline` | GET | List active queued/running import jobs in Recents queue order |
+| `/api/import-jobs/timeline` | GET | List active queued/running import jobs in importer order, with server-classified display fields |
 | `/api/import-jobs/<id>` | GET | Poll a single import queue job |
 | `/api/library/artist?name=...` | GET | Albums by artist from beets library (MB vs Discogs source) |
 | `/api/discogs/search?q=...` | GET | Search Discogs mirror (artist or release mode via `type=` param) |
@@ -91,16 +91,20 @@ Browser → https://music.ablz.au
   - Releases already in pipeline DB or beets library are badged
   - Click release metadata to open MB release page in new tab
 - **Add button** — adds release to pipeline DB (same logic as `pipeline-cli add`)
-- **Pipeline tab** — status dashboard (wanted/imported/manual counts + wanted list)
+- **Pipeline tab** — operational Dashboard + Long Tail views. The old global
+  request Queue subview was removed in #575 PR5: request state and actions live
+  on Browse's unified artist/release rows, while diagnostic API/CLI routes
+  remain available.
 - **Wrong Matches tab** — the old Complete-folder manual-import page is gone;
   the tab now opens straight into Wrong Matches. Import actions queue work and
   poll `import_jobs`, so long beets imports do not block the web request.
   Failed queued force-imports remove the reviewed wrong-match source from the
   actionable list while preserving the failed job/download audit.
-- **Recents Queue subview** — Recents has History and Queue subviews. Queue
-  shows import jobs in beets-import order, with preview states (`waiting`,
-  `previewing`, `importable`, `uncertain`, `failed`) and preview messages
-  visible before the serial importer claims work.
+- **Recents Imports subview** — Recents has History, Downloading, and Imports
+  subviews. Imports shows active jobs in beets-import order. The server
+  classifies each job into the same `badge` / `badge_class` / `border_color` /
+  `summary` display contract as Recents history, while raw preview/import
+  states remain visible as forensic metadata.
 - **Recents evidence schema (#575 PR2)** — History list rows carry a compact
   monospace `IN … HAVE …` evidence strip (measured incoming bitrate/spectral/
   V0 probe vs on-disk at download time); rows with no measurements (download-
@@ -113,7 +117,9 @@ Browser → https://music.ablz.au
   evidence all reads positive never buries its reason below the grid (request
   8781: `mbid_missing` under a "transparent vs transparent" comparison). The
   expanded pipeline/Recents detail panel puts Download History above the
-  track list for the same reason. Force imports show `overridden` in the
+  track list for the same reason, shows the newest 10 attempts initially,
+  and puts older attempts plus track inventories behind disclosures. Force
+  imports show `overridden` in the
   Distance row instead of beets' misleading 0.000. Debug internals (Detail /
   Preview / Reason / Stages) sit behind a collapsed `forensics` toggle per
   attempt. Every bitrate says which statistic it is: the min-vs-min row is
@@ -260,7 +266,7 @@ GitHub nixosconfig is a frozen fallback and is never a deployment source.
 The web service auto-restarts when the Nix store path changes.
 
 After deploy, check `systemctl status cratedigger-import-preview-worker
-cratedigger-importer` and the worker journals. The Recents Queue subview shows
+cratedigger-importer` and the worker journals. The Recents Imports subview shows
 only active queued/running import jobs as they move from waiting preview, to
 previewing, to importable, to importing. Completed, failed, or preview-rejected
 rows are history/audit rows, not live queue rows.

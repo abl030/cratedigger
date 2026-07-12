@@ -1,5 +1,5 @@
 /**
- * Unit tests for web/js/pipeline.js queue/nav/search helpers.
+ * Unit tests for web/js/pipeline.js navigation/detail helpers.
  * Run with: node tests/test_js_pipeline.mjs
  */
 
@@ -27,15 +27,15 @@ function assertExcludes(haystack, needle, msg) {
   }
 }
 
-console.log('renderPipelineNav() refreshes the queue subtab');
+console.log('renderPipelineNav() has operational views only');
 {
-  state.pipelineView = 'queue';
+  state.pipelineView = 'dashboard';
   const html = __test__.renderPipelineNav();
-  assertContains(html, 'window.setPipelineView(\'queue\')', 'queue tab rendered');
+  assertExcludes(html, 'window.setPipelineView(\'queue\')', 'request queue tab removed');
   assertContains(html, 'window.setPipelineView(\'dashboard\')', 'dashboard tab rendered');
-  assertContains(html, 'window.loadPipeline()', 'queue refresh reloads pipeline queue');
+  assertContains(html, 'window.setPipelineView(\'long-tail\')', 'long-tail tab rendered');
+  assertContains(html, 'window.loadPipelineDashboard()', 'dashboard refresh reloads metrics');
   assertContains(html, 'subtab-refresh', 'refresh uses shared subtab layout');
-  assertExcludes(html, 'window.loadPipelineDashboard()">Refresh', 'queue refresh does not load dashboard');
 }
 console.log('renderPipelineNav() refreshes the dashboard subtab');
 {
@@ -44,57 +44,31 @@ console.log('renderPipelineNav() refreshes the dashboard subtab');
   assertContains(html, 'window.loadPipelineDashboard()', 'dashboard refresh reloads dashboard metrics');
   assertContains(html, 'subtab-refresh', 'refresh uses shared subtab layout');
 }
-console.log('renderPipelineListBody() flags the imported recency window');
+console.log('request detail caps history and collapses tracks');
 {
-  state.pipelineFilter = 'imported';
-  state.pipelineSearchResults = null;
-  state.pipelineData = {
-    counts: { imported: 6828 },
-    imported: [],
-    imported_total: 6828,
-    imported_truncated: true,
-  };
-  const html = __test__.renderPipelineListBody();
-  assertContains(html, 'most recent of 6828 imported',
-    'truncation note names the full imported count');
-  assertContains(html, 'search above', 'note points at the search box');
+  const history = Array.from({ length: 12 }, (_, id) => ({
+    id, created_at: '2026-07-13T00:00:00+00:00',
+  }));
+  const tracks = Array.from({ length: 18 }, (_, id) => ({ id, title: `Track ${id}` }));
+  const html = __test__.renderRequestEvidenceSections(history, tracks, []);
+  assertContains(html, 'Download History (12)', 'full history count remains visible');
+  assertContains(html, 'Show 2 older attempts', 'only older attempts move behind disclosure');
+  assertContains(html, '<details class="p-tracks"', 'library tracks are collapsed by default');
+  assertContains(html, 'In Library (18 tracks)', 'track disclosure keeps its count');
 }
-console.log('renderPipelineListBody() renders server search results across statuses');
-{
-  state.pipelineFilter = 'wanted';
-  state.pipelineData = { counts: {}, wanted: [], imported: [] };
-  state.pipelineSearchResults = [
-    {
-      id: 7, artist_name: 'The Mountain Goats', album_title: 'Tallahassee',
-      status: 'imported', source: 'request', year: 2002,
-      created_at: '2026-06-01T00:00:00+00:00',
-      updated_at: '2026-06-02T00:00:00+00:00',
-      mb_release_id: 'mbid-7', mb_release_group_id: 'rg-7',
-    },
-  ];
-  const html = __test__.renderPipelineListBody();
-  assertContains(html, 'The Mountain Goats', 'search result row rendered');
-  assertExcludes(html, 'most recent of', 'no truncation note while searching');
 
-  state.pipelineSearchResults = [];
-  const emptyHtml = __test__.renderPipelineListBody();
-  assertContains(emptyHtml, 'No matches', 'empty search shows No matches');
-  state.pipelineSearchResults = null;
-}
-console.log('clearPipelineSearch() makes filters and search mutually exclusive');
-{
-  state.pipelineFilter = 'imported';
-  state.pipelineSearchQuery = 'mountain';
-  state.pipelineSearchResults = [{ id: 1 }];
-  __test__.clearPipelineSearch();
-  if (state.pipelineSearchQuery === '' && state.pipelineSearchResults === null) {
-    passed++;
+console.log('request detail disclosure — generated count sweep');
+for (let count = 0; count <= 30; count++) {
+  const history = Array.from({ length: count }, (_, id) => ({
+    id, created_at: '2026-07-13T00:00:00+00:00',
+  }));
+  const html = __test__.renderRequestEvidenceSections(history, [], []);
+  const expectedOlder = Math.max(0, count - 10);
+  if (expectedOlder === 0) {
+    assertExcludes(html, 'older attempt', `${count} histories need no older disclosure`);
   } else {
-    failed++;
-    console.error('  FAIL: clearPipelineSearch did not reset search state');
+    assertContains(html, `Show ${expectedOlder} older attempt`, `${count} histories expose exact remainder`);
   }
-  const html = __test__.renderPipelineListBody();
-  assertExcludes(html, 'No matches', 'list body is back in filter mode after clear');
 }
 
 console.log('request 6039 current Quality uses average positive track bitrate');

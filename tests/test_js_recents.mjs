@@ -1,5 +1,5 @@
 /**
- * Unit tests for web/js/recents.js queue rendering helpers.
+ * Unit tests for web/js/recents.js activity rendering helpers.
  * Run with: node tests/test_js_recents.mjs
  */
 
@@ -29,13 +29,17 @@ function assertExcludes(haystack, needle, msg) {
   }
 }
 
-console.log('renderImportQueueItems() shows ready next row and preview detail');
+console.log('renderImportItems() consumes the server-classified display contract');
 {
-  const html = __test__.renderImportQueueItems([{
+  const html = __test__.renderImportItems([{
     id: 77,
     job_type: 'force_import',
     status: 'queued',
     preview_status: 'evidence_ready',
+    badge: 'Next check',
+    badge_class: 'badge-new',
+    border_color: '#1a4a2a',
+    summary: 'Evidence ready for final check: import',
     artist_name: 'Broadcast',
     album_title: 'Tender Buttons',
     preview_message: 'Evidence ready for final check: import',
@@ -43,7 +47,7 @@ console.log('renderImportQueueItems() shows ready next row and preview detail');
   }]);
   assertContains(html, 'Tender Buttons', 'album title rendered');
   assertContains(html, 'Broadcast', 'artist name rendered');
-  assertContains(html, 'next check', 'first ready row is marked next check');
+  assertContains(html, 'Next check', 'server badge is rendered verbatim');
   assertContains(html, 'preview: evidence_ready', 'preview state rendered');
   assertContains(html, 'stage2_import:import', 'stage chain rendered');
 }
@@ -54,7 +58,8 @@ console.log('renderRecentsSubnav() refreshes the active recents subtab');
   const html = __test__.renderRecentsSubnav();
   assertContains(html, 'window.setRecentsSub(\'history\')', 'history tab rendered');
   assertContains(html, 'window.setRecentsSub(\'downloading\')', 'downloading tab rendered');
-  assertContains(html, 'window.setRecentsSub(\'queue\')', 'queue tab rendered');
+  assertContains(html, 'window.setRecentsSub(\'imports\')', 'imports tab rendered');
+  assertContains(html, '>Imports<', 'ambiguous Queue label is gone');
   assertContains(html, 'window.loadRecents()', 'refresh reloads current recents subtab');
   assertContains(html, 'subtab-refresh', 'refresh uses shared subtab layout');
 }
@@ -139,13 +144,17 @@ console.log('matchRatesFromDashboardWindows() derives found enqueue rates from o
   }
 }
 
-console.log('renderImportQueueItems() shows uncertain preview failures without next styling');
+console.log('renderImportItems() shows server-classified uncertain preview failures');
 {
-  const html = __test__.renderImportQueueItems([{
+  const html = __test__.renderImportItems([{
     id: 78,
     job_type: 'manual_import',
     status: 'failed',
     preview_status: 'uncertain',
+    badge: 'Uncertain',
+    badge_class: 'badge-warn',
+    border_color: '#a93',
+    summary: 'Preview failed: path_missing',
     artist_name: 'Low',
     album_title: 'Things We Lost in the Fire',
     preview_message: 'Preview failed: path_missing',
@@ -155,17 +164,21 @@ console.log('renderImportQueueItems() shows uncertain preview failures without n
   assertExcludes(html, 'next check', 'uncertain rows are not marked next');
 }
 
-console.log('renderImportQueueItems() renders measurement_failed badge and red border');
+console.log('renderImportItems() renders server-classified measurement failure');
 {
   // Post-U5: preview emits preview_status='measurement_failed' instead of
   // 'uncertain'. The badge must be present (no blank pill) and the border
   // must be the same red as 'confident_reject' so operators see the failure
   // at a glance.
-  const html = __test__.renderImportQueueItems([{
+  const html = __test__.renderImportItems([{
     id: 79,
     job_type: 'force_import',
     status: 'failed',
     preview_status: 'measurement_failed',
+    badge: 'Measurement failed',
+    badge_class: 'badge-failed',
+    border_color: '#a33',
+    summary: 'Preview measurement failed: snapshot_stale',
     artist_name: 'Slowdive',
     album_title: 'Souvlaki',
     preview_message: 'Preview measurement failed: snapshot_stale',
@@ -177,13 +190,17 @@ console.log('renderImportQueueItems() renders measurement_failed badge and red b
   assertExcludes(html, 'next check', 'measurement_failed rows are not marked next');
 }
 
-console.log('renderImportQueueItems() prefers terminal import messages over stale preview messages');
+console.log('renderImportItems() trusts the server summary over stale raw messages');
 {
-  const html = __test__.renderImportQueueItems([{
+  const html = __test__.renderImportItems([{
     id: 731,
     job_type: 'automation_import',
     status: 'failed',
     preview_status: 'would_import',
+    badge: 'Importing',
+    badge_class: 'badge-force',
+    border_color: '#36c',
+    summary: 'Rejected: high_distance - distance=0.1611',
     artist_name: 'Muse',
     album_title: 'Origin Of Symmetry',
     preview_message: 'Preview gate disabled',
@@ -195,13 +212,17 @@ console.log('renderImportQueueItems() prefers terminal import messages over stal
     'stale preview message hidden for terminal rows');
 }
 
-console.log('renderImportQueueItems() surfaces failed force-import source cleanup');
+console.log('renderImportItems() surfaces failed force-import source cleanup');
 {
-  const html = __test__.renderImportQueueItems([{
+  const html = __test__.renderImportItems([{
     id: 40636,
     job_type: 'force_import',
     status: 'failed',
     preview_status: 'evidence_ready',
+    badge: 'Next check',
+    badge_class: 'badge-new',
+    border_color: '#1a4a2a',
+    summary: '',
     artist_name: 'Parts & Labor',
     album_title: 'Escapers Two',
     message: 'Rejected by persisted quality evidence: downgrade',

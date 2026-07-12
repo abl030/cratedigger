@@ -30,6 +30,7 @@ from web.download_history_view import (
     build_download_history_rows,
     classify_download_log_row,
 )
+from web.classify import classify_import_job_display
 from lib.quality import CandidateScore, top_candidates
 
 DEFAULT_PIPELINE_LOG_LIMIT = 50
@@ -352,8 +353,15 @@ def get_import_jobs_timeline(h, params: dict[str, list[str]]) -> None:
     db = _server()._db()
     jobs = db.list_import_job_timeline(limit=50)
     serialized = []
-    for job in jobs:
+    for queue_position, job in enumerate(jobs):
         item = _serialize_import_job(job)
+        item.update(cast(
+            dict[str, object],
+            msgspec.to_builtins(classify_import_job_display(
+                job,
+                queue_position=queue_position,
+            )),
+        ))
         request_id = item.get("request_id")
         if isinstance(request_id, (int, str)) and not isinstance(request_id, bool):
             req = db.get_request(int(request_id))
@@ -419,8 +427,8 @@ ROUTES: list[RouteRegistration] = [
     ),
     route(
         "GET", "/api/import-jobs/timeline", get_import_jobs_timeline,
-        "Recent import-queue jobs with request metadata attached "
-        "(timeline view).",
+        "Active import-queue jobs in claim order with request metadata and "
+        "server-classified display fields.",
         classified=True,
     ),
     route(

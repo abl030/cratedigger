@@ -175,7 +175,7 @@ Rollback to pre-018 code requires queue reconciliation first: stop import
 workers and reset queued or running `evidence_ready` rows to queued `waiting`
 rows so old preview code recomputes them. Do not bulk-convert them to
 `would_import`; that would restore preview-decision authority.
-The Recents Queue endpoint lists only active `queued`/`running` jobs; terminal
+The Recents Imports endpoint lists only active `queued`/`running` jobs; terminal
 `completed`/`failed` rows remain durable audit history and must not be rendered
 as live queue work.
 

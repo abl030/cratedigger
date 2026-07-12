@@ -567,10 +567,11 @@ class TestClassifyBadge(unittest.TestCase):
         ))
         self.assertEqual(result.badge, "Rejected")
         self.assertEqual(result.badge_class, "badge-rejected")
-        self.assertIn("source V0 avg 175kbps", result.verdict)
-        self.assertIn("existing source V0 avg 171kbps", result.verdict)
-        self.assertIn("not meaningfully better", result.verdict)
-        self.assertIn("searching continues", result.verdict)
+        self.assertEqual(
+            result.verdict,
+            "Suspect lossless source not better than on-disk copy; "
+            "searching continues",
+        )
 
     def test_rejected_lossless_source_locked(self):
         # Lossy candidate offered against an existing album whose original
@@ -591,11 +592,36 @@ class TestClassifyBadge(unittest.TestCase):
         ))
         self.assertEqual(result.badge, "Rejected")
         self.assertEqual(result.badge_class, "badge-rejected")
-        self.assertIn("Lossless-source locked", result.verdict)
-        self.assertIn("240", result.verdict)
-        self.assertIn(
-            "only another lossless source can override", result.verdict)
-        self.assertIn("searching continues", result.verdict)
+        self.assertEqual(
+            result.verdict,
+            "Lossless-source locked; only another lossless source can "
+            "override; searching continues",
+        )
+
+    def test_reject_verdicts_use_one_short_grammar_per_decision_class(self):
+        cases = {
+            "quality_downgrade": (
+                "Quality not better than on-disk copy; searching continues"
+            ),
+            "transcode_downgrade": (
+                "Transcode not better than on-disk copy; searching continues"
+            ),
+            "spectral_reject": (
+                "Spectral quality not better than on-disk copy; "
+                "searching continues"
+            ),
+        }
+        for scenario, expected in cases.items():
+            with self.subTest(scenario=scenario):
+                result = classify_log_entry(_entry(
+                    outcome="rejected",
+                    beets_scenario=scenario,
+                    actual_min_bitrate=176,
+                    existing_min_bitrate=240,
+                    spectral_bitrate=128,
+                    existing_spectral_bitrate=192,
+                ))
+                self.assertEqual(result.verdict, expected)
 
     def test_rejected_high_distance(self):
         result = classify_log_entry(_entry(
@@ -753,8 +779,10 @@ class TestClassifyVerdict(unittest.TestCase):
         result = classify_log_entry(_entry(
             outcome="rejected", beets_scenario="quality_downgrade",
             actual_min_bitrate=320, existing_min_bitrate=320))
-        self.assertIn("320", result.verdict)
-        self.assertIn("not", result.verdict.lower())
+        self.assertEqual(
+            result.verdict,
+            "Quality not better than on-disk copy; searching continues",
+        )
 
     def test_persisted_quality_downgrade_verdict_uses_import_result(self):
         """A successful validation headline cannot hide a later downgrade.
@@ -783,17 +811,22 @@ class TestClassifyVerdict(unittest.TestCase):
                 },
             },
         ))
-        self.assertNotEqual(result.verdict, "downgrade")
-        self.assertIn("159", result.verdict)
-        self.assertIn("192", result.verdict)
+        self.assertEqual(
+            result.verdict,
+            "Quality not better than on-disk copy; searching continues",
+        )
         self.assertIn("CondosInQueens", result.summary)
 
     def test_spectral_reject_verdict(self):
         result = classify_log_entry(_entry(
             outcome="rejected", beets_scenario="spectral_reject",
             spectral_bitrate=160, existing_spectral_bitrate=192))
-        self.assertIn("160", result.verdict)
-        self.assertIn("192", result.verdict)
+        self.assertEqual(
+            result.verdict,
+            "Spectral quality not better than on-disk copy; searching continues",
+        )
+        self.assertEqual(result.spectral_bitrate, 160)
+        self.assertEqual(result.existing_spectral_bitrate, 192)
 
     def test_spectral_reject_verdict_falls_back_to_min_bitrate(self):
         """When existing_spectral_bitrate is 0/None (genuine files have no cliff),
@@ -802,16 +835,19 @@ class TestClassifyVerdict(unittest.TestCase):
             outcome="rejected", beets_scenario="spectral_reject",
             spectral_bitrate=192, existing_spectral_bitrate=0,
             existing_min_bitrate=226))
-        self.assertIn("192", result.verdict)
-        self.assertIn("226", result.verdict)
-        self.assertNotIn("unknown", result.verdict)
+        self.assertEqual(
+            result.verdict,
+            "Spectral quality not better than on-disk copy; searching continues",
+        )
 
     def test_transcode_downgrade_verdict(self):
         result = classify_log_entry(_entry(
             outcome="rejected", beets_scenario="transcode_downgrade",
             actual_min_bitrate=197, existing_min_bitrate=320))
-        self.assertIn("197", result.verdict)
-        self.assertIn("transcode", result.verdict.lower())
+        self.assertEqual(
+            result.verdict,
+            "Transcode not better than on-disk copy; searching continues",
+        )
 
     def test_high_distance_verdict(self):
         result = classify_log_entry(_entry(
@@ -981,7 +1017,7 @@ class TestClassifySummary(unittest.TestCase):
             spectral_bitrate=160, existing_spectral_bitrate=192,
             soulseek_username="fakeflac"))
         self.assertIn("fakeflac", result.summary)
-        self.assertIn("160", result.summary)
+        self.assertIn("Spectral quality not better", result.summary)
 
     def test_summary_no_html(self):
         result = classify_log_entry(_entry(
@@ -1081,8 +1117,10 @@ class TestExceptionVerdicts(unittest.TestCase):
                 "existing_measurement": {"min_bitrate_kbps": 320},
             },
         ))
-        self.assertIn("239", result.verdict)
-        self.assertIn("320", result.verdict)
+        self.assertEqual(
+            result.verdict,
+            "Quality not better than on-disk copy; searching continues",
+        )
 
     def test_failed_falls_back_to_import_result_error(self):
         """ImportResult error text is surfaced when error_message is blank."""
@@ -1300,12 +1338,11 @@ class TestVerdictSpectralFallback(unittest.TestCase):
                 },
             },
         ))
-        # Avg is the container measurement.
-        self.assertIn("187", result.verdict)
-        self.assertIn("avg", result.verdict)
-        # Spectral is the estimated source-quality floor.
-        self.assertIn("96", result.verdict)
-        self.assertIn("spectral", result.verdict.lower())
+        self.assertEqual(
+            result.verdict,
+            "Quality not better than on-disk copy; searching continues",
+        )
+        self.assertEqual(result.spectral_bitrate, 96)
 
     def test_quality_downgrade_without_import_result_uses_container_bitrate(self):
         """When there's no import_result at all, fall back to bitrate field
@@ -1320,9 +1357,12 @@ class TestVerdictSpectralFallback(unittest.TestCase):
             bitrate=128000,
             import_result=None,
         ))
-        self.assertIn("128", result.verdict)
-        self.assertIn("96", result.verdict)
-        self.assertIn("spectral", result.verdict.lower())
+        self.assertEqual(
+            result.verdict,
+            "Quality not better than on-disk copy; searching continues",
+        )
+        self.assertEqual(result.downloaded_label, "MP3 128k")
+        self.assertEqual(result.spectral_bitrate, 96)
 
     def test_transcode_downgrade_uses_real_bitrate_not_spectral(self):
         """Same spectral fallback bug in transcode_downgrade scenario."""
@@ -1342,8 +1382,10 @@ class TestVerdictSpectralFallback(unittest.TestCase):
                 "existing_measurement": {"min_bitrate_kbps": 240},
             },
         ))
-        self.assertIn("192", result.verdict)
-        self.assertNotIn("96", result.verdict)
+        self.assertEqual(
+            result.verdict,
+            "Transcode not better than on-disk copy; searching continues",
+        )
 
     def test_vbr_downgrade_verdict_uses_avg_not_min(self):
         """Unter Null - The Failure Epiphany (req 1749) VBR-downgrade rendering.
@@ -1397,21 +1439,10 @@ class TestVerdictSpectralFallback(unittest.TestCase):
                 },
             },
         ))
-        # Verdict must show the real avg numbers that drove the decision.
-        self.assertIn("152", result.verdict,
-                      "verdict must cite new avg (152)")
-        self.assertIn("225", result.verdict,
-                      "verdict must cite existing avg (225), "
-                      "not the clamped min — otherwise '152 > 96 but "
-                      "rejected' reads as a contradiction")
-        self.assertIn("spectral", result.verdict.lower())
-        self.assertIn("96", result.verdict)
-        # And MUST NOT say "152 is not better than existing 96" — the old
-        # one-sided min-based comparison.
-        self.assertNotRegex(
+        self.assertEqual(
             result.verdict,
-            r"152kbps avg\s+is not better than existing 96",
-            "verdict must not emit the misleading min-based comparison")
+            "Quality not better than on-disk copy; searching continues",
+        )
 
     def test_quality_downgrade_shows_spectral_on_both_sides(self):
         """Ambient One live shape: raw avg rises, but spectral regresses.
@@ -1457,10 +1488,12 @@ class TestVerdictSpectralFallback(unittest.TestCase):
             },
         ))
 
-        self.assertIn("222kbps avg", result.verdict)
-        self.assertIn("spectral likely_transcode ~128kbps", result.verdict)
-        self.assertIn("existing 192kbps avg", result.verdict)
-        self.assertIn("spectral likely_transcode ~192kbps", result.verdict)
+        self.assertEqual(
+            result.verdict,
+            "Quality not better than on-disk copy; searching continues",
+        )
+        self.assertEqual(result.spectral_bitrate, 128)
+        self.assertEqual(result.existing_spectral_bitrate, 192)
 
     def test_transcode_classify_uses_real_bitrate_not_spectral(self):
         """_classify_transcode has the same or-chain bug for success transcodes."""
@@ -1497,8 +1530,7 @@ class TestVerdictSpectralFallback(unittest.TestCase):
                 "existing_measurement": {"min_bitrate_kbps": 128},
             },
         ))
-        self.assertIn("128", result.summary)
-        self.assertNotIn("96", result.summary)
+        self.assertIn("Quality not better than on-disk copy", result.summary)
         self.assertIn("nexus15", result.summary)
 
 
@@ -1869,7 +1901,7 @@ class TestClassifyComparisonBasis(unittest.TestCase):
             c.verdict,
             "Upgrade: MP3 avg 196k (good) → AAC avg 192k (transparent)")
 
-    def test_downgrade_verdict_renders_ranks(self):
+    def test_downgrade_verdict_keeps_basis_in_evidence_contract(self):
         basis = self._basis_dict(self._SAY_HELLO_EXISTING, self._SAY_HELLO_NEW)
         entry = _entry(
             outcome="rejected",
@@ -1882,10 +1914,10 @@ class TestClassifyComparisonBasis(unittest.TestCase):
         c = classify_log_entry(entry)
         self.assertEqual(
             c.verdict,
-            "MP3 avg 196k (good) — not better than existing "
-            "avg 288k (transparent)")
+            "Quality not better than on-disk copy; searching continues")
+        self.assertEqual(c.comparison_basis, basis)
 
-    def test_equivalent_tiebreak_reject_shows_tolerance(self):
+    def test_equivalent_tiebreak_reject_keeps_tolerance_in_basis(self):
         basis = self._basis_dict(
             dict(avg_bitrate_kbps=250, format="MP3"),
             dict(avg_bitrate_kbps=248, format="MP3"),
@@ -1901,7 +1933,10 @@ class TestClassifyComparisonBasis(unittest.TestCase):
         c = classify_log_entry(entry)
         self.assertEqual(
             c.verdict,
-            "Equivalent: MP3 avg 250k vs avg 248k (within 5k)")
+            "Quality not better than on-disk copy; searching continues")
+        self.assertIsNotNone(c.comparison_basis)
+        assert c.comparison_basis is not None
+        self.assertEqual(c.comparison_basis["tolerance_kbps"], 5)
 
     def test_verified_lossless_bypass_names_the_bypass(self):
         basis = self._bypass_basis_dict(

@@ -678,6 +678,13 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
                                 "import jobs timeline item")
         _assert_required_fields(self, data["jobs"][0], {"artist_name", "album_title"},
                                 "import jobs timeline identity")
+        _assert_required_fields(
+            self,
+            data["jobs"][0],
+            {"badge", "badge_class", "border_color", "summary"},
+            "server-classified import job display",
+        )
+        self.assertEqual(data["jobs"][0]["badge"], "Waiting preview")
         # The identity join resolved through the seeded request row.
         self.assertEqual(data["jobs"][0]["artist_name"],
                          self.db.request(100)["artist_name"])

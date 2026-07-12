@@ -12,8 +12,8 @@ from typing import Any, Optional
 
 import msgspec
 
-from lib.quality import (AudioQualityMeasurement, ImportResult,
-                         QualityComparisonBasis, dispatch_action)
+from lib.import_queue import ImportJob
+from lib.quality import ImportResult, QualityComparisonBasis, dispatch_action
 from lib.validation_envelope import decode_validation_envelope
 
 # ---------------------------------------------------------------------------
@@ -151,6 +151,15 @@ class ClassifiedEntry(msgspec.Struct):
     existing_spectral_error: str | None = None
 
 
+class ImportJobDisplay(msgspec.Struct, frozen=True):
+    """Server-owned display contract for one active importer job."""
+
+    badge: str
+    badge_class: str
+    border_color: str
+    summary: str
+
+
 class _Classification(msgspec.Struct, frozen=True):
     """Typed core outcome used to finish a ``ClassifiedEntry``."""
 
@@ -158,6 +167,67 @@ class _Classification(msgspec.Struct, frozen=True):
     badge_class: str
     border_color: str
     verdict: str
+
+
+def classify_import_job_display(
+    job: ImportJob,
+    *,
+    queue_position: int,
+) -> ImportJobDisplay:
+    """Classify importer work without duplicating lifecycle copy in JS."""
+    if job.status not in ("queued", "running"):
+        raise ValueError(
+            f"timeline display requires an active import job, got {job.status!r}"
+        )
+    if queue_position < 0:
+        raise ValueError("queue_position must be non-negative")
+    if job.status == "running":
+        return ImportJobDisplay(
+            badge="Importing",
+            badge_class="badge-force",
+            border_color="#36c",
+            summary=(
+                job.message or job.error or job.preview_message
+                or job.preview_error or ""
+            ),
+        )
+
+    preview = job.preview_status
+    if preview == "evidence_ready":
+        badge = "Next check" if queue_position == 0 else "Ready check"
+        badge_class, border_color = "badge-new", "#1a4a2a"
+    elif preview == "would_import":
+        badge = "Next legacy check" if queue_position == 0 else "Legacy ready"
+        badge_class, border_color = "badge-new", "#1a4a2a"
+    elif preview == "running":
+        badge, badge_class, border_color = "Previewing", "badge-warn", "#a93"
+    elif preview == "waiting":
+        badge, badge_class, border_color = (
+            "Waiting preview", "badge-library", "#1a3a5a")
+    elif preview == "confident_reject":
+        badge, badge_class, border_color = (
+            "Preview reject", "badge-failed", "#a33")
+    elif preview == "measurement_failed":
+        badge, badge_class, border_color = (
+            "Measurement failed", "badge-failed", "#a33")
+    elif preview == "uncertain":
+        badge, badge_class, border_color = "Uncertain", "badge-warn", "#a93"
+    elif preview == "error":
+        badge, badge_class, border_color = (
+            "Preview error", "badge-failed", "#a33")
+    else:
+        badge, badge_class, border_color = (
+            "Queued", "badge-library", "#1a3a5a")
+
+    return ImportJobDisplay(
+        badge=badge,
+        badge_class=badge_class,
+        border_color=border_color,
+        summary=(
+            job.preview_message or job.message or job.preview_error
+            or job.error or ""
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -745,106 +815,6 @@ def _downloaded_min_bitrate_kbps(entry: LogEntry) -> int | None:
     return None
 
 
-def _comparison_verdict(
-    new_kbps: int | None,
-    old_kbps: int | None,
-    prefix: str = "",
-    metric: str | None = None,
-    new_spectral_kbps: int | None = None,
-    old_spectral_kbps: int | None = None,
-    new_spectral_grade: str | None = None,
-    old_spectral_grade: str | None = None,
-) -> str:
-    """Build a '… is not better than existing …' verdict string.
-
-    ``metric`` ("avg" / "min") annotates the bitrates so the reader can see
-    which number drove the rank comparison. This matters when the backend's
-    spectral override clamped ``min`` but kept ``avg`` on a VBR existing —
-    without the label, a verdict like "152 is not better than 96" reads as
-    a contradiction (it's really "avg 152 is not better than avg 225" but
-    min was shown and looked inverted). Pass ``None`` to omit the label when
-    both sides come from the same raw min.
-    """
-    new_s = _measurement_phrase(
-        new_kbps,
-        metric,
-        spectral_kbps=new_spectral_kbps,
-        spectral_grade=new_spectral_grade,
-    )
-    old_s = _measurement_phrase(
-        old_kbps,
-        metric,
-        spectral_kbps=old_spectral_kbps,
-        spectral_grade=old_spectral_grade,
-    )
-    if prefix:
-        return f"{prefix} {new_s} — not better than existing {old_s}"
-    return f"{new_s} is not better than existing {old_s}"
-
-
-def _measurement_spectral_phrase(
-    spectral_kbps: int | None,
-    spectral_grade: str | None,
-) -> str | None:
-    if spectral_kbps is None and not spectral_grade:
-        return None
-    if spectral_grade and spectral_kbps is not None:
-        return f"spectral {spectral_grade} ~{spectral_kbps}kbps"
-    if spectral_grade:
-        return f"spectral {spectral_grade}"
-    return f"spectral ~{spectral_kbps}kbps"
-
-
-def _measurement_phrase(
-    bitrate_kbps: int | None,
-    metric: str | None,
-    *,
-    spectral_kbps: int | None = None,
-    spectral_grade: str | None = None,
-) -> str:
-    suffix = f" {metric}" if metric else ""
-    primary = (
-        f"{bitrate_kbps}kbps{suffix}"
-        if bitrate_kbps is not None
-        else "unknown"
-    )
-    spectral = _measurement_spectral_phrase(spectral_kbps, spectral_grade)
-    if spectral:
-        return f"{primary} ({spectral})"
-    return primary
-
-
-def _verdict_bitrate(
-    m: AudioQualityMeasurement | None,
-) -> tuple[int | None, str | None]:
-    """Pick the bitrate and metric label to display for a measurement.
-
-    Prefers ``avg_bitrate_kbps`` when present (production's default
-    ``cfg.bitrate_metric=avg``) and falls back to ``min_bitrate_kbps``,
-    then ``spectral_bitrate_kbps`` as a last resort. Returns the value
-    plus a metric label ("avg" / "min" / None) so the caller can annotate
-    the verdict string.
-
-    Returning avg when it exists is important after the 2026-04-21
-    CBR-conditional override fix: for VBR existing, ``avg_bitrate_kbps``
-    carries the real signal that drove the rank comparison while
-    ``min_bitrate_kbps`` has been clamped by the spectral override.
-    Displaying min alone produced contradictory-looking verdicts
-    ("new 152 is not better than existing 96"). Spectral is rendered as
-    separate context by ``_comparison_verdict`` so the selected real bitrate
-    and source-quality estimate remain visible together.
-    """
-    if m is None:
-        return None, None
-    if m.avg_bitrate_kbps is not None:
-        return m.avg_bitrate_kbps, "avg"
-    if m.min_bitrate_kbps is not None:
-        return m.min_bitrate_kbps, "min"
-    if m.spectral_bitrate_kbps is not None:
-        return m.spectral_bitrate_kbps, None
-    return None, None
-
-
 def _quality_verdict_from_import_result(entry: LogEntry) -> str | None:
     """Derive a quality comparison verdict from ImportResult JSONB.
 
@@ -855,70 +825,21 @@ def _quality_verdict_from_import_result(entry: LogEntry) -> str | None:
     if ir is None:
         return None
 
-    # The persisted basis is the decision's own story — render it verbatim
-    # instead of re-deriving a comparison from the measurements (request
-    # 6039: re-derivation is how the display learned to lie).
-    if (ir.comparison_basis is not None
-            and ir.decision in ("downgrade", "transcode_downgrade")):
-        verdict = _verdict_from_basis(ir.comparison_basis)
-        if ir.decision == "transcode_downgrade":
-            return f"Transcode — {verdict}"
-        return verdict
-
-    new_m = ir.new_measurement
-    existing_m = ir.existing_measurement
-    new_kbps, new_metric = _verdict_bitrate(new_m)
-    old_kbps, old_metric = _verdict_bitrate(existing_m)
-    # Prefer the richer metric label when sides disagree ("avg" > "min")
-    # so the string doesn't read "new 152kbps avg vs existing 96kbps min".
-    # That split is rare — both sides come from the same ImportResult —
-    # but falling back to None keeps the verdict readable in the edge case.
-    metric = new_metric if new_metric == old_metric else None
-
+    # Rejected rows already carry the complete measured comparison in the
+    # fixed IN/HAVE/Spectral/V0 evidence schema. Keep verdict prose to one
+    # short decision-class grammar so the same rejection never reads like
+    # four different policies depending on which evidence path produced it.
     if ir.decision == "downgrade":
-        return _comparison_verdict(
-            new_kbps, old_kbps, metric=metric,
-            new_spectral_kbps=(
-                new_m.spectral_bitrate_kbps if new_m is not None else None
-            ),
-            old_spectral_kbps=(
-                existing_m.spectral_bitrate_kbps
-                if existing_m is not None else None
-            ),
-            new_spectral_grade=(
-                new_m.spectral_grade if new_m is not None else None
-            ),
-            old_spectral_grade=(
-                existing_m.spectral_grade if existing_m is not None else None
-            ),
-        )
-
+        return "Quality not better than on-disk copy; searching continues"
     if ir.decision == "transcode_downgrade":
-        return _comparison_verdict(
-            new_kbps, old_kbps, prefix="Transcode at", metric=metric,
-            new_spectral_kbps=(
-                new_m.spectral_bitrate_kbps if new_m is not None else None
-            ),
-            old_spectral_kbps=(
-                existing_m.spectral_bitrate_kbps
-                if existing_m is not None else None
-            ),
-            new_spectral_grade=(
-                new_m.spectral_grade if new_m is not None else None
-            ),
-            old_spectral_grade=(
-                existing_m.spectral_grade if existing_m is not None else None
-            ),
-        )
-
-    if ir.decision == "suspect_lossless_downgrade":
+        return "Transcode not better than on-disk copy; searching continues"
+    if ir.decision in (
+        "suspect_lossless_downgrade",
+        "suspect_lossless_probe_missing",
+    ):
         return _provisional_verdict(entry, imported=False)
-
-    if ir.decision == "suspect_lossless_probe_missing":
-        return _provisional_verdict(entry, imported=False)
-
     if ir.decision == "lossless_source_locked":
-        return _lossless_source_locked_verdict(entry)
+        return _lossless_source_locked_verdict()
 
     if ir.error:
         return f"Import error: {ir.error}"
@@ -968,33 +889,25 @@ def _spectral_phrase(entry: LogEntry) -> str | None:
     return phrase
 
 
-def _lossless_source_locked_verdict(entry: LogEntry) -> str:
+def _lossless_source_locked_verdict() -> str:
     """Verdict copy for the lossless-source lock rejection.
 
     Fires when a lossy candidate is offered against an existing album whose
-    original lossless-source V0 probe is already recorded. The candidate
-    cannot produce comparable evidence — only another lossless-container
-    source can override the recorded probe.
+    original lossless-source V0 probe is already recorded. Measurements stay
+    in the fixed evidence schema; this sentence names only the policy reason.
     """
-    _, existing_avg, _ = _probe_values(entry)
-    new_kbps = _downloaded_min_bitrate_kbps(entry)
-    parts: list[str] = []
-    if new_kbps is not None:
-        spectral = _spectral_phrase(entry)
-        new_phrase = f"{new_kbps}kbps lossy candidate"
-        if spectral:
-            new_phrase += f" ({spectral})"
-        parts.append(new_phrase)
-    if existing_avg is not None:
-        parts.append(
-            f"existing has lossless-source V0 probe {existing_avg}kbps"
-        )
-    parts.append("only another lossless source can override")
-    parts.append("searching continues")
-    return "Lossless-source locked: " + "; ".join(parts)
+    return (
+        "Lossless-source locked; only another lossless source can override; "
+        "searching continues"
+    )
 
 
 def _provisional_verdict(entry: LogEntry, *, imported: bool) -> str:
+    if not imported:
+        return (
+            "Suspect lossless source not better than on-disk copy; "
+            "searching continues"
+        )
     candidate_avg, existing_avg, final_format = _probe_values(entry)
     parts: list[str] = []
     spectral = _spectral_phrase(entry)
@@ -1006,15 +919,11 @@ def _provisional_verdict(entry: LogEntry, *, imported: bool) -> str:
         parts.append(f"existing source V0 avg {existing_avg}kbps")
     else:
         parts.append("no comparable source probe")
-    if imported:
-        if final_format:
-            parts.append(f"stored as {final_format}")
-        parts.append("source denylisted")
-        parts.append("searching continues")
-        return "Provisional lossless source: " + "; ".join(parts)
-    parts.append("not meaningfully better")
+    if final_format:
+        parts.append(f"stored as {final_format}")
+    parts.append("source denylisted")
     parts.append("searching continues")
-    return "Suspect lossless source rejected: " + "; ".join(parts)
+    return "Provisional lossless source: " + "; ".join(parts)
 
 
 def _classify_provisional(entry: LogEntry) -> _Classification:
@@ -1091,46 +1000,16 @@ def _rejection_verdict(entry: LogEntry) -> str:
         if scenario.startswith("suspect_lossless"):
             return _provisional_verdict(entry, imported=False)
         if scenario == "lossless_source_locked":
-            return _lossless_source_locked_verdict(entry)
-        # Fallback: use real file bitrate, not spectral
-        new_kbps = _downloaded_min_bitrate_kbps(entry)
-        old_kbps = entry.existing_min_bitrate or entry.existing_spectral_bitrate
+            return _lossless_source_locked_verdict()
         if scenario == "transcode_downgrade":
-            return _comparison_verdict(
-                new_kbps,
-                old_kbps,
-                prefix="Transcode at",
-                new_spectral_kbps=entry.spectral_bitrate,
-                old_spectral_kbps=entry.existing_spectral_bitrate,
-                new_spectral_grade=entry.spectral_grade,
-            )
-        return _comparison_verdict(
-            new_kbps,
-            old_kbps,
-            new_spectral_kbps=entry.spectral_bitrate,
-            old_spectral_kbps=entry.existing_spectral_bitrate,
-            new_spectral_grade=entry.spectral_grade,
-        )
+            return "Transcode not better than on-disk copy; searching continues"
+        return "Quality not better than on-disk copy; searching continues"
 
     if scenario == "spectral_reject":
-        # Spectral scenario — spectral_bitrate IS the right field here
-        old_kbps = entry.existing_spectral_bitrate or entry.existing_min_bitrate
-        # New preimport_decide path (post 2026-05-16 hotfix #254) writes the
-        # bitrate numbers into beets_detail (e.g. "spectral 128kbps <= existing
-        # 192kbps") but leaves the typed spectral_bitrate / existing_spectral_*
-        # columns NULL on the row, because _route_preimport_decision_reject's
-        # synthesized DownloadInfo doesn't carry spectral facts. When the
-        # typed columns are absent but beets_detail has a real string, render
-        # that directly — the importer already wrote a good human-readable
-        # reason.
-        if (
-            entry.spectral_bitrate is None
-            and old_kbps is None
-            and entry.beets_detail
-        ):
-            return f"Spectral: {entry.beets_detail}"
-        return _comparison_verdict(
-            entry.spectral_bitrate, old_kbps, prefix="Spectral:")
+        return (
+            "Spectral quality not better than on-disk copy; "
+            "searching continues"
+        )
 
     if scenario == "high_distance":
         dist = (f"{float(entry.beets_distance):.3f}"

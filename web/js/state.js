@@ -18,7 +18,7 @@ import { invalidateActiveRgs } from './active_rgs.js';
  * @property {number} requestId        The pipeline request being inspected.
  * @property {string} originTab        Tab to restore — `'browse'`, `'pipeline'`, `'recents'`, etc.
  * @property {number} originScrollY    `window.scrollY` at click time.
- * @property {string|null} originSubView  Sub-view to restore (e.g. `'queue'`/`'dashboard'` on Pipeline). `null` for tabs with no sub-view.
+ * @property {string|null} originSubView  Sub-view to restore (e.g. `'dashboard'`/`'long-tail'` on Pipeline). `null` for tabs with no sub-view.
  */
 
 /**
@@ -40,7 +40,7 @@ import { invalidateActiveRgs } from './active_rgs.js';
  * @property {string} query             Current search-box substring filter.
  */
 
-/** @type {{ browseSource: string, browseSearchType: string, browseArtist: {id:string, name:string}|null, browseLabel: {id:string, name:string}|null, labelFilters: {yearMin:number|null, yearMax:number|null, format:string, hideHeld:boolean}, labelPage: number, browseCache: Object, pipelineData: Object|null, pipelineSearchQuery: string, pipelineSearchResults: Array<Object>|null, pipelineDashboardData: Object|null, pipelineView: string, pipelineFilter: string, pipelineMatchGraphOpen: boolean, pipelineHourlyMatchGraphOpen: boolean, pipelineDailyMatchGraphOpen: boolean, longTail: LongTailState, recentsCounts: {all:number, imported:number, rejected:number, matches_24h:number, matches_6h:number, matches_per_hour_24h:number, matches_per_hour_6h:number}, recentsFilter: string, recentsSub: 'history'|'downloading'|'queue', dsConstants: Object|null, disambData: Object|null, searchTimer: number|null, searchTargetId: string|null, searchTargetExpandId: string|null, searchTargetSource: string|null, searchPlanDetailContext: SearchPlanDetailContext|null }} */
+/** @type {{ browseSource: string, browseSearchType: string, browseArtist: {id:string, name:string}|null, browseLabel: {id:string, name:string}|null, labelFilters: {yearMin:number|null, yearMax:number|null, format:string, hideHeld:boolean}, labelPage: number, browseCache: Object, pipelineDashboardData: Object|null, pipelineView: string, pipelineMatchGraphOpen: boolean, pipelineHourlyMatchGraphOpen: boolean, pipelineDailyMatchGraphOpen: boolean, longTail: LongTailState, recentsCounts: {all:number, imported:number, rejected:number, matches_24h:number, matches_6h:number, matches_per_hour_24h:number, matches_per_hour_6h:number}, recentsFilter: string, recentsSub: 'history'|'downloading'|'imports', dsConstants: Object|null, disambData: Object|null, searchTimer: number|null, searchTargetId: string|null, searchTargetExpandId: string|null, searchTargetSource: string|null, searchPlanDetailContext: SearchPlanDetailContext|null }} */
 export const state = {
   browseSource: 'mb',
   browseSearchType: 'artist',
@@ -49,12 +49,8 @@ export const state = {
   labelFilters: { yearMin: null, yearMax: null, format: '', hideHeld: false },
   labelPage: 1,
   browseCache: {},
-  pipelineData: null,
-  pipelineSearchQuery: '',
-  pipelineSearchResults: null,
   pipelineDashboardData: null,
-  pipelineView: 'queue',
-  pipelineFilter: 'wanted',
+  pipelineView: 'dashboard',
   pipelineMatchGraphOpen: false,
   pipelineHourlyMatchGraphOpen: false,
   pipelineDailyMatchGraphOpen: false,
