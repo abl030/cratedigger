@@ -219,7 +219,8 @@ across client-local memory stores.
 ### Shared skills
 
 `deploy` (full deploy sequence) · `debug-download` (live audit trail) · `check`
-(pyright + suite) · `beets-docs` (pinned upstream reference)
+(pyright + suite) · `beets-docs` (pinned upstream reference) ·
+`orchestrate-issue` (isolated multi-PR implementation/review/deploy loop)
 
 ### Shared rule loading
 
