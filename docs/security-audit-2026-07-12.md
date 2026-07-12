@@ -6,6 +6,14 @@ real code path and then adversarially re-verified (refute-by-default) by an
 independent pass. This document is the full rundown; the tracking issue links
 back here.
 
+After PR #662 merged the original report, an independent Codex pass reviewed
+the same runtime plus the request-state machine, import outcome atomicity,
+strict wire boundaries, live doc2 perimeter, full Python closure, and complete
+git history. The additions below are de-duplicated by root cause: overlaps keep
+their original `CD-SEC-*` ID, while genuinely distinct defects start at
+`CD-SEC-14`. Companion code-quality findings use `CD-QUAL-*` so they do not get
+misrepresented as remotely exploitable vulnerabilities.
+
 - **Scope:** the whole runtime — HTTP transport + routes, SQL/DB layer,
   subprocess/command construction, filesystem/destructive ops, web-UI XSS,
   secrets/credentials, SSRF/deserialization, dependency/supply-chain, and the
@@ -43,19 +51,25 @@ against that reality, not against a hypothetical public exposure.
 
 | ID | Severity | Title | Primary location |
 |----|----------|-------|------------------|
-| CD-SEC-01 | High | Cleartext Meelo credential committed to a public repo | `docs/meelo-primer.md` |
+| CD-SEC-01 | High | Historical credentials committed to a public repo | `docs/meelo-primer.md`, git history |
 | CD-SEC-02 | High | No auth + wildcard CORS on file-destructive endpoints | `web/server.py` |
 | CD-SEC-03 | Medium | Manual-import / import-preview accept an arbitrary absolute path (+ in-place `mp3val -f`) | `web/routes/imports.py`, `lib/util.py` |
 | CD-SEC-04 | Medium | No systemd sandboxing on services that process attacker-controlled bytes | `nix/module.nix` |
 | CD-SEC-05 | Low | Internal exception strings reflected in HTTP 500 bodies | `web/server.py` |
-| CD-SEC-06 | Low | TLS verification disabled on the Plex/Jellyfin fallback path | `lib/util.py` |
+| CD-SEC-06 | Medium | TLS verification disabled on the Plex/Jellyfin fallback path | `lib/util.py` |
 | CD-SEC-07 | Low | Unbounded request body read + JSON parse (memory-exhaustion DoS) | `web/server.py` |
 | CD-SEC-08 | Low | Unvalidated MB `id` interpolated into the mirror URL (request-shaping) | `web/routes/browse.py`, `web/mb.py` |
 | CD-SEC-09 | Low | Latent identifier-interpolation SQLi footguns (hardcoded today) | `lib/pipeline_db/requests.py`, `lib/pipeline_db/dashboard.py` |
 | CD-SEC-10 | Low | Unescaped controlled-vocabulary metadata in a few JS rows | `web/js/pipeline.js`, `web/js/library.js`, `web/js/wrong-matches.js` |
-| CD-SEC-11 | Info | Symlink/containment asymmetries in delete/move paths | `lib/processing_paths.py`, `lib/download_materialization.py` |
-| CD-SEC-12 | Info | Dependency currency (yt-dlp/ffmpeg) + CI gates only on GitGuardian | `flake.nix`, `flake.lock` |
+| CD-SEC-11 | Medium | Symlink escape in wrong-match streaming + containment asymmetries | `lib/processing_paths.py`, `web/wrong_match_file_service.py` |
+| CD-SEC-12 | Low | Vulnerable-version matches in the locked closure + narrow CI scope | `flake.lock`, `nix/package.nix` |
 | CD-SEC-13 | Info | Plex XML parsed with stdlib ElementTree under an unverified-TLS fallback | `lib/util.py` |
+| CD-SEC-14 | Critical | Destructive routes do not bind all identifiers to one release | `web/routes/pipeline_mutations.py`, `lib/library_delete_service.py` |
+| CD-SEC-15 | High | Request transition engine fails open and can resurrect `replaced` rows | `lib/transitions.py`, `lib/pipeline_db/requests.py` |
+| CD-SEC-16 | High | Destructive beets operations race the importer | `web/routes/pipeline_mutations.py`, `lib/library_delete_service.py` |
+| CD-SEC-17 | High | Terminal import outcomes persist as multiple autocommit statements | `lib/dispatch/outcome_actions.py`, `scripts/import_preview_worker.py` |
+| CD-SEC-18 | Medium | Track replacement is non-atomic | `lib/pipeline_db/misc.py` |
+| CD-SEC-19 | Medium | Import-job JSONB payloads bypass the strict wire-boundary policy | `lib/import_queue.py`, `scripts/importer.py` |
 
 **Clean (no exploitable issue found):** SQL injection (every attacker-influenced
 value is `%s`-parameterized), command/subprocess injection (all argv is
@@ -63,15 +77,16 @@ list-form, no shell; the yt-dlp URL is `--`-separated; peer filenames are
 absolutised before reaching ffmpeg/mp3val/sox/flac), static-file serving
 (basename reduction + a `/js/` prefix/suffix allowlist), stored XSS of
 free-text peer fields (a single consistent escape helper is applied to every
-free-text string), config secret handling (`*_file` indirection, peer-auth DB,
-no plaintext in the rendered config, VM-test-enforced), and request-time SSRF to
+free-text string), runtime config secret handling (`*_file` indirection,
+peer-auth DB, no secret material in the Nix store or process argv,
+VM-test-enforced), and request-time SSRF to
 arbitrary hosts (every outbound base URL is fixed config, not request input).
 
 ---
 
 ## Priority 1
 
-### CD-SEC-01 — Cleartext Meelo credential in a public repo (High)
+### CD-SEC-01 — Historical credentials in a public repo (High)
 
 `docs/meelo-primer.md` contained a real login (`username abl030`, a plaintext
 password) in four places, and it has been present in git **history** since the
@@ -79,15 +94,26 @@ Meelo-scan feature commit. The cratedigger repo remote is public GitHub, so the
 credential is world-readable and is in history — removing the lines from the
 working tree does not un-publish it.
 
+A full-history Gitleaks scan of 2,135 commits found one additional credible
+credential-shaped value: the original imported `soularr.py` history contains
+the same 32-character hexadecimal Lidarr API key in two early commits. The
+associated host is a private-LAN address and the integration is obsolete, so
+the key may already be dead; it is nevertheless public and must be treated as
+compromised. The other 16 raw Gitleaks matches were de-duplicated false
+positives: a deliberately synthetic redaction-test token and expiring GitHub
+private-image URL parameters. A tracked-HEAD scan found only the synthetic test
+token, not a current credential.
+
 - **Impact:** anyone reading the public repo obtains the operator's Meelo login;
   the dominant real risk is password reuse across other services.
 - **Why CI missed it:** the only CI gate is GitGuardian, whose detectors key on
   high-entropy tokens; a low-entropy dictionary-style password does not trip it.
-- **Remediation:** treat the credential as compromised and **rotate it** (and
-  anywhere it was reused). Scrub the plaintext from the docs (done in the same
-  change that adds this audit). History rewrite is optional for a single-operator
-  repo once the credential is rotated. (Operator note: Meelo is no longer in
-  active use, which caps the blast radius — rotation is still the correct close.)
+- **Remediation:** treat both credentials as compromised and **rotate/revoke
+  them** (and any reuse). Scrub the Meelo plaintext from the docs (done in the
+  same change that adds this audit). History rewrite is optional for a
+  single-operator repo once the credentials are dead. (Operator note: Meelo and
+  the original Lidarr integration are no longer in active use, which caps the
+  blast radius — invalidating the old credentials is still the correct close.)
 
 ### CD-SEC-02 — No auth + wildcard CORS on file-destructive endpoints (High)
 
@@ -118,6 +144,84 @@ an attacker simply supplies the constant.
   routes should be treated as privileged operations, not confirm-string-gated
   ones. This is a design decision (auth mechanism) and is intentionally left for
   the operator rather than auto-fixed.
+
+### CD-SEC-14 — Destructive routes do not bind identifiers to one release (Critical)
+
+Two destructive workflows accept multiple independently trusted identifiers
+without proving they describe the same release:
+
+- `/api/pipeline/ban-source` accepts `request_id` and `mb_release_id`. It uses
+  `request_id` for uploader lookup, bad-hash ownership, denylisting, state
+  transition and audit logging, but uses `mb_release_id` for beets lookup,
+  hashing and `beet remove -d`.
+- `/api/beets/delete` accepts a beets `album_id`, optional `pipeline_id`, and
+  `release_id`. `resolve_pipeline_request` deliberately prefers the explicit
+  `pipeline_id`, while the filesystem/beets deletion independently targets the
+  supplied `album_id`.
+
+A mismatched payload can therefore delete release A's files while purging or
+requeueing request B. The ban-source variant additionally records A's good
+audio hashes as bad under B, poisoning future acquisition decisions. The
+library-delete test suite currently pins the unsafe preference for explicit
+`pipeline_id`, so the green suite certifies the wrong contract.
+
+- **Remediation:** choose one server-resolved identity root per operation. Load
+  the request/beets album server-side, derive every other identifier from it,
+  and reject redundant mismatched identifiers with zero DB, beets or filesystem
+  mutation. Ship a deterministic A/B mismatch pin plus a generated cross-product
+  property for the no-mutation invariant.
+
+### CD-SEC-15 — Request transitions fail open and can resurrect `replaced` rows (High)
+
+`lib/transitions.py::apply_transition` logs an invalid transition and then
+continues. Most target states ultimately call `update_status`,
+`reset_to_wanted`, or `mark_imported_with_rescue`, whose SQL does not compare
+the row's current status with the caller's `from_status`. The web
+`/api/pipeline/update` route and CLI status actions can therefore move a frozen
+`replaced` audit row back to `wanted`, `manual`, or `imported`; a stale valid
+transition can also race Replace and overwrite the newly frozen status.
+
+The follow-up audit reproduced the real seam with a stateful fake:
+`replaced -> wanted` logged "proceeding anyway", returned `True`, and changed
+the row to `wanted`. The existing deterministic test explicitly preserves this
+fail-open behavior "for backward compatibility", contrary to the current
+single-operator, forward-only contract.
+
+- **Remediation:** reject invalid transitions with a typed conflict and make
+  every transition a SQL compare-and-set against the expected source status.
+  Expand the generated lifecycle model to drive every operator entry point from
+  every status, with `replaced` frozen under all worlds.
+
+### CD-SEC-16 — Destructive beets operations race the importer (High)
+
+Ban-source checks for an active import job, then releases that observation and
+hashes/removes the release without acquiring the importer's per-release
+advisory lock. An importer can claim the job immediately after the check.
+`/api/beets/delete` has neither an active-job check nor a release lock. Both
+paths can therefore mutate the beets DB and album files concurrently with
+`dispatch_import_core`, even though the importer deliberately holds the release
+lock for exactly this data-loss boundary.
+
+- **Remediation:** acquire the same per-release advisory lock before the final
+  active-job recheck and hold it across the complete destructive operation.
+  Return 409 on contention. Test with two real DB sessions and a
+  barrier-controlled beets mutation. Add a server-validated confirmation to
+  ban-source; its current browser `confirm()` is only a UI affordance.
+
+### CD-SEC-17 — Terminal import outcomes are non-atomic (High)
+
+Successful and rejected outcomes persist request state, attempts, download
+audit, denylist state and import-job state as separate autocommit statements.
+The preview worker first marks a job terminal, then catches and suppresses any
+failure while requeueing/logging its parent; its own comment documents the
+result as a terminal job whose request remains `downloading` forever. The
+success path similarly marks a request `imported` before writing the mandatory
+download audit.
+
+- **Remediation:** introduce one DB-layer transaction per terminal domain
+  outcome. Existing helpers commit internally, so merely wrapping their current
+  calls is insufficient. Add failure injection at every write boundary and
+  assert all-or-none persisted state.
 
 ## Priority 2
 
@@ -159,7 +263,38 @@ entire music library plus read access to every secret the user can read.
   existing module VM check, since over-tight confinement would break real file
   access. This is a module change and is deferred to its own PR.
 
-## Priority 3 — low / hardening
+### CD-SEC-18 — Track replacement is non-atomic (Medium)
+
+`PipelineDB.set_tracks` deletes the current release tracklist, then inserts the
+replacement one row at a time under autocommit. A malformed later track,
+connection failure, or concurrent reader can observe or leave zero/partial
+tracks. Those rows feed exact-pressing matching and persisted search plans, so
+partial replacement corrupts identity evidence rather than merely degrading a
+display. `FakePipelineDB` replaces its list atomically, while the real-PG write
+audit explicitly leaves `set_tracks` on a TODO exemption and covers only the
+successful path.
+
+- **Remediation:** perform delete + bulk insert in one DB transaction. Seed an
+  old tracklist, force a later-row constraint failure, and prove the old set
+  survives. Pair the deterministic pin with an all-or-nothing generated
+  property.
+
+### CD-SEC-19 — Import-job JSONB payloads bypass strict boundary validation (Medium)
+
+`ImportJob` is a dataclass containing `dict[str, Any]` payload/result fields,
+and `from_row` manually coerces outer scalars rather than decoding job-specific
+wire contracts. Force/manual consumers then use permissive `.get()` checks. A
+drifted `download_log_id: "42"`, for example, silently becomes `None`; the job
+continues without its wrong-match/audit ancestor instead of failing at the DB
+boundary. This violates the repository's `msgspec.Struct` policy for JSONB and
+subprocess wire data.
+
+- **Remediation:** define strict payload Structs discriminated by job type and
+  decode once when reading the DB row. Reject wrong-type IDs with a boundary
+  test, then remove legacy preview-status compatibility after confirming the
+  migration-swept values are absent live.
+
+## Additional hardening findings
 
 ### CD-SEC-05 — Exception strings reflected in 500 bodies (Low)
 
@@ -172,15 +307,18 @@ could reveal are already in the public repo), so severity is low.
 - **Remediation:** return a generic `{"error": "internal error"}` on the 500 path
   and keep the full trace in the server log.
 
-### CD-SEC-06 — TLS verification disabled on the Plex/Jellyfin fallback (Low)
+### CD-SEC-06 — TLS verification disabled on the Plex/Jellyfin fallback (Medium)
 
 The verify-then-unverified helper in `lib/util.py` retries with
 `check_hostname = False` and `verify_mode = CERT_NONE` on `ssl.SSLError`. It is
 used by the Plex XML/PUT and Jellyfin JSON calls, which carry the
 `X-Plex-Token` / `X-Emby-Token`. An active LAN MITM can present an invalid cert
-to force the fallback and then harvest the token and inject responses. The first
-attempt still verifies, and these are homelab media-server tokens, so severity
-is low — but a "fall back to no verification" downgrade is worth removing.
+to force the fallback and then harvest the token and inject responses. Because
+certificate failure itself deterministically activates the insecure retry,
+there is no authenticated first-attempt protection once an attacker is on path.
+The credentials authorize media-server reads/writes, making this a confirmed
+credential-confidentiality and response-integrity failure rather than an
+informational self-signed-certificate accommodation.
 
 - **Remediation:** trust the homelab CA (or pin the expected self-signed cert)
   instead of disabling verification.
@@ -238,37 +376,65 @@ the codebase's own escaping discipline.
   a JS lint/test rule that flags un-escaped interpolations inside `innerHTML`
   template literals.
 
-## Info / defense-in-depth
+## Containment, dependency and defense-in-depth
 
-### CD-SEC-11 — Symlink/containment asymmetries in delete/move paths (Info)
+### CD-SEC-11 — Symlink escape in wrong-match streaming + containment asymmetries (Medium)
 
 The containment guard in `lib/processing_paths.py` normalizes `..` textually but
-does not resolve symlinks (`normpath`, not `realpath`), and the materialize move
-in `lib/download_materialization.py` trusts the slskd-stamped source path with no
-within-root check, whereas the delete/reap paths in `lib/slskd_transfers.py` do
-guard it. No peer-reachable vector exists today (slskd sanitizes remote filenames
-and writes only regular files into its own tree; the reaper additionally requires
-ledger ownership and does not descend symlinked dirs), so these are hardening
-asymmetries rather than live bugs.
+does not resolve symlinks (`abspath`/`normpath`, not `realpath`). The wrong-match
+audio route validates a lexically contained candidate path and extension, then
+opens it for streaming. A real-function reproduction planted
+`failed_imports/Album/track.mp3` as a symlink to a file outside the candidate
+root; the guard accepted it and the route would stream the target bytes.
 
-- **Remediation:** unify on `realpath`-based containment and add the missing
-  within-root check to the move source, matching the stronger guard used on the
-  delete side.
+The prerequisite is the ability to create a symlink in a candidate tree — not a
+plain Soulseek filename — so this is not anonymous peer-to-file-read. A
+compromised downloader, co-resident process, or writer sharing the staging group
+is sufficient, and CD-SEC-04 documents how broad the live service-user access
+currently is. Separately, the materialize move in
+`lib/download_materialization.py` trusts the slskd-stamped source path without
+the within-root check used by delete/reap paths; that half remains
+defense-in-depth rather than a reproduced escape.
 
-### CD-SEC-12 — Dependency currency and CI scope (Info)
+- **Remediation:** canonicalize both root and candidate with `realpath`, reject
+  symlink components, and open the audio file with `O_NOFOLLOW`/fd-based
+  validation to close the check/open race. Add the missing move-source
+  within-root check, matching the stronger delete-side guard.
 
-Supply-chain hygiene is otherwise good: `flake.lock` pins nixpkgs to a specific
-rev, the runtime source is content-addressed, and there are no unpinned code or
-binary fetches. The residual risk is **version currency of yt-dlp and ffmpeg** —
-both parse attacker-controlled input/streams and are the highest-value targets in
-the closure, so the `nix flake update` cadence (already coupled to a beets-drift
-gate in the deploy rules) matters most for them. Separately, CI runs only
-GitGuardian; the test suite, pyright, and dead-code checks are enforced by the
-local pre-push hook rather than in CI, so a green PR check is not a green suite.
+### CD-SEC-12 — Vulnerable-version matches in the locked closure + narrow CI scope (Low)
 
-- **Remediation:** keep a regular flake-update cadence with an eye on yt-dlp/ffmpeg
-  advisories; optionally add the suite to CI so the gate does not depend solely on
-  the local hook.
+Supply-chain structure is good: `flake.lock` pins nixpkgs to a specific rev, the
+runtime source is content-addressed, and there are no unpinned code or binary
+fetches. The pin was last updated from a 2026-06-29 nixpkgs revision, so the
+point-in-time OSV scan also checked the actual Nix Python environment rather
+than inferring dependencies from a nonexistent requirements file.
+
+The scan covered 111 installed distributions and returned 25 raw advisory
+records. After alias de-duplication and Nix/call-path verification, six packages
+genuinely match affected version ranges: Flask 3.1.2, idna 3.13, lxml 6.0.2,
+msgpack 1.1.2, soupsieve 2.8.3, and urllib3 2.6.3. No current Cratedigger path
+was found using the vulnerable Flask session behavior, lxml parser,
+`msgpack.Unpacker`, attacker-controlled SoupSieve selector/IDNA hostname, or the
+two affected urllib3 low-level streaming/proxy patterns. urllib3 is nevertheless
+reachable through the YouTube/requests code and should be the first upgrade;
+2.7.0 fixes GHSA-mf9v-mfxr-j63j and GHSA-qccp-gfcp-xxvc.
+
+Two scanner hits were verified false positives rather than silently waived:
+the cryptography advisory applies to OpenSSL bundled in wheels, while the Nix
+extension dynamically links Nix OpenSSL 3.6.2; and broken Flask-CORS metadata
+reports 0.0.1 even though the pinned Nix derivation/source is fixed 6.0.2.
+yt-dlp and ffmpeg still deserve particular attention because both parse
+attacker-controlled input/streams.
+
+Separately, CI runs only GitGuardian; the suite, pyright, dead-code and flake
+checks are enforced by the local pre-push hook rather than CI, so a green PR
+check is not a green suite.
+
+- **Remediation:** update the flake and re-run the real-beets/full-suite gates;
+  confirm urllib3 >= 2.7.0, idna >= 3.15, lxml >= 6.1.0, msgpack >= 1.2.1,
+  soupsieve >= 2.8.4, and Flask >= 3.1.3 in the realized closure. Keep a regular
+  update cadence for yt-dlp/ffmpeg advisories; optionally add the suite to CI so
+  the gate does not depend solely on the local hook.
 
 ### CD-SEC-13 — Plex XML parsed with stdlib ElementTree (Info)
 
@@ -278,6 +444,52 @@ with the unverified-TLS fallback (CD-SEC-06) a MITM could feed crafted XML.
 
 - **Remediation:** use `defusedxml` for the Plex XML parse as defense-in-depth,
   and/or fix CD-SEC-06 so the response source is authenticated.
+
+## Companion code-quality findings
+
+These are durable correctness/maintenance gaps found by the follow-up pass.
+They belong in the covering issue because they affect the same remediation
+surfaces, but they are not counted as remotely exploitable security findings.
+
+### CD-QUAL-01 — Seven operator actions lack CLI/API symmetry
+
+Dynamic route/CLI comparison found web-only POST actions for beets delete,
+ban-source, pipeline delete, set-quality, upgrade, wrong-match converge, and
+release-group resolution. This violates the repository rule that both adapters
+wrap one shared service method. The drift is already visible in ban-source: a
+large destructive handler owns identity resolution, hashing, denylisting,
+cleanup, transition and audit logic directly in the route.
+
+- **Remediation:** as each affected security finding is fixed, move authority
+  into a typed service result and add the missing thin CLI/API twin with matched
+  exit/status mappings. Do not create seven independent rewrites; group by the
+  shared destructive or identity service seam.
+
+### CD-QUAL-02 — Forward-only cleanup and documentation drift
+
+`scripts/populate_tracks.py` is an obsolete committed one-shot that passes an
+old SQLite path to the PostgreSQL `PipelineDB` and can no longer run. The import
+queue retains `would_import`/`uncertain` compatibility even though migration 018
+is documented as having swept those values. The pipeline DB rule still lists
+four statuses and omits terminal `replaced`. These are three instances of the
+same forward-only hygiene failure: one-shot/compatibility residue outliving its
+deployment window and prose no longer matching the authoritative schema.
+
+- **Remediation:** delete the dead one-shot, confirm the legacy preview-status
+  cohort is empty before removing compatibility, and update the status docs in
+  the same PR that fixes CD-SEC-15/CD-SEC-19.
+
+### CD-QUAL-03 — The real-PostgreSQL write audit overstates its coverage
+
+The write-contract audit describes universal coverage but still allowlists
+several writers with `TODO` rationales, including `set_tracks`. A green suite
+therefore does not establish the repository's documented rule that every DB
+write preserves every field and failure boundary through real PostgreSQL.
+
+- **Remediation:** replace TODO exemptions with named real-PG round trips or
+  narrowly document why a method is structurally inapplicable. CD-SEC-18 should
+  remove the `set_tracks` exemption first and qualify the failure path with a
+  planted later-row violation.
 
 ## Considered and dismissed (refuted)
 
@@ -291,34 +503,59 @@ with the unverified-TLS fallback (CD-SEC-06) a MITM could feed crafted XML.
 - **`failed_imports` rmtree fallback.** The fallback that approves a directory
   with a `failed_imports` ancestor is deliberate (force/manual quarantine folders
   live outside the strict slskd-root branch), every path reaching the delete
-  originates from a cratedigger-written DB value, and no route/CLI accepts a path.
+  originates from a cratedigger-written DB value, and no *delete* route/CLI
+  accepts a free path. (CD-SEC-03 is a separate import/preview path-input bug.)
   Removing the fallback would regress legitimate cleanup.
 
 ## Remediation checklist
 
 Operator actions (not code):
 
-- [ ] **CD-SEC-01** — rotate the Meelo password (and any reuse); confirm the
-      plaintext is scrubbed from the docs.
+- [ ] **CD-SEC-01** — rotate/revoke the Meelo password and historical Lidarr API
+      key (and any reuse); confirm the Meelo plaintext is scrubbed from the docs.
 - [ ] **CD-SEC-02** — decide the web-UI auth mechanism (proxy-injected shared
       secret vs session) before wiring it.
 
-Safe code fixes (candidate single hardening PR):
+Priority data-loss / audit-integrity work:
+
+- [ ] **CD-SEC-14** — bind every destructive identifier to one server-resolved
+      release; mismatch must produce zero mutation.
+- [ ] **CD-SEC-15** — fail closed on invalid transitions and compare-and-set the
+      expected source status, including frozen `replaced` rows.
+- [ ] **CD-SEC-16** — hold the importer release lock across ban/delete beets
+      mutations and return 409 on contention.
+- [ ] **CD-SEC-17** — persist each terminal import outcome in one DB transaction.
+
+Priority containment / integrity work:
 
 - [ ] CD-SEC-03 — within-root confinement + `parse_body` on import endpoints.
+- [ ] CD-SEC-04 — systemd hardening block (gated by the module VM check).
+- [ ] CD-SEC-06 — replace `CERT_NONE` fallback with CA trust / cert pin.
+- [ ] CD-SEC-11 — symlink-safe stream open + `realpath` containment +
+      move-source within-root check.
+- [ ] CD-SEC-18 — transactional track replacement + real-PG failure pin/property.
+- [ ] CD-SEC-19 — strict job-specific JSONB payload Structs at the DB boundary.
+
+Safe hardening fixes (candidate single PR):
+
 - [ ] CD-SEC-05 — generic 500 body.
 - [ ] CD-SEC-07 — request-body size cap.
 - [ ] CD-SEC-08 — UUID-validate MB id + `quote` path segments.
 - [ ] CD-SEC-09 — allowlist the two identifier-interpolation sites.
 - [ ] CD-SEC-10 — escape enum metadata in the three JS rows + lint rule.
-- [ ] CD-SEC-11 — `realpath` containment + move-source within-root check.
 - [ ] CD-SEC-13 — `defusedxml` for the Plex XML parse.
 
-Larger / separate PRs:
+Auth, dependency and quality follow-through:
 
 - [ ] CD-SEC-02 — drop wildcard CORS + add auth layer.
-- [ ] CD-SEC-04 — systemd hardening block (gated by the module VM check).
-- [ ] CD-SEC-06 — replace `CERT_NONE` fallback with CA trust / cert pin.
+- [ ] CD-SEC-12 — update the flake, verify fixed Python closure versions, and
+      consider moving local-only gates into CI.
+- [ ] CD-QUAL-01 — add missing CLI/API twins while extracting the shared
+      destructive/identity services for CD-SEC-14/CD-SEC-16.
+- [ ] CD-QUAL-02 — delete the dead one-shot, retire proven-empty compatibility,
+      and correct status docs alongside CD-SEC-15/CD-SEC-19.
+- [ ] CD-QUAL-03 — eliminate TODO write-audit exemptions, starting with
+      `set_tracks` in CD-SEC-18.
 
 ## Appendix — audit method
 
@@ -334,4 +571,13 @@ SSRF/deserialization, dependency/supply-chain, nix-module/infra) were completed
 in-session by the orchestrator at the same rigor, reading the same files. Raw
 finding counts before de-duplication: 3 CONFIRMED, 12 PLAUSIBLE, 2 REFUTED across
 the workflow half, consolidated with the four inline dimensions into the 13
-findings above.
+original findings.
+
+The follow-up pass ran Bandit over 64,065 production lines, Gitleaks over tracked
+HEAD and all 2,135 commits, OSV against 111 realized Python distributions,
+warning-level ShellCheck, pyright, `nix flake check`, dead-code/dict-access/JS
+gates, and the full 5,625-test suite. It also inspected the live doc2 listener,
+route index/CORS behavior and systemd exposure without invoking a destructive
+endpoint. After root-cause de-duplication it re-verified eight original items,
+added six distinct security/integrity findings (`CD-SEC-14..19`), and added three
+companion quality findings (`CD-QUAL-01..03`).
