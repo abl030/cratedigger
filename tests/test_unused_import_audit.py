@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+from collections import Counter
 import json
 import os
 from pathlib import Path
@@ -22,6 +24,77 @@ LEGACY_EXPORT_SURFACES = (
     "cratedigger.py",
     "scripts/pipeline_cli/__init__.py",
 )
+EXPECTED_REDUNDANT_ALIASES = {
+    "cratedigger.py": frozenset({
+        ("lib.browse", "_browse_directories"),
+        ("lib.browse", "_browse_one"),
+        ("lib.browse", "download_filter"),
+        ("lib.browse", "rank_candidate_dirs"),
+        ("lib.enqueue", "_get_denied_users"),
+        ("lib.enqueue", "_get_user_dirs"),
+        ("lib.enqueue", "_prefixed_directory_files"),
+        ("lib.enqueue", "_try_filetype"),
+        ("lib.enqueue", "choose_release"),
+        ("lib.enqueue", "get_album_tracks"),
+        ("lib.enqueue", "release_trackcount_mode"),
+        ("lib.enqueue", "try_enqueue"),
+        ("lib.enqueue", "try_multi_enqueue"),
+        ("lib.matching", "album_match"),
+        ("lib.matching", "album_track_num"),
+        ("lib.matching", "check_for_match"),
+        ("lib.matching", "check_ratio"),
+        ("lib.matching", "get_album_by_id"),
+        ("lib.util", "_track_titles_cross_check"),
+    }),
+    "scripts/pipeline_cli/__init__.py": frozenset({
+        ("scripts.pipeline_cli._format", "_fmt_br"),
+        ("scripts.pipeline_cli._format", "_fmt_measurement"),
+        ("scripts.pipeline_cli._format", "_format_dt"),
+        ("scripts.pipeline_cli._format", "_json_default"),
+        ("scripts.pipeline_cli._format", "_truncate"),
+        ("scripts.pipeline_cli.album_requests", "_build_search_plan_service"),
+        ("scripts.pipeline_cli.album_requests", "_cmd_add_discogs"),
+        ("scripts.pipeline_cli.album_requests", "_cmd_add_mb"),
+        ("scripts.pipeline_cli.album_requests", "_generate_plan_after_add"),
+        ("scripts.pipeline_cli.album_requests", "_mb_api"),
+        (
+            "scripts.pipeline_cli.album_requests",
+            "_resolve_and_update_after_add",
+        ),
+        ("scripts.pipeline_cli.imports", "_preview_values_from_args"),
+        ("scripts.pipeline_cli.imports", "_print_preview_result"),
+        ("scripts.pipeline_cli.imports", "_resolve_failed_path"),
+        ("scripts.pipeline_cli.long_tail", "_cli_band_fn"),
+        ("scripts.pipeline_cli.quality", "_load_beets_album_info"),
+        ("scripts.pipeline_cli.quality", "_load_runtime_audio_check_mode"),
+        ("scripts.pipeline_cli.quality", "_load_runtime_rank_config"),
+        (
+            "scripts.pipeline_cli.quality",
+            "_load_runtime_verified_lossless_target",
+        ),
+        ("scripts.pipeline_cli.quality", "_quality_preview_target_label"),
+        ("scripts.pipeline_cli.query", "_get_query_sql"),
+        ("scripts.pipeline_cli.query", "_render_query_table"),
+        ("scripts.pipeline_cli.query", "_stringify_query_value"),
+        ("scripts.pipeline_cli.routes_meta", "_build_parser"),
+        ("scripts.pipeline_cli.routes_meta", "_collect_cli_routes"),
+        ("scripts.pipeline_cli.routes_meta", "_describe_argparse_action"),
+        ("scripts.pipeline_cli.search_plan", "_search_plan_exit_code"),
+        ("scripts.pipeline_cli.show", "_render_download_history_header"),
+        ("scripts.pipeline_cli.show", "_render_import_result"),
+        ("scripts.pipeline_cli.show", "_render_search_forensics_summary"),
+        ("scripts.pipeline_cli.show", "_render_youtube_metadata"),
+        ("scripts.pipeline_cli.triage", "_TRIAGE_VALID_FILTER_FORMS"),
+        ("scripts.pipeline_cli.triage", "_TRIAGE_VALID_FILTER_FORMS_BASE"),
+        ("scripts.pipeline_cli.wrong_match", "_print_wrong_match_delete_result"),
+        (
+            "scripts.pipeline_cli.wrong_match",
+            "_wrong_match_delete_group_exit_code",
+        ),
+        ("scripts.pipeline_cli.youtube", "_RedisYoutubeCache"),
+        ("scripts.pipeline_cli.youtube", "_build_youtube_client"),
+    }),
+}
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -103,7 +176,79 @@ def assert_dead_code_gate_rejects(result: subprocess.CompletedProcess[str]) -> N
     assert result.returncode != 0, result.stdout + result.stderr
 
 
+def redundant_aliases(source: str) -> tuple[tuple[str, str], ...]:
+    """Return exact redundant import-alias identities."""
+    aliases: list[tuple[str, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom):
+            module = "." * node.level + (node.module or "")
+            aliases.extend(
+                (module, alias.name)
+                for alias in node.names
+                if alias.asname == alias.name
+            )
+        elif isinstance(node, ast.Import):
+            aliases.extend(
+                ("", alias.name)
+                for alias in node.names
+                if alias.asname == alias.name
+            )
+    return tuple(aliases)
+
+
+def assert_redundant_alias_baseline(
+    source: str,
+    expected: frozenset[tuple[str, str]],
+) -> None:
+    """Require the exact intentional redundant-alias baseline."""
+    actual = redundant_aliases(source)
+    actual_set = frozenset(actual)
+    duplicates = sorted(
+        alias for alias, occurrences in Counter(actual).items() if occurrences > 1
+    )
+    unexpected = actual_set - expected
+    stale = expected - actual_set
+    assert not unexpected and not stale and not duplicates, (
+        f"unexpected redundant aliases: {sorted(unexpected)!r}; "
+        f"stale expected aliases: {sorted(stale)!r}; "
+        f"duplicate redundant aliases: {duplicates!r}"
+    )
+
+
 class TestUnusedImportAudit(unittest.TestCase):
+    def test_legacy_redundant_alias_baseline_is_exact(self) -> None:
+        self.assertEqual(
+            set(EXPECTED_REDUNDANT_ALIASES),
+            set(LEGACY_EXPORT_SURFACES),
+        )
+        for relative_path, expected in EXPECTED_REDUNDANT_ALIASES.items():
+            with self.subTest(relative_path=relative_path):
+                source = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+                assert_redundant_alias_baseline(source, expected)
+
+    def test_redundant_alias_checker_rejects_a_peer_masked_expansion(self) -> None:
+        source = "from dependency import shared_name as shared_name\n"
+        peer_source = "shared_name = object()\nprint(shared_name)\n"
+        findings = ruff_findings({
+            "lib/importing.py": source,
+            "lib/peer.py": peer_source,
+        })
+        assert_import_liveness(
+            findings,
+            relative_path="lib/importing.py",
+            import_is_live=True,
+        )
+
+        with self.assertRaisesRegex(AssertionError, "unexpected redundant aliases"):
+            assert_redundant_alias_baseline(source, frozenset())
+
+    def test_redundant_alias_checker_rejects_a_duplicate_identity(self) -> None:
+        import_line = "from dependency import shared_name as shared_name\n"
+        expected = frozenset({("dependency", "shared_name")})
+
+        with self.assertRaisesRegex(AssertionError, "duplicate redundant aliases"):
+            assert_redundant_alias_baseline(import_line * 2, expected)
+
     def test_peer_name_use_does_not_keep_an_import_live(self) -> None:
         findings = ruff_findings({
             "lib/importing.py": "from dependency import shared_name\n",

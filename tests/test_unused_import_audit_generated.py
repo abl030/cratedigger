@@ -9,7 +9,9 @@ from hypothesis import example, given, strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers suite/push/fuzz tiers
 from tests.test_unused_import_audit import (
+    assert_redundant_alias_baseline,
     assert_import_liveness,
+    redundant_aliases,
     ruff_findings,
 )
 
@@ -43,6 +45,68 @@ def _aggregate_name_fault(
 
 
 class TestGeneratedUnusedImportAudit(unittest.TestCase):
+    @given(
+        names=st.lists(_IDENTIFIERS, min_size=2, max_size=5, unique=True),
+        delta=st.sampled_from(("duplicate", "expansion", "stale_expected")),
+        import_style=st.sampled_from(("from", "import")),
+    )
+    @example(
+        names=["existing_pin", "peer_used_pin"],
+        delta="expansion",
+        import_style="from",
+    )
+    @example(
+        names=["existing_pin", "stale_pin"],
+        delta="stale_expected",
+        import_style="import",
+    )
+    @example(
+        names=["duplicated_pin", "peer_pin"],
+        delta="duplicate",
+        import_style="from",
+    )
+    def test_any_redundant_alias_baseline_delta_is_rejected(
+        self,
+        names: list[str],
+        delta: str,
+        import_style: str,
+    ) -> None:
+        baseline_names = names[:-1]
+        changed_name = names[-1]
+
+        def import_line(name: str) -> str:
+            if import_style == "from":
+                return f"from dependency import {name} as {name}\n"
+            return f"import {name} as {name}\n"
+
+        changed_identity = (
+            "dependency" if import_style == "from" else "",
+            changed_name,
+        )
+        baseline_source = "".join(import_line(name) for name in baseline_names)
+        source = baseline_source
+        expected = frozenset(redundant_aliases(baseline_source))
+        if delta == "expansion":
+            source += import_line(changed_name)
+        elif delta == "stale_expected":
+            expected |= frozenset({changed_identity})
+        else:
+            source += import_line(baseline_names[0])
+        peer_source = f"{changed_name} = object()\nprint({changed_name})\n"
+
+        findings = ruff_findings({
+            "lib/importing.py": source,
+            "lib/peer.py": peer_source,
+        })
+        if delta != "duplicate":
+            assert_import_liveness(
+                findings,
+                relative_path="lib/importing.py",
+                import_is_live=True,
+            )
+        with self.assertRaises(AssertionError):
+            assert_redundant_alias_baseline(source, expected)
+
     @given(
         imported_name=_IDENTIFIERS,
         import_style=st.sampled_from(("from", "alias")),
