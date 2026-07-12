@@ -355,6 +355,87 @@ class TestImportPreviewPath(unittest.TestCase):
             handle.write(b"not real audio but never inspected in this test")
         return source
 
+    def _direct_preview_override(self, db: FakePipelineDB) -> int | None:
+        source = self._source_dir()
+        run = SimpleNamespace(
+            import_result=ImportResult(
+                decision="import",
+                new_measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    avg_bitrate_kbps=245,
+                    median_bitrate_kbps=245,
+                    format="mp3 v0",
+                ),
+            )
+        )
+        try:
+            with patch(
+                "lib.config.read_runtime_config",
+                return_value=CratediggerConfig(
+                    beets_harness_path="/fake/harness/run_beets_harness.sh",
+                    pipeline_db_enabled=True,
+                ),
+            ), patch(
+                "lib.import_preview.inspect_local_files",
+                return_value=LocalFileInspection(
+                    filetype="flac",
+                    min_bitrate_bps=900000,
+                    is_vbr=False,
+                ),
+            ), patch(
+                "lib.import_preview.measure_preimport_state",
+                return_value=PreimportMeasurement(
+                    folder_layout="flat",
+                    audio_file_count=1,
+                ),
+            ), patch(
+                "lib.import_preview.run_import_one",
+                return_value=run,
+            ) as mock_run:
+                preview_import_from_path(db, request_id=42, path=source)
+            return mock_run.call_args.kwargs["override_min_bitrate"]
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_direct_preview_legacy_no_fk_uses_spectral_floor(self):
+        db = self._db()
+        db.request(42).update(
+            min_bitrate=320,
+            current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=96,
+        )
+
+        self.assertEqual(self._direct_preview_override(db), 96)
+
+    def test_direct_preview_authoritative_empty_ignores_stale_scalars(self):
+        db = self._db()
+        db.request(42).update(
+            min_bitrate=320,
+            current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=96,
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="mbid-42",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3 320",
+                spectral_grade=None,
+                spectral_bitrate_kbps=None,
+            ),
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_request_current_evidence(42, persisted.id)
+
+        self.assertEqual(self._direct_preview_override(db), 320)
+
     def test_real_path_preview_runs_harness_dry_run_without_db_writes(self):
         db = self._db()
         source = self._source_dir()

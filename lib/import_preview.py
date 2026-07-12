@@ -800,12 +800,14 @@ def measure_and_persist_candidate_evidence(
                 current_evidence = None
         existing_spectral = measurement.existing_spectral
         existing_grade = (
-            existing_spectral.grade if existing_spectral else req.get("current_spectral_grade")
+            existing_spectral.grade
+            if existing_spectral is not None
+            else existing_spectral_evidence.grade
         )
         existing_bitrate = (
             existing_spectral.bitrate_kbps
             if existing_spectral is not None
-            else req.get("current_spectral_bitrate")
+            else existing_spectral_evidence.bitrate_kbps
         )
         if current_evidence is not None:
             current_m = current_evidence.measurement
@@ -1186,11 +1188,15 @@ def preview_import_from_path(
             )
 
         existing_spectral = measurement.existing_spectral
-        existing_grade = existing_spectral.grade if existing_spectral else None
+        existing_grade = (
+            existing_spectral.grade
+            if existing_spectral is not None
+            else existing_spectral_evidence.grade
+        )
         existing_bitrate = (
             existing_spectral.bitrate_kbps
             if existing_spectral is not None
-            else None
+            else existing_spectral_evidence.bitrate_kbps
         )
         if (
             persist_candidate_evidence
