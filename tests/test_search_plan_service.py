@@ -692,6 +692,50 @@ class TestSearchPlanServiceResolver(unittest.TestCase):
         self.assertEqual(result.failure_class,
                          FAILURE_CLASS_DEPENDENCY_FAILURE)
 
+    def test_resolver_result_loses_to_concurrent_replace(self):
+        """A resolver that started first cannot thaw a replaced ancestor."""
+        _seed_request(
+            self.db,
+            id=23,
+            artist_name="Low",
+            album_title="Things We Lost in the Fire",
+            mb_release_id="resolver-race-old",
+        )
+        before_tracks = self.db.get_tracks(23)
+        db = self.db
+
+        class ReplacingResolver:
+            def resolve_tracks(self, *, release_id: str, request_id: int):
+                db.supersede_request_mbid(
+                    request_id,
+                    new_mb_release_id="resolver-race-new",
+                    new_mb_release_group_id=None,
+                    new_mb_artist_id=None,
+                    new_artist_name="Low",
+                    new_album_title="Things We Lost in the Fire (correct)",
+                    new_year=2001,
+                    new_country=None,
+                    new_tracks=[],
+                )
+                return [{
+                    "disc_number": 1,
+                    "track_number": 1,
+                    "title": "Late resolver result",
+                    "length_seconds": 180,
+                }]
+
+        result = SearchPlanService(
+            self.db,
+            self.cfg,
+            resolver=ReplacingResolver(),
+        ).generate_for_request(23, regenerate=False)
+
+        self.assertEqual(result.outcome, RESULT_REQUEST_REPLACED)
+        self.assertEqual(self.db.get_tracks(23), before_tracks)
+        row = self.db.get_request(23)
+        assert row is not None
+        self.assertEqual(row["status"], "replaced")
+
 
 class TestSearchPlanSnapshotEquivalence(unittest.TestCase):
     """AE13: CLI and web add paths produce equivalent plans."""

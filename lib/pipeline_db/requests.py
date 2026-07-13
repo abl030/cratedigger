@@ -379,10 +379,27 @@ class _RequestsMixin(_PipelineDBBase):
         self.conn.commit()
 
 
-    def update_request_fields(self, request_id: int, **extra: Any) -> None:
-        """Update album_requests metadata without changing status."""
+    def update_request_fields(
+        self,
+        request_id: int,
+        **extra: Any,
+    ) -> bool:
+        """Compare-and-set metadata without mutating a replaced request.
+
+        ``expected_status`` lets read-then-write adapters reject a concurrent
+        lifecycle change instead of reporting a metadata update that matched
+        no row. Callers that do not hold a source snapshot still receive the
+        terminal ``replaced`` guard.
+        """
+        expected_status_raw = extra.pop("expected_status", None)
+        if (
+            expected_status_raw is not None
+            and not isinstance(expected_status_raw, str)
+        ):
+            raise TypeError("expected_status must be a string or None")
+        expected_status = expected_status_raw
         if not extra:
-            return
+            return True
         now = datetime.now(timezone.utc)
         sets = ["updated_at = %s"]
         params: list[object] = [now]
@@ -390,12 +407,21 @@ class _RequestsMixin(_PipelineDBBase):
             sets.append(f"{key} = %s")
             params.append(val)
         params.append(request_id)
-        self._execute(
-            f"UPDATE album_requests SET {', '.join(sets)} "
-            "WHERE id = %s AND status != 'replaced'",
-            params,
-        )
+        if expected_status is not None:
+            params.append(expected_status)
+            cur = self._execute(
+                f"UPDATE album_requests SET {', '.join(sets)} "
+                "WHERE id = %s AND status != 'replaced' AND status = %s",
+                params,
+            )
+        else:
+            cur = self._execute(
+                f"UPDATE album_requests SET {', '.join(sets)} "
+                "WHERE id = %s AND status != 'replaced'",
+                params,
+            )
         self.conn.commit()
+        return cur.rowcount > 0
 
 
     # ---------- Unfindable detection (U13) ----------

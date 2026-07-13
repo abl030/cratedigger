@@ -104,6 +104,19 @@ def assert_replaced_row_frozen(snapshot: dict, row: dict) -> None:
             f"replaced request {snapshot['id']} mutated after supersede: {diffs}")
 
 
+def assert_replaced_tracks_frozen(
+    request_id: int,
+    snapshot: list[dict],
+    tracks: list[dict],
+) -> None:
+    """A replaced request's child track rows are historical audit data too."""
+    if tracks != snapshot:
+        raise AssertionError(
+            f"replaced request {request_id} tracks mutated after supersede: "
+            f"{snapshot!r} -> {tracks!r}"
+        )
+
+
 def assert_identity_immutable(identity: tuple, row: dict) -> None:
     current = tuple(row[field] for field in _IDENTITY_FIELDS)
     if current != identity:
@@ -157,6 +170,7 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
         self.ids: list[int] = []
         self.identity: dict[int, tuple] = {}
         self.frozen: dict[int, dict] = {}
+        self.frozen_tracks: dict[int, list[dict]] = {}
         self._mbid_counter = 0
 
     # -- helpers ------------------------------------------------------
@@ -392,13 +406,17 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
                 f"supersede left old row status={old_row['status']!r}")
         # The frozen audit snapshot: byte-identical from here on.
         self.frozen[rid] = copy.deepcopy(old_row)
+        self.frozen_tracks[rid] = self.db.get_tracks(rid)
         assert_replacement_linked(
             rid, self.db.get_request_by_replaces_request_id(rid))
 
     @precondition(lambda self: bool(self.frozen))
     @rule(data=st.data())
     def late_writers_cannot_mutate_replaced_ancestor(self, data) -> None:
-        """Exercise real metadata/search-plan writers after supersede."""
+        """Exercise real metadata/search-plan writers after supersede.
+
+        ``set_tracks`` models a resolver result arriving after Replace won.
+        """
         rid = data.draw(st.sampled_from(sorted(self.frozen)), label="frozen row")
         snapshot = copy.deepcopy(self._row(rid))
 
@@ -424,6 +442,23 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
             expected_status="wanted",
         ):
             raise AssertionError("late retry write thawed replaced row")
+
+        try:
+            self.db.set_tracks(rid, [{
+                "disc_number": 1,
+                "track_number": 1,
+                "title": "Late resolver result",
+                "length_seconds": 180,
+            }])
+        except ReplacedRequestMutationError:
+            pass
+        else:
+            raise AssertionError("late resolver result rewrote replaced tracks")
+        assert_replaced_tracks_frozen(
+            rid,
+            self.frozen_tracks[rid],
+            self.db.get_tracks(rid),
+        )
 
         try:
             self.db.create_failed_search_plan(
@@ -489,6 +524,11 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
             assert_replaced_row_frozen(snapshot, self._row(rid))
 
     @invariant()
+    def replaced_tracks_stay_frozen(self) -> None:
+        for rid, snapshot in self.frozen_tracks.items():
+            assert_replaced_tracks_frozen(rid, snapshot, self.db.get_tracks(rid))
+
+    @invariant()
     def identity_never_drifts(self) -> None:
         for rid, identity in self.identity.items():
             assert_identity_immutable(identity, self._row(rid))
@@ -520,6 +560,14 @@ class TestLifecycleCheckersTripOnViolations(unittest.TestCase):
         thawed = {"id": 1, "status": "replaced", "min_bitrate": 320}
         with self.assertRaises(AssertionError):
             assert_replaced_row_frozen(snapshot, thawed)
+
+    def test_trips_on_rewritten_replaced_tracks(self):
+        with self.assertRaises(AssertionError):
+            assert_replaced_tracks_frozen(
+                1,
+                [{"track_number": 1, "title": "Original"}],
+                [{"track_number": 1, "title": "Late resolver result"}],
+            )
 
     def test_trips_on_resurrected_replaced_row(self):
         snapshot = {"id": 1, "status": "replaced"}

@@ -41,6 +41,30 @@ def _transition_applied_or_report(
     }))
     return False
 
+
+def _request_fields_applied_or_report(
+    db,
+    request_id: int,
+    *,
+    expected_status: str,
+    applied: bool,
+) -> bool:
+    """Map a metadata compare-and-set miss through the transition contract."""
+    if applied:
+        return True
+    row = db.get_request(request_id)
+    return _transition_applied_or_report(transitions.TransitionConflict(
+        request_id=request_id,
+        target_status=expected_status,
+        kind=(
+            transitions.TransitionConflictKind.not_found
+            if row is None
+            else transitions.TransitionConflictKind.stale_source
+        ),
+        expected_status=expected_status,
+        actual_status=None if row is None else str(row["status"]),
+    ))
+
 VALID_STATUSES = ["wanted", "imported", "manual"]
 
 
@@ -517,7 +541,18 @@ def cmd_set_intent(db, args):
         )
         if not _transition_applied_or_report(result):
             return 4
-        db.update_request_fields(args.id, target_format=target_format)
+        applied = db.update_request_fields(
+            args.id,
+            expected_status="wanted",
+            target_format=target_format,
+        )
+        if not _request_fields_applied_or_report(
+            db,
+            args.id,
+            expected_status="wanted",
+            applied=applied,
+        ):
+            return 4
         print(f"  [{args.id}] {label}: lossless on disk, re-queued for search")
     else:
         update_fields = {"target_format": target_format}
@@ -527,7 +562,18 @@ def cmd_set_intent(db, args):
             search_filetype_override=req.get("search_filetype_override"),
         ):
             update_fields["search_filetype_override"] = None
-        db.update_request_fields(args.id, **update_fields)
+        applied = db.update_request_fields(
+            args.id,
+            expected_status=str(req["status"]),
+            **update_fields,
+        )
+        if not _request_fields_applied_or_report(
+            db,
+            args.id,
+            expected_status=str(req["status"]),
+            applied=applied,
+        ):
+            return 4
         action = "lossless on disk" if target_format else "default (pipeline decides)"
         print(f"  [{args.id}] {label}: {action} "
               f"(target_format: {old_target} → {target_format})")

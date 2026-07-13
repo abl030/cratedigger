@@ -1691,6 +1691,128 @@ class TestTrackManagement(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["title"], "New")
 
+    def test_resolver_tracks_racing_replace_leave_ancestor_frozen(self):
+        """Real PG barrier: Replace wins while resolver is in flight."""
+        from lib.config import CratediggerConfig
+        from lib.pipeline_db import PipelineDB
+        from lib.search_plan_service import (
+            RESULT_REQUEST_REPLACED,
+            SearchPlanService,
+        )
+
+        entered = threading.Event()
+        release = threading.Event()
+        results: list[Any] = []
+        errors: list[BaseException] = []
+
+        class BarrierResolver:
+            def resolve_tracks(
+                self,
+                *,
+                release_id: str,
+                request_id: int,
+            ) -> list[dict[str, Any]]:
+                entered.set()
+                if not release.wait(timeout=10):
+                    raise TimeoutError("replace barrier was not released")
+                return [{
+                    "disc_number": 1,
+                    "track_number": 1,
+                    "title": "Late resolver result",
+                    "length_seconds": 180,
+                }]
+
+        def generate() -> None:
+            try:
+                results.append(SearchPlanService(
+                    self.db,
+                    CratediggerConfig(),
+                    resolver=BarrierResolver(),
+                ).generate_for_request(self.req_id, regenerate=False))
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        worker = threading.Thread(target=generate)
+        worker.start()
+        self.assertTrue(entered.wait(timeout=10))
+
+        replacing_db = PipelineDB(TEST_DSN)
+        try:
+            replacing_db.supersede_request_mbid(
+                self.req_id,
+                new_mb_release_id="track-resolver-race-new",
+                new_mb_release_group_id=None,
+                new_mb_artist_id=None,
+                new_artist_name="A",
+                new_album_title="B (correct pressing)",
+                new_year=None,
+                new_country=None,
+                new_tracks=[],
+            )
+            frozen_row = replacing_db.get_request(self.req_id)
+            frozen_tracks = replacing_db.get_tracks(self.req_id)
+        finally:
+            release.set()
+            worker.join(timeout=10)
+            replacing_db.close()
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].outcome, RESULT_REQUEST_REPLACED)
+        self.assertEqual(self.db.get_request(self.req_id), frozen_row)
+        self.assertEqual(self.db.get_tracks(self.req_id), frozen_tracks)
+
+    def test_metadata_compare_and_set_loses_to_replace(self):
+        """Real PG barrier: a stale set-intent snapshot reports no apply."""
+        from lib.pipeline_db import PipelineDB
+
+        ready = threading.Event()
+        release = threading.Event()
+        applied: list[bool] = []
+        errors: list[BaseException] = []
+
+        def write_metadata() -> None:
+            try:
+                ready.set()
+                if not release.wait(timeout=10):
+                    raise TimeoutError("metadata barrier was not released")
+                applied.append(self.db.update_request_fields(
+                    self.req_id,
+                    expected_status="wanted",
+                    target_format="lossless",
+                ))
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        worker = threading.Thread(target=write_metadata)
+        worker.start()
+        self.assertTrue(ready.wait(timeout=10))
+
+        replacing_db = PipelineDB(TEST_DSN)
+        try:
+            replacing_db.supersede_request_mbid(
+                self.req_id,
+                new_mb_release_id="metadata-race-new",
+                new_mb_release_group_id=None,
+                new_mb_artist_id=None,
+                new_artist_name="A",
+                new_album_title="B (correct pressing)",
+                new_year=None,
+                new_country=None,
+                new_tracks=[],
+            )
+            frozen_row = replacing_db.get_request(self.req_id)
+        finally:
+            release.set()
+            worker.join(timeout=10)
+            replacing_db.close()
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(applied, [False])
+        self.assertEqual(self.db.get_request(self.req_id), frozen_row)
+
 
 @requires_postgres
 class TestDownloadLog(unittest.TestCase):

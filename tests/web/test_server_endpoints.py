@@ -541,10 +541,10 @@ class _RaisingUpdateFieldsDB(FakePipelineDB):
         super().__init__()
         self.update_error: Exception | None = None
 
-    def update_request_fields(self, request_id: int, **fields: object) -> None:
+    def update_request_fields(self, request_id: int, **fields: object) -> bool:
         if self.update_error is not None:
             raise self.update_error
-        super().update_request_fields(request_id, **fields)
+        return super().update_request_fields(request_id, **fields)
 
 
 class TestClientDisconnectHandling(_FakeDbWebServerCase):

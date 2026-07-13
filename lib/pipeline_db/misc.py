@@ -15,6 +15,7 @@ from lib.quality import (
 from lib.pipeline_db._shared import (
     BadAudioHashInput,
     BadAudioHashRow,
+    ReplacedRequestMutationError,
 )
 
 from lib.pipeline_db._core import _PipelineDBBase
@@ -61,20 +62,43 @@ class _MiscMixin(_PipelineDBBase):
     # --- Track management ---
 
     def set_tracks(self, request_id: int, tracks: list[dict[str, Any]]) -> None:
-        self._execute("DELETE FROM album_tracks WHERE request_id = %s", (request_id,))
-        for t in tracks:
-            self._execute("""
-                INSERT INTO album_tracks (request_id, disc_number, track_number, title, length_seconds, track_artist)
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (
-                request_id,
-                t.get("disc_number", 1),
-                t["track_number"],
-                t["title"],
-                t.get("length_seconds"),
-                t.get("track_artist"),
-            ))
-        self.conn.commit()
+        """Replace a live request's tracklist without thawing an ancestor.
+
+        The request-row lock linearizes this multi-row replacement with
+        ``supersede_request_mbid``. A resolver may have started before Replace;
+        once Replace wins, its late result must not mutate the frozen request's
+        child rows.
+        """
+        with self._atomic():
+            cur = self._execute(
+                "SELECT status FROM album_requests WHERE id = %s FOR UPDATE",
+                (request_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise ValueError(f"request {request_id} not found")
+            if row["status"] == "replaced":
+                raise ReplacedRequestMutationError(request_id)
+
+            self._execute(
+                "DELETE FROM album_tracks WHERE request_id = %s",
+                (request_id,),
+            )
+            for track in tracks:
+                self._execute("""
+                    INSERT INTO album_tracks (
+                        request_id, disc_number, track_number, title,
+                        length_seconds, track_artist
+                    ) VALUES (%s, %s, %s, %s, %s, %s)
+                """, (
+                    request_id,
+                    track.get("disc_number", 1),
+                    track["track_number"],
+                    track["title"],
+                    track.get("length_seconds"),
+                    track.get("track_artist"),
+                ))
+            self.conn.commit()
 
 
     def get_tracks(self, request_id: int) -> list[dict[str, Any]]:

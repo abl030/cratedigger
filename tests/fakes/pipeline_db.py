@@ -2299,18 +2299,38 @@ class FakePipelineDB:
         return [copy.deepcopy(r) for r in self._requests.values()
                 if r.get("status") == "downloading"]
 
-    def update_request_fields(self, request_id: int, **fields: Any) -> None:
+    def update_request_fields(
+        self,
+        request_id: int,
+        **fields: Any,
+    ) -> bool:
+        expected_status_raw = fields.pop("expected_status", None)
+        if (
+            expected_status_raw is not None
+            and not isinstance(expected_status_raw, str)
+        ):
+            raise TypeError("expected_status must be a string or None")
+        expected_status = expected_status_raw
         self.update_request_fields_calls.append((request_id, dict(fields)))
         row = self._requests.get(request_id)
-        if row and row.get("status") != "replaced":
-            if fields.get("mb_release_id") is not None:
-                # Production's UPDATE hits the same UNIQUE(mb_release_id)
-                # as the INSERT — re-pointing a row at another row's mbid
-                # raises there too (setting a row's own mbid is a no-op).
-                self._assert_mb_release_id_unique(
-                    fields["mb_release_id"], exclude_id=request_id)
-            row.update(fields)
-            row["updated_at"] = _utcnow()
+        if (
+            not row
+            or row.get("status") == "replaced"
+            or (
+                expected_status is not None
+                and row.get("status") != expected_status
+            )
+        ):
+            return False
+        if fields.get("mb_release_id") is not None:
+            # Production's UPDATE hits the same UNIQUE(mb_release_id)
+            # as the INSERT — re-pointing a row at another row's mbid
+            # raises there too (setting a row's own mbid is a no-op).
+            self._assert_mb_release_id_unique(
+                fields["mb_release_id"], exclude_id=request_id)
+        row.update(fields)
+        row["updated_at"] = _utcnow()
+        return True
 
     # --- Unfindable detection (U13) ---
     #
@@ -3123,6 +3143,11 @@ class FakePipelineDB:
 
     def set_tracks(self, request_id: int,
                    tracks: list[dict[str, Any]]) -> None:
+        row = self._requests.get(request_id)
+        if row is None:
+            raise ValueError(f"request {request_id} not found")
+        if row.get("status") == "replaced":
+            raise ReplacedRequestMutationError(request_id)
         self._tracks[request_id] = [
             {
                 "disc_number": t.get("disc_number", 1),

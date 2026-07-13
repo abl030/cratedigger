@@ -1438,7 +1438,11 @@ class TestCmdSetIntent(unittest.TestCase):
             min_bitrate=245,
         ))
         args = MagicMock(id=2, intent="lossless")
-        pipeline_cli.cmd_set_intent(cast(Any, db), args)
+        mock_finalize.side_effect = (
+            pipeline_cli_album_requests.transitions.finalize_request
+        )
+        result = pipeline_cli.cmd_set_intent(cast(Any, db), args)
+        self.assertEqual(result, 0)
         called_db, request_id, transition = mock_finalize.call_args.args
         self.assertIs(called_db, db)
         self.assertEqual(request_id, 2)
@@ -1449,6 +1453,59 @@ class TestCmdSetIntent(unittest.TestCase):
             {"search_filetype_override": "lossless", "min_bitrate": 245},
         )
         self.assertEqual(db.update_request_fields_calls, [(2, dict(target_format="lossless"))])
+
+    @patch("builtins.print")
+    def test_set_intent_reports_replace_race_instead_of_success(
+        self,
+        mock_print,
+    ):
+        class RacingDB(FakePipelineDB):
+            def update_request_fields(
+                self,
+                request_id: int,
+                *,
+                expected_status: str | None = None,
+                **fields: Any,
+            ) -> bool:
+                self.supersede_request_mbid(
+                    request_id,
+                    new_mb_release_id="set-intent-race-new",
+                    new_mb_release_group_id=None,
+                    new_mb_artist_id=None,
+                    new_artist_name="A",
+                    new_album_title="B (correct pressing)",
+                    new_year=None,
+                    new_country=None,
+                    new_tracks=[],
+                )
+                return super().update_request_fields(
+                    request_id,
+                    expected_status=expected_status,
+                    **fields,
+                )
+
+        db = RacingDB()
+        db.seed_request(make_request_row(
+            id=7,
+            status="wanted",
+            artist_name="A",
+            album_title="B",
+            target_format=None,
+        ))
+
+        result = pipeline_cli.cmd_set_intent(
+            cast(Any, db),
+            MagicMock(id=7, intent="lossless"),
+        )
+
+        self.assertEqual(result, 4)
+        row = db.get_request(7)
+        assert row is not None
+        self.assertEqual(row["status"], "replaced")
+        self.assertIsNone(row["target_format"])
+        rendered = "\n".join(str(call.args[0]) for call in mock_print.call_args_list)
+        self.assertIn('"error": "transition_conflict"', rendered)
+        self.assertNotIn("lossless on disk", rendered)
 
     @patch("builtins.print")
     def test_set_default_clears_stale_lossless_override(self, _mock_print):

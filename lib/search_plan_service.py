@@ -1079,6 +1079,8 @@ class SearchPlanService:
                     if resolved:
                         self.db.set_tracks(request_id, resolved)
                         tracks = self.db.get_tracks(request_id) or list(resolved)
+        except ReplacedRequestMutationError:
+            return self._replaced_result(request_id)
         except ResolverFailure as exc:
             return self._record_failure(
                 request_id,

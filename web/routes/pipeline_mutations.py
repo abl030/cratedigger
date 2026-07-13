@@ -62,6 +62,31 @@ def _transition_applied_or_respond(h, result: transitions.TransitionResult) -> b
     return False
 
 
+def _request_fields_applied_or_respond(
+    h,
+    db,
+    request_id: int,
+    *,
+    expected_status: str,
+    applied: bool,
+) -> bool:
+    """Map a metadata compare-and-set miss through the HTTP CAS contract."""
+    if applied:
+        return True
+    row = db.get_request(request_id)
+    return _transition_applied_or_respond(h, transitions.TransitionConflict(
+        request_id=request_id,
+        target_status=expected_status,
+        kind=(
+            transitions.TransitionConflictKind.not_found
+            if row is None
+            else transitions.TransitionConflictKind.stale_source
+        ),
+        expected_status=expected_status,
+        actual_status=None if row is None else str(row["status"]),
+    ))
+
+
 def _resolve_and_update_after_add(
     db,
     req_id: int,
@@ -653,7 +678,19 @@ def post_pipeline_set_quality(h, body: dict) -> None:
         if not _transition_applied_or_respond(h, result):
             return
         if min_bitrate is not None and new_status == "manual":
-            s._db().update_request_fields(req_id, min_bitrate=min_bitrate)
+            applied = s._db().update_request_fields(
+                req_id,
+                expected_status="manual",
+                min_bitrate=min_bitrate,
+            )
+            if not _request_fields_applied_or_respond(
+                h,
+                s._db(),
+                req_id,
+                expected_status="manual",
+                applied=applied,
+            ):
+                return
     elif min_bitrate is not None:
         if existing["status"] == "replaced":
             result = finalize_request(
@@ -664,7 +701,19 @@ def post_pipeline_set_quality(h, body: dict) -> None:
             )
             if not _transition_applied_or_respond(h, result):
                 return
-        s._db().update_request_fields(req_id, min_bitrate=min_bitrate)
+        applied = s._db().update_request_fields(
+            req_id,
+            expected_status=str(existing["status"]),
+            min_bitrate=min_bitrate,
+        )
+        if not _request_fields_applied_or_respond(
+            h,
+            s._db(),
+            req_id,
+            expected_status=str(existing["status"]),
+            applied=applied,
+        ):
+            return
 
     h._json({
         "status": "ok",
@@ -742,7 +791,19 @@ def post_pipeline_set_intent(h, body: dict) -> None:
         )
         if not _transition_applied_or_respond(h, result):
             return
-        s._db().update_request_fields(int(req_id), target_format=target_format)
+        applied = s._db().update_request_fields(
+            int(req_id),
+            expected_status="wanted",
+            target_format=target_format,
+        )
+        if not _request_fields_applied_or_respond(
+            h,
+            s._db(),
+            int(req_id),
+            expected_status="wanted",
+            applied=applied,
+        ):
+            return
         h._json({
             "status": "ok",
             "id": int(req_id),
@@ -759,7 +820,19 @@ def post_pipeline_set_intent(h, body: dict) -> None:
             search_filetype_override=req.get("search_filetype_override"),
         ):
             update_fields["search_filetype_override"] = None
-        s._db().update_request_fields(int(req_id), **update_fields)
+        applied = s._db().update_request_fields(
+            int(req_id),
+            expected_status=str(req["status"]),
+            **update_fields,
+        )
+        if not _request_fields_applied_or_respond(
+            h,
+            s._db(),
+            int(req_id),
+            expected_status=str(req["status"]),
+            applied=applied,
+        ):
+            return
         h._json({
             "status": "ok",
             "id": int(req_id),

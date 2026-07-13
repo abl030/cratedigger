@@ -1604,7 +1604,7 @@ class _ApplyResolveAllRecipient(Protocol):
 
     def update_request_fields(
         self, request_id: int, **fields: Any,
-    ) -> None: ...
+    ) -> bool: ...
 
     def update_track_artists(
         self, request_id: int, track_artists: list[str | None],

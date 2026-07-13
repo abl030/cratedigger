@@ -3474,6 +3474,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
 
     def test_tracks_round_trip_and_count(self):
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
         db.set_tracks(1, [
             {"track_number": 2, "title": "Second"},
             {"track_number": 1, "title": "First"},
@@ -3490,6 +3491,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         the upstream payload (e.g. discogs adapter passes per-track
         artists directly)."""
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
         db.set_tracks(1, [
             {"track_number": 1, "title": "T1", "track_artist": "Artist X"},
             {"track_number": 2, "title": "T2", "track_artist": None},
@@ -3505,6 +3507,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         order — so the resolver's per-track output, which sorts the
         same way, lines up."""
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
         db.set_tracks(1, [
             {"track_number": 2, "title": "Second", "disc_number": 1},
             {"track_number": 1, "title": "First", "disc_number": 1},
@@ -3521,6 +3524,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         """Fewer entries: trailing rows keep existing value. More
         entries: extras silently dropped. Same shape as real DB."""
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
         db.set_tracks(1, [
             {"track_number": 1, "title": "T1", "track_artist": "Pre"},
             {"track_number": 2, "title": "T2", "track_artist": "Pre"},
@@ -3541,6 +3545,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
 
     def test_update_track_artists_empty_input_is_noop(self):
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
         db.set_tracks(1, [
             {"track_number": 1, "title": "T1", "track_artist": "Pre"},
         ])

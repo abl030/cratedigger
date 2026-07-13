@@ -1577,7 +1577,7 @@ class TestApplyResolveAllResult(unittest.TestCase):
         class FailingDB:
             update_request_fields_calls: list[tuple[int, dict[str, Any]]] = []
 
-            def update_request_fields(self, request_id: int, **fields: Any) -> None:
+            def update_request_fields(self, request_id: int, **fields: Any) -> bool:
                 raise RuntimeError("db boom")
 
             def update_track_artists(
