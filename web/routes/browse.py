@@ -552,7 +552,10 @@ def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
 
     Resolves both source artist IDs from the supplied name (and optional
     explicit IDs to skip the lookup), fetches each source's discography,
-    and fuzzy-merges by title+year via lib.artist_compare.merge_discographies.
+    and conservatively pairs rows via lib.artist_compare.merge_discographies:
+    normalized title and appearance provenance must agree, known structural
+    Album/EP/Single evidence cannot conflict, and a one-year source-date
+    difference is accepted only when both sources positively overlap on type.
 
     Returns three buckets so the UI can show what each source uniquely
     contributes plus the matched-on-both core catalog.
@@ -572,7 +575,7 @@ def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
 
     # Skeleton key is the resolved (mbid, discogs_id) pair — display
     # names are stamped on outside the cache from the canonical APIs.
-    cache_key = f"artist:compare:v2:{mbid or 'none'}:{discogs_id or 'none'}"
+    cache_key = f"artist:compare:v3:{mbid or 'none'}:{discogs_id or 'none'}"
     skeleton = _cache.memoize_meta(
         cache_key,
         lambda: _build_compare_skeleton(mbid, discogs_id),
