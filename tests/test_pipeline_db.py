@@ -9,11 +9,13 @@ Tests create/drop tables in the target database — use a dedicated test DB.
 import json
 import os
 import sys
+import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 from unittest.mock import patch
 
 import msgspec
@@ -9106,6 +9108,78 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         )
         return [dict(row) for row in cur.fetchall()]
 
+    def _force_row_writer_overlap(
+        self,
+        row_id: int,
+        operations: tuple[Callable[[Any], Any], Callable[[Any], Any]],
+    ) -> list[Any]:
+        """Block two real production writers on the same PostgreSQL row.
+
+        The lock holder is released only after ``pg_stat_activity`` proves
+        both worker backends are waiting on a lock. This deterministically
+        gives both statements the same pre-update candidate rather than
+        hoping a scheduler race happens during a stress loop.
+        """
+        from lib.pipeline_db import PipelineDB
+
+        assert TEST_DSN is not None
+        locker = psycopg2.connect(TEST_DSN)
+        locker.autocommit = False
+        locker_cursor = locker.cursor()
+        locker_cursor.execute(
+            "SELECT id FROM slskd_transfer_ledger WHERE id = %s FOR UPDATE",
+            (row_id,),
+        )
+        started = (threading.Event(), threading.Event())
+        pids: list[int | None] = [None, None]
+
+        def run(index: int) -> Any:
+            db = PipelineDB(TEST_DSN)
+            try:
+                pid_row = db._execute(
+                    "SELECT pg_backend_pid() AS pid").fetchone()
+                pids[index] = int(pid_row["pid"])
+                started[index].set()
+                return operations[index](db)
+            finally:
+                db.close()
+
+        pool = ThreadPoolExecutor(max_workers=2)
+        futures = [pool.submit(run, index) for index in range(2)]
+        both_started = False
+        both_waiting = False
+        try:
+            both_started = all(event.wait(timeout=5) for event in started)
+            if both_started:
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    worker_pids = [pid for pid in pids if pid is not None]
+                    if len(worker_pids) == 2:
+                        rows = self.db._execute(
+                            "SELECT pid, wait_event_type FROM pg_stat_activity "
+                            "WHERE pid = ANY(%s)",
+                            (worker_pids,),
+                        ).fetchall()
+                        both_waiting = (
+                            len(rows) == 2
+                            and all(
+                                row["wait_event_type"] == "Lock" for row in rows)
+                        )
+                        if both_waiting:
+                            break
+                    time.sleep(0.01)
+        finally:
+            locker.commit()
+            locker_cursor.close()
+            locker.close()
+        try:
+            self.assertTrue(both_started, "both production writers must start")
+            self.assertTrue(
+                both_waiting, "both production writers must overlap on row lock")
+            return [future.result(timeout=5) for future in futures]
+        finally:
+            pool.shutdown(wait=True)
+
     def test_record_transfer_enqueue_round_trip_preserves_every_field(self):
         rid = self._seed_request()
         self.db.record_transfer_enqueue([
@@ -9320,6 +9394,90 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         self.assertEqual(len(stamped), 1)
         self.assertNotEqual(stamped[0]["id"], old_row["id"])
         self.assertEqual(stamped[0]["transfer_id"], "tid-newest")
+
+    def test_stamp_transfer_id_different_ids_are_compare_and_set(self):
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+        row_id = self._ledger_rows(rid)[0]["id"]
+
+        results = self._force_row_writer_overlap(row_id, (
+            lambda db: db.stamp_transfer_id("p0", "a.flac", "tid-a"),
+            lambda db: db.stamp_transfer_id("p0", "a.flac", "tid-b"),
+        ))
+
+        authorized = {
+            transfer_id
+            for transfer_id, result in zip(("tid-a", "tid-b"), results)
+            if result == 1
+        }
+        row = self._ledger_rows(rid)[0]
+        self.assertEqual(authorized, {row["transfer_id"]})
+        self.assertEqual(len(authorized), 1)
+
+    def test_stamp_transfer_id_vs_success_event_authorizes_durable_winner(self):
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+        row_id = self._ledger_rows(rid)[0]["id"]
+        completed_at = datetime.now(timezone.utc)
+
+        results = self._force_row_writer_overlap(row_id, (
+            lambda db: db.stamp_transfer_id(
+                "p0", "a.flac", "tid-enqueue"),
+            lambda db: db.stamp_transfer_completion(
+                "p0", "a.flac", "/downloads/a.flac", completed_at,
+                transfer_id="tid-event"),
+        ))
+
+        authorized = set()
+        if results[0] == 1:
+            authorized.add("tid-enqueue")
+        if results[1] == 1:
+            authorized.add("tid-event")
+        row = self._ledger_rows(rid)[0]
+        self.assertEqual(authorized, {row["transfer_id"]})
+        self.assertEqual(len(authorized), 1)
+        if row["transfer_id"] == "tid-event":
+            self.assertEqual(row["local_path"], "/downloads/a.flac")
+        else:
+            self.assertIsNone(row["local_path"])
+
+    def test_stamp_transfer_id_vs_failure_claim_authorizes_durable_winner(self):
+        rid = self._seed_request()
+        requested_at = datetime.now(timezone.utc)
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+        row = self._ledger_rows(rid)[0]
+        self.db._execute(
+            "UPDATE slskd_transfer_ledger SET enqueued_at = %s WHERE id = %s",
+            (requested_at - timedelta(minutes=1), row["id"]),
+        )
+        claim = TerminalFailureClaim(
+            transfer_id="tid-claim", username="p0", filename="a.flac",
+            requested_at=requested_at,
+        )
+
+        results = self._force_row_writer_overlap(row["id"], (
+            lambda db: db.stamp_transfer_id(
+                "p0", "a.flac", "tid-enqueue"),
+            lambda db: db.claim_terminal_failures([claim], requested_at),
+        ))
+
+        authorized = set()
+        if results[0] == 1:
+            authorized.add("tid-enqueue")
+        authorized.update(results[1])
+        persisted = self._ledger_rows(rid)[0]
+        self.assertEqual(authorized, {persisted["transfer_id"]})
+        self.assertEqual(len(authorized), 1)
+        self.assertEqual(
+            persisted["completed_at"] is not None,
+            persisted["transfer_id"] == "tid-claim",
+        )
 
     def test_stamp_transfer_completion_coalesces_transfer_id_when_missing(self):
         """T2 fallback: when T1.5's enqueue-response capture never ran

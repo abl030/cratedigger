@@ -113,8 +113,9 @@ class _TransferLedgerMixin(_PipelineDBBase):
         Returns 1 if a row was stamped, 0 if no ledgered row matched (an
         unledgered/foreign transfer, a replay, or every matching row already
         has a transfer ID) -- never raises for a miss. Migration 049's global
-        unique index is the concurrency backstop: an ID can authorize exactly
-        one ledger attempt even when writers race.
+        unique index is the equal-ID concurrency backstop. The outer UPDATE
+        reasserts that the chosen row is still open after any lock wait, so a
+        different-ID writer cannot be overwritten while both report success.
         """
         try:
             cur = self._execute(
@@ -130,6 +131,8 @@ class _TransferLedgerMixin(_PipelineDBBase):
                     ORDER BY enqueued_at DESC
                     LIMIT 1
                 )
+                  AND transfer_id IS NULL
+                  AND completed_at IS NULL
                   AND NOT EXISTS (
                       SELECT 1 FROM slskd_transfer_ledger
                       WHERE transfer_id = %s
@@ -157,7 +160,9 @@ class _TransferLedgerMixin(_PipelineDBBase):
         missed the ID entirely, the newest open exact-key row is used only
         when that ID is absent globally. Replays against an already path-
         stamped row are no-ops, and the unique transfer-ID boundary makes
-        concurrent/retried writes fail closed without raising.
+        concurrent/retried writes fail closed without raising. The outer
+        compare-and-set permits either the same exact ID or a still-null/open
+        fallback row; a different ID that wins the row lock is never replaced.
 
         Returns 1 if a row was stamped, 0 if no ledgered row matched
         (an unledgered/foreign transfer, or every matching row was
@@ -190,10 +195,14 @@ class _TransferLedgerMixin(_PipelineDBBase):
                     transfer_id = COALESCE(transfer_id, %s)
                 WHERE id = (SELECT id FROM target)
                   AND local_path IS NULL
+                  AND (
+                      transfer_id = %s
+                      OR (transfer_id IS NULL AND completed_at IS NULL)
+                  )
                 """,
                 (
                     transfer_id, username, filename, transfer_id,
-                    local_path, completed_at, transfer_id,
+                    local_path, completed_at, transfer_id, transfer_id,
                 ),
             )
         except psycopg2.errors.UniqueViolation:
@@ -285,7 +294,10 @@ class _TransferLedgerMixin(_PipelineDBBase):
         Each claim consumes at most one exact ``(username, filename)``
         ledger row written within five minutes before slskd's request.
         Claims run oldest-first so duplicate retry keys bind one-to-one in
-        lifecycle order.  Successes never call this method.
+        lifecycle order. The outer compare-and-set rechecks that a row remains
+        ID-less and open after its ``FOR UPDATE`` wait, so a competing T1.5 or
+        event writer cannot leave the returned authorization stale. Successes
+        never call this method.
         """
         confirmed: set[str] = set()
         ordered = sorted(
@@ -312,6 +324,8 @@ class _TransferLedgerMixin(_PipelineDBBase):
                         LIMIT 1
                         FOR UPDATE
                     )
+                      AND transfer_id IS NULL
+                      AND completed_at IS NULL
                       AND NOT EXISTS (
                           SELECT 1 FROM slskd_transfer_ledger
                           WHERE transfer_id = %s

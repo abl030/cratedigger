@@ -37,6 +37,7 @@ class FakeSlskdTransfers:
         self.enqueue_error: Exception | None = None
         self.get_all_downloads_error: Exception | None = None
         self.cancel_download_error: Exception | None = None
+        self.cancel_download_errors_by_id: dict[str, Exception] = {}
         self.cancel_download_result = True
 
     def enqueue(self, username: str, files: list[dict[str, Any]]) -> bool:
@@ -61,6 +62,8 @@ class FakeSlskdTransfers:
                         remove: bool = False) -> bool:
         self.cancel_download_calls.append(
             CancelDownloadCall(username, id, remove=remove))
+        if id in self.cancel_download_errors_by_id:
+            raise self.cancel_download_errors_by_id[id]
         if self.cancel_download_error is not None:
             raise self.cancel_download_error
         if not self.cancel_download_result:
@@ -511,5 +514,4 @@ class FakeSlskdAPI:
         row = {"directory": directory, "files": []}
         group["directories"].append(row)
         return row
-
 

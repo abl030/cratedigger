@@ -245,8 +245,11 @@ The terminal columns deliberately encode two different evidence strengths:
 If enqueue-response reconciliation missed `transfer_id`, a terminal failure may
 claim one exact peer/file row only from slskd's own `requestedAt` timestamp and
 only within the five-minute causal window before it. Local `enqueued_at` is not
-a substitute for missing slskd evidence. The unique index plus atomic writes
-make replayed and concurrent claims idempotent.
+a substitute for missing slskd evidence, and a date-only ISO value is not a
+lifecycle timestamp. T1.5, event fallback, and causal-claim writers reassert
+their expected row state in the outer UPDATE after lock waits; this prevents a
+different-ID winner from being overwritten while both writers claim success.
+The unique index remains the equal-ID backstop.
 
 ## Persisted search plans (migration 014)
 

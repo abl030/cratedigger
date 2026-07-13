@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -645,10 +646,12 @@ class CompletedPurgeSummary:
 
     ``reportable`` gates the cycle's INFO summary line. Newly stamped or
     unconfirmed failures, successes still waiting on their authoritative
-    event, and foreign terminal rows are operator-relevant even when no slskd
-    row was removed.
+    event, failed removals, and foreign terminal rows are operator-relevant
+    even when no slskd row was removed. ``failure_stamped`` is an overlapping
+    action metric; it is deliberately excluded from terminal-row conservation.
     """
     removed: int = 0
+    removal_failed: int = 0
     failure_stamped: int = 0
     failure_unconfirmed: int = 0
     success_waiting: int = 0
@@ -659,6 +662,7 @@ class CompletedPurgeSummary:
     def reportable(self) -> bool:
         return bool(
             self.removed
+            or self.removal_failed
             or self.failure_stamped
             or self.failure_unconfirmed
             or self.success_waiting
@@ -666,9 +670,20 @@ class CompletedPurgeSummary:
         )
 
 
+_SLSKD_LIFECYCLE_TIMESTAMP = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}"
+    r"(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?$"
+)
+
+
 def _terminal_claim_timestamp(value: str | None) -> datetime | None:
-    """Parse slskd's causal request/enqueue time, failing closed."""
-    if not value:
+    """Parse a real slskd lifecycle datetime, failing closed.
+
+    A date alone is valid to ``datetime.fromisoformat`` but is not lifecycle
+    evidence. The explicit shape check retains slskd's aware and naive forms
+    while requiring an actual time component.
+    """
+    if not value or _SLSKD_LIFECYCLE_TIMESTAMP.fullmatch(value) is None:
         return None
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -774,18 +789,28 @@ def purge_completed_transfers(ctx: CratediggerContext) -> CompletedPurgeSummary:
         for transfer_id in confirmed_claims
     )
     removed = 0
+    removal_failed = 0
     for item in removable:
         try:
-            ctx.slskd.transfers.cancel_download(
+            removed_ok = ctx.slskd.transfers.cancel_download(
                 item.username, item.transfer_id, remove=True)
-            removed += 1
+            if removed_ok:
+                removed += 1
+            else:
+                removal_failed += 1
+                logger.error(
+                    "COMPLETED-PURGE: slskd rejected completed transfer "
+                    f"removal user={item.username!r} file={item.filename!r} "
+                    f"id={item.transfer_id} — will retry next cycle")
         except Exception:
+            removal_failed += 1
             logger.exception(
                 "COMPLETED-PURGE: failed to remove completed transfer "
                 f"user={item.username!r} file={item.filename!r} "
                 f"id={item.transfer_id} — will retry next cycle")
     summary = CompletedPurgeSummary(
         removed=removed,
+        removal_failed=removal_failed,
         failure_stamped=len(newly_confirmed),
         failure_unconfirmed=(
             len(exact_failure_ids) - len(confirmed_exact)
@@ -799,10 +824,10 @@ def purge_completed_transfers(ctx: CratediggerContext) -> CompletedPurgeSummary:
     )
     if summary.reportable:
         logger.info(
-            "COMPLETED-PURGE: removed=%d failure_stamped=%d "
+            "COMPLETED-PURGE: removed=%d removal_failed=%d failure_stamped=%d "
             "failure_unconfirmed=%d success_waiting=%d foreign=%d "
             "nonterminal=%d",
-            summary.removed, summary.failure_stamped,
+            summary.removed, summary.removal_failed, summary.failure_stamped,
             summary.failure_unconfirmed, summary.success_waiting,
             summary.foreign_count, summary.nonterminal_count)
     return summary

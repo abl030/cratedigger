@@ -6279,11 +6279,68 @@ class TestPurgeCompletedTransfers(unittest.TestCase):
         self.assertEqual(summary.removed, 0)
         self.assertEqual(
             summary.removed
+            + summary.removal_failed
             + summary.success_waiting
             + summary.failure_unconfirmed
             + summary.foreign_count,
             2,
         )
+
+    def test_terminal_accounting_conservation_table(self):
+        """Every terminal record lands in exactly one lifecycle category."""
+        from lib.slskd_transfers import purge_completed_transfers
+
+        cases = (
+            ("removed", "Completed, Succeeded", "t-removed", True, False),
+            ("removal_failed", "Completed, Succeeded", "t-failed", True, True),
+            ("success_waiting", "Completed, Succeeded", "t-wait", False, False),
+            ("failure_unconfirmed", "Completed, Errored", "", False, False),
+            ("foreign_count", "Completed, Succeeded", None, False, False),
+        )
+        for expected_field, state, ledger_id, completed, removal_fails in cases:
+            with self.subTest(category=expected_field):
+                transfer_id = ledger_id or f"foreign-{expected_field}"
+                filename = f"Music\\{expected_field}\\track.flac"
+                slskd = FakeSlskdAPI()
+                slskd.add_transfer(
+                    username="peer", directory=f"Music\\{expected_field}",
+                    filename=filename, id=transfer_id, state=state,
+                )
+                ledger_rows = []
+                if ledger_id is not None:
+                    ledger_rows.append(
+                        ("peer", filename, ledger_id, completed))
+                if removal_fails:
+                    slskd.transfers.cancel_download_errors_by_id[transfer_id] = (
+                        RuntimeError("remove failed"))
+                summary = purge_completed_transfers(
+                    self._make_ctx(slskd, ledger_rows=ledger_rows))
+
+                self.assertEqual(getattr(summary, expected_field), 1)
+                self.assertEqual(
+                    summary.removed
+                    + summary.removal_failed
+                    + summary.success_waiting
+                    + summary.failure_unconfirmed
+                    + summary.foreign_count,
+                    1,
+                )
+
+    def test_terminal_claim_timestamp_requires_real_datetime_shape(self):
+        from lib.slskd_transfers import _terminal_claim_timestamp
+
+        expected_aware = datetime(2026, 7, 13, 1, 5, tzinfo=timezone.utc)
+        cases = (
+            (None, None),
+            ("", None),
+            ("not-a-time", None),
+            ("2026-07-13", None),
+            ("2026-07-13T01:05:00Z", expected_aware),
+            ("2026-07-13T01:05:00", expected_aware),
+        )
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(_terminal_claim_timestamp(value), expected)
 
     def test_foreign_record_is_never_removed(self):
         """P1: zero ledger knowledge of this transfer id -- never
@@ -6342,6 +6399,13 @@ class TestPurgeCompletedTransfers(unittest.TestCase):
         summary = purge_completed_transfers(ctx)
 
         self.assertEqual(summary.removed, 0)
+        self.assertEqual(summary.removal_failed, 2)
+        self.assertEqual(
+            summary.removed + summary.removal_failed
+            + summary.success_waiting + summary.failure_unconfirmed
+            + summary.foreign_count,
+            2,
+        )
         # Both stamped-owned records were still attempted despite the
         # first failure.
         self.assertEqual(len(slskd.transfers.cancel_download_calls), 2)

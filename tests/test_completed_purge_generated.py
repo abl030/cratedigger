@@ -23,6 +23,7 @@ import sys
 import unittest
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -34,7 +35,7 @@ from hypothesis import strategies as st
 from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.pipeline_db import TerminalFailureClaim, TransferLedgerRow
-from lib.slskd_transfers import purge_completed_transfers
+from lib.slskd_transfers import _terminal_claim_timestamp, purge_completed_transfers
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 
 _LIVE_STATES = ("InProgress", "Queued, Remotely", "Queued, Locally", "")
@@ -261,13 +262,17 @@ def assert_terminal_summary_is_disjoint(
     worlds: tuple[CompletedTransferWorld, ...],
     *,
     removed: int,
+    removal_failed: int,
     success_waiting: int,
     failure_unconfirmed: int,
     foreign: int,
 ) -> None:
     terminal_count = sum(
         world.state.startswith("Completed,") for world in worlds)
-    accounted = removed + success_waiting + failure_unconfirmed + foreign
+    accounted = (
+        removed + removal_failed + success_waiting
+        + failure_unconfirmed + foreign
+    )
     if accounted != terminal_count:
         raise AssertionError(
             f"terminal accounting overlaps or omits rows: "
@@ -281,6 +286,12 @@ def assert_transfer_id_claim_is_globally_unique(
     if ledger_transfer_ids.count(transfer_id) > 1:
         raise AssertionError(
             f"transfer ID {transfer_id!r} was claimed by multiple rows")
+
+
+def assert_date_only_timestamp_rejected(parser, value: str) -> None:
+    if parser(value) is not None:
+        raise AssertionError(
+            f"date-only value {value!r} was accepted as lifecycle evidence")
 
 
 class TestGeneratedPurgeCompletedTransfers(unittest.TestCase):
@@ -316,10 +327,41 @@ class TestGeneratedPurgeCompletedTransfers(unittest.TestCase):
         assert_terminal_summary_is_disjoint(
             worlds,
             removed=summary.removed,
+            removal_failed=summary.removal_failed,
             success_waiting=summary.success_waiting,
             failure_unconfirmed=summary.failure_unconfirmed,
             foreign=summary.foreign_count,
         )
+
+    @given(
+        worlds=completed_transfer_worlds(),
+        removal_fails=st.booleans(),
+    )
+    def test_terminal_summary_conserves_rows_when_removal_raises(
+        self, worlds, removal_fails,
+    ):
+        db, slskd = _build_world_fakes(worlds)
+        if removal_fails:
+            slskd.transfers.cancel_download_error = RuntimeError("remove failed")
+
+        if removal_fails:
+            with patch("lib.slskd_transfers.logger"):
+                summary = purge_completed_transfers(_ctx(db, slskd))
+        else:
+            summary = purge_completed_transfers(_ctx(db, slskd))
+
+        assert_terminal_summary_is_disjoint(
+            worlds,
+            removed=summary.removed,
+            removal_failed=summary.removal_failed,
+            success_waiting=summary.success_waiting,
+            failure_unconfirmed=summary.failure_unconfirmed,
+            foreign=summary.foreign_count,
+        )
+
+    @given(value=st.dates().map(lambda value: value.isoformat()))
+    def test_date_only_requested_at_always_fails_closed(self, value):
+        assert_date_only_timestamp_rejected(_terminal_claim_timestamp, value)
 
     @given(worlds=completed_transfer_worlds())
     def test_purge_is_idempotent_second_pass_removes_nothing_new(
@@ -608,10 +650,29 @@ class TestPurgeCheckersTripOnViolations(unittest.TestCase):
             assert_terminal_summary_is_disjoint(
                 worlds,
                 removed=0,
+                removal_failed=0,
                 success_waiting=0,
                 failure_unconfirmed=1,
                 foreign=1,
             )
+
+    def test_terminal_accounting_checker_trips_when_failure_is_omitted(self):
+        worlds = (CompletedTransferWorld(
+            key=0, state="Completed, Succeeded", ownership="stamped"),)
+        with self.assertRaises(AssertionError):
+            assert_terminal_summary_is_disjoint(
+                worlds,
+                removed=0,
+                removal_failed=0,
+                success_waiting=0,
+                failure_unconfirmed=0,
+                foreign=0,
+            )
+
+    def test_timestamp_shape_checker_trips_on_old_date_acceptance(self):
+        old_parser = lambda value: datetime.fromisoformat(value)
+        with self.assertRaises(AssertionError):
+            assert_date_only_timestamp_rejected(old_parser, "2026-07-13")
 
     def test_global_transfer_id_checker_trips_on_duplicate_claim(self):
         with self.assertRaises(AssertionError):
