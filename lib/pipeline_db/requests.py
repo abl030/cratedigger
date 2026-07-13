@@ -16,6 +16,7 @@ from lib.pipeline_db._shared import (
     BACKOFF_BASE_MINUTES,
     BACKOFF_MAX_MINUTES,
     MbidCollisionError,
+    REQUEST_METADATA_RESERVED_FIELDS,
     RequestSpectralStateUpdate,
     SupersedeRaceError,
     _escape_like_pattern,
@@ -290,15 +291,20 @@ class _RequestsMixin(_PipelineDBBase):
                         "between Phase 0 read and Phase 3 lock"
                     )
                 old_source = old_row["source"]
+                old_status = str(old_row["status"])
+                if old_status == "replaced":
+                    raise SupersedeRaceError(
+                        f"old request {old_request_id} was already replaced"
+                    )
 
                 # 2. Flip old row's status; clear imported_path (R14).
                 cur.execute(
                     "UPDATE album_requests "
                     "SET status = 'replaced', imported_path = NULL, "
                     "    updated_at = %s "
-                    "WHERE id = %s AND status != 'replaced' "
+                    "WHERE id = %s AND status = %s "
                     "RETURNING id",
-                    (now, old_request_id),
+                    (now, old_request_id, old_status),
                 )
                 if cur.fetchone() is None:
                     raise SupersedeRaceError(
@@ -384,12 +390,13 @@ class _RequestsMixin(_PipelineDBBase):
         request_id: int,
         **extra: Any,
     ) -> bool:
-        """Compare-and-set metadata without mutating a replaced request.
+        """Compare-and-set metadata without mutating lifecycle or identity.
 
         ``expected_status`` lets read-then-write adapters reject a concurrent
         lifecycle change instead of reporting a metadata update that matched
         no row. Callers that do not hold a source snapshot still receive the
-        terminal ``replaced`` guard.
+        terminal ``replaced`` guard. Lifecycle, immutable identity, and
+        dedicated audit fields are reserved for their typed writer seams.
         """
         expected_status_raw = extra.pop("expected_status", None)
         if (
@@ -398,6 +405,12 @@ class _RequestsMixin(_PipelineDBBase):
         ):
             raise TypeError("expected_status must be a string or None")
         expected_status = expected_status_raw
+        reserved = sorted(set(extra) & REQUEST_METADATA_RESERVED_FIELDS)
+        if reserved:
+            raise ValueError(
+                "update_request_fields cannot mutate reserved lifecycle/"
+                "identity fields: " + ", ".join(reserved)
+            )
         if not extra:
             # A control-only/empty update still has a meaningful CAS result.
             # Returning True without consulting the row lets a dependent

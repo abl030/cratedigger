@@ -789,6 +789,7 @@ class TestUnfindableDetectionService(unittest.TestCase):
             self.db,
             last_artist_probe_at=now - timedelta(days=14),
             last_artist_probe_match_count=0,
+            unfindable_category=CATEGORY_ARTIST_ABSENT,
         )
 
         # Probe stub mutates the row in the slskd window — simulates
@@ -804,15 +805,10 @@ class TestUnfindableDetectionService(unittest.TestCase):
             ) -> ArtistProbeResult:
                 # Mid-probe rescue: status flips to imported,
                 # unfindable_category cleared, rescue stamp written.
-                self.db.update_request_fields(
+                self.db.mark_imported_with_rescue(
                     self.request_id,
-                    status="imported",
-                    unfindable_category=None,
-                    rescued_at=datetime.now(timezone.utc),
+                    expected_status="wanted",
                 )
-                # Drop the recorder write so it doesn't pollute the
-                # service's own assertion targets.
-                self.db.update_request_fields_calls.pop()
                 return ArtistProbeResult(
                     match_count=0, artist_observed=False,
                 )

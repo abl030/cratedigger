@@ -65,6 +65,7 @@ from lib.pipeline_db import (
     ReplacedRequestMutationError,
     SearchPlanItemInput,
 )
+from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS
 from lib.search_plan_service import (
     RESULT_REQUEST_REPLACED,
     SearchPlanService,
@@ -250,6 +251,33 @@ class TestReadOnlyMetadataCasGenerated(unittest.TestCase):
             before=before,
             after=copy.deepcopy(db.get_request(request_id)),
         )
+
+    @given(
+        field=st.sampled_from(sorted(REQUEST_METADATA_RESERVED_FIELDS)),
+        value=st.one_of(st.none(), st.integers(), st.text(max_size=24)),
+    )
+    @example(field="status", value="replaced")
+    @example(field="status", value="manual")
+    @example(field="mb_release_id", value="different-pressing")
+    def test_reserved_lifecycle_and_identity_fields_cannot_be_smuggled(
+        self,
+        *,
+        field: str,
+        value: object,
+    ) -> None:
+        db = FakePipelineDB()
+        request_id = db.add_request(
+            "Artist",
+            "Album",
+            "request",
+            mb_release_id="immutable-release",
+        )
+        before = copy.deepcopy(db.get_request(request_id))
+
+        with self.assertRaises(ValueError):
+            db.update_request_fields(request_id, **{field: value})
+
+        self.assertEqual(db.get_request(request_id), before)
 
 
 class TestResolverSourceStatusGenerated(unittest.TestCase):

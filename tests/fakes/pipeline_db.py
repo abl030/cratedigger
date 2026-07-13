@@ -65,6 +65,7 @@ from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
                              TransferIdOwnership,
                              TransferLedgerRow,
                              WantedReconciliationCandidate)
+from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS
 from lib.quality import (
     AlbumQualityEvidence,
 )
@@ -2313,6 +2314,12 @@ class FakePipelineDB:
         ):
             raise TypeError("expected_status must be a string or None")
         expected_status = expected_status_raw
+        reserved = sorted(set(fields) & REQUEST_METADATA_RESERVED_FIELDS)
+        if reserved:
+            raise ValueError(
+                "update_request_fields cannot mutate reserved lifecycle/"
+                "identity fields: " + ", ".join(reserved)
+            )
         self.update_request_fields_calls.append((request_id, dict(fields)))
         row = self._requests.get(request_id)
         if (

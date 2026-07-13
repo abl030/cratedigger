@@ -10446,7 +10446,10 @@ class TestPlanWrapClassificationSlice(unittest.TestCase):
             rejection_reason="strict_count_mismatch",
         ))
         # Importer drops in mid-cycle and flips status.
-        db.update_request_fields(rid, status="imported")
+        self.assertTrue(db.mark_imported_with_rescue(
+            rid,
+            expected_status="wanted",
+        ))
         result = db.record_consumed_search_attempt(self._build_attempt(
             db, rid, plan_id, 1, outcome="no_match",
             rejection_reason="avg_ratio_low",

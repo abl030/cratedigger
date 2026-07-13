@@ -480,11 +480,17 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
         self._seed(None)
 
         def replace_then_resolve(*_args, **_kwargs):
-            self.assertTrue(self.db.update_request_fields(
+            self.db.supersede_request_mbid(
                 42,
-                status="replaced",
-                expected_status="wanted",
-            ))
+                new_mb_release_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                new_mb_release_group_id="ssssssss-ssss-ssss-ssss-ssssssssssss",
+                new_mb_artist_id=None,
+                new_artist_name="Replacement Artist",
+                new_album_title="Replacement Album",
+                new_year=None,
+                new_country=None,
+                new_tracks=[],
+            )
             return {"release_group_id": "rrrr-rrrr-rrrr"}
 
         with patch("web.mb.get_release", side_effect=replace_then_resolve):

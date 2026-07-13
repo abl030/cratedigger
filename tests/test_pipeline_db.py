@@ -36,6 +36,7 @@ from lib.pipeline_db import (  # noqa: E402
     TerminalFailureClaim,
     TransferLedgerRow,
 )
+from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS  # noqa: E402
 
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
@@ -1716,6 +1717,30 @@ class TestTrackManagement(unittest.TestCase):
 
         self.assertEqual(self.db.get_request(self.req_id), active_before)
         self.assertEqual(self.db.get_request(replaced_id), replaced_before)
+
+    def test_metadata_update_rejects_every_reserved_field(self):
+        before = self.db.get_request(self.req_id)
+        assert before is not None
+
+        for field in sorted(REQUEST_METADATA_RESERVED_FIELDS):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "reserved lifecycle/identity fields",
+                ):
+                    self.db.update_request_fields(
+                        self.req_id,
+                        **{
+                            field: (
+                                "replaced" if field == "status" else "smuggled"
+                            ),
+                        },
+                    )
+                self.assertEqual(self.db.get_request(self.req_id), before)
+
+        with self.assertRaises(ValueError):
+            self.db.update_request_fields(self.req_id, status="manual")
+        self.assertEqual(self.db.get_request(self.req_id), before)
 
     def test_set_get_tracks_roundtrip(self):
         tracks = [

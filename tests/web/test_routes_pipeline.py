@@ -484,8 +484,13 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
 
     def test_pipeline_detail_surfaces_manual_reason(self):
         """manual_reason='search_exhausted' is exposed on the detail response."""
-        self.db.update_request_fields(
-            100, status="manual", manual_reason="search_exhausted")
+        row = self.db.get_request(100)
+        assert row is not None
+        self.db.seed_request({
+            **row,
+            "status": "manual",
+            "manual_reason": "search_exhausted",
+        })
         status, data = self._get("/api/pipeline/100")
 
         self.assertEqual(status, 200)

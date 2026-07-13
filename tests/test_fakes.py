@@ -20,6 +20,7 @@ from lib.pipeline_db import (
     TerminalFailureClaim,
     TransferLedgerRow,
 )
+from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS
 from lib.quality import SpectralMeasurement, ValidationResult
 from tests.fakes import (
     FakeBeetsDB,
@@ -488,6 +489,26 @@ class TestFakePipelineDB(unittest.TestCase):
 
         self.assertEqual(db.request(41), active_before)
         self.assertEqual(db.request(42), replaced_before)
+
+    def test_metadata_update_rejects_every_reserved_field(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=41, status="wanted"))
+        before = copy.deepcopy(db.request(41))
+
+        for field in sorted(REQUEST_METADATA_RESERVED_FIELDS):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "reserved lifecycle/identity fields",
+                ):
+                    db.update_request_fields(41, **{
+                        field: "replaced" if field == "status" else "smuggled",
+                    })
+                self.assertEqual(db.request(41), before)
+
+        with self.assertRaises(ValueError):
+            db.update_request_fields(41, status="manual")
+        self.assertEqual(db.request(41), before)
 
     def test_empty_spectral_adapter_cannot_report_missing_or_replaced_success(self):
         db = FakePipelineDB()
@@ -5898,24 +5919,6 @@ class TestFakeRequestUniqueMbReleaseId(unittest.TestCase):
         db.seed_request(make_request_row(id=7, mb_release_id="mbid-seeded"))
         with self.assertRaises(psycopg2.errors.UniqueViolation):
             db.add_request("A", "B", "request", mb_release_id="mbid-seeded")
-
-    def test_update_request_fields_rejects_duplicate_mb_release_id(self):
-        # Production's UPDATE hits the same UNIQUE as the INSERT.
-        import psycopg2.errors
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=1, mb_release_id="mbid-1"))
-        db.seed_request(make_request_row(id=2, mb_release_id="mbid-2"))
-        with self.assertRaises(psycopg2.errors.UniqueViolation):
-            db.update_request_fields(2, mb_release_id="mbid-1")
-        self.assertEqual(db.request(2)["mb_release_id"], "mbid-2")
-
-    def test_update_request_fields_setting_own_mbid_is_a_noop(self):
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=1, mb_release_id="mbid-1"))
-        db.update_request_fields(1, mb_release_id="mbid-1", status="manual")
-        self.assertEqual(db.request(1)["status"], "manual")
-
 
 class TestFakeDownloadLogIdMint(unittest.TestCase):
     """Minted download_log ids mirror production's sequence-backed PK.

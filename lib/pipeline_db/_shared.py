@@ -44,6 +44,26 @@ DASHBOARD_WANTED_TREND_WINDOWS: tuple[tuple[str, int], ...] = (
 # backlog, just in the acquisition sub-state.
 DASHBOARD_WANTED_BACKLOG_STATUSES: tuple[str, ...] = ("wanted", "downloading")
 
+# ``update_request_fields`` is deliberately a metadata-only compare-and-set
+# seam.  These columns either define the request's immutable identity, belong
+# to the typed lifecycle state machine, or are owned by a dedicated audit
+# writer.  Keeping the vocabulary here gives the production and in-memory DBs
+# one contract: callers cannot smuggle a status transition (including creation
+# of a frozen ``replaced`` row) through ``**extra``.
+REQUEST_METADATA_RESERVED_FIELDS: frozenset[str] = frozenset({
+    "id",
+    "status",
+    "active_download_state",
+    "mb_release_id",
+    "discogs_release_id",
+    "source",
+    "replaces_request_id",
+    "created_at",
+    "updated_at",
+    "rescued_at",
+    "prior_unfindable_category",
+})
+
 
 class ReplacedRequestMutationError(RuntimeError):
     """Raised when a writer targets a frozen ``replaced`` request row."""
