@@ -8,7 +8,7 @@ tests/web/_harness.py.
 import os
 import sys
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import msgspec
 
@@ -147,25 +147,15 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
 
     def _configure_beets_delete_mock(
         self,
-        beets_cls: MagicMock,
+        _beets_cls,
         *,
         delete_side_effect: object | None = None,
     ) -> None:
-        """The class patch swaps the BeetsDB constructor for a seeded
-        FakeBeetsDB; ``delete_album`` stays a MagicMock attr — it is the
-        allowlisted SQLite-write + file-delete leaf seam, not a query
-        collaborator."""
-        fake = FakeBeetsDB()
-        fake.set_album_detail(7, {"id": 7})
-        beets_cls.return_value = fake
-        if delete_side_effect is not None:
-            beets_cls.delete_album.side_effect = delete_side_effect
-            return
-        beets_cls.delete_album.return_value = (
-            "Test Album",
-            "Test Artist",
-            ["/music/Test Artist/Test Album/01 Track.mp3"],
-        )
+        detail = self._album()
+        detail["tracks"] = [self._track()]
+        self.beets_db.set_album_detail(7, detail)
+        if isinstance(delete_side_effect, Exception):
+            self.beets_db.set_delete_album_error(delete_side_effect)
 
     def test_beets_album_detail_contract(self):
         detail = self._album()
@@ -267,9 +257,9 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["formats"], "")
         self.assertIsNone(data["tracks"][0]["format"])
 
-    @patch("lib.library_delete_service.os.path.isdir", return_value=False)
-    @patch("lib.library_delete_service.os.path.isfile", return_value=False)
-    @patch("lib.library_delete_service.os.path.exists", return_value=True)
+    @patch("lib.destructive_release_service.os.path.isdir", return_value=False)
+    @patch("lib.destructive_release_service.os.path.isfile", return_value=False)
+    @patch("lib.destructive_release_service.os.path.exists", return_value=True)
     @patch("lib.beets_db.BeetsDB")
     def test_beets_delete_contract(
         self,
@@ -287,9 +277,19 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         _assert_required_fields(self, data, self.DELETE_REQUIRED_FIELDS,
                                 "beets delete response")
 
-    @patch("lib.library_delete_service.os.path.isdir", return_value=False)
-    @patch("lib.library_delete_service.os.path.isfile", return_value=False)
-    @patch("lib.library_delete_service.os.path.exists", return_value=True)
+    def test_beets_delete_rejects_wrong_confirmation_before_mutation(self):
+        status, data = self._post(
+            "/api/beets/delete",
+            {"id": 7, "confirm": "BAN"},
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("confirm", data["error"])
+        self.assertEqual(self.beets_db.delete_album_calls, [])
+
+    @patch("lib.destructive_release_service.os.path.isdir", return_value=False)
+    @patch("lib.destructive_release_service.os.path.isfile", return_value=False)
+    @patch("lib.destructive_release_service.os.path.exists", return_value=True)
     @patch("lib.beets_db.BeetsDB")
     def test_beets_delete_purges_explicit_pipeline_request(
         self,
@@ -317,9 +317,41 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["pipeline_id"], 42)
         self.assertIsNone(self.db.get_request(42))
 
-    @patch("lib.library_delete_service.os.path.isdir", return_value=False)
-    @patch("lib.library_delete_service.os.path.isfile", return_value=False)
-    @patch("lib.library_delete_service.os.path.exists", return_value=True)
+    @patch("lib.destructive_release_service.os.path.isdir", return_value=False)
+    @patch("lib.destructive_release_service.os.path.isfile", return_value=False)
+    @patch("lib.destructive_release_service.os.path.exists", return_value=True)
+    @patch("lib.beets_db.BeetsDB")
+    def test_beets_delete_rejects_mismatched_pipeline_confirmation(
+        self,
+        beets_cls,
+        _mock_exists,
+        _mock_isfile,
+        _mock_isdir,
+    ):
+        self.db.seed_request(make_request_row(
+            id=99,
+            status="imported",
+            mb_release_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        ))
+        self._configure_beets_delete_mock(beets_cls)
+
+        status, data = self._post("/api/beets/delete", {
+            "id": 7,
+            "confirm": "DELETE",
+            "purge_pipeline": True,
+            "pipeline_id": 99,
+            "release_id": self.RELEASE_ID,
+        })
+
+        self.assertEqual(status, 422)
+        self.assertEqual(data["error"], "release_mismatch")
+        self.assertIsNotNone(self.db.get_request(42))
+        self.assertIsNotNone(self.db.get_request(99))
+        self.assertEqual(self.beets_db.delete_album_calls, [])
+
+    @patch("lib.destructive_release_service.os.path.isdir", return_value=False)
+    @patch("lib.destructive_release_service.os.path.isfile", return_value=False)
+    @patch("lib.destructive_release_service.os.path.exists", return_value=True)
     @patch("lib.beets_db.BeetsDB")
     def test_beets_delete_purges_pipeline_request_by_release_id_fallback(
         self,
@@ -349,9 +381,9 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["pipeline_id"], 99)
         self.assertIsNone(self.db.get_request(99))
 
-    @patch("lib.library_delete_service.os.path.isdir", return_value=False)
-    @patch("lib.library_delete_service.os.path.isfile", return_value=False)
-    @patch("lib.library_delete_service.os.path.exists", return_value=True)
+    @patch("lib.destructive_release_service.os.path.isdir", return_value=False)
+    @patch("lib.destructive_release_service.os.path.isfile", return_value=False)
+    @patch("lib.destructive_release_service.os.path.exists", return_value=True)
     @patch("lib.beets_db.BeetsDB")
     def test_beets_delete_purges_pipeline_request_by_uppercase_release_id(
         self,
@@ -381,9 +413,9 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["pipeline_id"], 98)
         self.assertIsNone(self.db.get_request(98))
 
-    @patch("lib.library_delete_service.os.path.isdir", return_value=False)
-    @patch("lib.library_delete_service.os.path.isfile", return_value=False)
-    @patch("lib.library_delete_service.os.path.exists", return_value=True)
+    @patch("lib.destructive_release_service.os.path.isdir", return_value=False)
+    @patch("lib.destructive_release_service.os.path.isfile", return_value=False)
+    @patch("lib.destructive_release_service.os.path.exists", return_value=True)
     @patch("lib.beets_db.BeetsDB")
     def test_beets_delete_without_purge_pipeline_leaves_request_intact(
         self,
@@ -408,11 +440,11 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         self.assertIsNone(data["pipeline_id"])
         self.assertIsNotNone(self.db.get_request(42))
 
-    @patch("lib.library_delete_service.os.path.isdir", return_value=False)
-    @patch("lib.library_delete_service.os.path.isfile", return_value=False)
-    @patch("lib.library_delete_service.os.path.exists", return_value=True)
+    @patch("lib.destructive_release_service.os.path.isdir", return_value=False)
+    @patch("lib.destructive_release_service.os.path.isfile", return_value=False)
+    @patch("lib.destructive_release_service.os.path.exists", return_value=True)
     @patch("lib.beets_db.BeetsDB")
-    def test_beets_delete_purge_with_no_pipeline_context_is_noop(
+    def test_beets_delete_derives_pipeline_context_from_beets_identity(
         self,
         beets_cls,
         _mock_exists,
@@ -429,15 +461,13 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         })
 
         self.assertEqual(status, 200)
-        self.assertFalse(data["pipeline_deleted"])
-        self.assertIsNone(data["pipeline_id"])
-        # The setUp-seeded request is untouched — no pipeline context
-        # in the body means no purge, even with purge_pipeline=True.
-        self.assertIsNotNone(self.db.get_request(42))
+        self.assertTrue(data["pipeline_deleted"])
+        self.assertEqual(data["pipeline_id"], 42)
+        self.assertIsNone(self.db.get_request(42))
 
-    @patch("lib.library_delete_service.os.path.isdir", return_value=False)
-    @patch("lib.library_delete_service.os.path.isfile", return_value=False)
-    @patch("lib.library_delete_service.os.path.exists", return_value=True)
+    @patch("lib.destructive_release_service.os.path.isdir", return_value=False)
+    @patch("lib.destructive_release_service.os.path.isfile", return_value=False)
+    @patch("lib.destructive_release_service.os.path.exists", return_value=True)
     @patch("lib.beets_db.BeetsDB")
     def test_beets_delete_purges_discogs_request_by_numeric_release_id_fallback(
         self,
@@ -454,6 +484,12 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
             status="imported",
         ))
         self._configure_beets_delete_mock(beets_cls)
+        detail = self._album()
+        detail["mb_albumid"] = "12856590"
+        detail["discogs_albumid"] = "12856590"
+        detail["source"] = "discogs"
+        detail["tracks"] = [self._track()]
+        self.beets_db.set_album_detail(7, detail)
 
         status, data = self._post("/api/beets/delete", {
             "id": 7,
@@ -467,9 +503,9 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["pipeline_id"], 77)
         self.assertIsNone(self.db.get_request(77))
 
-    @patch("lib.library_delete_service.os.path.isdir", return_value=False)
-    @patch("lib.library_delete_service.os.path.isfile", return_value=False)
-    @patch("lib.library_delete_service.os.path.exists", return_value=True)
+    @patch("lib.destructive_release_service.os.path.isdir", return_value=False)
+    @patch("lib.destructive_release_service.os.path.isfile", return_value=False)
+    @patch("lib.destructive_release_service.os.path.exists", return_value=True)
     @patch("lib.beets_db.BeetsDB")
     def test_beets_delete_pipeline_failure_aborts_before_beets_delete(
         self,
@@ -496,11 +532,11 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
 
         self.assertEqual(status, 500)
         self.assertIn("error", data)
-        beets_cls.delete_album.assert_not_called()
+        self.assertEqual(self.beets_db.delete_album_calls, [])
 
-    @patch("lib.library_delete_service.os.path.isdir", return_value=False)
-    @patch("lib.library_delete_service.os.path.isfile", return_value=False)
-    @patch("lib.library_delete_service.os.path.exists", return_value=True)
+    @patch("lib.destructive_release_service.os.path.isdir", return_value=False)
+    @patch("lib.destructive_release_service.os.path.isfile", return_value=False)
+    @patch("lib.destructive_release_service.os.path.exists", return_value=True)
     @patch("lib.beets_db.BeetsDB")
     def test_beets_delete_failure_after_pipeline_purge_returns_targeted_error(
         self,

@@ -148,6 +148,7 @@ class BeetsDB:
         """
         if not os.path.exists(db_path):
             raise FileNotFoundError(f"Beets DB not found: {db_path}")
+        self._db_path = db_path
         self._conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         self._library_root = library_root
 
@@ -603,10 +604,16 @@ class BeetsDB:
         } for i in items]
         album_path = os.path.dirname(tracks[0]["path"]) if tracks and tracks[0]["path"] else None
         identity = ReleaseIdentity.from_fields(album[4], album[10])
+        mb_release_id = normalize_release_id(album[4]) or None
+        discogs_release_id = normalize_release_id(album[10]) or None
         return {
             "id": album[0], "album": album[1], "artist": album[2],
             "year": album[3],
-            "mb_albumid": identity.release_id if identity else None,
+            # Preserve both server-owned columns, including malformed
+            # nonempty values. Collapsing or dropping either field hides an
+            # authority ambiguity from destructive callers.
+            "mb_albumid": mb_release_id,
+            "discogs_albumid": discogs_release_id,
             "type": album[5],
             "label": album[6], "country": album[7],
             "artpath": self._resolve_path(album[8]) if album[8] else None,
@@ -688,14 +695,13 @@ class BeetsDB:
         """
         return self._batch_lookup_album_ids(mbids)
 
-    @staticmethod
-    def delete_album(db_path: str, album_id: int) -> tuple[str, str, list[str]]:
+    def delete_album(self, album_id: int) -> tuple[str, str, list[str]]:
         """Delete an album from beets DB (read-write). Returns (album, artist, file_paths).
 
         Opens a separate writable connection — does not use the read-only instance conn.
         Raises ValueError if album not found.
         """
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(self._db_path)
         try:
             album_row = conn.execute(
                 "SELECT album, albumartist FROM albums WHERE id = ?", (album_id,)
@@ -705,10 +711,7 @@ class BeetsDB:
             items = conn.execute(
                 "SELECT path FROM items WHERE album_id = ?", (album_id,)
             ).fetchall()
-            file_paths = [
-                r[0].decode("utf-8", errors="replace") if isinstance(r[0], bytes) else r[0]
-                for r in items
-            ]
+            file_paths = [self._resolve_path(r[0]) for r in items]
             conn.execute("DELETE FROM items WHERE album_id = ?", (album_id,))
             conn.execute("DELETE FROM albums WHERE id = ?", (album_id,))
             conn.commit()

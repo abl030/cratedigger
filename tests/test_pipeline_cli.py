@@ -24,8 +24,12 @@ import scripts.pipeline_cli.long_tail as pipeline_cli_long_tail
 from scripts import pipeline_cli
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
+from tests.test_beets_db import _create_test_db, _insert_album
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
+
+RELEASE_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+RELEASE_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
 SAMPLE_MB_RELEASE = {
     "id": "44438bf9-26d9-4460-9b4f-1a1b015e37a1",
@@ -4192,6 +4196,84 @@ class TestCmdYoutubeRescue(unittest.TestCase):
              redirect_stdout(io.StringIO()), \
              self.assertRaises(SystemExit) as cm:
             pipeline_cli.main()
+        self.assertEqual(cm.exception.code, 2)
+
+
+class TestDestructiveCliAdapters(unittest.TestCase):
+    """CLI exit mappings mirror the destructive HTTP adapters."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.beets_path = os.path.join(self.tmpdir.name, "beets.db")
+        _create_test_db(self.beets_path)
+        _insert_album(
+            self.beets_path,
+            7,
+            RELEASE_A,
+            [],
+            album="Album A",
+            albumartist="Artist A",
+        )
+        self.config_path = os.path.join(self.tmpdir.name, "config.ini")
+        with open(self.config_path, "w", encoding="utf-8") as handle:
+            handle.write(f"[Beets]\ndirectory = {self.tmpdir.name}\n")
+
+    def _env(self):
+        return patch.dict(
+            os.environ,
+            {"CRATEDIGGER_RUNTIME_CONFIG": self.config_path},
+            clear=False,
+        )
+
+    def test_ban_source_release_mismatch_returns_semantic_exit_3(self) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41, status="imported", mb_release_id=RELEASE_A,
+        ))
+        args = SimpleNamespace(
+            request_id=41,
+            release_id=RELEASE_B,
+            beets_db=self.beets_path,
+        )
+        output = io.StringIO()
+        with self._env(), redirect_stdout(output):
+            rc = pipeline_cli.cmd_ban_source(db, args)
+
+        self.assertEqual(rc, 3)
+        self.assertEqual(json.loads(output.getvalue())["error"], "release_mismatch")
+        self.assertEqual(db.denylist, [])
+
+    def test_library_delete_lock_contention_returns_state_exit_4(self) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41, status="imported", mb_release_id=RELEASE_A,
+        ))
+        db.set_advisory_lock_result(False)
+        args = SimpleNamespace(
+            album_id=7,
+            purge_pipeline=True,
+            pipeline_id=41,
+            release_id=RELEASE_A,
+            beets_db=self.beets_path,
+        )
+        output = io.StringIO()
+        with self._env(), redirect_stdout(output):
+            rc = pipeline_cli.cmd_library_delete(db, args)
+
+        self.assertEqual(rc, 4)
+        self.assertEqual(
+            json.loads(output.getvalue())["error"],
+            "destructive_operation_busy",
+        )
+        self.assertIsNotNone(db.get_request(41))
+
+    def test_argparse_requires_server_validated_ban_confirmation(self) -> None:
+        from scripts.pipeline_cli.routes_meta import _build_parser
+
+        parser, _, _ = _build_parser()
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+            parser.parse_args(["ban-source", "41"])
         self.assertEqual(cm.exception.code, 2)
 
 

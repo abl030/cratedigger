@@ -64,9 +64,9 @@ against that reality, not against a hypothetical public exposure.
 | CD-SEC-11 | Medium | Symlink escape in wrong-match streaming + containment asymmetries | `lib/processing_paths.py`, `web/wrong_match_file_service.py` |
 | CD-SEC-12 | Low | Vulnerable-version matches in the locked closure + narrow CI scope | `flake.lock`, `nix/package.nix` |
 | CD-SEC-13 | Info | Plex XML parsed with stdlib ElementTree under an unverified-TLS fallback | `lib/util.py` |
-| CD-SEC-14 | Critical | Destructive routes do not bind all identifiers to one release | `web/routes/pipeline_mutations.py`, `lib/library_delete_service.py` |
+| CD-SEC-14 | Critical | Remediated: destructive identifiers bind to one server-owned release | `lib/destructive_release_service.py` |
 | CD-SEC-15 | High | Request transition engine fails open and can resurrect `replaced` rows | `lib/transitions.py`, `lib/pipeline_db/requests.py` |
-| CD-SEC-16 | High | Destructive beets operations race the importer | `web/routes/pipeline_mutations.py`, `lib/library_delete_service.py` |
+| CD-SEC-16 | High | Remediated: destructive operations share importer locks | `lib/destructive_release_service.py` |
 | CD-SEC-17 | High | Terminal import outcomes persist as multiple autocommit statements | `lib/dispatch/outcome_actions.py`, `scripts/import_preview_worker.py` |
 | CD-SEC-18 | Medium | Track replacement is non-atomic | `lib/pipeline_db/misc.py` |
 | CD-SEC-19 | Medium | Import-job JSONB payloads bypass the strict wire-boundary policy | `lib/import_queue.py`, `scripts/importer.py` |
@@ -145,6 +145,18 @@ an attacker simply supplies the constant.
 
 ### CD-SEC-14 — Destructive routes do not bind identifiers to one release (Critical)
 
+**Remediated in the issue #663 destructive-authority workstream.** Ban-source
+roots authority in `album_requests.id`; library-delete roots it in the beets
+album primary key. Release/pipeline IDs supplied by a client are optional
+confirmation values only. The service rejects a mismatch before mutation and
+the HTTP/CLI adapters map that semantic conflict to 422/exit 3. A beets album
+row carrying both a valid MusicBrainz UUID and a distinct valid Discogs ID is
+not collapsed to one source: it is ambiguous authority and fails closed before
+pipeline lookup, lock acquisition, or mutation. Any nonempty malformed identity
+field fails closed for the same reason: importer code may use that raw truthy
+value as its RELEASE lock key. Empty, whitespace, and zero sentinels remain
+absence; the same valid numeric Discogs ID in both columns remains one identity.
+
 Two destructive workflows accept multiple independently trusted identifiers
 without proving they describe the same release:
 
@@ -191,6 +203,14 @@ single-operator, forward-only contract.
   every status, with `replaced` frozen under all worlds.
 
 ### CD-SEC-16 — Destructive beets operations race the importer (High)
+
+**Remediated in the issue #663 destructive-authority workstream.** Both
+destructive services take the importer's session advisory locks in canonical
+IMPORT then RELEASE order (RELEASE only when a library album has no pipeline
+row), re-read identity and active-job state under lock, and hold the lock
+through every destructive effect. Contention/active jobs map to 409/exit 4.
+Ban-source additionally requires the server-validated literal confirmation
+`BAN`; the browser dialog remains only the first UI affordance.
 
 Ban-source checks for an active import job, then releases that observation and
 hashes/removes the release without acquiring the importer's per-release
