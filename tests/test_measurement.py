@@ -20,62 +20,136 @@ from tests.fakes import FakePipelineDB
 
 
 class TestAttemptSpectralAudit(unittest.TestCase):
-    """Attempt audit measures IN and preserves persisted HAVE provenance."""
+    """Attempt audit scans ordinary HAVE and preserves lossless provenance."""
 
-    def test_taboo_vi_have_uses_persisted_flac_evidence_not_opus_scan(self):
-        """The installed Opus derivative must not rewrite source provenance."""
-        from lib.measurement import collect_attempt_spectral_audit
+    def test_ordinary_existing_mp3_is_scanned_on_disk(self):
+        """Non-lossless-converted HAVE is measured from the exact files."""
+        from lib.beets_db import AlbumInfo
+        from lib.config import CratediggerConfig
+        from lib.measurement import measure_preimport_state
         from lib.quality import SpectralAnalysisDetail
+        from tests.fakes import FakeBeetsDB
 
-        persisted_flac = SpectralAnalysisDetail(
-            attempted=True,
-            grade="likely_transcode",
-        )
-        analyzed_paths: list[object] = []
+        with tempfile.TemporaryDirectory() as candidate, \
+             tempfile.TemporaryDirectory() as existing:
+            Path(candidate, "01.mp3").write_bytes(b"candidate")
+            Path(existing, "01.mp3").write_bytes(b"existing")
+            beets = FakeBeetsDB()
+            beets.set_album_info("mbid", AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                is_cbr=True,
+                album_path=existing,
+                format="MP3",
+            ))
+            calls: list[str] = []
 
-        def analyze(path: object, trim_seconds: int = 30):
-            del trim_seconds
-            analyzed_paths.append(path)
-            return SimpleNamespace(
-                grade=(
-                    "likely_transcode"
-                    if path == "/incoming/taboo-vi-flac"
-                    else "genuine"
-                ),
-                estimated_bitrate_kbps=None,
-                suspect_pct=(80.0 if path == "/incoming/taboo-vi-flac" else 40.0),
-                tracks=[],
+            def analyze(path: str, trim_seconds: int = 30):
+                del trim_seconds
+                calls.append(path)
+                return SimpleNamespace(
+                    grade="suspect" if path == existing else "genuine",
+                    estimated_bitrate_kbps=(128 if path == existing else None),
+                    suspect_pct=(100.0 if path == existing else 0.0),
+                    tracks=[],
+                )
+
+            with patch("lib.beets_db.BeetsDB", return_value=beets), \
+                 patch("lib.measurement.spectral_analyze", side_effect=analyze):
+                measured = measure_preimport_state(
+                    path=candidate,
+                    mb_release_id="mbid",
+                    label="Gespenst - The Saint",
+                    download_filetype="mp3",
+                    download_min_bitrate_bps=219_000,
+                    download_is_vbr=False,
+                    cfg=CratediggerConfig(audio_check_mode="off"),
+                    existing_spectral_evidence=SpectralAnalysisDetail(
+                        attempted=False,
+                    ),
+                )
+
+        self.assertEqual(calls, [candidate, existing])
+        assert measured.spectral_audit.existing is not None
+        self.assertTrue(measured.spectral_audit.existing.attempted)
+        self.assertEqual(measured.spectral_audit.existing.grade, "suspect")
+        self.assertEqual(measured.spectral_audit.existing.bitrate_kbps, 128)
+
+    def test_lossless_converted_have_preserves_source_without_derivative_scan(self):
+        """FLAC-derived HAVE keeps source evidence and skips installed Opus."""
+        from lib.beets_db import AlbumInfo
+        from lib.config import CratediggerConfig
+        from lib.measurement import measure_preimport_state
+        from lib.quality import SpectralAnalysisDetail
+        from tests.fakes import FakeBeetsDB
+
+        with tempfile.TemporaryDirectory() as candidate, \
+             tempfile.TemporaryDirectory() as existing:
+            Path(candidate, "01.mp3").write_bytes(b"candidate")
+            Path(existing, "01.opus").write_bytes(b"derivative")
+            beets = FakeBeetsDB()
+            beets.set_album_info("mbid", AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=122,
+                avg_bitrate_kbps=127,
+                median_bitrate_kbps=127,
+                is_cbr=False,
+                album_path=existing,
+                format="Opus",
+            ))
+            persisted = SpectralAnalysisDetail(
+                attempted=True,
+                grade="likely_transcode",
+                bitrate_kbps=224,
             )
+            calls: list[str] = []
 
-        with patch("lib.measurement.spectral_analyze", side_effect=analyze):
-            audit = collect_attempt_spectral_audit(
-                "/incoming/taboo-vi-flac",
-                persisted_flac,
-            )
+            def analyze(path: str, trim_seconds: int = 30):
+                del trim_seconds
+                calls.append(path)
+                return SimpleNamespace(
+                    grade="genuine",
+                    estimated_bitrate_kbps=None,
+                    suspect_pct=0.0,
+                    tracks=[],
+                )
 
-        assert audit.candidate is not None
-        assert audit.existing is not None
-        self.assertEqual(audit.candidate.grade, "likely_transcode")
-        self.assertEqual(audit.existing.grade, "likely_transcode")
-        self.assertEqual(analyzed_paths, ["/incoming/taboo-vi-flac"])
+            with patch("lib.beets_db.BeetsDB", return_value=beets), \
+                 patch("lib.measurement.spectral_analyze", side_effect=analyze):
+                measured = measure_preimport_state(
+                    path=candidate,
+                    mb_release_id="mbid",
+                    label="Taboo VI",
+                    download_filetype="mp3",
+                    download_min_bitrate_bps=219_000,
+                    download_is_vbr=False,
+                    cfg=CratediggerConfig(audio_check_mode="off"),
+                    existing_spectral_evidence=persisted,
+                    preserve_existing_source_spectral=True,
+                )
+
+        self.assertEqual(calls, [candidate])
+        self.assertIs(measured.spectral_audit.existing, persisted)
 
     def test_candidate_failure_does_not_hide_existing_measurement(self):
         from lib.measurement import collect_attempt_spectral_audit
-        from lib.quality import SpectralAnalysisDetail
-
-        existing = SpectralAnalysisDetail(
-            attempted=True,
-            grade="suspect",
-            bitrate_kbps=128,
-        )
 
         def analyze(path: str, trim_seconds: int = 30):
             if path == "/candidate":
                 raise RuntimeError("candidate decode failed")
-            return existing
+            return SimpleNamespace(
+                grade="suspect",
+                estimated_bitrate_kbps=128,
+                suspect_pct=100.0,
+                tracks=[],
+            )
 
         with patch("lib.measurement.spectral_analyze", side_effect=analyze):
-            audit = collect_attempt_spectral_audit("/candidate", existing)
+            audit = collect_attempt_spectral_audit("/candidate", "/existing")
 
         assert audit.candidate is not None
         assert audit.existing is not None
@@ -84,8 +158,6 @@ class TestAttemptSpectralAudit(unittest.TestCase):
 
     def test_normal_harness_collector_only_analyzes_candidate(self):
         from lib.measurement import collect_attempt_spectral_audit
-        from lib.quality import SpectralAnalysisDetail
-
         result = SimpleNamespace(
             grade="genuine", estimated_bitrate_kbps=None,
             suspect_pct=0.0, tracks=[],
@@ -99,7 +171,7 @@ class TestAttemptSpectralAudit(unittest.TestCase):
         with patch("lib.measurement.spectral_analyze", side_effect=analyze):
             collect_attempt_spectral_audit(
                 "/candidate",
-                SpectralAnalysisDetail(attempted=True, grade="suspect"),
+                None,
             )
         self.assertEqual(calls, ["/candidate"])
 

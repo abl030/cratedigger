@@ -36,6 +36,9 @@ from lib.quality_evidence import (
     snapshot_audio_files,
 )
 from lib.quality import (
+    LOSSLESS_CODECS,
+    V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
+    AlbumQualityEvidence,
     AudioQualityMeasurement,
     ImportResult,
     MeasurementFailure,
@@ -74,7 +77,7 @@ def compose_attempt_spectral_audit(
     measured: SpectralDetail,
     harness: SpectralDetail,
 ) -> SpectralDetail:
-    """Compose WANT from the best scan and HAVE from persisted provenance."""
+    """Compose IN from the best scan and HAVE from the preview measurement."""
     candidate = _prefer_successful_spectral_detail(
         measured.candidate, harness.candidate)
     existing = measured.existing
@@ -106,8 +109,8 @@ def load_persisted_existing_spectral(
     db: ImportPreviewDB,
     request_id: int,
     req: dict[str, Any],
-) -> tuple[Any, SpectralAnalysisDetail, bool]:
-    """Load HAVE from durable source evidence, never the installed derivative.
+) -> tuple[AlbumQualityEvidence | None, SpectralAnalysisDetail, bool]:
+    """Load persisted HAVE provenance for the conditional audit boundary.
 
     Once ``current_evidence_id`` exists, that row is authoritative even when
     it deliberately carries no spectral fields. The request scalar columns are
@@ -158,6 +161,25 @@ def load_persisted_existing_spectral(
             measurement.spectral_bitrate_kbps,
         ),
         True,
+    )
+
+
+def preserve_existing_source_spectral(
+    current_evidence: AlbumQualityEvidence | None,
+) -> bool:
+    """Whether HAVE must retain lossless-source pre-conversion evidence."""
+    if current_evidence is None:
+        return False
+    converted_from = (
+        current_evidence.measurement.was_converted_from or ""
+    ).lower()
+    if converted_from in LOSSLESS_CODECS:
+        return True
+    v0_metric = current_evidence.v0_metric
+    return (
+        converted_from == "m4a"
+        and v0_metric is not None
+        and v0_metric.source_lineage == V0_SOURCE_LINEAGE_LOSSLESS_SOURCE
     )
 
 
@@ -658,6 +680,7 @@ def measure_and_persist_candidate_evidence(
         existing_spectral_evidence,
         current_evidence_authoritative,
     ) = load_persisted_existing_spectral(db, request_id, req)
+    preserve_have_source = preserve_existing_source_spectral(current_evidence)
 
     temp_root = tempfile.mkdtemp(prefix="cratedigger-import-preview-")
     try:
@@ -695,6 +718,7 @@ def measure_and_persist_candidate_evidence(
                 db=None,
                 request_id=None,
                 existing_spectral_evidence=existing_spectral_evidence,
+                preserve_existing_source_spectral=preserve_have_source,
                 propagate_download_to_existing=False,
                 precomputed_inspection=inspection,
             )
@@ -1056,6 +1080,7 @@ def preview_import_from_path(
         existing_spectral_evidence,
         current_evidence_authoritative,
     ) = load_persisted_existing_spectral(db, request_id, req)
+    preserve_have_source = preserve_existing_source_spectral(current_evidence)
 
     # --- Source cleanup BEFORE snapshot ---
     # mp3val runs once on the source so the snapshot captures the
@@ -1142,6 +1167,7 @@ def preview_import_from_path(
             existing_spectral_evidence=(
                 existing_spectral_evidence
             ),
+            preserve_existing_source_spectral=preserve_have_source,
             propagate_download_to_existing=False,
             precomputed_inspection=inspection,
         )

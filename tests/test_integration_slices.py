@@ -915,10 +915,10 @@ class TestSpectralPropagationSlice(unittest.TestCase):
     """
 
     def test_suspect_download_persists_existing_spectral_state(self):
-        """Issue #90: candidate measurement must preserve the installed
-        release's persisted source spectral state in
+        """Issue #90: candidate measurement must persist the installed
+        release's newly measured spectral state in
         ``album_requests.current_spectral_*`` so subsequent attempts compare
-        evidence-to-evidence without scanning a derivative.
+        evidence-to-evidence.
 
         Spectral comparison itself is owned by the importer's evidence
         pipeline (``full_pipeline_decision_from_evidence``) — preimport just
@@ -942,16 +942,21 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         )
         cfg = CratediggerConfig(audio_check_mode="off")
 
-        with patch(
-            "lib.measurement.spectral_analyze",
-            return_value=SimpleNamespace(
-                grade="suspect",
-                estimated_bitrate_kbps=128,
-                suspect_pct=90.0,
+        def analyze(path: str, trim_seconds: int = 30):
+            del trim_seconds
+            existing = path == "/Beets/Test"
+            return SimpleNamespace(
+                grade="genuine" if existing else "suspect",
+                estimated_bitrate_kbps=320 if existing else 128,
+                suspect_pct=0.0 if existing else 90.0,
                 tracks=[],
-            ),
-        ), patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
-             patch("os.path.isdir", return_value=True):
+            )
+
+        with (
+            patch("lib.measurement.spectral_analyze", side_effect=analyze),
+            patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)),
+            patch("os.path.isdir", return_value=True),
+        ):
             measurement = measure_preimport_state(
                 path="/tmp/download",
                 mb_release_id="mbid-123",
@@ -964,8 +969,8 @@ class TestSpectralPropagationSlice(unittest.TestCase):
                 request_id=42,
                 existing_spectral_evidence=SpectralAnalysisDetail(
                     attempted=True,
-                    grade="genuine",
-                    bitrate_kbps=320,
+                    grade="suspect",
+                    bitrate_kbps=64,
                 ),
             )
 
@@ -1150,16 +1155,21 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
         )
         cfg = CratediggerConfig(audio_check_mode="off")
 
-        with patch(
-            "lib.measurement.spectral_analyze",
-            return_value=SimpleNamespace(
-                grade="suspect",
-                estimated_bitrate_kbps=256,
-                suspect_pct=70.0,
+        def analyze(path: str, trim_seconds: int = 30):
+            del trim_seconds
+            existing = path == "/Beets/Test"
+            return SimpleNamespace(
+                grade="likely_transcode" if existing else "suspect",
+                estimated_bitrate_kbps=96 if existing else 256,
+                suspect_pct=100.0 if existing else 70.0,
                 tracks=[],
-            ),
-        ), patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
-             patch("os.path.isdir", return_value=True):
+            )
+
+        with (
+            patch("lib.measurement.spectral_analyze", side_effect=analyze),
+            patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)),
+            patch("os.path.isdir", return_value=True),
+        ):
             measurement = measure_preimport_state(
                 path="/tmp/dl",
                 mb_release_id="mbid-upgrade",
@@ -1172,8 +1182,8 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
                 request_id=42,
                 existing_spectral_evidence=SpectralAnalysisDetail(
                     attempted=True,
-                    grade="likely_transcode",
-                    bitrate_kbps=96,
+                    grade="genuine",
+                    bitrate_kbps=None,
                 ),
             )
 
@@ -5611,14 +5621,14 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 )
 
             audit_calls: list[
-                tuple[str, SpectralAnalysisDetail | None]
+                tuple[str, str | None]
             ] = []
 
             def collect_audit(
                 path: str,
-                existing: SpectralAnalysisDetail | None,
+                existing_path: str | None,
             ) -> SpectralDetail:
-                audit_calls.append((path, existing))
+                audit_calls.append((path, existing_path))
                 return audit
 
             with patch(
@@ -5742,14 +5752,14 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             )
 
             audit_calls: list[
-                tuple[str, SpectralAnalysisDetail | None]
+                tuple[str, str | None]
             ] = []
 
             def collect_audit(
                 path: str,
-                existing: SpectralAnalysisDetail | None,
+                existing_path: str | None,
             ) -> SpectralDetail:
-                audit_calls.append((path, existing))
+                audit_calls.append((path, existing_path))
                 return audit
 
             with patch(

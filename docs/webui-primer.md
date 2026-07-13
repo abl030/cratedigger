@@ -125,15 +125,16 @@ Browser → https://music.ablz.au
   attempt. Every bitrate says which statistic it is: the min-vs-min row is
   labelled "Min bitrate" and strip mins render as `min 216k` (request 8781:
   an unlabelled 216 beside an avg-labelled 255 read as a contradiction).
-  Spectral evidence preserves source provenance on both sides: `IN` is measured
-  from the candidate before conversion, while `HAVE` comes from the exact
-  requested release's persisted pre-conversion evidence. The analyzer never
-  runs over installed Opus or another post-import derivative, whose altered
+  Spectral evidence is attempt-local and two-sided: `IN` is measured from the
+  candidate before conversion, while `HAVE` normally measures the exact
+  requested release's current Beets files. The sole exception is a current
+  copy proven to be a derivative converted from a lossless source: `HAVE` then
+  uses persisted pre-conversion evidence because the derivative's altered
   spectrum could mislabel the source. Both sides show grade plus floor when
-  known. Historical rows remain explicitly unmeasured, or `ungraded` when an
-  old row has only an existing floor. A candidate analysis failure renders
-  `analysis failed`; this is distinct from a legacy row whose source evidence
-  was never measured.
+  measured. Historical rows remain explicitly unmeasured, or `ungraded` when
+  an old row has only an existing floor. A side that was attempted but could
+  not be decoded renders `analysis failed`; this is distinct from a legacy
+  row whose analysis was never attempted.
   V0 probes render for every candidate — research probes of lossy sources
   qualified "(from lossy)" — matching the Wrong Matches convention.
 - **Comparison basis rendering (request 6039)** — rows whose

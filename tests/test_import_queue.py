@@ -2177,18 +2177,18 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             # Seed download_log_candidate evidence — force/manual path uses it.
             self._seed_evidence_for_download_log(db, download_log_id, source)
 
-            audit_calls: list[tuple[str, SpectralAnalysisDetail | None]] = []
+            audit_calls: list[tuple[str, str | None]] = []
             def collect_audit(
                 path: str,
-                existing: SpectralAnalysisDetail | None,
+                existing_path: str | None,
             ) -> SpectralDetail:
-                audit_calls.append((path, existing))
+                audit_calls.append((path, existing_path))
                 return SpectralDetail(
                     candidate=SpectralAnalysisDetail(
                         attempted=True,
                         grade="likely_transcode",
                     ),
-                    existing=existing,
+                    existing=SpectralAnalysisDetail(attempted=False),
                 )
 
             with patch(
@@ -2206,12 +2206,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         preimport.assert_not_called()
         self.assertEqual(len(audit_calls), 1)
         self.assertEqual(audit_calls[0][0], source)
-        assert audit_calls[0][1] is not None
-        self.assertTrue(audit_calls[0][1].attempted)
-        self.assertEqual(
-            audit_calls[0][1].grade,
-            "likely_transcode",
-        )
+        self.assertIsNone(audit_calls[0][1])
         assert updated is not None
         self.assertEqual(updated.status, "queued")
         self.assertEqual(updated.preview_status, "evidence_ready")
@@ -2230,6 +2225,87 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             "likely_transcode",
         )
         self.assertIsNotNone(updated.importable_at)
+
+    def test_reused_evidence_scans_ordinary_have_path(self):
+        """Front-gate reuse still analyzes non-lossless-converted HAVE."""
+        from scripts import import_preview_worker
+        from lib.quality import SpectralAnalysisDetail, SpectralDetail
+
+        with tempfile.TemporaryDirectory() as source, \
+             tempfile.TemporaryDirectory() as existing:
+            for root in (source, existing):
+                with open(os.path.join(root, "01.mp3"), "wb") as handle:
+                    handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=42, mb_release_id="mbid-42"))
+            _seed_current_for_request(
+                db,
+                42,
+                mb_release_id="mbid-42",
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=320,
+                    avg_bitrate_kbps=320,
+                    median_bitrate_kbps=320,
+                    format="MP3",
+                    was_converted_from=None,
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="MP3",
+            )
+            download_log_id = db.log_download(42, outcome="rejected")
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+            self._seed_evidence_for_download_log(db, download_log_id, source)
+            calls: list[tuple[str, str | None]] = []
+
+            def collect_audit(path: str, existing_path: str | None):
+                calls.append((path, existing_path))
+                return SpectralDetail(
+                    candidate=SpectralAnalysisDetail(
+                        attempted=True,
+                        grade="genuine",
+                    ),
+                    existing=SpectralAnalysisDetail(
+                        attempted=True,
+                        grade="suspect",
+                        bitrate_kbps=128,
+                    ),
+                )
+
+            with patch(
+                "scripts.import_preview_worker.read_runtime_config",
+                return_value=CratediggerConfig(audio_check_mode="off"),
+            ):
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                    spectral_audit_collector=collect_audit,
+                    existing_path_resolver=lambda _mbid, _cfg: (
+                        existing,
+                        None,
+                    ),
+                )
+
+        self.assertEqual(calls, [(source, existing)])
+        assert updated is not None and updated.preview_result is not None
+        import_result = ImportResult.from_dict(cast(
+            dict[str, Any],
+            updated.preview_result["import_result"],
+        ))
+        assert import_result.spectral.existing is not None
+        self.assertEqual(import_result.spectral.existing.grade, "suspect")
+        self.assertEqual(import_result.spectral.existing.bitrate_kbps, 128)
 
     def test_have_lookup_failure_still_analyzes_candidate(self):
         """A DB failure on HAVE provenance must not suppress the WANT scan."""
@@ -2262,13 +2338,13 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             self._seed_evidence_for_download_log(db, download_log_id, source)
             calls: list[str] = []
 
-            def collect_audit(path, existing):
+            def collect_audit(path, existing_path):
                 calls.append(path)
-                self.assertFalse(existing.attempted)
+                self.assertIsNone(existing_path)
                 return SpectralDetail(
                     candidate=SpectralAnalysisDetail(
                         attempted=True, grade="likely_transcode"),
-                    existing=existing,
+                    existing=SpectralAnalysisDetail(attempted=False),
                 )
 
             updated = import_preview_worker.process_claimed_preview_job(
