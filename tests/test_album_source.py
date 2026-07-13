@@ -128,7 +128,6 @@ class TestDatabaseSourceRejectAndRequeueSeam(unittest.TestCase):
     def test_conflict_stops_attempt_and_audit_side_effects(self) -> None:
         from lib.transitions import (
             RequestTransitionConflict,
-            TransitionConflict,
             TransitionConflictKind,
         )
 
@@ -143,24 +142,17 @@ class TestDatabaseSourceRejectAndRequeueSeam(unittest.TestCase):
             distance=0.35,
             scenario="high_distance",
         )
-        conflict = TransitionConflict(
-            request_id=42,
-            target_status="wanted",
-            kind=TransitionConflictKind.invalid_edge,
-            expected_status="replaced",
-            actual_status="replaced",
-        )
-
-        with (
-            patch("lib.transitions.finalize_request", return_value=conflict),
-            self.assertRaises(RequestTransitionConflict),
-        ):
+        with self.assertRaises(RequestTransitionConflict) as raised:
             source.reject_and_requeue(
                 album_record,
                 bv_result,
                 usernames={"peer"},
             )
 
+        self.assertEqual(
+            raised.exception.conflict.kind,
+            TransitionConflictKind.invalid_edge,
+        )
         self.assertEqual(fake_db.request(42), before)
         self.assertEqual(fake_db.recorded_attempts, [])
         self.assertEqual(fake_db.download_logs, [])
