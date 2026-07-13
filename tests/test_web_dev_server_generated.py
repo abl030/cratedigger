@@ -295,8 +295,11 @@ class TestBrowseResolveWarmCacheGenerated(unittest.TestCase):
             f"{self.base}/api/browse/resolve?source=discogs&"
             f"id={discogs_id}&kind={kind}"
         )
+        # The pre-push gate runs every generated module in parallel. Keep this
+        # bounded, but allow enough scheduling headroom for the server thread
+        # when the host is saturated by the sharded fuzz burst.
         with self.assertRaises(urllib.error.HTTPError) as raised:
-            urllib.request.urlopen(url, timeout=2)
+            urllib.request.urlopen(url, timeout=10)
         self.assertEqual(raised.exception.code, 503)
         raised.exception.close()
 
