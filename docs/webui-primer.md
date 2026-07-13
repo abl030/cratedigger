@@ -224,7 +224,8 @@ Browser → https://music.ablz.au
 deploying `music.ablz.au`. The important split is:
 
 - `--data live-db` — run local route code against a read-only PostgreSQL
-  session and the backend host's filesystem.
+  session and the backend host's filesystem. Supply the metadata mirror bases;
+  missing Discogs configuration deliberately makes cross-source routes 503.
 - `--data prod-api` — serve local `web/` files while proxying `/api/*` to some
   other read-only backend.
 
@@ -238,7 +239,15 @@ A practical "develop anywhere" loop is:
 ```bash
 # backend host shell
 PIPELINE_DB_DSN=postgresql://cratedigger@127.0.0.1:15432/cratedigger \
-  nix-shell --run "python3 scripts/web_dev_server.py --data live-db --host 127.0.0.1 --port 8096"
+  nix-shell --run "python3 scripts/web_dev_server.py --data live-db \
+    --host 127.0.0.1 --port 8096 \
+    --mb-api http://192.168.1.35:5200/ws/2 \
+    --discogs-api https://discogs.ablz.au"
+
+# Required from a second backend-host shell before accepting screenshots.
+test "$(curl --silent --show-error --output /tmp/artist-compare.json \
+  --write-out '%{http_code}' --get --data-urlencode 'name=Deloris' \
+  http://127.0.0.1:8096/api/artist/compare)" = 200
 
 # local machine shell
 ssh -N -L 18096:127.0.0.1:8096 <backend-host>
