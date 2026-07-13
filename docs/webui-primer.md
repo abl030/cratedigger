@@ -70,13 +70,18 @@ Browser → https://music.ablz.au
   Discography / Analysis / Library / Compare sub-tabs are gone), sectioned by
   availability: **In library / In flight / Missing / Appearances /
   Bootleg-only releases**, each grouped by type (Albums, EPs, Singles, etc.).
-  Ownership ("own work" vs Appearances) uses artist-credit matching; Missing =
-  official own-work release groups the beets library doesn't hold; In flight =
+  Appearance provenance comes from each source rather than title heuristics:
+  MusicBrainz release groups discovered through the `track_artist` release
+  browse and Discogs rows from `/artists/<id>/appearances` are kept out of
+  mainline Albums even when they are VA compilations. Ownership matching is a
+  fallback for non-primary release-group credits. Missing = official own-work
+  release groups the beets library doesn't hold; In flight =
   requests currently `downloading` or `manual` (`wanted` is ambient after the
   full-library backfill and stays a badge). Two slow feeds decorate the page
   after the fast render, without re-rendering: `/api/artist/compare` appends an
-  "Only on Discogs/MusicBrainz" complement section (silently skipped on hosts
-  without the Discogs mirror), and `/api/artist/<id>/disambiguate` adds
+  "Only on Discogs/MusicBrainz" complement section, with source-only
+  appearances under a distinct **Appears on** bucket (silently skipped on
+  hosts without the Discogs mirror), and `/api/artist/<id>/disambiguate` adds
   unique-track / covered-by chips to rows plus colour-dot recordings
   breakdowns inside expanded release groups (MB artists only). Expanding an
   in-library pressing's detail offers a lazy **Library detail** panel (path,
@@ -89,8 +94,8 @@ Browser → https://music.ablz.au
     (`splitPressings` in `web/js/discography.js`; an owned pressing is never
     hidden, whatever its status)
   - Exceptional artist-page sections stay quiet unless they contain something
-    owned. An in-library Bootleg-only or other-source-only row opens its outer
-    section and only the Albums/EPs/Singles/Other type buckets containing
+    owned. An in-library Bootleg-only, appearance, or other-source-only row
+    opens its exceptional section and only the type buckets containing
     in-library rows; a pipeline request alone never auto-expands them.
   - Releases already in pipeline DB or beets library are badged
   - Click release metadata to open MB release page in new tab

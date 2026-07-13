@@ -488,6 +488,7 @@ class TestGetArtistReleases(unittest.TestCase):
         self.assertEqual(album["artist_credit"], "Radiohead")
         self.assertEqual(album["primary_artist_id"], "3840")
         self.assertEqual(album["secondary_types"], [])
+        self.assertIs(album["is_appearance"], False)
         self.assertNotIn("is_masterless", album)  # only set when True
 
         masterless = next(r for r in results if r["title"] == "Stupid Car (demo)")
@@ -520,6 +521,7 @@ class TestGetArtistReleases(unittest.TestCase):
         comp = next(r for r in results if r["title"] == "Indie 1996")
         self.assertEqual(comp["primary_artist_id"], "194")
         self.assertEqual(comp["artist_credit"], "Various")
+        self.assertIs(comp["is_appearance"], True)
         # The JS classifier reads primary_artist_id !== artist_id to route into
         # the Appearances section — so it must NOT equal the queried artist id.
         self.assertNotEqual(comp["primary_artist_id"], "3840")
@@ -555,6 +557,7 @@ class TestGetArtistReleases(unittest.TestCase):
         pablo = next(r for r in results if r["id"] == "13344")
         self.assertEqual(pablo["artist_credit"], "Radiohead")
         self.assertEqual(pablo["primary_artist_id"], "3840")
+        self.assertIs(pablo["is_appearance"], False)
 
 
 class TestGetArtistName(unittest.TestCase):
