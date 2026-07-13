@@ -13,8 +13,8 @@ from typing import Protocol, cast
 
 import msgspec
 
-from lib.library_delete_service import (
-    SupportsLibraryPipelineLookupDB,
+from lib.destructive_release_service import (
+    SupportsReleaseLookupDB,
     resolve_pipeline_request,
 )
 from lib.release_identity import (
@@ -33,7 +33,7 @@ class SupportsLibraryAlbumDetailLookup(Protocol):
 
 
 class SupportsLibraryAlbumDetailPipelineDB(
-    SupportsLibraryPipelineLookupDB,
+    SupportsReleaseLookupDB,
     Protocol,
 ):
     """Pipeline DB surface needed for library album detail overlays."""
@@ -266,7 +266,6 @@ def load_library_album_detail(
     pipeline_request = (
         resolve_pipeline_request(
             pipeline_db,
-            pipeline_id=None,
             release_id=release_id or "",
         )
         if release_id

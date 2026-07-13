@@ -9,7 +9,7 @@ problem_type: design-decision
 
 ## TL;DR
 
-Two attempts to rewrite `cratedigger-web` (Bottle + waitress; then Rust) both failed at the requirements-doc stage for the same underlying reason: **`web/routes/*.py` is not a clean architectural seam.** POST handlers orchestrate ~4,000 LOC of pipeline business logic from `lib/*` (`manual_import`, `import_queue`, `wrong_match_triage`, `import_preview`, `search_plan_service`, `audio_hash`, `release_cleanup`, `library_delete_service`, `spectral_check`, `wrong_matches`). Carving the web layer into a separate language requires either re-deriving all of that lib code (forgets accumulated bug-fixes from many incidents) or designing a new IPC surface (new design + maintenance burden + cross-language debugging). Neither is a "rewrite the web layer" project — both are cratedigger-runtime-redesign projects with the web rewrite as a beneficiary.
+Two attempts to rewrite `cratedigger-web` (Bottle + waitress; then Rust) both failed at the requirements-doc stage for the same underlying reason: **`web/routes/*.py` is not a clean architectural seam.** POST handlers orchestrate ~4,000 LOC of pipeline business logic from `lib/*` (`manual_import`, `import_queue`, `wrong_match_triage`, `import_preview`, `search_plan_service`, `audio_hash`, `release_cleanup`, `destructive_release_service`, `spectral_check`, `wrong_matches`). Carving the web layer into a separate language requires either re-deriving all of that lib code (forgets accumulated bug-fixes from many incidents) or designing a new IPC surface (new design + maintenance burden + cross-language debugging). Neither is a "rewrite the web layer" project — both are cratedigger-runtime-redesign projects with the web rewrite as a beneficiary.
 
 **Decision:** apply the minimal Python patch to kill the current wedge (issue #233). Defer any framework or language migration until the cratedigger runtime is redesigned (cycle-driven → static / event-driven), at which point the web layer's seams will be in cleaner places and a Rust rewrite becomes a tractable carve-out.
 
@@ -39,7 +39,7 @@ The pitch: leave Python for the pipeline (beets-locked) but rewrite the web laye
 
 **Killed by ce-doc-review** (feasibility persona, P0 finding): the doc treated "52 routes" as if they were thin "query DB, format JSON" handlers. Reality from `web/routes/*.py`:
 
-- POST handlers call into ~3,900 LOC of pipeline lib code: `manual_import`, `import_queue`, `wrong_match_triage`, `import_preview`, `search_plan_service`, `audio_hash`, `release_cleanup`, `library_delete_service`, `artist_compare`, `artist_releases`, `spectral_check`, `wrong_matches`.
+- POST handlers call into ~3,900 LOC of pipeline lib code: `manual_import`, `import_queue`, `wrong_match_triage`, `import_preview`, `search_plan_service`, `audio_hash`, `release_cleanup`, `destructive_release_service`, `artist_compare`, `artist_releases`, `spectral_check`, `wrong_matches`.
 - Endpoints like `post_pipeline_ban_source`, `post_pipeline_force_import`, `post_wrong_match_converge`, `post_pipeline_search_plan_regenerate` aren't thin routing — they orchestrate audio hashing, beets removal via subprocess, advisory locks, importer-job race-checks, search-plan generation.
 - The Decisions tab additionally exposes pure functions from `lib/quality.py` (`dispatch_action`, `get_decision_tree`, `quality_gate_decision`) — same coupling.
 

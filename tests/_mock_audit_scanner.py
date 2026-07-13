@@ -272,7 +272,8 @@ _LEAF_SEAM_PATTERNS = [
     # function lives in lib.* and is allowlisted there; tests just
     # patch the import binding inside the route module.
     re.compile(r"^web\.routes\.\w+\.resolve_failed_path$"),
-    re.compile(r"^web\.routes\.pipeline_mutations\.hash_audio_content$"),
+    # Destructive service binding around the ffmpeg-backed audio hash leaf.
+    re.compile(r"^lib\.destructive_release_service\.hash_audio_content$"),
 
     # Route-to-transition DI seam. ``web.routes.pipeline_mutations.finalize_request``
     # is the module-level swap point for ``transitions.finalize_request``;

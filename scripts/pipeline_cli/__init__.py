@@ -19,6 +19,7 @@ mechanical pattern as the ``lib/quality/`` split, issue #477):
                        saturation / advance / history
     replace.py           replace
     beets_distance.py    beets-distance
+    destructive.py       ban-source / library-delete
     youtube.py           youtube-album / youtube-rescue
     triage.py             triage show / list / quarantine
     long_tail.py          long-tail
@@ -99,6 +100,7 @@ from scripts.pipeline_cli.search_plan import (
 )
 from scripts.pipeline_cli.replace import cmd_replace
 from scripts.pipeline_cli.beets_distance import cmd_beets_distance
+from scripts.pipeline_cli.destructive import cmd_ban_source, cmd_library_delete
 from scripts.pipeline_cli.youtube import (
     OUTCOME_EXIT_CODE,
     cmd_youtube_album,
@@ -122,12 +124,14 @@ __all__ = [
     "VALID_STATUSES",
     "cmd_add",
     "cmd_beets_distance",
+    "cmd_ban_source",
     "cmd_cancel",
     "cmd_disk_coverage",
     "cmd_force_import",
     "cmd_import_jobs",
     "cmd_import_preview",
     "cmd_list",
+    "cmd_library_delete",
     "cmd_long_tail",
     "cmd_manual_import",
     "cmd_quality",

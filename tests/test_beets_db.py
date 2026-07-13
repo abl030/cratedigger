@@ -1161,6 +1161,62 @@ class TestGetAlbumDetail(unittest.TestCase):
             detail = db.get_album_detail(999)
         self.assertIsNone(detail)
 
+    def test_preserves_both_canonical_identity_columns_for_authority_checks(
+        self,
+    ) -> None:
+        """Destructive callers must see ambiguity instead of MB-first collapse."""
+        self._conn = sqlite3.connect(self.db_path)
+        try:
+            self._conn.execute(
+                "UPDATE albums SET mb_albumid = ?, discogs_albumid = ? WHERE id = 1",
+                ("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", 12856590),
+            )
+            self._conn.commit()
+        finally:
+            self._conn.close()
+
+        with BeetsDB(self.db_path) as db:
+            detail = db.get_album_detail(1)
+
+        assert detail is not None
+        self.assertEqual(
+            detail["mb_albumid"],
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        )
+        self.assertEqual(detail["discogs_albumid"], "12856590")
+
+    def test_preserves_nonempty_malformed_identity_for_fail_closed_authority(
+        self,
+    ) -> None:
+        for mb_albumid, discogs_albumid in (
+            ("malformed-provider-id", 12856590),
+            ("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "malformed-provider-id"),
+        ):
+            with self.subTest(
+                mb_albumid=mb_albumid,
+                discogs_albumid=discogs_albumid,
+            ):
+                conn = sqlite3.connect(self.db_path)
+                try:
+                    conn.execute(
+                        "UPDATE albums SET mb_albumid = ?, discogs_albumid = ? "
+                        "WHERE id = 1",
+                        (mb_albumid, discogs_albumid),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+
+                with BeetsDB(self.db_path) as db:
+                    detail = db.get_album_detail(1)
+
+                assert detail is not None
+                self.assertEqual(detail["mb_albumid"], str(mb_albumid))
+                self.assertEqual(
+                    detail["discogs_albumid"],
+                    str(discogs_albumid),
+                )
+
 
 class TestGetAlbumsByArtist(unittest.TestCase):
     """Test get_albums_by_artist — albums by artist name."""
@@ -1352,7 +1408,7 @@ class TestGetAlbumIdsByMbids(unittest.TestCase):
 
 
 class TestDeleteAlbum(unittest.TestCase):
-    """Test delete_album — static method for writable deletion."""
+    """Test delete_album on an explicitly opened writable database."""
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -1363,7 +1419,8 @@ class TestDeleteAlbum(unittest.TestCase):
         ], album="Test Album", albumartist="Test Artist")
 
     def test_deletes_and_returns_metadata(self) -> None:
-        album, artist, paths = BeetsDB.delete_album(self.db_path, 1)
+        with BeetsDB(self.db_path) as db:
+            album, artist, paths = db.delete_album(1)
         self.assertEqual(album, "Test Album")
         self.assertEqual(artist, "Test Artist")
         self.assertEqual(len(paths), 2)
@@ -1373,7 +1430,8 @@ class TestDeleteAlbum(unittest.TestCase):
 
     def test_not_found_raises(self) -> None:
         with self.assertRaises(ValueError):
-            BeetsDB.delete_album(self.db_path, 999)
+            with BeetsDB(self.db_path) as db:
+                db.delete_album(999)
 
 
 class TestAlbumRowSource(unittest.TestCase):

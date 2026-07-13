@@ -17,6 +17,7 @@ import json
 from lib.pipeline_db import DEFAULT_DSN
 from scripts.pipeline_cli.album_requests import add_album_requests_subparsers
 from scripts.pipeline_cli.beets_distance import add_beets_distance_subparser
+from scripts.pipeline_cli.destructive import add_destructive_subparsers
 from scripts.pipeline_cli.imports import add_imports_subparsers
 from scripts.pipeline_cli.long_tail import add_long_tail_subparser
 from scripts.pipeline_cli.quality import add_quality_subparsers
@@ -76,6 +77,9 @@ def _build_parser() -> tuple[
 
     # beets-distance
     add_beets_distance_subparser(sub)
+
+    # ban-source / library-delete
+    add_destructive_subparsers(sub)
 
     # youtube-album / youtube-rescue
     add_youtube_subparsers(sub)
