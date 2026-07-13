@@ -237,10 +237,9 @@ def _stamp_transfer_ledger(
     the caller so a single pass stamps every matched row with one
     consistent value.
 
-    ``transfer_id`` (issue #571 PR 5, T1.5's fallback) is forwarded from
-    the SAME decoded event — ``stamp_transfer_completion`` COALESCEs it
-    in only when the enqueue-response capture hasn't already set it, so
-    this is always safe to pass even when T1.5 already won the race.
+    ``transfer_id`` is forwarded from the SAME decoded event. It selects an
+    existing exact-ID row first (including a prior pathless failure stamp),
+    or binds the newest open exact-key row only when the ID is globally absent.
     """
     stamped = 0
     for (username, filename), info in completion_info.items():

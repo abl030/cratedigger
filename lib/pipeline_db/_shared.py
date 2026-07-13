@@ -15,7 +15,7 @@ import logging
 import os
 import zlib
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import psycopg2
@@ -1075,9 +1075,10 @@ class TransferLedgerRow(msgspec.Struct, kw_only=True):
     Deliberately NOT part of this Struct: ``enqueued_at`` defaults from
     the DB (``DEFAULT now()``); ``transfer_id`` is never known yet at
     write-ahead time (the row is inserted BEFORE the POST that would
-    return it); ``local_path``/``completed_at`` are stamped later, only
-    by event ingestion (``stamp_transfer_completion``, T2), never at
-    enqueue time.
+    return it); ``local_path``/``completed_at`` are stamped later, never at
+    enqueue time. Success uses event ingestion
+    (``stamp_transfer_completion``, T2); terminal failures use the exact-ID
+    or causal T1-row writes in ``transfer_ledger`` without inventing a path.
     """
 
     request_id: int
@@ -1088,17 +1089,34 @@ class TransferLedgerRow(msgspec.Struct, kw_only=True):
 
 @dataclass(frozen=True)
 class TransferIdOwnership:
-    """Ledger ``transfer_id`` membership, partitioned by completion stamp
-    (#571 PR 5) -- what ``lib.slskd_transfers.purge_completed_transfers``
-    needs to classify a live completed slskd transfer without a second
-    query per row.
+    """Owned IDs partitioned by authoritative path and terminal stamps.
 
-    ``stamped`` -- transfer_ids whose ledger row has ``completed_at`` set
-    (the P2 stamp-before-remove ordering constraint is satisfied; safe to
-    remove). ``unstamped`` -- transfer_ids cratedigger ledgered but whose
-    completion stamp hasn't landed yet (event ingestion hasn't caught up);
-    left for a later cycle, never removed. A transfer_id in neither set is
-    foreign -- never cratedigger's, never touched.
+    ``path_stamped`` rows have the success event's non-NULL ``local_path``
+    and may authorize removal for any terminal snapshot. ``pathless_stamped``
+    rows carry only a failure observation and may authorize removal only
+    while slskd still reports failure. ``unstamped`` rows are owned but await
+    one of those terminal writes.
     """
-    stamped: set[str]
+    path_stamped: set[str]
+    pathless_stamped: set[str]
     unstamped: set[str]
+
+
+TERMINAL_FAILURE_CLAIM_MAX_SKEW = timedelta(minutes=5)
+
+
+@dataclass(frozen=True)
+class TerminalFailureClaim:
+    """One terminal-failure snapshot eligible for the T1 ID fallback.
+
+    ``requested_at`` is slskd's earliest available lifecycle timestamp.
+    The database may bind this transfer only to an exact-key open ledger
+    row in the short causal window immediately before that timestamp,
+    preventing either an old ledger key or a newer retry from becoming
+    ownership evidence.
+    """
+
+    transfer_id: str
+    username: str
+    filename: str
+    requested_at: datetime

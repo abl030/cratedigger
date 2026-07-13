@@ -9,10 +9,13 @@ Tests create/drop tables in the target database — use a dedicated test DB.
 import json
 import os
 import sys
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 from unittest.mock import patch
 
 import msgspec
@@ -30,6 +33,7 @@ from lib.pipeline_db import (  # noqa: E402
     PersistedDistance,
     PersistedTrack,
     PersistedYoutubeRow,
+    TerminalFailureClaim,
     TransferLedgerRow,
 )
 
@@ -9103,6 +9107,78 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         )
         return [dict(row) for row in cur.fetchall()]
 
+    def _force_row_writer_overlap(
+        self,
+        row_id: int,
+        operations: tuple[Callable[[Any], Any], Callable[[Any], Any]],
+    ) -> list[Any]:
+        """Block two real production writers on the same PostgreSQL row.
+
+        The lock holder is released only after ``pg_stat_activity`` proves
+        both worker backends are waiting on a lock. This deterministically
+        gives both statements the same pre-update candidate rather than
+        hoping a scheduler race happens during a stress loop.
+        """
+        from lib.pipeline_db import PipelineDB
+
+        assert TEST_DSN is not None
+        locker = psycopg2.connect(TEST_DSN)
+        locker.autocommit = False
+        locker_cursor = locker.cursor()
+        locker_cursor.execute(
+            "SELECT id FROM slskd_transfer_ledger WHERE id = %s FOR UPDATE",
+            (row_id,),
+        )
+        started = (threading.Event(), threading.Event())
+        pids: list[int | None] = [None, None]
+
+        def run(index: int) -> Any:
+            db = PipelineDB(TEST_DSN)
+            try:
+                pid_row = db._execute(
+                    "SELECT pg_backend_pid() AS pid").fetchone()
+                pids[index] = int(pid_row["pid"])
+                started[index].set()
+                return operations[index](db)
+            finally:
+                db.close()
+
+        pool = ThreadPoolExecutor(max_workers=2)
+        futures = [pool.submit(run, index) for index in range(2)]
+        both_started = False
+        both_waiting = False
+        try:
+            both_started = all(event.wait(timeout=5) for event in started)
+            if both_started:
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    worker_pids = [pid for pid in pids if pid is not None]
+                    if len(worker_pids) == 2:
+                        rows = self.db._execute(
+                            "SELECT pid, wait_event_type FROM pg_stat_activity "
+                            "WHERE pid = ANY(%s)",
+                            (worker_pids,),
+                        ).fetchall()
+                        both_waiting = (
+                            len(rows) == 2
+                            and all(
+                                row["wait_event_type"] == "Lock" for row in rows)
+                        )
+                        if both_waiting:
+                            break
+                    time.sleep(0.01)
+        finally:
+            locker.commit()
+            locker_cursor.close()
+            locker.close()
+        try:
+            self.assertTrue(both_started, "both production writers must start")
+            self.assertTrue(
+                both_waiting, "both production writers must overlap on row lock")
+            return [future.result(timeout=5) for future in futures]
+        finally:
+            pool.shutdown(wait=True)
+
     def test_record_transfer_enqueue_round_trip_preserves_every_field(self):
         rid = self._seed_request()
         self.db.record_transfer_enqueue([
@@ -9163,7 +9239,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         ])
         self.db.stamp_transfer_completion(
             "p0", "a.flac", "/downloads/complete/a.flac",
-            datetime.now(timezone.utc))
+            datetime.now(timezone.utc), transfer_id="tid-a")
 
         self.assertEqual(
             self.db.get_owned_transfer_keys(),
@@ -9177,17 +9253,42 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         completed_at = datetime.now(timezone.utc)
 
         stamped = self.db.stamp_transfer_completion(
-            "p0", "a.flac", "/downloads/complete/a.flac", completed_at)
+            "p0", "a.flac", "/downloads/complete/a.flac", completed_at,
+            transfer_id="tid-a")
 
         self.assertEqual(stamped, 1)
         row = self._ledger_rows(rid)[0]
         self.assertEqual(row["local_path"], "/downloads/complete/a.flac")
         self.assertIsNotNone(row["completed_at"])
 
+    def test_success_event_upgrades_pathless_failure_stamp_by_exact_id(self):
+        """A failure stamp cannot block a later authoritative success path."""
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+        self.db.stamp_transfer_id("p0", "a.flac", "tid-a")
+        failure_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        self.assertEqual(
+            self.db.stamp_terminal_failures({"tid-a"}, failure_at),
+            {"tid-a"},
+        )
+        success_at = datetime.now(timezone.utc)
+
+        stamped = self.db.stamp_transfer_completion(
+            "p0", "a.flac", "/downloads/a.flac", success_at,
+            transfer_id="tid-a")
+
+        self.assertEqual(stamped, 1)
+        row = self._ledger_rows(rid)[0]
+        self.assertEqual(row["transfer_id"], "tid-a")
+        self.assertEqual(row["local_path"], "/downloads/a.flac")
+        self.assertEqual(row["completed_at"], success_at)
+
     def test_stamp_transfer_completion_unledgered_pair_returns_zero(self):
         stamped = self.db.stamp_transfer_completion(
             "foreign-peer", "foreign.flac", "/downloads/x",
-            datetime.now(timezone.utc))
+            datetime.now(timezone.utc), transfer_id="foreign-id")
         self.assertEqual(stamped, 0)
 
     def test_stamp_transfer_completion_reprocessing_is_idempotent(self):
@@ -9200,9 +9301,11 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         completed_at = datetime.now(timezone.utc)
 
         first = self.db.stamp_transfer_completion(
-            "p0", "a.flac", "/downloads/a.flac", completed_at)
+            "p0", "a.flac", "/downloads/a.flac", completed_at,
+            transfer_id="tid-a")
         second = self.db.stamp_transfer_completion(
-            "p0", "a.flac", "/downloads/a.flac", completed_at)
+            "p0", "a.flac", "/downloads/a.flac", completed_at,
+            transfer_id="tid-a")
 
         self.assertEqual(first, 1)
         self.assertEqual(second, 0)  # the row is no longer "open"
@@ -9227,7 +9330,8 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         ])
 
         self.db.stamp_transfer_completion(
-            "p0", "a.flac", "/downloads/newest.flac", datetime.now(timezone.utc))
+            "p0", "a.flac", "/downloads/newest.flac", datetime.now(timezone.utc),
+            transfer_id="tid-newest")
 
         rows = self._ledger_rows(rid)
         stamped = [r for r in rows if r["completed_at"] is not None]
@@ -9254,6 +9358,18 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             "foreign-peer", "foreign.flac", "tid-x")
         self.assertEqual(stamped, 0)
 
+    def test_stamp_transfer_id_replay_does_not_duplicate_id(self):
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+
+        self.assertEqual(self.db.stamp_transfer_id("p0", "a.flac", "tid-1"), 1)
+        self.assertEqual(self.db.stamp_transfer_id("p0", "a.flac", "tid-1"), 0)
+        rows = self._ledger_rows(rid)
+        self.assertEqual(sum(r["transfer_id"] == "tid-1" for r in rows), 1)
+
     def test_stamp_transfer_id_prefers_newest_open_row(self):
         """Same tie-break as stamp_transfer_completion: a retried file
         mints a fresh ledger row (T1); the enqueue-response capture must
@@ -9277,6 +9393,90 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         self.assertEqual(len(stamped), 1)
         self.assertNotEqual(stamped[0]["id"], old_row["id"])
         self.assertEqual(stamped[0]["transfer_id"], "tid-newest")
+
+    def test_stamp_transfer_id_different_ids_are_compare_and_set(self):
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+        row_id = self._ledger_rows(rid)[0]["id"]
+
+        results = self._force_row_writer_overlap(row_id, (
+            lambda db: db.stamp_transfer_id("p0", "a.flac", "tid-a"),
+            lambda db: db.stamp_transfer_id("p0", "a.flac", "tid-b"),
+        ))
+
+        authorized = {
+            transfer_id
+            for transfer_id, result in zip(("tid-a", "tid-b"), results)
+            if result == 1
+        }
+        row = self._ledger_rows(rid)[0]
+        self.assertEqual(authorized, {row["transfer_id"]})
+        self.assertEqual(len(authorized), 1)
+
+    def test_stamp_transfer_id_vs_success_event_authorizes_durable_winner(self):
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+        row_id = self._ledger_rows(rid)[0]["id"]
+        completed_at = datetime.now(timezone.utc)
+
+        results = self._force_row_writer_overlap(row_id, (
+            lambda db: db.stamp_transfer_id(
+                "p0", "a.flac", "tid-enqueue"),
+            lambda db: db.stamp_transfer_completion(
+                "p0", "a.flac", "/downloads/a.flac", completed_at,
+                transfer_id="tid-event"),
+        ))
+
+        authorized = set()
+        if results[0] == 1:
+            authorized.add("tid-enqueue")
+        if results[1] == 1:
+            authorized.add("tid-event")
+        row = self._ledger_rows(rid)[0]
+        self.assertEqual(authorized, {row["transfer_id"]})
+        self.assertEqual(len(authorized), 1)
+        if row["transfer_id"] == "tid-event":
+            self.assertEqual(row["local_path"], "/downloads/a.flac")
+        else:
+            self.assertIsNone(row["local_path"])
+
+    def test_stamp_transfer_id_vs_failure_claim_authorizes_durable_winner(self):
+        rid = self._seed_request()
+        requested_at = datetime.now(timezone.utc)
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+        row = self._ledger_rows(rid)[0]
+        self.db._execute(
+            "UPDATE slskd_transfer_ledger SET enqueued_at = %s WHERE id = %s",
+            (requested_at - timedelta(minutes=1), row["id"]),
+        )
+        claim = TerminalFailureClaim(
+            transfer_id="tid-claim", username="p0", filename="a.flac",
+            requested_at=requested_at,
+        )
+
+        results = self._force_row_writer_overlap(row["id"], (
+            lambda db: db.stamp_transfer_id(
+                "p0", "a.flac", "tid-enqueue"),
+            lambda db: db.claim_terminal_failures([claim], requested_at),
+        ))
+
+        authorized = set()
+        if results[0] == 1:
+            authorized.add("tid-enqueue")
+        authorized.update(results[1])
+        persisted = self._ledger_rows(rid)[0]
+        self.assertEqual(authorized, {persisted["transfer_id"]})
+        self.assertEqual(len(authorized), 1)
+        self.assertEqual(
+            persisted["completed_at"] is not None,
+            persisted["transfer_id"] == "tid-claim",
+        )
 
     def test_stamp_transfer_completion_coalesces_transfer_id_when_missing(self):
         """T2 fallback: when T1.5's enqueue-response capture never ran
@@ -9310,24 +9510,10 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         row = self._ledger_rows(rid)[0]
         self.assertEqual(row["transfer_id"], "tid-from-enqueue")
 
-    def test_stamp_transfer_completion_with_no_transfer_id_leaves_it_null(self):
-        """Existing callers that don't pass transfer_id (none in
-        production after this PR, but the parameter is optional) must not
-        regress to a non-NULL sentinel."""
-        rid = self._seed_request()
-        self.db.record_transfer_enqueue([
-            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
-        ])
-
-        self.db.stamp_transfer_completion(
-            "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc))
-
-        row = self._ledger_rows(rid)[0]
-        self.assertIsNone(row["transfer_id"])
-
     def test_get_owned_transfer_id_sets_empty_before_any_record(self):
         result = self.db.get_owned_transfer_id_sets()
-        self.assertEqual(result.stamped, set())
+        self.assertEqual(result.path_stamped, set())
+        self.assertEqual(result.pathless_stamped, set())
         self.assertEqual(result.unstamped, set())
 
     def test_get_owned_transfer_id_sets_partitions_by_completion_stamp(self):
@@ -9341,12 +9527,185 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         self.db.stamp_transfer_id("p0", "b.flac", "tid-b")
         # c.flac never gets a transfer_id at all -- absent from both sets.
         self.db.stamp_transfer_completion(
-            "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc))
+            "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc),
+            transfer_id="tid-a")
 
         result = self.db.get_owned_transfer_id_sets()
 
-        self.assertEqual(result.stamped, {"tid-a"})
+        self.assertEqual(result.path_stamped, {"tid-a"})
+        self.assertEqual(result.pathless_stamped, set())
         self.assertEqual(result.unstamped, {"tid-b"})
+
+    def test_get_owned_transfer_id_sets_separates_pathless_failure_stamp(self):
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+        self.db.stamp_transfer_id("p0", "a.flac", "tid-a")
+        self.db.stamp_terminal_failures(
+            {"tid-a"}, datetime.now(timezone.utc))
+
+        result = self.db.get_owned_transfer_id_sets()
+
+        self.assertEqual(result.path_stamped, set())
+        self.assertEqual(result.pathless_stamped, {"tid-a"})
+        self.assertEqual(result.unstamped, set())
+
+    def test_stamp_terminal_failures_round_trip_is_exact_and_idempotent(self):
+        """Failure snapshots stamp only exact open owned transfer IDs."""
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+            TransferLedgerRow(request_id=rid, username="p0", filename="b.flac"),
+            TransferLedgerRow(request_id=rid, username="p0", filename="c.flac"),
+        ])
+        self.db.stamp_transfer_id("p0", "a.flac", "tid-a")
+        self.db.stamp_transfer_id("p0", "b.flac", "tid-b")
+        self.db.stamp_transfer_id("p0", "c.flac", "tid-c")
+        observed_at = datetime.now(timezone.utc)
+
+        first = self.db.stamp_terminal_failures(
+            {"tid-a", "tid-b", "foreign-id"}, observed_at)
+        second = self.db.stamp_terminal_failures(
+            {"tid-a", "tid-b", "foreign-id"}, observed_at)
+
+        self.assertEqual(first, {"tid-a", "tid-b"})
+        self.assertEqual(second, set())
+        rows = {row["transfer_id"]: row for row in self._ledger_rows(rid)}
+        self.assertEqual(rows["tid-a"]["completed_at"], observed_at)
+        self.assertEqual(rows["tid-b"]["completed_at"], observed_at)
+        self.assertIsNone(rows["tid-a"]["local_path"])
+        self.assertIsNone(rows["tid-b"]["local_path"])
+        self.assertIsNone(rows["tid-c"]["completed_at"])
+
+    def test_claim_terminal_failures_round_trip_consumes_one_causal_open_row(self):
+        """T1 fallback cannot bind an old failure to a newer retry row."""
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+        old_row = self._ledger_rows(rid)[0]
+        terminal_requested_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        old_enqueued_at = terminal_requested_at - timedelta(minutes=4)
+        self.db._execute(
+            "UPDATE slskd_transfer_ledger SET enqueued_at = %s WHERE id = %s",
+            (old_enqueued_at, old_row["id"]),
+        )
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+        observed_at = datetime.now(timezone.utc)
+
+        first = self.db.claim_terminal_failures([
+            TerminalFailureClaim(
+                transfer_id="tid-old", username="p0", filename="a.flac",
+                requested_at=terminal_requested_at),
+            TerminalFailureClaim(
+                transfer_id="tid-human", username="foreign",
+                filename="human.flac", requested_at=terminal_requested_at),
+        ], observed_at)
+        second = self.db.claim_terminal_failures([
+            TerminalFailureClaim(
+                transfer_id="tid-other-terminal", username="p0",
+                filename="a.flac", requested_at=terminal_requested_at),
+        ], observed_at)
+
+        self.assertEqual(first, {"tid-old"})
+        self.assertEqual(second, set())
+        rows = self._ledger_rows(rid)
+        claimed = [row for row in rows if row["transfer_id"] == "tid-old"]
+        self.assertEqual(len(claimed), 1)
+        self.assertEqual(claimed[0]["completed_at"], observed_at)
+        newer = max(rows, key=lambda row: row["enqueued_at"])
+        self.assertIsNone(newer["transfer_id"])
+        self.assertIsNone(newer["completed_at"])
+
+    def test_claim_terminal_failures_rejects_stale_exact_key_row(self):
+        """A historical peer/file key is not positive ownership evidence."""
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+        requested_at = datetime.now(timezone.utc)
+        row = self._ledger_rows(rid)[0]
+        self.db._execute(
+            "UPDATE slskd_transfer_ledger SET enqueued_at = %s WHERE id = %s",
+            (requested_at - timedelta(days=1), row["id"]),
+        )
+
+        claimed = self.db.claim_terminal_failures([
+            TerminalFailureClaim(
+                transfer_id="tid-human", username="p0", filename="a.flac",
+                requested_at=requested_at),
+        ], requested_at)
+
+        self.assertEqual(claimed, set())
+        persisted = self._ledger_rows(rid)[0]
+        self.assertIsNone(persisted["transfer_id"])
+        self.assertIsNone(persisted["completed_at"])
+
+    def test_claim_terminal_failures_repeat_cannot_duplicate_transfer_id(self):
+        rid = self._seed_request()
+        requested_at = datetime.now(timezone.utc)
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+        self.db._execute(
+            "UPDATE slskd_transfer_ledger SET enqueued_at = %s "
+            "WHERE request_id = %s",
+            (requested_at - timedelta(minutes=1), rid),
+        )
+        claim = TerminalFailureClaim(
+            transfer_id="tid-one", username="p0", filename="a.flac",
+            requested_at=requested_at)
+
+        first = self.db.claim_terminal_failures([claim], requested_at)
+        second = self.db.claim_terminal_failures([claim], requested_at)
+
+        self.assertEqual(first, {"tid-one"})
+        self.assertEqual(second, set())
+        rows = self._ledger_rows(rid)
+        self.assertEqual(
+            sum(row["transfer_id"] == "tid-one" for row in rows), 1)
+
+    def test_claim_terminal_failures_concurrent_transfer_id_is_globally_unique(self):
+        rid = self._seed_request()
+        requested_at = datetime.now(timezone.utc)
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+            TransferLedgerRow(request_id=rid, username="p1", filename="b.flac"),
+        ])
+        self.db._execute(
+            "UPDATE slskd_transfer_ledger SET enqueued_at = %s "
+            "WHERE request_id = %s",
+            (requested_at - timedelta(minutes=1), rid),
+        )
+        claims = (
+            TerminalFailureClaim(
+                transfer_id="tid-race", username="p0", filename="a.flac",
+                requested_at=requested_at),
+            TerminalFailureClaim(
+                transfer_id="tid-race", username="p1", filename="b.flac",
+                requested_at=requested_at),
+        )
+
+        def run(claim: TerminalFailureClaim) -> set[str]:
+            from lib.pipeline_db import PipelineDB
+            db = PipelineDB(TEST_DSN)
+            try:
+                return db.claim_terminal_failures([claim], requested_at)
+            finally:
+                db.close()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(run, claims))
+
+        self.assertEqual(sum(result == {"tid-race"} for result in results), 1)
+        self.assertEqual(sum(result == set() for result in results), 1)
+        rows = self._ledger_rows(rid)
+        self.assertEqual(
+            sum(row["transfer_id"] == "tid-race" for row in rows), 1)
 
     def test_get_owned_local_paths_only_returns_stamped_rows(self):
         rid = self._seed_request()
@@ -9355,7 +9714,8 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             TransferLedgerRow(request_id=rid, username="p0", filename="b.flac"),
         ])
         self.db.stamp_transfer_completion(
-            "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc))
+            "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc),
+            transfer_id="tid-a")
 
         self.assertEqual(self.db.get_owned_local_paths(), {"/downloads/a.flac"})
 
@@ -9448,7 +9808,8 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
                 TransferLedgerRow(request_id=rid, username="p0", filename="b.flac"),
             ])
             db.stamp_transfer_completion(
-                "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc))
+                "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc),
+                transfer_id="tid-a")
 
         self.assertEqual(
             self.db.get_owned_local_paths(), fake.get_owned_local_paths())

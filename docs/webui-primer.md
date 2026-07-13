@@ -87,6 +87,16 @@ Browser → https://music.ablz.au
   in-library pressing's detail offers a lazy **Library detail** panel (path,
   download history, status / min-bitrate / intent controls) fetched from
   `/api/beets/album/<id>`.
+  Cross-source pairing is conservative: normalized titles and appearance
+  provenance must agree; known Album/EP/Single sets must overlap; exact years
+  may pair when a type is genuinely unknown; and an adjacent-year discrepancy
+  pairs only with positive type overlap. Discogs structural evidence comes
+  from the mirror's master-wide `primary_types`, never its representative
+  pressing's legacy scalar `type`. This preserves the Beatles' distinct
+  *Twist and Shout* Album/EP/Single works while pairing *The Pointless Gift*
+  despite MB (2000) and Discogs (2001) date disagreement. Reissues and
+  remasters remain child pressings inside their existing MB release group or
+  Discogs master; this display merge does not split them.
 - **Release editions** — when you expand a release group, shows all editions sorted by date
   - Official releases first, bootleg/promo collapsed — EXCEPT pressings that
     are in the library or have a pipeline request, which are always hoisted

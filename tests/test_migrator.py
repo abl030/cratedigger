@@ -1420,14 +1420,14 @@ class TestReplaceSupersedeSchema(unittest.TestCase):
 class TestBackfillV0MetricFromMeasurementSchema(unittest.TestCase):
     """Migration 024 backfills v0_metric on album_quality_evidence and
     v0_probe_* columns on download_log from the row's own
-    ``import_result.source_measurement`` JSONB. Without it, every non-lossless
-    candidate (MP3 V0, Opus, CBR 320) had NULL V0 probe fields and the
+    historical ``import_result.new_measurement`` JSONB. Without it, every
+    non-lossless candidate (MP3 V0, Opus, CBR 320) had NULL V0 probe fields and the
     audit/UI surface showed a blank "V0 probe" row.
 
     Validates:
     - schema_migrations records 024
     - the backfill UPDATE fills NULL v0_* fields on evidence rows that have
-      a linked download_log with ``import_result.source_measurement``
+      a linked download_log with legacy ``import_result.new_measurement``
     - the backfill UPDATE fills NULL v0_probe_* columns on download_log
       rows whose own JSONB carries ``new_measurement``
     - rows that already have v0_metric / v0_probe_* set are left untouched
@@ -3263,7 +3263,7 @@ class TestPinStatusDomainMigration(unittest.TestCase):
         dsn = _create_fresh_database(name)
         try:
             applied = apply_migrations(dsn, DEFAULT_MIGRATIONS_DIR)
-            self.assertEqual(applied[-1].version, 48)
+            self.assertEqual(applied[-1].version, 49)
             self.assertEqual(
                 self._query(
                     dsn,
@@ -3345,6 +3345,108 @@ class TestDropDeadSlskdBitrateMigration(unittest.TestCase):
                     ORDER BY column_name
                 """)
                 self.assertEqual(cur.fetchall(), [("slskd_filetype",)])
+        finally:
+            conn.close()
+
+
+@requires_postgres
+class TestUniqueSlskdTransferIdsMigration(unittest.TestCase):
+    """Migration 049 repairs duplicates without losing forensic rows."""
+
+    def _copy_through(self, target: str, version: int) -> None:
+        for migration in discover_migrations(DEFAULT_MIGRATIONS_DIR):
+            if migration.version <= version:
+                shutil.copy2(migration.path, target)
+
+    def test_dedupe_prefers_path_evidence_then_enforces_uniqueness(self) -> None:
+        name = "cratedigger_test_unique_transfer_ids_049"
+        dsn = _create_fresh_database(name)
+        try:
+            with tempfile.TemporaryDirectory() as migrations_dir:
+                self._copy_through(migrations_dir, 48)
+                apply_migrations(dsn, migrations_dir)
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO album_requests
+                                (artist_name, album_title, source, status)
+                            VALUES ('Artist', 'Album', 'request', 'wanted')
+                            RETURNING id
+                        """)
+                        request_row = cur.fetchone()
+                        assert request_row is not None
+                        request_id = request_row[0]
+                        cur.execute("""
+                            INSERT INTO slskd_transfer_ledger
+                                (request_id, username, filename, transfer_id,
+                                 enqueued_at, local_path, completed_at)
+                            VALUES
+                                (%s, 'p', 'a.flac', 'dup',
+                                 '2026-01-01T00:00:00Z', NULL, NULL),
+                                (%s, 'p', 'a.flac', 'dup',
+                                 '2026-01-02T00:00:00Z', NULL,
+                                 '2026-01-02T00:01:00Z'),
+                                (%s, 'p', 'a.flac', 'dup',
+                                 '2026-01-03T00:00:00Z', '/downloads/a.flac',
+                                 '2026-01-03T00:01:00Z'),
+                                (%s, 'p', 'a.flac', 'dup',
+                                 '2026-01-04T00:00:00Z', '/downloads/b.flac',
+                                 '2026-01-04T00:01:00Z')
+                        """, (request_id,) * 4)
+                finally:
+                    conn.close()
+
+                self._copy_through(migrations_dir, 49)
+                applied = apply_migrations(dsn, migrations_dir)
+                self.assertEqual([migration.version for migration in applied], [49])
+
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT transfer_id, local_path
+                            FROM slskd_transfer_ledger
+                            ORDER BY enqueued_at
+                        """)
+                        rows = cur.fetchall()
+                        self.assertEqual(
+                            [row for row in rows if row[0] == "dup"],
+                            [("dup", "/downloads/a.flac")],
+                        )
+                        self.assertEqual(len(rows), 4)
+                        with self.assertRaises(psycopg2.errors.UniqueViolation):
+                            cur.execute("""
+                                INSERT INTO slskd_transfer_ledger
+                                    (request_id, username, filename, transfer_id)
+                                VALUES (%s, 'p', 'other.flac', 'dup')
+                            """, (request_id,))
+                finally:
+                    conn.close()
+        finally:
+            _drop_database(name)
+
+    def test_records_049_and_partial_unique_index_exists(self) -> None:
+        conn = psycopg2.connect(TEST_DSN)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT name FROM schema_migrations WHERE version = 49")
+                self.assertEqual(
+                    cur.fetchone(), ("unique_slskd_transfer_ids",))
+                cur.execute("""
+                    SELECT indexdef FROM pg_indexes
+                    WHERE schemaname = 'public'
+                      AND indexname =
+                          'idx_slskd_transfer_ledger_transfer_id_unique'
+                """)
+                index_row = cur.fetchone()
+                assert index_row is not None
+                indexdef = index_row[0]
+                self.assertIn("UNIQUE", indexdef)
+                self.assertIn("WHERE (transfer_id IS NOT NULL)", indexdef)
         finally:
             conn.close()
 

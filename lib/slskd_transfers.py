@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ from typing import Any, Literal, TYPE_CHECKING
 
 from lib.download_reconstruction import reconstruct_grab_list_entry
 from lib.grab_list import DownloadFile, GrabListEntry
+from lib.pipeline_db import TerminalFailureClaim
 from lib.processing_paths import (
     canonical_folder_for_row,
     canonical_processing_path,
@@ -642,23 +644,59 @@ def rederive_transfer_ids(
 class CompletedPurgeSummary:
     """Aggregate result of one completed-transfer purge pass.
 
-    ``mutated`` gates the cycle's INFO summary line, matching
-    ``converge_slskd_orphans``'s Phase 0 contract: a pass that removed
-    nothing stays silent unless it also skipped an unstamped row (still
-    worth a log line — it explains why slskd's UI didn't clear).
+    ``reportable`` gates the cycle's INFO summary line. Newly stamped or
+    unconfirmed failures, successes still waiting on their authoritative
+    event, failed removals, and foreign terminal rows are operator-relevant
+    even when no slskd row was removed. ``failure_stamped`` is an overlapping
+    action metric; it is deliberately excluded from terminal-row conservation.
     """
     removed: int = 0
-    unstamped_skipped: int = 0
+    removal_failed: int = 0
+    failure_stamped: int = 0
+    failure_unconfirmed: int = 0
+    success_waiting: int = 0
     foreign_count: int = 0
+    nonterminal_count: int = 0
 
     @property
-    def mutated(self) -> bool:
-        return bool(self.removed or self.unstamped_skipped)
+    def reportable(self) -> bool:
+        return bool(
+            self.removed
+            or self.removal_failed
+            or self.failure_stamped
+            or self.failure_unconfirmed
+            or self.success_waiting
+            or self.foreign_count
+        )
+
+
+_SLSKD_LIFECYCLE_TIMESTAMP = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}"
+    r"(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?$"
+)
+
+
+def _terminal_claim_timestamp(value: str | None) -> datetime | None:
+    """Parse a real slskd lifecycle datetime, failing closed.
+
+    A date alone is valid to ``datetime.fromisoformat`` but is not lifecycle
+    evidence. The explicit shape check retains slskd's aware and naive forms
+    while requiring an actual time component.
+    """
+    if not value or _SLSKD_LIFECYCLE_TIMESTAMP.fullmatch(value) is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def purge_completed_transfers(ctx: CratediggerContext) -> CompletedPurgeSummary:
     """End-of-cycle sweep (issue #571 PR 5): per-id removal of ledger-
-    owned, completion-stamped completed slskd transfer records.
+    owned, terminal-stamped slskd transfer records.
 
     Replaces the old bulk ``remove_completed_downloads()`` call (``DELETE
     /transfers/downloads/all/completed``), which purged EVERY completed
@@ -666,16 +704,14 @@ def purge_completed_transfers(ctx: CratediggerContext) -> CompletedPurgeSummary:
     instance. Good-citizen doctrine (#571): a completed record is removed
     ONLY when it is BOTH (a) present in cratedigger's write-ahead
     ``slskd_transfer_ledger`` by ``transfer_id`` (proof cratedigger
-    created it — (username, filename) alone is ambiguous across retry
-    attempts, unlike ``converge_slskd_orphans``'s live-transfer case,
-    which never needs cross-attempt disambiguation because a retry's old
-    transfer is already gone from the live snapshot by the time a new one
-    exists) AND (b) its ledger row already carries the T2 completion
-    stamp (P2 ordering constraint: the events feed is the ONLY location
-    source, so removing slskd's own record before the stamp lands would
-    race it — an unstamped owned row is left for a later cycle, never
-    removed this pass). A record absent from the ledger is foreign and is
-    NEVER removed, whatever its state or age — counted only.
+    created it) AND (b) its ledger row carries a durable terminal stamp.
+    Successful transfers receive that stamp only with the authoritative
+    DownloadFileComplete local-path event. Non-success ``Completed,*``
+    snapshots receive it by exact transfer ID after the pre-purge evidence
+    harvest. If T1.5 never captured an ID, a failure may atomically claim
+    one causal ID-less T1 row for the exact peer/file key; the ledger row
+    must predate slskd's request timestamp, so an old terminal snapshot
+    cannot consume a newer retry. Removal remains per confirmed ID.
 
     Interplay with issue #550's disk reaper: the old bulk purge destroyed
     every completed transfer's slskd handle every cycle, which is part of
@@ -698,28 +734,102 @@ def purge_completed_transfers(ctx: CratediggerContext) -> CompletedPurgeSummary:
     db = ctx.pipeline_db_source._get_db()
     id_sets = db.get_owned_transfer_id_sets()
     classification = find_completed_transfers_to_purge(
-        downloads, id_sets.stamped, id_sets.unstamped)
-    removed = 0
-    for item in classification.to_remove:
+        downloads,
+        id_sets.path_stamped,
+        id_sets.pathless_stamped,
+        id_sets.unstamped,
+    )
+
+    observed_at = datetime.now(timezone.utc)
+    exact_failure_ids = {
+        item.transfer_id for item in classification.to_stamp_failures
+    }
+    confirmed_exact: set[str] = set()
+    if exact_failure_ids:
         try:
-            ctx.slskd.transfers.cancel_download(
-                item.username, item.transfer_id, remove=True)
-            removed += 1
+            confirmed_exact = db.stamp_terminal_failures(
+                exact_failure_ids, observed_at)
         except Exception:
+            logger.exception(
+                "COMPLETED-PURGE: exact-ID terminal-failure stamp failed; "
+                "those transfers will not be removed this cycle")
+
+    claim_by_id = {
+        item.transfer_id: item for item in classification.to_claim_failures
+    }
+    claims: list[TerminalFailureClaim] = []
+    for item in classification.to_claim_failures:
+        requested_at = _terminal_claim_timestamp(item.requested_at)
+        if requested_at is None:
+            continue
+        claims.append(TerminalFailureClaim(
+            transfer_id=item.transfer_id,
+            username=item.username,
+            filename=item.filename,
+            requested_at=requested_at,
+        ))
+    confirmed_claims: set[str] = set()
+    if claims:
+        try:
+            confirmed_claims = db.claim_terminal_failures(
+                claims, observed_at)
+        except Exception:
+            logger.exception(
+                "COMPLETED-PURGE: causal T1 terminal-failure claim failed; "
+                "those transfers will not be removed this cycle")
+
+    newly_confirmed = confirmed_exact | confirmed_claims
+    removable = list(classification.to_remove)
+    removable.extend(
+        item for item in classification.to_stamp_failures
+        if item.transfer_id in confirmed_exact
+    )
+    removable.extend(
+        claim_by_id[transfer_id]
+        for transfer_id in confirmed_claims
+    )
+    removed = 0
+    removal_failed = 0
+    for item in removable:
+        try:
+            removed_ok = ctx.slskd.transfers.cancel_download(
+                item.username, item.transfer_id, remove=True)
+            if removed_ok:
+                removed += 1
+            else:
+                removal_failed += 1
+                logger.error(
+                    "COMPLETED-PURGE: slskd rejected completed transfer "
+                    f"removal user={item.username!r} file={item.filename!r} "
+                    f"id={item.transfer_id} — will retry next cycle")
+        except Exception:
+            removal_failed += 1
             logger.exception(
                 "COMPLETED-PURGE: failed to remove completed transfer "
                 f"user={item.username!r} file={item.filename!r} "
                 f"id={item.transfer_id} — will retry next cycle")
     summary = CompletedPurgeSummary(
         removed=removed,
-        unstamped_skipped=classification.unstamped_count,
-        foreign_count=classification.foreign_count,
+        removal_failed=removal_failed,
+        failure_stamped=len(newly_confirmed),
+        failure_unconfirmed=(
+            len(exact_failure_ids) - len(confirmed_exact)
+            + len(classification.to_claim_failures) - len(confirmed_claims)
+        ),
+        success_waiting=classification.success_waiting_count,
+        foreign_count=(
+            classification.foreign_count
+        ),
+        nonterminal_count=classification.nonterminal_count,
     )
-    if summary.mutated:
+    if summary.reportable:
         logger.info(
-            "COMPLETED-PURGE: removed=%d unstamped_skipped=%d foreign=%d",
-            summary.removed, summary.unstamped_skipped,
-            summary.foreign_count)
+            "COMPLETED-PURGE: removed=%d removal_failed=%d failure_stamped=%d "
+            "failure_unconfirmed=%d success_waiting=%d foreign=%d "
+            "nonterminal=%d",
+            summary.removed, summary.removal_failed, summary.failure_stamped,
+            summary.failure_unconfirmed, summary.success_waiting,
+            summary.foreign_count, summary.nonterminal_count)
     return summary
 
 

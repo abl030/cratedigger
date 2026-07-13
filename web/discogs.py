@@ -282,8 +282,31 @@ def search_artists(query: str) -> list[dict]:
     )
 
 
+_DiscogsStructuralType = Literal["Album", "EP", "Single"]
+
+
+class _DiscogsArtistMasterEntry(msgspec.Struct):
+    """Strict row from an artist ``masters`` or ``appearances`` response."""
+    id: int | str
+    title: str
+    type: str
+    primary_types: list[_DiscogsStructuralType]
+    first_release_date: str
+    artist_credit: str
+    primary_artist_id: int | None
+    is_masterless: bool
+
+
+class _DiscogsArtistMastersResponse(msgspec.Struct):
+    """Strict response shared by artist masters and appearances endpoints."""
+    results: list[_DiscogsArtistMasterEntry]
+    total: int
+    page: int
+    per_page: int
+
+
 def _normalize_artist_master_entry(
-    r: dict,
+    r: _DiscogsArtistMasterEntry,
     *,
     is_appearance: bool,
 ) -> dict:
@@ -294,30 +317,36 @@ def _normalize_artist_master_entry(
     ``is_masterless=True`` + a ``discogs_release_id`` so the UI knows to expand
     via the release endpoint, not the master endpoint).
     """
-    raw_id = r.get("id")
-    is_masterless = bool(r.get("is_masterless"))
+    raw_id = r.id
+    is_masterless = r.is_masterless
     if is_masterless and isinstance(raw_id, str) and raw_id.startswith("release-"):
         bare_id = raw_id[len("release-"):]
         return {
             "id": bare_id,
-            "title": r.get("title", ""),
-            "type": r.get("type", ""),
+            "title": r.title,
+            "type": r.type,
+            "primary_types": list(r.primary_types),
             "secondary_types": [],
-            "first_release_date": r.get("first_release_date", ""),
-            "artist_credit": r.get("artist_credit", ""),
-            "primary_artist_id": str(r.get("primary_artist_id") or ""),
+            "first_release_date": r.first_release_date,
+            "artist_credit": r.artist_credit,
+            "primary_artist_id": (
+                str(r.primary_artist_id) if r.primary_artist_id is not None else ""
+            ),
             "is_appearance": is_appearance,
             "is_masterless": True,
             "discogs_release_id": bare_id,
         }
     return {
         "id": str(raw_id),
-        "title": r.get("title", ""),
-        "type": r.get("type", ""),
+        "title": r.title,
+        "type": r.type,
+        "primary_types": list(r.primary_types),
         "secondary_types": [],
-        "first_release_date": r.get("first_release_date", ""),
-        "artist_credit": r.get("artist_credit", ""),
-        "primary_artist_id": str(r.get("primary_artist_id") or ""),
+        "first_release_date": r.first_release_date,
+        "artist_credit": r.artist_credit,
+        "primary_artist_id": (
+            str(r.primary_artist_id) if r.primary_artist_id is not None else ""
+        ),
         "is_appearance": is_appearance,
     }
 
@@ -345,10 +374,11 @@ def get_artist_releases(artist_id: int) -> list[dict]:
 
         page = 1
         while True:
-            data = _get(
+            raw = _get(
                 f"{_api_base()}/api/artists/{artist_id}/masters?per_page=100&page={page}"
             )
-            results = data.get("results", [])
+            data = msgspec.convert(raw, type=_DiscogsArtistMastersResponse)
+            results = data.results
             if not results:
                 break
             for r in results:
@@ -356,15 +386,15 @@ def get_artist_releases(artist_id: int) -> list[dict]:
                     r, is_appearance=False,
                 )
                 entries.setdefault(entry["id"], entry)
-            total = data.get("total", 0)
-            if page * data.get("per_page", 100) >= total:
+            if page * data.per_page >= data.total:
                 break
             page += 1
 
-        appearances = _get(
-            f"{_api_base()}/api/artists/{artist_id}/appearances"
+        appearances = msgspec.convert(
+            _get(f"{_api_base()}/api/artists/{artist_id}/appearances"),
+            type=_DiscogsArtistMastersResponse,
         )
-        for r in appearances.get("results", []):
+        for r in appearances.results:
             entry = _normalize_artist_master_entry(
                 r, is_appearance=True,
             )
@@ -375,7 +405,7 @@ def get_artist_releases(artist_id: int) -> list[dict]:
             key=lambda e: (e.get("first_release_date") or "", e.get("id", "")),
         )
 
-    return _cache.memoize_meta(f"discogs:artist:{artist_id}:releases:v3", _fetch)
+    return _cache.memoize_meta(f"discogs:artist:{artist_id}:releases:v4", _fetch)
 
 
 def get_master_releases(master_id: int) -> dict:
