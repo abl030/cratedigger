@@ -361,6 +361,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "id": "21491",
             "title": "OK Computer",
             "type": "Album",
+            "primary_types": ["Album"],
             "secondary_types": [],
             "first_release_date": "1997",
             "artist_credit": "Radiohead",
@@ -630,12 +631,14 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "id": "8317023",
             "title": "Feather Figure/Elastic Bones",
             "type": "EP",
+            "primary_types": ["EP"],
             "secondary_types": [],
             "first_release_date": "2005-06-00",
             "artist_credit": "Deloris",
             "primary_artist_id": "361476",
             "is_masterless": True,
             "discogs_release_id": "8317023",
+            "is_appearance": False,
         }
         self.db.seed_request(make_request_row(
             id=8838,
@@ -933,6 +936,11 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
     DISCOGS_ARTIST_REQUIRED_FIELDS = {
         "artist_id", "artist_name", "release_groups",
     }
+    DISCOGS_ARTIST_ROW_REQUIRED_FIELDS = {
+        "id", "title", "type", "primary_types", "secondary_types",
+        "first_release_date", "artist_credit", "primary_artist_id",
+        "is_appearance", "has_official",
+    }
 
     def test_discogs_routes_return_503_mirror_required_when_base_unset(self):
         """R13: no mirror configured -> a clear mirror-required 503 from the
@@ -992,6 +1000,7 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
                     "id": "21491",
                     "title": "OK Computer",
                     "type": "Album",
+                    "primary_types": ["Album"],
                     "secondary_types": [],
                     "first_release_date": "1997",
                     "artist_credit": "Radiohead",
@@ -1004,6 +1013,12 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.DISCOGS_ARTIST_REQUIRED_FIELDS,
                                 "discogs artist response")
+        _assert_required_fields(
+            self,
+            data["release_groups"][0],
+            self.DISCOGS_ARTIST_ROW_REQUIRED_FIELDS,
+            "discogs artist row",
+        )
         self.assertIs(data["release_groups"][0]["is_appearance"], False)
 
     def test_discogs_artist_masterless_pipeline_overlay(self):
@@ -1026,12 +1041,14 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
                     "id": "8317023",
                     "title": "Feather Figure/Elastic Bones",
                     "type": "EP",
+                    "primary_types": ["EP"],
                     "secondary_types": [],
                     "first_release_date": "2005-06-00",
                     "artist_credit": "Deloris",
                     "primary_artist_id": "361476",
                     "is_masterless": True,
                     "discogs_release_id": "8317023",
+                    "is_appearance": False,
                 },
             ]
             status, data = self._get("/api/discogs/artist/361476?name=Deloris")

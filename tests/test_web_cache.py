@@ -18,9 +18,12 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
+from unittest.mock import patch
 
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -94,6 +97,16 @@ class FakeRedis:
         pattern = match or "*"
         keys = [k for k in self._store if fnmatch.fnmatch(k, pattern)]
         return 0, keys
+
+
+class RaisingRedis(FakeRedis):
+    """Redis client whose reads and writes both fail like a lost socket."""
+
+    def get(self, key: str) -> str | None:
+        raise ConnectionError(f"read failed for {key}")
+
+    def setex(self, key: str, ttl: int, value: str) -> None:
+        raise ConnectionError(f"write failed for {key}")
 
 
 class _CacheTestBase(unittest.TestCase):
@@ -270,6 +283,265 @@ class TestMemoizeMetaFresh(_CacheTestBase):
         self.assertEqual(third, {"title": "Corrected Title"})
         self.assertEqual(calls, [1, 2],
                          "cache must have been repopulated by fresh=True")
+
+
+class _FlightAbort(BaseException):
+    """A non-Exception failure used to pin BaseException cleanup."""
+
+
+class TestMemoizeMetaSingleFlight(_CacheTestBase):
+    """Concurrent cold metadata misses share one isolated cache fill."""
+
+    def test_overlapping_misses_execute_one_fill_and_isolate_waiters(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        calls: list[int] = []
+        original = {"rows": [{"id": "one"}]}
+
+        def fetch() -> dict[str, list[dict[str, str]]]:
+            calls.append(1)
+            entered.set()
+            self.assertTrue(release.wait(timeout=5))
+            return original
+
+        started = threading.Barrier(4)
+
+        def call() -> object:
+            started.wait(timeout=5)
+            return self.cache.memoize_meta("artist:one", fetch)
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = [pool.submit(call) for _ in range(3)]
+            started.wait(timeout=5)
+            self.assertTrue(entered.wait(timeout=5))
+            time.sleep(0.02)
+            release.set()
+            results = [future.result(timeout=5) for future in futures]
+
+        self.assertEqual(calls, [1])
+        self.assertTrue(all(result == original for result in results))
+        self.assertTrue(
+            any(result is original for result in results),
+            "the elected leader should retain the fetch result it owns",
+        )
+        self.assertEqual(len({id(result) for result in results}), 3)
+        result_rows = [result["rows"] for result in results]  # type: ignore[index]
+        self.assertEqual(len({id(rows) for rows in result_rows}), 3)
+        result_rows[0][0]["overlay"] = "request-one"
+        self.assertNotIn("overlay", result_rows[1][0])
+        self.assertNotIn("overlay", result_rows[2][0])
+
+    def test_leader_rechecks_cache_after_election(self) -> None:
+        cached = {"source": "just-finished"}
+        reads = [None, cached]
+
+        with patch.object(
+            self.cache,
+            "meta_get",
+            side_effect=lambda _key: reads.pop(0),
+        ), patch.object(self.cache, "meta_set") as meta_set:
+            result = self.cache.memoize_meta(
+                "artist:stale-miss",
+                lambda: self.fail("stale leader must re-read Redis"),
+            )
+
+        self.assertEqual(result, cached)
+        meta_set.assert_not_called()
+
+    def test_failure_wakes_followers_and_next_call_retries(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        failure = RuntimeError("mirror exploded")
+        calls = 0
+
+        def fail() -> object:
+            nonlocal calls
+            calls += 1
+            entered.set()
+            self.assertTrue(release.wait(timeout=5))
+            raise failure
+
+        started = threading.Barrier(4)
+
+        def call() -> object:
+            started.wait(timeout=5)
+            return self.cache.memoize_meta("artist:failure", fail)
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = [pool.submit(call) for _ in range(3)]
+            started.wait(timeout=5)
+            self.assertTrue(entered.wait(timeout=5))
+            time.sleep(0.02)
+            release.set()
+            raised: list[BaseException] = []
+            for future in futures:
+                with self.assertRaises(RuntimeError) as ctx:
+                    future.result(timeout=5)
+                raised.append(ctx.exception)
+
+        self.assertEqual(calls, 1)
+        self.assertTrue(all(exc is failure for exc in raised))
+        recovered = self.cache.memoize_meta(
+            "artist:failure", lambda: {"ok": True},
+        )
+        self.assertEqual(recovered, {"ok": True})
+
+    def test_baseexception_cleans_up_flight_for_retry(self) -> None:
+        failure = _FlightAbort("stop this fill")
+
+        with self.assertRaises(_FlightAbort) as ctx:
+            self.cache.memoize_meta(
+                "artist:abort", lambda: (_ for _ in ()).throw(failure),
+            )
+        self.assertIs(ctx.exception, failure)
+        self.assertEqual(
+            self.cache.memoize_meta("artist:abort", lambda: {"retry": True}),
+            {"retry": True},
+        )
+
+    def test_redis_down_shares_overlap_but_later_call_refetches(self) -> None:
+        self.cache._redis = None
+        entered = threading.Event()
+        release = threading.Event()
+        calls = 0
+
+        def fetch() -> dict[str, int]:
+            nonlocal calls
+            calls += 1
+            entered.set()
+            self.assertTrue(release.wait(timeout=5))
+            return {"fill": calls}
+
+        started = threading.Barrier(4)
+
+        def call() -> object:
+            started.wait(timeout=5)
+            return self.cache.memoize_meta("artist:no-redis", fetch)
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = [pool.submit(call) for _ in range(3)]
+            started.wait(timeout=5)
+            self.assertTrue(entered.wait(timeout=5))
+            time.sleep(0.02)
+            release.set()
+            results = [future.result(timeout=5) for future in futures]
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(results, [{"fill": 1}] * 3)
+        release.set()
+        self.assertEqual(
+            self.cache.memoize_meta("artist:no-redis", fetch), {"fill": 2},
+        )
+
+    def test_redis_command_failures_share_overlap_then_retry(self) -> None:
+        self.cache._redis = RaisingRedis()
+        entered = threading.Event()
+        release = threading.Event()
+        calls = 0
+
+        def fetch() -> dict[str, int]:
+            nonlocal calls
+            calls += 1
+            entered.set()
+            self.assertTrue(release.wait(timeout=5))
+            return {"fill": calls}
+
+        started = threading.Barrier(3)
+
+        def call() -> object:
+            started.wait(timeout=5)
+            return self.cache.memoize_meta("artist:redis-errors", fetch)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(call) for _ in range(2)]
+            started.wait(timeout=5)
+            self.assertTrue(entered.wait(timeout=5))
+            time.sleep(0.02)
+            release.set()
+            results = [future.result(timeout=5) for future in futures]
+
+        self.assertEqual(results, [{"fill": 1}, {"fill": 1}])
+        self.assertEqual(calls, 1)
+        self.assertEqual(
+            self.cache.memoize_meta("artist:redis-errors", fetch), {"fill": 2},
+        )
+
+    def test_distinct_keys_fill_in_parallel(self) -> None:
+        both_entered = threading.Event()
+        release = threading.Event()
+        entered: set[str] = set()
+        lock = threading.Lock()
+
+        def fetch(key: str) -> dict[str, str]:
+            with lock:
+                entered.add(key)
+                if len(entered) == 2:
+                    both_entered.set()
+            self.assertTrue(release.wait(timeout=5))
+            return {"key": key}
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(self.cache.memoize_meta, key, lambda k=key: fetch(k))
+                for key in ("artist:a", "artist:b")
+            ]
+            self.assertTrue(
+                both_entered.wait(timeout=5),
+                "a registry-wide lock serialized independent metadata keys",
+            )
+            release.set()
+            results = [future.result(timeout=5) for future in futures]
+
+        self.assertCountEqual(results, [{"key": "artist:a"}, {"key": "artist:b"}])
+
+    def test_fresh_calls_bypass_singleflight(self) -> None:
+        calls = 0
+
+        def fetch() -> dict[str, int]:
+            nonlocal calls
+            calls += 1
+            return {"fill": calls}
+
+        first = self.cache.memoize_meta("artist:fresh", fetch, fresh=True)
+        second = self.cache.memoize_meta("artist:fresh", fetch, fresh=True)
+        self.assertEqual(first, {"fill": 1})
+        self.assertEqual(second, {"fill": 2})
+
+    def test_abandoned_waiter_does_not_cancel_leader(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        calls = 0
+
+        def fetch() -> dict[str, bool]:
+            nonlocal calls
+            calls += 1
+            entered.set()
+            self.assertTrue(release.wait(timeout=5))
+            return {"filled": True}
+
+        leader = threading.Thread(
+            target=self.cache.memoize_meta,
+            args=("artist:abandoned", fetch),
+            daemon=True,
+        )
+        leader.start()
+        self.assertTrue(entered.wait(timeout=5))
+
+        # A follower represents a request whose client has disconnected. We
+        # deliberately stop observing it; the leader must still finish/cache.
+        abandoned = threading.Thread(
+            target=self.cache.memoize_meta,
+            args=("artist:abandoned", fetch),
+            daemon=True,
+        )
+        abandoned.start()
+        time.sleep(0.02)
+        release.set()
+        leader.join(timeout=5)
+        abandoned.join(timeout=5)
+        self.assertFalse(leader.is_alive())
+        self.assertEqual(calls, 1)
+        self.assertEqual(self.cache.meta_get("artist:abandoned"), {"filled": True})
 
 
 class TestRedisMetrics(_CacheTestBase):
