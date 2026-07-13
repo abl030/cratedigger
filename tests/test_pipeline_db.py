@@ -3450,6 +3450,81 @@ class TestApplyTransitionDB(unittest.TestCase):
         assert req is not None
         self.assertIsNone(req["search_filetype_override"])
 
+    def test_two_session_cas_race_exactly_one_transition_wins(self):
+        from lib.pipeline_db import PipelineDB
+        from lib.transitions import (
+            TransitionApplied,
+            TransitionConflict,
+            apply_transition,
+        )
+
+        req_id = self.db.add_request(
+            mb_release_id="transition-cas-race",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        db_two = PipelineDB(TEST_DSN)
+        barrier = threading.Barrier(2)
+
+        def race(db, target: str):
+            barrier.wait(timeout=5)
+            return apply_transition(
+                db, req_id, target, from_status="wanted")
+
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(
+                    lambda pair: race(*pair),
+                    ((self.db, "manual"), (db_two, "imported")),
+                ))
+        finally:
+            db_two.close()
+
+        self.assertEqual(
+            sum(isinstance(result, TransitionApplied) for result in results), 1)
+        self.assertEqual(
+            sum(isinstance(result, TransitionConflict) for result in results), 1)
+        row = self.db.get_request(req_id)
+        assert row is not None
+        self.assertIn(row["status"], {"manual", "imported"})
+
+    def test_replaced_row_is_frozen_across_every_status_writer(self):
+        from lib.transitions import TransitionConflict, apply_transition
+
+        old_id = self.db.add_request(
+            mb_release_id="transition-frozen-old",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        self.db.supersede_request_mbid(
+            old_id,
+            new_mb_release_id="transition-frozen-new",
+            new_mb_release_group_id=None,
+            new_mb_artist_id=None,
+            new_artist_name="A",
+            new_album_title="B2",
+            new_year=None,
+            new_country=None,
+            new_tracks=[],
+        )
+        before = self.db.get_request(old_id)
+        assert before is not None
+
+        result = apply_transition(
+            self.db, old_id, "wanted", from_status="replaced")
+        self.assertIsInstance(result, TransitionConflict)
+        self.assertFalse(self.db.update_status(
+            old_id, "wanted", expected_status="replaced"))
+        self.assertFalse(self.db.reset_to_wanted(
+            old_id, expected_status="replaced"))
+        self.assertFalse(self.db.mark_imported_with_rescue(
+            old_id, expected_status="replaced"))
+        self.assertFalse(self.db.set_downloading(
+            old_id, "{}", expected_status="wanted"))
+        self.assertEqual(self.db.get_request(old_id), before)
+
 
 @requires_postgres
 class TestAlbumQualityEvidenceStorage(unittest.TestCase):

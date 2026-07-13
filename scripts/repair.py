@@ -351,12 +351,12 @@ def cmd_fix(db: PipelineDB, slskd_host: str | None = None,
     for issue in issues:
         repair = suggest_repair(issue)
         if repair.action == "reset_to_wanted":
-            finalize_request(
+            transitions.require_transition_applied(finalize_request(
                 db,
                 issue.request_id,
                 transitions.RequestTransition.to_wanted(
                     from_status="downloading"),
-            )
+            ))
             print(f"  [{issue.request_id}] Reset to wanted ({issue.issue_type})")
         elif repair.action == "wait_for_automatic_recovery":
             print(

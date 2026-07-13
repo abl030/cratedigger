@@ -125,6 +125,47 @@ class TestDatabaseSourceRejectAndRequeueSeam(unittest.TestCase):
         self.assertEqual(row["status"], "wanted")
         self.assertEqual(row["validation_attempts"], 1)
 
+    def test_conflict_stops_attempt_and_audit_side_effects(self) -> None:
+        from lib.transitions import (
+            RequestTransitionConflict,
+            TransitionConflict,
+            TransitionConflictKind,
+        )
+
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(id=42, status="replaced"))
+        before = dict(fake_db.request(42))
+        source = DatabaseSource.__new__(DatabaseSource)
+        source._db = fake_db  # type: ignore[assignment]
+        album_record = MagicMock(db_request_id=42)
+        bv_result = ValidationResult(
+            valid=False,
+            distance=0.35,
+            scenario="high_distance",
+        )
+        conflict = TransitionConflict(
+            request_id=42,
+            target_status="wanted",
+            kind=TransitionConflictKind.invalid_edge,
+            expected_status="replaced",
+            actual_status="replaced",
+        )
+
+        with (
+            patch("lib.transitions.finalize_request", return_value=conflict),
+            self.assertRaises(RequestTransitionConflict),
+        ):
+            source.reject_and_requeue(
+                album_record,
+                bv_result,
+                usernames={"peer"},
+            )
+
+        self.assertEqual(fake_db.request(42), before)
+        self.assertEqual(fake_db.recorded_attempts, [])
+        self.assertEqual(fake_db.download_logs, [])
+        self.assertEqual(fake_db.denylist, [])
+
 
 class TestDatabaseSource(unittest.TestCase):
     def _make_source(self):

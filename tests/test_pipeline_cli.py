@@ -24,6 +24,7 @@ import scripts.pipeline_cli.long_tail as pipeline_cli_long_tail
 from scripts import pipeline_cli
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
+from lib.transitions import TransitionConflict, TransitionConflictKind
 from tests.test_beets_db import _create_test_db, _insert_album
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
@@ -422,6 +423,28 @@ class TestCmdRetry(unittest.TestCase):
         req = self.db.get_request(req_id)
         assert req is not None
         self.assertEqual(req["status"], "wanted")
+
+    @patch("scripts.pipeline_cli.album_requests.finalize_request")
+    def test_retry_maps_stale_transition_to_nonzero_without_success(
+        self, mock_transition,
+    ):
+        req_id = self.db.add_request(
+            mb_release_id="retry-conflict", artist_name="A",
+            album_title="B", source="request")
+        mock_transition.return_value = TransitionConflict(
+            request_id=req_id,
+            target_status="wanted",
+            kind=TransitionConflictKind.stale_source,
+            expected_status="imported",
+            actual_status="replaced",
+        )
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = pipeline_cli.cmd_retry(self.db, MagicMock(id=req_id))
+
+        self.assertEqual(rc, 4)
+        self.assertEqual(json.loads(out.getvalue())["error"], "transition_conflict")
 
 
 class TestCmdCancel(unittest.TestCase):

@@ -515,7 +515,7 @@ def dispatch_import_core(
                     if decision in ("import", "preflight_existing"):
                         if prev_br is not None or new_br is not None:
                             try:
-                                finalize_request(
+                                transitions.require_transition_applied(finalize_request(
                                     db,
                                     request_id,
                                     transitions.RequestTransition.to_imported(
@@ -523,7 +523,7 @@ def dispatch_import_core(
                                         prev_min_bitrate=prev_br,
                                         min_bitrate=new_br,
                                     ),
-                                )
+                                ))
                             except Exception:
                                 logger.exception("Failed to update upgrade delta")
                     outcome_success = True
@@ -745,14 +745,14 @@ def dispatch_import_core(
                     }
                     if action.mark_done and new_br is not None:
                         requeue_fields["min_bitrate"] = new_br
-                    finalize_request(
+                    transitions.require_transition_applied(finalize_request(
                         db,
                         request_id,
                         transitions.RequestTransition.to_wanted_fields(
                             from_status="imported",
                             fields=requeue_fields,
                         ),
-                    )
+                    ))
 
                 if action.run_quality_gate:
                     quality_gate_fn(

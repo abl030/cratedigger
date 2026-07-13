@@ -1239,10 +1239,12 @@ def update_pipeline_db(request_id, status, imported_path=None, distance=None, sc
                 transition = transitions.RequestTransition.to_manual()
             else:
                 transition = transitions.RequestTransition.status_only(status)
-            finalize_request(
-                db,
-                request_id,
-                transition,
+            transitions.require_transition_applied(
+                finalize_request(
+                    db,
+                    request_id,
+                    transition,
+                )
             )
         except (TypeError, ValueError) as e:
             print(f"  [WARN] Pipeline DB transition rejected: {e}", file=sys.stderr)

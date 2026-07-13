@@ -22,13 +22,11 @@ lifecycle invariants after every step:
   row and a downloading→wanted requeue on a non-downloading row are
   no-ops that leave the row untouched.
 
-Rule eligibility mirrors production caller guards: the DB-guarded
-operations (claim, download-fail requeue) deliberately target ANY row —
-the guard is the contract under test — while unguarded transitions
-(→imported/→manual/→wanted-reset, supersede) select rows by the statuses
-their production callers act on, exactly as the live system does (the
-DAG in ``VALID_TRANSITIONS`` warns but does not block; enforcement lives
-in caller row-selection).
+Alongside scenario-shaped rules, ``attempt_any_transition`` deliberately drives
+every target from every current status (including ``replaced``), with both
+current and stale explicit source snapshots. The production transition DAG and
+SQL compare-and-set boundary must reject every invalid/stale world without
+caller-side eligibility filtering.
 
 Profiles, promotion policy, fault-injection qualification:
 docs/generated-testing.md.
@@ -51,7 +49,14 @@ from hypothesis.stateful import (
     rule,
 )
 
-from lib.transitions import RequestTransition, finalize_request
+from lib.transitions import (
+    VALID_TRANSITIONS,
+    RequestTransition,
+    TransitionApplied,
+    TransitionConflict,
+    TransitionResult,
+    finalize_request,
+)
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_active_download_state_json
 
@@ -111,6 +116,25 @@ def assert_replacement_linked(replaced_id: int, descendant: dict | None) -> None
             f"(replaces_request_id={descendant.get('replaces_request_id')!r})")
 
 
+def assert_transition_result_matches(
+    before: dict,
+    after: dict,
+    target_status: str,
+    result: TransitionResult,
+) -> None:
+    """A conflict is a byte-identical no-op; applied means target landed."""
+    if isinstance(result, TransitionApplied):
+        if after["status"] != target_status:
+            raise AssertionError(
+                f"applied transition reported {target_status!r} but row is "
+                f"{after['status']!r}")
+        return
+    if after != before:
+        raise AssertionError(
+            f"conflicted transition mutated request {before['id']}: "
+            f"{before} -> {after}")
+
+
 class RequestLifecycleMachine(RuleBasedStateMachine):
     def __init__(self) -> None:
         super().__init__()
@@ -162,12 +186,12 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
             state_json=make_active_download_state_json([])))
         row = self._row(rid)
         if before["status"] == "wanted":
-            if not ok or row["status"] != "downloading":
+            if not isinstance(ok, TransitionApplied) or row["status"] != "downloading":
                 raise AssertionError(
                     f"wanted->downloading claim failed: ok={ok}, "
                     f"status={row['status']!r}")
         else:
-            if ok or row != before:
+            if not isinstance(ok, TransitionConflict) or row != before:
                 raise AssertionError(
                     f"claim on {before['status']!r} row must be a no-op "
                     f"(ok={ok})")
@@ -184,7 +208,7 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
             min_bitrate=245,
         ))
         row = self._row(rid)
-        if not ok or row["status"] != "imported":
+        if not isinstance(ok, TransitionApplied) or row["status"] != "imported":
             raise AssertionError(
                 f"downloading->imported failed: ok={ok}, "
                 f"status={row['status']!r}")
@@ -200,7 +224,7 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
             from_status="downloading", attempt_type="download"))
         row = self._row(rid)
         if before["status"] == "downloading":
-            if not ok or row["status"] != "wanted":
+            if not isinstance(ok, TransitionApplied) or row["status"] != "wanted":
                 raise AssertionError(
                     f"downloading->wanted requeue failed: ok={ok}, "
                     f"status={row['status']!r}")
@@ -210,7 +234,7 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
                     f"({before['download_attempts']} -> "
                     f"{row['download_attempts']})")
         else:
-            if ok or row != before:
+            if not isinstance(ok, TransitionConflict) or row != before:
                 raise AssertionError(
                     f"downloading->wanted on {before['status']!r} row must "
                     f"be a no-op (ok={ok})")
@@ -225,7 +249,7 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
         ok = finalize_request(
             self.db, rid, RequestTransition.to_manual(from_status=from_status))
         row = self._row(rid)
-        if not ok or row["status"] != "manual":
+        if not isinstance(ok, TransitionApplied) or row["status"] != "manual":
             raise AssertionError(
                 f"{from_status}->manual failed: ok={ok}, "
                 f"status={row['status']!r}")
@@ -241,7 +265,7 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
         ok = finalize_request(
             self.db, rid, RequestTransition.to_wanted(from_status=from_status))
         row = self._row(rid)
-        if not ok or row["status"] != "wanted":
+        if not isinstance(ok, TransitionApplied) or row["status"] != "wanted":
             raise AssertionError(
                 f"{from_status}->wanted requeue failed: ok={ok}, "
                 f"status={row['status']!r}")
@@ -249,6 +273,58 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
             if row[counter] != 0:
                 raise AssertionError(
                     f"requeue did not clear {counter} (={row[counter]})")
+
+    @precondition(lambda self: self.ids)
+    @rule(
+        data=st.data(),
+        target_status=st.sampled_from(
+            ("wanted", "downloading", "imported", "manual")),
+        explicit_source=st.booleans(),
+    )
+    def attempt_any_transition(
+        self,
+        data,
+        target_status: str,
+        explicit_source: bool,
+    ) -> None:
+        """Drive every target from every current status, including replaced.
+
+        This is deliberately NOT eligibility-filtered: invalid edges and stale
+        explicit snapshots are production inputs whose no-op behavior is part
+        of the lifecycle contract.
+        """
+        rid = data.draw(st.sampled_from(self.ids), label="any transition target")
+        before = copy.deepcopy(self._row(rid))
+        actual = str(before["status"])
+        claimed_source = actual if explicit_source else None
+        if explicit_source and data.draw(st.booleans(), label="stale snapshot"):
+            claimed_source = "wanted" if actual != "wanted" else "manual"
+
+        if target_status == "wanted":
+            command = RequestTransition.to_wanted(from_status=claimed_source)
+        elif target_status == "downloading":
+            command = RequestTransition.to_downloading(
+                from_status=claimed_source,
+                state_json=make_active_download_state_json([]),
+            )
+        elif target_status == "imported":
+            command = RequestTransition.to_imported(from_status=claimed_source)
+        else:
+            command = RequestTransition.to_manual(from_status=claimed_source)
+
+        result = finalize_request(self.db, rid, command)
+        after = self._row(rid)
+        should_apply = (
+            (claimed_source is None or claimed_source == actual)
+            and (actual, target_status) in VALID_TRANSITIONS
+        )
+        if should_apply and not isinstance(result, TransitionApplied):
+            raise AssertionError(
+                f"valid {actual!r}->{target_status!r} conflicted: {result}")
+        if not should_apply and not isinstance(result, TransitionConflict):
+            raise AssertionError(
+                f"invalid/stale {actual!r}->{target_status!r} applied: {result}")
+        assert_transition_result_matches(before, after, target_status, result)
 
     @precondition(
         lambda self: self._ids_with_status("wanted", "imported", "manual"))
@@ -350,6 +426,24 @@ class TestLifecycleCheckersTripOnViolations(unittest.TestCase):
             assert_replacement_linked(1, None)
         with self.assertRaises(AssertionError):
             assert_replacement_linked(1, {"replaces_request_id": 99})
+
+    def test_trips_when_conflict_mutates_row(self):
+        from lib.transitions import TransitionConflictKind
+
+        before = {"id": 1, "status": "replaced"}
+        after = {"id": 1, "status": "wanted"}
+        conflict = TransitionConflict(
+            1, "wanted", TransitionConflictKind.invalid_edge,
+            "replaced", "replaced",
+        )
+        with self.assertRaises(AssertionError):
+            assert_transition_result_matches(before, after, "wanted", conflict)
+
+    def test_trips_when_applied_target_did_not_land(self):
+        row = {"id": 1, "status": "wanted"}
+        applied = TransitionApplied(1, "wanted", "manual")
+        with self.assertRaises(AssertionError):
+            assert_transition_result_matches(row, row, "manual", applied)
 
 
 if __name__ == "__main__":

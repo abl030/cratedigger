@@ -65,7 +65,7 @@ against that reality, not against a hypothetical public exposure.
 | CD-SEC-12 | Low | Vulnerable-version matches in the locked closure + narrow CI scope | `flake.lock`, `nix/package.nix` |
 | CD-SEC-13 | Info | Plex XML parsed with stdlib ElementTree under an unverified-TLS fallback | `lib/util.py` |
 | CD-SEC-14 | Critical | Remediated: destructive identifiers bind to one server-owned release | `lib/destructive_release_service.py` |
-| CD-SEC-15 | High | Request transition engine fails open and can resurrect `replaced` rows | `lib/transitions.py`, `lib/pipeline_db/requests.py` |
+| CD-SEC-15 | High | Remediated: typed fail-closed transitions and source-status CAS freeze `replaced` rows | `lib/transitions.py`, `lib/pipeline_db/requests.py` |
 | CD-SEC-16 | High | Remediated: destructive operations share importer locks | `lib/destructive_release_service.py` |
 | CD-SEC-17 | High | Terminal import outcomes persist as multiple autocommit statements | `lib/dispatch/outcome_actions.py`, `scripts/import_preview_worker.py` |
 | CD-SEC-18 | Medium | Track replacement is non-atomic | `lib/pipeline_db/misc.py` |
@@ -182,6 +182,17 @@ library-delete test suite currently pins the unsafe preference for explicit
   property for the no-mutation invariant.
 
 ### CD-SEC-15 — Request transitions fail open and can resurrect `replaced` rows (High)
+
+**Remediated in the issue #663 transition-integrity workstream.** Invalid,
+missing, and stale-source attempts return distinct typed conflicts before any
+mutation seam. Every ordinary status writer compares and sets the exact source
+status in SQL (explicit caller snapshots are checked against the current row),
+and `replaced` is rejected by both the lifecycle graph and the DB writers.
+HTTP conflicts map to 409 (404 for a disappeared row); CLI twins return exit 4.
+Worker callers require an applied result before continuing with dependent
+effects. Deterministic resurrection/stale-snapshot pins, a stateful generated
+all-status/all-target property with known-bad qualification, and a real
+two-session PostgreSQL race prove zero mutation and exactly one CAS winner.
 
 `lib/transitions.py::apply_transition` logs an invalid transition and then
 continues. Most target states ultimately call `update_status`,
@@ -485,6 +496,12 @@ cleanup, transition and audit logic directly in the route.
 
 ### CD-QUAL-02 — Forward-only cleanup and documentation drift
 
+The status-documentation portion is remediated alongside CD-SEC-15: the shared
+Pipeline DB rule and schema guide now include terminal, frozen `replaced`.
+The production legacy preview-status cohorts are nonempty, so their
+compatibility and `scripts/populate_tracks.py` are deliberately untouched by
+this workstream rather than being removed on an untrue empty-cohort premise.
+
 `scripts/populate_tracks.py` is an obsolete committed one-shot that passes an
 old SQLite path to the PostgreSQL `PipelineDB` and can no longer run. The import
 queue retains `would_import`/`uncertain` compatibility even though migration 018
@@ -538,7 +555,7 @@ Priority data-loss / audit-integrity work:
 
 - [ ] **CD-SEC-14** — bind every destructive identifier to one server-resolved
       release; mismatch must produce zero mutation.
-- [ ] **CD-SEC-15** — fail closed on invalid transitions and compare-and-set the
+- [x] **CD-SEC-15** — fail closed on invalid transitions and compare-and-set the
       expected source status, including frozen `replaced` rows.
 - [ ] **CD-SEC-16** — hold the importer release lock across ban/delete beets
       mutations and return 409 on contention.

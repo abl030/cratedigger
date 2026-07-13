@@ -6,6 +6,9 @@ from typing import Any, TYPE_CHECKING, cast
 from lib.transitions import (
     VALID_TRANSITIONS,
     RequestTransition,
+    TransitionApplied,
+    TransitionConflict,
+    TransitionConflictKind,
     TransitionSideEffects,
     apply_transition,
     finalize_request,
@@ -162,7 +165,9 @@ class TestApplyTransition(unittest.TestCase):
             cast(Any, db), 1, "wanted", from_status="downloading",
             attempt_type="download",
         )
-        self.assertFalse(result)
+        self.assertIsInstance(result, TransitionConflict)
+        assert isinstance(result, TransitionConflict)
+        self.assertEqual(result.kind, TransitionConflictKind.stale_source)
         self.assertEqual(db.request(1)["download_attempts"], 0)
 
     def test_imported_to_wanted_resets_and_clears_retry_counters(self):
@@ -208,26 +213,19 @@ class TestApplyTransition(unittest.TestCase):
         self.assertEqual(row["min_bitrate"], 245)
         self.assertEqual(row["last_download_spectral_grade"], "genuine")
 
-    def test_invalid_transition_logs_warning_but_proceeds_to_seam(self):
-        """Invalid transitions still proceed to the seam (with warning)
-        for backward compatibility — see lib.transitions.apply_transition
-        line 451. Whether the seam itself accepts the change is a
-        separate concern: set_downloading has a SQL guard
-        ``WHERE status='wanted'``, so a manual → downloading attempt
-        logs the validity warning AND then logs the guard rejection.
-        The row stays at ``manual``."""
+    def test_invalid_transition_fails_closed_before_any_mutation_seam(self):
+        """An invalid edge is a typed conflict and never reaches a writer."""
         db = self._make_db("manual")
-        with self.assertLogs("cratedigger", level="WARNING") as cm:
-            apply_transition(
-                cast(Any, db), 1, "downloading", from_status="manual",
-                state_json='{}',
-            )
-        self.assertTrue(any("invalid" in m.lower() for m in cm.output))
-        # Row stays at manual — the seam's own guard refused the
-        # change. This matches production behavior; the previous
-        # MagicMock test only verified the seam was called and
-        # missed that production wouldn't actually have moved the
-        # row either.
+        before_history = list(db.status_history)
+        result = apply_transition(
+            cast(Any, db), 1, "downloading", from_status="manual",
+            state_json='{}',
+        )
+
+        self.assertIsInstance(result, TransitionConflict)
+        assert isinstance(result, TransitionConflict)
+        self.assertEqual(result.kind, TransitionConflictKind.invalid_edge)
+        self.assertEqual(db.status_history, before_history)
         self.assertEqual(db.request(1)["status"], "manual")
 
     def test_downloading_guard_logs_when_set_downloading_refuses(self):
@@ -235,12 +233,13 @@ class TestApplyTransition(unittest.TestCase):
         the transition logs a warning and the row's status stays."""
         # Seed as 'imported' so set_downloading's guard refuses the change.
         db = self._make_db("imported")
-        with self.assertLogs("cratedigger", level="WARNING") as cm:
-            apply_transition(
-                cast(Any, db), 1, "downloading", from_status="wanted",
-                state_json='{"filetype":"flac"}',
-            )
-        self.assertTrue(any("status guard" in msg for msg in cm.output))
+        result = apply_transition(
+            cast(Any, db), 1, "downloading", from_status="wanted",
+            state_json='{"filetype":"flac"}',
+        )
+        self.assertIsInstance(result, TransitionConflict)
+        assert isinstance(result, TransitionConflict)
+        self.assertEqual(result.kind, TransitionConflictKind.stale_source)
         # Status unchanged.
         self.assertEqual(db.request(1)["status"], "imported")
 
@@ -259,15 +258,45 @@ class TestApplyTransition(unittest.TestCase):
         any update. The empty DB stays empty."""
         db = FakePipelineDB()  # no rows seeded
         # auto-detect from_status path queries the row first, finds None,
-        # logs, returns False.
+        # returns a typed not-found conflict.
         result = apply_transition(cast(Any, db), 999, "imported")
-        self.assertFalse(result)
+        self.assertIsInstance(result, TransitionConflict)
+        assert isinstance(result, TransitionConflict)
+        self.assertEqual(result.kind, TransitionConflictKind.not_found)
         self.assertIsNone(db._requests.get(999))
 
     def test_wanted_to_manual_sets_status(self):
         db = self._make_db("wanted")
-        apply_transition(cast(Any, db), 1, "manual", from_status="wanted")
+        result = apply_transition(
+            cast(Any, db), 1, "manual", from_status="wanted")
+        self.assertIsInstance(result, TransitionApplied)
         self.assertEqual(db.request(1)["status"], "manual")
+
+    def test_explicit_source_is_validated_against_the_actual_row(self):
+        db = self._make_db("imported")
+        before = db.request(1)
+
+        result = apply_transition(
+            cast(Any, db), 1, "manual", from_status="wanted")
+
+        self.assertIsInstance(result, TransitionConflict)
+        assert isinstance(result, TransitionConflict)
+        self.assertEqual(result.kind, TransitionConflictKind.stale_source)
+        self.assertEqual(result.actual_status, "imported")
+        self.assertEqual(db.request(1), before)
+
+    def test_replaced_row_cannot_be_resurrected(self):
+        db = self._make_db("replaced")
+        before = db.request(1)
+
+        for target in ("wanted", "manual", "imported", "downloading"):
+            kwargs = {"state_json": "{}"} if target == "downloading" else {}
+            result = apply_transition(
+                cast(Any, db), 1, target, from_status="replaced", **kwargs)
+            self.assertIsInstance(result, TransitionConflict)
+            assert isinstance(result, TransitionConflict)
+            self.assertEqual(result.kind, TransitionConflictKind.invalid_edge)
+            self.assertEqual(db.request(1), before)
 
 
 class TestRequestTransition(unittest.TestCase):

@@ -219,11 +219,11 @@ def _do_mark_done(
             ).as_update_fields()
         )
     update_fields["final_format"] = dl_info.final_format
-    finalize_request(
+    transitions.require_transition_applied(finalize_request(
         db,
         request_id,
         transitions.RequestTransition.to_imported_fields(fields=update_fields),
-    )
+    ))
 
     validation_result = dl_info.validation_result or ValidationResult(
         valid=True,
@@ -320,12 +320,12 @@ def _finalize_request_and_log_rejection(
         transition_kwargs: dict[str, object] = {}
         if search_filetype_override is not None:
             transition_kwargs["search_filetype_override"] = search_filetype_override
-        finalize_request(
+        transitions.require_transition_applied(finalize_request(
             db,
             request_id,
             transitions.RequestTransition.to_wanted_fields(
                 fields=transition_kwargs),
-        )
+        ))
         if record_validation_attempt:
             db.record_attempt(request_id, "validation")
 

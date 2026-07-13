@@ -4,18 +4,16 @@ Pure functions for transition validation. The imperative apply_transition()
 delegates to pipeline_db methods and is the single entry point for all
 state mutations.
 
-4 statuses: wanted, downloading, imported, manual
+Active statuses: wanted, downloading, imported, manual.
+Terminal audit status: replaced (no outgoing lifecycle transitions).
 """
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
+from enum import Enum
 from types import MappingProxyType
-from typing import Any, Literal, Mapping, Protocol, runtime_checkable
-
-logger = logging.getLogger("cratedigger")
-
+from typing import Any, Literal, Mapping, Protocol, TypeAlias, runtime_checkable
 
 @runtime_checkable
 class TransitionsDB(Protocol):
@@ -26,29 +24,49 @@ class TransitionsDB(Protocol):
 
     def get_request(self, request_id: int) -> dict[str, Any] | None: ...
 
-    def set_downloading(self, request_id: int, state_json: str) -> bool: ...
+    def set_downloading(
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        expected_status: str = "wanted",
+    ) -> bool: ...
 
     def reset_to_wanted(
         self,
         request_id: int,
         *,
+        expected_status: str | None = None,
         clear_retry_counters: bool = True,
         **fields: Any,
-    ) -> None: ...
+    ) -> bool: ...
 
     def reset_downloading_to_wanted(
-        self, request_id: int, **fields: Any,
+        self,
+        request_id: int,
+        *,
+        expected_status: str = "downloading",
+        **fields: Any,
     ) -> bool: ...
 
     def record_attempt(self, request_id: int, attempt_type: str) -> None: ...
 
     def mark_imported_with_rescue(
-        self, request_id: int, **extra: Any,
-    ) -> None: ...
+        self,
+        request_id: int,
+        *,
+        expected_status: str | None = None,
+        **extra: Any,
+    ) -> bool: ...
 
     def update_status(
-        self, request_id: int, status: str, **extra: Any,
-    ) -> None: ...
+        self,
+        request_id: int,
+        status: str,
+        *,
+        expected_status: str | None = None,
+        **extra: Any,
+    ) -> bool: ...
 
 
 class _OmittedField:
@@ -59,6 +77,53 @@ _OMITTED = _OmittedField()
 
 
 RequestStatus = Literal["wanted", "downloading", "imported", "manual"]
+
+
+class TransitionConflictKind(str, Enum):
+    """Machine-readable reason a request transition did not apply."""
+
+    not_found = "not_found"
+    invalid_edge = "invalid_edge"
+    stale_source = "stale_source"
+
+
+@dataclass(frozen=True)
+class TransitionApplied:
+    request_id: int
+    from_status: str
+    target_status: str
+
+
+@dataclass(frozen=True)
+class TransitionConflict:
+    request_id: int
+    target_status: str
+    kind: TransitionConflictKind
+    expected_status: str | None
+    actual_status: str | None
+
+
+TransitionResult: TypeAlias = TransitionApplied | TransitionConflict
+
+
+class RequestTransitionConflict(RuntimeError):
+    """Raised by imperative callers that cannot continue after a conflict."""
+
+    def __init__(self, conflict: TransitionConflict) -> None:
+        self.conflict = conflict
+        super().__init__(
+            f"request {conflict.request_id} transition to "
+            f"{conflict.target_status!r} conflicted: {conflict.kind.value} "
+            f"(expected={conflict.expected_status!r}, "
+            f"actual={conflict.actual_status!r})"
+        )
+
+
+def require_transition_applied(result: TransitionResult) -> TransitionApplied:
+    """Return the applied result or stop a worker before dependent effects."""
+    if isinstance(result, TransitionConflict):
+        raise RequestTransitionConflict(result)
+    return result
 
 
 def _explicit_fields(**values: object) -> dict[str, object]:
@@ -325,7 +390,7 @@ def finalize_request(
     db: TransitionsDB,
     request_id: int,
     transition: RequestTransition,
-) -> bool:
+) -> TransitionResult:
     """Apply one validated request-state transition command."""
 
     _validate_transition_fields(transition.target_status, transition.fields)
@@ -395,12 +460,14 @@ def apply_transition(
     request_id: int,
     to_status: str,
     **extra: Any,
-) -> bool:
+) -> TransitionResult:
     """Execute a validated state transition.
 
-    This is the single entry point for all album_requests status mutations.
-    It validates the transition, then delegates to the appropriate PipelineDB
-    method with the correct side effects.
+    This is the single entry point for ordinary album_requests status
+    mutations. It verifies an explicit source snapshot against the current row,
+    rejects invalid edges, then delegates to a SQL compare-and-set writer.
+    ``supersede_request_mbid`` is the sole deliberate creator of the terminal
+    ``replaced`` audit status.
 
     Special keys extracted from extra:
         from_status: Current status (fetched from DB if not provided)
@@ -410,10 +477,11 @@ def apply_transition(
         attempt_type: For record_attempt (e.g. "download", "search")
         Everything else: passed to update_status as extra fields
     """
-    # Extract special keys that control routing
-    from_status = extra.pop("from_status", None)
-    if from_status is not None:
-        from_status = str(from_status)
+    # Extract special keys that control routing. Even an explicit source is
+    # checked against the row: caller snapshots are assertions, not authority.
+    expected_status = extra.pop("from_status", None)
+    if expected_status is not None:
+        expected_status = str(expected_status)
     # Presence-based: only fields explicitly passed get written.
     # Omitted fields are preserved by reset_to_wanted / update_status.
     transition_fields: dict[str, Any] = {}
@@ -422,21 +490,52 @@ def apply_transition(
             transition_fields[_key] = extra.pop(_key)
     state_json = extra.pop("state_json", None)
     attempt_type = extra.pop("attempt_type", None)
-    if from_status is None:
-        row = db.get_request(request_id)
-        if row is None:
-            logger.warning(f"apply_transition: request {request_id} not found")
-            return False
-        current = row["status"]
-        assert isinstance(current, str)
-        from_status = current
+    row = db.get_request(request_id)
+    if row is None:
+        return TransitionConflict(
+            request_id=request_id,
+            target_status=to_status,
+            kind=TransitionConflictKind.not_found,
+            expected_status=expected_status,
+            actual_status=None,
+        )
+    current = row["status"]
+    assert isinstance(current, str)
+    if expected_status is not None and current != expected_status:
+        return TransitionConflict(
+            request_id=request_id,
+            target_status=to_status,
+            kind=TransitionConflictKind.stale_source,
+            expected_status=expected_status,
+            actual_status=current,
+        )
+    from_status = current
 
     if not validate_transition(from_status, to_status):
-        logger.warning(
-            f"apply_transition: invalid {from_status!r} -> {to_status!r} "
-            f"for request {request_id}, proceeding anyway")
+        return TransitionConflict(
+            request_id=request_id,
+            target_status=to_status,
+            kind=TransitionConflictKind.invalid_edge,
+            expected_status=expected_status,
+            actual_status=from_status,
+        )
 
-    fx = VALID_TRANSITIONS.get((from_status, to_status), TransitionSideEffects())
+    fx = VALID_TRANSITIONS[(from_status, to_status)]
+
+    def _cas_result(applied: bool) -> TransitionResult:
+        if applied:
+            return TransitionApplied(request_id, from_status, to_status)
+        refreshed = db.get_request(request_id)
+        return TransitionConflict(
+            request_id=request_id,
+            target_status=to_status,
+            kind=(TransitionConflictKind.not_found
+                  if refreshed is None else TransitionConflictKind.stale_source),
+            expected_status=from_status,
+            actual_status=(
+                str(refreshed["status"]) if refreshed is not None else None
+            ),
+        )
 
     # wanted → downloading: use set_downloading with JSONB state
     if to_status == "downloading":
@@ -444,34 +543,36 @@ def apply_transition(
             raise ValueError("state_json is required for downloading transitions")
         if not isinstance(state_json, str):
             raise ValueError("state_json must be a string")
-        if not db.set_downloading(request_id, state_json):
-            logger.warning(
-                f"apply_transition: status guard prevented {from_status!r} -> "
-                f"'downloading' for request {request_id} (album no longer wanted)")
-            return False
-        return True
+        return _cas_result(db.set_downloading(
+            request_id,
+            state_json,
+            expected_status=from_status,
+        ))
 
     # → wanted with counter reset: use reset_to_wanted
     if to_status == "wanted" and fx.clear_retry_counters:
-        db.reset_to_wanted(request_id, **transition_fields)
-        if fx.record_attempt and attempt_type:
+        applied = db.reset_to_wanted(
+            request_id,
+            expected_status=from_status,
+            **transition_fields,
+        )
+        if applied and fx.record_attempt and attempt_type:
             db.record_attempt(request_id, attempt_type)
-        return True
+        return _cas_result(applied)
 
     # downloading → wanted: clear active download state, preserve retry counters,
     # then record the failed automatic attempt so backoff can continue growing.
     if from_status == "downloading" and to_status == "wanted":
         reset_ok = bool(
-            db.reset_downloading_to_wanted(request_id, **transition_fields)
+            db.reset_downloading_to_wanted(
+                request_id,
+                expected_status=from_status,
+                **transition_fields,
+            )
         )
-        if not reset_ok:
-            logger.warning(
-                f"apply_transition: status guard prevented 'downloading' -> "
-                f"'wanted' for request {request_id}")
-            return False
-        if attempt_type:
+        if reset_ok and attempt_type:
             db.record_attempt(request_id, attempt_type)
-        return True
+        return _cas_result(reset_ok)
 
     # All other transitions: use update_status
     all_extra: dict[str, object] = dict(extra)
@@ -483,7 +584,14 @@ def apply_transition(
     # like update_status (status + extras), just inside an explicit
     # transaction. No "import without rescue check" parallel path.
     if to_status == "imported":
-        db.mark_imported_with_rescue(request_id, **all_extra)
-        return True
-    db.update_status(request_id, to_status, **all_extra)
-    return True
+        return _cas_result(db.mark_imported_with_rescue(
+            request_id,
+            expected_status=from_status,
+            **all_extra,
+        ))
+    return _cas_result(db.update_status(
+        request_id,
+        to_status,
+        expected_status=from_status,
+        **all_extra,
+    ))

@@ -21,6 +21,7 @@ from tests.web._harness import (
 
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
+from lib.transitions import TransitionConflict, TransitionConflictKind
 
 
 class _RacingDeleteDB(FakePipelineDB):
@@ -552,6 +553,26 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.UPDATE_REQUIRED_FIELDS,
                                 "pipeline update response")
+
+    @patch("web.routes.pipeline_mutations.finalize_request")
+    def test_pipeline_update_maps_stale_transition_to_409_without_success(
+        self, mock_transition,
+    ):
+        mock_transition.return_value = TransitionConflict(
+            request_id=100,
+            target_status="manual",
+            kind=TransitionConflictKind.stale_source,
+            expected_status="imported",
+            actual_status="replaced",
+        )
+
+        status, data = self._post(
+            "/api/pipeline/update", {"id": 100, "status": "manual"})
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "transition_conflict")
+        self.assertEqual(data["reason"], "stale_source")
+        self.assertNotIn("status", data)
 
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_pipeline_upgrade_contract(self, _mock_transition):

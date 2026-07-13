@@ -92,9 +92,15 @@ class TestPipelineDbUpdate(unittest.TestCase):
         mock_finalize,
     ) -> None:
         from harness import import_one
+        from lib.transitions import TransitionApplied
 
         db = FakePipelineDB()
         mock_db_cls.return_value = db
+        mock_finalize.return_value = TransitionApplied(
+            request_id=42,
+            from_status="downloading",
+            target_status="imported",
+        )
 
         import_one.update_pipeline_db(
             42,

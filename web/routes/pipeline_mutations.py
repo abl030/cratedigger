@@ -43,6 +43,25 @@ from web import discogs as discogs_api
 from web.wrong_match_file_service import source_dirs_from_validation_result
 
 
+def _transition_applied_or_respond(h, result: transitions.TransitionResult) -> bool:
+    """Map lifecycle CAS conflicts identically for every HTTP adapter."""
+    if not isinstance(result, transitions.TransitionConflict):
+        return True
+    status = (
+        404
+        if result.kind is transitions.TransitionConflictKind.not_found
+        else 409
+    )
+    h._json({
+        "error": "transition_conflict",
+        "reason": result.kind.value,
+        "expected_status": result.expected_status,
+        "actual_status": result.actual_status,
+        "target_status": result.target_status,
+    }, status=status)
+    return False
+
+
 def _resolve_and_update_after_add(
     db,
     req_id: int,
@@ -397,7 +416,7 @@ def post_pipeline_update(h, body: dict) -> None:
             wanted_fields["search_filetype_override"] = quality
         if min_br is not None:
             wanted_fields["min_bitrate"] = min_br
-        finalize_request(
+        result = finalize_request(
             s._db(),
             int(req_id),
             transitions.RequestTransition.to_wanted_fields(
@@ -406,7 +425,7 @@ def post_pipeline_update(h, body: dict) -> None:
             ),
         )
     else:
-        finalize_request(
+        result = finalize_request(
             s._db(),
             int(req_id),
             transitions.RequestTransition.status_only(
@@ -414,6 +433,9 @@ def post_pipeline_update(h, body: dict) -> None:
                 from_status=req["status"],
             ),
         )
+
+    if not _transition_applied_or_respond(h, result):
+        return
 
     h._json({"status": "ok", "id": req_id, "new_status": new_status})
 
@@ -458,7 +480,7 @@ def post_pipeline_upgrade(h, body: dict) -> None:
         }
         if min_bitrate is not None:
             transition_fields["min_bitrate"] = min_bitrate
-        finalize_request(
+        result = finalize_request(
             s._db(),
             req_id,
             transitions.RequestTransition.to_wanted_fields(
@@ -466,6 +488,8 @@ def post_pipeline_upgrade(h, body: dict) -> None:
                 fields=transition_fields,
             ),
         )
+        if not _transition_applied_or_respond(h, result):
+            return
         h._json({
             "status": "upgrade_queued",
             "id": req_id,
@@ -534,7 +558,7 @@ def post_pipeline_upgrade(h, body: dict) -> None:
             release_group_year=rg_year_upgrade,
         )
         # Newly added request — status is already 'wanted', set quality override
-        finalize_request(
+        result = finalize_request(
             s._db(),
             req_id,
             transitions.RequestTransition.to_wanted(
@@ -543,6 +567,8 @@ def post_pipeline_upgrade(h, body: dict) -> None:
                 min_bitrate=min_bitrate,
             ),
         )
+        if not _transition_applied_or_respond(h, result):
+            return
         h._json({
             "status": "upgrade_queued",
             "id": req_id,
@@ -580,7 +606,6 @@ def post_pipeline_set_quality(h, body: dict) -> None:
 
     if min_bitrate is not None:
         min_bitrate = int(min_bitrate)
-        s._db().update_request_fields(req_id, min_bitrate=min_bitrate)
 
     if new_status:
         if new_status not in ("wanted", "imported", "manual"):
@@ -596,7 +621,7 @@ def post_pipeline_set_quality(h, body: dict) -> None:
             }
             if min_bitrate is not None:
                 imported_fields["min_bitrate"] = int(min_bitrate)
-            finalize_request(
+            result = finalize_request(
                 s._db(),
                 req_id,
                 transitions.RequestTransition.to_imported_fields(
@@ -604,15 +629,20 @@ def post_pipeline_set_quality(h, body: dict) -> None:
                     fields=imported_fields,
                 ),
             )
-        elif new_status == "wanted" and existing["status"] != "wanted":
-            finalize_request(
+        elif new_status == "wanted":
+            wanted_fields: dict[str, object] = {}
+            if min_bitrate is not None:
+                wanted_fields["min_bitrate"] = min_bitrate
+            result = finalize_request(
                 s._db(),
                 req_id,
-                transitions.RequestTransition.to_wanted(
-                    from_status=existing["status"]),
+                transitions.RequestTransition.to_wanted_fields(
+                    from_status=existing["status"],
+                    fields=wanted_fields,
+                ),
             )
         else:
-            finalize_request(
+            result = finalize_request(
                 s._db(),
                 req_id,
                 transitions.RequestTransition.status_only(
@@ -620,6 +650,21 @@ def post_pipeline_set_quality(h, body: dict) -> None:
                     from_status=existing["status"],
                 ),
             )
+        if not _transition_applied_or_respond(h, result):
+            return
+        if min_bitrate is not None and new_status == "manual":
+            s._db().update_request_fields(req_id, min_bitrate=min_bitrate)
+    elif min_bitrate is not None:
+        if existing["status"] == "replaced":
+            result = finalize_request(
+                s._db(),
+                req_id,
+                transitions.RequestTransition.to_wanted(
+                    from_status="replaced"),
+            )
+            if not _transition_applied_or_respond(h, result):
+                return
+        s._db().update_request_fields(req_id, min_bitrate=min_bitrate)
 
     h._json({
         "status": "ok",
@@ -674,10 +719,19 @@ def post_pipeline_set_intent(h, body: dict) -> None:
         h._error("Cannot set intent while album is downloading")
         return
 
+    if req["status"] == "replaced":
+        result = finalize_request(
+            s._db(),
+            int(req_id),
+            transitions.RequestTransition.to_wanted(from_status="replaced"),
+        )
+        _transition_applied_or_respond(h, result)
+        return
+
     if req["status"] == "imported" and target_format:
         # Re-queue to search for lossless source
         min_br = req.get("min_bitrate")
-        finalize_request(
+        result = finalize_request(
             s._db(),
             int(req_id),
             transitions.RequestTransition.to_wanted(
@@ -686,6 +740,8 @@ def post_pipeline_set_intent(h, body: dict) -> None:
                 min_bitrate=min_br,
             ),
         )
+        if not _transition_applied_or_respond(h, result):
+            return
         s._db().update_request_fields(int(req_id), target_format=target_format)
         h._json({
             "status": "ok",
@@ -727,6 +783,7 @@ def post_pipeline_ban_source(h, body: dict) -> None:
         BanSourceRequest,
         BanSourceRequestNotFound,
         BanSourceSuccess,
+        BanSourceTransitionConflict,
         ban_source,
     )
 
@@ -764,6 +821,9 @@ def post_pipeline_ban_source(h, body: dict) -> None:
         return
     if isinstance(result, BanSourceImporterBusy):
         h._json({"error": "importer_busy", "retry_after_seconds": 30}, status=409)
+        return
+    if isinstance(result, BanSourceTransitionConflict):
+        _transition_applied_or_respond(h, result.conflict)
         return
     assert isinstance(result, BanSourceSuccess)
 

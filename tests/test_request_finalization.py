@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from lib.dispatch import DispatchOutcome
-from lib.transitions import RequestTransition, finalize_request
+from lib.transitions import RequestTransition, TransitionApplied, finalize_request
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
@@ -23,6 +23,35 @@ def _is_pipeline_db_seam(rel_path: str) -> bool:
     (``lib/pipeline_db.py``); decomposed into the ``lib/pipeline_db/`` package
     of cluster mixins (#379). Either form is the seam."""
     return rel_path == "lib/pipeline_db.py" or rel_path.startswith("lib/pipeline_db/")
+
+
+def _ignored_finalize_request_calls(tree: ast.AST) -> list[ast.Call]:
+    aliases = {"finalize_request"}
+    if isinstance(tree, ast.Module):
+        for node in tree.body:
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if node.module != "lib.transitions":
+                continue
+            for imported in node.names:
+                if imported.name == "finalize_request":
+                    aliases.add(imported.asname or imported.name)
+
+    ignored: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Expr):
+            continue
+        call = node.value
+        if not isinstance(call, ast.Call):
+            continue
+        if isinstance(call.func, ast.Name) and call.func.id in aliases:
+            ignored.append(call)
+        elif (
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr == "finalize_request"
+        ):
+            ignored.append(call)
+    return ignored
 
 
 class TestDispatchOutcomeSummary(unittest.TestCase):
@@ -65,7 +94,7 @@ class TestFinalizeRequest(unittest.TestCase):
             ),
         )
 
-        finalize_request(
+        result = finalize_request(
             cast(Any, db),
             42,
             RequestTransition.to_wanted(
@@ -76,6 +105,7 @@ class TestFinalizeRequest(unittest.TestCase):
             ),
         )
 
+        self.assertIsInstance(result, TransitionApplied)
         row = db.request(42)
         self.assertEqual(row["status"], "wanted")
         self.assertEqual(row["search_filetype_override"], "flac,mp3 v0")
@@ -222,6 +252,37 @@ class TestTerminalTransitionContract(unittest.TestCase):
                 "Route them through lib.transitions.finalize_request(...).\n"
                 + "\n".join(lines)
             )
+
+    def test_every_production_finalize_request_result_is_consumed(self) -> None:
+        offending: list[tuple[str, int, str]] = []
+
+        def scan(rel_path: str) -> None:
+            path = REPO_ROOT / rel_path
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel_path)
+            for call in _ignored_finalize_request_calls(tree):
+                offending.append((rel_path, call.lineno, ast.unparse(call)))
+
+        for rel_path in PRODUCTION_FILES:
+            scan(rel_path)
+        for root_name in PRODUCTION_ROOTS:
+            for path in sorted((REPO_ROOT / root_name).rglob("*.py")):
+                scan(path.relative_to(REPO_ROOT).as_posix())
+
+        self.assertEqual(
+            offending,
+            [],
+            "Every finalize_request caller must consume its typed result; "
+            f"ignored calls: {offending}",
+        )
+
+    def test_finalize_result_audit_rejects_known_bad_ignored_call(self) -> None:
+        tree = ast.parse(
+            "from lib.transitions import finalize_request as finish\n"
+            "finish(db, 42, transition)\n"
+        )
+        ignored = _ignored_finalize_request_calls(tree)
+
+        self.assertEqual(len(ignored), 1)
 
 
 def _module_string_constants(tree: ast.AST) -> dict[str, str]:
