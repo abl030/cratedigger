@@ -1207,7 +1207,7 @@ class TestDownloadInfo(unittest.TestCase):
                 format="FLAC", verified_lossless=True),
             current_measurement=AudioQualityMeasurement(
                 spectral_bitrate_kbps=128),
-            target_quality_contract=TargetQualityContract.from_format(
+            target_quality_contract=TargetQualityContract.from_explicit_label(
                 "mp3 v0"
             ),
             materialized_measurement=AudioQualityMeasurement(

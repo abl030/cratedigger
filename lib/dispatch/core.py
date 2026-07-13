@@ -316,14 +316,25 @@ def dispatch_import_core(
                             else None
                         ),
                         target_quality_contract=(
-                            TargetQualityContract.from_format(
+                            TargetQualityContract.from_projection(
                                 evidence_gate.candidate.target_format,
                                 projected_is_cbr=(
                                     evidence_gate.candidate.target_is_cbr
                                 ),
                             )
-                            if evidence_gate.candidate.target_format is not None
-                            else None
+                            if (
+                                evidence_gate.candidate.target_format is not None
+                                and evidence_gate.candidate.target_is_cbr
+                                is not None
+                            )
+                            else (
+                                TargetQualityContract.from_explicit_label(
+                                    evidence_gate.candidate.target_format
+                                )
+                                if evidence_gate.candidate.target_format
+                                is not None
+                                else None
+                            )
                         ),
                         v0_probe=audit_v0_probe_from_metric(
                             evidence_gate.candidate.v0_metric

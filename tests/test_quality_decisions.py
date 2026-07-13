@@ -1711,6 +1711,7 @@ class TestFullPipelineContract(unittest.TestCase):
             is_flac=True, min_bitrate=0, is_cbr=False,
             spectral_grade="suspect", converted_count=10,
             post_conversion_min_bitrate=190,
+            post_conversion_is_cbr=False,
             verified_lossless_target="aac 128",
             supported_lossless_source=False)
         self.assertIsNone(r["target_final_format"])

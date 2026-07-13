@@ -185,7 +185,7 @@ def make_album_quality_evidence(
             target_is_cbr
             if target_is_cbr is not None
             else (
-                TargetQualityContract.from_format(target_format).is_cbr
+                TargetQualityContract.from_explicit_label(target_format).is_cbr
                 if target_format is not None
                 else None
             )
@@ -477,7 +477,7 @@ def make_import_result(
         ),
         final_format=final_format,
         target_quality_contract=(
-            TargetQualityContract.from_format(final_format)
+            TargetQualityContract.from_explicit_label(final_format)
             if was_converted and final_format
             else None
         ),

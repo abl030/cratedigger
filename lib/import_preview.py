@@ -784,7 +784,6 @@ def measure_and_persist_candidate_evidence(
                     measurement=measurement,
                     download_log_id=download_log_id,
                     import_job_id=import_job_id,
-                    target_format=req.get("target_format"),
                     files=source_snapshot,
                 )
             except Exception as exc:

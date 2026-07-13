@@ -387,13 +387,13 @@ def projected_target_quality_contract(
     *,
     converted_count: int,
     keep_lossless: bool,
-    projected_is_cbr: bool | None,
+    projected_is_cbr: bool,
 ) -> TargetQualityContract | None:
     """Typed target policy for the direct harness producer path."""
 
     if format_hint is None or (converted_count <= 0 and not keep_lossless):
         return None
-    return TargetQualityContract.from_format(
+    return TargetQualityContract.from_projection(
         format_hint,
         projected_is_cbr=projected_is_cbr,
     )
@@ -1395,7 +1395,9 @@ def _materialize_quality_evidence_action(
                 r.conversion.original_filetype = original_ext
                 r.conversion.target_filetype = "flac"
         r.final_format = "flac"
-        r.target_quality_contract = TargetQualityContract.from_format("flac")
+        r.target_quality_contract = TargetQualityContract.from_explicit_label(
+            "flac"
+        )
         return False
 
     target_spec = (
@@ -1425,7 +1427,7 @@ def _materialize_quality_evidence_action(
         r.conversion.target_filetype = target_spec.extension
     r.final_format = target_spec.label
     target_bitrates = _get_folder_bitrates(work_path)
-    r.target_quality_contract = TargetQualityContract.from_format(
+    r.target_quality_contract = TargetQualityContract.from_projection(
         target_spec.label,
         projected_is_cbr=projected_is_cbr_from_bitrates(target_bitrates),
     )
@@ -1483,9 +1485,15 @@ def _run_quality_evidence_authorized_import(
         )
         candidate_target_format = payload.candidate.target_format
         if candidate_target_format is not None:
-            r.target_quality_contract = TargetQualityContract.from_format(
-                candidate_target_format,
-                projected_is_cbr=payload.candidate.target_is_cbr,
+            r.target_quality_contract = (
+                TargetQualityContract.from_projection(
+                    candidate_target_format,
+                    projected_is_cbr=payload.candidate.target_is_cbr,
+                )
+                if payload.candidate.target_is_cbr is not None
+                else TargetQualityContract.from_explicit_label(
+                    candidate_target_format
+                )
             )
         r.quality_evidence_provenance = QualityEvidenceActionProvenance(
             candidate_status=payload.provenance.candidate_status,
@@ -1519,20 +1527,11 @@ def _run_quality_evidence_authorized_import(
             _emit_and_exit(r)
 
         _validate_quality_evidence_action_snapshot(args.path, payload)
-        source_was_lossless = bool(_lossless_filenames(args.path))
         quality_is_transcode = _materialize_quality_evidence_action(
             work_path=args.path,
             payload=payload,
             r=r,
         )
-        if (
-            source_was_lossless
-            and r.target_quality_contract is None
-            and r.final_format
-        ):
-            r.target_quality_contract = TargetQualityContract.from_format(
-                r.final_format
-            )
     except Exception as exc:
         r.exit_code = 5
         r.decision = "quality_evidence_action_failed"
@@ -2071,7 +2070,7 @@ def main():
                     native_codec_family=native_codec_family,
                 )
                 if new_format_label is not None:
-                    target_contract = TargetQualityContract.from_format(
+                    target_contract = TargetQualityContract.from_projection(
                         new_format_label,
                         projected_is_cbr=projected_is_cbr,
                     )
@@ -2206,7 +2205,7 @@ def main():
                 int(sum(target_bitrates) / len(target_bitrates))
                 if target_bitrates else None
             )
-            r.target_quality_contract = TargetQualityContract.from_format(
+            r.target_quality_contract = TargetQualityContract.from_projection(
                 target_spec.label,
                 projected_is_cbr=projected_is_cbr_from_bitrates(
                     target_bitrates

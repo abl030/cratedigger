@@ -7,6 +7,7 @@ import unittest
 from hypothesis import example, given, strategies as st
 
 from harness.import_one import projected_is_cbr_from_bitrates
+from lib.measurement import PreimportMeasurement
 from lib.quality import (
     AlbumQualityEvidenceFile,
     AudioQualityMeasurement,
@@ -16,10 +17,11 @@ from lib.quality import (
     TargetQualityContract,
     V0ProbeEvidence,
     full_pipeline_decision,
+    gate_rank,
     measured_import_decision,
     quality_gate_decision,
 )
-from lib.quality_evidence import evidence_from_import_result
+from lib.quality_evidence import evidence_from_import_result, evidence_from_measurement
 
 
 def assert_source_target_lineage(result: ImportResult) -> None:
@@ -65,7 +67,9 @@ class TestQualityLineagePins(unittest.TestCase):
         result = ImportResult(
             source_measurement=source,
             v0_probe=probe,
-            target_quality_contract=TargetQualityContract.from_format("opus 128"),
+            target_quality_contract=TargetQualityContract.from_explicit_label(
+                "opus 128"
+            ),
             materialized_measurement=output,
         )
 
@@ -93,7 +97,9 @@ class TestQualityLineagePins(unittest.TestCase):
                 avg_bitrate_kbps=230,
                 median_bitrate_kbps=232,
             ),
-            target_quality_contract=TargetQualityContract.from_format("mp3 v2"),
+            target_quality_contract=TargetQualityContract.from_explicit_label(
+                "mp3 v2"
+            ),
         )
 
         assert_source_target_lineage(result)
@@ -137,7 +143,9 @@ class TestQualityLineagePins(unittest.TestCase):
                 min_bitrate_kbps=191,
                 avg_bitrate_kbps=224,
             ),
-            target_quality_contract=TargetQualityContract.from_format("flac"),
+            target_quality_contract=TargetQualityContract.from_explicit_label(
+                "flac"
+            ),
         )
 
         self.assertEqual(ImportResult.from_json(result.to_json()), result)
@@ -154,7 +162,7 @@ class TestQualityLineagePins(unittest.TestCase):
             min_bitrate_kbps=191,
             avg_bitrate_kbps=224,
         )
-        contract = TargetQualityContract.from_format("opus 128")
+        contract = TargetQualityContract.from_explicit_label("opus 128")
         legacy = AudioQualityMeasurement(
             min_bitrate_kbps=191,
             avg_bitrate_kbps=224,
@@ -200,7 +208,7 @@ class TestQualityLineagePins(unittest.TestCase):
     def test_single_track_bare_mp3_preserves_legacy_cbr_projection(self):
         projected_bitrates = [128]
         projected_is_cbr = projected_is_cbr_from_bitrates(projected_bitrates)
-        contract = TargetQualityContract.from_format(
+        contract = TargetQualityContract.from_projection(
             "MP3", projected_is_cbr=projected_is_cbr
         )
         self.assertTrue(contract.is_cbr)
@@ -231,19 +239,11 @@ class TestQualityLineagePins(unittest.TestCase):
         legacy = measured_import_decision(
             MeasuredImportDecisionInput(proxy, current, True), cfg=cfg
         )
-        wrong_bare_mp3 = measured_import_decision(
-            MeasuredImportDecisionInput(
-                source,
-                current,
-                True,
-                TargetQualityContract.from_format("MP3"),
-                None,
-            ),
-            cfg=cfg,
-        )
         self.assertEqual(projected, legacy)
         self.assertEqual(projected.decision, "transcode_upgrade")
-        self.assertEqual(wrong_bare_mp3.decision, "transcode_downgrade")
+        with self.assertRaisesRegex(ValueError, "bare MP3"):
+            TargetQualityContract.from_explicit_label("MP3")
+        self.assertFalse(hasattr(TargetQualityContract, "from_format"))
 
         pipeline = full_pipeline_decision(
             is_flac=True,
@@ -268,15 +268,72 @@ class TestQualityLineagePins(unittest.TestCase):
         for bitrates, expected in cases:
             with self.subTest(bitrates=bitrates):
                 mode = projected_is_cbr_from_bitrates(bitrates)
-                contract = TargetQualityContract.from_format(
+                contract = TargetQualityContract.from_projection(
                     "MP3", projected_is_cbr=mode
                 )
                 self.assertEqual(mode, expected)
                 self.assertEqual(contract.is_cbr, expected)
 
+    def test_bare_mp3_requires_mode_after_case_and_whitespace_normalization(self):
+        for label in ("MP3", " mp3 ", "\tMp3\n"):
+            with self.subTest(label=label), self.assertRaisesRegex(
+                ValueError, "bare MP3"
+            ):
+                TargetQualityContract.from_explicit_label(label)
+
     def test_numeric_mp3_target_is_explicitly_cbr(self):
-        self.assertTrue(TargetQualityContract.from_format("mp3 192").is_cbr)
-        self.assertFalse(TargetQualityContract.from_format("mp3 v2").is_cbr)
+        self.assertTrue(
+            TargetQualityContract.from_explicit_label("mp3 192").is_cbr
+        )
+        self.assertFalse(
+            TargetQualityContract.from_explicit_label("mp3 v2").is_cbr
+        )
+
+    def test_explicit_mp3_labels_ignore_contradictory_projected_modes(self):
+        cfg = QualityRankConfig.defaults()
+        v0_output = AudioQualityMeasurement(
+            min_bitrate_kbps=245,
+            avg_bitrate_kbps=245,
+            format="MP3",
+            is_cbr=True,
+        )
+        cbr_output = AudioQualityMeasurement(
+            min_bitrate_kbps=320,
+            avg_bitrate_kbps=320,
+            format="MP3",
+            is_cbr=False,
+        )
+        for supplied_mode in (False, True):
+            with self.subTest(label="mp3 v0", supplied_mode=supplied_mode):
+                contract = TargetQualityContract.from_projection(
+                    "mp3 v0", projected_is_cbr=supplied_mode
+                )
+                self.assertFalse(contract.is_cbr)
+                self.assertEqual(
+                    gate_rank(v0_output, cfg, target_contract=contract).name,
+                    "TRANSPARENT",
+                )
+                self.assertEqual(
+                    quality_gate_decision(
+                        v0_output, cfg=cfg, target_contract=contract
+                    ),
+                    "accept",
+                )
+            with self.subTest(label="mp3 320", supplied_mode=supplied_mode):
+                contract = TargetQualityContract.from_projection(
+                    "mp3 320", projected_is_cbr=supplied_mode
+                )
+                self.assertTrue(contract.is_cbr)
+                self.assertEqual(
+                    gate_rank(cbr_output, cfg, target_contract=contract).name,
+                    "TRANSPARENT",
+                )
+                self.assertEqual(
+                    quality_gate_decision(
+                        cbr_output, cfg=cfg, target_contract=contract
+                    ),
+                    "requeue_lossless",
+                )
 
     def test_early_downgrade_keeps_projected_target_for_dispatch_audit(self):
         decision = full_pipeline_decision(
@@ -301,6 +358,137 @@ class TestQualityLineagePins(unittest.TestCase):
 
 class TestQualityLineageGenerated(unittest.TestCase):
     @given(
+        label=st.sampled_from(("mp3 v0", "MP3 V0", "mp3 320", " MP3 320 ")),
+        supplied_mode=st.booleans(),
+    )
+    @example(label="mp3 v0", supplied_mode=True)
+    @example(label="mp3 320", supplied_mode=False)
+    def test_explicit_mp3_label_owns_mode_and_gate_policy(
+        self,
+        label: str,
+        supplied_mode: bool,
+    ) -> None:
+        cfg = QualityRankConfig.defaults()
+        expected_cbr = label.strip().lower() == "mp3 320"
+        bitrate = 320 if expected_cbr else 245
+        contract = TargetQualityContract.from_projection(
+            label,
+            projected_is_cbr=supplied_mode,
+        )
+        output = AudioQualityMeasurement(
+            min_bitrate_kbps=bitrate,
+            avg_bitrate_kbps=bitrate,
+            format="MP3",
+            is_cbr=not expected_cbr,
+        )
+
+        self.assertEqual(contract.is_cbr, expected_cbr)
+        self.assertEqual(
+            gate_rank(output, cfg, target_contract=contract).name,
+            "TRANSPARENT",
+        )
+        self.assertEqual(
+            quality_gate_decision(output, cfg=cfg, target_contract=contract),
+            "requeue_lossless" if expected_cbr else "accept",
+        )
+
+    @given(
+        reject_fact=st.sampled_from(("audio_corrupt", "bad_hash", "nested", "empty")),
+        bitrate=st.integers(min_value=1, max_value=320),
+    )
+    @example(reject_fact="audio_corrupt", bitrate=128)
+    def test_measurement_only_rejects_never_invent_target_policy(
+        self,
+        reject_fact: str,
+        bitrate: int,
+    ) -> None:
+        files = [] if reject_fact == "empty" else [
+            AlbumQualityEvidenceFile(
+                relative_path="01.mp3",
+                size_bytes=1,
+                mtime_ns=1,
+                extension="mp3",
+                container="mp3",
+                codec="mp3",
+            )
+        ]
+        measurement = PreimportMeasurement(
+            audio_corrupt=reject_fact == "audio_corrupt",
+            corrupt_files=(
+                ["01.mp3"] if reject_fact == "audio_corrupt" else []
+            ),
+            matched_bad_hash_id=(1 if reject_fact == "bad_hash" else None),
+            matched_bad_track_path=(
+                "01.mp3" if reject_fact == "bad_hash" else None
+            ),
+            folder_layout="nested" if reject_fact == "nested" else "flat",
+            audio_file_count=0 if reject_fact == "empty" else 1,
+            filetype_band="mp3",
+            min_bitrate_kbps=bitrate,
+            is_vbr=False,
+        )
+
+        built = evidence_from_measurement(
+            mb_release_id="generated-early-reject",
+            source_path="/generated/source",
+            measurement=measurement,
+            files=files,
+        )
+
+        self.assertEqual(built.status, "ready")
+        assert built.evidence is not None
+        self.assertIsNone(built.evidence.target_format)
+        self.assertIsNone(built.evidence.target_is_cbr)
+
+    @given(
+        prefix=st.sampled_from(("", " ", "\t", "\n ")),
+        spelling=st.sampled_from(("mp3", "MP3", "Mp3", "mP3")),
+        suffix=st.sampled_from(("", " ", "\t", " \n")),
+    )
+    @example(prefix=" ", spelling="MP3", suffix=" ")
+    def test_bare_mp3_always_requires_an_explicit_mode(
+        self,
+        prefix: str,
+        spelling: str,
+        suffix: str,
+    ) -> None:
+        with self.assertRaisesRegex(ValueError, "bare MP3"):
+            TargetQualityContract.from_explicit_label(
+                prefix + spelling + suffix
+            )
+
+    @given(
+        prefix=st.sampled_from(("", " ", "\t", "\n ")),
+        spelling=st.sampled_from(("mp3", "MP3", "Mp3", "mP3")),
+        suffix=st.sampled_from(("", " ", "\t", " \n")),
+        projected_is_cbr=st.booleans(),
+    )
+    @example(
+        prefix=" ",
+        spelling="MP3",
+        suffix=" ",
+        projected_is_cbr=False,
+    )
+    @example(
+        prefix="\t",
+        spelling="Mp3",
+        suffix="\n",
+        projected_is_cbr=True,
+    )
+    def test_projection_api_preserves_required_bare_mp3_mode(
+        self,
+        prefix: str,
+        spelling: str,
+        suffix: str,
+        projected_is_cbr: bool,
+    ) -> None:
+        contract = TargetQualityContract.from_projection(
+            prefix + spelling + suffix,
+            projected_is_cbr=projected_is_cbr,
+        )
+        self.assertEqual(contract.is_cbr, projected_is_cbr)
+
+    @given(
         projected_bitrates=st.lists(
             st.integers(min_value=32, max_value=200),
             min_size=1,
@@ -311,6 +499,16 @@ class TestQualityLineageGenerated(unittest.TestCase):
     )
     @example(
         projected_bitrates=[128],
+        existing=123,
+        existing_is_cbr=False,
+    )
+    @example(
+        projected_bitrates=[128, 128],
+        existing=123,
+        existing_is_cbr=False,
+    )
+    @example(
+        projected_bitrates=[128, 129],
         existing=123,
         existing_is_cbr=False,
     )
@@ -380,7 +578,9 @@ class TestQualityLineageGenerated(unittest.TestCase):
                 min_bitrate_kbps=probe_min,
                 avg_bitrate_kbps=probe_avg,
             ),
-            target_quality_contract=TargetQualityContract.from_format(target),
+            target_quality_contract=(
+                TargetQualityContract.from_explicit_label(target)
+            ),
         )
 
         decoded = ImportResult.from_json(result.to_json())
@@ -482,7 +682,9 @@ class TestQualityLineageGenerated(unittest.TestCase):
                 min_bitrate_kbps=proxy_min,
                 avg_bitrate_kbps=proxy_avg,
             ),
-            target_quality_contract=TargetQualityContract.from_format(target),
+            target_quality_contract=(
+                TargetQualityContract.from_explicit_label(target)
+            ),
         )
         with self.assertRaisesRegex(ValueError, "bare measured codec label"):
             planted_bad.to_json()
@@ -529,7 +731,7 @@ class TestQualityLineageGenerated(unittest.TestCase):
             min_bitrate_kbps=probe_min,
             avg_bitrate_kbps=probe_avg,
         )
-        contract = TargetQualityContract.from_format(target)
+        contract = TargetQualityContract.from_explicit_label(target)
 
         old_decision = measured_import_decision(
             MeasuredImportDecisionInput(proxy, existing), cfg=cfg
@@ -573,7 +775,7 @@ class TestQualityLineageGenerated(unittest.TestCase):
         cfg = QualityRankConfig.defaults()
         bitrate = min(projected_bitrates)
         projected_is_cbr = projected_is_cbr_from_bitrates(projected_bitrates)
-        contract = TargetQualityContract.from_format(
+        contract = TargetQualityContract.from_projection(
             "MP3", projected_is_cbr=projected_is_cbr
         )
         source = AudioQualityMeasurement(
@@ -695,7 +897,9 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 min_bitrate_kbps=191,
                 avg_bitrate_kbps=224,
             ),
-            target_quality_contract=TargetQualityContract.from_format("opus 128"),
+            target_quality_contract=TargetQualityContract.from_explicit_label(
+                "opus 128"
+            ),
         )
 
         with self.assertRaisesRegex(AssertionError, "bare codec"):

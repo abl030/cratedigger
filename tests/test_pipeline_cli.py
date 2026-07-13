@@ -1524,30 +1524,85 @@ class TestCmdQuality(unittest.TestCase):
     gate label agrees with the gate verdict.
     """
 
-    def _run_quality(self, request_row, *, runtime_target: str | None):
+    def _run_quality(
+        self,
+        request_row,
+        *,
+        runtime_target: str | None,
+        beets_info: Any = ...,
+        beets_error: Exception | None = None,
+    ):
         from lib.quality import QualityRankConfig
 
         db = FakePipelineDB()
         db.seed_request(request_row)
 
-        beets_info = SimpleNamespace(
-            is_cbr=False,
-            avg_bitrate_kbps=245,
-            median_bitrate_kbps=245,
-            format="MP3",
-        )
+        if beets_info is ...:
+            beets_info = SimpleNamespace(
+                is_cbr=False,
+                avg_bitrate_kbps=245,
+                median_bitrate_kbps=245,
+                format="MP3",
+            )
 
         stdout = io.StringIO()
+        beets_lookup = patch(
+            "scripts.pipeline_cli.quality._load_beets_album_info",
+            side_effect=beets_error,
+        ) if beets_error is not None else patch(
+            "scripts.pipeline_cli.quality._load_beets_album_info",
+            return_value=beets_info,
+        )
         with patch("scripts.pipeline_cli.quality._load_runtime_rank_config",
                    return_value=QualityRankConfig.defaults()), \
              patch("scripts.pipeline_cli.quality._load_runtime_verified_lossless_target",
                    return_value=runtime_target or ""), \
-             patch("scripts.pipeline_cli.quality._load_beets_album_info",
-                   return_value=beets_info), \
+             beets_lookup, \
              redirect_stdout(stdout):
             pipeline_cli.cmd_quality(cast(Any, db), MagicMock(id=request_row["id"]))
 
         return stdout.getvalue()
+
+    def _bare_mp3_request(self, *, request_id: int):
+        return make_request_row(
+            id=request_id,
+            status="imported",
+            mb_release_id=f"mbid-missing-{request_id}",
+            artist_name="Missing Beets Artist",
+            album_title="Missing Beets Album",
+            min_bitrate=256,
+            current_spectral_grade="genuine",
+            verified_lossless=False,
+            final_format="MP3",
+        )
+
+    def test_quality_bare_mp3_missing_beets_mode_is_unavailable(self):
+        output = self._run_quality(
+            self._bare_mp3_request(request_id=4136),
+            runtime_target=None,
+            beets_info=None,
+        )
+
+        self.assertIn("Quality gate:  UNAVAILABLE", output)
+        self.assertIn("materialized MP3 mode unknown", output)
+        self.assertIn("What would happen if we downloaded", output)
+        self.assertNotIn("Quality gate:  DONE", output)
+        self.assertNotIn("Quality gate:  NEEDS", output)
+        self.assertNotIn("is_cbr=False", output)
+
+    def test_quality_bare_mp3_beets_exception_is_unavailable(self):
+        output = self._run_quality(
+            self._bare_mp3_request(request_id=4137),
+            runtime_target=None,
+            beets_error=RuntimeError("beets unavailable"),
+        )
+
+        self.assertIn("Quality gate:  UNAVAILABLE", output)
+        self.assertIn("materialized MP3 mode unknown", output)
+        self.assertIn("Beets lookup: unavailable", output)
+        self.assertIn("What would happen if we downloaded", output)
+        self.assertNotIn("Traceback", output)
+        self.assertNotIn("is_cbr=False", output)
 
     def test_quality_threads_runtime_verified_lossless_target(self):
         request_row = make_request_row(
@@ -1588,6 +1643,78 @@ class TestCmdQuality(unittest.TestCase):
         # Request's target_format=flac wins over the runtime opus 128 target.
         self.assertIn("Verified-lossless output: flac", output)
         self.assertIn("Genuine FLAC → flac (high bitrate):", output)
+
+    def test_quality_bare_mp3_uses_materialized_album_mode(self):
+        """Live request 4135: bare MP3 CBR 256 must match the real gate."""
+        from lib.beets_db import AlbumInfo
+
+        request_row = make_request_row(
+            id=4135,
+            status="imported",
+            mb_release_id="mbid-johnny-x",
+            artist_name="The Bouncing Souls",
+            album_title="Johnny X",
+            min_bitrate=256,
+            current_spectral_grade="genuine",
+            verified_lossless=False,
+            final_format="MP3",
+        )
+        cbr_info = AlbumInfo(
+            album_id=4135,
+            track_count=4,
+            min_bitrate_kbps=256,
+            avg_bitrate_kbps=256,
+            median_bitrate_kbps=256,
+            format="MP3",
+            is_cbr=True,
+            album_path="/Beets/The Bouncing Souls/Johnny X",
+        )
+
+        output = self._run_quality(
+            request_row,
+            runtime_target=None,
+            beets_info=cbr_info,
+        )
+
+        self.assertIn("NEEDS LOSSLESS", output)
+        self.assertIn("(rank=EXCELLENT)", output)
+        self.assertIn("is_cbr=True", output)
+
+    def test_quality_bare_mp3_vbr_control_remains_transparent(self):
+        """Live request 8499 control: bare MP3 VBR keeps VBR policy bands."""
+        from lib.beets_db import AlbumInfo
+
+        request_row = make_request_row(
+            id=8499,
+            status="imported",
+            mb_release_id="mbid-vbr-control",
+            artist_name="VBR Artist",
+            album_title="VBR Album",
+            min_bitrate=319,
+            current_spectral_grade="genuine",
+            verified_lossless=False,
+            final_format="MP3",
+        )
+        vbr_info = AlbumInfo(
+            album_id=8499,
+            track_count=10,
+            min_bitrate_kbps=319,
+            avg_bitrate_kbps=319,
+            median_bitrate_kbps=319,
+            format="MP3",
+            is_cbr=False,
+            album_path="/Beets/VBR Artist/VBR Album",
+        )
+
+        output = self._run_quality(
+            request_row,
+            runtime_target=None,
+            beets_info=vbr_info,
+        )
+
+        self.assertIn("Quality gate:  DONE", output)
+        self.assertIn("(rank=TRANSPARENT)", output)
+        self.assertIn("is_cbr=False", output)
 
     def test_quality_label_matches_gate_after_spectral_clamp(self):
         """AFX Analord 09 regression: displayed rank label must match the gate verdict.

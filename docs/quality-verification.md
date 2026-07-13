@@ -276,7 +276,9 @@ Version 3 import results persist four disjoint facts:
 - `target_quality_contract` is configured policy used explicitly by comparison
   and gate ranking. It owns the target bitrate mode (`is_cbr`) as well as its
   label, so source/output CBR observations cannot change projected MP3 rank;
-  and
+  bare `MP3` therefore requires an explicit projected or materialized CBR/VBR
+  fact, while labels such as `mp3 v0`, `mp3 320`, and `opus 128` remain
+  self-describing; and
 - `materialized_measurement` is built
 from the postflight Beets album info after conversion and import. It records the
 actual stored codec plus min/avg/median bitrate. This is deliberately separate

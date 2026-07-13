@@ -249,6 +249,7 @@ class TestImportPreviewValues(unittest.TestCase):
                 spectral_grade="suspect",
                 spectral_bitrate=160,
                 post_conversion_min_bitrate=228,
+                post_conversion_is_cbr=False,
                 converted_count=12,
                 candidate_v0_probe_avg=228,
                 existing_v0_probe_avg=171,
@@ -273,6 +274,7 @@ class TestImportPreviewValues(unittest.TestCase):
                 spectral_grade="likely_transcode",
                 spectral_bitrate=160,
                 post_conversion_min_bitrate=237,
+                post_conversion_is_cbr=False,
                 converted_count=12,
                 candidate_v0_probe_avg=276,
                 candidate_v0_probe_min=237,
@@ -297,6 +299,7 @@ class TestImportPreviewValues(unittest.TestCase):
                 spectral_bitrate=128,
                 existing_spectral_bitrate=160,
                 post_conversion_min_bitrate=228,
+                post_conversion_is_cbr=False,
                 converted_count=12,
                 existing_v0_probe_avg=171,
             )
@@ -319,6 +322,7 @@ class TestImportPreviewValues(unittest.TestCase):
                 spectral_grade="suspect",
                 spectral_bitrate=160,
                 post_conversion_min_bitrate=175,
+                post_conversion_is_cbr=False,
                 converted_count=12,
                 candidate_v0_probe_avg=175,
                 existing_v0_probe_avg=171,
@@ -714,7 +718,9 @@ class TestImportPreviewPath(unittest.TestCase):
                             format="FLAC",
                         ),
                         target_quality_contract=(
-                            TargetQualityContract.from_format("opus 128")
+                            TargetQualityContract.from_explicit_label(
+                                "opus 128"
+                            )
                         ),
                     )
                 ),

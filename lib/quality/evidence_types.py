@@ -100,33 +100,49 @@ class TargetQualityContract(msgspec.Struct, frozen=True):
     is_cbr: bool
 
     @classmethod
-    def from_format(
+    def from_explicit_label(
         cls,
         format_hint: str,
-        *,
-        projected_is_cbr: bool | None = None,
     ) -> "TargetQualityContract":
-        """Build target policy with an optional independently measured mode.
+        """Build policy from a self-describing target label.
 
-        Explicit target labels remain self-describing.  Bare codec labels such
-        as ``MP3`` are not: the harness must pass the album-wide bitrate mode
-        measured from the projected/probe files.  The fallback preserves the
-        policy-only constructor for callers that do not have those files.
+        Bare ``MP3`` is deliberately rejected because it does not declare CBR
+        versus VBR.  Callers with a measured projection must use
+        :meth:`from_projection` instead.
         """
 
         parts = format_hint.strip().lower().split()
+        if parts == ["mp3"]:
+            raise ValueError(
+                "bare MP3 target contract requires a measured projection"
+            )
+        is_cbr = (
+            len(parts) == 2
+            and parts[0] == "mp3"
+            and parts[1].isdigit()
+        )
         return cls(
             format=format_hint,
-            is_cbr=(
-                projected_is_cbr
-                if projected_is_cbr is not None
-                else (
-                    len(parts) == 2
-                    and parts[0] == "mp3"
-                    and parts[1].isdigit()
-                )
-            ),
+            is_cbr=is_cbr,
         )
+
+    @classmethod
+    def from_projection(
+        cls,
+        format_hint: str,
+        *,
+        projected_is_cbr: bool,
+    ) -> "TargetQualityContract":
+        """Build policy with a required independently measured target mode.
+
+        Bare ``MP3`` consumes the projection.  Explicit labels remain
+        authoritative and cannot be contradicted by the measured mode.
+        """
+
+        parts = format_hint.strip().lower().split()
+        if parts == ["mp3"]:
+            return cls(format=format_hint, is_cbr=projected_is_cbr)
+        return cls.from_explicit_label(format_hint)
 
 
 _LEGACY_POLICY_V0_PROBE_KINDS: tuple[str, ...] = (

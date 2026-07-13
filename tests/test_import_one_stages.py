@@ -1092,7 +1092,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
             storage_format="MP3",
             target_format=target_format,
             target_is_cbr=(
-                TargetQualityContract.from_format(target_format).is_cbr
+                TargetQualityContract.from_explicit_label(target_format).is_cbr
                 if target_format is not None
                 else None
             ),
@@ -1425,7 +1425,9 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                 avg_bitrate_kbps=224,
                 median_bitrate_kbps=237,
             ),
-            target_quality_contract=TargetQualityContract.from_format("opus 128"),
+            target_quality_contract=TargetQualityContract.from_explicit_label(
+                "opus 128"
+            ),
             conversion=ConversionInfo(
                 was_converted=True,
                 original_filetype="flac",

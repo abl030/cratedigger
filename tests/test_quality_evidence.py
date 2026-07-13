@@ -14,6 +14,7 @@ import unittest
 from typing import TYPE_CHECKING
 
 from lib.beets_db import AlbumInfo
+from lib.measurement import PreimportMeasurement
 from lib.quality import (
     AlbumQualityEvidenceFile,
     AudioQualityMeasurement,
@@ -25,6 +26,7 @@ from lib.quality_evidence import (
     audio_snapshot_matches,
     backfill_current_evidence_from_album_info,
     evidence_from_import_result,
+    evidence_from_measurement,
     snapshot_audio_files,
 )
 from tests.fakes import FakePipelineDB
@@ -127,6 +129,26 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
 
         self.assertFalse(result.available)
         self.assertEqual(result.status, "empty_fileset")
+
+    def test_measurement_only_reject_evidence_has_no_target_policy(self):
+        result = evidence_from_measurement(
+            mb_release_id="mb-early-reject",
+            source_path=self.root,
+            measurement=PreimportMeasurement(
+                audio_corrupt=True,
+                corrupt_files=["01.mp3"],
+                folder_layout="flat",
+                audio_file_count=2,
+                filetype_band="mp3",
+                min_bitrate_kbps=128,
+                is_vbr=False,
+            ),
+        )
+
+        self.assertEqual(result.status, "ready")
+        assert result.evidence is not None
+        self.assertIsNone(result.evidence.target_format)
+        self.assertIsNone(result.evidence.target_is_cbr)
 
     def test_current_backfill_seeds_legacy_verified_lossless_proof_once(self):
         db = FakePipelineDB()
