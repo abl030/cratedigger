@@ -604,10 +604,18 @@ class BeetsDB:
         } for i in items]
         album_path = os.path.dirname(tracks[0]["path"]) if tracks and tracks[0]["path"] else None
         identity = ReleaseIdentity.from_fields(album[4], album[10])
+        mb_identity = ReleaseIdentity.from_id(album[4])
+        discogs_identity = ReleaseIdentity.from_id(album[10])
         return {
             "id": album[0], "album": album[1], "artist": album[2],
             "year": album[3],
-            "mb_albumid": identity.release_id if identity else None,
+            # Preserve both server-owned columns.  Collapsing a row that has
+            # a valid MB UUID *and* a valid Discogs ID to the MB UUID hides an
+            # authority ambiguity from destructive callers.
+            "mb_albumid": mb_identity.release_id if mb_identity else None,
+            "discogs_albumid": (
+                discogs_identity.release_id if discogs_identity else None
+            ),
             "type": album[5],
             "label": album[6], "country": album[7],
             "artpath": self._resolve_path(album[8]) if album[8] else None,

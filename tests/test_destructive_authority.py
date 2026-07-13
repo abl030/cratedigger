@@ -16,6 +16,7 @@ from lib.destructive_release_service import (
     DeleteLockContended,
     DeleteReleaseMismatch,
     DeleteRequest,
+    DeleteSuccess,
     ban_source,
     delete_release_from_library,
 )
@@ -33,6 +34,7 @@ from tests.test_pipeline_db import TEST_DSN, make_db, requires_postgres
 
 RELEASE_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 RELEASE_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+DISCOGS_A = "12856590"
 
 
 def _album(album_id: int = 7, release_id: str = RELEASE_A) -> dict[str, object]:
@@ -117,6 +119,23 @@ class TestBanSourceAuthority(unittest.TestCase):
         )
 
         self.assertIsInstance(result, BanSourceImporterBusy)
+        self._assert_no_mutation()
+
+    def test_dual_canonical_request_identity_fails_closed(self) -> None:
+        self.db.seed_request(make_request_row(
+            id=41,
+            status="imported",
+            mb_release_id=RELEASE_A,
+            discogs_release_id=DISCOGS_A,
+        ))
+
+        result = ban_source(
+            pipeline_db=self.db,
+            beets_db=self.beets,
+            request=BanSourceRequest(request_id=41),
+        )
+
+        self.assertIsInstance(result, BanSourceReleaseMismatch)
         self._assert_no_mutation()
 
 
@@ -204,6 +223,51 @@ class TestLibraryDeleteAuthority(unittest.TestCase):
         self.assertIsInstance(result, DeleteImporterBusy)
         self._assert_no_mutation()
 
+    def test_dual_canonical_album_identity_fails_closed_in_every_pipeline_world(
+        self,
+    ) -> None:
+        """A Beets row naming two pressings can never select a delete target."""
+        for pipeline_world in ("mb", "discogs", "neither", "both"):
+            with self.subTest(pipeline_world=pipeline_world):
+                db = FakePipelineDB()
+                if pipeline_world in ("mb", "both"):
+                    db.seed_request(make_request_row(
+                        id=41,
+                        status="imported",
+                        mb_release_id=RELEASE_A,
+                    ))
+                if pipeline_world in ("discogs", "both"):
+                    db.seed_request(make_request_row(
+                        id=42,
+                        status="imported",
+                        mb_release_id=DISCOGS_A,
+                        discogs_release_id=DISCOGS_A,
+                    ))
+                    db.enqueue_import_job(
+                        IMPORT_JOB_AUTOMATION,
+                        request_id=42,
+                        dedupe_key="automation_import:request:42",
+                    )
+                beets = FakeBeetsDB()
+                beets.set_album_detail(7, {
+                    **_album(),
+                    "discogs_albumid": DISCOGS_A,
+                })
+
+                result = delete_release_from_library(
+                    pipeline_db=db,
+                    beets_db=beets,
+                    request=DeleteRequest(album_id=7, purge_pipeline=True),
+                )
+
+                self.assertIsInstance(result, DeleteReleaseMismatch)
+                self.assertIsNotNone(beets.get_album_detail(7))
+                self.assertEqual(beets.delete_album_calls, [])
+                if pipeline_world in ("mb", "both"):
+                    self.assertIsNotNone(db.get_request(41))
+                if pipeline_world in ("discogs", "both"):
+                    self.assertIsNotNone(db.get_request(42))
+
 
 @requires_postgres
 class TestDestructiveAuthorityRealPostgres(unittest.TestCase):
@@ -252,6 +316,162 @@ class TestDestructiveAuthorityRealPostgres(unittest.TestCase):
             self.assertEqual(beets.get_item_paths_calls, [])
             self.assertEqual(beets.locate_calls, [])
         finally:
+            db1.close()
+
+    def test_library_delete_no_pipeline_honors_release_lock(self) -> None:
+        db1 = make_db()
+        beets = FakeBeetsDB()
+        beets.set_album_detail(7, _album())
+        barrier = threading.Barrier(2)
+        try:
+            with db1.advisory_lock(
+                ADVISORY_LOCK_NAMESPACE_RELEASE,
+                release_id_to_lock_key(RELEASE_A),
+            ) as acquired:
+                self.assertTrue(acquired)
+
+                def contend() -> object:
+                    assert TEST_DSN is not None
+                    db2 = PipelineDB(TEST_DSN)
+                    try:
+                        barrier.wait(timeout=5)
+                        return delete_release_from_library(
+                            pipeline_db=db2,
+                            beets_db=beets,
+                            request=DeleteRequest(album_id=7),
+                        )
+                    finally:
+                        db2.close()
+
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(contend)
+                    barrier.wait(timeout=5)
+                    result = future.result(timeout=5)
+
+            self.assertIsInstance(result, DeleteLockContended)
+            self.assertIsNotNone(beets.get_album_detail(7))
+            self.assertEqual(beets.delete_album_calls, [])
+        finally:
+            db1.close()
+
+    def test_library_delete_pipeline_lock_then_active_job_both_fail_closed(
+        self,
+    ) -> None:
+        db1 = make_db()
+        request_id = db1.add_request(
+            "Artist A",
+            "Album A",
+            "request",
+            mb_release_id=DISCOGS_A,
+            discogs_release_id=DISCOGS_A,
+            status="imported",
+        )
+        db1.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=request_id,
+            dedupe_key=f"automation_import:request:{request_id}",
+        )
+        beets = FakeBeetsDB()
+        beets.set_album_detail(7, {
+            **_album(release_id=DISCOGS_A),
+            "discogs_albumid": DISCOGS_A,
+        })
+        barrier = threading.Barrier(2)
+        try:
+            with db1.advisory_lock(
+                ADVISORY_LOCK_NAMESPACE_IMPORT,
+                request_id,
+            ) as acquired:
+                self.assertTrue(acquired)
+
+                def contend() -> object:
+                    assert TEST_DSN is not None
+                    db2 = PipelineDB(TEST_DSN)
+                    try:
+                        barrier.wait(timeout=5)
+                        return delete_release_from_library(
+                            pipeline_db=db2,
+                            beets_db=beets,
+                            request=DeleteRequest(album_id=7),
+                        )
+                    finally:
+                        db2.close()
+
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(contend)
+                    barrier.wait(timeout=5)
+                    contended = future.result(timeout=5)
+
+            self.assertIsInstance(contended, DeleteLockContended)
+            assert TEST_DSN is not None
+            db2 = PipelineDB(TEST_DSN)
+            try:
+                busy = delete_release_from_library(
+                    pipeline_db=db2,
+                    beets_db=beets,
+                    request=DeleteRequest(album_id=7),
+                )
+            finally:
+                db2.close()
+            self.assertIsInstance(busy, DeleteImporterBusy)
+            self.assertIsNotNone(db1.get_request(request_id))
+            self.assertIsNotNone(beets.get_album_detail(7))
+            self.assertEqual(beets.delete_album_calls, [])
+        finally:
+            db1.close()
+
+    def test_import_lock_remains_held_during_instrumented_beets_mutation(
+        self,
+    ) -> None:
+        db1 = make_db()
+        request_id = db1.add_request(
+            "Artist A",
+            "Album A",
+            "request",
+            mb_release_id=RELEASE_A,
+            status="imported",
+        )
+        entered_delete = threading.Event()
+        allow_delete = threading.Event()
+
+        class BlockingBeetsDB(FakeBeetsDB):
+            def delete_album(self, album_id: int) -> tuple[str, str, list[str]]:
+                entered_delete.set()
+                if not allow_delete.wait(timeout=5):
+                    raise TimeoutError("test did not release Beets mutation")
+                return super().delete_album(album_id)
+
+        beets = BlockingBeetsDB()
+        beets.set_album_detail(7, _album())
+        try:
+            def destroy() -> object:
+                assert TEST_DSN is not None
+                db2 = PipelineDB(TEST_DSN)
+                try:
+                    return delete_release_from_library(
+                        pipeline_db=db2,
+                        beets_db=beets,
+                        request=DeleteRequest(album_id=7),
+                    )
+                finally:
+                    db2.close()
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(destroy)
+                self.assertTrue(entered_delete.wait(timeout=5))
+                with db1.advisory_lock(
+                    ADVISORY_LOCK_NAMESPACE_IMPORT,
+                    request_id,
+                ) as acquired_during_delete:
+                    self.assertFalse(acquired_during_delete)
+                allow_delete.set()
+                result = future.result(timeout=5)
+
+            self.assertIsInstance(result, DeleteSuccess)
+            self.assertIsNone(beets.get_album_detail(7))
+            self.assertIsNotNone(db1.get_request(request_id))
+        finally:
+            allow_delete.set()
             db1.close()
 
 

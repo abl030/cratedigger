@@ -149,7 +149,10 @@ an attacker simply supplies the constant.
 roots authority in `album_requests.id`; library-delete roots it in the beets
 album primary key. Release/pipeline IDs supplied by a client are optional
 confirmation values only. The service rejects a mismatch before mutation and
-the HTTP/CLI adapters map that semantic conflict to 422/exit 3.
+the HTTP/CLI adapters map that semantic conflict to 422/exit 3. A beets album
+row carrying both a valid MusicBrainz UUID and a distinct valid Discogs ID is
+not collapsed to one source: it is ambiguous authority and fails closed before
+pipeline lookup, lock acquisition, or mutation.
 
 Two destructive workflows accept multiple independently trusted identifiers
 without proving they describe the same release:

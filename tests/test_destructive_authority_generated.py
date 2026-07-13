@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import copy
+import tempfile
 import unittest
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
-from hypothesis import given, strategies as st
+from hypothesis import example, given, strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.destructive_release_service import (
@@ -24,7 +26,8 @@ from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
     ADVISORY_LOCK_NAMESPACE_RELEASE,
 )
-from tests.fakes import FakeBeetsDB, FakePipelineDB
+from lib.release_identity import ReleaseIdentity
+from tests.fakes import DenylistEntry, FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
 
 
@@ -36,6 +39,8 @@ class DestructiveState:
     logs: tuple[object, ...]
     album: dict[str, object] | None
     delete_calls: tuple[int, ...]
+    files: tuple[tuple[str, bytes], ...]
+    directories: tuple[str, ...]
 
 
 def snapshot_state(
@@ -44,7 +49,21 @@ def snapshot_state(
     *,
     request_ids: tuple[int, ...],
     album_id: int,
+    filesystem_root: Path | None = None,
 ) -> DestructiveState:
+    files: tuple[tuple[str, bytes], ...] = ()
+    directories: tuple[str, ...] = ()
+    if filesystem_root is not None and filesystem_root.exists():
+        files = tuple(sorted(
+            (str(path.relative_to(filesystem_root)), path.read_bytes())
+            for path in filesystem_root.rglob("*")
+            if path.is_file()
+        ))
+        directories = tuple(sorted(
+            str(path.relative_to(filesystem_root))
+            for path in filesystem_root.rglob("*")
+            if path.is_dir()
+        ))
     return DestructiveState(
         requests=tuple(
             (request_id, copy.deepcopy(db.get_request(request_id)))
@@ -55,6 +74,8 @@ def snapshot_state(
         logs=tuple(copy.deepcopy(db.download_logs)),
         album=copy.deepcopy(beets.get_album_detail(album_id)),
         delete_calls=tuple(beets.delete_album_calls),
+        files=files,
+        directories=directories,
     )
 
 
@@ -70,14 +91,20 @@ def assert_rejection_preserved_state(
 
 
 def _different_release(release_id: str) -> str:
-    value = uuid.UUID(release_id)
-    return str(uuid.UUID(int=value.int ^ 1))
+    identity = ReleaseIdentity.from_id(release_id)
+    assert identity is not None
+    if identity.source == "musicbrainz":
+        value = uuid.UUID(release_id)
+        return str(uuid.UUID(int=value.int ^ 1))
+    return str(int(release_id) + 1)
 
 
+MB_RELEASE_IDS = st.uuids().map(str)
+DISCOGS_RELEASE_IDS = st.integers(min_value=1, max_value=2_000_000_000).map(str)
 def _configure_lock_world(
     db: FakePipelineDB,
     *,
-    request_id: int,
+    request_id: int | None,
     lock_failure: str,
     job_race: bool,
 ) -> None:
@@ -90,7 +117,8 @@ def _configure_lock_world(
         if lock_failure == "release" and namespace == ADVISORY_LOCK_NAMESPACE_RELEASE:
             return False
         if (
-            job_race
+            request_id is not None
+            and job_race
             and not job_inserted
             and namespace == ADVISORY_LOCK_NAMESPACE_RELEASE
         ):
@@ -106,24 +134,55 @@ def _configure_lock_world(
 
 
 class TestGeneratedDestructiveAuthority(unittest.TestCase):
+    @example(
+        mb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        discogs_id="12856590",
+        identity_shape="discogs_dual_layout",
+        identity_matches=True,
+        lock_failure="none",
+        job_race=False,
+    )
+    @example(
+        mb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        discogs_id="12856590",
+        identity_shape="dual",
+        identity_matches=True,
+        lock_failure="none",
+        job_race=False,
+    )
     @given(
-        release_uuid=st.uuids().map(str),
+        mb_id=MB_RELEASE_IDS,
+        discogs_id=DISCOGS_RELEASE_IDS,
+        identity_shape=st.sampled_from((
+            "mb", "discogs", "discogs_dual_layout", "dual",
+        )),
         identity_matches=st.booleans(),
         lock_failure=st.sampled_from(("none", "import", "release")),
         job_race=st.booleans(),
     )
     def test_ban_rejections_are_zero_mutation(
         self,
-        release_uuid: str,
+        mb_id: str,
+        discogs_id: str,
+        identity_shape: str,
         identity_matches: bool,
         lock_failure: str,
         job_race: bool,
     ) -> None:
+        release_id = mb_id if identity_shape in ("mb", "dual") else discogs_id
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=41,
             status="imported",
-            mb_release_id=release_uuid,
+            mb_release_id=(
+                mb_id if identity_shape in ("mb", "dual")
+                else discogs_id
+            ),
+            discogs_release_id=(
+                discogs_id
+                if identity_shape in ("discogs", "discogs_dual_layout", "dual")
+                else None
+            ),
         ))
         beets = FakeBeetsDB()
         _configure_lock_world(
@@ -132,7 +191,7 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
             lock_failure=lock_failure,
             job_race=job_race,
         )
-        expected = release_uuid if identity_matches else _different_release(release_uuid)
+        expected = release_id if identity_matches else _different_release(release_id)
         before = snapshot_state(db, beets, request_ids=(41,), album_id=7)
 
         result = ban_source(
@@ -147,87 +206,270 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
             after,
             rejected=not isinstance(result, BanSourceSuccess),
         )
+        should_succeed = (
+            identity_shape != "dual"
+            and identity_matches
+            and lock_failure == "none"
+            and not job_race
+        )
+        self.assertEqual(isinstance(result, BanSourceSuccess), should_succeed)
 
+    @example(
+        mb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        discogs_id="12856590",
+        album_shape="mb",
+        seed_mb_pipeline=True,
+        seed_discogs_pipeline=False,
+        release_confirmation="same",
+        pipeline_confirmation="same",
+        lock_failure="none",
+        job_race=False,
+        purge_pipeline=True,
+        file_payloads=[b"mb-track"],
+        sidecar=False,
+    )
+    @example(
+        mb_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        discogs_id="12856590",
+        album_shape="discogs",
+        seed_mb_pipeline=False,
+        seed_discogs_pipeline=True,
+        release_confirmation="absent",
+        pipeline_confirmation="absent",
+        lock_failure="none",
+        job_race=False,
+        purge_pipeline=False,
+        file_payloads=[b"discogs-track"],
+        sidecar=True,
+    )
     @given(
-        release_uuid=st.uuids().map(str),
+        mb_id=MB_RELEASE_IDS,
+        discogs_id=DISCOGS_RELEASE_IDS,
+        album_shape=st.sampled_from((
+            "mb", "discogs", "discogs_dual_layout", "dual",
+        )),
+        seed_mb_pipeline=st.booleans(),
+        seed_discogs_pipeline=st.booleans(),
         release_confirmation=st.sampled_from(("same", "different", "absent")),
         pipeline_confirmation=st.sampled_from(("same", "different", "absent")),
         lock_failure=st.sampled_from(("none", "import", "release")),
         job_race=st.booleans(),
+        purge_pipeline=st.booleans(),
+        file_payloads=st.lists(st.binary(max_size=32), max_size=3),
+        sidecar=st.booleans(),
     )
-    def test_library_delete_rejections_are_zero_mutation(
+    def test_library_delete_authority_across_identity_and_filesystem_worlds(
         self,
-        release_uuid: str,
+        mb_id: str,
+        discogs_id: str,
+        album_shape: str,
+        seed_mb_pipeline: bool,
+        seed_discogs_pipeline: bool,
         release_confirmation: str,
         pipeline_confirmation: str,
         lock_failure: str,
         job_race: bool,
+        purge_pipeline: bool,
+        file_payloads: list[bytes],
+        sidecar: bool,
     ) -> None:
-        other = _different_release(release_uuid)
         db = FakePipelineDB()
+        if seed_mb_pipeline:
+            db.seed_request(make_request_row(
+                id=41, status="imported", mb_release_id=mb_id,
+            ))
+        if seed_discogs_pipeline:
+            db.seed_request(make_request_row(
+                id=42,
+                status="imported",
+                mb_release_id=discogs_id,
+                discogs_release_id=discogs_id,
+            ))
+
+        authoritative_release = (
+            mb_id if album_shape in ("mb", "dual") else discogs_id
+        )
+        current_pipeline_id = (
+            41 if album_shape == "mb" and seed_mb_pipeline
+            else 42 if (
+                album_shape in ("discogs", "discogs_dual_layout")
+                and seed_discogs_pipeline
+            )
+            else None
+        )
+        expected_release = {
+            "same": authoritative_release,
+            "different": _different_release(authoritative_release),
+            "absent": None,
+        }[release_confirmation]
+        other_pipeline_id = (
+            42 if current_pipeline_id == 41 and seed_discogs_pipeline
+            else 41 if current_pipeline_id == 42 and seed_mb_pipeline
+            else 999
+        )
+        expected_pipeline = {
+            "same": current_pipeline_id or 999,
+            "different": other_pipeline_id,
+            "absent": None,
+        }[pipeline_confirmation]
+        _configure_lock_world(
+            db,
+            request_id=current_pipeline_id,
+            lock_failure=lock_failure,
+            job_race=job_race,
+        )
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            album_dir = root / "Artist" / "Album"
+            album_dir.mkdir(parents=True)
+            tracks: list[dict[str, object]] = []
+            track_paths: list[Path] = []
+            for index, payload in enumerate(file_payloads, start=1):
+                track_path = album_dir / f"{index:02d}.flac"
+                track_path.write_bytes(payload)
+                track_paths.append(track_path)
+                tracks.append({"id": index, "path": str(track_path)})
+            sidecar_path = album_dir / "cover.jpg"
+            if sidecar:
+                sidecar_path.write_bytes(b"cover")
+
+            beets = FakeBeetsDB()
+            beets.set_album_detail(7, {
+                "id": 7,
+                "album": "A",
+                "artist": "B",
+                "mb_albumid": (
+                    mb_id if album_shape in ("mb", "dual")
+                    else discogs_id if album_shape == "discogs_dual_layout"
+                    else None
+                ),
+                "discogs_albumid": (
+                    discogs_id
+                    if album_shape in ("discogs", "discogs_dual_layout", "dual")
+                    else None
+                ),
+                "tracks": tracks,
+            })
+            before = snapshot_state(
+                db,
+                beets,
+                request_ids=(41, 42),
+                album_id=7,
+                filesystem_root=root,
+            )
+
+            result = delete_release_from_library(
+                pipeline_db=db,
+                beets_db=beets,
+                request=DeleteRequest(
+                    album_id=7,
+                    purge_pipeline=purge_pipeline,
+                    expected_pipeline_id=expected_pipeline,
+                    expected_release_id=expected_release,
+                ),
+            )
+
+            after = snapshot_state(
+                db,
+                beets,
+                request_ids=(41, 42),
+                album_id=7,
+                filesystem_root=root,
+            )
+            succeeded = isinstance(result, DeleteSuccess)
+            assert_rejection_preserved_state(
+                before,
+                after,
+                rejected=not succeeded,
+            )
+            confirmation_ok = (
+                release_confirmation != "different"
+                and (
+                    pipeline_confirmation == "absent"
+                    or (
+                        pipeline_confirmation == "same"
+                        and current_pipeline_id is not None
+                    )
+                )
+            )
+            locks_ok = (
+                lock_failure != "release"
+                and not (
+                    current_pipeline_id is not None
+                    and lock_failure == "import"
+                )
+            )
+            job_ok = current_pipeline_id is None or not job_race
+            should_succeed = (
+                album_shape != "dual"
+                and confirmation_ok
+                and locks_ok
+                and job_ok
+            )
+            self.assertEqual(succeeded, should_succeed)
+            if succeeded:
+                self.assertIsNone(beets.get_album_detail(7))
+                self.assertTrue(all(not path.exists() for path in track_paths))
+                self.assertEqual(sidecar_path.exists(), sidecar)
+                for request_id in (41, 42):
+                    should_be_deleted = (
+                        purge_pipeline and request_id == current_pipeline_id
+                    )
+                    self.assertEqual(
+                        db.get_request(request_id) is None,
+                        should_be_deleted or (
+                            request_id == 41 and not seed_mb_pipeline
+                        ) or (
+                            request_id == 42 and not seed_discogs_pipeline
+                        ),
+                    )
+
+
+class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
+    def test_checker_trips_on_fault_injected_production_mutation(self) -> None:
+        class FaultInjectingPipelineDB(FakePipelineDB):
+            inject_mutation = False
+
+            def get_request_by_release_id(
+                self, release_id: object | None,
+            ) -> dict[str, object] | None:
+                row = super().get_request_by_release_id(release_id)
+                if self.inject_mutation:
+                    self.inject_mutation = False
+                    self.denylist.append(DenylistEntry(
+                        request_id=41,
+                        username="planted production mutation",
+                    ))
+                return row
+
+        db = FaultInjectingPipelineDB()
         db.seed_request(make_request_row(
-            id=41, status="imported", mb_release_id=release_uuid,
-        ))
-        db.seed_request(make_request_row(
-            id=42, status="imported", mb_release_id=other,
+            id=41, status="imported", mb_release_id="12856590",
+            discogs_release_id="12856590",
         ))
         beets = FakeBeetsDB()
         beets.set_album_detail(7, {
             "id": 7,
             "album": "A",
             "artist": "B",
-            "mb_albumid": release_uuid,
-            "discogs_albumid": None,
+            "mb_albumid": "12856590",
+            "discogs_albumid": "12856590",
             "tracks": [],
         })
-        _configure_lock_world(
-            db,
-            request_id=41,
-            lock_failure=lock_failure,
-            job_race=job_race,
-        )
-        expected_release = {
-            "same": release_uuid,
-            "different": other,
-            "absent": None,
-        }[release_confirmation]
-        expected_pipeline = {
-            "same": 41,
-            "different": 42,
-            "absent": None,
-        }[pipeline_confirmation]
-        before = snapshot_state(db, beets, request_ids=(41, 42), album_id=7)
+        before = snapshot_state(db, beets, request_ids=(41,), album_id=7)
+        db.inject_mutation = True
 
         result = delete_release_from_library(
             pipeline_db=db,
             beets_db=beets,
-            request=DeleteRequest(
-                album_id=7,
-                purge_pipeline=True,
-                expected_pipeline_id=expected_pipeline,
-                expected_release_id=expected_release,
-            ),
+            request=DeleteRequest(album_id=7, expected_pipeline_id=999),
         )
 
-        after = snapshot_state(db, beets, request_ids=(41, 42), album_id=7)
-        assert_rejection_preserved_state(
-            before,
-            after,
-            rejected=not isinstance(result, DeleteSuccess),
-        )
-
-
-class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
-    def test_checker_rejects_planted_mutation(self) -> None:
-        before = DestructiveState((), (), (), (), None, ())
-        after = DestructiveState((), ("planted denylist write",), (), (), None, ())
+        self.assertNotIsInstance(result, DeleteSuccess)
+        after = snapshot_state(db, beets, request_ids=(41,), album_id=7)
         with self.assertRaisesRegex(AssertionError, "mutated owned state"):
             assert_rejection_preserved_state(before, after, rejected=True)
-
-    def test_checker_ignores_success_state_changes(self) -> None:
-        before = DestructiveState((), (), (), (), None, ())
-        after = DestructiveState((), (), (), (), None, (7,))
-        assert_rejection_preserved_state(before, after, rejected=False)
 
 
 if __name__ == "__main__":

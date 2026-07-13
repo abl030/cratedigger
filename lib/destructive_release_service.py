@@ -94,18 +94,31 @@ class FinalizeRequestFn(Protocol):
     ) -> bool: ...
 
 
+def _distinct_identities(*values: object | None) -> tuple[ReleaseIdentity, ...]:
+    """Return every distinct canonical identity carried by server state."""
+    identities: list[ReleaseIdentity] = []
+    for value in values:
+        identity = ReleaseIdentity.from_id(value)
+        if identity is not None and identity not in identities:
+            identities.append(identity)
+    return tuple(identities)
+
+
 def _request_identity(row: dict[str, Any]) -> ReleaseIdentity | None:
-    return ReleaseIdentity.from_fields(
+    identities = _distinct_identities(
         row.get("mb_release_id"),
         row.get("discogs_release_id"),
     )
+    return identities[0] if len(identities) == 1 else None
 
 
 def _album_identity(row: dict[str, object]) -> ReleaseIdentity | None:
-    return ReleaseIdentity.from_fields(
+    """Return one unambiguous identity; dual-source rows fail closed."""
+    identities = _distinct_identities(
         row.get("mb_albumid"),
         row.get("discogs_albumid"),
     )
+    return identities[0] if len(identities) == 1 else None
 
 
 def resolve_pipeline_request(

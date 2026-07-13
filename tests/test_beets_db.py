@@ -1161,6 +1161,30 @@ class TestGetAlbumDetail(unittest.TestCase):
             detail = db.get_album_detail(999)
         self.assertIsNone(detail)
 
+    def test_preserves_both_canonical_identity_columns_for_authority_checks(
+        self,
+    ) -> None:
+        """Destructive callers must see ambiguity instead of MB-first collapse."""
+        self._conn = sqlite3.connect(self.db_path)
+        try:
+            self._conn.execute(
+                "UPDATE albums SET mb_albumid = ?, discogs_albumid = ? WHERE id = 1",
+                ("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", 12856590),
+            )
+            self._conn.commit()
+        finally:
+            self._conn.close()
+
+        with BeetsDB(self.db_path) as db:
+            detail = db.get_album_detail(1)
+
+        assert detail is not None
+        self.assertEqual(
+            detail["mb_albumid"],
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        )
+        self.assertEqual(detail["discogs_albumid"], "12856590")
+
 
 class TestGetAlbumsByArtist(unittest.TestCase):
     """Test get_albums_by_artist — albums by artist name."""
