@@ -15,7 +15,7 @@ import logging
 import os
 import zlib
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import psycopg2
@@ -1075,9 +1075,10 @@ class TransferLedgerRow(msgspec.Struct, kw_only=True):
     Deliberately NOT part of this Struct: ``enqueued_at`` defaults from
     the DB (``DEFAULT now()``); ``transfer_id`` is never known yet at
     write-ahead time (the row is inserted BEFORE the POST that would
-    return it); ``local_path``/``completed_at`` are stamped later, only
-    by event ingestion (``stamp_transfer_completion``, T2), never at
-    enqueue time.
+    return it); ``local_path``/``completed_at`` are stamped later, never at
+    enqueue time. Success uses event ingestion
+    (``stamp_transfer_completion``, T2); terminal failures use the exact-ID
+    or causal T1-row writes in ``transfer_ledger`` without inventing a path.
     """
 
     request_id: int
@@ -1094,11 +1095,31 @@ class TransferIdOwnership:
     query per row.
 
     ``stamped`` -- transfer_ids whose ledger row has ``completed_at`` set
-    (the P2 stamp-before-remove ordering constraint is satisfied; safe to
-    remove). ``unstamped`` -- transfer_ids cratedigger ledgered but whose
-    completion stamp hasn't landed yet (event ingestion hasn't caught up);
-    left for a later cycle, never removed. A transfer_id in neither set is
-    foreign -- never cratedigger's, never touched.
+    and may be removed. ``unstamped`` -- known owned IDs still awaiting a
+    terminal stamp: successes wait for event/local-path ingestion; failures
+    are stamped from the terminal snapshot before removal. An ID in neither
+    set is not yet owned; a failure may only cross that boundary through an
+    atomic causal T1-row claim.
     """
     stamped: set[str]
     unstamped: set[str]
+
+
+TERMINAL_FAILURE_CLAIM_MAX_SKEW = timedelta(minutes=5)
+
+
+@dataclass(frozen=True)
+class TerminalFailureClaim:
+    """One terminal-failure snapshot eligible for the T1 ID fallback.
+
+    ``requested_at`` is slskd's earliest available lifecycle timestamp.
+    The database may bind this transfer only to an exact-key open ledger
+    row in the short causal window immediately before that timestamp,
+    preventing either an old ledger key or a newer retry from becoming
+    ownership evidence.
+    """
+
+    transfer_id: str
+    username: str
+    filename: str
+    requested_at: datetime

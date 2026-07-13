@@ -17,6 +17,7 @@ from lib.pipeline_db import (
     PersistedYoutubeRow,
     PipelineDB,
     RequestSpectralStateUpdate,
+    TerminalFailureClaim,
     TransferLedgerRow,
 )
 from lib.quality import SpectralMeasurement, ValidationResult
@@ -4281,6 +4282,8 @@ class TestPipelineDBFakeContract(unittest.TestCase):
             "set_advisory_lock_result",
             "set_cooldown_result",
             "set_update_download_state_error",
+            "set_stamp_terminal_failures_error",
+            "set_claim_terminal_failures_error",
             "queue_execute_results",
             "seed_youtube_album_mapping",
         }
@@ -6109,6 +6112,76 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
 
         self.assertEqual(result.stamped, {"tid-a"})
         self.assertEqual(result.unstamped, {"tid-b"})
+
+    def test_stamp_terminal_failures_matches_real_exact_open_row_semantics(self):
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+            TransferLedgerRow(request_id=1, username="p0", filename="b.flac"),
+        ])
+        db.stamp_transfer_id("p0", "a.flac", "tid-a")
+        db.stamp_transfer_id("p0", "b.flac", "tid-b")
+        observed_at = datetime.now(timezone.utc)
+
+        first = db.stamp_terminal_failures(
+            {"tid-a", "foreign-id"}, observed_at)
+        second = db.stamp_terminal_failures(
+            {"tid-a", "foreign-id"}, observed_at)
+
+        self.assertEqual(first, {"tid-a"})
+        self.assertEqual(second, set())
+        rows = {row.transfer_id: row for row in db._transfer_ledger.values()}
+        self.assertEqual(rows["tid-a"].completed_at, observed_at)
+        self.assertIsNone(rows["tid-a"].local_path)
+        self.assertIsNone(rows["tid-b"].completed_at)
+
+    def test_claim_terminal_failures_matches_causal_one_to_one_semantics(self):
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+        terminal_requested_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        old = next(iter(db._transfer_ledger.values()))
+        old.enqueued_at = terminal_requested_at - timedelta(minutes=4)
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+        observed_at = datetime.now(timezone.utc)
+
+        claimed = db.claim_terminal_failures([
+            TerminalFailureClaim(
+                transfer_id="tid-old", username="p0", filename="a.flac",
+                requested_at=terminal_requested_at),
+            TerminalFailureClaim(
+                transfer_id="tid-foreign", username="human",
+                filename="human.flac", requested_at=terminal_requested_at),
+        ], observed_at)
+
+        self.assertEqual(claimed, {"tid-old"})
+        self.assertEqual(old.transfer_id, "tid-old")
+        self.assertEqual(old.completed_at, observed_at)
+        newer = max(db._transfer_ledger.values(), key=lambda row: row.enqueued_at)
+        self.assertIsNone(newer.transfer_id)
+        self.assertIsNone(newer.completed_at)
+
+    def test_claim_terminal_failures_rejects_stale_exact_key_row(self):
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+        requested_at = datetime.now(timezone.utc)
+        row = next(iter(db._transfer_ledger.values()))
+        row.enqueued_at = requested_at - timedelta(days=1)
+
+        claimed = db.claim_terminal_failures([
+            TerminalFailureClaim(
+                transfer_id="tid-human", username="p0", filename="a.flac",
+                requested_at=requested_at),
+        ], requested_at)
+
+        self.assertEqual(claimed, set())
+        self.assertIsNone(row.transfer_id)
+        self.assertIsNone(row.completed_at)
 
     def test_get_owned_local_paths_only_returns_stamped_rows(self):
         db = FakePipelineDB()

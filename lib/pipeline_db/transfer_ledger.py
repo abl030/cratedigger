@@ -17,13 +17,17 @@ The methods this mixin adds:
   in from the completion event when T1.5 hasn't set it yet (a reconciled-
   timeout fallback -- see ``transfer_id`` parameter below) -- never
   clobbers an already-known value.
+* ``stamp_terminal_failures`` / ``claim_terminal_failures`` -- end-of-cycle
+  terminal stamps for non-success ``Completed,*`` snapshots. Exact-ID rows
+  stamp in bulk; a failure that raced T1.5 may claim one causal, exact-key,
+  ID-less T1 row. Both return only IDs whose durable write succeeded.
 * ``get_owned_transfer_keys`` / ``get_owned_transfer_id_sets`` /
   ``get_owned_local_paths`` -- purpose-shaped read surfaces for the
   reaper/convergence/purge flips: the bare "is this (username, filename)
   mine?" membership set the #571 PR 3 convergence flip consumes each
-  cycle, the stamped/unstamped ``transfer_id`` membership sets the #571
-  PR 5 completed-transfer purge consumes each cycle, and "is this
-  local_path mine?".
+  cycle, the stamped/unstamped ``transfer_id`` membership sets the
+  completed-transfer purge consumes each cycle, and "is this local_path
+  mine?".
 * ``get_owned_attempt_folders`` -- read surface for the disk-reaper
   flip (issue #571 PR 4): "which canonical processing folders are
   mine?", joined to each ledgered attempt's request identity so the
@@ -44,7 +48,12 @@ import msgspec
 import psycopg2.extras
 
 from lib.pipeline_db._core import _PipelineDBBase
-from lib.pipeline_db._shared import TransferIdOwnership, TransferLedgerRow
+from lib.pipeline_db._shared import (
+    TERMINAL_FAILURE_CLAIM_MAX_SKEW,
+    TerminalFailureClaim,
+    TransferIdOwnership,
+    TransferLedgerRow,
+)
 
 # Requests still active (in-flight) can't be pruned regardless of age --
 # a future reaper/convergence flip may still need the ledger row while
@@ -214,6 +223,83 @@ class _TransferLedgerMixin(_PipelineDBBase):
             target = stamped if row["completed_at"] is not None else unstamped
             target.add(row["transfer_id"])
         return TransferIdOwnership(stamped=stamped, unstamped=unstamped)
+
+    def stamp_terminal_failures(
+        self,
+        transfer_ids: set[str],
+        observed_at: datetime,
+    ) -> set[str]:
+        """Stamp exact-ID owned terminal failures and return confirmed IDs.
+
+        Only still-open ledger rows can transition.  The returned IDs are
+        the authorization boundary for the caller's per-ID slskd removal:
+        absent/foreign IDs and already-stamped rows never appear.
+        """
+        if not transfer_ids:
+            return set()
+        cur = self._execute(
+            """
+            UPDATE slskd_transfer_ledger
+            SET completed_at = %s
+            WHERE completed_at IS NULL
+              AND transfer_id = ANY(%s)
+            RETURNING transfer_id
+            """,
+            (observed_at, sorted(transfer_ids)),
+        )
+        return {row["transfer_id"] for row in cur.fetchall()}
+
+    def claim_terminal_failures(
+        self,
+        claims: list[TerminalFailureClaim],
+        observed_at: datetime,
+    ) -> set[str]:
+        """Atomically claim causal ID-less T1 rows for terminal failures.
+
+        Each claim consumes at most one exact ``(username, filename)``
+        ledger row written within five minutes before slskd's request.
+        Claims run oldest-first so duplicate retry keys bind one-to-one in
+        lifecycle order.  Successes never call this method.
+        """
+        confirmed: set[str] = set()
+        ordered = sorted(
+            claims,
+            key=lambda claim: (claim.requested_at, claim.transfer_id),
+        )
+        for claim in ordered:
+            if claim.transfer_id in confirmed:
+                continue
+            cur = self._execute(
+                """
+                UPDATE slskd_transfer_ledger
+                SET transfer_id = %s, completed_at = %s
+                WHERE id = (
+                    SELECT id FROM slskd_transfer_ledger
+                    WHERE username = %s
+                      AND filename = %s
+                      AND transfer_id IS NULL
+                      AND completed_at IS NULL
+                      AND enqueued_at >= %s
+                      AND enqueued_at <= %s
+                    ORDER BY enqueued_at DESC, id DESC
+                    LIMIT 1
+                    FOR UPDATE
+                )
+                RETURNING transfer_id
+                """,
+                (
+                    claim.transfer_id,
+                    observed_at,
+                    claim.username,
+                    claim.filename,
+                    claim.requested_at - TERMINAL_FAILURE_CLAIM_MAX_SKEW,
+                    claim.requested_at,
+                ),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                confirmed.add(row["transfer_id"])
+        return confirmed
 
     def get_owned_local_paths(self) -> set[str]:
         """Every completion-stamped ``local_path`` in the ledger -- the

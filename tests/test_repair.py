@@ -394,11 +394,13 @@ class TestFindCompletedTransfersToPurge(unittest.TestCase):
     @staticmethod
     def _snapshot(username="peer1", directory="Music\\Album",
                   filename="Music\\Album\\01 - Track.flac",
-                  transfer_id="t-1", state="Completed, Succeeded"):
+                  transfer_id="t-1", state="Completed, Succeeded",
+                  requested_at="2026-07-13T01:00:00+00:00"):
         return [make_download_user(username=username, directories=[
             make_download_directory(directory=directory, files=[
                 make_transfer_snapshot(
-                    filename=filename, id=transfer_id, state=state),
+                    filename=filename, id=transfer_id, state=state,
+                    requested_at=requested_at),
             ]),
         ])]
 
@@ -409,16 +411,50 @@ class TestFindCompletedTransfersToPurge(unittest.TestCase):
         self.assertEqual(ownership.to_remove[0].username, "peer1")
         self.assertEqual(ownership.to_remove[0].transfer_id, "t-1")
         self.assertEqual(ownership.to_remove[0].filename, self.FILENAME)
-        self.assertEqual(ownership.unstamped_count, 0)
+        self.assertEqual(ownership.to_stamp_failures, [])
+        self.assertEqual(ownership.to_claim_failures, [])
+        self.assertEqual(ownership.success_waiting_count, 0)
         self.assertEqual(ownership.foreign_count, 0)
 
-    def test_unstamped_owned_transfer_is_left_for_a_later_cycle(self):
-        """P2: ledger-owned but not yet completion-stamped -- never
-        removed this pass, counted only."""
+    def test_unstamped_owned_success_waits_for_authoritative_event(self):
+        """An unstamped success still needs the event/local-path stamp."""
         ownership = find_completed_transfers_to_purge(
             self._snapshot(), set(), {"t-1"})
         self.assertEqual(ownership.to_remove, [])
-        self.assertEqual(ownership.unstamped_count, 1)
+        self.assertEqual(ownership.to_stamp_failures, [])
+        self.assertEqual(ownership.success_waiting_count, 1)
+        self.assertEqual(ownership.foreign_count, 0)
+
+    def test_every_unstamped_owned_failure_is_selected_for_terminal_stamp(self):
+        """Every known non-success terminal mode gets exact-id stamping."""
+        for state in (
+            "Completed, Aborted",
+            "Completed, Cancelled",
+            "Completed, Errored",
+            "Completed, Rejected",
+            "Completed, TimedOut",
+        ):
+            with self.subTest(state=state):
+                ownership = find_completed_transfers_to_purge(
+                    self._snapshot(state=state), set(), {"t-1"})
+                self.assertEqual(ownership.to_remove, [])
+                self.assertEqual(
+                    [item.transfer_id for item in ownership.to_stamp_failures],
+                    ["t-1"],
+                )
+                self.assertEqual(ownership.success_waiting_count, 0)
+                self.assertEqual(ownership.foreign_count, 0)
+
+    def test_unbound_terminal_failure_is_an_atomic_claim_candidate(self):
+        """A failed T1.5 can claim an exact-key causal open T1 row in DB."""
+        ownership = find_completed_transfers_to_purge(
+            self._snapshot(state="Completed, Errored"), set(), set())
+        self.assertEqual(ownership.to_remove, [])
+        self.assertEqual(ownership.to_stamp_failures, [])
+        self.assertEqual(
+            [item.transfer_id for item in ownership.to_claim_failures],
+            ["t-1"],
+        )
         self.assertEqual(ownership.foreign_count, 0)
 
     def test_foreign_completed_transfer_is_never_removed(self):
@@ -427,7 +463,9 @@ class TestFindCompletedTransfersToPurge(unittest.TestCase):
         ownership = find_completed_transfers_to_purge(
             self._snapshot(), set(), set())
         self.assertEqual(ownership.to_remove, [])
-        self.assertEqual(ownership.unstamped_count, 0)
+        self.assertEqual(ownership.to_stamp_failures, [])
+        self.assertEqual(ownership.to_claim_failures, [])
+        self.assertEqual(ownership.success_waiting_count, 0)
         self.assertEqual(ownership.foreign_count, 1)
 
     def test_live_non_terminal_transfer_is_skipped_entirely(self):
@@ -439,8 +477,10 @@ class TestFindCompletedTransfersToPurge(unittest.TestCase):
         ownership = find_completed_transfers_to_purge(
             self._snapshot(state="InProgress"), {"t-1"}, set())
         self.assertEqual(ownership.to_remove, [])
-        self.assertEqual(ownership.unstamped_count, 0)
+        self.assertEqual(ownership.to_stamp_failures, [])
+        self.assertEqual(ownership.success_waiting_count, 0)
         self.assertEqual(ownership.foreign_count, 0)
+        self.assertEqual(ownership.nonterminal_count, 1)
 
     def test_transfer_id_disambiguates_retried_attempts(self):
         """The brief's exact scenario: two completed records share the
@@ -455,12 +495,18 @@ class TestFindCompletedTransfersToPurge(unittest.TestCase):
             snapshot, {"t-new"}, set())
         self.assertEqual(len(ownership.to_remove), 1)
         self.assertEqual(ownership.to_remove[0].transfer_id, "t-new")
+        self.assertEqual(
+            [item.transfer_id for item in ownership.to_claim_failures],
+            ["t-old"],
+        )
 
     def test_completed_transfer_with_no_id_is_skipped(self):
         snapshot = self._snapshot(transfer_id="")
         ownership = find_completed_transfers_to_purge(snapshot, set(), set())
         self.assertEqual(ownership.to_remove, [])
+        self.assertEqual(ownership.to_claim_failures, [])
         self.assertEqual(ownership.foreign_count, 0)
+        self.assertEqual(ownership.nonterminal_count, 0)
 
     def test_mixed_snapshot_classifies_all_three_tiers_independently(self):
         snapshot = (
@@ -476,14 +522,20 @@ class TestFindCompletedTransfersToPurge(unittest.TestCase):
             snapshot, {"t-1"}, {"t-2"})
         self.assertEqual(len(ownership.to_remove), 1)
         self.assertEqual(ownership.to_remove[0].transfer_id, "t-1")
-        self.assertEqual(ownership.unstamped_count, 1)
+        self.assertEqual(ownership.to_stamp_failures, [])
+        self.assertEqual(ownership.to_claim_failures, [])
+        self.assertEqual(ownership.success_waiting_count, 1)
         self.assertEqual(ownership.foreign_count, 1)
+        self.assertEqual(ownership.nonterminal_count, 1)
 
     def test_empty_snapshot(self):
         ownership = find_completed_transfers_to_purge([], {"t-1"}, {"t-2"})
         self.assertEqual(ownership.to_remove, [])
-        self.assertEqual(ownership.unstamped_count, 0)
+        self.assertEqual(ownership.to_stamp_failures, [])
+        self.assertEqual(ownership.to_claim_failures, [])
+        self.assertEqual(ownership.success_waiting_count, 0)
         self.assertEqual(ownership.foreign_count, 0)
+        self.assertEqual(ownership.nonterminal_count, 0)
 
 
 class TestSuggestRepair(unittest.TestCase):

@@ -59,6 +59,8 @@ from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
                              SearchPlanItemProvenance, SearchPlanItemRow,
                              SearchPlanMetadataSnapshot,
                              SearchPlanProvenance, SearchPlanRow,
+                             TERMINAL_FAILURE_CLAIM_MAX_SKEW,
+                             TerminalFailureClaim,
                              TransferIdOwnership,
                              TransferLedgerRow,
                              WantedReconciliationCandidate)
@@ -166,6 +168,12 @@ class FakePipelineDB:
         self.record_transfer_enqueue_calls: list[TransferLedgerRow] = []
         # #571 PR 5, T1.5: (username, filename, transfer_id) per call.
         self.stamp_transfer_id_calls: list[tuple[str, str, str]] = []
+        self.stamp_terminal_failures_calls: list[
+            tuple[set[str], datetime]] = []
+        self.claim_terminal_failures_calls: list[
+            tuple[list[TerminalFailureClaim], datetime]] = []
+        self._stamp_terminal_failures_error: Exception | None = None
+        self._claim_terminal_failures_error: Exception | None = None
         self.denylist: list[DenylistEntry] = []
         self.bad_audio_hashes: list[BadAudioHashRow] = []
         # Call-count tracking for the bad-audio-hash gate. Tests that
@@ -4450,6 +4458,66 @@ class FakePipelineDB:
             target = stamped if r.completed_at is not None else unstamped
             target.add(r.transfer_id)
         return TransferIdOwnership(stamped=stamped, unstamped=unstamped)
+
+    def set_stamp_terminal_failures_error(self, error: Exception) -> None:
+        """Inject a persistence failure before any fake row mutates."""
+        self._stamp_terminal_failures_error = error
+
+    def set_claim_terminal_failures_error(self, error: Exception) -> None:
+        """Inject a T1-claim failure before any fake row mutates."""
+        self._claim_terminal_failures_error = error
+
+    def stamp_terminal_failures(
+        self, transfer_ids: set[str], observed_at: datetime,
+    ) -> set[str]:
+        """Mirror the real exact-ID, open-row-only terminal stamp."""
+        self.stamp_terminal_failures_calls.append(
+            (set(transfer_ids), observed_at))
+        if self._stamp_terminal_failures_error is not None:
+            raise self._stamp_terminal_failures_error
+        confirmed: set[str] = set()
+        for row in self._transfer_ledger.values():
+            if (
+                row.completed_at is None
+                and row.transfer_id is not None
+                and row.transfer_id in transfer_ids
+            ):
+                row.completed_at = observed_at
+                confirmed.add(row.transfer_id)
+        return confirmed
+
+    def claim_terminal_failures(
+        self,
+        claims: list[TerminalFailureClaim],
+        observed_at: datetime,
+    ) -> set[str]:
+        """Mirror causal, exact-key, one-open-row-per-failure claiming."""
+        self.claim_terminal_failures_calls.append((list(claims), observed_at))
+        if self._claim_terminal_failures_error is not None:
+            raise self._claim_terminal_failures_error
+        confirmed: set[str] = set()
+        for claim in sorted(
+            claims, key=lambda item: (item.requested_at, item.transfer_id),
+        ):
+            if claim.transfer_id in confirmed:
+                continue
+            candidates = [
+                row for row in self._transfer_ledger.values()
+                if row.username == claim.username
+                and row.filename == claim.filename
+                and row.transfer_id is None
+                and row.completed_at is None
+                and row.enqueued_at >= (
+                    claim.requested_at - TERMINAL_FAILURE_CLAIM_MAX_SKEW)
+                and row.enqueued_at <= claim.requested_at
+            ]
+            if not candidates:
+                continue
+            newest = max(candidates, key=lambda row: (row.enqueued_at, row.id))
+            newest.transfer_id = claim.transfer_id
+            newest.completed_at = observed_at
+            confirmed.add(claim.transfer_id)
+        return confirmed
 
     def get_owned_local_paths(self) -> set[str]:
         return {
