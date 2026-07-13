@@ -100,16 +100,31 @@ class TargetQualityContract(msgspec.Struct, frozen=True):
     is_cbr: bool
 
     @classmethod
-    def from_format(cls, format_hint: str) -> "TargetQualityContract":
-        """Build target bitrate mode from policy, never from source bytes."""
+    def from_format(
+        cls,
+        format_hint: str,
+        *,
+        projected_is_cbr: bool | None = None,
+    ) -> "TargetQualityContract":
+        """Build target policy with an optional independently measured mode.
+
+        Explicit target labels remain self-describing.  Bare codec labels such
+        as ``MP3`` are not: the harness must pass the album-wide bitrate mode
+        measured from the projected/probe files.  The fallback preserves the
+        policy-only constructor for callers that do not have those files.
+        """
 
         parts = format_hint.strip().lower().split()
         return cls(
             format=format_hint,
             is_cbr=(
-                len(parts) == 2
-                and parts[0] == "mp3"
-                and parts[1].isdigit()
+                projected_is_cbr
+                if projected_is_cbr is not None
+                else (
+                    len(parts) == 2
+                    and parts[0] == "mp3"
+                    and parts[1].isdigit()
+                )
             ),
         )
 
@@ -231,6 +246,9 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
     container: str | None = None
     storage_format: str | None = None
     target_format: str | None = None
+    # Album-wide bitrate mode of the projected target/probe.  This is a
+    # contract fact, not the downloaded source or materialized-output mode.
+    target_is_cbr: bool | None = None
     # Migration 050 marks the interpretation of storage/target fields.
     # Existing rows are v1; every new separated-lineage writer emits v3.
     lineage_version: int = 3
@@ -262,6 +280,7 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
             container=self.container,
             storage_format=self.storage_format,
             target_format=self.target_format,
+            target_is_cbr=self.target_is_cbr,
             lineage_version=self.lineage_version,
             v0_metric=self.v0_metric,
             verified_lossless_proof=self.verified_lossless_proof,
@@ -285,6 +304,10 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
             errors.append("lineage_version must be 1 or 3")
         if self.lineage_version == 3:
             errors.extend(self.measurement.new_row_validation_errors())
+            if (self.target_format is None) != (self.target_is_cbr is None):
+                errors.append(
+                    "target_format and target_is_cbr must be set together"
+                )
             if self.storage_format is not None:
                 storage_label = self.storage_format.strip()
                 if not storage_label or len(storage_label.split()) != 1:

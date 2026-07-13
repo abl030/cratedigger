@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import unittest
 
-from hypothesis import given, strategies as st
+from hypothesis import example, given, strategies as st
 
+from harness.import_one import projected_is_cbr_from_bitrates
 from lib.quality import (
     AlbumQualityEvidenceFile,
     AudioQualityMeasurement,
@@ -196,40 +197,82 @@ class TestQualityLineagePins(unittest.TestCase):
             ),
         )
 
-    def test_bare_mp3_target_owns_vbr_mode_independently(self):
-        contract = TargetQualityContract.from_format("MP3")
-        self.assertFalse(contract.is_cbr)
+    def test_single_track_bare_mp3_preserves_legacy_cbr_projection(self):
+        projected_bitrates = [128]
+        projected_is_cbr = projected_is_cbr_from_bitrates(projected_bitrates)
+        contract = TargetQualityContract.from_format(
+            "MP3", projected_is_cbr=projected_is_cbr
+        )
+        self.assertTrue(contract.is_cbr)
         source = AudioQualityMeasurement(
-            min_bitrate_kbps=220,
-            avg_bitrate_kbps=220,
+            min_bitrate_kbps=128,
+            avg_bitrate_kbps=128,
             format="FLAC",
             is_cbr=True,
         )
         current = AudioQualityMeasurement(
-            min_bitrate_kbps=200,
-            avg_bitrate_kbps=200,
+            min_bitrate_kbps=123,
+            avg_bitrate_kbps=123,
             format="MP3",
             is_cbr=False,
         )
         proxy = AudioQualityMeasurement(
-            min_bitrate_kbps=220,
-            avg_bitrate_kbps=220,
+            min_bitrate_kbps=128,
+            avg_bitrate_kbps=128,
             format="MP3",
-            is_cbr=False,
+            is_cbr=projected_is_cbr,
         )
         cfg = QualityRankConfig.defaults()
 
-        self.assertEqual(
-            measured_import_decision(
-                MeasuredImportDecisionInput(
-                    source, current, False, contract, None
-                ),
-                cfg=cfg,
-            ),
-            measured_import_decision(
-                MeasuredImportDecisionInput(proxy, current), cfg=cfg
-            ),
+        projected = measured_import_decision(
+            MeasuredImportDecisionInput(source, current, True, contract, None),
+            cfg=cfg,
         )
+        legacy = measured_import_decision(
+            MeasuredImportDecisionInput(proxy, current, True), cfg=cfg
+        )
+        wrong_bare_mp3 = measured_import_decision(
+            MeasuredImportDecisionInput(
+                source,
+                current,
+                True,
+                TargetQualityContract.from_format("MP3"),
+                None,
+            ),
+            cfg=cfg,
+        )
+        self.assertEqual(projected, legacy)
+        self.assertEqual(projected.decision, "transcode_upgrade")
+        self.assertEqual(wrong_bare_mp3.decision, "transcode_downgrade")
+
+        pipeline = full_pipeline_decision(
+            is_flac=True,
+            min_bitrate=800,
+            is_cbr=False,
+            existing_min_bitrate=123,
+            existing_avg_bitrate=123,
+            existing_format="MP3",
+            existing_is_cbr=False,
+            post_conversion_min_bitrate=128,
+            post_conversion_is_cbr=projected_is_cbr,
+            converted_count=1,
+        )
+        self.assertEqual(pipeline["stage2_import"], "transcode_upgrade")
+
+    def test_projection_mode_covers_one_multi_same_and_multi_different(self):
+        cases = (
+            ([128], True),
+            ([128, 128], True),
+            ([128, 129], False),
+        )
+        for bitrates, expected in cases:
+            with self.subTest(bitrates=bitrates):
+                mode = projected_is_cbr_from_bitrates(bitrates)
+                contract = TargetQualityContract.from_format(
+                    "MP3", projected_is_cbr=mode
+                )
+                self.assertEqual(mode, expected)
+                self.assertEqual(contract.is_cbr, expected)
 
     def test_numeric_mp3_target_is_explicitly_cbr(self):
         self.assertTrue(TargetQualityContract.from_format("mp3 192").is_cbr)
@@ -257,6 +300,60 @@ class TestQualityLineagePins(unittest.TestCase):
 
 
 class TestQualityLineageGenerated(unittest.TestCase):
+    @given(
+        projected_bitrates=st.lists(
+            st.integers(min_value=32, max_value=200),
+            min_size=1,
+            max_size=8,
+        ),
+        existing=st.integers(min_value=32, max_value=320),
+        existing_is_cbr=st.booleans(),
+    )
+    @example(
+        projected_bitrates=[128],
+        existing=123,
+        existing_is_cbr=False,
+    )
+    def test_full_pipeline_preserves_legacy_projection_mode(
+        self,
+        projected_bitrates: list[int],
+        existing: int,
+        existing_is_cbr: bool,
+    ) -> None:
+        projected_min = min(projected_bitrates)
+        projected_is_cbr = projected_is_cbr_from_bitrates(projected_bitrates)
+        result = full_pipeline_decision(
+            is_flac=True,
+            min_bitrate=800,
+            is_cbr=False,
+            existing_min_bitrate=existing,
+            existing_avg_bitrate=existing,
+            existing_format="MP3",
+            existing_is_cbr=existing_is_cbr,
+            post_conversion_min_bitrate=projected_min,
+            post_conversion_is_cbr=projected_is_cbr,
+            converted_count=len(projected_bitrates),
+        )
+        legacy = measured_import_decision(
+            MeasuredImportDecisionInput(
+                AudioQualityMeasurement(
+                    min_bitrate_kbps=projected_min,
+                    avg_bitrate_kbps=projected_min,
+                    format="MP3",
+                    is_cbr=projected_is_cbr,
+                ),
+                AudioQualityMeasurement(
+                    min_bitrate_kbps=existing,
+                    avg_bitrate_kbps=existing,
+                    format="MP3",
+                    is_cbr=existing_is_cbr,
+                ),
+                True,
+            ),
+            cfg=QualityRankConfig.defaults(),
+        )
+        self.assertEqual(result["stage2_import"], legacy.decision)
+
     @given(
         source_min=st.integers(min_value=1, max_value=5000),
         source_avg=st.integers(min_value=1, max_value=5000),
@@ -312,6 +409,11 @@ class TestQualityLineageGenerated(unittest.TestCase):
         self.assertEqual(built.status, "ready")
         assert built.evidence is not None
         self.assertEqual(built.evidence.measurement, decoded.source_measurement)
+        assert decoded.target_quality_contract is not None
+        self.assertEqual(
+            built.evidence.target_is_cbr,
+            decoded.target_quality_contract.is_cbr,
+        )
         assert built.evidence.v0_metric is not None
         self.assertEqual(built.evidence.v0_metric.min_bitrate_kbps, probe_min)
         self.assertEqual(built.evidence.v0_metric.avg_bitrate_kbps, probe_avg)
@@ -454,18 +556,26 @@ class TestQualityLineageGenerated(unittest.TestCase):
     @given(
         source_is_cbr=st.booleans(),
         output_is_cbr=st.booleans(),
-        bitrate=st.integers(min_value=130, max_value=319),
-        existing=st.integers(min_value=130, max_value=319),
+        projected_bitrates=st.lists(
+            st.integers(min_value=32, max_value=320),
+            min_size=1,
+            max_size=8,
+        ),
+        existing=st.integers(min_value=32, max_value=320),
     )
-    def test_bare_mp3_target_mode_is_independent_of_source_and_output(
+    def test_bare_mp3_projection_mode_is_independent_of_source_and_output(
         self,
         source_is_cbr: bool,
         output_is_cbr: bool,
-        bitrate: int,
+        projected_bitrates: list[int],
         existing: int,
     ) -> None:
         cfg = QualityRankConfig.defaults()
-        contract = TargetQualityContract.from_format("MP3")
+        bitrate = min(projected_bitrates)
+        projected_is_cbr = projected_is_cbr_from_bitrates(projected_bitrates)
+        contract = TargetQualityContract.from_format(
+            "MP3", projected_is_cbr=projected_is_cbr
+        )
         source = AudioQualityMeasurement(
             min_bitrate_kbps=bitrate,
             avg_bitrate_kbps=bitrate,
@@ -482,7 +592,7 @@ class TestQualityLineageGenerated(unittest.TestCase):
             min_bitrate_kbps=bitrate,
             avg_bitrate_kbps=bitrate,
             format="MP3",
-            is_cbr=False,
+            is_cbr=projected_is_cbr,
         )
         self.assertEqual(
             measured_import_decision(

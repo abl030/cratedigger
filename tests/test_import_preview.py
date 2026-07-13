@@ -735,11 +735,13 @@ class TestImportPreviewPath(unittest.TestCase):
             assert loaded is not None
             self.assertEqual(loaded.measurement.format, "FLAC")
             self.assertEqual(loaded.target_format, "opus 128")
+            self.assertFalse(loaded.target_is_cbr)
             self.assertEqual(loaded.lineage_version, 3)
             wrong_match = db.get_wrong_matches()[0]
             self.assertEqual(
                 wrong_match["evidence_target_format"], "opus 128"
             )
+            self.assertFalse(wrong_match["evidence_target_is_cbr"])
             self.assertEqual(wrong_match["evidence_lineage_version"], 3)
         finally:
             import shutil

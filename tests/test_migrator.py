@@ -3503,6 +3503,20 @@ class TestQualityEvidenceLineageVersionMigration(unittest.TestCase):
                             cur.fetchone(),
                             ("quality_evidence_lineage_version",),
                         )
+                        # A future SQL writer that omits the explicit lineage
+                        # must create a current typed row, never another
+                        # silently legacy-marked row.
+                        cur.execute("""
+                            INSERT INTO album_quality_evidence (
+                                mb_release_id, snapshot_fingerprint,
+                                source_path, measured_at
+                            ) VALUES (
+                                'new-default-050', 'snapshot-new-default-050',
+                                '/new-default', NOW()
+                            )
+                            RETURNING lineage_version
+                        """)
+                        self.assertEqual(cur.fetchone(), (3,))
                 finally:
                     conn.close()
         finally:

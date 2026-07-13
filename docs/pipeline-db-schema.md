@@ -33,10 +33,14 @@ Key fields:
   `format`; bitrate/profile labels never live in either field.
 - `target_format` — projected target policy from the typed import contract,
   independent of the measured source. It may be NULL.
+- `target_is_cbr` — album-wide bitrate mode measured from the projected
+  target/probe files. It belongs to the target contract, independently of
+  both the downloaded source and materialized output measurements.
 - `lineage_version SMALLINT` — `1` marks historical rows whose storage/target
   projection is ambiguous; `3` marks separated source and target facts.
-  Migration 050 explicitly marks all pre-existing rows as version 1, and new
-  writers always persist version 3.
+  Migration 050 marks all pre-existing rows as version 1, then changes the
+  column default to 3 so an omitted future insert cannot silently create
+  legacy evidence. New typed writers also persist version 3 explicitly.
 - `min_bitrate_kbps`, `avg_bitrate_kbps`, `median_bitrate_kbps`, `format`,
   `is_cbr`, `spectral_grade`, `spectral_bitrate_kbps`,
   `was_converted_from` — the wrapped `AudioQualityMeasurement` facts.

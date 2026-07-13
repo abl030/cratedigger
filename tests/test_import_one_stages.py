@@ -678,7 +678,10 @@ class TestConversionTarget(unittest.TestCase):
         from harness.import_one import projected_target_quality_contract
 
         contract = projected_target_quality_contract(
-            "flac", converted_count=0, keep_lossless=True
+            "flac",
+            converted_count=0,
+            keep_lossless=True,
+            projected_is_cbr=False,
         )
         self.assertIsNotNone(contract)
         assert contract is not None
@@ -1051,6 +1054,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
             AudioQualityMeasurement,
             QualityEvidenceActionPayload,
             QualityEvidenceActionProvenance,
+            TargetQualityContract,
         )
         from lib.quality_evidence import snapshot_fingerprint
 
@@ -1087,6 +1091,11 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
             container=files[0].container if files else "mp3",
             storage_format="MP3",
             target_format=target_format,
+            target_is_cbr=(
+                TargetQualityContract.from_format(target_format).is_cbr
+                if target_format is not None
+                else None
+            ),
         )
         decision_payload: dict[str, object] = {"stage2_import": decision}
         if imported is not None:

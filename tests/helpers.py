@@ -138,6 +138,7 @@ def make_album_quality_evidence(
     container: str | None = "mp3",
     storage_format: str | None = "MP3",
     target_format: str | None = None,
+    target_is_cbr: bool | None = None,
     lineage_version: int = 3,
 ) -> AlbumQualityEvidence:
     """Build production-shaped active album-quality evidence.
@@ -180,6 +181,15 @@ def make_album_quality_evidence(
         container=container,
         storage_format=storage_format,
         target_format=target_format,
+        target_is_cbr=(
+            target_is_cbr
+            if target_is_cbr is not None
+            else (
+                TargetQualityContract.from_format(target_format).is_cbr
+                if target_format is not None
+                else None
+            )
+        ),
         lineage_version=lineage_version,
         v0_metric=v0_metric,
         verified_lossless_proof=verified_lossless_proof,

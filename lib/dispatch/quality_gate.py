@@ -83,7 +83,12 @@ def load_quality_gate_state(
     verified_lossless = bool(req.get("verified_lossless")) if req else False
     if req and req.get("final_format"):
         target_contract = TargetQualityContract.from_format(
-            str(req["final_format"])
+            str(req["final_format"]),
+            # Bare MP3 is not self-describing. At the post-import gate the
+            # materialized album is the available confirmation of the
+            # projection mode; keep it on the contract instead of borrowing
+            # it implicitly inside rank classification.
+            projected_is_cbr=info.is_cbr,
         )
 
     current = AudioQualityMeasurement(

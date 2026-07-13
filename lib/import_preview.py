@@ -215,6 +215,7 @@ class ImportPreviewValues(msgspec.Struct, frozen=True):
     existing_format: str | None = None
     existing_is_cbr: bool = False
     post_conversion_min_bitrate: int | None = None
+    post_conversion_is_cbr: bool | None = None
     converted_count: int = 0
     verified_lossless: bool = False
     verified_lossless_target: str | None = None
@@ -492,6 +493,7 @@ def preview_import_from_values(
         existing_format=values.existing_format,
         existing_is_cbr=values.existing_is_cbr,
         post_conversion_min_bitrate=values.post_conversion_min_bitrate,
+        post_conversion_is_cbr=values.post_conversion_is_cbr,
         converted_count=values.converted_count,
         verified_lossless=values.verified_lossless,
         verified_lossless_target=values.verified_lossless_target,

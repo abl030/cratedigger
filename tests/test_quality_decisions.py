@@ -900,7 +900,7 @@ EXPECTED_PARAMS = {
     "existing_spectral_grade", "existing_spectral_bitrate",
     "override_min_bitrate",
     "existing_format", "existing_is_cbr",
-    "post_conversion_min_bitrate", "converted_count",
+    "post_conversion_min_bitrate", "post_conversion_is_cbr", "converted_count",
     "verified_lossless", "verified_lossless_target",
     "target_format",
     "new_format", "cfg",

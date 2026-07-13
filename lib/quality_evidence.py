@@ -22,6 +22,7 @@ from lib.quality import (
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     ImportResult,
+    TargetQualityContract,
     V0ProbeEvidence,
     VerifiedLosslessProof,
 )
@@ -550,6 +551,9 @@ def evidence_from_import_result(
     target_format = (
         target_contract.format if target_contract is not None else None
     )
+    target_is_cbr = (
+        target_contract.is_cbr if target_contract is not None else None
+    )
     proof = verified_lossless_proof_from_import_result(import_result)
     audio_corrupt = any(not file.decode_ok for file in files)
     if measurement is not None:
@@ -581,6 +585,7 @@ def evidence_from_import_result(
         container=files[0].container,
         storage_format=audio_measurement.format,
         target_format=target_format,
+        target_is_cbr=target_is_cbr,
         lineage_version=3,
         v0_metric=(
             neutral_v0_metric_from_probe(import_result.v0_probe)
@@ -677,6 +682,11 @@ def evidence_from_measurement(
         container=container,
         storage_format=audio_measurement.format,
         target_format=target_format,
+        target_is_cbr=(
+            TargetQualityContract.from_format(target_format).is_cbr
+            if target_format is not None
+            else None
+        ),
         lineage_version=3,
         v0_metric=None,
         verified_lossless_proof=None,

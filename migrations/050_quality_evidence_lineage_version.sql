@@ -7,7 +7,14 @@
 -- lineage v1; every new typed producer writes lineage v3.
 
 ALTER TABLE album_quality_evidence
+    ADD COLUMN target_is_cbr BOOLEAN,
     ADD COLUMN lineage_version SMALLINT NOT NULL DEFAULT 1;
+
+-- The ADD COLUMN default above marks every already-present row as historical.
+-- New SQL writers that omit the explicit v3 field must fail safe into the
+-- current typed lineage instead of silently manufacturing another v1 row.
+ALTER TABLE album_quality_evidence
+    ALTER COLUMN lineage_version SET DEFAULT 3;
 
 ALTER TABLE album_quality_evidence
     ADD CONSTRAINT album_quality_evidence_lineage_version_check
@@ -15,3 +22,6 @@ ALTER TABLE album_quality_evidence
 
 COMMENT ON COLUMN album_quality_evidence.lineage_version IS
     '1=historical ambiguous storage/target projection, 3=separate source and target facts';
+
+COMMENT ON COLUMN album_quality_evidence.target_is_cbr IS
+    'album-wide bitrate mode of the projected target/probe; independent of source and output measurements';

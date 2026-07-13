@@ -303,9 +303,6 @@ def dispatch_import_core(
                 )
                 if not _import_allowed_by_evidence_pipeline(evidence_decision):
                     decision = evidence_decision_name(evidence_decision)
-                    target_final_format = evidence_decision.get(
-                        "target_final_format"
-                    )
                     detail = (
                         "import-time persisted evidence rejected candidate "
                         f"(decision={decision})"
@@ -320,10 +317,12 @@ def dispatch_import_core(
                         ),
                         target_quality_contract=(
                             TargetQualityContract.from_format(
-                                target_final_format
+                                evidence_gate.candidate.target_format,
+                                projected_is_cbr=(
+                                    evidence_gate.candidate.target_is_cbr
+                                ),
                             )
-                            if isinstance(target_final_format, str)
-                            and target_final_format
+                            if evidence_gate.candidate.target_format is not None
                             else None
                         ),
                         v0_probe=audit_v0_probe_from_metric(

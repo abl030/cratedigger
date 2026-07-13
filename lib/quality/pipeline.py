@@ -98,6 +98,7 @@ def full_pipeline_decision(
     # Rank-model config (defaults() for legacy callers)
     cfg: "QualityRankConfig | None" = None,
     *,
+    post_conversion_is_cbr: bool | None = None,
     candidate_v0_probe_avg: int | None = None,
     candidate_v0_probe_min: int | None = None,
     existing_v0_probe_avg: int | None = None,
@@ -409,7 +410,10 @@ def full_pipeline_decision(
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate)
         target_contract = (
-            TargetQualityContract.from_format(stage2_new_format)
+            TargetQualityContract.from_format(
+                stage2_new_format,
+                projected_is_cbr=post_conversion_is_cbr,
+            )
             if stage2_new_format is not None
             else None
         )
@@ -519,7 +523,10 @@ def full_pipeline_decision(
         else:
             gate_format = stage2_new_format
         gate_contract = (
-            TargetQualityContract.from_format(gate_format)
+            TargetQualityContract.from_format(
+                gate_format,
+                projected_is_cbr=post_conversion_is_cbr,
+            )
             if gate_format is not None
             else None
         )
@@ -652,6 +659,7 @@ class AlbumQualityEvidenceDecisionFacts(msgspec.Struct, frozen=True):
     target_format: str | None = None
     converted_count: int | None = None
     post_conversion_min_bitrate: int | None = None
+    post_conversion_is_cbr: bool | None = None
 
 
 class QualityEvidenceActionPayload(msgspec.Struct, frozen=True):
@@ -891,6 +899,27 @@ def _evidence_target_format(
     return facts.target_format if facts.target_format is not None else candidate.target_format
 
 
+def _evidence_target_is_cbr(
+    candidate: AlbumQualityEvidence,
+    facts: AlbumQualityEvidenceDecisionFacts,
+    *,
+    target_format: str | None,
+) -> bool | None:
+    """Resolve projected mode without borrowing source/output measurements."""
+
+    if facts.post_conversion_is_cbr is not None:
+        return facts.post_conversion_is_cbr
+    if (
+        target_format is not None
+        and target_format == candidate.target_format
+        and candidate.target_is_cbr is not None
+    ):
+        return candidate.target_is_cbr
+    if target_format is None:
+        return None
+    return TargetQualityContract.from_format(target_format).is_cbr
+
+
 def _new_format_hint_from_evidence(
     candidate: AlbumQualityEvidence,
     *,
@@ -1079,6 +1108,11 @@ def full_pipeline_decision_from_evidence(
     )
 
     target_format = _evidence_target_format(candidate, facts)
+    post_conversion_is_cbr = _evidence_target_is_cbr(
+        candidate,
+        facts,
+        target_format=target_format,
+    )
     supported_lossless_source = _lossless_source_from_evidence(candidate)
     post_conversion_min = (
         facts.post_conversion_min_bitrate
@@ -1135,6 +1169,7 @@ def full_pipeline_decision_from_evidence(
         existing_format=existing_format,
         existing_is_cbr=existing_is_cbr,
         post_conversion_min_bitrate=post_conversion_min,
+        post_conversion_is_cbr=post_conversion_is_cbr,
         converted_count=converted_count,
         verified_lossless=candidate_measurement.verified_lossless,
         verified_lossless_target=facts.verified_lossless_target,

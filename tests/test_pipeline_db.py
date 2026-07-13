@@ -3564,6 +3564,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         self.assertEqual(loaded.measurement.format, "flac")
         self.assertTrue(loaded.measurement.verified_lossless)
         self.assertEqual(loaded.target_format, "lossless")
+        self.assertFalse(loaded.target_is_cbr)
         self.assertEqual(loaded.lineage_version, 3)
         self.assertIsNotNone(loaded.verified_lossless_proof)
         # Files round-trip sorted-for-storage.
@@ -5132,6 +5133,7 @@ class TestGetWrongMatches(unittest.TestCase):
         self.assertEqual(row["evidence_source_container"], "flac")
         self.assertEqual(row["evidence_storage_format"], "FLAC")
         self.assertEqual(row["evidence_target_format"], "opus 128")
+        self.assertFalse(row["evidence_target_is_cbr"])
         self.assertEqual(row["evidence_min_bitrate"], 0)
         self.assertTrue(row["evidence_verified_lossless"])
 

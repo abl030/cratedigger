@@ -387,12 +387,22 @@ def projected_target_quality_contract(
     *,
     converted_count: int,
     keep_lossless: bool,
+    projected_is_cbr: bool | None,
 ) -> TargetQualityContract | None:
     """Typed target policy for the direct harness producer path."""
 
     if format_hint is None or (converted_count <= 0 and not keep_lossless):
         return None
-    return TargetQualityContract.from_format(format_hint)
+    return TargetQualityContract.from_format(
+        format_hint,
+        projected_is_cbr=projected_is_cbr,
+    )
+
+
+def projected_is_cbr_from_bitrates(bitrates: list[int]) -> bool:
+    """Return the legacy album-wide bitrate mode for projected files."""
+
+    return len(set(bitrates)) == 1 if bitrates else False
 
 
 def should_run_target_conversion(conv_target: str | None) -> bool:
@@ -1385,6 +1395,7 @@ def _materialize_quality_evidence_action(
                 r.conversion.original_filetype = original_ext
                 r.conversion.target_filetype = "flac"
         r.final_format = "flac"
+        r.target_quality_contract = TargetQualityContract.from_format("flac")
         return False
 
     target_spec = (
@@ -1413,6 +1424,11 @@ def _materialize_quality_evidence_action(
         r.conversion.original_filetype = original_ext or "flac"
         r.conversion.target_filetype = target_spec.extension
     r.final_format = target_spec.label
+    target_bitrates = _get_folder_bitrates(work_path)
+    r.target_quality_contract = TargetQualityContract.from_format(
+        target_spec.label,
+        projected_is_cbr=projected_is_cbr_from_bitrates(target_bitrates),
+    )
     return _evidence_action_decision_name(payload) in {
         "transcode_upgrade",
         "transcode_first",
@@ -1465,10 +1481,11 @@ def _run_quality_evidence_authorized_import(
         r.current_measurement = (
             payload.current.measurement if payload.current is not None else None
         )
-        target_final_format = payload.decision.get("target_final_format")
-        if isinstance(target_final_format, str) and target_final_format:
+        candidate_target_format = payload.candidate.target_format
+        if candidate_target_format is not None:
             r.target_quality_contract = TargetQualityContract.from_format(
-                target_final_format
+                candidate_target_format,
+                projected_is_cbr=payload.candidate.target_is_cbr,
             )
         r.quality_evidence_provenance = QualityEvidenceActionProvenance(
             candidate_status=payload.provenance.candidate_status,
@@ -1918,6 +1935,7 @@ def main():
             _log(f"  native_lossy_research_v0_avg={r.v0_probe.avg_bitrate_kbps}kbps")
     new_min_br = min(new_bitrates) if new_bitrates else None
     new_avg_br = int(sum(new_bitrates) / len(new_bitrates)) if new_bitrates else None
+    projected_is_cbr = projected_is_cbr_from_bitrates(new_bitrates)
     existing_info = beets.get_album_info(mbid, _rank_cfg)
     _log_timing("quality_measurement", stage_start)
     existing_min_br = existing_info.min_bitrate_kbps if existing_info else None
@@ -2010,6 +2028,7 @@ def main():
         new_format_label,
         converted_count=converted,
         keep_lossless=keep_lossless,
+        projected_is_cbr=projected_is_cbr,
     )
     existing_m = build_existing_measurement(
         existing_info,
@@ -2053,7 +2072,8 @@ def main():
                 )
                 if new_format_label is not None:
                     target_contract = TargetQualityContract.from_format(
-                        new_format_label
+                        new_format_label,
+                        projected_is_cbr=projected_is_cbr,
                     )
                     r.target_quality_contract = target_contract
     else:
@@ -2187,7 +2207,10 @@ def main():
                 if target_bitrates else None
             )
             r.target_quality_contract = TargetQualityContract.from_format(
-                target_spec.label
+                target_spec.label,
+                projected_is_cbr=projected_is_cbr_from_bitrates(
+                    target_bitrates
+                ),
             )
             r.conversion.target_filetype = target_spec.extension
             r.final_format = target_spec.label
