@@ -23,6 +23,7 @@ from typing import Literal
 import msgspec
 
 from web import cache as _cache
+from web.artist_search import merge_exact_artist_identities
 
 # Mirror-REQUIRED (tier-2 plan U6, R13): these endpoints (/api/search,
 # /api/masters/<id>, ...) and the msgspec response Structs are the Rust
@@ -243,7 +244,7 @@ def search_artists(query: str) -> list[dict]:
     def _fetch() -> list[dict]:
         q = urllib.parse.quote(query)
         data = _get(f"{_api_base()}/api/artists?name={q}&per_page=20")
-        return [
+        results = [
             {
                 "id": str(r["id"]),
                 "name": r.get("name", ""),
@@ -252,9 +253,33 @@ def search_artists(query: str) -> list[dict]:
             }
             for r in data.get("results", [])
         ]
+        exact = next((
+            row for row in results
+            if row["name"].casefold() == query.casefold()
+        ), None)
+        if exact is None:
+            return results
+        try:
+            detail = _get(f"{_api_base()}/api/artists/{exact['id']}")
+        except (urllib.error.HTTPError, urllib.error.URLError):
+            return results
+        related = [
+            {
+                "id": str(alias["id"]),
+                "name": alias.get("name", ""),
+                "disambiguation": "",
+                "score": max(0, exact["score"] - 1),
+            }
+            for alias in detail.get("aliases", [])
+        ]
+        return merge_exact_artist_identities(
+            results, exact_id=exact["id"], related=related,
+        )
 
     cache_query = _search_cache_query_part(query)
-    return _cache.memoize_meta(f"discogs:search:artists:{cache_query}", _fetch)
+    return _cache.memoize_meta(
+        f"discogs:search:artists:v2:{cache_query}", _fetch,
+    )
 
 
 def _normalize_artist_master_entry(r: dict) -> dict:

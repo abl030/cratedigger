@@ -20,6 +20,7 @@ import urllib.error
 # Use the `web.` package-qualified path to keep the web metadata cache
 # separate from the pipeline's peer-cache implementation.
 from web import cache as _cache
+from web.artist_search import merge_exact_artist_identities
 
 # Default: public MusicBrainz (functional but rate-limited ~1 req/s).
 # Production points this at the local mirror via the module's
@@ -103,22 +104,78 @@ def search_release_groups(query):
     return _cache.memoize_meta(f"mb:search:release_groups:{query}", _fetch)
 
 
+def _artist_search_hit(artist: dict, *, score: int) -> dict:
+    return {
+        "id": artist["id"],
+        "name": artist.get("name", ""),
+        "disambiguation": artist.get("disambiguation", ""),
+        "score": score,
+    }
+
+
+def _related_artist_identity_hits(artist_id: str, *, score: int) -> list[dict]:
+    """Resolve canonical MusicBrainz ``is person`` identity siblings."""
+    detail = _get(
+        f"{MB_API_BASE}/artist/{artist_id}?inc=artist-rels&fmt=json"
+    )
+    relations = detail.get("relations", [])
+    identity_artists: list[dict] = []
+
+    # A persona such as Four Tet points backward to the underlying person.
+    person = next((
+        rel.get("artist")
+        for rel in relations
+        if rel.get("type") == "is person"
+        and rel.get("direction") == "backward"
+        and rel.get("artist")
+    ), None)
+    if person:
+        identity_artists.append(person)
+        detail = _get(
+            f"{MB_API_BASE}/artist/{person['id']}?inc=artist-rels&fmt=json"
+        )
+        relations = detail.get("relations", [])
+
+    # The person entity points forward to each separately catalogued persona.
+    identity_artists.extend(
+        rel["artist"]
+        for rel in relations
+        if rel.get("type") == "is person"
+        and rel.get("direction") == "forward"
+        and rel.get("artist")
+    )
+    return [
+        _artist_search_hit(artist, score=score)
+        for artist in identity_artists
+    ]
+
+
 def search_artists(query):
     """Search for artists by name. Returns list of {id, name, disambiguation, score}."""
     def _fetch() -> list[dict]:
         q = urllib.parse.quote(query)
         data = _get(f"{MB_API_BASE}/artist?query={q}&fmt=json&limit=20")
-        return [
-            {
-                "id": a["id"],
-                "name": a.get("name", ""),
-                "disambiguation": a.get("disambiguation", ""),
-                "score": a.get("score", 0),
-            }
+        results = [
+            _artist_search_hit(a, score=a.get("score", 0))
             for a in data.get("artists", [])
         ]
+        exact = next((
+            row for row in results
+            if row["name"].casefold() == query.casefold()
+        ), None)
+        if exact is None:
+            return results
+        try:
+            related = _related_artist_identity_hits(
+                exact["id"], score=max(0, exact["score"] - 1),
+            )
+        except (urllib.error.HTTPError, urllib.error.URLError):
+            return results
+        return merge_exact_artist_identities(
+            results, exact_id=exact["id"], related=related,
+        )
 
-    return _cache.memoize_meta(f"mb:search:artists:{query}", _fetch)
+    return _cache.memoize_meta(f"mb:search:artists:v2:{query}", _fetch)
 
 
 def get_artist_release_groups(artist_mbid):
