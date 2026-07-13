@@ -24,6 +24,7 @@ import scripts.pipeline_cli.long_tail as pipeline_cli_long_tail
 from scripts import pipeline_cli
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
+from lib.transitions import TransitionConflict, TransitionConflictKind
 from tests.test_beets_db import _create_test_db, _insert_album
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
@@ -345,6 +346,64 @@ class TestCmdAddPlanGenerationFakeDB(unittest.TestCase):
         # No new plan rows for the duplicate path.
         self.assertEqual(len(db.search_plans), before_plan_count)
 
+    @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
+    def test_cli_add_replace_during_resolution_skips_plan(self, mock_fetch):
+        class RacingDB(FakePipelineDB):
+            def __init__(self) -> None:
+                super().__init__()
+                self.raced = False
+
+            def update_request_fields(
+                self,
+                request_id: int,
+                *,
+                expected_status: str | None = None,
+                **fields: object,
+            ) -> bool:
+                if not self.raced:
+                    self.raced = True
+                    self.supersede_request_mbid(
+                        request_id,
+                        new_mb_release_id="cli-add-race-descendant",
+                        new_mb_release_group_id=None,
+                        new_mb_artist_id=None,
+                        new_artist_name="Buke and Gase",
+                        new_album_title="Riposte (correct pressing)",
+                        new_year=None,
+                        new_country=None,
+                        new_tracks=[],
+                    )
+                return super().update_request_fields(
+                    request_id,
+                    expected_status=expected_status,
+                    **fields,
+                )
+
+        release = json.loads(json.dumps(SAMPLE_MB_RELEASE))
+        for track in release["media"][0]["tracks"]:
+            track["artist-credit"] = [{"name": "Late Artist"}]
+        mock_fetch.return_value = release
+        db = RacingDB()
+        stderr = io.StringIO()
+        with patch(
+            "web.mb.get_release_group_year",
+            return_value=2014,
+        ), redirect_stderr(stderr):
+            exit_code = pipeline_cli.cmd_add(db, MagicMock(
+                mbid="44438bf9-26d9-4460-9b4f-1a1b015e37a1",
+                source="request",
+            ))
+
+        source = db.get_request_by_release_id(
+            "44438bf9-26d9-4460-9b4f-1a1b015e37a1",
+        )
+        assert source is not None
+        self.assertEqual(source["status"], "replaced")
+        self.assertIsNone(db.get_tracks(source["id"])[0]["track_artist"])
+        self.assertIsNone(db.get_active_search_plan(source["id"]))
+        self.assertIn("skipping plan generation", stderr.getvalue())
+        self.assertEqual(exit_code, 4)
+
 
 class TestCmdList(unittest.TestCase):
     def setUp(self):
@@ -423,6 +482,28 @@ class TestCmdRetry(unittest.TestCase):
         assert req is not None
         self.assertEqual(req["status"], "wanted")
 
+    @patch("scripts.pipeline_cli.album_requests.finalize_request")
+    def test_retry_maps_stale_transition_to_nonzero_without_success(
+        self, mock_transition,
+    ):
+        req_id = self.db.add_request(
+            mb_release_id="retry-conflict", artist_name="A",
+            album_title="B", source="request")
+        mock_transition.return_value = TransitionConflict(
+            request_id=req_id,
+            target_status="wanted",
+            kind=TransitionConflictKind.stale_source,
+            expected_status="imported",
+            actual_status="replaced",
+        )
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = pipeline_cli.cmd_retry(self.db, MagicMock(id=req_id))
+
+        self.assertEqual(rc, 4)
+        self.assertEqual(json.loads(out.getvalue())["error"], "transition_conflict")
+
 
 class TestCmdCancel(unittest.TestCase):
     def setUp(self):
@@ -441,6 +522,33 @@ class TestCmdCancel(unittest.TestCase):
 
 
 class TestCmdSet(unittest.TestCase):
+    def test_same_status_is_idempotent_for_operator_statuses(self):
+        for index, status in enumerate(("wanted", "imported", "manual"), 1):
+            with self.subTest(status=status):
+                db = FakePipelineDB()
+                db.seed_request(make_request_row(id=index, status=status))
+                before = db.get_request(index)
+
+                rc = pipeline_cli.cmd_set(
+                    cast(Any, db),
+                    MagicMock(id=index, status=status),
+                )
+
+                self.assertEqual(rc, 0)
+                self.assertEqual(db.get_request(index), before)
+
+    def test_imported_to_manual_is_supported(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=8, status="imported"))
+
+        rc = pipeline_cli.cmd_set(
+            cast(Any, db),
+            MagicMock(id=8, status="manual"),
+        )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(db.request(8)["status"], "manual")
+
     @patch("builtins.print")
     @patch("scripts.pipeline_cli.album_requests.finalize_request")
     def test_set_routes_dynamic_status_through_shared_finalizer(
@@ -1388,7 +1496,11 @@ class TestCmdSetIntent(unittest.TestCase):
             min_bitrate=245,
         ))
         args = MagicMock(id=2, intent="lossless")
-        pipeline_cli.cmd_set_intent(cast(Any, db), args)
+        mock_finalize.side_effect = (
+            pipeline_cli_album_requests.transitions.finalize_request
+        )
+        result = pipeline_cli.cmd_set_intent(cast(Any, db), args)
+        self.assertEqual(result, 0)
         called_db, request_id, transition = mock_finalize.call_args.args
         self.assertIs(called_db, db)
         self.assertEqual(request_id, 2)
@@ -1399,6 +1511,59 @@ class TestCmdSetIntent(unittest.TestCase):
             {"search_filetype_override": "lossless", "min_bitrate": 245},
         )
         self.assertEqual(db.update_request_fields_calls, [(2, dict(target_format="lossless"))])
+
+    @patch("builtins.print")
+    def test_set_intent_reports_replace_race_instead_of_success(
+        self,
+        mock_print,
+    ):
+        class RacingDB(FakePipelineDB):
+            def update_request_fields(
+                self,
+                request_id: int,
+                *,
+                expected_status: str | None = None,
+                **fields: Any,
+            ) -> bool:
+                self.supersede_request_mbid(
+                    request_id,
+                    new_mb_release_id="set-intent-race-new",
+                    new_mb_release_group_id=None,
+                    new_mb_artist_id=None,
+                    new_artist_name="A",
+                    new_album_title="B (correct pressing)",
+                    new_year=None,
+                    new_country=None,
+                    new_tracks=[],
+                )
+                return super().update_request_fields(
+                    request_id,
+                    expected_status=expected_status,
+                    **fields,
+                )
+
+        db = RacingDB()
+        db.seed_request(make_request_row(
+            id=7,
+            status="wanted",
+            artist_name="A",
+            album_title="B",
+            target_format=None,
+        ))
+
+        result = pipeline_cli.cmd_set_intent(
+            cast(Any, db),
+            MagicMock(id=7, intent="lossless"),
+        )
+
+        self.assertEqual(result, 4)
+        row = db.get_request(7)
+        assert row is not None
+        self.assertEqual(row["status"], "replaced")
+        self.assertIsNone(row["target_format"])
+        rendered = "\n".join(str(call.args[0]) for call in mock_print.call_args_list)
+        self.assertIn('"error": "transition_conflict"', rendered)
+        self.assertNotIn("lossless on disk", rendered)
 
     @patch("builtins.print")
     def test_set_default_clears_stale_lossless_override(self, _mock_print):
@@ -1459,11 +1624,8 @@ class TestCmdRepairSpectral(unittest.TestCase):
                 "last_download_spectral_grade": None,
                 "verified_lossless": True,
             }]
-            clear_cur = MagicMock()
             delete_cur = MagicMock()
             delete_cur.fetchall.return_value = []
-            finalize_request = MagicMock()
-
             db = FakePipelineDB()
             db.seed_request(make_request_row(
                 id=42,
@@ -1477,7 +1639,7 @@ class TestCmdRepairSpectral(unittest.TestCase):
                 verified_lossless=True,
                 final_format="mp3 v0",
             ))
-            db.queue_execute_results(candidate_cur, clear_cur, delete_cur)
+            db.queue_execute_results(candidate_cur, delete_cur)
 
             beets_info = AlbumInfo(
                 album_id=1,
@@ -1498,20 +1660,18 @@ class TestCmdRepairSpectral(unittest.TestCase):
             stdout = io.StringIO()
             with patch.dict(os.environ, {"CRATEDIGGER_RUNTIME_CONFIG": cfg_path}), \
                  patch("lib.beets_db.BeetsDB", return_value=mock_beets), \
-                 patch("scripts.pipeline_cli.quality.finalize_request", finalize_request), \
                  redirect_stdout(stdout):
                 pipeline_cli.cmd_repair_spectral(cast(Any, db), args)
 
             output = stdout.getvalue()
             self.assertIn("quality_gate_decision → accept", output)
             self.assertIn("→ transitioned to imported", output)
-            self.assertEqual(len(db.execute_calls), 3)
-            called_db, request_id, transition = finalize_request.call_args.args
-            self.assertIs(called_db, db)
-            self.assertEqual(request_id, 42)
-            self.assertEqual(transition.target_status, "imported")
-            self.assertEqual(transition.from_status, "wanted")
-            self.assertEqual(transition.fields, {"min_bitrate": 207})
+            self.assertEqual(len(db.execute_calls), 2)
+            repaired = db.request(42)
+            self.assertEqual(repaired["status"], "imported")
+            self.assertEqual(repaired["min_bitrate"], 207)
+            self.assertIsNone(repaired["last_download_spectral_bitrate"])
+            self.assertIsNone(repaired["current_spectral_bitrate"])
         finally:
             os.unlink(cfg_path)
 
@@ -2358,6 +2518,19 @@ class TestCmdSearchPlanRegenerate(unittest.TestCase):
         self.assertEqual(payload["request_status"], "imported")
         self.assertFalse(payload["executable"])
 
+    def test_regenerate_replaced_request_returns_4_without_mutation(self):
+        db, rid, _ = self._seed_with_plan()
+        db._requests[rid]["status"] = "replaced"
+        before = db.request(rid)
+        plans_before = dict(db.search_plans)
+
+        rc, out = self._run(db, rid, json_out=True)
+
+        self.assertEqual(rc, 4)
+        self.assertEqual(json.loads(out)["outcome"], "request_replaced")
+        self.assertEqual(db.request(rid), before)
+        self.assertEqual(db.search_plans, plans_before)
+
     def test_regenerate_deterministic_failure_returns_3_preserves_old_plan(self):
         from tests.fakes import FakePipelineDB
         from lib.pipeline_db import SearchPlanItemInput
@@ -2818,6 +2991,17 @@ class TestCmdSearchPlanAdvance(unittest.TestCase):
         rc, out = self._run(db, rid, to_ordinal=1)
         self.assertEqual(rc, 4)
         self.assertIn("no_active_plan", out)
+
+    def test_advance_returns_4_for_replaced_request_without_mutation(self):
+        db, rid = self._seed_plan()
+        db._requests[rid]["status"] = "replaced"
+        before = db.request(rid)
+
+        rc, out = self._run(db, rid, to_ordinal=5, json_out=True)
+
+        self.assertEqual(rc, 4)
+        self.assertEqual(json.loads(out)["outcome"], "request_replaced")
+        self.assertEqual(db.request(rid), before)
 
     def test_advance_json_output_carries_full_payload(self):
         db, rid = self._seed_plan()

@@ -499,9 +499,13 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
+        request_overrides = {
+            "active_download_state": {"files": [], "filetype": "mp3"},
+            **(request_overrides or {}),
+        }
         db.seed_request(make_request_row(
             id=42, status="downloading",
-            **(request_overrides or {}),
+            **request_overrides,
         ))
 
         if cfg is None:
@@ -1133,6 +1137,34 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
     a phantom existing measurement.
     """
 
+    def test_replaced_request_spectral_noop_is_reported_as_not_persisted(self):
+        from lib.measurement import _persist_spectral_state
+        from lib.quality import SpectralMeasurement
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="replaced",
+            current_spectral_grade=None,
+            current_spectral_bitrate=None,
+        ))
+        before = db.request(42)
+
+        persisted = _persist_spectral_state(
+            db=db,  # type: ignore[arg-type]
+            request_id=42,
+            download_spectral=None,
+            existing_spectral=SpectralMeasurement(
+                grade="genuine",
+                bitrate_kbps=320,
+            ),
+            existing_min_bitrate=320,
+            label="Frozen Artist - Frozen Album",
+        )
+
+        self.assertIsNone(persisted)
+        self.assertEqual(db.request(42), before)
+
     def test_accept_suspect_upgrade_still_persists_spectral(self):
         """Accept (suspect grade but bitrate upgrades existing) → spectral state still propagates."""
         from lib.config import CratediggerConfig
@@ -1280,6 +1312,7 @@ class TestLosslessSourceLockedSlice(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42, status="downloading", mb_release_id="mbid-123",
+            active_download_state={"files": [], "filetype": "mp3"},
             current_lossless_source_v0_probe_min_bitrate=210,
             current_lossless_source_v0_probe_avg_bitrate=240,
             current_lossless_source_v0_probe_median_bitrate=235,
@@ -1345,7 +1378,11 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         )
 
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS, pipeline_db_enabled=True)
         audit = SpectralDetail(
@@ -1420,7 +1457,11 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
 
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
 
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
@@ -1468,7 +1509,11 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
 
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS, pipeline_db_enabled=True)
         audit = SpectralDetail(
@@ -1507,7 +1552,11 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
 
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS, pipeline_db_enabled=True)
         audit = SpectralDetail(
@@ -1552,7 +1601,11 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         )
 
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS, pipeline_db_enabled=True)
         audit = SpectralDetail(
@@ -2054,9 +2107,13 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
         from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
+        request_overrides = {
+            "active_download_state": {"files": [], "filetype": "mp3"},
+            **(request_overrides or {}),
+        }
         db.seed_request(make_request_row(
             id=42, status="downloading",
-            **(request_overrides or {}),
+            **request_overrides,
         ))
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
@@ -2296,7 +2353,11 @@ class TestReleaseLockContention(unittest.TestCase):
     def _make_db(self) -> FakePipelineDB:
         db = FakePipelineDB()
         db.seed_request(make_request_row(
-            id=42, mb_release_id=self.MBID, status="downloading"))
+            id=42,
+            mb_release_id=self.MBID,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
         return db
 
     def test_auto_contention_returns_deferred_and_leaves_all_state(self):
@@ -2524,7 +2585,11 @@ class TestReleaseLockContention(unittest.TestCase):
         db = self._make_db()
         # Re-seed with empty mb_release_id.
         db.seed_request(make_request_row(
-            id=43, mb_release_id="", status="downloading"))
+            id=43,
+            mb_release_id="",
+            status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
         ir = make_import_result(decision="import", new_min_bitrate=245)
         beets_info = AlbumInfo(
             album_id=1, track_count=10, min_bitrate_kbps=245,
@@ -9572,6 +9637,16 @@ class TestFieldResolverSlice(unittest.TestCase):
         pass
 
     @staticmethod
+    def _recorder_db(request_id: int) -> FakePipelineDB:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=request_id,
+            status="wanted",
+            mb_release_id=f"field-resolver-slice-{request_id}",
+        ))
+        return db
+
+    @staticmethod
     def _patch_urlopen(monkey_patches: dict[str, bytes]):
         """Return a context manager patching urlopen with URL→bytes dispatch.
 
@@ -9633,7 +9708,7 @@ class TestFieldResolverSlice(unittest.TestCase):
             b'"primary-type":"Album","first-release-date":"1997-05-21"}'
         )
 
-        db = FakePipelineDB()
+        db = self._recorder_db(4001)
         req = {
             "id": 4001,
             "mb_release_id": "rec-mbid-xyz",
@@ -9675,7 +9750,7 @@ class TestFieldResolverSlice(unittest.TestCase):
             b'"primary_artist_id":3840,"releases":[]}'
         )
 
-        db = FakePipelineDB()
+        db = self._recorder_db(4002)
         req = {
             "id": 4002,
             "mb_release_id": None,
@@ -9707,7 +9782,7 @@ class TestFieldResolverSlice(unittest.TestCase):
         from unittest.mock import patch as _patch
         import urllib.error
 
-        db = FakePipelineDB()
+        db = self._recorder_db(4003)
         req = {
             "id": 4003,
             "mb_release_id": "rec-mbid-xyz",
@@ -9746,7 +9821,7 @@ class TestFieldResolverSlice(unittest.TestCase):
         )
         from tests.fakes import FakePipelineDB
 
-        db = FakePipelineDB()
+        db = self._recorder_db(4011)
         req = {
             "id": 4011,
             "mb_release_id": "rec-mbid-zzz",
@@ -9801,7 +9876,7 @@ class TestFieldResolverSlice(unittest.TestCase):
             b']}]}'
         )
 
-        db = FakePipelineDB()
+        db = self._recorder_db(4004)
         req = {
             "id": 4004,
             "mb_release_id": "rec-mbid-xyz",
@@ -10168,7 +10243,9 @@ class TestVaPlanRoundTripsThroughDB(unittest.TestCase):
             is_va_compilation=True,
             track_artists=["Artist A", "Artist B", "Artist C"],
         )
-        apply_resolve_all_result(db, req_id, result)
+        apply_resolve_all_result(
+            db, req_id, result, expected_status="wanted",
+        )
 
         # Verify track_artist landed in the DB (Finding #1d wired this).
         rows = db.get_tracks(req_id)
@@ -10369,7 +10446,10 @@ class TestPlanWrapClassificationSlice(unittest.TestCase):
             rejection_reason="strict_count_mismatch",
         ))
         # Importer drops in mid-cycle and flips status.
-        db.update_request_fields(rid, status="imported")
+        self.assertTrue(db.mark_imported_with_rescue(
+            rid,
+            expected_status="wanted",
+        ))
         result = db.record_consumed_search_attempt(self._build_attempt(
             db, rid, plan_id, 1, outcome="no_match",
             rejection_reason="avg_ratio_low",

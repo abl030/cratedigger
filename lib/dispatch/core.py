@@ -378,17 +378,26 @@ def dispatch_import_core(
             # ``lib/download.py::_import_subprocess_already_started``.
             if scenario not in FORCE_MANUAL_SCENARIOS:
                 try:
-                    db.mark_import_subprocess_started(
+                    stamped = db.mark_import_subprocess_started(
                         request_id,
                         datetime.now(timezone.utc).isoformat(),
                     )
                 except Exception:
                     logger.exception(
                         "Failed to stamp import_subprocess_started_at "
-                        "for request %s; continuing with subprocess "
-                        "launch (resume guard may fail-open until "
-                        "completion)",
+                        "for request %s; deferring before subprocess launch",
                         request_id,
+                    )
+                    return DispatchOutcome(
+                        success=False,
+                        message="Could not claim request before import launch",
+                        deferred=True,
+                    )
+                if not stamped:
+                    return DispatchOutcome(
+                        success=False,
+                        message="Request state changed before import launch",
+                        deferred=True,
                     )
             # Force/manual import operates on the user's only copy of the source
             # material (typically failed_imports/…). Tell the harness to keep
@@ -515,7 +524,7 @@ def dispatch_import_core(
                     if decision in ("import", "preflight_existing"):
                         if prev_br is not None or new_br is not None:
                             try:
-                                finalize_request(
+                                transitions.require_transition_applied(finalize_request(
                                     db,
                                     request_id,
                                     transitions.RequestTransition.to_imported(
@@ -523,7 +532,7 @@ def dispatch_import_core(
                                         prev_min_bitrate=prev_br,
                                         min_bitrate=new_br,
                                     ),
-                                )
+                                ))
                             except Exception:
                                 logger.exception("Failed to update upgrade delta")
                     outcome_success = True
@@ -745,14 +754,14 @@ def dispatch_import_core(
                     }
                     if action.mark_done and new_br is not None:
                         requeue_fields["min_bitrate"] = new_br
-                    finalize_request(
+                    transitions.require_transition_applied(finalize_request(
                         db,
                         request_id,
                         transitions.RequestTransition.to_wanted_fields(
                             from_status="imported",
                             fields=requeue_fields,
                         ),
-                    )
+                    ))
 
                 if action.run_quality_gate:
                     quality_gate_fn(

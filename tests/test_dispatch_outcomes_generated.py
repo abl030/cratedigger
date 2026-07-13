@@ -171,6 +171,7 @@ def _run_dispatch(world: DispatchWorld) -> dict:
     db.seed_request(make_request_row(
         id=42, status="downloading",
         min_bitrate=180, current_spectral_bitrate=128,
+        active_download_state={"files": [], "filetype": "mp3"},
     ))
     cfg = CratediggerConfig(
         beets_harness_path=_HARNESS,

@@ -283,7 +283,10 @@ def _build_harness(world: EventWorld) -> tuple[FakePipelineDB, FakeSlskdAPI, lis
     downloading = db.get_downloading()
     for row in world.rows:
         if row.leaves_mid_ingest:
-            db.update_request_fields(row.request_id, status="wanted")
+            db.reset_downloading_to_wanted(
+                row.request_id,
+                expected_status="downloading",
+            )
 
     # T2 (issue #571): seed one open ledger row per pre-ledgered key,
     # AFTER the leaves_mid_ingest flip above -- the ledger stamp must
@@ -310,8 +313,15 @@ def _stamped_paths(db: FakePipelineDB, world: EventWorld) -> dict:
     """(request_id, key) → local_path for every world file, from the DB."""
     stamped = {}
     for row in world.rows:
-        state = ActiveDownloadState.from_dict(
-            db.request(row.request_id)["active_download_state"])
+        raw_state = db.request(row.request_id)["active_download_state"]
+        if raw_state is None:
+            # A real downloading -> wanted lifecycle transition clears the
+            # active state atomically. Preserve the oracle's key universe
+            # while representing every cleared file as unstamped.
+            for key in row.file_keys:
+                stamped[(row.request_id, key)] = None
+            continue
+        state = ActiveDownloadState.from_dict(raw_state)
         for file_state in state.files:
             stamped[(row.request_id, (file_state.username, file_state.filename))] = (
                 file_state.local_path)

@@ -33,6 +33,7 @@ def _search_plan_exit_code(outcome: str) -> int:
         RESULT_INVALID_TARGET,
         RESULT_NO_ACTIVE_PLAN,
         RESULT_REQUEST_NOT_FOUND,
+        RESULT_REQUEST_REPLACED,
         RESULT_SATURATION_INPUT_INVALID,
         RESULT_SATURATION_SUCCESS,
     )
@@ -43,6 +44,7 @@ def _search_plan_exit_code(outcome: str) -> int:
         RESULT_ADVANCED: 0,
         RESULT_HISTORY_PAGE_SUCCESS: 0,
         RESULT_REQUEST_NOT_FOUND: 2,
+        RESULT_REQUEST_REPLACED: 4,
         RESULT_SATURATION_INPUT_INVALID: 3,
         RESULT_INVALID_TARGET: 3,
         RESULT_HISTORY_PAGE_INPUT_INVALID: 3,
@@ -92,9 +94,10 @@ def cmd_search_plan_regenerate(db, args):
     """U8: ``pipeline-cli search-plan regenerate <request_id>``.
 
     Wraps ``SearchPlanService.generate_for_request(regenerate=True)``
-    so the CLI never hand-rolls plan persistence. Allowed for any
-    request status, but only ``wanted`` requests with a successful
-    active plan are executable — the output makes that explicit.
+    so the CLI never hand-rolls plan persistence. Allowed for every
+    non-terminal request status, but only ``wanted`` requests with a
+    successful active plan are executable. Replaced audit ancestors
+    reject regeneration.
 
     Exit codes:
       * 0 — ``RESULT_SUCCESS`` or ``RESULT_NOOP_ACTIVE_PLAN_EXISTS``
@@ -104,8 +107,8 @@ def cmd_search_plan_regenerate(db, args):
       * 2 — ``RESULT_REQUEST_NOT_FOUND`` (matches search-plan show).
       * 3 — ``RESULT_FAILED_DETERMINISTIC`` (sticky failure; old
         active plan preserved).
-      * 4 — ``RESULT_FAILED_TRANSIENT`` (retryable; old active plan
-        preserved).
+      * 4 — ``RESULT_REQUEST_REPLACED`` or ``RESULT_FAILED_TRANSIENT``
+        (the latter is retryable; old active plan preserved).
     """
     from lib.config import read_runtime_config
     from lib.search_plan_service import (
@@ -113,6 +116,7 @@ def cmd_search_plan_regenerate(db, args):
         RESULT_FAILED_TRANSIENT,
         RESULT_NOOP_ACTIVE_PLAN_EXISTS,
         RESULT_REQUEST_NOT_FOUND,
+        RESULT_REQUEST_REPLACED,
         RESULT_SUCCESS,
         SearchPlanService,
     )
@@ -172,6 +176,8 @@ def cmd_search_plan_regenerate(db, args):
         return 0
     if result.outcome == RESULT_REQUEST_NOT_FOUND:
         return 2
+    if result.outcome == RESULT_REQUEST_REPLACED:
+        return 4
     if result.outcome == RESULT_FAILED_DETERMINISTIC:
         return 3
     if result.outcome == RESULT_FAILED_TRANSIENT:
@@ -364,7 +370,7 @@ def cmd_search_plan_advance(db, args):
       * 2 — ``RESULT_REQUEST_NOT_FOUND``
       * 3 — ``RESULT_INVALID_TARGET`` (out of range, would go backward,
         no slot matches strategy, or both/neither flag given)
-      * 4 — ``RESULT_NO_ACTIVE_PLAN``
+      * 4 — ``RESULT_NO_ACTIVE_PLAN`` or ``RESULT_REQUEST_REPLACED``
       * 5 — ``RESULT_FAILED_TRANSIENT`` (lock contention)
     """
     from lib.config import read_runtime_config

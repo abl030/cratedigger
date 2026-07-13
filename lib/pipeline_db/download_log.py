@@ -278,6 +278,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                         last_attempt_at = %s,
                         updated_at = %s
                     WHERE id = %s
+                      AND status = 'wanted'
                     RETURNING download_attempts
                     """,
                     (now, now, request_id),
@@ -294,6 +295,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                     UPDATE album_requests
                     SET next_retry_after = %s
                     WHERE id = %s
+                      AND status = 'wanted'
                     """,
                     (now + timedelta(minutes=backoff_minutes), request_id),
                 )

@@ -36,6 +36,7 @@ from lib.pipeline_db import (  # noqa: E402
     TerminalFailureClaim,
     TransferLedgerRow,
 )
+from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS  # noqa: E402
 
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
@@ -1584,6 +1585,21 @@ class TestUpdateStatus(unittest.TestCase):
         self.assertAlmostEqual(req["beets_distance"], 0.05)
         self.assertEqual(req["imported_path"], "/Beets/A/2020 - B")
 
+    def test_update_status_metadata_rejects_lifecycle_and_malformed_fields(self):
+        before = self.db.get_request(self.req_id)
+        for fields in (
+            {"active_download_state": "{}"},
+            {"reasoning, status": "smuggled"},
+        ):
+            with self.subTest(fields=fields):
+                with self.assertRaises(ValueError):
+                    self.db.update_status(
+                        self.req_id,
+                        "imported",
+                        **fields,
+                    )
+                self.assertEqual(self.db.get_request(self.req_id), before)
+
 
 @requires_postgres
 class TestGetWanted(unittest.TestCase):
@@ -1666,6 +1682,90 @@ class TestTrackManagement(unittest.TestCase):
     def tearDown(self):
         self.db.close()
 
+    def test_empty_request_field_update_is_a_read_only_cas_truth_table(self):
+        """Empty/control-only metadata writes still validate lifecycle."""
+        from lib import pipeline_db
+
+        replaced_id = self.db.add_request(
+            mb_release_id="empty-cas-replaced-old",
+            artist_name="A",
+            album_title="Old",
+            source="request",
+        )
+        self.db.supersede_request_mbid(
+            replaced_id,
+            new_mb_release_id="empty-cas-replaced-new",
+            new_mb_release_group_id=None,
+            new_mb_artist_id=None,
+            new_artist_name="A",
+            new_album_title="New",
+            new_year=None,
+            new_country=None,
+            new_tracks=[],
+        )
+        active_before = self.db.get_request(self.req_id)
+        replaced_before = self.db.get_request(replaced_id)
+        assert active_before is not None
+        assert replaced_before is not None
+
+        self.assertTrue(self.db.update_request_fields(self.req_id))
+        self.assertTrue(self.db.update_request_fields(
+            self.req_id, expected_status="wanted",
+        ))
+        self.assertFalse(self.db.update_request_fields(
+            self.req_id, expected_status="manual",
+        ))
+        self.assertFalse(self.db.update_request_fields(replaced_id))
+        self.assertFalse(self.db.update_request_fields(
+            replaced_id, expected_status="replaced",
+        ))
+        self.assertFalse(self.db.update_request_fields(999_999))
+        self.assertFalse(self.db.update_request_fields(
+            999_999, expected_status="wanted",
+        ))
+        self.assertFalse(self.db.update_spectral_state(
+            replaced_id, pipeline_db.RequestSpectralStateUpdate(),
+        ))
+        self.assertFalse(self.db.update_spectral_state(
+            999_999, pipeline_db.RequestSpectralStateUpdate(),
+        ))
+
+        self.assertEqual(self.db.get_request(self.req_id), active_before)
+        self.assertEqual(self.db.get_request(replaced_id), replaced_before)
+
+    def test_metadata_update_rejects_every_reserved_field(self):
+        before = self.db.get_request(self.req_id)
+        assert before is not None
+
+        for field in sorted(REQUEST_METADATA_RESERVED_FIELDS):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "reserved lifecycle/identity fields",
+                ):
+                    self.db.update_request_fields(
+                        self.req_id,
+                        **{
+                            field: (
+                                "replaced" if field == "status" else "smuggled"
+                            ),
+                        },
+                    )
+                self.assertEqual(self.db.get_request(self.req_id), before)
+
+        with self.assertRaises(ValueError):
+            self.db.update_request_fields(self.req_id, status="manual")
+        self.assertEqual(self.db.get_request(self.req_id), before)
+
+    def test_metadata_update_rejects_malformed_identifier(self):
+        before = self.db.get_request(self.req_id)
+        with self.assertRaisesRegex(ValueError, "lowercase SQL identifiers"):
+            self.db.update_request_fields(
+                self.req_id,
+                **{"reasoning, status": "smuggled"},
+            )
+        self.assertEqual(self.db.get_request(self.req_id), before)
+
     def test_set_get_tracks_roundtrip(self):
         tracks = [
             {"disc_number": 1, "track_number": 1, "title": "Intro", "length_seconds": 120},
@@ -1690,6 +1790,269 @@ class TestTrackManagement(unittest.TestCase):
         result = self.db.get_tracks(self.req_id)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["title"], "New")
+
+    def test_child_metadata_writers_reject_missing_parent(self):
+        self.assertFalse(self.db.update_track_artists(
+            999_999,
+            ["Orphan Artist"],
+        ))
+        self.assertFalse(self.db.record_field_resolution(
+            999_999,
+            "track_artist",
+            "resolved",
+            None,
+        ))
+
+    def test_resolver_tracks_racing_replace_leave_ancestor_frozen(self):
+        """Real PG barrier: Replace wins while resolver is in flight."""
+        from lib.config import CratediggerConfig
+        from lib.pipeline_db import PipelineDB
+        from lib.search_plan_service import (
+            RESULT_REQUEST_REPLACED,
+            SearchPlanService,
+        )
+
+        entered = threading.Event()
+        release = threading.Event()
+        results: list[Any] = []
+        errors: list[BaseException] = []
+
+        class BarrierResolver:
+            def resolve_tracks(
+                self,
+                *,
+                release_id: str,
+                request_id: int,
+            ) -> list[dict[str, Any]]:
+                entered.set()
+                if not release.wait(timeout=10):
+                    raise TimeoutError("replace barrier was not released")
+                return [{
+                    "disc_number": 1,
+                    "track_number": 1,
+                    "title": "Late resolver result",
+                    "length_seconds": 180,
+                }]
+
+        def generate() -> None:
+            try:
+                results.append(SearchPlanService(
+                    self.db,
+                    CratediggerConfig(),
+                    resolver=BarrierResolver(),
+                ).generate_for_request(self.req_id, regenerate=False))
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        worker = threading.Thread(target=generate)
+        worker.start()
+        self.assertTrue(entered.wait(timeout=10))
+
+        replacing_db = PipelineDB(TEST_DSN)
+        try:
+            replacing_db.supersede_request_mbid(
+                self.req_id,
+                new_mb_release_id="track-resolver-race-new",
+                new_mb_release_group_id=None,
+                new_mb_artist_id=None,
+                new_artist_name="A",
+                new_album_title="B (correct pressing)",
+                new_year=None,
+                new_country=None,
+                new_tracks=[],
+            )
+            frozen_row = replacing_db.get_request(self.req_id)
+            frozen_tracks = replacing_db.get_tracks(self.req_id)
+        finally:
+            release.set()
+            worker.join(timeout=10)
+            replacing_db.close()
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].outcome, RESULT_REQUEST_REPLACED)
+        self.assertEqual(self.db.get_request(self.req_id), frozen_row)
+        self.assertEqual(self.db.get_tracks(self.req_id), frozen_tracks)
+
+    def test_field_resolver_racing_replace_cannot_rewrite_child_rows(self):
+        """Real PG barrier: late scalar/artist resolution loses to Replace."""
+        from lib.field_resolver_service import (
+            ResolveAllResult,
+            apply_resolve_all_result,
+        )
+        from lib.pipeline_db import PipelineDB
+
+        self.db.set_tracks(self.req_id, [{
+            "disc_number": 1,
+            "track_number": 1,
+            "title": "Track",
+            "track_artist": None,
+        }])
+        entered = threading.Event()
+        release = threading.Event()
+        applied: list[bool] = []
+        errors: list[BaseException] = []
+
+        def resolve_and_apply() -> None:
+            try:
+                entered.set()
+                if not release.wait(timeout=10):
+                    raise TimeoutError("field resolver barrier was not released")
+                applied.append(apply_resolve_all_result(
+                    self.db,
+                    self.req_id,
+                    ResolveAllResult(
+                        release_group_year=1999,
+                        track_artists=["Late Artist"],
+                        is_va_compilation=False,
+                    ),
+                    expected_status="wanted",
+                ))
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        worker = threading.Thread(target=resolve_and_apply)
+        worker.start()
+        self.assertTrue(entered.wait(timeout=10))
+
+        replacing_db = PipelineDB(TEST_DSN)
+        try:
+            replacing_db.supersede_request_mbid(
+                self.req_id,
+                new_mb_release_id="field-resolver-race-new",
+                new_mb_release_group_id=None,
+                new_mb_artist_id=None,
+                new_artist_name="A",
+                new_album_title="B (correct pressing)",
+                new_year=None,
+                new_country=None,
+                new_tracks=[],
+            )
+            frozen_row = replacing_db.get_request(self.req_id)
+            frozen_tracks = replacing_db.get_tracks(self.req_id)
+        finally:
+            release.set()
+            worker.join(timeout=10)
+            replacing_db.close()
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(applied, [False])
+        self.assertEqual(self.db.get_request(self.req_id), frozen_row)
+        self.assertEqual(self.db.get_tracks(self.req_id), frozen_tracks)
+        self.assertIsNone(self.db.get_tracks(self.req_id)[0]["track_artist"])
+        self.assertFalse(self.db.record_field_resolution(
+            self.req_id,
+            "track_artist",
+            "resolved",
+            None,
+        ))
+        self.assertIsNone(
+            self.db.get_field_resolution(self.req_id, "track_artist"),
+        )
+
+    def test_metadata_compare_and_set_loses_to_replace(self):
+        """Real PG barrier: a stale set-intent snapshot reports no apply."""
+        from lib.pipeline_db import PipelineDB
+
+        ready = threading.Event()
+        release = threading.Event()
+        applied: list[bool] = []
+        errors: list[BaseException] = []
+
+        def write_metadata() -> None:
+            try:
+                ready.set()
+                if not release.wait(timeout=10):
+                    raise TimeoutError("metadata barrier was not released")
+                applied.append(self.db.update_request_fields(
+                    self.req_id,
+                    expected_status="wanted",
+                    target_format="lossless",
+                ))
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        worker = threading.Thread(target=write_metadata)
+        worker.start()
+        self.assertTrue(ready.wait(timeout=10))
+
+        replacing_db = PipelineDB(TEST_DSN)
+        try:
+            replacing_db.supersede_request_mbid(
+                self.req_id,
+                new_mb_release_id="metadata-race-new",
+                new_mb_release_group_id=None,
+                new_mb_artist_id=None,
+                new_artist_name="A",
+                new_album_title="B (correct pressing)",
+                new_year=None,
+                new_country=None,
+                new_tracks=[],
+            )
+            frozen_row = replacing_db.get_request(self.req_id)
+        finally:
+            release.set()
+            worker.join(timeout=10)
+            replacing_db.close()
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(applied, [False])
+        self.assertEqual(self.db.get_request(self.req_id), frozen_row)
+
+    def test_field_resolver_snapshot_loses_to_wanted_manual_transition(self):
+        """Real PG barrier: stale resolver output cannot touch parent/child."""
+        from lib.field_resolver_service import (
+            ResolveAllResult,
+            apply_resolve_all_result,
+        )
+
+        self.db.set_tracks(self.req_id, [{
+            "disc_number": 1,
+            "track_number": 1,
+            "title": "Track",
+            "track_artist": None,
+        }])
+        entered = threading.Event()
+        release = threading.Event()
+        applied: list[bool] = []
+
+        def stale_apply() -> None:
+            entered.set()
+            if not release.wait(timeout=10):
+                raise TimeoutError("field resolver barrier was not released")
+            applied.append(apply_resolve_all_result(
+                self.db,
+                self.req_id,
+                ResolveAllResult(
+                    release_group_year=1999,
+                    is_va_compilation=True,
+                    track_artists=["Late Artist"],
+                ),
+                expected_status="wanted",
+            ))
+
+        worker = threading.Thread(target=stale_apply)
+        worker.start()
+        self.assertTrue(entered.wait(timeout=10))
+        self.assertTrue(self.db.update_status(
+            self.req_id, "manual", expected_status="wanted",
+        ))
+        manual_row = self.db.get_request(self.req_id)
+        manual_tracks = self.db.get_tracks(self.req_id)
+        assert manual_row is not None
+        release.set()
+        worker.join(timeout=10)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(applied, [False])
+        self.assertEqual(self.db.get_request(self.req_id), manual_row)
+        self.assertEqual(self.db.get_tracks(self.req_id), manual_tracks)
+        self.assertIsNone(manual_row["release_group_year"])
+        self.assertFalse(manual_row["is_va_compilation"])
+        self.assertIsNone(manual_tracks[0]["track_artist"])
 
 
 @requires_postgres
@@ -2972,18 +3335,18 @@ class TestRetryLogic(unittest.TestCase):
         self.db.close()
 
     def test_record_attempt_increments_counters(self):
-        self.db.record_attempt(self.req_id, "search")
+        self.db.record_attempt(self.req_id, "search", expected_status="wanted")
         req = self.db.get_request(self.req_id)
         assert req is not None
         self.assertEqual(req["search_attempts"], 1)
 
-        self.db.record_attempt(self.req_id, "search")
+        self.db.record_attempt(self.req_id, "search", expected_status="wanted")
         req = self.db.get_request(self.req_id)
         assert req is not None
         self.assertEqual(req["search_attempts"], 2)
 
     def test_record_attempt_sets_backoff(self):
-        self.db.record_attempt(self.req_id, "download")
+        self.db.record_attempt(self.req_id, "download", expected_status="wanted")
         req = self.db.get_request(self.req_id)
         assert req is not None
         self.assertEqual(req["download_attempts"], 1)
@@ -2991,12 +3354,12 @@ class TestRetryLogic(unittest.TestCase):
         self.assertGreater(req["next_retry_after"], datetime.now(timezone.utc))
 
     def test_exponential_backoff(self):
-        self.db.record_attempt(self.req_id, "search")
+        self.db.record_attempt(self.req_id, "search", expected_status="wanted")
         req1 = self.db.get_request(self.req_id)
         assert req1 is not None
         retry1 = req1["next_retry_after"]
 
-        self.db.record_attempt(self.req_id, "search")
+        self.db.record_attempt(self.req_id, "search", expected_status="wanted")
         req2 = self.db.get_request(self.req_id)
         assert req2 is not None
         retry2 = req2["next_retry_after"]
@@ -3011,7 +3374,7 @@ class TestRetryLogic(unittest.TestCase):
         # until commit 1d84037 lowered it to raise steady-state search
         # frequency from ~4 to ~6 searches/release/day).
         for _ in range(6):
-            self.db.record_attempt(self.req_id, "search")
+            self.db.record_attempt(self.req_id, "search", expected_status="wanted")
 
         req = self.db.get_request(self.req_id)
         assert req is not None
@@ -3087,9 +3450,9 @@ class TestResetToWanted(unittest.TestCase):
 
     def test_reset_to_wanted_can_preserve_retry_counters(self):
         req_id = self._make_request("preserve-counters")
-        self.db.record_attempt(req_id, "search")
-        self.db.record_attempt(req_id, "download")
-        self.db.record_attempt(req_id, "validation")
+        self.db.record_attempt(req_id, "search", expected_status="imported")
+        self.db.record_attempt(req_id, "download", expected_status="imported")
+        self.db.record_attempt(req_id, "validation", expected_status="imported")
         before = self.db.get_request(req_id)
         assert before is not None
         before_retry = before["next_retry_after"]
@@ -3267,6 +3630,28 @@ class TestResetToWanted(unittest.TestCase):
         assert req is not None
         self.assertEqual(req["min_bitrate"], 320)
         self.assertEqual(req["prev_min_bitrate"], 192)
+
+    def test_explicit_previous_bitrate_wins_over_derived_history(self):
+        req_id = self._make_request("explicit-prev-br")
+        self.db.update_request_fields(
+            req_id,
+            min_bitrate=192,
+            prev_min_bitrate=128,
+        )
+
+        applied = self.db.reset_to_wanted(
+            req_id,
+            expected_status="imported",
+            min_bitrate=320,
+            prev_min_bitrate=256,
+        )
+
+        self.assertTrue(applied)
+        req = self.db.get_request(req_id)
+        assert req is not None
+        self.assertEqual(req["status"], "wanted")
+        self.assertEqual(req["min_bitrate"], 320)
+        self.assertEqual(req["prev_min_bitrate"], 256)
 
     def test_clears_manual_reason(self):
         """U6: re-queue clears ``manual_reason`` alongside attempt counters.
@@ -3449,6 +3834,197 @@ class TestApplyTransitionDB(unittest.TestCase):
         req = self.db.get_request(req_id)
         assert req is not None
         self.assertIsNone(req["search_filetype_override"])
+
+    def test_two_session_cas_race_exactly_one_transition_wins(self):
+        from lib.pipeline_db import PipelineDB
+        from lib.transitions import (
+            TransitionApplied,
+            TransitionConflict,
+            apply_transition,
+        )
+
+        req_id = self.db.add_request(
+            mb_release_id="transition-cas-race",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        db_two = PipelineDB(TEST_DSN)
+        barrier = threading.Barrier(2)
+
+        def race(db, target: str):
+            barrier.wait(timeout=5)
+            return apply_transition(
+                db, req_id, target, from_status="wanted")
+
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(
+                    lambda pair: race(*pair),
+                    ((self.db, "manual"), (db_two, "imported")),
+                ))
+        finally:
+            db_two.close()
+
+        self.assertEqual(
+            sum(isinstance(result, TransitionApplied) for result in results), 1)
+        self.assertEqual(
+            sum(isinstance(result, TransitionConflict) for result in results), 1)
+        row = self.db.get_request(req_id)
+        assert row is not None
+        self.assertIn(row["status"], {"manual", "imported"})
+
+    def test_replaced_row_is_frozen_across_every_status_writer(self):
+        from lib.transitions import TransitionConflict, apply_transition
+
+        old_id = self.db.add_request(
+            mb_release_id="transition-frozen-old",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        self.db.supersede_request_mbid(
+            old_id,
+            new_mb_release_id="transition-frozen-new",
+            new_mb_release_group_id=None,
+            new_mb_artist_id=None,
+            new_artist_name="A",
+            new_album_title="B2",
+            new_year=None,
+            new_country=None,
+            new_tracks=[],
+        )
+        before = self.db.get_request(old_id)
+        assert before is not None
+
+        result = apply_transition(
+            self.db, old_id, "wanted", from_status="replaced")
+        self.assertIsInstance(result, TransitionConflict)
+        self.assertFalse(self.db.update_status(
+            old_id, "wanted", expected_status="replaced"))
+        self.assertFalse(self.db.reset_to_wanted(
+            old_id, expected_status="replaced"))
+        self.assertFalse(self.db.mark_imported_with_rescue(
+            old_id, expected_status="replaced"))
+        self.assertFalse(self.db.set_downloading(
+            old_id, "{}", expected_status="wanted"))
+        self.assertEqual(self.db.get_request(old_id), before)
+
+    def test_replace_wins_between_requeue_and_late_retry_write(self):
+        """Real-PG barrier pin for the former two-write thaw race."""
+        from lib.pipeline_db import PipelineDB
+
+        request_id = self.db.add_request(
+            mb_release_id="transition-late-retry-old",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        self.assertTrue(self.db.set_downloading(
+            request_id,
+            '{"files": [], "filetype": "flac"}',
+            expected_status="wanted",
+        ))
+        worker_db = PipelineDB(TEST_DSN)
+        replace_db = PipelineDB(TEST_DSN)
+        reset_done = threading.Barrier(2)
+        replace_done = threading.Barrier(2)
+
+        def late_worker() -> bool:
+            self.assertTrue(worker_db.reset_downloading_to_wanted(
+                request_id,
+                expected_status="downloading",
+            ))
+            reset_done.wait(timeout=5)
+            replace_done.wait(timeout=5)
+            return worker_db.record_attempt(
+                request_id,
+                "download",
+                expected_status="wanted",
+            )
+
+        def replace() -> int:
+            reset_done.wait(timeout=5)
+            new_id = replace_db.supersede_request_mbid(
+                request_id,
+                new_mb_release_id="transition-late-retry-new",
+                new_mb_release_group_id=None,
+                new_mb_artist_id=None,
+                new_artist_name="A",
+                new_album_title="B2",
+                new_year=None,
+                new_country=None,
+                new_tracks=[],
+            )
+            replace_done.wait(timeout=5)
+            return new_id
+
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                worker_future = pool.submit(late_worker)
+                replace_future = pool.submit(replace)
+                self.assertGreater(replace_future.result(timeout=10), request_id)
+                self.assertFalse(worker_future.result(timeout=10))
+        finally:
+            worker_db.close()
+            replace_db.close()
+
+        row = self.db.get_request(request_id)
+        assert row is not None
+        self.assertEqual(row["status"], "replaced")
+        self.assertEqual(row["download_attempts"], 0)
+        self.assertIsNone(row["next_retry_after"])
+
+    def test_replace_from_downloading_freezes_metadata_writers(self):
+        request_id = self.db.add_request(
+            mb_release_id="transition-metadata-old",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        self.assertTrue(self.db.set_downloading(
+            request_id,
+            '{"files": [], "filetype": "flac", "current_path": "/old"}',
+            expected_status="wanted",
+        ))
+        self.db.supersede_request_mbid(
+            request_id,
+            new_mb_release_id="transition-metadata-new",
+            new_mb_release_group_id=None,
+            new_mb_artist_id=None,
+            new_artist_name="A",
+            new_album_title="B2",
+            new_year=None,
+            new_country=None,
+            new_tracks=[],
+        )
+        frozen = self.db.get_request(request_id)
+        assert frozen is not None
+
+        self.assertFalse(self.db.update_download_state(
+            request_id,
+            '{"files": [], "filetype": "mp3"}',
+            expected_status="downloading",
+        ))
+        self.assertFalse(self.db.update_download_state_current_path(
+            request_id,
+            "/late",
+        ))
+        self.assertFalse(self.db.mark_import_subprocess_started(
+            request_id,
+            "2026-07-13T15:00:00+00:00",
+        ))
+        self.assertFalse(self.db.set_request_current_evidence(
+            request_id,
+            999,
+            expected_status="downloading",
+        ))
+        self.assertFalse(self.db.record_attempt(
+            request_id,
+            "download",
+            expected_status="wanted",
+        ))
+        self.assertEqual(self.db.get_request(request_id), frozen)
 
 
 @requires_postgres
@@ -4337,7 +4913,7 @@ class TestDownloadingStatus(unittest.TestCase):
             "files": [],
         })
         self.db.set_downloading(req_id, state_json)
-        self.db.record_attempt(req_id, "download")
+        self.db.record_attempt(req_id, "download", expected_status="downloading")
 
         reset = self.db.reset_downloading_to_wanted(req_id)
         blocked = self.db.reset_downloading_to_wanted(blocked_id)
@@ -4352,6 +4928,37 @@ class TestDownloadingStatus(unittest.TestCase):
         self.assertIsNone(req["active_download_state"])
         self.assertEqual(req["download_attempts"], 1)
         self.assertEqual(blocked_req["status"], "wanted")
+
+    def test_reset_downloading_accepts_explicit_previous_bitrate(self):
+        req_id = self.db.add_request(
+            mb_release_id="rdtw-prev-br",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        self.db.update_request_fields(
+            req_id,
+            min_bitrate=245,
+            prev_min_bitrate=128,
+        )
+        self.assertTrue(self.db.set_downloading(req_id, json.dumps({
+            "filetype": "flac",
+            "enqueued_at": "2026-04-03T12:00:00+00:00",
+            "files": [],
+        })))
+
+        applied = self.db.reset_downloading_to_wanted(
+            req_id,
+            min_bitrate=192,
+            prev_min_bitrate=None,
+        )
+
+        self.assertTrue(applied)
+        req = self.db.get_request(req_id)
+        assert req is not None
+        self.assertEqual(req["status"], "wanted")
+        self.assertEqual(req["min_bitrate"], 192)
+        self.assertIsNone(req["prev_min_bitrate"])
 
     def test_update_download_state_current_path(self):
         """update_download_state_current_path() rewrites only the path field."""
@@ -5927,6 +6534,98 @@ class TestPersistedSearchPlanCRUD(unittest.TestCase):
         assert active is not None
         self.assertEqual(active.plan.id, plan_id)
         self.assertEqual(active.items, [])
+
+    def test_replaced_request_rejects_every_plan_mutation(self):
+        from lib.pipeline_db import (
+            ConsumedAttemptInput,
+            NonConsumingAttemptInput,
+            ReplacedRequestMutationError,
+        )
+
+        plan_id = self.db.create_successful_search_plan(
+            request_id=self.req_id,
+            generator_id="g1",
+            items=self._items("Q1", "Q2"),
+        )
+        active = self.db.get_active_search_plan(self.req_id)
+        assert active is not None
+        first = active.items[0]
+        self.db.supersede_request_mbid(
+            self.req_id,
+            new_mb_release_id="plan-crud-replacement",
+            new_mb_release_group_id=None,
+            new_mb_artist_id=None,
+            new_artist_name="Plan",
+            new_album_title="Replacement",
+            new_year=None,
+            new_country=None,
+            new_tracks=[],
+        )
+        frozen = self.db.get_request(self.req_id)
+        assert frozen is not None
+
+        with self.assertRaises(ReplacedRequestMutationError):
+            self.db.create_failed_search_plan(
+                request_id=self.req_id,
+                generator_id="g2",
+                failure_class="dependency_failure",
+                transient=True,
+            )
+        with self.assertRaises(ReplacedRequestMutationError):
+            self.db.create_successful_search_plan(
+                request_id=self.req_id,
+                generator_id="g2",
+                items=self._items("Q3"),
+            )
+        with self.assertRaises(ReplacedRequestMutationError):
+            self.db.supersede_search_plan_with_replacement(
+                request_id=self.req_id,
+                generator_id="g2",
+                items=self._items("Q3"),
+            )
+        with self.assertRaises(ReplacedRequestMutationError):
+            self.db.advance_search_plan_cursor(
+                self.req_id,
+                target_ordinal=1,
+                plan_item_count=2,
+            )
+
+        consumed = self.db.record_consumed_search_attempt(
+            ConsumedAttemptInput(
+                request_id=self.req_id,
+                plan_id=plan_id,
+                plan_item_id=first.id,
+                plan_ordinal=first.ordinal,
+                plan_strategy=first.strategy,
+                plan_canonical_query_key=first.canonical_query_key,
+                plan_repeat_group=first.repeat_group,
+                plan_generator_id="g1",
+                query=first.query,
+                outcome="no_results",
+                plan_item_count=2,
+                cycle_count_snapshot=0,
+                elapsed_s=0.1,
+                result_count=0,
+                apply_scheduler_attempt=True,
+                scheduler_success=False,
+            )
+        )
+        self.assertTrue(consumed.is_stale)
+        stale_log = self.db._execute(
+            "SELECT stale_reason FROM search_log WHERE id = %s",
+            (consumed.search_log_id,),
+        ).fetchone()
+        assert stale_log is not None
+        self.assertEqual(stale_log["stale_reason"], "request_replaced")
+
+        self.db.record_non_consuming_search_attempt(
+            NonConsumingAttemptInput(
+                request_id=self.req_id,
+                outcome="error",
+                apply_scheduler_attempt=True,
+            )
+        )
+        self.assertEqual(self.db.get_request(self.req_id), frozen)
 
 
 @requires_postgres

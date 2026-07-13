@@ -14,6 +14,7 @@ from lib.destructive_release_service import (
     BanSourceRequest,
     BanSourceRequestNotFound,
     BanSourceSuccess,
+    BanSourceTransitionConflict,
     DeleteAlbumNotFound,
     DeleteBeetsFailure,
     DeleteImporterBusy,
@@ -82,6 +83,15 @@ def cmd_ban_source(db, args) -> int:
         return 4
     if isinstance(result, BanSourceImporterBusy):
         print(json.dumps({"error": "destructive_operation_busy"}))
+        return 4
+    if isinstance(result, BanSourceTransitionConflict):
+        print(json.dumps({
+            "error": "transition_conflict",
+            "reason": result.conflict.kind.value,
+            "expected_status": result.conflict.expected_status,
+            "actual_status": result.conflict.actual_status,
+            "target_status": result.conflict.target_status,
+        }))
         return 4
     raise AssertionError(f"Unhandled ban-source result: {result!r}")
 

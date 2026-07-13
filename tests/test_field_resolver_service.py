@@ -12,7 +12,9 @@ passed as kwargs (the DI seam pattern).
 
 from __future__ import annotations
 
+import copy
 import socket
+import threading
 import unittest
 import urllib.error
 from typing import Any
@@ -35,7 +37,32 @@ from lib.field_resolver_service import (
     resolve_release_group_year,
     resolve_track_artists,
 )
-from tests.fakes import FakePipelineDB
+from tests.fakes import FakePipelineDB as _GuardedFakePipelineDB
+from tests.helpers import make_request_row
+
+
+class FakePipelineDB(_GuardedFakePipelineDB):
+    """Recorder harness with the parent row resolvers receive in production."""
+
+    def record_field_resolution(
+        self,
+        request_id: int,
+        field_name: str,
+        status: str,
+        reason_code: str | None,
+    ) -> bool:
+        if self.get_request(request_id) is None:
+            self.seed_request(make_request_row(
+                id=request_id,
+                status="wanted",
+                mb_release_id=f"resolver-parent-{request_id}",
+            ))
+        return super().record_field_resolution(
+            request_id,
+            field_name,
+            status,
+            reason_code,
+        )
 
 
 def _request(**overrides: Any) -> dict[str, Any]:
@@ -1074,7 +1101,8 @@ class TestResolveAll(unittest.TestCase):
         self.assertEqual(result.release_group_id, "98765")
 
         apply_resolve_all_result(
-            db, 803, result, existing_mb_release_group_id=None,
+            db, 803, result, expected_status="wanted",
+            existing_mb_release_group_id=None,
         )
         _req_id, fields = db.update_request_fields_calls[-1]
         self.assertEqual(fields["mb_release_group_id"], "98765")
@@ -1112,7 +1140,8 @@ class TestResolveAll(unittest.TestCase):
         self.assertIsNone(result.release_group_id)
 
         apply_resolve_all_result(
-            db, 804, result, existing_mb_release_group_id=None,
+            db, 804, result, expected_status="wanted",
+            existing_mb_release_group_id=None,
         )
         _req_id, fields = db.update_request_fields_calls[-1]
         self.assertNotIn("mb_release_group_id", fields)
@@ -1499,7 +1528,10 @@ class TestApplyResolveAllResult(unittest.TestCase):
             is_va_compilation=False,
         )
 
-        apply_resolve_all_result(db, 42, result, existing_mb_release_group_id=None)
+        apply_resolve_all_result(
+            db, 42, result, expected_status="wanted",
+            existing_mb_release_group_id=None,
+        )
 
         self.assertEqual(len(db.update_request_fields_calls), 1)
         req_id, fields = db.update_request_fields_calls[0]
@@ -1518,7 +1550,7 @@ class TestApplyResolveAllResult(unittest.TestCase):
             is_va_compilation=True,
         )
 
-        apply_resolve_all_result(db, 7, result)
+        apply_resolve_all_result(db, 7, result, expected_status="wanted")
 
         self.assertEqual(len(db.update_request_fields_calls), 1)
         req_id, fields = db.update_request_fields_calls[0]
@@ -1544,6 +1576,7 @@ class TestApplyResolveAllResult(unittest.TestCase):
 
         apply_resolve_all_result(
             db, 9, result,
+            expected_status="wanted",
             existing_mb_release_group_id="upstream-known-rg",
         )
 
@@ -1560,6 +1593,7 @@ class TestApplyResolveAllResult(unittest.TestCase):
 
         apply_resolve_all_result(
             db, 11, result,
+            expected_status="wanted",
             existing_mb_release_group_id=None,
         )
 
@@ -1577,12 +1611,16 @@ class TestApplyResolveAllResult(unittest.TestCase):
         class FailingDB:
             update_request_fields_calls: list[tuple[int, dict[str, Any]]] = []
 
-            def update_request_fields(self, request_id: int, **fields: Any) -> None:
+            def update_request_fields(self, request_id: int, **fields: Any) -> bool:
                 raise RuntimeError("db boom")
 
             def update_track_artists(
-                self, request_id: int, track_artists: list[str | None],
-            ) -> None:
+                self,
+                request_id: int,
+                track_artists: list[str | None],
+                *,
+                expected_status: str | None = None,
+            ) -> bool:
                 # Never reached: update_request_fields raises first.
                 raise AssertionError("unexpected call")
 
@@ -1591,7 +1629,124 @@ class TestApplyResolveAllResult(unittest.TestCase):
             apply_resolve_all_result(
                 FailingDB(), 99,
                 ResolveAllResult(is_va_compilation=False),
+                expected_status="wanted",
             )
+
+    def test_scalar_conflict_aborts_track_artist_write(self):
+        class ConflictDB:
+            track_calls = 0
+
+            def update_request_fields(
+                self, request_id: int, **fields: Any,
+            ) -> bool:
+                return False
+
+            def update_track_artists(
+                self,
+                request_id: int,
+                track_artists: list[str | None],
+                *,
+                expected_status: str | None = None,
+            ) -> bool:
+                self.track_calls += 1
+                return True
+
+        db = ConflictDB()
+        applied = apply_resolve_all_result(
+            db,
+            42,
+            ResolveAllResult(
+                is_va_compilation=False,
+                track_artists=["Late Artist"],
+            ),
+            expected_status="wanted",
+        )
+
+        self.assertFalse(applied)
+        self.assertEqual(db.track_calls, 0)
+
+    def test_stale_wanted_snapshot_cannot_write_manual_parent_or_tracks(self):
+        db = FakePipelineDB()
+        request_id = db.add_request(
+            "Artist", "Album", "request", mb_release_id="resolver-stale",
+        )
+        db.set_tracks(request_id, [{
+            "disc_number": 1,
+            "track_number": 1,
+            "title": "Track",
+            "track_artist": None,
+        }])
+        self.assertTrue(db.update_status(
+            request_id, "manual", expected_status="wanted",
+        ))
+        before_row = copy.deepcopy(db.get_request(request_id))
+        before_tracks = db.get_tracks(request_id)
+
+        applied = apply_resolve_all_result(
+            db,
+            request_id,
+            ResolveAllResult(
+                release_group_year=1999,
+                is_va_compilation=True,
+                track_artists=["Late Artist"],
+            ),
+            expected_status="wanted",
+        )
+
+        self.assertFalse(applied)
+        self.assertEqual(db.get_request(request_id), before_row)
+        self.assertEqual(db.get_tracks(request_id), before_tracks)
+
+    def test_in_flight_resolver_cannot_rewrite_replaced_tracks(self):
+        db = FakePipelineDB()
+        request_id = db.add_request(
+            "Artist", "Album", "request", mb_release_id="resolver-old",
+        )
+        db.set_tracks(request_id, [{
+            "disc_number": 1,
+            "track_number": 1,
+            "title": "Track",
+            "track_artist": None,
+        }])
+        entered = threading.Event()
+        release = threading.Event()
+        outcomes: list[bool] = []
+
+        def late_apply() -> None:
+            entered.set()
+            self.assertTrue(release.wait(timeout=10))
+            outcomes.append(apply_resolve_all_result(
+                db,
+                request_id,
+                ResolveAllResult(
+                    is_va_compilation=False,
+                    track_artists=["Late Artist"],
+                ),
+                expected_status="wanted",
+            ))
+
+        worker = threading.Thread(target=late_apply)
+        worker.start()
+        self.assertTrue(entered.wait(timeout=10))
+        db.supersede_request_mbid(
+            request_id,
+            new_mb_release_id="resolver-new",
+            new_mb_release_group_id=None,
+            new_mb_artist_id=None,
+            new_artist_name="Artist",
+            new_album_title="Album (correct pressing)",
+            new_year=None,
+            new_country=None,
+            new_tracks=[],
+        )
+        frozen = db.get_tracks(request_id)
+        release.set()
+        worker.join(timeout=10)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(outcomes, [False])
+        self.assertEqual(db.get_tracks(request_id), frozen)
+        self.assertIsNone(db.get_tracks(request_id)[0]["track_artist"])
 
 
 if __name__ == "__main__":

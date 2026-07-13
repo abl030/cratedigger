@@ -1,7 +1,8 @@
 """album_requests CRUD, status state machine, and Replace/rescue."""
 import dataclasses
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
+import msgspec
 import psycopg2
 import psycopg2.extras
 
@@ -19,6 +20,7 @@ from lib.pipeline_db._shared import (
     RequestSpectralStateUpdate,
     SupersedeRaceError,
     _escape_like_pattern,
+    validate_request_metadata_fields,
 )
 
 from lib.pipeline_db._core import _PipelineDBBase
@@ -232,6 +234,25 @@ class _RequestsMixin(_PipelineDBBase):
         return [dict(r) for r in cur.fetchall()]
 
 
+    @staticmethod
+    def _mark_request_replaced(
+        cur: Any,
+        request_id: int,
+        expected_status: str,
+        now: datetime,
+    ) -> bool:
+        """Canonical locked-row status CAS used only by Replace."""
+        cur.execute(
+            "UPDATE album_requests "
+            "SET status = 'replaced', imported_path = NULL, "
+            "updated_at = %s "
+            "WHERE id = %s AND status = %s "
+            "RETURNING id",
+            (now, request_id, expected_status),
+        )
+        return cur.fetchone() is not None
+
+
     def supersede_request_mbid(
         self,
         old_request_id: int,
@@ -290,17 +311,18 @@ class _RequestsMixin(_PipelineDBBase):
                         "between Phase 0 read and Phase 3 lock"
                     )
                 old_source = old_row["source"]
+                if str(old_row["status"]) == "replaced":
+                    raise SupersedeRaceError(
+                        f"old request {old_request_id} was already replaced"
+                    )
 
                 # 2. Flip old row's status; clear imported_path (R14).
-                cur.execute(
-                    "UPDATE album_requests "
-                    "SET status = 'replaced', imported_path = NULL, "
-                    "    updated_at = %s "
-                    "WHERE id = %s AND status != 'replaced' "
-                    "RETURNING id",
-                    (now, old_request_id),
-                )
-                if cur.fetchone() is None:
+                if not self._mark_request_replaced(
+                    cur,
+                    old_request_id,
+                    str(old_row["status"]),
+                    now,
+                ):
                     raise SupersedeRaceError(
                         f"old request {old_request_id} was already "
                         "replaced (rowcount=0 on UPDATE)"
@@ -379,22 +401,109 @@ class _RequestsMixin(_PipelineDBBase):
         self.conn.commit()
 
 
-    def update_request_fields(self, request_id: int, **extra: Any) -> None:
-        """Update album_requests metadata without changing status."""
+    def _update_request_metadata_cas(
+        self,
+        request_id: int,
+        fields: dict[str, Any],
+        *,
+        expected_status: str | None,
+        now: datetime,
+    ) -> bool:
+        """Apply bounded dynamic metadata without owning lifecycle fields."""
+        validate_request_metadata_fields(fields)
+        if not fields:
+            return True
+        assignments = ", ".join(
+            f"{key} = populated.{key}" for key in sorted(fields)
+        )
+        if expected_status is not None:
+            cur = self._execute(
+                f"UPDATE album_requests AS ar "
+                f"SET updated_at = %s, {assignments} "
+                "FROM jsonb_populate_record("
+                "NULL::album_requests, %s::jsonb) AS populated "
+                "WHERE ar.id = %s AND ar.status != 'replaced' "
+                "AND ar.status = %s",
+                (
+                    now,
+                    psycopg2.extras.Json(
+                        fields,
+                        dumps=lambda value: msgspec.json.encode(value).decode(),
+                    ),
+                    request_id,
+                    expected_status,
+                ),
+            )
+        else:
+            cur = self._execute(
+                f"UPDATE album_requests AS ar "
+                f"SET updated_at = %s, {assignments} "
+                "FROM jsonb_populate_record("
+                "NULL::album_requests, %s::jsonb) AS populated "
+                "WHERE ar.id = %s AND ar.status != 'replaced'",
+                (
+                    now,
+                    psycopg2.extras.Json(
+                        fields,
+                        dumps=lambda value: msgspec.json.encode(value).decode(),
+                    ),
+                    request_id,
+                ),
+            )
+        return cur.rowcount > 0
+
+
+    def update_request_fields(
+        self,
+        request_id: int,
+        **extra: Any,
+    ) -> bool:
+        """Compare-and-set metadata without mutating lifecycle or identity.
+
+        ``expected_status`` lets read-then-write adapters reject a concurrent
+        lifecycle change instead of reporting a metadata update that matched
+        no row. Callers that do not hold a source snapshot still receive the
+        terminal ``replaced`` guard. Lifecycle, immutable identity, and
+        dedicated audit fields are reserved for their typed writer seams.
+        """
+        expected_status_raw = extra.pop("expected_status", None)
+        if (
+            expected_status_raw is not None
+            and not isinstance(expected_status_raw, str)
+        ):
+            raise TypeError("expected_status must be a string or None")
+        expected_status = expected_status_raw
+        # Validate before the empty/control-only branch too: an attempted
+        # reserved write must never be mistaken for an empty CAS.
+        validate_request_metadata_fields(dict(extra))
         if not extra:
-            return
-        now = datetime.now(timezone.utc)
-        sets = ["updated_at = %s"]
-        params: list[object] = [now]
-        for key, val in extra.items():
-            sets.append(f"{key} = %s")
-            params.append(val)
-        params.append(request_id)
-        self._execute(
-            f"UPDATE album_requests SET {', '.join(sets)} WHERE id = %s",
-            params,
+            # A control-only/empty update still has a meaningful CAS result.
+            # Returning True without consulting the row lets a dependent
+            # adapter report success for a deleted, replaced, or stale
+            # request.  Keep this branch read-only (including ``updated_at``)
+            # while applying the same existence/lifecycle predicate as the
+            # UPDATE below.
+            if expected_status is not None:
+                cur = self._execute(
+                    "SELECT 1 FROM album_requests "
+                    "WHERE id = %s AND status != 'replaced' AND status = %s",
+                    (request_id, expected_status),
+                )
+            else:
+                cur = self._execute(
+                    "SELECT 1 FROM album_requests "
+                    "WHERE id = %s AND status != 'replaced'",
+                    (request_id,),
+                )
+            return cur.fetchone() is not None
+        applied = self._update_request_metadata_cas(
+            request_id,
+            dict(extra),
+            expected_status=expected_status,
+            now=datetime.now(timezone.utc),
         )
         self.conn.commit()
+        return applied
 
 
     # ---------- Unfindable detection (U13) ----------
@@ -592,26 +701,78 @@ class _RequestsMixin(_PipelineDBBase):
         )
 
 
-    def update_status(self, request_id: int, status: str, **extra: Any) -> None:
-        now = datetime.now(timezone.utc)
-        sets = ["status = %s", "active_download_state = NULL", "updated_at = %s"]
-        params = [status, now]
-        for key, val in extra.items():
-            sets.append(f"{key} = %s")
-            params.append(val)
-        params.append(request_id)
-        self._execute(
-            f"UPDATE album_requests SET {', '.join(sets)} WHERE id = %s",
-            params,
+    def _status_for_cas(
+        self,
+        request_id: int,
+        expected_status: str | None,
+    ) -> str | None:
+        """Resolve the exact source status for a compare-and-set writer."""
+        if expected_status is not None:
+            return expected_status
+        cur = self._execute(
+            "SELECT status FROM album_requests WHERE id = %s", (request_id,)
         )
-        self.conn.commit()
+        row = cur.fetchone()
+        return str(row["status"]) if row is not None else None
+
+
+    def update_status(
+        self,
+        request_id: int,
+        status: str,
+        *,
+        expected_status: str | None = None,
+        **extra: Any,
+    ) -> bool:
+        if status == "replaced":
+            raise ValueError(
+                "status='replaced' is owned by supersede_request_mbid")
+        validate_request_metadata_fields(dict(extra))
+        if expected_status is None:
+            observed_status = self._status_for_cas(request_id, None)
+            if observed_status is None:
+                return False
+            return self.update_status(
+                request_id,
+                status,
+                expected_status=observed_status,
+                **extra,
+            )
+        if expected_status == "replaced":
+            return False
+        with self._atomic():
+            now = datetime.now(timezone.utc)
+            cur = self._execute(
+                "UPDATE album_requests "
+                "SET status = %s, active_download_state = NULL, "
+                "updated_at = %s "
+                "WHERE id = %s AND status = %s "
+                "AND status != 'replaced'",
+                (status, now, request_id, expected_status),
+            )
+            if cur.rowcount <= 0:
+                self.conn.commit()
+                return False
+            if extra and not self._update_request_metadata_cas(
+                request_id,
+                dict(extra),
+                expected_status=status,
+                now=now,
+            ):
+                raise RuntimeError(
+                    "status transition metadata CAS lost its owned row"
+                )
+            self.conn.commit()
+            return True
 
 
     def mark_imported_with_rescue(
         self,
         request_id: int,
+        *,
+        expected_status: str | None = None,
         **extra: Any,
-    ) -> None:
+    ) -> bool:
         """Flip ``status`` to ``'imported'`` + capture long-tail-rescue audit
         atomically. U14 / R21.
 
@@ -642,16 +803,10 @@ class _RequestsMixin(_PipelineDBBase):
         The current ``unfindable_category`` IS still cleared on every
         call, because the rescue still IS the resolution.
 
-        **Atomicity contract:** ``PipelineDB`` is autocommit-mode by
-        default. Without a transaction boundary, three separate
-        UPDATEs would leave a crash window where (e.g.)
-        ``unfindable_category`` is cleared but ``rescued_at`` is not
-        yet written — observable corruption that lies about whether
-        a request was ever rescued. Follows the canonical
-        autocommit-flip pattern from ``replace_request_with_new_mbid``:
-        temporarily flip ``autocommit=False``, wrap explicit
-        ``commit()`` / ``rollback()`` in try/finally so a mid-flow
-        failure leaves the row in its original state.
+        **Atomicity contract:** the static lifecycle UPDATE captures and
+        clears rescue state in one compare-and-set. Optional metadata is a
+        separate, bounded UPDATE in the same explicit transaction, so a
+        metadata error rolls the lifecycle write back too.
 
         ``**extra`` mirrors ``update_status`` — additional column
         writes that ride along with the status flip (e.g.
@@ -660,87 +815,78 @@ class _RequestsMixin(_PipelineDBBase):
         ``updated_at``, the four rescue columns) are not accepted —
         they're managed by this method.
         """
-        reserved = {
-            "status", "active_download_state", "updated_at",
-            "rescued_at", "prior_unfindable_category", "unfindable_category",
+        rescue_owned = {
+            "unfindable_category",
             "unfindable_categorised_at",
         }
-        bad = set(extra) & reserved
-        if bad:
+        bad_rescue_fields = sorted(set(extra) & rescue_owned)
+        if bad_rescue_fields:
             raise ValueError(
-                "mark_imported_with_rescue: reserved kwargs not allowed: "
-                + ", ".join(sorted(bad))
+                "mark_imported_with_rescue cannot accept rescue-owned fields: "
+                + ", ".join(bad_rescue_fields)
             )
+        validate_request_metadata_fields(dict(extra))
+        if expected_status is None:
+            observed_status = self._status_for_cas(request_id, None)
+            if observed_status is None:
+                return False
+            return self.mark_imported_with_rescue(
+                request_id,
+                expected_status=observed_status,
+                **extra,
+            )
+        if expected_status == "replaced":
+            return False
 
         with self._atomic():
             now = datetime.now(timezone.utc)
-            with self.conn.cursor(
-                cursor_factory=psycopg2.extras.RealDictCursor,
-            ) as cur:
-                # 1. Read the row's current rescue + categorisation
-                #    state under a row lock so the read-then-write is
-                #    serialised against concurrent operator actions on
-                #    the same id.
-                cur.execute(
-                    "SELECT unfindable_category, rescued_at, "
-                    "       prior_unfindable_category "
-                    "FROM album_requests WHERE id = %s FOR UPDATE",
-                    (request_id,),
+            cur = self._execute(
+                "UPDATE album_requests AS ar "
+                "SET status = 'imported', "
+                "active_download_state = NULL, "
+                "updated_at = %s, "
+                "rescued_at = CASE "
+                "  WHEN ar.unfindable_category IS NOT NULL "
+                "   AND ar.rescued_at IS NULL THEN %s "
+                "  ELSE ar.rescued_at END, "
+                "prior_unfindable_category = CASE "
+                "  WHEN ar.unfindable_category IS NOT NULL "
+                "   AND ar.rescued_at IS NULL "
+                "  THEN ar.unfindable_category "
+                "  ELSE ar.prior_unfindable_category END, "
+                "unfindable_categorised_at = CASE "
+                "  WHEN ar.unfindable_category IS NOT NULL THEN %s "
+                "  ELSE ar.unfindable_categorised_at END, "
+                "unfindable_category = NULL "
+                "WHERE ar.id = %s AND ar.status = %s "
+                "AND ar.status != 'replaced'",
+                (now, now, now, request_id, expected_status),
+            )
+            if cur.rowcount <= 0:
+                self.conn.commit()
+                return False
+            if extra and not self._update_request_metadata_cas(
+                request_id,
+                dict(extra),
+                expected_status="imported",
+                now=now,
+            ):
+                raise RuntimeError(
+                    "import rescue metadata CAS lost its owned row"
                 )
-                row = cur.fetchone()
-                if row is None:
-                    # Mirror update_status's missing-row tolerance —
-                    # the caller's audit (download_log) will still
-                    # tell the story.
-                    self.conn.commit()
-                    return
-                current_category = row["unfindable_category"]
-                already_rescued = row["rescued_at"] is not None
-
-                # 2. Single UPDATE covering status + active_download
-                #    + rescue audit. Drop the rescue columns onto the
-                #    write list conditionally so the immutability
-                #    contract is enforced in SQL, not in Python.
-                sets = [
-                    "status = 'imported'",
-                    "active_download_state = NULL",
-                    "updated_at = %s",
-                ]
-                params: list[Any] = [now]
-                # Always clear unfindable_category — the rescue IS
-                # the resolution. (Stamps unfindable_categorised_at
-                # so the audit trail dates the clear.)
-                if current_category is not None:
-                    sets.append("unfindable_category = NULL")
-                    sets.append("unfindable_categorised_at = %s")
-                    params.append(now)
-                # Only stamp rescued_at + prior_unfindable_category
-                # on the FIRST rescue — one-shot capture.
-                if current_category is not None and not already_rescued:
-                    sets.append("rescued_at = %s")
-                    params.append(now)
-                    sets.append("prior_unfindable_category = %s")
-                    params.append(current_category)
-                for key, val in extra.items():
-                    sets.append(f"{key} = %s")
-                    params.append(val)
-                params.append(request_id)
-                cur.execute(
-                    f"UPDATE album_requests SET {', '.join(sets)} "
-                    "WHERE id = %s",
-                    params,
-                )
-
             self.conn.commit()
+            return True
 
 
     def update_spectral_state(
         self,
         request_id: int,
         update: RequestSpectralStateUpdate,
-    ) -> None:
+    ) -> bool:
         """Write spectral state pairs together, including explicit NULLs."""
-        self.update_request_fields(request_id, **update.as_update_fields())
+        return self.update_request_fields(
+            request_id, **update.as_update_fields(),
+        )
 
 
 
@@ -776,7 +922,7 @@ class _RequestsMixin(_PipelineDBBase):
                    current_lossless_source_v0_probe_median_bitrate = NULL,
                    imported_path = NULL,
                    updated_at = %s
-               WHERE id = %s""",
+               WHERE id = %s AND status != 'replaced'""",
             (now, request_id),
         )
         self.conn.commit()
@@ -786,9 +932,10 @@ class _RequestsMixin(_PipelineDBBase):
         self,
         request_id: int,
         *,
+        expected_status: str | None = None,
         clear_retry_counters: bool = True,
         **fields: Any,
-    ) -> None:
+    ) -> bool:
         """Reset to wanted.
 
         Only fields explicitly passed are updated — omitted fields are
@@ -805,40 +952,77 @@ class _RequestsMixin(_PipelineDBBase):
         funnels through this method, so a single ``manual_reason = NULL``
         write here covers web UI, CLI, and importer requeue paths.
         """
+        unknown = sorted(
+            set(fields) - {
+                "search_filetype_override",
+                "min_bitrate",
+                "prev_min_bitrate",
+            }
+        )
+        if unknown:
+            raise ValueError(
+                "reset_to_wanted does not accept fields: "
+                + ", ".join(unknown)
+            )
+        if expected_status is None:
+            observed_status = self._status_for_cas(request_id, None)
+            if observed_status is None:
+                return False
+            return self.reset_to_wanted(
+                request_id,
+                expected_status=observed_status,
+                clear_retry_counters=clear_retry_counters,
+                **fields,
+            )
+        if expected_status == "replaced":
+            return False
         now = datetime.now(timezone.utc)
-        sets = [
-            "status = 'wanted'",
-            "active_download_state = NULL",
-            "manual_reason = NULL",
-            "updated_at = %s",
-        ]
-        params: list[object] = [now]
-        if clear_retry_counters:
-            sets.extend([
-                "search_attempts = 0",
-                "download_attempts = 0",
-                "validation_attempts = 0",
-                "next_retry_after = NULL",
-                "last_attempt_at = NULL",
-            ])
-        if "search_filetype_override" in fields:
-            sets.append("search_filetype_override = %s")
-            params.append(fields["search_filetype_override"])
-        if "min_bitrate" in fields:
-            sets.append("prev_min_bitrate = COALESCE(min_bitrate, prev_min_bitrate)")
-            sets.append("min_bitrate = %s")
-            params.append(fields["min_bitrate"])
-        params.append(request_id)
-        self._execute(
-            f"UPDATE album_requests SET {', '.join(sets)} WHERE id = %s",
-            params,
+        override_present = "search_filetype_override" in fields
+        min_bitrate_present = "min_bitrate" in fields
+        prev_min_bitrate_present = "prev_min_bitrate" in fields
+        cur = self._execute(
+            "UPDATE album_requests "
+            "SET status = 'wanted', active_download_state = NULL, "
+            "manual_reason = NULL, updated_at = %s, "
+            "search_attempts = CASE WHEN %s THEN 0 ELSE search_attempts END, "
+            "download_attempts = CASE WHEN %s THEN 0 ELSE download_attempts END, "
+            "validation_attempts = CASE WHEN %s THEN 0 ELSE validation_attempts END, "
+            "next_retry_after = CASE WHEN %s THEN NULL ELSE next_retry_after END, "
+            "last_attempt_at = CASE WHEN %s THEN NULL ELSE last_attempt_at END, "
+            "prev_min_bitrate = CASE WHEN %s THEN %s "
+            "WHEN %s THEN COALESCE(min_bitrate, prev_min_bitrate) "
+            "ELSE prev_min_bitrate END, "
+            "min_bitrate = CASE WHEN %s THEN %s ELSE min_bitrate END, "
+            "search_filetype_override = CASE WHEN %s THEN %s "
+            "ELSE search_filetype_override END "
+            "WHERE id = %s AND status = %s AND status != 'replaced'",
+            (
+                now,
+                clear_retry_counters,
+                clear_retry_counters,
+                clear_retry_counters,
+                clear_retry_counters,
+                clear_retry_counters,
+                prev_min_bitrate_present,
+                fields.get("prev_min_bitrate"),
+                min_bitrate_present,
+                min_bitrate_present,
+                fields.get("min_bitrate"),
+                override_present,
+                fields.get("search_filetype_override"),
+                request_id,
+                expected_status,
+            ),
         )
         self.conn.commit()
+        return cur.rowcount > 0
 
 
     def reset_downloading_to_wanted(
         self,
         request_id: int,
+        *,
+        expected_status: str = "downloading",
         **fields: Any,
     ) -> bool:
         """Reset a still-downloading request to wanted.
@@ -847,26 +1031,47 @@ class _RequestsMixin(_PipelineDBBase):
         requeue rows that an operator or another phase already moved elsewhere.
         Retry counters are preserved so automatic backoff keeps growing.
         """
+        unknown = sorted(
+            set(fields) - {
+                "search_filetype_override",
+                "min_bitrate",
+                "prev_min_bitrate",
+            }
+        )
+        if unknown:
+            raise ValueError(
+                "reset_downloading_to_wanted does not accept fields: "
+                + ", ".join(unknown)
+            )
+        if expected_status != "downloading":
+            return False
         now = datetime.now(timezone.utc)
-        sets = [
-            "status = 'wanted'",
-            "active_download_state = NULL",
-            "manual_reason = NULL",
-            "updated_at = %s",
-        ]
-        params: list[object] = [now]
-        if "search_filetype_override" in fields:
-            sets.append("search_filetype_override = %s")
-            params.append(fields["search_filetype_override"])
-        if "min_bitrate" in fields:
-            sets.append("prev_min_bitrate = COALESCE(min_bitrate, prev_min_bitrate)")
-            sets.append("min_bitrate = %s")
-            params.append(fields["min_bitrate"])
-        params.append(request_id)
+        override_present = "search_filetype_override" in fields
+        min_bitrate_present = "min_bitrate" in fields
+        prev_min_bitrate_present = "prev_min_bitrate" in fields
         cur = self._execute(
-            f"UPDATE album_requests SET {', '.join(sets)} "
-            "WHERE id = %s AND status = 'downloading'",
-            params,
+            "UPDATE album_requests "
+            "SET status = 'wanted', active_download_state = NULL, "
+            "manual_reason = NULL, updated_at = %s, "
+            "prev_min_bitrate = CASE WHEN %s THEN %s "
+            "WHEN %s THEN COALESCE(min_bitrate, prev_min_bitrate) "
+            "ELSE prev_min_bitrate END, "
+            "min_bitrate = CASE WHEN %s THEN %s ELSE min_bitrate END, "
+            "search_filetype_override = CASE WHEN %s THEN %s "
+            "ELSE search_filetype_override END "
+            "WHERE id = %s AND status = %s AND status != 'replaced'",
+            (
+                now,
+                prev_min_bitrate_present,
+                fields.get("prev_min_bitrate"),
+                min_bitrate_present,
+                min_bitrate_present,
+                fields.get("min_bitrate"),
+                override_present,
+                fields.get("search_filetype_override"),
+                request_id,
+                expected_status,
+            ),
         )
         self.conn.commit()
         return cur.rowcount > 0
@@ -874,12 +1079,20 @@ class _RequestsMixin(_PipelineDBBase):
 
     # --- Downloading state ---
 
-    def set_downloading(self, request_id: int, state_json: str) -> bool:
+    def set_downloading(
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        expected_status: str = "wanted",
+    ) -> bool:
         """Set album to downloading and store the active download state.
 
         Only transitions from 'wanted' status. Returns True if the update
         matched (album was wanted), False if the status guard prevented it.
         """
+        if expected_status != "wanted":
+            return False
         now = datetime.now(timezone.utc)
         cur = self._execute("""
             UPDATE album_requests
@@ -887,8 +1100,8 @@ class _RequestsMixin(_PipelineDBBase):
                 active_download_state = %s::jsonb,
                 last_attempt_at = %s,
                 updated_at = %s
-            WHERE id = %s AND status = 'wanted'
-        """, (state_json, now, now, request_id))
+            WHERE id = %s AND status = %s AND status != 'replaced'
+        """, (state_json, now, now, request_id, expected_status))
         self.conn.commit()
         return cur.rowcount > 0
 
@@ -936,16 +1149,25 @@ class _RequestsMixin(_PipelineDBBase):
         return cur.rowcount > 0
 
 
-    def update_download_state(self, request_id: int, state_json: str) -> None:
-        """Rewrite active_download_state without changing status or attempt counters."""
+    def update_download_state(
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        expected_status: str = "downloading",
+    ) -> bool:
+        """CAS active download state while the worker still owns the row."""
         now = datetime.now(timezone.utc)
-        self._execute("""
+        cur = self._execute("""
             UPDATE album_requests
             SET active_download_state = %s::jsonb,
                 updated_at = %s
             WHERE id = %s
-        """, (state_json, now, request_id))
+              AND status = %s
+              AND status != 'replaced'
+        """, (state_json, now, request_id, expected_status))
         self.conn.commit()
+        return cur.rowcount > 0
 
 
     def update_download_state_if_downloading(
@@ -970,10 +1192,10 @@ class _RequestsMixin(_PipelineDBBase):
         self,
         request_id: int,
         current_path: str | None,
-    ) -> None:
+    ) -> bool:
         """Rewrite only ``active_download_state.current_path`` on downloading rows."""
         now = datetime.now(timezone.utc)
-        self._execute("""
+        cur = self._execute("""
             UPDATE album_requests
             SET active_download_state = jsonb_set(
                     COALESCE(active_download_state, '{}'::jsonb),
@@ -987,13 +1209,14 @@ class _RequestsMixin(_PipelineDBBase):
               AND active_download_state IS NOT NULL
         """, (current_path, now, request_id))
         self.conn.commit()
+        return cur.rowcount > 0
 
 
     def mark_import_subprocess_started(
         self,
         request_id: int,
         timestamp: str,
-    ) -> None:
+    ) -> bool:
         """Stamp ``active_download_state.import_subprocess_started_at``.
 
         Called immediately before launching ``import_one.py`` on the
@@ -1006,7 +1229,7 @@ class _RequestsMixin(_PipelineDBBase):
         See ``docs/advisory-locks.md``.
         """
         now = datetime.now(timezone.utc)
-        self._execute("""
+        cur = self._execute("""
             UPDATE album_requests
             SET active_download_state = jsonb_set(
                     active_download_state,
@@ -1016,9 +1239,11 @@ class _RequestsMixin(_PipelineDBBase):
                 ),
                 updated_at = %s
             WHERE id = %s
+              AND status = 'downloading'
               AND active_download_state IS NOT NULL
         """, (timestamp, now, request_id))
         self.conn.commit()
+        return cur.rowcount > 0
 
 
     def get_downloading(self) -> list[dict[str, Any]]:
@@ -1240,32 +1465,44 @@ class _RequestsMixin(_PipelineDBBase):
 
     # --- Retry logic ---
 
-    def record_attempt(self, request_id: int, attempt_type: str) -> None:
+    def record_attempt(
+        self,
+        request_id: int,
+        attempt_type: str,
+        *,
+        expected_status: str,
+    ) -> bool:
+        if attempt_type not in {"search", "download", "validation"}:
+            raise ValueError(f"Unknown attempt type: {attempt_type!r}")
         col = f"{attempt_type}_attempts"
         now = datetime.now(timezone.utc)
 
-        # Atomic increment + fetch in single statement (avoids TOCTOU race)
+        # Counter + backoff are one CAS. A Replace that wins before this
+        # statement leaves the frozen ancestor byte-identical.
         cur = self._execute(f"""
             UPDATE album_requests
             SET {col} = COALESCE({col}, 0) + 1,
                 last_attempt_at = %s,
+                next_retry_after = %s + (
+                    LEAST(
+                        %s * POWER(2, COALESCE({col}, 0)),
+                        %s
+                    ) * INTERVAL '1 minute'
+                ),
                 updated_at = %s
             WHERE id = %s
+              AND status = %s
+              AND status != 'replaced'
             RETURNING {col}
-        """, (now, now, request_id))
-        row = cur.fetchone()
-        assert row is not None, f"Request {request_id} not found"
-        new_count: int = int(row[col])
-
-        # Exponential backoff: base * 2^(attempts-1), capped
-        backoff_minutes = min(
-            BACKOFF_BASE_MINUTES * (2 ** (new_count - 1)),
+        """, (
+            now,
+            now,
+            BACKOFF_BASE_MINUTES,
             BACKOFF_MAX_MINUTES,
-        )
-        next_retry = now + timedelta(minutes=backoff_minutes)
-
-        self._execute("""
-            UPDATE album_requests
-            SET next_retry_after = %s
-            WHERE id = %s
-        """, (next_retry, request_id))
+            now,
+            request_id,
+            expected_status,
+        ))
+        row = cur.fetchone()
+        self.conn.commit()
+        return row is not None

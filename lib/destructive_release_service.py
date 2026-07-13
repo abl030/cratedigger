@@ -91,7 +91,7 @@ class FinalizeRequestFn(Protocol):
         db: transitions.TransitionsDB,
         request_id: int,
         transition: transitions.RequestTransition,
-    ) -> bool: ...
+    ) -> transitions.TransitionResult: ...
 
 
 def _distinct_identities(
@@ -192,12 +192,19 @@ class BanSourceImporterBusy:
     request_id: int
 
 
+@dataclass(frozen=True)
+class BanSourceTransitionConflict:
+    request_id: int
+    conflict: transitions.TransitionConflict
+
+
 BanSourceResult: TypeAlias = (
     BanSourceSuccess
     | BanSourceRequestNotFound
     | BanSourceReleaseMismatch
     | BanSourceLockContended
     | BanSourceImporterBusy
+    | BanSourceTransitionConflict
 )
 
 
@@ -231,6 +238,26 @@ def _ban_source_locked(
         )
     if pipeline_db.get_active_import_job_for_request(request.request_id) is not None:
         return BanSourceImporterBusy(request.request_id)
+
+    # Establish the lifecycle transition before any hash, denylist, beets, or
+    # audit mutation. A stale/replaced row is therefore a true zero-effect
+    # conflict, and this service can never report destructive success after a
+    # failed request CAS.
+    quality = resolve_user_requeue_override(current.get("search_filetype_override"))
+    fields: dict[str, object] = {"search_filetype_override": quality}
+    if current.get("min_bitrate") is not None:
+        fields["min_bitrate"] = current["min_bitrate"]
+    transition_result = finalize_request_fn(
+        pipeline_db,
+        request.request_id,
+        transitions.RequestTransition.to_wanted_fields(
+            from_status=str(current["status"]),
+            fields=fields,
+        ),
+    )
+    if isinstance(transition_result, transitions.TransitionConflict):
+        return BanSourceTransitionConflict(
+            request.request_id, transition_result)
 
     release_id = identity.release_id
     reported_username = pipeline_db.get_recent_successful_uploader(request.request_id)
@@ -270,19 +297,6 @@ def _ban_source_locked(
         pipeline_db=pipeline_db,
         release_id=release_id,
         request_id=request.request_id,
-    )
-
-    quality = resolve_user_requeue_override(current.get("search_filetype_override"))
-    fields: dict[str, object] = {"search_filetype_override": quality}
-    if current.get("min_bitrate") is not None:
-        fields["min_bitrate"] = current["min_bitrate"]
-    finalize_request_fn(
-        pipeline_db,
-        request.request_id,
-        transitions.RequestTransition.to_wanted_fields(
-            from_status=str(current["status"]),
-            fields=fields,
-        ),
     )
 
     cleanup_errors = tuple(cleanup.selector_failures)

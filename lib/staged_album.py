@@ -22,7 +22,7 @@ class SupportsCurrentPathUpdate(Protocol):
         self,
         request_id: int,
         current_path: str | None,
-    ) -> None:
+    ) -> bool:
         ...
 
 
@@ -66,7 +66,13 @@ class StagedAlbum:
     ) -> None:
         if self.request_id is None or db is None:
             return
-        db.update_download_state_current_path(self.request_id, self.current_path)
+        if not db.update_download_state_current_path(
+            self.request_id,
+            self.current_path,
+        ):
+            raise RuntimeError(
+                f"request {self.request_id} no longer owns downloading state"
+            )
 
     def move_to(
         self,

@@ -21,6 +21,8 @@ from tests.web._harness import (
 
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
+from lib import transitions
+from lib.transitions import TransitionConflict, TransitionConflictKind
 
 
 class _RacingDeleteDB(FakePipelineDB):
@@ -33,6 +35,40 @@ class _RacingDeleteDB(FakePipelineDB):
             id=250, status="wanted", mb_release_id="race-250",
             replaces_request_id=request_id))
         raise psycopg2.errors.ForeignKeyViolation("descendant landed")
+
+
+class _RacingRequestFieldsDB(FakePipelineDB):
+    """Replace the target immediately before a guarded metadata write."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.raced = False
+
+    def update_request_fields(
+        self,
+        request_id: int,
+        *,
+        expected_status: str | None = None,
+        **fields: object,
+    ) -> bool:
+        if not self.raced:
+            self.raced = True
+            self.supersede_request_mbid(
+                request_id,
+                new_mb_release_id=f"metadata-race-new-{request_id}",
+                new_mb_release_group_id=None,
+                new_mb_artist_id=None,
+                new_artist_name="Race Artist",
+                new_album_title="Correct pressing",
+                new_year=None,
+                new_country=None,
+                new_tracks=[],
+            )
+        return super().update_request_fields(
+            request_id,
+            expected_status=expected_status,
+            **fields,
+        )
 
 
 class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
@@ -147,6 +183,52 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.EXISTS_REQUIRED_FIELDS,
                                 "pipeline add exists response")
+
+    @patch("web.routes.pipeline_mutations.mb_api.get_release_raw")
+    @patch("web.routes.pipeline_mutations.mb_api.get_release")
+    @patch("web.routes.pipeline_mutations.mb_api.get_release_group_year")
+    def test_pipeline_add_replace_during_resolution_returns_409(
+        self, mock_get_group_year, mock_get_release, mock_get_raw,
+    ):
+        import web.server as srv
+
+        release = {
+            "release_group_id": "rg-race",
+            "artist_id": "artist-race",
+            "artist_name": "Race Artist",
+            "title": "Race Album",
+            "year": 2020,
+            "country": "AU",
+            "tracks": [{
+                "title": "Track",
+                "track_number": 1,
+                "disc_number": 1,
+            }],
+        }
+        mock_get_release.return_value = release
+        mock_get_raw.return_value = {
+            **release,
+            "media": [{
+                "tracks": [{
+                    "artist-credit": [{"name": "Late Artist"}],
+                }],
+            }],
+        }
+        mock_get_group_year.return_value = 2020
+
+        racing_db = _RacingRequestFieldsDB()
+        with patch.object(srv, "db", racing_db):
+            status, data = self._post(
+                "/api/pipeline/add", {"mb_release_id": "add-race-source"},
+            )
+
+        self.assertEqual(status, 409)
+        self.assertIn("changed during field resolution", data["error"])
+        source = racing_db.get_request_by_release_id("add-race-source")
+        assert source is not None
+        self.assertEqual(source["status"], "replaced")
+        self.assertIsNone(racing_db.get_tracks(source["id"])[0]["track_artist"])
+        self.assertIsNone(racing_db.get_active_search_plan(source["id"]))
 
     @patch("web.routes.pipeline_mutations.mb_api.get_release_group_year")
     @patch("web.routes.pipeline_mutations.mb_api.get_release")
@@ -553,6 +635,64 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         _assert_required_fields(self, data, self.UPDATE_REQUIRED_FIELDS,
                                 "pipeline update response")
 
+    def test_pipeline_update_same_status_is_idempotent_for_operator_statuses(self):
+        for index, request_status in enumerate(
+            ("wanted", "imported", "manual"),
+            start=601,
+        ):
+            with self.subTest(status=request_status):
+                self.db.seed_request(make_request_row(
+                    id=index,
+                    status=request_status,
+                    mb_release_id=f"same-status-{index}",
+                ))
+                before = self.db.get_request(index)
+
+                status, data = self._post(
+                    "/api/pipeline/update",
+                    {"id": index, "status": request_status},
+                )
+
+                self.assertEqual(status, 200)
+                self.assertEqual(data["new_status"], request_status)
+                self.assertEqual(self.db.get_request(index), before)
+
+    def test_pipeline_update_imported_to_manual(self):
+        self.db.seed_request(make_request_row(
+            id=604,
+            status="imported",
+            mb_release_id="imported-to-manual",
+        ))
+
+        status, data = self._post(
+            "/api/pipeline/update",
+            {"id": 604, "status": "manual"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["new_status"], "manual")
+        self.assertEqual(self.db.request(604)["status"], "manual")
+
+    @patch("web.routes.pipeline_mutations.finalize_request")
+    def test_pipeline_update_maps_stale_transition_to_409_without_success(
+        self, mock_transition,
+    ):
+        mock_transition.return_value = TransitionConflict(
+            request_id=100,
+            target_status="manual",
+            kind=TransitionConflictKind.stale_source,
+            expected_status="imported",
+            actual_status="replaced",
+        )
+
+        status, data = self._post(
+            "/api/pipeline/update", {"id": 100, "status": "manual"})
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "transition_conflict")
+        self.assertEqual(data["reason"], "stale_source")
+        self.assertNotIn("status", data)
+
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_pipeline_upgrade_contract(self, _mock_transition):
         status, data = self._post("/api/pipeline/upgrade", {"mb_release_id": "abc-123"})
@@ -594,7 +734,8 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
                                 "pipeline upgrade response (discogs)")
 
     @patch("web.routes.pipeline_mutations.finalize_request")
-    def test_pipeline_set_quality_contract(self, _mock_transition):
+    def test_pipeline_set_quality_contract(self, mock_transition):
+        mock_transition.side_effect = transitions.finalize_request
         status, data = self._post(
             "/api/pipeline/set-quality",
             {"mb_release_id": "abc-123", "status": "manual", "min_bitrate": 245},
@@ -606,8 +747,9 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
 
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_pipeline_set_quality_discogs_request_normalizes_and_falls_back(
-        self, _mock_transition,
+        self, mock_transition,
     ):
+        mock_transition.side_effect = transitions.finalize_request
         self.db.seed_request(make_request_row(
             id=100,
             status="imported",
@@ -653,6 +795,52 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.SET_INTENT_REQUIRED_FIELDS,
                                 "pipeline set-intent response")
+
+    def test_pipeline_set_intent_reports_replace_race(self):
+        import web.server as srv
+
+        racing_db = _RacingRequestFieldsDB()
+        racing_db.seed_request(make_request_row(
+            id=1710,
+            status="wanted",
+            mb_release_id="intent-race-old",
+            target_format=None,
+        ))
+        with patch.object(srv, "db", racing_db):
+            status, data = self._post(
+                "/api/pipeline/set-intent",
+                {"id": 1710, "intent": "lossless"},
+            )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "transition_conflict")
+        self.assertEqual(data["actual_status"], "replaced")
+        row = racing_db.get_request(1710)
+        assert row is not None
+        self.assertIsNone(row["target_format"])
+
+    def test_pipeline_set_quality_reports_replace_race(self):
+        import web.server as srv
+
+        racing_db = _RacingRequestFieldsDB()
+        racing_db.seed_request(make_request_row(
+            id=1711,
+            status="imported",
+            mb_release_id="quality-race-old",
+            min_bitrate=192,
+        ))
+        with patch.object(srv, "db", racing_db):
+            status, data = self._post(
+                "/api/pipeline/set-quality",
+                {"mb_release_id": "quality-race-old", "min_bitrate": 320},
+            )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "transition_conflict")
+        self.assertEqual(data["actual_status"], "replaced")
+        row = racing_db.get_request(1711)
+        assert row is not None
+        self.assertEqual(row["min_bitrate"], 192)
 
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_pipeline_ban_source_contract(self, _mock_transition):

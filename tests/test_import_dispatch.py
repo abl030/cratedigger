@@ -72,7 +72,11 @@ def _make_ctx():
     cfg.verified_lossless_target = ""
     cfg.quality_ranks.to_json.return_value = "{}"
     fake_db = FakePipelineDB()
-    fake_db.seed_request(make_request_row(id=42, status="downloading"))
+    fake_db.seed_request(make_request_row(
+        id=42,
+        status="downloading",
+        active_download_state={"files": [], "filetype": "mp3"},
+    ))
     ctx = make_ctx_with_fake_db(fake_db, cfg=cfg)
     ctx.cooled_down_users = set()
     return ctx
@@ -113,6 +117,12 @@ def _dispatch_valid_result_cmd(
         # looking up by ``album_data.db_request_id``.
         override = dict(db_fields)
         override["id"] = album_data.db_request_id
+        override["status"] = "downloading"
+        if override.get("active_download_state") is None:
+            override["active_download_state"] = {
+                "files": [],
+                "filetype": "mp3",
+            }
         fake_db = ctx.pipeline_db_source._get_db()
         fake_db.seed_request(override)
     bv_result = _make_bv_result()
@@ -331,8 +341,8 @@ class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
         _db_arg, request_id, outcome = mock_finalize.call_args.args
         self.assertEqual(request_id, 42)
         self.assertIsNone(outcome.from_status)
-        self.assertIsNone(outcome.attempt_type)
-        self.assertEqual(db.request(42)["validation_attempts"], 1)
+        self.assertEqual(outcome.attempt_type, "validation")
+        self.assertEqual(db.request(42)["validation_attempts"], 0)
 
     def test_requeue_only_forwards_fields_persisted_by_wanted_transition(self) -> None:
         from lib.dispatch import _record_rejection_and_maybe_requeue
@@ -548,9 +558,13 @@ class TestDispatchImport(unittest.TestCase):
             ir = make_import_result(decision="import")
 
         db = FakePipelineDB()
+        request_overrides = {
+            "active_download_state": {"files": [], "filetype": "mp3"},
+            **(request_overrides or {}),
+        }
         db.seed_request(make_request_row(
             id=42, status="downloading",
-            **(request_overrides or {}),
+            **request_overrides,
         ))
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
@@ -904,7 +918,11 @@ class TestDispatchImport(unittest.TestCase):
         )
 
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             beets_staging_dir=staging_root,
@@ -962,7 +980,11 @@ class TestDispatchImport(unittest.TestCase):
     def test_timeout(self):
         from lib.dispatch import dispatch_import_core
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
 
         with patch("lib.dispatch.subprocess_runner.sp.run",
                    side_effect=sp.TimeoutExpired(cmd="test", timeout=1800)):
@@ -980,7 +1002,11 @@ class TestDispatchImport(unittest.TestCase):
     def test_exception(self):
         from lib.dispatch import dispatch_import_core
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
 
         with patch("lib.dispatch.subprocess_runner.sp.run",
                    side_effect=RuntimeError("boom")):
@@ -1024,6 +1050,7 @@ class TestImportDispatchRescueCapture(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42, status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
         ))
         # Seed the row's unfindable state directly so the test starts
         # from the "categorised, just finished downloading" shape.
@@ -1171,7 +1198,11 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
         """Call dispatch_import_core with cfg_obj, return captured argv."""
         from lib.dispatch import dispatch_import_core
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
         ir = make_import_result(decision="import")
 
         with patch_dispatch_externals() as ext, \
@@ -1677,7 +1708,11 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         """Transcode-upgrade requeue path uses quality constants."""
         from lib.dispatch import dispatch_import_core
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
         ir = make_import_result(decision="transcode_upgrade",
                                 new_min_bitrate=227)
 

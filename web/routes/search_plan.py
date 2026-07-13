@@ -311,13 +311,15 @@ def post_pipeline_search_plan_regenerate(
     """U8: ``POST /api/pipeline/<id>/search-plan/regenerate``.
 
     Wraps ``SearchPlanService.generate_for_request(regenerate=True)``.
-    Allowed for any request status; only ``wanted`` requests are
-    executable, surfaced via ``executable`` in the response so
-    operators can't misread "regenerated" as "now downloading".
+    Allowed for every non-terminal request status; only ``wanted``
+    requests are executable, surfaced via ``executable`` in the response
+    so operators can't misread "regenerated" as "now downloading".
+    Replaced audit ancestors reject regeneration.
 
     Status-code mapping mirrors the CLI's exit codes:
       * 200 — ``RESULT_SUCCESS`` or ``RESULT_NOOP_ACTIVE_PLAN_EXISTS``
       * 404 — ``RESULT_REQUEST_NOT_FOUND``
+      * 409 — ``RESULT_REQUEST_REPLACED``
       * 422 — ``RESULT_FAILED_DETERMINISTIC`` (sticky, body explains)
       * 503 — ``RESULT_FAILED_TRANSIENT`` (retryable)
     """
@@ -327,6 +329,7 @@ def post_pipeline_search_plan_regenerate(
         RESULT_FAILED_TRANSIENT,
         RESULT_NOOP_ACTIVE_PLAN_EXISTS,
         RESULT_REQUEST_NOT_FOUND,
+        RESULT_REQUEST_REPLACED,
         RESULT_SUCCESS,
         SearchPlanService,
     )
@@ -372,6 +375,10 @@ def post_pipeline_search_plan_regenerate(
         # error_message even on the not-found path.
         payload["error"] = "Not found"
         h._json(payload, status=404)
+        return
+    if result.outcome == RESULT_REQUEST_REPLACED:
+        payload["error"] = result.error_message or "Request is replaced"
+        h._json(payload, status=409)
         return
     if result.outcome == RESULT_FAILED_DETERMINISTIC:
         payload["error"] = result.error_message or "Plan generation failed"
@@ -429,6 +436,7 @@ def post_pipeline_search_plan_advance(
       * 400 — body validation failure (missing/extra keys, wrong type)
       * 404 — ``RESULT_REQUEST_NOT_FOUND``
       * 409 — ``RESULT_NO_ACTIVE_PLAN`` (request needs ``regenerate`` first)
+        or ``RESULT_REQUEST_REPLACED``
       * 422 — ``RESULT_INVALID_TARGET`` (out of range, backward, no slot
         matches strategy)
       * 503 — ``RESULT_FAILED_TRANSIENT`` (lock contention)
@@ -440,6 +448,7 @@ def post_pipeline_search_plan_advance(
         RESULT_INVALID_TARGET,
         RESULT_NO_ACTIVE_PLAN,
         RESULT_REQUEST_NOT_FOUND,
+        RESULT_REQUEST_REPLACED,
         SearchPlanService,
     )
     try:
@@ -475,6 +484,10 @@ def post_pipeline_search_plan_advance(
     if result.outcome == RESULT_REQUEST_NOT_FOUND:
         payload["error"] = result.error_message or "Not found"
         h._json(payload, status=404)
+        return
+    if result.outcome == RESULT_REQUEST_REPLACED:
+        payload["error"] = result.error_message or "Request is replaced"
+        h._json(payload, status=409)
         return
     if result.outcome == RESULT_NO_ACTIVE_PLAN:
         payload["error"] = (

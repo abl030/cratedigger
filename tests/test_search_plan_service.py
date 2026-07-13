@@ -17,6 +17,7 @@ edge cases enumerated in §U3:
 
 from __future__ import annotations
 
+import copy
 import os
 import sys
 import unittest
@@ -51,6 +52,7 @@ from lib.search_plan_service import (
     RESULT_FAILED_TRANSIENT,
     RESULT_NOOP_ACTIVE_PLAN_EXISTS,
     RESULT_REQUEST_NOT_FOUND,
+    RESULT_REQUEST_REPLACED,
     RESULT_SUCCESS,
     SearchPlanService,
     sanitize_error_message,
@@ -317,6 +319,18 @@ class TestSearchPlanServiceRegenerate(unittest.TestCase):
         self.assertEqual(result.outcome, RESULT_SUCCESS)
         # Status itself is unchanged — regeneration does not flip status.
         self.assertEqual(self.db.request(11)["status"], "imported")
+
+    def test_replaced_request_rejects_generation_without_plan_rows(self):
+        self._seed_with_active_plan(16)
+        self.db.request(16)["status"] = "replaced"
+        before_plans = copy.deepcopy(self.db.search_plans)
+        before_request = self.db.request(16)
+
+        result = self.svc.generate_for_request(16, regenerate=True)
+
+        self.assertEqual(result.outcome, RESULT_REQUEST_REPLACED)
+        self.assertEqual(self.db.search_plans, before_plans)
+        self.assertEqual(self.db.request(16), before_request)
 
     def test_repair_path_when_request_has_tracks_but_no_plan(self):
         """Interrupted add: tracks persisted, plan never written.
@@ -677,6 +691,50 @@ class TestSearchPlanServiceResolver(unittest.TestCase):
         self.assertEqual(result.outcome, RESULT_FAILED_TRANSIENT)
         self.assertEqual(result.failure_class,
                          FAILURE_CLASS_DEPENDENCY_FAILURE)
+
+    def test_resolver_result_loses_to_concurrent_replace(self):
+        """A resolver that started first cannot thaw a replaced ancestor."""
+        _seed_request(
+            self.db,
+            id=23,
+            artist_name="Low",
+            album_title="Things We Lost in the Fire",
+            mb_release_id="resolver-race-old",
+        )
+        before_tracks = self.db.get_tracks(23)
+        db = self.db
+
+        class ReplacingResolver:
+            def resolve_tracks(self, *, release_id: str, request_id: int):
+                db.supersede_request_mbid(
+                    request_id,
+                    new_mb_release_id="resolver-race-new",
+                    new_mb_release_group_id=None,
+                    new_mb_artist_id=None,
+                    new_artist_name="Low",
+                    new_album_title="Things We Lost in the Fire (correct)",
+                    new_year=2001,
+                    new_country=None,
+                    new_tracks=[],
+                )
+                return [{
+                    "disc_number": 1,
+                    "track_number": 1,
+                    "title": "Late resolver result",
+                    "length_seconds": 180,
+                }]
+
+        result = SearchPlanService(
+            self.db,
+            self.cfg,
+            resolver=ReplacingResolver(),
+        ).generate_for_request(23, regenerate=False)
+
+        self.assertEqual(result.outcome, RESULT_REQUEST_REPLACED)
+        self.assertEqual(self.db.get_tracks(23), before_tracks)
+        row = self.db.get_request(23)
+        assert row is not None
+        self.assertEqual(row["status"], "replaced")
 
 
 class TestSearchPlanSnapshotEquivalence(unittest.TestCase):
@@ -1418,6 +1476,16 @@ class TestSearchPlanServiceAdvance(unittest.TestCase):
         active = self.db.get_active_search_plan(10)
         assert active is not None
         self.assertEqual(active.next_ordinal, 7)
+
+    def test_replaced_request_rejects_cursor_advance(self):
+        self._seed_plan_with_items()
+        self.db.request(10)["status"] = "replaced"
+        before = self.db.request(10)
+
+        result = self.svc.advance_for_request(10, to_ordinal=7)
+
+        self.assertEqual(result.outcome, RESULT_REQUEST_REPLACED)
+        self.assertEqual(self.db.request(10), before)
 
     def test_advance_to_strategy_finds_first_matching_slot(self):
         """``--to-strategy track`` jumps to the first ``track_*`` slot past

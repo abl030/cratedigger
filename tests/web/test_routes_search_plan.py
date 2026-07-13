@@ -599,6 +599,7 @@ class TestPipelineSearchPlanRegenerateContract(_FakeDbWebServerCase):
     with status-code mapping that mirrors the CLI exit codes:
       * 200 — success / noop
       * 404 — request not found
+      * 409 — request replaced
       * 422 — deterministic failure (sticky)
       * 503 — transient failure (retryable)
     """
@@ -682,6 +683,20 @@ class TestPipelineSearchPlanRegenerateContract(_FakeDbWebServerCase):
         self.assertIn("plan_id", data)
         self.assertIsNone(data["plan_id"])
         self.assertEqual(data["request_id"], 9999)
+
+    def test_regenerate_replaced_request_returns_409(self):
+        self.db.seed_request(make_request_row(
+            id=100, status="replaced",
+        ))
+        with self._patch_service(
+                outcome="request_replaced",
+                error_message="request 100 is replaced"):
+            status, data = self._post(
+                "/api/pipeline/100/search-plan/regenerate", {})
+        self.assertEqual(status, 409)
+        self.assertEqual(data["outcome"], "request_replaced")
+        self.assertEqual(data["request_status"], "replaced")
+        self.assertFalse(data["executable"])
 
     def test_regenerate_noop_returns_200_with_noop_outcome(self):
         """#7: NOOP outcome from the service surfaces as 200 with the
@@ -808,7 +823,7 @@ class TestPipelineSearchPlanAdvanceContract(_FakeDbWebServerCase):
       * 200 — RESULT_ADVANCED
       * 400 — body validation failure
       * 404 — RESULT_REQUEST_NOT_FOUND
-      * 409 — RESULT_NO_ACTIVE_PLAN
+      * 409 — RESULT_NO_ACTIVE_PLAN or RESULT_REQUEST_REPLACED
       * 422 — RESULT_INVALID_TARGET
       * 503 — RESULT_FAILED_TRANSIENT
     """
@@ -866,6 +881,17 @@ class TestPipelineSearchPlanAdvanceContract(_FakeDbWebServerCase):
         self.assertEqual(status, 404)
         _assert_required_fields(self, data, self.ADVANCE_REQUIRED_FIELDS,
                                 "404 advance response")
+        self.assertIn("error", data)
+
+    def test_advance_replaced_request_returns_409(self):
+        with self._patch_service(
+                outcome="request_replaced", request_id=100,
+                error_message="request 100 is replaced"):
+            status, data = self._post(
+                "/api/pipeline/100/search-plan/advance",
+                {"to_ordinal": 7})
+        self.assertEqual(status, 409)
+        self.assertEqual(data["outcome"], "request_replaced")
         self.assertIn("error", data)
 
     def test_advance_no_active_plan_returns_409(self):

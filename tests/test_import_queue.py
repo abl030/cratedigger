@@ -374,11 +374,13 @@ class TestImporterWorker(unittest.TestCase):
                 imported_path=source_path,
             ))
         else:
-            db.update_request_fields(
-                request_id,
-                status="imported",
-                imported_path=source_path,
-            )
+            row = db.get_request(request_id)
+            assert row is not None
+            db.seed_request({
+                **row,
+                "status": "imported",
+                "imported_path": source_path,
+            })
         _seed_candidate_for_download_log(
             db, log_id,
             mb_release_id="mbid-candidate-reject",

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from lib.release_identity import detect_release_source, normalize_release_id
 from lib.replace_status import (
+    RESOLVE_STATUS_CONFLICT,
     RESOLVE_STATUS_LOOKUP_FAILED,
     RESOLVE_STATUS_MASTERLESS,
     RESOLVE_STATUS_MIRROR_UNCONFIGURED,
@@ -24,6 +25,33 @@ from web import mb as mb_api
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteRegistration, pattern_route
 from web.routes._server_access import _server
+
+
+def _resolved_rg_applied_or_respond(
+    h,
+    db,
+    request_id: int,
+    release_group_id: str,
+    *,
+    expected_status: str,
+) -> bool:
+    applied = db.update_request_fields(
+        request_id,
+        mb_release_group_id=release_group_id,
+        expected_status=expected_status,
+    )
+    if applied:
+        return True
+    h._json({
+        "request_id": request_id,
+        "mb_release_group_id": None,
+        "status": RESOLVE_STATUS_CONFLICT,
+        "error": (
+            f"request {request_id} changed while its release group "
+            "was resolving"
+        ),
+    }, status=409)
+    return False
 
 
 def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
@@ -178,7 +206,14 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
             })
             return
 
-        db.update_request_fields(request_id, mb_release_group_id=master_id)
+        if not _resolved_rg_applied_or_respond(
+            h,
+            db,
+            request_id,
+            str(master_id),
+            expected_status=str(row["status"]),
+        ):
+            return
         h._json({
             "request_id": request_id,
             "mb_release_group_id": master_id,
@@ -219,7 +254,14 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
         }, status=422)
         return
 
-    db.update_request_fields(request_id, mb_release_group_id=rg_id)
+    if not _resolved_rg_applied_or_respond(
+        h,
+        db,
+        request_id,
+        str(rg_id),
+        expected_status=str(row["status"]),
+    ):
+        return
     h._json({
         "request_id": request_id,
         "mb_release_group_id": rg_id,

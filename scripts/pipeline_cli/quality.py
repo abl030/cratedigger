@@ -493,14 +493,34 @@ def cmd_repair_spectral(db, args):
             print(f"         [DRY RUN] would clear spectral + remove stale denylists")
             continue
 
-        # Clear stale spectral fields
-        db._execute("""
-            UPDATE album_requests
-            SET last_download_spectral_bitrate = NULL,
-                current_spectral_bitrate = NULL,
-                updated_at = NOW()
-            WHERE id = %s
-        """, (rid,))
+        expected_after_transition = "wanted"
+        if decision == "accept" and effective_min_br is not None:
+            transition_result = finalize_request(
+                db,
+                rid,
+                transitions.RequestTransition.to_imported(
+                    from_status="wanted",
+                    min_bitrate=effective_min_br,
+                ),
+            )
+            if isinstance(transition_result, transitions.TransitionConflict):
+                print(
+                    f"         transition conflict: "
+                    f"{transition_result.kind.value} "
+                    f"(actual={transition_result.actual_status})")
+                return 4
+            expected_after_transition = "imported"
+
+        # Clear only if the row is still in the status this repair established.
+        cleared = db.update_request_fields(
+            rid,
+            expected_status=expected_after_transition,
+            last_download_spectral_bitrate=None,
+            current_spectral_bitrate=None,
+        )
+        if not cleared:
+            print("         transition conflict: row changed during repair")
+            return 4
 
         # Remove denylist entries caused by stale spectral
         del_cur = db._execute("""
@@ -514,16 +534,7 @@ def cmd_repair_spectral(db, args):
         for entry in removed:
             print(f"         un-denylisted: {entry['username']} ({entry['reason']})")
 
-        # If quality gate would accept, transition to imported
         if decision == "accept" and effective_min_br is not None:
-            finalize_request(
-                db,
-                rid,
-                transitions.RequestTransition.to_imported(
-                    from_status="wanted",
-                    min_bitrate=effective_min_br,
-                ),
-            )
             print(f"         → transitioned to imported")
         else:
             print(f"         → remains wanted (gate says {decision})")

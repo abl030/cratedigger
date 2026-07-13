@@ -105,8 +105,12 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
     ) -> bool: ...
 
     def update_download_state(
-        self, request_id: int, state_json: str,
-    ) -> None: ...
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        expected_status: str = "downloading",
+    ) -> bool: ...
 
     def update_download_state_if_downloading(
         self, request_id: int, state_json: str,
@@ -114,7 +118,7 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
 
     def update_download_state_current_path(
         self, request_id: int, current_path: str | None,
-    ) -> None: ...
+    ) -> bool: ...
 
     def log_download(
         self,
@@ -343,14 +347,14 @@ def _timeout_album(
     for username in extract_usernames(entry.files):
         if db.check_and_apply_cooldown(username):
             ctx.cooled_down_users.add(username)
-    transitions.finalize_request(
+    transitions.require_transition_applied(transitions.finalize_request(
         db,
         request_id,
         transitions.RequestTransition.to_wanted(
             from_status="downloading",
             attempt_type="download",
         ),
-    )
+    ))
 
 
 def _persist_updated_download_state(
@@ -358,9 +362,9 @@ def _persist_updated_download_state(
     request_id: int,
     entry: GrabListEntry,
     state: ActiveDownloadState,
-) -> None:
+) -> bool:
     """Persist retry counters or processing markers back to JSONB."""
-    db.update_download_state(
+    return db.update_download_state(
         request_id,
         build_active_download_state(
             entry,
@@ -372,6 +376,7 @@ def _persist_updated_download_state(
             ),
             current_path=entry.import_folder,
         ).to_json(),
+        expected_status="downloading",
     )
 
 
@@ -501,7 +506,10 @@ def _run_completed_processing(
                 ctx.cfg.slskd_download_dir,
             )
         state.processing_started_at = datetime.now(timezone.utc).isoformat()
-        _persist_updated_download_state(db, request_id, entry, state)
+        if not _persist_updated_download_state(db, request_id, entry, state):
+            return CompletionDeferred(
+                detail="request_state_changed_before_local_processing",
+            )
 
     try:
         result = _process(
@@ -537,13 +545,13 @@ def _run_completed_processing(
         if refreshed and refreshed["status"] == "downloading":
             logger.info(f"  process_completed_album succeeded without "
                         f"setting status — setting imported")
-            transitions.finalize_request(
+            transitions.require_transition_applied(transitions.finalize_request(
                 db,
                 request_id,
                 transitions.RequestTransition.to_imported(
                     from_status="downloading",
                 ),
-            )
+            ))
         return result
 
     if isinstance(result, CompletionFailed):
@@ -551,14 +559,14 @@ def _run_completed_processing(
         if refreshed and refreshed["status"] == "downloading":
             logger.warning(f"  process_completed_album failed without "
                            f"setting status — resetting to wanted")
-            transitions.finalize_request(
+            transitions.require_transition_applied(transitions.finalize_request(
                 db,
                 request_id,
                 transitions.RequestTransition.to_wanted(
                     from_status="downloading",
                     attempt_type="download",
                 ),
-            )
+            ))
         return result
 
     assert_never(result)
@@ -659,14 +667,14 @@ def _enqueue_completed_processing(
                 outcome="failed",
                 error_message=detail,
             )
-            transitions.finalize_request(
+            transitions.require_transition_applied(transitions.finalize_request(
                 db,
                 request_id,
                 transitions.RequestTransition.to_wanted(
                     from_status="downloading",
                     attempt_type="download",
                 ),
-            )
+            ))
             return None
         logger.warning(
             "Completed download for request %s could not be materialized "
@@ -755,14 +763,14 @@ def _processing_path_ready_for_importer(
         return False
 
     assert isinstance(result, MaterializeFailed)
-    transitions.finalize_request(
+    transitions.require_transition_applied(transitions.finalize_request(
         db,
         request_id,
         transitions.RequestTransition.to_wanted(
             from_status="downloading",
             attempt_type="download",
         ),
-    )
+    ))
     return False
 
 
@@ -955,13 +963,13 @@ def _poll_one_active_download(
     if verdict.decision == PollCycleDecision.reset_missing_state:
         logger.error(f"Downloading album {request_id} has no active_download_state — "
                      f"resetting to wanted")
-        transitions.finalize_request(
+        transitions.require_transition_applied(transitions.finalize_request(
             db,
             request_id,
             transitions.RequestTransition.to_wanted(
                 from_status="downloading",
             ),
-        )
+        ))
         return
 
     if verdict.decision == PollCycleDecision.wait_import_job:
@@ -1132,14 +1140,14 @@ def grab_most_wanted(albums: list[Any],
         if request_id and getattr(ctx, "download_ownership", None) is None:
             state = build_active_download_state(entry)
             db = ctx.pipeline_db_source._get_db()
-            transitions.finalize_request(
+            transitions.require_transition_applied(transitions.finalize_request(
                 db,
                 request_id,
                 transitions.RequestTransition.to_downloading(
                     from_status="wanted",
                     state_json=state.to_json(),
                 ),
-            )
+            ))
             logger.info(f"  Set status=downloading, {len(entry.files)} files tracked")
 
     logger.info(f"Failed to grab: {len(failed_grab)}")

@@ -52,6 +52,7 @@ from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
                              PLAN_STATUS_SUPERSEDED,
                              PersistedYoutubeRow,
                              RequestSpectralStateUpdate,
+                             ReplacedRequestMutationError,
                              SEARCH_LOG_STAGE_ACCEPTED,
                              SEARCH_LOG_STAGE_PRE_ATTEMPT,
                              SEARCH_LOG_STAGE_STALE_COMPLETION,
@@ -64,6 +65,9 @@ from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
                              TransferIdOwnership,
                              TransferLedgerRow,
                              WantedReconciliationCandidate)
+from lib.pipeline_db._shared import (
+    validate_request_metadata_fields,
+)
 from lib.quality import (
     AlbumQualityEvidence,
 )
@@ -1140,22 +1144,39 @@ class FakePipelineDB:
             return req
         return self.get_request_by_mb_release_id(identity.release_id)
 
-    def update_status(self, request_id: int, status: str, **extra: Any) -> None:
+    def update_status(
+        self,
+        request_id: int,
+        status: str,
+        *,
+        expected_status: str | None = None,
+        **extra: Any,
+    ) -> bool:
+        if status == "replaced":
+            raise ValueError(
+                "status='replaced' is owned by supersede_request_mbid")
+        validate_request_metadata_fields(dict(extra))
         row = self._requests.get(request_id)
-        if row is None:
-            return
+        if row is None or row.get("status") == "replaced":
+            return False
+        source_status = expected_status or str(row["status"])
+        if row["status"] != source_status:
+            return False
         row["status"] = status
         row["active_download_state"] = None
         row["updated_at"] = _utcnow()
         for key, val in extra.items():
             row[key] = val
         self.status_history.append((request_id, status))
+        return True
 
     def mark_imported_with_rescue(
         self,
         request_id: int,
+        *,
+        expected_status: str | None = None,
         **extra: Any,
-    ) -> None:
+    ) -> bool:
         """Mirror ``PipelineDB.mark_imported_with_rescue`` (U14).
 
         Atomic in-memory equivalent: writes ``status='imported'``,
@@ -1163,20 +1184,23 @@ class FakePipelineDB:
         ``rescued_at`` + ``prior_unfindable_category``. Reserved
         kwargs the production method rejects are rejected here too.
         """
-        reserved = {
-            "status", "active_download_state", "updated_at",
-            "rescued_at", "prior_unfindable_category", "unfindable_category",
+        rescue_owned = {
+            "unfindable_category",
             "unfindable_categorised_at",
         }
-        bad = set(extra) & reserved
-        if bad:
+        bad_rescue_fields = sorted(set(extra) & rescue_owned)
+        if bad_rescue_fields:
             raise ValueError(
-                "mark_imported_with_rescue: reserved kwargs not allowed: "
-                + ", ".join(sorted(bad))
+                "mark_imported_with_rescue cannot accept rescue-owned fields: "
+                + ", ".join(bad_rescue_fields)
             )
+        validate_request_metadata_fields(dict(extra))
         row = self._requests.get(request_id)
-        if row is None:
-            return
+        if row is None or row.get("status") == "replaced":
+            return False
+        source_status = expected_status or str(row["status"])
+        if row["status"] != source_status:
+            return False
         now = _utcnow()
         current_category = row.get("unfindable_category")
         already_rescued = row.get("rescued_at") is not None
@@ -1193,17 +1217,34 @@ class FakePipelineDB:
         for key, val in extra.items():
             row[key] = val
         self.status_history.append((request_id, "imported"))
+        return True
 
     def reset_to_wanted(
         self,
         request_id: int,
         *,
+        expected_status: str | None = None,
         clear_retry_counters: bool = True,
         **fields: Any,
-    ) -> None:
+    ) -> bool:
+        unknown = sorted(
+            set(fields) - {
+                "search_filetype_override",
+                "min_bitrate",
+                "prev_min_bitrate",
+            }
+        )
+        if unknown:
+            raise ValueError(
+                "reset_to_wanted does not accept fields: "
+                + ", ".join(unknown)
+            )
         row = self._requests.get(request_id)
-        if row is None:
-            return
+        if row is None or row.get("status") == "replaced":
+            return False
+        source_status = expected_status or str(row["status"])
+        if row["status"] != source_status:
+            return False
         now = _utcnow()
         row["status"] = "wanted"
         if clear_retry_counters:
@@ -1217,20 +1258,44 @@ class FakePipelineDB:
         row["updated_at"] = now
         if "search_filetype_override" in fields:
             row["search_filetype_override"] = fields["search_filetype_override"]
+        if "prev_min_bitrate" in fields:
+            row["prev_min_bitrate"] = fields["prev_min_bitrate"]
         if "min_bitrate" in fields:
             current_min_bitrate = row.get("min_bitrate")
-            if current_min_bitrate is not None:
+            if (
+                "prev_min_bitrate" not in fields
+                and current_min_bitrate is not None
+            ):
                 row["prev_min_bitrate"] = current_min_bitrate
             row["min_bitrate"] = fields["min_bitrate"]
         self.status_history.append((request_id, "wanted"))
+        return True
 
     def reset_downloading_to_wanted(
         self,
         request_id: int,
+        *,
+        expected_status: str = "downloading",
         **fields: Any,
     ) -> bool:
+        unknown = sorted(
+            set(fields) - {
+                "search_filetype_override",
+                "min_bitrate",
+                "prev_min_bitrate",
+            }
+        )
+        if unknown:
+            raise ValueError(
+                "reset_downloading_to_wanted does not accept fields: "
+                + ", ".join(unknown)
+            )
         row = self._requests.get(request_id)
-        if row is None or row["status"] != "downloading":
+        if (
+            row is None
+            or expected_status != "downloading"
+            or row["status"] != expected_status
+        ):
             return False
         now = _utcnow()
         row["status"] = "wanted"
@@ -1239,17 +1304,32 @@ class FakePipelineDB:
         row["updated_at"] = now
         if "search_filetype_override" in fields:
             row["search_filetype_override"] = fields["search_filetype_override"]
+        if "prev_min_bitrate" in fields:
+            row["prev_min_bitrate"] = fields["prev_min_bitrate"]
         if "min_bitrate" in fields:
             current_min_bitrate = row.get("min_bitrate")
-            if current_min_bitrate is not None:
+            if (
+                "prev_min_bitrate" not in fields
+                and current_min_bitrate is not None
+            ):
                 row["prev_min_bitrate"] = current_min_bitrate
             row["min_bitrate"] = fields["min_bitrate"]
         self.status_history.append((request_id, "wanted"))
         return True
 
-    def set_downloading(self, request_id: int, state_json: str) -> bool:
+    def set_downloading(
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        expected_status: str = "wanted",
+    ) -> bool:
         row = self._requests.get(request_id)
-        if row is None or row["status"] != "wanted":
+        if (
+            row is None
+            or expected_status != "wanted"
+            or row["status"] != expected_status
+        ):
             return False
         now = _utcnow()
         row["status"] = "downloading"
@@ -1290,7 +1370,13 @@ class FakePipelineDB:
         self.status_history.append((request_id, "downloading"))
         return True
 
-    def update_download_state(self, request_id: int, state_json: str) -> None:
+    def update_download_state(
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        expected_status: str = "downloading",
+    ) -> bool:
         row = self._requests.get(request_id)
         self.update_download_state_calls.append((request_id, state_json))
         injected = self._update_download_state_errors.get(request_id)
@@ -1299,12 +1385,14 @@ class FakePipelineDB:
             # recorded (like FakeSlskdAPI's failing calls) but the row
             # is never mutated. See set_update_download_state_error.
             raise injected
-        if row:
+        if row and row.get("status") == expected_status:
             try:
                 row["active_download_state"] = json.loads(state_json)
             except json.JSONDecodeError:
                 row["active_download_state"] = state_json
             row["updated_at"] = _utcnow()
+            return True
+        return False
 
     def update_download_state_if_downloading(
         self,
@@ -1314,14 +1402,17 @@ class FakePipelineDB:
         row = self._requests.get(request_id)
         if row is None or row["status"] != "downloading":
             return False
-        self.update_download_state(request_id, state_json)
-        return True
+        return self.update_download_state(
+            request_id,
+            state_json,
+            expected_status="downloading",
+        )
 
     def update_download_state_current_path(
         self,
         request_id: int,
         current_path: str | None,
-    ) -> None:
+    ) -> bool:
         self.update_download_state_current_path_calls.append(
             (request_id, current_path),
         )
@@ -1342,12 +1433,14 @@ class FakePipelineDB:
             state["current_path"] = current_path
             row["active_download_state"] = state
             row["updated_at"] = _utcnow()
+            return True
+        return False
 
     def mark_import_subprocess_started(
         self,
         request_id: int,
         timestamp: str,
-    ) -> None:
+    ) -> bool:
         """Stamp ``import_subprocess_started_at`` on the active download
         state. No-op when the row has no ``active_download_state``
         (force/manual paths). See ``docs/advisory-locks.md``.
@@ -1356,19 +1449,24 @@ class FakePipelineDB:
             (request_id, timestamp),
         )
         row = self._requests.get(request_id)
-        if not row or row.get("active_download_state") is None:
-            return
+        if (
+            not row
+            or row.get("status") != "downloading"
+            or row.get("active_download_state") is None
+        ):
+            return False
         state = row.get("active_download_state")
         if isinstance(state, str):
             try:
                 state = json.loads(state)
             except json.JSONDecodeError:
-                return
+                return False
         if not isinstance(state, dict):
-            return
+            return False
         state["import_subprocess_started_at"] = timestamp
         row["active_download_state"] = state
         row["updated_at"] = _utcnow()
+        return True
 
     def log_download(self, request_id: int,
                      soulseek_username: str | None = None,
@@ -1679,7 +1777,11 @@ class FakePipelineDB:
         row["manual_reason"] = None
         row["updated_at"] = now
         self.status_history.append((request_id, "wanted"))
-        self.record_attempt(request_id, "download")
+        self.record_attempt(
+            request_id,
+            "download",
+            expected_status="wanted",
+        )
         log_kwargs: dict[str, Any] = {}
         if validation_result is None:
             log_kwargs["beets_scenario"] = "abandoned_auto_import"
@@ -1789,10 +1891,16 @@ class FakePipelineDB:
             return self._cooldown_result(username)
         return self._cooldown_result
 
-    def record_attempt(self, request_id: int, attempt_type: str) -> None:
+    def record_attempt(
+        self,
+        request_id: int,
+        attempt_type: str,
+        *,
+        expected_status: str,
+    ) -> bool:
         self.recorded_attempts.append((request_id, attempt_type))
         row = self._requests.get(request_id)
-        if row:
+        if row and row.get("status") == expected_status != "replaced":
             col = f"{attempt_type}_attempts"
             now = _utcnow()
             row[col] = (row.get(col) or 0) + 1
@@ -1803,6 +1911,8 @@ class FakePipelineDB:
                 BACKOFF_MAX_MINUTES,
             )
             row["next_retry_after"] = now + timedelta(minutes=backoff_minutes)
+            return True
+        return False
 
     def record_field_resolution(
         self,
@@ -1810,12 +1920,15 @@ class FakePipelineDB:
         field_name: str,
         status: str,
         reason_code: str | None,
-    ) -> None:
+    ) -> bool:
         """UPSERT a row into ``field_resolutions`` mirroring migration 030.
 
         On conflict: increment ``attempts``, replace status / reason,
         bump ``resolved_at``. Tests assert directly against the dict.
         """
+        request = self._requests.get(int(request_id))
+        if request is None or request.get("status") == "replaced":
+            return False
         key = (int(request_id), field_name)
         now = _utcnow()
         existing = self.field_resolutions.get(key)
@@ -1830,11 +1943,12 @@ class FakePipelineDB:
                 resolved_at=now,
                 id=self._next_field_resolution_id,
             )
-            return
+            return True
         existing.status = status
         existing.reason_code = reason_code
         existing.attempts += 1
         existing.resolved_at = now
+        return True
 
     def get_field_resolution(
         self,
@@ -2088,12 +2202,10 @@ class FakePipelineDB:
         }
 
     def update_spectral_state(self, request_id: int,
-                              update: RequestSpectralStateUpdate) -> None:
-        row = self._requests.get(request_id)
-        if row:
-            fields = update.as_update_fields()
-            row.update(fields)
-            row["updated_at"] = _utcnow()
+                              update: RequestSpectralStateUpdate) -> bool:
+        return self.update_request_fields(
+            request_id, **update.as_update_fields(),
+        )
 
     def upsert_album_quality_evidence(
         self,
@@ -2159,11 +2271,22 @@ class FakePipelineDB:
         self,
         request_id: int,
         evidence_id: int | None,
-    ) -> None:
+        *,
+        expected_status: str | None = None,
+    ) -> bool:
         row = self._requests.get(request_id)
-        if row is not None:
+        if (
+            row is not None
+            and row.get("status") != "replaced"
+            and (
+                expected_status is None
+                or row.get("status") == expected_status
+            )
+        ):
             row["current_evidence_id"] = evidence_id
             row["updated_at"] = _utcnow()
+            return True
+        return False
 
     def get_import_job_candidate_evidence_id(
         self,
@@ -2201,7 +2324,7 @@ class FakePipelineDB:
     def clear_on_disk_quality_fields(self, request_id: int) -> None:
         self.clear_on_disk_quality_fields_calls.append(request_id)
         row = self._requests.get(request_id)
-        if row is None:
+        if row is None or row.get("status") == "replaced":
             return
         row["verified_lossless"] = False
         row["current_spectral_grade"] = None
@@ -2216,18 +2339,43 @@ class FakePipelineDB:
         return [copy.deepcopy(r) for r in self._requests.values()
                 if r.get("status") == "downloading"]
 
-    def update_request_fields(self, request_id: int, **fields: Any) -> None:
+    def update_request_fields(
+        self,
+        request_id: int,
+        **fields: Any,
+    ) -> bool:
+        expected_status_raw = fields.pop("expected_status", None)
+        if (
+            expected_status_raw is not None
+            and not isinstance(expected_status_raw, str)
+        ):
+            raise TypeError("expected_status must be a string or None")
+        expected_status = expected_status_raw
+        validate_request_metadata_fields(dict(fields))
         self.update_request_fields_calls.append((request_id, dict(fields)))
         row = self._requests.get(request_id)
-        if row:
-            if fields.get("mb_release_id") is not None:
-                # Production's UPDATE hits the same UNIQUE(mb_release_id)
-                # as the INSERT — re-pointing a row at another row's mbid
-                # raises there too (setting a row's own mbid is a no-op).
-                self._assert_mb_release_id_unique(
-                    fields["mb_release_id"], exclude_id=request_id)
-            row.update(fields)
-            row["updated_at"] = _utcnow()
+        if (
+            not row
+            or row.get("status") == "replaced"
+            or (
+                expected_status is not None
+                and row.get("status") != expected_status
+            )
+        ):
+            return False
+        if not fields:
+            # Mirror production's control-only CAS: validate the row and
+            # expected status, but do not manufacture an ``updated_at`` write.
+            return True
+        if fields.get("mb_release_id") is not None:
+            # Production's UPDATE hits the same UNIQUE(mb_release_id)
+            # as the INSERT — re-pointing a row at another row's mbid
+            # raises there too (setting a row's own mbid is a no-op).
+            self._assert_mb_release_id_unique(
+                fields["mb_release_id"], exclude_id=request_id)
+        row.update(fields)
+        row["updated_at"] = _utcnow()
+        return True
 
     # --- Unfindable detection (U13) ---
     #
@@ -3040,6 +3188,11 @@ class FakePipelineDB:
 
     def set_tracks(self, request_id: int,
                    tracks: list[dict[str, Any]]) -> None:
+        row = self._requests.get(request_id)
+        if row is None:
+            raise ValueError(f"request {request_id} not found")
+        if row.get("status") == "replaced":
+            raise ReplacedRequestMutationError(request_id)
         self._tracks[request_id] = [
             {
                 "disc_number": t.get("disc_number", 1),
@@ -3063,19 +3216,32 @@ class FakePipelineDB:
     def update_track_artists(
         self, request_id: int,
         track_artists: list[str | None],
-    ) -> None:
+        *,
+        expected_status: str | None = None,
+    ) -> bool:
         """Mirror of ``PipelineDB.update_track_artists`` — apply per-track
         artists in (disc, track) order. Length mismatches are tolerated
         (fewer keeps existing, more drops extras) — same shape as real.
         """
+        request = self._requests.get(request_id)
+        if (
+            request is None
+            or request.get("status") == "replaced"
+            or (
+                expected_status is not None
+                and request.get("status") != expected_status
+            )
+        ):
+            return False
         if not track_artists:
-            return
+            return True
         rows = self._tracks.get(request_id, [])
         if not rows:
-            return
+            return True
         rows.sort(key=lambda t: (t["disc_number"], t["track_number"]))
         for row, artist in zip(rows, track_artists):
             row["track_artist"] = artist
+        return True
 
     def get_track_counts(self,
                          request_ids: list[int]) -> dict[int, int]:
@@ -4640,6 +4806,8 @@ class FakePipelineDB:
                 "use create_failed_search_plan for empty results.")
         if request_id not in self._requests:
             raise ValueError(f"request {request_id} not found")
+        if self._requests[request_id].get("status") == "replaced":
+            raise ReplacedRequestMutationError(request_id)
         # Mirror the partial unique index "one active plan per request".
         if set_active:
             for existing in self.search_plans.values():
@@ -4707,6 +4875,8 @@ class FakePipelineDB:
     ) -> int:
         if request_id not in self._requests:
             raise ValueError(f"request {request_id} not found")
+        if self._requests[request_id].get("status") == "replaced":
+            raise ReplacedRequestMutationError(request_id)
         status = (
             PLAN_STATUS_FAILED_TRANSIENT if transient
             else PLAN_STATUS_FAILED_DETERMINISTIC
@@ -4742,6 +4912,8 @@ class FakePipelineDB:
         if request_id not in self._requests:
             raise ValueError(f"request {request_id} not found")
         row = self._requests[request_id]
+        if row.get("status") == "replaced":
+            raise ReplacedRequestMutationError(request_id)
         old_id = row.get("active_plan_id")
         now = _utcnow()
         if old_id is not None:
@@ -4888,6 +5060,8 @@ class FakePipelineDB:
         row = self._requests.get(request_id)
         if row is None:
             raise ValueError(f"request {request_id} not found")
+        if row.get("status") == "replaced":
+            raise ReplacedRequestMutationError(request_id)
         active_plan_id = row.get("active_plan_id")
         if active_plan_id is None:
             raise ValueError(
@@ -5140,7 +5314,8 @@ class FakePipelineDB:
                 f"plan_item_id={attempt.plan_item_id} does not belong to "
                 f"plan_id={attempt.plan_id} for request_id={attempt.request_id}")
         is_stale = (
-            active_plan_id != attempt.plan_id
+            row.get("status") == "replaced"
+            or active_plan_id != attempt.plan_id
             or next_ordinal != attempt.plan_ordinal
             or cycle_count != attempt.cycle_count_snapshot
         )
@@ -5155,7 +5330,11 @@ class FakePipelineDB:
             if is_stale:
                 cursor_update_status = CURSOR_UPDATE_STALE
                 execution_stage = SEARCH_LOG_STAGE_STALE_COMPLETION
-                stale_reason: str | None = "regenerated"
+                stale_reason: str | None = (
+                    "request_replaced"
+                    if row.get("status") == "replaced"
+                    else "regenerated"
+                )
                 new_next_ordinal = next_ordinal
                 new_cycle = cycle_count
             else:
@@ -5325,7 +5504,7 @@ class FakePipelineDB:
             matcher_score_top1=attempt.matcher_score_top1,
             query_template=attempt.query_template,
         ))
-        if attempt.apply_scheduler_attempt:
+        if attempt.apply_scheduler_attempt and row.get("status") != "replaced":
             now = _utcnow()
             new_count = (row.get("search_attempts") or 0) + 1
             row["search_attempts"] = new_count

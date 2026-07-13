@@ -1149,7 +1149,10 @@ class TestRunJobRunnerUnhandled(unittest.TestCase):
                 file_path.write_bytes(b"opus")
 
             def _runner(**_kwargs: Any) -> YtdlpRunResult:
-                pdb.update_request_fields(42, status="imported")
+                pdb.mark_imported_with_rescue(
+                    42,
+                    expected_status="wanted",
+                )
                 return YtdlpRunResult(
                     exit_code=0,
                     stderr_excerpt=None,

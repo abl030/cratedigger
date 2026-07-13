@@ -58,7 +58,7 @@ class WrongMatchCleanupDB(WrongMatchSourceDB, QualityEvidenceDB, Protocol):
         self, namespace: int, key: int,
     ) -> AbstractContextManager[bool]: ...
 
-    def update_request_fields(self, request_id: int, **extra: Any) -> None: ...
+    def update_request_fields(self, request_id: int, **extra: Any) -> bool: ...
 
     def list_active_import_jobs_for_wrong_match(
         self,
@@ -585,9 +585,28 @@ def _perform_cleanup_deletion(
             )
             narrowed = narrow_override_on_lossless_source_lock(current_override)
             if narrowed is not None:
-                db.update_request_fields(
-                    request_id, search_filetype_override=narrowed,
+                applied = db.update_request_fields(
+                    request_id,
+                    search_filetype_override=narrowed,
+                    expected_status=(
+                        str(request_row["status"])
+                        if request_row is not None else None
+                    ),
                 )
+                if not applied:
+                    return _result(
+                        download_log_id,
+                        OUTCOME_SKIPPED_OPERATIONAL,
+                        request_id=request_id,
+                        source_path=resolved_path,
+                        reason="request_changed_during_cleanup",
+                        verdict=verdict,
+                        preview_decision=preview_decision,
+                        cleanup_eligible=cleanup_eligible,
+                        decision=decision,
+                        cleared_rows=cleanup.cleared_rows,
+                        deleted_path=cleanup.deleted_path,
+                    )
                 logger.info(
                     "wrong_match_cleanup: narrowed search_filetype_override"
                     " from %r to %r after lossless_source_locked"

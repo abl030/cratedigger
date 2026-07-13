@@ -164,6 +164,12 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         "source_dirs": list,
     }
 
+    def _reseed_request(self, request_id: int, **overrides: object) -> None:
+        """Adjust fixture state through the fake's explicit setup seam."""
+        row = self.db.get_request(request_id)
+        assert row is not None
+        self.db.seed_request({**row, **overrides})
+
     def _seed_wrong_match(
         self, *,
         download_log_id: int | None = None,
@@ -195,7 +201,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                 **(request_overrides or {}),
             ))
         elif request_overrides:
-            self.db.update_request_fields(request_id, **request_overrides)
+            self._reseed_request(request_id, **request_overrides)
         vr = copy.deepcopy(_DEFAULT_WRONG_MATCH_VALIDATION)
         vr["failed_path"] = failed_path
         vr["scenario"] = scenario
@@ -333,7 +339,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
 
     def test_default_wrong_matches_excludes_replaced_audit_rows(self):
         self._seed_wrong_match(request_id=101, mb_release_id="abc-101")
-        self.db.update_request_fields(101, status="replaced")
+        self._reseed_request(101, status="replaced")
 
         status, data = self._get("/api/wrong-matches")
 
@@ -342,7 +348,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
 
     def test_include_replaced_true_preserves_explicit_history_view(self):
         self._seed_wrong_match(request_id=101, mb_release_id="abc-101")
-        self.db.update_request_fields(101, status="replaced")
+        self._reseed_request(101, status="replaced")
 
         status, data = self._get("/api/wrong-matches?include_replaced=true")
 
@@ -829,10 +835,10 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                                      "beets_tracks": 12}})
     def test_group_shows_current_quality_when_imported(self, _mock_beets):
         """Imported album: quality_label, quality_rank, verified_lossless reflect on-disk state."""
-        self.db.update_request_fields(
-            100, status="imported", min_bitrate=207,
+        self.assertTrue(self.db.mark_imported_with_rescue(
+            100, expected_status="wanted", min_bitrate=207,
             verified_lossless=True, current_spectral_grade="genuine",
-            imported_path="/mnt/virtio/Music/Beets/Artist/Album")
+            imported_path="/mnt/virtio/Music/Beets/Artist/Album"))
         status, data = self._get("/api/wrong-matches")
         group = data["groups"][0]
         self.assertEqual(group["status"], "imported")
@@ -867,7 +873,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         force-imports based on false quality data.
         """
         self.db.update_request_fields(
-            100, status="wanted", min_bitrate=320,            # stale
+            100, min_bitrate=320,                             # stale
             verified_lossless=False,
             current_spectral_grade="likely_transcode",        # stale
             current_spectral_bitrate=160)                     # stale
@@ -908,7 +914,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         of the album, the honest UI answer is 'not in library' — re-tag
         it or add it to the pipeline.
         """
-        self.db.update_request_fields(
+        self._reseed_request(
             100, status="imported",
             mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             min_bitrate=245, verified_lossless=True,
@@ -942,7 +948,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         have returned a match (mocked here with ``create=True`` so the
         test is RED against the current code).
         """
-        self.db.update_request_fields(
+        self._reseed_request(
             100, status="imported", mb_release_id=None,
             min_bitrate=245, verified_lossless=True,
             current_spectral_grade="genuine")

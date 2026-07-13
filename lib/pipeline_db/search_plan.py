@@ -33,6 +33,7 @@ from lib.pipeline_db._shared import (
     PLAN_STATUS_FAILED_DETERMINISTIC,
     PLAN_STATUS_FAILED_TRANSIENT,
     PLAN_STATUS_SUPERSEDED,
+    ReplacedRequestMutationError,
     SEARCH_LOG_STAGE_ACCEPTED,
     SEARCH_LOG_STAGE_PRE_ATTEMPT,
     SEARCH_LOG_STAGE_STALE_COMPLETION,
@@ -451,6 +452,15 @@ class _SearchPlanMixin(_PipelineDBBase):
                 cursor_factory=psycopg2.extras.RealDictCursor,
             ) as cur:
                 cur.execute(
+                    "SELECT status FROM album_requests WHERE id = %s FOR UPDATE",
+                    (request_id,),
+                )
+                request_row = cur.fetchone()
+                if request_row is None:
+                    raise ValueError(f"request {request_id} not found")
+                if request_row["status"] == "replaced":
+                    raise ReplacedRequestMutationError(request_id)
+                cur.execute(
                     """
                     INSERT INTO search_plans
                         (request_id, generator_id, status,
@@ -504,9 +514,12 @@ class _SearchPlanMixin(_PipelineDBBase):
                             plan_cycle_count = 0,
                             updated_at = %s
                         WHERE id = %s
+                          AND status != 'replaced'
                         """,
                         (plan_id, now, request_id),
                     )
+                    if cur.rowcount != 1:
+                        raise ReplacedRequestMutationError(request_id)
             self.conn.commit()
             return plan_id
 
@@ -539,27 +552,43 @@ class _SearchPlanMixin(_PipelineDBBase):
             PLAN_STATUS_FAILED_TRANSIENT if transient
             else PLAN_STATUS_FAILED_DETERMINISTIC
         )
-        cur = self._execute(
-            """
-            INSERT INTO search_plans
-                (request_id, generator_id, status, failure_class,
-                 metadata_snapshot, provenance, error_message)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            RETURNING id
-            """,
-            (
-                request_id,
-                generator_id,
-                status,
-                failure_class,
-                _json_param(metadata_snapshot, SearchPlanMetadataSnapshot),
-                _json_param(provenance, SearchPlanProvenance),
-                error_message,
-            ),
-        )
-        row = cur.fetchone()
-        assert row is not None, "INSERT RETURNING must produce a row"
-        return int(row["id"])
+        with self._atomic():
+            with self.conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            ) as cur:
+                cur.execute(
+                    "SELECT status FROM album_requests WHERE id = %s FOR UPDATE",
+                    (request_id,),
+                )
+                request_row = cur.fetchone()
+                if request_row is None:
+                    raise ValueError(f"request {request_id} not found")
+                if request_row["status"] == "replaced":
+                    raise ReplacedRequestMutationError(request_id)
+                cur.execute(
+                    """
+                    INSERT INTO search_plans
+                        (request_id, generator_id, status, failure_class,
+                         metadata_snapshot, provenance, error_message)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        request_id,
+                        generator_id,
+                        status,
+                        failure_class,
+                        _json_param(
+                            metadata_snapshot, SearchPlanMetadataSnapshot),
+                        _json_param(provenance, SearchPlanProvenance),
+                        error_message,
+                    ),
+                )
+                row = cur.fetchone()
+                assert row is not None, "INSERT RETURNING must produce a row"
+                plan_id = int(row["id"])
+            self.conn.commit()
+            return plan_id
 
 
     def supersede_search_plan_with_replacement(
@@ -595,7 +624,7 @@ class _SearchPlanMixin(_PipelineDBBase):
                 # Read current active plan id under the lock implied by the
                 # transaction; NULL means "no replacement, just create+activate".
                 cur.execute(
-                    "SELECT active_plan_id FROM album_requests WHERE id = %s "
+                    "SELECT active_plan_id, status FROM album_requests WHERE id = %s "
                     "FOR UPDATE",
                     (request_id,),
                 )
@@ -603,6 +632,8 @@ class _SearchPlanMixin(_PipelineDBBase):
                 if req_row is None:
                     raise ValueError(
                         f"request {request_id} not found")
+                if req_row["status"] == "replaced":
+                    raise ReplacedRequestMutationError(request_id)
                 old_active_id = req_row["active_plan_id"]
 
                 # Detach the old active plan first so the partial unique
@@ -682,9 +713,12 @@ class _SearchPlanMixin(_PipelineDBBase):
                         plan_cycle_count = 0,
                         updated_at = %s
                     WHERE id = %s
+                      AND status != 'replaced'
                     """,
                     (new_plan_id, now, request_id),
                 )
+                if cur.rowcount != 1:
+                    raise ReplacedRequestMutationError(request_id)
             self.conn.commit()
             return new_plan_id
 
@@ -821,13 +855,15 @@ class _SearchPlanMixin(_PipelineDBBase):
                 cursor_factory=psycopg2.extras.RealDictCursor,
             ) as cur:
                 cur.execute(
-                    "SELECT active_plan_id, next_plan_ordinal "
+                    "SELECT active_plan_id, next_plan_ordinal, status "
                     "FROM album_requests WHERE id = %s FOR UPDATE",
                     (request_id,),
                 )
                 row = cur.fetchone()
                 if row is None:
                     raise ValueError(f"request {request_id} not found")
+                if row["status"] == "replaced":
+                    raise ReplacedRequestMutationError(request_id)
                 active_plan_id = row["active_plan_id"]
                 if active_plan_id is None:
                     raise ValueError(
@@ -841,9 +877,12 @@ class _SearchPlanMixin(_PipelineDBBase):
                         "backward intent)")
                 cur.execute(
                     "UPDATE album_requests SET next_plan_ordinal = %s, "
-                    "updated_at = NOW() WHERE id = %s",
+                    "updated_at = NOW() WHERE id = %s "
+                    "AND status != 'replaced'",
                     (target_ordinal, request_id),
                 )
+                if cur.rowcount != 1:
+                    raise ReplacedRequestMutationError(request_id)
             self.conn.commit()
             return (int(active_plan_id), previous_ordinal, target_ordinal)
 
@@ -1184,7 +1223,8 @@ class _SearchPlanMixin(_PipelineDBBase):
              ``cursor_update_status`` accordingly; flagged ``advanced``
              or ``wrapped`` on the log row.
           4. Otherwise: leave the cursor alone, flag the log row as
-             ``stale`` with ``stale_reason='regenerated'`` and
+             ``stale`` with ``stale_reason='regenerated'`` (or
+             ``'request_replaced'`` for a terminal ancestor) and
              ``execution_stage='stale_completion'``.
 
         Either every write commits or none do. Callers must NOT separately
@@ -1237,7 +1277,8 @@ class _SearchPlanMixin(_PipelineDBBase):
                         f"request_id={attempt.request_id}")
 
                 is_stale = (
-                    active_plan_id != attempt.plan_id
+                    current_status == "replaced"
+                    or active_plan_id != attempt.plan_id
                     or next_ordinal != attempt.plan_ordinal
                     or cycle_count != attempt.cycle_count_snapshot
                 )
@@ -1245,7 +1286,11 @@ class _SearchPlanMixin(_PipelineDBBase):
                 if is_stale:
                     cursor_update_status = CURSOR_UPDATE_STALE
                     execution_stage = SEARCH_LOG_STAGE_STALE_COMPLETION
-                    stale_reason = "regenerated"
+                    stale_reason = (
+                        "request_replaced"
+                        if current_status == "replaced"
+                        else "regenerated"
+                    )
                     new_next_ordinal = next_ordinal
                     new_cycle = cycle_count
                 else:
@@ -1355,6 +1400,7 @@ class _SearchPlanMixin(_PipelineDBBase):
                             plan_cycle_count = %s,
                             updated_at = %s
                         WHERE id = %s
+                          AND status != 'replaced'
                         """,
                         (new_next_ordinal, new_cycle, now,
                          attempt.request_id),
@@ -1371,6 +1417,7 @@ class _SearchPlanMixin(_PipelineDBBase):
                                 last_attempt_at = %s,
                                 updated_at = %s
                             WHERE id = %s
+                              AND status != 'replaced'
                             RETURNING search_attempts
                             """,
                             (now, now, attempt.request_id),
@@ -1384,7 +1431,8 @@ class _SearchPlanMixin(_PipelineDBBase):
                         )
                         cur.execute(
                             "UPDATE album_requests "
-                            "SET next_retry_after = %s WHERE id = %s",
+                            "SET next_retry_after = %s WHERE id = %s "
+                            "AND status != 'replaced'",
                             (now + timedelta(minutes=backoff_minutes),
                              attempt.request_id),
                         )
@@ -1397,7 +1445,7 @@ class _SearchPlanMixin(_PipelineDBBase):
                         cur.execute(
                             "UPDATE album_requests "
                             "SET last_attempt_at = %s, updated_at = %s "
-                            "WHERE id = %s",
+                            "WHERE id = %s AND status != 'replaced'",
                             (now, now, attempt.request_id),
                         )
 
@@ -1445,7 +1493,7 @@ class _SearchPlanMixin(_PipelineDBBase):
                             cur.execute(
                                 "UPDATE album_requests "
                                 "SET failure_class = %s, updated_at = %s "
-                                "WHERE id = %s",
+                                "WHERE id = %s AND status != 'replaced'",
                                 (verdict, now, attempt.request_id),
                             )
 
@@ -1480,7 +1528,7 @@ class _SearchPlanMixin(_PipelineDBBase):
                 cursor_factory=psycopg2.extras.RealDictCursor,
             ) as cur:
                 cur.execute(
-                    "SELECT plan_cycle_count "
+                    "SELECT plan_cycle_count, status "
                     "FROM album_requests WHERE id = %s FOR UPDATE",
                     (attempt.request_id,),
                 )
@@ -1489,6 +1537,7 @@ class _SearchPlanMixin(_PipelineDBBase):
                     raise ValueError(
                         f"request {attempt.request_id} not found")
                 cycle_snapshot = int(row["plan_cycle_count"])
+                request_replaced = row["status"] == "replaced"
 
                 cur.execute(
                     """
@@ -1553,7 +1602,7 @@ class _SearchPlanMixin(_PipelineDBBase):
                 assert log_row is not None
                 search_log_id = int(log_row["id"])
 
-                if attempt.apply_scheduler_attempt:
+                if attempt.apply_scheduler_attempt and not request_replaced:
                     cur.execute(
                         """
                         UPDATE album_requests
@@ -1561,6 +1610,7 @@ class _SearchPlanMixin(_PipelineDBBase):
                             last_attempt_at = %s,
                             updated_at = %s
                         WHERE id = %s
+                          AND status != 'replaced'
                         RETURNING search_attempts
                         """,
                         (now, now, attempt.request_id),
@@ -1574,7 +1624,8 @@ class _SearchPlanMixin(_PipelineDBBase):
                     )
                     cur.execute(
                         "UPDATE album_requests "
-                        "SET next_retry_after = %s WHERE id = %s",
+                        "SET next_retry_after = %s WHERE id = %s "
+                        "AND status != 'replaced'",
                         (now + timedelta(minutes=backoff_minutes),
                          attempt.request_id),
                     )

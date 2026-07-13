@@ -25,6 +25,46 @@ from lib.release_identity import detect_release_source, normalize_release_id
 # ``web.routes.pipeline_mutations.finalize_request`` / ``harness.import_one.finalize_request``).
 finalize_request = transitions.finalize_request
 
+
+def _transition_applied_or_report(
+    result: transitions.TransitionResult,
+) -> bool:
+    """Print the CLI twin of the HTTP transition-conflict payload."""
+    if not isinstance(result, transitions.TransitionConflict):
+        return True
+    print(json.dumps({
+        "error": "transition_conflict",
+        "reason": result.kind.value,
+        "expected_status": result.expected_status,
+        "actual_status": result.actual_status,
+        "target_status": result.target_status,
+    }))
+    return False
+
+
+def _request_fields_applied_or_report(
+    db,
+    request_id: int,
+    *,
+    expected_status: str,
+    applied: bool,
+) -> bool:
+    """Map a metadata compare-and-set miss through the transition contract."""
+    if applied:
+        return True
+    row = db.get_request(request_id)
+    return _transition_applied_or_report(transitions.TransitionConflict(
+        request_id=request_id,
+        target_status=expected_status,
+        kind=(
+            transitions.TransitionConflictKind.not_found
+            if row is None
+            else transitions.TransitionConflictKind.stale_source
+        ),
+        expected_status=expected_status,
+        actual_status=None if row is None else str(row["status"]),
+    ))
+
 VALID_STATUSES = ["wanted", "imported", "manual"]
 
 
@@ -240,10 +280,18 @@ def _resolve_and_update_after_add(
         return ResolveAllResult()
 
     try:
-        apply_resolve_all_result(
+        applied = apply_resolve_all_result(
             db, req_id, result,
+            expected_status="wanted",
             existing_mb_release_group_id=mb_release_group_id,
         )
+        if not applied:
+            print(
+                f"  Request {req_id} changed during field resolution; "
+                "skipping plan generation",
+                file=sys.stderr,
+            )
+            return None
     except Exception as exc:  # noqa: BLE001
         print(
             f"  Failed to persist resolved fields: {exc}",
@@ -313,6 +361,8 @@ def _cmd_add_mb(db, mbid, source):
         mb_artist_id=artist_id,
         mb_release_payload=release,
     )
+    if resolved is None:
+        return 4
     # Re-read tracks from the DB so the per-track ``track_artist``
     # column the resolver just wrote (PR2 Apply #1) flows into the
     # snapshot. The upstream ``tracks`` extracted from the MB payload
@@ -374,6 +424,8 @@ def _cmd_add_discogs(db, discogs_id, source):
         mb_artist_id=str(release.get("artist_id") or "") or None,
         discogs_release_payload=release,
     )
+    if resolved is None:
+        return 4
     # Re-read tracks from the DB so the per-track ``track_artist``
     # column the resolver just wrote (PR2 Apply #1) flows into the
     # snapshot.
@@ -408,38 +460,44 @@ def cmd_retry(db, args):
     req = db.get_request(args.id)
     if not req:
         print(f"  Request {args.id} not found.")
-        return
-    finalize_request(
+        return 2
+    result = finalize_request(
         db,
         args.id,
         transitions.RequestTransition.to_wanted(from_status=req["status"]),
     )
+    if not _transition_applied_or_report(result):
+        return 4
     print(f"  Reset to wanted: [{args.id}] {req['artist_name']} - {req['album_title']}")
+    return 0
 
 
 def cmd_cancel(db, args):
     req = db.get_request(args.id)
     if not req:
         print(f"  Request {args.id} not found.")
-        return
-    finalize_request(
+        return 2
+    result = finalize_request(
         db,
         args.id,
         transitions.RequestTransition.to_manual(from_status=req["status"]),
     )
+    if not _transition_applied_or_report(result):
+        return 4
     print(f"  Marked for manual download: [{args.id}] {req['artist_name']} - {req['album_title']}")
+    return 0
 
 
 def cmd_set(db, args):
     req = db.get_request(args.id)
     if not req:
         print(f"  Request {args.id} not found.")
-        return
+        return 2
     old_status = req["status"]
     if old_status == args.status:
         print(f"  [{args.id}] already has status '{args.status}'.")
-        return
-    finalize_request(
+        return 0
+    result = finalize_request(
         db,
         args.id,
         transitions.RequestTransition.status_only(
@@ -447,7 +505,10 @@ def cmd_set(db, args):
             from_status=old_status,
         ),
     )
+    if not _transition_applied_or_report(result):
+        return 4
     print(f"  [{args.id}] {req['artist_name']} - {req['album_title']}: {old_status} → {args.status}")
+    return 0
 
 
 def cmd_set_intent(db, args):
@@ -463,17 +524,25 @@ def cmd_set_intent(db, args):
     req = db.get_request(args.id)
     if not req:
         print(f"  Request {args.id} not found.")
-        return
+        return 2
     if req["status"] == "downloading":
         print(f"  Cannot set intent while album is downloading.")
-        return
+        return 1
+    if req["status"] == "replaced":
+        result = finalize_request(
+            db,
+            args.id,
+            transitions.RequestTransition.to_wanted(from_status="replaced"),
+        )
+        _transition_applied_or_report(result)
+        return 4
     old_target = req.get("target_format")
     label = f"{req['artist_name']} - {req['album_title']}"
 
     if req["status"] == "imported" and target_format:
         # Re-queue to search for lossless source
         min_br = req.get("min_bitrate")
-        finalize_request(
+        result = finalize_request(
             db,
             args.id,
             transitions.RequestTransition.to_wanted(
@@ -482,7 +551,20 @@ def cmd_set_intent(db, args):
                 min_bitrate=min_br,
             ),
         )
-        db.update_request_fields(args.id, target_format=target_format)
+        if not _transition_applied_or_report(result):
+            return 4
+        applied = db.update_request_fields(
+            args.id,
+            expected_status="wanted",
+            target_format=target_format,
+        )
+        if not _request_fields_applied_or_report(
+            db,
+            args.id,
+            expected_status="wanted",
+            applied=applied,
+        ):
+            return 4
         print(f"  [{args.id}] {label}: lossless on disk, re-queued for search")
     else:
         update_fields = {"target_format": target_format}
@@ -492,10 +574,22 @@ def cmd_set_intent(db, args):
             search_filetype_override=req.get("search_filetype_override"),
         ):
             update_fields["search_filetype_override"] = None
-        db.update_request_fields(args.id, **update_fields)
+        applied = db.update_request_fields(
+            args.id,
+            expected_status=str(req["status"]),
+            **update_fields,
+        )
+        if not _request_fields_applied_or_report(
+            db,
+            args.id,
+            expected_status=str(req["status"]),
+            applied=applied,
+        ):
+            return 4
         action = "lossless on disk" if target_format else "default (pipeline decides)"
         print(f"  [{args.id}] {label}: {action} "
               f"(target_format: {old_target} → {target_format})")
+    return 0
 
 
 def add_album_requests_subparsers(sub: argparse._SubParsersAction) -> None:

@@ -12,6 +12,7 @@ from lib.destructive_release_service import (
     BanSourceLockContended,
     BanSourceReleaseMismatch,
     BanSourceRequest,
+    BanSourceTransitionConflict,
     DeleteImporterBusy,
     DeleteLockContended,
     DeleteReleaseMismatch,
@@ -27,6 +28,7 @@ from lib.pipeline_db import (
     release_id_to_lock_key,
 )
 from lib.import_queue import IMPORT_JOB_AUTOMATION
+from lib.transitions import TransitionConflict, TransitionConflictKind
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
 from tests.test_pipeline_db import TEST_DSN, make_db, requires_postgres
@@ -171,6 +173,25 @@ class TestBanSourceAuthority(unittest.TestCase):
                     [(ADVISORY_LOCK_NAMESPACE_IMPORT, 41)],
                 )
                 self._assert_no_mutation()
+
+    def test_lifecycle_cas_conflict_precedes_every_destructive_effect(self) -> None:
+        conflict = TransitionConflict(
+            request_id=41,
+            target_status="wanted",
+            kind=TransitionConflictKind.stale_source,
+            expected_status="imported",
+            actual_status="replaced",
+        )
+
+        result = ban_source(
+            pipeline_db=self.db,
+            beets_db=self.beets,
+            request=BanSourceRequest(request_id=41),
+            finalize_request_fn=lambda *_args, **_kwargs: conflict,
+        )
+
+        self.assertIsInstance(result, BanSourceTransitionConflict)
+        self._assert_no_mutation()
 
 
 class TestLibraryDeleteAuthority(unittest.TestCase):

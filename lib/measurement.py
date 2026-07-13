@@ -444,12 +444,20 @@ def _persist_spectral_state(
             f"adopting download spectral grade={to_write.grade}")
     if to_write is not None:
         try:
-            db.update_spectral_state(
+            applied = db.update_spectral_state(
                 request_id,
                 RequestSpectralStateUpdate(current=to_write),
             )
+            if not applied:
+                logger.warning(
+                    "Skipped on-disk spectral update for frozen/missing "
+                    "request %s",
+                    request_id,
+                )
+                return None
         except Exception:
             logger.exception("Failed to update on-disk spectral data")
+            return None
     return to_write
 
 

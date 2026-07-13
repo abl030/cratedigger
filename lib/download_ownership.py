@@ -126,7 +126,7 @@ class DownloadOwnershipWriter:
                         plan_execution.cycle_count_snapshot,
                     )
                 return claimed
-            return transitions.finalize_request(
+            result = transitions.finalize_request(
                 db,
                 request_id,
                 transitions.RequestTransition.to_downloading(
@@ -134,6 +134,7 @@ class DownloadOwnershipWriter:
                     state_json=state_json,
                 ),
             )
+            return isinstance(result, transitions.TransitionApplied)
         finally:
             self._close_db(db)
 
@@ -141,7 +142,7 @@ class DownloadOwnershipWriter:
         """Guarded downloading -> wanted reset for verified no-acceptance."""
         db = self._open_db()
         try:
-            return transitions.finalize_request(
+            result = transitions.finalize_request(
                 db,
                 request_id,
                 transitions.RequestTransition.to_wanted(
@@ -149,6 +150,7 @@ class DownloadOwnershipWriter:
                     attempt_type="download",
                 ),
             )
+            return isinstance(result, transitions.TransitionApplied)
         finally:
             self._close_db(db)
 

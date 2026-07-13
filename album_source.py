@@ -262,13 +262,15 @@ class DatabaseSource:
         transition_kwargs: dict[str, object] = {}
         if search_filetype_override is not None:
             transition_kwargs["search_filetype_override"] = search_filetype_override
-        transitions.finalize_request(
-            db,
-            request_id,
-            transitions.RequestTransition.to_wanted_fields(
-                fields=transition_kwargs),
+        transitions.require_transition_applied(
+            transitions.finalize_request(
+                db,
+                request_id,
+                transitions.RequestTransition.to_wanted_fields(
+                    attempt_type="validation",
+                    fields=transition_kwargs),
+            )
         )
-        db.record_attempt(request_id, "validation")
 
         validation_result = dl.validation_result or bv_result.to_json()
 

@@ -7,6 +7,7 @@ content-addressed writers and the FK-chain readers.
 
 from __future__ import annotations
 
+import copy
 import os
 import shutil
 import tempfile
@@ -217,6 +218,34 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         self.assertEqual(loaded.measurement.min_bitrate_kbps, 121)
         self.assertTrue(loaded.measurement.verified_lossless)
         self.assertEqual(loaded.verified_lossless_proof, proof)
+
+    def test_current_backfill_cannot_relink_replaced_request(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="replaced",
+            current_evidence_id=77,
+        ))
+        frozen = copy.deepcopy(db.request(42))
+
+        result = backfill_current_evidence_from_album_info(
+            db,
+            request_id=42,
+            mb_release_id="mb-replaced",
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=2,
+                min_bitrate_kbps=121,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=127,
+                is_cbr=False,
+                album_path=self.root,
+                format="Opus",
+            ),
+        )
+
+        self.assertEqual(result.status, "stale_request")
+        self.assertEqual(db.request(42), frozen)
 
     def test_later_lossy_backfill_preserves_existing_true_source_proof(self):
         db = FakePipelineDB()

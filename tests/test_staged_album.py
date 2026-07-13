@@ -124,7 +124,7 @@ class TestStagedAlbum(unittest.TestCase):
                 self,
                 request_id: int,
                 current_path: str | None,
-            ) -> None:
+            ) -> bool:
                 raise RuntimeError("db boom")
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -144,6 +144,37 @@ class TestStagedAlbum(unittest.TestCase):
             self.assertTrue(os.path.exists(source_file))
             self.assertFalse(os.path.exists(os.path.join(dest, "track.mp3")))
 
+    def test_move_to_rolls_back_when_request_loses_download_ownership(self):
+        from lib.staged_album import StagedAlbum
+
+        class StaleDB:
+            def update_download_state_current_path(
+                self,
+                request_id: int,
+                current_path: str | None,
+            ) -> bool:
+                return False
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = os.path.join(tmpdir, "source")
+            os.makedirs(source)
+            source_file = os.path.join(source, "track.mp3")
+            with open(source_file, "w") as fp:
+                fp.write("audio")
+
+            dest = os.path.join(tmpdir, "staging", "Artist", "Album")
+            staged_album = StagedAlbum(current_path=source, request_id=42)
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "no longer owns downloading state",
+            ):
+                staged_album.move_to(dest, StaleDB())
+
+            self.assertEqual(staged_album.current_path, source)
+            self.assertTrue(os.path.exists(source_file))
+            self.assertFalse(os.path.exists(os.path.join(dest, "track.mp3")))
+
     def test_move_to_raises_explicit_error_when_rollback_move_fails(self):
         from lib.staged_album import StagedAlbum
 
@@ -152,7 +183,7 @@ class TestStagedAlbum(unittest.TestCase):
                 self,
                 request_id: int,
                 current_path: str | None,
-            ) -> None:
+            ) -> bool:
                 raise RuntimeError("db boom")
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -203,9 +234,10 @@ class TestStagedAlbum(unittest.TestCase):
                     self,
                     request_id: int,
                     current_path: str | None,
-                ) -> None:
+                ) -> bool:
                     nonlocal saw_source_during_persist
                     saw_source_during_persist = os.path.isdir(source)
+                    return True
 
             staged_album = StagedAlbum(current_path=source, request_id=42)
 

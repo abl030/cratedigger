@@ -305,6 +305,7 @@ def _run_dispatch_finalization_world(
         id=42,
         status="downloading",
         search_filetype_override="mp3",
+        active_download_state={"files": [], "filetype": "mp3"},
     ))
     cfg = CratediggerConfig(
         beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",

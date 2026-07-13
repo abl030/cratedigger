@@ -162,7 +162,7 @@ def _check_quality_gate_core(
 
         if decision == "requeue_upgrade":
             upgrade_override = QUALITY_UPGRADE_TIERS
-            finalize_request(
+            transitions.require_transition_applied(finalize_request(
                 db,
                 request_id,
                 transitions.RequestTransition.to_wanted(
@@ -170,7 +170,7 @@ def _check_quality_gate_core(
                     search_filetype_override=upgrade_override,
                     min_bitrate=min_br_kbps,
                 ),
-            )
+            ))
             usernames = extract_usernames(files)
             gate_br = compute_effective_override_bitrate(
                 min_br_kbps, spectral_br, spectral_grade) or min_br_kbps
@@ -195,7 +195,7 @@ def _check_quality_gate_core(
                 f"(searching {upgrade_override})")
         elif decision == "requeue_lossless":
             lossless_override = QUALITY_LOSSLESS
-            finalize_request(
+            transitions.require_transition_applied(finalize_request(
                 db,
                 request_id,
                 transitions.RequestTransition.to_wanted(
@@ -203,13 +203,13 @@ def _check_quality_gate_core(
                     search_filetype_override=lossless_override,
                     min_bitrate=min_br_kbps,
                 ),
-            )
+            ))
             logger.info(
                 f"QUALITY GATE: {label} "
                 f"min_bitrate={min_br_kbps}kbps CBR, not verified lossless — "
                 f"searching for lossless to verify")
         else:  # accept
-            finalize_request(
+            transitions.require_transition_applied(finalize_request(
                 db,
                 request_id,
                 transitions.RequestTransition.to_imported(
@@ -217,7 +217,7 @@ def _check_quality_gate_core(
                     min_bitrate=min_br_kbps,
                     search_filetype_override=None,  # done searching
                 ),
-            )
+            ))
             if current.verified_lossless:
                 logger.info(f"QUALITY GATE: {label} min_bitrate={min_br_kbps}kbps — quality OK")
             else:

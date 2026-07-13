@@ -13,6 +13,7 @@ Usage:
 import hashlib
 import logging
 import os
+import re
 import zlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -43,6 +44,53 @@ DASHBOARD_WANTED_TREND_WINDOWS: tuple[tuple[str, int], ...] = (
 # Operator-facing dashboard semantics: active downloads are still wanted
 # backlog, just in the acquisition sub-state.
 DASHBOARD_WANTED_BACKLOG_STATUSES: tuple[str, ...] = ("wanted", "downloading")
+
+# ``update_request_fields`` is deliberately a metadata-only compare-and-set
+# seam.  These columns either define the request's immutable identity, belong
+# to the typed lifecycle state machine, or are owned by a dedicated audit
+# writer.  Keeping the vocabulary here gives the production and in-memory DBs
+# one contract: callers cannot smuggle a status transition (including creation
+# of a frozen ``replaced`` row) through ``**extra``.
+REQUEST_METADATA_RESERVED_FIELDS: frozenset[str] = frozenset({
+    "id",
+    "status",
+    "active_download_state",
+    "mb_release_id",
+    "discogs_release_id",
+    "source",
+    "replaces_request_id",
+    "created_at",
+    "updated_at",
+    "rescued_at",
+    "prior_unfindable_category",
+})
+
+
+def validate_request_metadata_fields(fields: dict[str, Any]) -> None:
+    """Reject lifecycle columns and non-canonical SQL identifiers."""
+    reserved = sorted(set(fields) & REQUEST_METADATA_RESERVED_FIELDS)
+    if reserved:
+        raise ValueError(
+            "metadata CAS cannot mutate reserved lifecycle/identity fields: "
+            + ", ".join(reserved)
+        )
+    invalid = sorted(
+        key for key in fields
+        if re.fullmatch(r"[a-z_][a-z0-9_]*", key) is None
+    )
+    if invalid:
+        raise ValueError(
+            "metadata CAS field names must be lowercase SQL identifiers: "
+            + ", ".join(invalid)
+        )
+
+
+class ReplacedRequestMutationError(RuntimeError):
+    """Raised when a writer targets a frozen ``replaced`` request row."""
+
+    def __init__(self, request_id: int) -> None:
+        self.request_id = int(request_id)
+        super().__init__(f"request {request_id} is replaced and immutable")
 
 
 def _escape_like_pattern(value: str) -> str:

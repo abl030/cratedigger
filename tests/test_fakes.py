@@ -20,6 +20,7 @@ from lib.pipeline_db import (
     TerminalFailureClaim,
     TransferLedgerRow,
 )
+from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS
 from lib.quality import SpectralMeasurement, ValidationResult
 from tests.fakes import (
     FakeBeetsDB,
@@ -313,7 +314,7 @@ class TestFakePipelineDB(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="wanted"))
 
-        db.record_attempt(42, "validation")
+        db.record_attempt(42, "validation", expected_status="wanted")
 
         row = db.request(42)
         self.assertEqual(row["validation_attempts"], 1)
@@ -462,6 +463,91 @@ class TestFakePipelineDB(unittest.TestCase):
         row = db.request(42)
         self.assertEqual(row["current_spectral_grade"], "genuine")
         self.assertIsNone(row["current_spectral_bitrate"])
+
+    def test_empty_request_field_update_is_a_read_only_cas(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=41, status="wanted"))
+        db.seed_request(make_request_row(id=42, status="replaced"))
+        active_before = copy.deepcopy(db.request(41))
+        replaced_before = copy.deepcopy(db.request(42))
+
+        self.assertTrue(db.update_request_fields(41))
+        self.assertTrue(db.update_request_fields(
+            41, expected_status="wanted",
+        ))
+        self.assertFalse(db.update_request_fields(
+            41, expected_status="manual",
+        ))
+        self.assertFalse(db.update_request_fields(42))
+        self.assertFalse(db.update_request_fields(
+            42, expected_status="replaced",
+        ))
+        self.assertFalse(db.update_request_fields(999))
+        self.assertFalse(db.update_request_fields(
+            999, expected_status="wanted",
+        ))
+
+        self.assertEqual(db.request(41), active_before)
+        self.assertEqual(db.request(42), replaced_before)
+
+    def test_metadata_update_rejects_every_reserved_field(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=41, status="wanted"))
+        before = copy.deepcopy(db.request(41))
+
+        for field in sorted(REQUEST_METADATA_RESERVED_FIELDS):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "reserved lifecycle/identity fields",
+                ):
+                    db.update_request_fields(41, **{
+                        field: "replaced" if field == "status" else "smuggled",
+                    })
+                self.assertEqual(db.request(41), before)
+
+        with self.assertRaises(ValueError):
+            db.update_request_fields(41, status="manual")
+        self.assertEqual(db.request(41), before)
+
+    def test_metadata_writers_reject_malformed_and_lifecycle_fields(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=41, status="wanted"))
+        before = copy.deepcopy(db.request(41))
+
+        for writer in (
+            lambda: db.update_request_fields(
+                41, **{"reasoning, status": "smuggled"},
+            ),
+            lambda: db.update_status(
+                41, "imported", active_download_state="{}",
+            ),
+        ):
+            with self.subTest(writer=writer):
+                with self.assertRaises(ValueError):
+                    writer()
+                self.assertEqual(db.request(41), before)
+
+    def test_reset_writers_reject_noncanonical_metadata(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=41, status="downloading"))
+        before = copy.deepcopy(db.request(41))
+
+        with self.assertRaises(ValueError):
+            db.reset_to_wanted(41, reasoning="smuggled")
+        with self.assertRaises(ValueError):
+            db.reset_downloading_to_wanted(41, reasoning="smuggled")
+        self.assertEqual(db.request(41), before)
+
+    def test_empty_spectral_adapter_cannot_report_missing_or_replaced_success(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="replaced"))
+        before = copy.deepcopy(db.request(42))
+        empty = RequestSpectralStateUpdate()
+
+        self.assertFalse(db.update_spectral_state(42, empty))
+        self.assertFalse(db.update_spectral_state(999, empty))
+        self.assertEqual(db.request(42), before)
 
     def test_clear_on_disk_quality_fields_matches_real_db(self):
         """FakePipelineDB must mirror PipelineDB.clear_on_disk_quality_fields:
@@ -800,6 +886,39 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertEqual(row["search_attempts"], 0)
         self.assertIsNone(row["manual_reason"])
 
+    def test_wanted_resets_accept_explicit_previous_bitrate(self):
+        """Fake parity: explicit history wins over derived old-min capture."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="manual",
+            min_bitrate=320,
+            prev_min_bitrate=192,
+        ))
+        db.seed_request(make_request_row(
+            id=43,
+            status="downloading",
+            min_bitrate=245,
+            prev_min_bitrate=128,
+        ))
+
+        self.assertTrue(db.reset_to_wanted(
+            42,
+            expected_status="manual",
+            min_bitrate=224,
+            prev_min_bitrate=256,
+        ))
+        self.assertTrue(db.reset_downloading_to_wanted(
+            43,
+            min_bitrate=192,
+            prev_min_bitrate=None,
+        ))
+
+        self.assertEqual(db.request(42)["min_bitrate"], 224)
+        self.assertEqual(db.request(42)["prev_min_bitrate"], 256)
+        self.assertEqual(db.request(43)["min_bitrate"], 192)
+        self.assertIsNone(db.request(43)["prev_min_bitrate"])
+
 
 # ---------------------------------------------------------------------------
 # Field resolutions (migration 030) — fake parity
@@ -812,8 +931,16 @@ class TestFakePipelineDBFieldResolutions(unittest.TestCase):
     PipelineDB integration is exercised in ``tests/test_pipeline_db.py``.
     """
 
+    def setUp(self) -> None:
+        self.db = FakePipelineDB()
+        self.db.seed_request(make_request_row(
+            id=42,
+            status="wanted",
+            mb_release_id="field-resolution-parent",
+        ))
+
     def test_first_call_creates_row_with_attempts_one(self):
-        db = FakePipelineDB()
+        db = self.db
         db.record_field_resolution(
             request_id=42,
             field_name="release_group_year",
@@ -829,7 +956,7 @@ class TestFakePipelineDBFieldResolutions(unittest.TestCase):
         self.assertEqual(row["field_name"], "release_group_year")
 
     def test_re_upsert_increments_attempts_and_updates_status(self):
-        db = FakePipelineDB()
+        db = self.db
         db.record_field_resolution(
             request_id=42, field_name="release_group_year",
             status="unresolved_mirror_unavailable", reason_code="URLError",
@@ -847,7 +974,7 @@ class TestFakePipelineDBFieldResolutions(unittest.TestCase):
         self.assertEqual(len(db.field_resolutions), 1)
 
     def test_different_fields_get_distinct_rows(self):
-        db = FakePipelineDB()
+        db = self.db
         db.record_field_resolution(
             request_id=42, field_name="release_group_year",
             status="resolved", reason_code=None,
@@ -867,8 +994,30 @@ class TestFakePipelineDBFieldResolutions(unittest.TestCase):
         )
 
     def test_get_field_resolution_returns_none_when_absent(self):
-        db = FakePipelineDB()
-        self.assertIsNone(db.get_field_resolution(42, "release_group_year"))
+        self.assertIsNone(
+            self.db.get_field_resolution(42, "release_group_year"),
+        )
+
+    def test_missing_or_replaced_parent_rejects_write(self):
+        self.db.seed_request(make_request_row(
+            id=43,
+            status="replaced",
+            mb_release_id="field-resolution-frozen-parent",
+        ))
+
+        self.assertFalse(self.db.record_field_resolution(
+            request_id=999,
+            field_name="release_group_year",
+            status="resolved",
+            reason_code=None,
+        ))
+        self.assertFalse(self.db.record_field_resolution(
+            request_id=43,
+            field_name="release_group_year",
+            status="resolved",
+            reason_code=None,
+        ))
+        self.assertEqual(self.db.field_resolutions, {})
 
 
 # ---------------------------------------------------------------------------
@@ -3474,6 +3623,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
 
     def test_tracks_round_trip_and_count(self):
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
         db.set_tracks(1, [
             {"track_number": 2, "title": "Second"},
             {"track_number": 1, "title": "First"},
@@ -3490,6 +3640,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         the upstream payload (e.g. discogs adapter passes per-track
         artists directly)."""
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
         db.set_tracks(1, [
             {"track_number": 1, "title": "T1", "track_artist": "Artist X"},
             {"track_number": 2, "title": "T2", "track_artist": None},
@@ -3505,6 +3656,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         order — so the resolver's per-track output, which sorts the
         same way, lines up."""
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
         db.set_tracks(1, [
             {"track_number": 2, "title": "Second", "disc_number": 1},
             {"track_number": 1, "title": "First", "disc_number": 1},
@@ -3521,6 +3673,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         """Fewer entries: trailing rows keep existing value. More
         entries: extras silently dropped. Same shape as real DB."""
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
         db.set_tracks(1, [
             {"track_number": 1, "title": "T1", "track_artist": "Pre"},
             {"track_number": 2, "title": "T2", "track_artist": "Pre"},
@@ -3541,6 +3694,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
 
     def test_update_track_artists_empty_input_is_noop(self):
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
         db.set_tracks(1, [
             {"track_number": 1, "title": "T1", "track_artist": "Pre"},
         ])
@@ -5827,24 +5981,6 @@ class TestFakeRequestUniqueMbReleaseId(unittest.TestCase):
         db.seed_request(make_request_row(id=7, mb_release_id="mbid-seeded"))
         with self.assertRaises(psycopg2.errors.UniqueViolation):
             db.add_request("A", "B", "request", mb_release_id="mbid-seeded")
-
-    def test_update_request_fields_rejects_duplicate_mb_release_id(self):
-        # Production's UPDATE hits the same UNIQUE as the INSERT.
-        import psycopg2.errors
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=1, mb_release_id="mbid-1"))
-        db.seed_request(make_request_row(id=2, mb_release_id="mbid-2"))
-        with self.assertRaises(psycopg2.errors.UniqueViolation):
-            db.update_request_fields(2, mb_release_id="mbid-1")
-        self.assertEqual(db.request(2)["mb_release_id"], "mbid-2")
-
-    def test_update_request_fields_setting_own_mbid_is_a_noop(self):
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=1, mb_release_id="mbid-1"))
-        db.update_request_fields(1, mb_release_id="mbid-1", status="manual")
-        self.assertEqual(db.request(1)["status"], "manual")
-
 
 class TestFakeDownloadLogIdMint(unittest.TestCase):
     """Minted download_log ids mirror production's sequence-backed PK.
