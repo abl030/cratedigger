@@ -168,13 +168,6 @@ class CratediggerConfig:
     peer_cache_redis_connect_timeout_ms: int = 200
     peer_cache_redis_operation_timeout_ms: int = 100
 
-    # --- Meelo ---
-    meelo_url: Optional[str] = None
-    meelo_username: Optional[str] = None
-    meelo_password: Optional[str] = None
-    meelo_username_file: str = ""
-    meelo_password_file: str = ""
-
     # --- Plex ---
     plex_url: Optional[str] = None
     plex_token: Optional[str] = None
@@ -223,12 +216,6 @@ class CratediggerConfig:
 
     def resolved_slskd_api_key(self) -> str:
         return self._resolve_secret(self.slskd_api_key, self.slskd_api_key_file) or ""
-
-    def resolved_meelo_username(self) -> Optional[str]:
-        return self._resolve_secret(self.meelo_username, self.meelo_username_file)
-
-    def resolved_meelo_password(self) -> Optional[str]:
-        return self._resolve_secret(self.meelo_password, self.meelo_password_file)
 
     def resolved_plex_token(self) -> Optional[str]:
         return self._resolve_secret(self.plex_token, self.plex_token_file)
@@ -352,12 +339,6 @@ class CratediggerConfig:
             peer_cache_speed_ttl_seconds=max(1, getint("Peer Cache", "speed_ttl_seconds", 24 * 60 * 60)),
             peer_cache_redis_connect_timeout_ms=max(1, getint("Peer Cache", "redis_connect_timeout_ms", 200)),
             peer_cache_redis_operation_timeout_ms=max(1, getint("Peer Cache", "redis_operation_timeout_ms", 100)),
-            # Meelo
-            meelo_url=get("Meelo", "url") or None,
-            meelo_username=get("Meelo", "username") or None,
-            meelo_password=get("Meelo", "password") or None,
-            meelo_username_file=get("Meelo", "username_file"),
-            meelo_password_file=get("Meelo", "password_file"),
             # Plex
             plex_url=get("Plex", "url") or None,
             plex_token=get("Plex", "token") or None,

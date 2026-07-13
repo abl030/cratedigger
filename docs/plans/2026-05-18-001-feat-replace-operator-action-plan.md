@@ -9,7 +9,7 @@ source: docs/brainstorms/2026-05-18-replace-operator-action-requirements.md
 
 ## Summary
 
-Add a first-class "Replace" operator action — a service method exposed identically by `pipeline-cli replace` and `POST /api/pipeline/<request_id>/replace`, plus a shared web UI picker on the Browse, Pipeline, and Wrong Matches tabs. Replace supersedes an existing `album_requests` row (status → `replaced`, otherwise frozen) with a new row carrying the operator-selected target MBID from the same release group. The work also drops the long-dead lidarr columns, adds the schema for the supersede pattern, and enshrines two new CLAUDE.md critical invariants ("pipeline self-heals", "don't duplicate convergence"). Pet Grief request 4194 is the dogfood case for success.
+Add a first-class "Replace" operator action — a service method exposed identically by `pipeline-cli replace` and `POST /api/pipeline/<request_id>/replace`, plus a shared web UI picker on the Browse, Pipeline, and Wrong Matches tabs. Replace supersedes an existing `album_requests` row (status → `replaced`, otherwise frozen) with a new row carrying the operator-selected target MBID from the same release group. The work also drops obsolete upstream-bridge columns, adds the schema for the supersede pattern, and enshrines two new CLAUDE.md critical invariants ("pipeline self-heals", "don't duplicate convergence"). Pet Grief request 4194 is the dogfood case for success.
 
 ---
 
@@ -75,7 +75,7 @@ The supersede transition for a single Replace invocation:
         ┌─────────────────────┴─────────────────────┐
         │  Phase 5: post-cleanup                    │
         │  - SearchPlanService.generate(new_id)     │
-        │  - trigger_meelo / plex / jellyfin scan   │
+        │  - trigger plex / jellyfin scan           │
         │  - release advisory lock                  │
         └─────────────────────┬─────────────────────┘
                               │
@@ -96,7 +96,7 @@ New files this plan creates:
 lib/
   mbid_replace_service.py             [U4]
 migrations/
-  022_drop_lidarr_columns.sql         [U1]
+  migration 022                         [U1]
   023_add_replace_supersede_schema.sql [U2]
 tests/
   test_mbid_replace_service.py        [U4]
@@ -162,27 +162,27 @@ web/routes/pipeline.py                [U6, U10]
 
 ## Implementation Units
 
-### U1. Migration 022 — drop lidarr columns
+### U1. Migration 022 — drop obsolete bridge columns
 
-**Goal:** Remove the long-dead `lidarr_album_id` and `lidarr_artist_id` columns from `album_requests` and clean up test infrastructure references.
+**Goal:** Remove the two long-dead upstream-bridge columns from `album_requests` and clean up test infrastructure references.
 
 **Requirements:** R27.
 
 **Dependencies:** None.
 
 **Files:**
-- `migrations/022_drop_lidarr_columns.sql` (new)
-- `tests/helpers.py` (modify — strip `lidarr_album_id` / `lidarr_artist_id` from `make_request_row` defaults at lines 72-73)
-- `tests/fakes.py` (modify — strip `lidarr_album_id` / `lidarr_artist_id` at lines 2013-2014; verified present during review)
-- `scripts/migrate_to_postgres.py` (DELETED in this PR — historical one-shot SQLite→Postgres importer ran 2026-03-25 and was the only reference to ``lidarr_album_id`` / ``lidarr_artist_id`` outside the dropped schema; no production code paths reach it)
+- migration 022 (new)
+- `tests/helpers.py` (modify — strip the obsolete bridge-field defaults)
+- `tests/fakes.py` (modify — strip the same obsolete fields; verified present during review)
+- `scripts/migrate_to_postgres.py` (DELETED in this PR — historical one-shot SQLite→Postgres importer ran 2026-03-25 and was the only non-schema reference to the dropped fields; no production code paths reach it)
 
-**Approach:** Plain `ALTER TABLE album_requests DROP COLUMN lidarr_album_id, DROP COLUMN lidarr_artist_id;` per existing migration style. No defensive `IF EXISTS`. No FK considerations (verified: only `001_initial.sql` declares them).
+**Approach:** Plain `ALTER TABLE album_requests DROP COLUMN ...` statements per existing migration style. No defensive `IF EXISTS`. No FK considerations (verified: only `001_initial.sql` declares them).
 
 **Patterns to follow:** `migrations/021_evidence_canonical_rekey.sql` for the header comment style and direct-DDL style.
 
 **Test scenarios:**
-- `tests/test_migrator.py::TestMigrator` applies the migration; assert `SELECT column_name FROM information_schema.columns WHERE table_name='album_requests' AND column_name IN ('lidarr_album_id', 'lidarr_artist_id')` returns 0 rows after migration 022.
-- Grep `tests/` for any remaining `lidarr_` reference before commit — should be zero.
+- `tests/test_migrator.py::TestMigrator` applies the migration; assert the retired bridge columns are absent after migration 022.
+- Grep `tests/` for remaining retired-field references before commit — only the migration contract test may name them.
 
 **Verification:** Migration applies cleanly via `nix-shell --run "python3 -m unittest tests.test_migrator -v"`; no test file references the dropped columns.
 
@@ -340,7 +340,7 @@ Module-level outcome constants matching `lib/search_plan_service.py:74-86` style
     - If `old_status != 'downloading'`: compute `stage_to_ai_path(artist=old_artist, title=old_title, staging_dir=cfg.staging_directory, request_id=request_id, auto_import=True)` and `auto_import=False`. `shutil.rmtree` each that exists. `FileNotFoundError` → silent. Other → warning.
 10. **Phase 5 — post-cleanup**:
     - `search_plan_service.generate_for_request(new_request_id, regenerate=False)`. Errors → warning.
-    - `trigger_meelo_scan(cfg)`, `trigger_plex_scan(cfg, imported_path=old_imported_path)`, `trigger_jellyfin_scan(cfg)`. All already best-effort internally.
+    - `trigger_plex_scan(cfg, imported_path=old_imported_path)` and `trigger_jellyfin_scan(cfg)`. Both are already best-effort internally.
 11. Return `ReplaceResult(outcome=RESULT_REPLACED, request_id=request_id, new_request_id=new_request_id, warnings=tuple(warnings))`.
 
 **Patterns to follow:**
@@ -654,7 +654,7 @@ For the add-flow warning: when the response has `current_status='replaced'`, fet
 - Construct a `tmp_path` filesystem with mock `/Incoming` staging folders matching `stage_to_ai_path` output for the seeded artist/title.
 - Construct an `MbidReplaceService` with the FakePipelineDB, a `FakeSlskdAPI`, a mocked `beets_db_factory` (returns object whose `locate` returns `kind='exact'` for the old MBID), and a mocked MB lookup function returning the target release in the same release group.
 - Patch `subprocess.run` for the `beet remove` calls (used by `remove_album_by_selectors`).
-- Patch the three rescan triggers to assert they're called.
+- Patch the two rescan triggers to assert they're called.
 - Run `replace_request_mbid(4194, target_mb_release_id='18056805-...')` and assert the full post-state.
 
 Assertions for AE4:
@@ -665,7 +665,7 @@ Assertions for AE4:
 - Old request's `download_log` rows still present; still reference 4194.
 - Old request's staging folders no longer exist on tmp_path.
 - Beets removal subprocess invoked for the old MBID.
-- All three rescan triggers called.
+- Both rescan triggers called.
 - SearchPlanService called for the new request id.
 
 **Patterns to follow:**
@@ -725,7 +725,7 @@ In `docs/advisory-locks.md`, append a row to the IMPORT-namespace call-site tabl
 - **MB-mirror 301 redirect on merged MBIDs is the central use case.** Mitigation: `web/mb.py::get_release` is the existing helper and is already used by the add flow with `fresh=True`; Replace reuses the same pattern. The R10 outcome explicitly handles 301-to-different-MBID via re-check against canonical.
 - **`beet remove -d` is the Palo Santo data-loss surface.** Mitigation: Replace composes `lib/release_cleanup.py::remove_and_reset_release` rather than hand-rolling. Same primitive ban-source uses.
 - **slskd transfers are intentionally orphaned by Replace.** Replace does not cancel in-flight transfers or modify `active_download_state`; the orphan inventory waits for general convergence at issue #278. Trade-off: small inventory of orphan transfers + landed files between now and #278's ship. Operator-rare invocation keeps inventory small.
-- **Migration unit blocks app startup on failure.** Mitigation: pg_dump backup before deploy; run `nix-shell --run "python3 -m unittest tests.test_migrator -v"` locally first; lidarr drop has no FKs; 023 only adds a column (low-risk).
+- **Migration unit blocks app startup on failure.** Mitigation: pg_dump backup before deploy; run `nix-shell --run "python3 -m unittest tests.test_migrator -v"` locally first; the bridge-column drop has no FKs; 023 only adds a column (low-risk).
 - **Race window: Replace fires between Phase 2 search submission and `set_downloading_if_plan_current`.** Mitigation: verified during review — `set_downloading_if_plan_current` already includes `status = 'wanted'` in its WHERE clause (`lib/pipeline_db.py:2347`), so a row that Replace has flipped to `status='replaced'` cannot be transitioned to `downloading` by a stale cycle. No code change needed.
 - **Picker→POST TOCTOU window** (operator opens picker, source row's status drifts between fetch and POST). Accepted trade-off: Replace acts on `request_id`, not on a snapshot of status at picker time. For single-operator homelab use this is operator-rare and self-correcting (Phase 0 step 1a's already-replaced early-exit + lock contention + collision branches together cover the realistic drift paths). No idempotency token needed; advisory lock + plan-aware downstream serialization handle the concurrency that matters.
 - **WMCL contention during wrong-matches cleanup.** Accepted trade-off: if a concurrent classifier-gated `cleanup_wrong_match` is mid-flight on a source the operator-authority `delete_wrong_match_group` wants, the latter returns `OUTCOME_SKIPPED_LOCKED` per source. Replace's Phase 4 surfaces this as a warning. After Replace completes, R31's filter hides the old request's wrong-matches rows from the default Wrong Matches tab view; operator can flip the "show replaced" toggle to find leftover folders if needed. The orphan folder is harmless under self-heal but worth knowing about.
@@ -740,10 +740,10 @@ In `docs/advisory-locks.md`, append a row to the IMPORT-namespace call-site tabl
 4. On doc2: `sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh`.
 5. Verify migrations applied: `ssh doc2 'pipeline-cli query "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 5"'` — expect 022 and 023 present.
 6. Verify cratedigger-web restarted: `ssh doc2 'sudo systemctl is-active cratedigger-web'`.
-7. Verify config rendering: `ssh doc2 'grep -c lidarr /var/lib/cratedigger/config.ini || true'` — should be 0 references.
+7. Verify config rendering contains no retired bridge settings.
 8. **Dogfood Pet Grief**: open `music.ablz.au` → Pipeline tab → find request 4194 → click Replace → pick `18056805-...` → confirm.
 9. Follow logs: `ssh doc2 'sudo journalctl -u cratedigger -u cratedigger-web -u cratedigger-importer -f'`.
-10. Within 5 minutes: verify new request appears (e.g., 4995) with `status='downloading'`, then `imported`. Verify Meelo and Plex show the album.
+10. Within 5 minutes: verify new request appears (e.g., 4995) with `status='downloading'`, then `imported`. Verify Plex shows the album.
 11. Confirm: `ssh doc2 'pipeline-cli query "SELECT id, status, mb_release_id, replaces_request_id FROM album_requests WHERE id IN (4194, <new_id>)"'` — request 4194 has `status='replaced'`, otherwise unchanged; new row has correct identity and lineage.
 
 ---
@@ -752,10 +752,10 @@ In `docs/advisory-locks.md`, append a row to the IMPORT-namespace call-site tabl
 
 (See origin: `docs/brainstorms/2026-05-18-replace-operator-action-requirements.md` § Success Criteria.)
 
-- Pet Grief 4194 self-heals end-to-end via the new action (operator click → supersede → search → download → import → Meelo/Plex visible). Request 4194 stays `status='replaced'` with row otherwise unchanged.
+- Pet Grief 4194 self-heals end-to-end via the new action (operator click → supersede → search → download → import → Plex visible). Request 4194 stays `status='replaced'` with row otherwise unchanged.
 - Logs show the complete trace: identity transition → fs cleanup → search-plan regenerate → search → download → validation success → import → rescan. No manual SQL or filesystem intervention.
 - All service-test outcome branches green (U4). The integration slice (U11) covers AE4.
-- No `album_requests.lidarr_*` columns in the schema after deploy.
+- No obsolete upstream-bridge columns in the schema after deploy.
 - CLAUDE.md contains both new invariants + rule #1 exception (U12).
 - `tests/test_web_server.py::TestRouteContractAudit` includes both new routes (U6).
 

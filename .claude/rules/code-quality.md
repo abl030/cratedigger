@@ -303,7 +303,7 @@ Four categories of tests. Each has different rules for what's acceptable. **All 
 - Implementation assertions (call args, payload shape) are **acceptable and encouraged** here.
 - Examples: `--force` flag forwarded, `--override-min-bitrate` derived correctly, route returns required fields.
 - These are legitimate tests — do not delete them to satisfy an "assert behavior not implementation" rule.
-- For dispatch tests, use `patch_dispatch_externals()` from `tests/helpers.py` — it patches the 6 external edges (`sp.run`, `_cleanup_staged_dir`, `trigger_meelo_scan`, `trigger_plex_scan`, `trigger_jellyfin_scan`, `cleanup_disambiguation_orphans`) and yields a `SimpleNamespace` with mock references. Add your own test-specific patches inside the `with` block.
+- For dispatch tests, use `patch_dispatch_externals()` from `tests/helpers.py` — it patches the 5 external edges (`sp.run`, `_cleanup_staged_dir`, `trigger_plex_scan`, `trigger_jellyfin_scan`, `cleanup_disambiguation_orphans`) and yields a `SimpleNamespace` with mock references. Add your own test-specific patches inside the `with` block.
 
 ### 3. Orchestration tests
 - Must assert **domain outcomes**, not only helper call shapes.
@@ -315,7 +315,7 @@ Four categories of tests. Each has different rules for what's acceptable. **All 
   - attempt counters incremented (`row["validation_attempts"]`)
   - `validation_result` / `import_result` preserved
   - filesystem side effects (cleanup, staging)
-- Mocking is allowed for external edges (subprocess, meelo, plex), but the assertion target must be domain state.
+- Mocking is allowed for external edges (subprocess and media-server clients), but the assertion target must be domain state.
 - **Use `FakePipelineDB` from `tests/fakes/` for stateful collaborators instead of MagicMock.** It records request rows, download_logs, denylist entries, cooldowns, status history, spectral state updates. See `tests/test_fakes.py` for the full API.
 - **Use `FakeSlskdAPI` from `tests/fakes/` for slskd interactions.** Stateful `transfers` and `users` fakes with `add_transfer()`, `queue_download_snapshots()`, `set_directory()`, `set_directory_error()`, configurable errors, and call recording.
 - Use `make_ctx_with_fake_db(fake_db)` from `tests/helpers.py` to wire `FakePipelineDB` into a `CratediggerContext`.

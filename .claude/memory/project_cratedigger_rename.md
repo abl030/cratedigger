@@ -6,7 +6,7 @@ originSessionId: a018bdd2-f59a-49b3-90f9-f7edc2682a61
 ---
 Rename landed 2026-04-20. GH issue abl030/cratedigger#134 tracks the full scope.
 
-**Why:** The code had long since diverged from mrusse/soularr — no longer a Lidarr bridge, the pipeline DB is the source of truth, "cratedigger" fits what it actually does. Also: the repo's old About blurb still said "A Python script that connects Lidarr with Soulseek!" with a non-ours homepage `soularr.net`.
+**Why:** The code had long since diverged from mrusse/soularr — no longer an upstream media-manager bridge, the pipeline DB is the source of truth, and "cratedigger" fits what it actually does. The old About blurb and non-project homepage were retired with the rename.
 
 **How to apply:**
 - GH repo is now `abl030/cratedigger` (old URL auto-redirects).

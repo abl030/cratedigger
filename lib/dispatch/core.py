@@ -34,7 +34,7 @@ from lib.quality import (AlbumQualityEvidenceDecisionFacts, DownloadInfo,
                          rejection_backfill_override)
 from lib.quality_evidence import (audit_v0_probe_from_metric,
                                   legacy_current_lossless_v0_probe_from_request)
-from lib.util import cleanup_disambiguation_orphans, trigger_meelo_clean
+from lib.util import cleanup_disambiguation_orphans
 
 from lib.dispatch.types import (DispatchOutcome, FORCE_MANUAL_SCENARIOS,
                                 ImportAttemptResult, ImportOneRun, QualityGateFn)
@@ -103,7 +103,6 @@ def dispatch_import_core(
     Used by the auto-import flow in ``lib.download`` and by
     ``dispatch_import_from_db()`` (force/manual import).
     """
-    from lib.util import trigger_meelo_scan as _trigger_meelo
     from lib.util import trigger_plex_scan as _trigger_plex
     from lib.util import trigger_jellyfin_scan as _trigger_jellyfin
 
@@ -765,7 +764,6 @@ def dispatch_import_core(
                         quality_ranks=cfg.quality_ranks if cfg is not None else None,
                     )
                 if action.trigger_notifiers and cfg is not None:
-                    _trigger_meelo(cfg)
                     # Capture the album's pre-upgrade Plex addedAt BEFORE the
                     # refresh re-stamps it, so the reconciler (5-min cycle) can
                     # restore it and keep upgrades out of "Recently Added"
@@ -811,12 +809,10 @@ def dispatch_import_core(
                     # disposable by design.
                     _cleanup_staged_dir(path)
                 if action.mark_done and ir.postflight.disambiguated and ir.postflight.imported_path:
-                    removed = cleanup_disambiguation_orphans(
+                    cleanup_disambiguation_orphans(
                         ir.postflight.imported_path,
                         beets_directory=cfg.beets_directory if cfg is not None else "",
                     )
-                    if removed and cfg is not None:
-                        trigger_meelo_clean(cfg)
         except sp.TimeoutExpired:
             logger.error(f"{mode} TIMEOUT: {label}")
             _record_rejection_and_maybe_requeue(

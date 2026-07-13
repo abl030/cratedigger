@@ -397,11 +397,6 @@
     redis_connect_timeout_ms = ${toString cfg.peerCache.redisConnectTimeoutMs}
     redis_operation_timeout_ms = ${toString cfg.peerCache.redisOperationTimeoutMs}
 
-    [Meelo]
-    url = ${cfg.notifiers.meelo.url}
-    username_file = ${toString cfg.notifiers.meelo.usernameFile}
-    password_file = ${toString cfg.notifiers.meelo.passwordFile}
-
     [Plex]
     url = ${cfg.notifiers.plex.url}
     token_file = ${toString cfg.notifiers.plex.tokenFile}
@@ -424,7 +419,7 @@
   # embeds any plaintext secrets (issue #117 — they're *File paths now), there's
   # no chmod dance, no sed substitution, and no group-ownership hack. The
   # secrets themselves still need to be readable by cfg.user at whatever paths
-  # slskd.apiKeyFile / notifiers.*.{username,password,token}File point to.
+  # slskd.apiKeyFile / notifiers.*.tokenFile point to.
   preStartScript = pkgs.writeShellScript "cratedigger-prestart" ''
     set -euo pipefail
     config_dir="${cfg.stateDir}"
@@ -879,8 +874,8 @@ in {
             type = types.int;
             default = 300;
             description = ''
-              fetchart minwidth. Load-bearing: art under ~2KB renders as
-              black boxes in Meelo — 300px is the observed floor.
+              fetchart minwidth. Reject unusably small embedded artwork;
+              300px is the collection's established quality floor.
             '';
           };
         };
@@ -1033,22 +1028,6 @@ in {
     # by that user too, otherwise notifier scans silently no-op after
     # CLI-triggered imports (the import itself still succeeds).
     notifiers = {
-      meelo = {
-        enable = mkEnableOption "Meelo post-import scanner notifier";
-        url = mkOption {
-          type = types.str;
-          default = "";
-          example = "https://meelo.example.com";
-        };
-        usernameFile = mkOption {
-          type = types.nullOr types.path;
-          default = null;
-        };
-        passwordFile = mkOption {
-          type = types.nullOr types.path;
-          default = null;
-        };
-      };
       plex = {
         enable = mkEnableOption "Plex post-import scanner notifier";
         url = mkOption {
@@ -1331,10 +1310,6 @@ in {
         message = "services.cratedigger.discogs.apiBase must be an origin URL (scheme://host[:port]) when set, e.g. https://discogs.ablz.au.";
       }
       {
-        assertion = !cfg.notifiers.meelo.enable || (cfg.notifiers.meelo.usernameFile != null && cfg.notifiers.meelo.passwordFile != null && cfg.notifiers.meelo.url != "");
-        message = "services.cratedigger.notifiers.meelo: enable requires url, usernameFile, and passwordFile";
-      }
-      {
         assertion = !cfg.notifiers.plex.enable || (cfg.notifiers.plex.tokenFile != null && cfg.notifiers.plex.url != "");
         message = "services.cratedigger.notifiers.plex: enable requires url and tokenFile";
       }
@@ -1364,7 +1339,7 @@ in {
     # Since config.ini no longer embeds plaintext secrets (issue #117), the
     # state directory and the rendered config can both be world-readable. The
     # secrets themselves live at operator-chosen paths (see slskd.apiKeyFile
-    # / notifiers.*.{username,password,token}File) and retain their own
+    # / notifiers.*.tokenFile) and retain their own
     # restrictive modes from whatever provisioned them (sops-nix, agenix, etc).
     systemd.tmpfiles.rules =
       [

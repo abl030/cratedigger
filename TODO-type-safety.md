@@ -33,4 +33,4 @@ Audited all tests. Fixed `test_download.py` (2 tests passing dicts → `AlbumRec
 ### 5. ~~Stale comments~~ ✅ DONE
 
 - Fixed "bridge during migration" → removed from cratedigger.py
-- Fixed "Lidarr bridge" → clarified as legacy columns in pipeline_db.py
+- Removed the obsolete upstream bridge and clarified legacy columns in pipeline_db.py

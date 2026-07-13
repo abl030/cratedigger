@@ -52,6 +52,17 @@ DOCS_DIR = REPO_ROOT / "docs"
 MODULE_NIX = REPO_ROOT / "nix" / "module.nix"
 BEETS_PRIMER = DOCS_DIR / "beets-primer.md"
 DEBUGGING_CLI = DOCS_DIR / "debugging-cli.md"
+RETIRED_INTEGRATION_TERMS = ("mee" + "lo", "lid" + "arr")
+
+
+def _retired_integration_counts(text: str) -> dict[str, int]:
+    """Count retired integration names without preserving them as literals."""
+    lowered = text.lower()
+    return {
+        term: lowered.count(term)
+        for term in RETIRED_INTEGRATION_TERMS
+        if term in lowered
+    }
 
 
 class TestReferenceScannerKnownBadCases(unittest.TestCase):
@@ -302,6 +313,52 @@ def _all_missing_call_references(
             scope=scope,
         ))
     return sorted(missing)
+
+
+class TestRetiredIntegrationReferences(unittest.TestCase):
+    """Retired integrations stay absent outside immutable schema history."""
+
+    def test_scanner_flags_a_synthetic_reference(self) -> None:
+        term = RETIRED_INTEGRATION_TERMS[0]
+        self.assertEqual(
+            _retired_integration_counts(f"obsolete notifier: {term}"),
+            {term: 1},
+        )
+
+    def test_current_tree_has_only_immutable_schema_mentions(self) -> None:
+        bridge_term = RETIRED_INTEGRATION_TERMS[1]
+        expected = {
+            Path("migrations/001_initial.sql"): {bridge_term: 3},
+            Path("migrations") / f"022_drop_{bridge_term}_columns.sql": {
+                bridge_term: 7,
+            },
+            Path("tests/test_migrator.py"): {bridge_term: 6},
+        }
+        tracked = subprocess.check_output(
+            ["git", "ls-files", "-z"],
+            cwd=REPO_ROOT,
+        ).decode().split("\0")
+        actual: dict[Path, dict[str, int]] = {}
+        for relative in filter(None, tracked):
+            relative_path = Path(relative)
+            path = REPO_ROOT / relative_path
+            if not path.is_file():
+                continue
+            text = relative + "\n" + path.read_text(
+                encoding="utf-8",
+                errors="ignore",
+            )
+            counts = _retired_integration_counts(text)
+            if counts:
+                actual[relative_path] = counts
+
+        self.assertEqual(
+            actual,
+            expected,
+            "Retired integration reference escaped immutable migration "
+            "history; remove the reference or update the exact historical "
+            "contract deliberately.",
+        )
 
 
 class TestLivingCodeReferences(unittest.TestCase):
@@ -741,9 +798,6 @@ OPTIONS_WITHOUT_DESCRIPTION_OK: frozenset[str] = frozenset({
     "redis.port",                                 # TODO: document
     "web.port",                                   # TODO: document
     "web.redis.port",                              # TODO: document
-    "notifiers.meelo.url",                        # TODO: document
-    "notifiers.meelo.usernameFile",               # TODO: document
-    "notifiers.meelo.passwordFile",               # TODO: document
     "notifiers.plex.url",                         # TODO: document
     "notifiers.plex.tokenFile",                   # TODO: document
     "notifiers.jellyfin.url",                     # TODO: document

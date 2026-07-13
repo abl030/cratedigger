@@ -158,7 +158,7 @@ A request can be `wanted` while intentionally skipped for a few hours: retry-wor
 | Pipeline DB schema + audit blobs | [docs/pipeline-db-schema.md](docs/pipeline-db-schema.md) |
 | Debugging a decision (`pipeline-cli show/quality/debug-download`) | [docs/debugging-cli.md](docs/debugging-cli.md) |
 | Web UI internals + dev server | [docs/webui-primer.md](docs/webui-primer.md), [docs/web-dev-server.md](docs/web-dev-server.md) |
-| Post-import notifiers (Meelo / Plex / Jellyfin) | [docs/meelo-primer.md](docs/meelo-primer.md), [docs/plex-primer.md](docs/plex-primer.md), [docs/jellyfin-primer.md](docs/jellyfin-primer.md) |
+| Post-import notifiers (Plex / Jellyfin) | [docs/plex-primer.md](docs/plex-primer.md), [docs/jellyfin-primer.md](docs/jellyfin-primer.md) |
 
 ## Development
 

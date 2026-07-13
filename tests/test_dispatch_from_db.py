@@ -232,7 +232,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             "db": db,
             "path": tmpdir,
             "mock_gate": mock_gate,
-            "mock_meelo": ext.meelo,
             "mock_jellyfin": ext.jellyfin,
             "mock_cleanup": ext.cleanup,
         }
@@ -255,7 +254,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             with self.subTest(force=force):
                 r = self._dispatch(force=force)
                 r["mock_gate"].assert_called_once()
-                r["mock_meelo"].assert_called_once()
                 r["mock_jellyfin"].assert_called_once()
 
     def test_no_double_download_log(self):

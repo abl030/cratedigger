@@ -82,7 +82,6 @@ from lib.release_cleanup import ReleaseCleanupDB, remove_and_reset_release
 from lib.search_plan_service import SearchPlanDB, SearchPlanService
 from lib.util import (
     trigger_jellyfin_scan,
-    trigger_meelo_scan,
     trigger_plex_scan,
 )
 from lib.wrong_match_delete_service import (
@@ -271,7 +270,7 @@ class MbidReplaceService:
            - wrong-matches group delete
            - staging folder rmtree (skipped when old was downloading)
         5. Post-cleanup (advisory lock RELEASED first): regenerate
-           search plan for the new request, trigger Meelo / Plex /
+           search plan for the new request, trigger Plex /
            Jellyfin rescans. The lock is dropped before these run
            because rescans each carry their own ~10s timeout and the
            new request has ``active_plan_id=NULL`` until SearchPlanService
@@ -948,12 +947,6 @@ class MbidReplaceService:
                 f"{new_request_id}: {type(exc).__name__}: {exc}"
             )
 
-        try:
-            trigger_meelo_scan(self.config)
-        except Exception as exc:  # noqa: BLE001
-            warnings.append(
-                f"meelo rescan failed: {type(exc).__name__}: {exc}"
-            )
         try:
             trigger_plex_scan(
                 self.config, imported_path=old_imported_path

@@ -1,7 +1,7 @@
 """Integration slice tests — real code paths with minimal patching.
 
 These exercise real orchestration flows end-to-end, patching only external
-edges: subprocess (sp.run), filesystem cleanup, network calls (meelo/plex/jellyfin),
+edges: subprocess (sp.run), filesystem cleanup, network calls (Plex/Jellyfin),
 and BeetsDB (requires real beets SQLite DB on disk).
 
 The key difference from unit/orchestration tests is that parse_import_result
@@ -488,7 +488,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
     """Integration slice: dispatch_import_core → real parse_import_result
     → real _check_quality_gate_core → domain state assertions.
 
-    Patches only: sp.run, cleanup, meelo/plex, BeetsDB.
+    Patches only: sp.run, cleanup, Plex, BeetsDB.
     Runs for real: parse_import_result, dispatch_action, _do_mark_done,
     _check_quality_gate_core, quality_gate_decision, apply_transition.
     """
@@ -9421,8 +9421,6 @@ class TestReplaceFullPath(unittest.TestCase):
                 selector_failures=(),
             )),
         ) as mock_remove, patch(
-            "lib.mbid_replace_service.trigger_meelo_scan", MagicMock(),
-        ) as mock_meelo, patch(
             "lib.mbid_replace_service.trigger_plex_scan", MagicMock(),
         ) as mock_plex, patch(
             "lib.mbid_replace_service.trigger_jellyfin_scan", MagicMock(),
@@ -9439,7 +9437,7 @@ class TestReplaceFullPath(unittest.TestCase):
             )
         return db, result, tmpdir, plan_svc, {
             "remove": mock_remove,
-            "meelo": mock_meelo, "plex": mock_plex,
+            "plex": mock_plex,
             "jellyfin": mock_jellyfin,
             "stage_path": stage_path,
         }
@@ -9477,7 +9475,6 @@ class TestReplaceFullPath(unittest.TestCase):
         _, kwargs = mocks["remove"].call_args
         self.assertFalse(kwargs.get("clear_pipeline_state"))
         # Rescans triggered.
-        mocks["meelo"].assert_called_once()
         mocks["plex"].assert_called_once()
         mocks["jellyfin"].assert_called_once()
         # Search plan generated for new id.

@@ -40,7 +40,7 @@ Cratedigger validates Beets' would-remove set before answering remove.
   allow Beets to remove duplicates.
 - A4. Acquisition pipeline: Should keep searching for a valid source when one
   source trips the duplicate-remove guard.
-- A5. Downstream library scanners: Plex and Meelo observe final Beets folder
+- A5. Downstream library scanners: Plex and Jellyfin observe final Beets folder
   state and should not be handed avoidable path churn.
 
 ---
