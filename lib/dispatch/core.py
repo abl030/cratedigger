@@ -2,9 +2,7 @@
 
 ``dispatch_import_core`` is the funnel every import path (auto / force /
 manual) runs through: acquire the RELEASE advisory lock, load evidence,
-run the subprocess, and dispatch on the decision. ``finalize_request``,
-``cleanup_disambiguation_orphans``, and ``_cleanup_staged_dir`` are looked
-up here (tests patch them on this module).
+run the subprocess, and dispatch on the decision.
 """
 
 from __future__ import annotations
@@ -14,11 +12,6 @@ import subprocess as sp
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Sequence, TYPE_CHECKING
-
-from lib import transitions
-
-# Module-level DI seam for ``transitions.finalize_request``.
-finalize_request = transitions.finalize_request
 
 from lib.processing_paths import normalize_source_dirs
 from lib.quality import (AlbumQualityEvidenceDecisionFacts, DownloadInfo,
@@ -34,6 +27,7 @@ from lib.quality import (AlbumQualityEvidenceDecisionFacts, DownloadInfo,
                          rejection_backfill_override)
 from lib.quality_evidence import (audit_v0_probe_from_metric,
                                   legacy_current_lossless_v0_probe_from_request)
+from lib.terminal_outcomes import DenylistWrite, ImportJobOutcomeResult
 from lib.util import cleanup_disambiguation_orphans
 
 from lib.dispatch.types import (DispatchOutcome, FORCE_MANUAL_SCENARIOS,
@@ -64,6 +58,24 @@ if TYPE_CHECKING:
     from lib.quality import SpectralDetail
 
 logger = logging.getLogger("cratedigger")
+
+
+def _dispatch_denylist_reason(decision: str, bitrate_kbps: int | None) -> str:
+    if decision == "downgrade":
+        return "quality downgrade prevented"
+    if decision == "provisional_lossless_upgrade":
+        return "provisional lossless source imported"
+    if decision.startswith("suspect_lossless"):
+        return "suspect lossless source not an upgrade"
+    if decision.startswith("transcode"):
+        return (
+            f"transcode: {bitrate_kbps}kbps"
+            if bitrate_kbps
+            else "transcode detected"
+        )
+    if decision == "duplicate_remove_guard_failed":
+        return "duplicate remove guard failed"
+    return f"rejected: {decision}"
 
 
 def dispatch_import_core(
@@ -126,6 +138,7 @@ def dispatch_import_core(
 
     outcome_success = False
     outcome_message = ""
+    terminal_outcome_persisted = False
 
     # Acquire the RELEASE (per-MBID) advisory lock for the duration of
     # the ``import_one.py`` subprocess. This is the funnel every path
@@ -358,6 +371,7 @@ def dispatch_import_core(
                         files=files,
                         source_path_cleanup_scenario=scenario,
                         cooled_down_users=cooled_down_users,
+                        import_job_id=candidate_import_job_id,
                     )
                 quality_evidence_action_file = _write_quality_evidence_action_file(
                     candidate=evidence_gate.candidate,
@@ -435,6 +449,7 @@ def dispatch_import_core(
                     f"{mode} FAILED (no JSON, rc={run.returncode}): {label}")
                 for line in run.stdout.strip().split("\n"):
                     logger.error(f"  {line}")
+                outcome_message = f"No JSON result (rc={run.returncode})"
                 _record_rejection_and_maybe_requeue(
                     db, request_id, dl_info,
                     detail=f"import_one.py rc={run.returncode}, no JSON",
@@ -449,8 +464,17 @@ def dispatch_import_core(
                         source_dirs=source_dirs,
                     ).to_json(),
                     staged_path=path,
-                    attempt_result=attempt_result)
-                outcome_message = f"No JSON result (rc={run.returncode})"
+                    attempt_result=attempt_result,
+                    import_job_id=candidate_import_job_id,
+                    job_result=ImportJobOutcomeResult(
+                        success=False,
+                        message=outcome_message,
+                        deferred=False,
+                        code=None,
+                    ),
+                    job_error=f"rc={run.returncode}",
+                    job_message=outcome_message)
+                terminal_outcome_persisted = True
             else:
                 _populate_dl_info_from_import_result(dl_info, ir)
                 _log_postflight_bad_extensions(
@@ -479,6 +503,12 @@ def dispatch_import_core(
                         if decision == "provisional_lossless_upgrade"
                         else scenario
                     )
+                    denylist_reason = _dispatch_denylist_reason(decision, new_br)
+                    denylist = tuple(
+                        DenylistWrite(username=username, reason=denylist_reason)
+                        for username in sorted(usernames)
+                    )
+                    outcome_message = "Import successful"
                     _do_mark_done(
                         db, request_id, dl_info,
                         distance=distance, scenario=mark_scenario,
@@ -487,7 +517,28 @@ def dispatch_import_core(
                         clear_stale_v0_probe=(
                             decision != "preflight_existing"
                         ),
-                        attempt_result=attempt_result)
+                        attempt_result=attempt_result,
+                        import_job_id=candidate_import_job_id,
+                        denylist=denylist,
+                        requeue_after_import=action.requeue,
+                        requeue_search_filetype_override=(
+                            QUALITY_UPGRADE_TIERS if action.requeue else None
+                        ),
+                        requeue_min_bitrate=(new_br if action.requeue else None),
+                        write_quality_delta=(
+                            decision in ("import", "preflight_existing")
+                            and (prev_br is not None or new_br is not None)
+                        ),
+                        prev_min_bitrate=prev_br,
+                        min_bitrate=new_br,
+                        job_result=ImportJobOutcomeResult(
+                            success=True,
+                            message=outcome_message,
+                            deferred=False,
+                            code=None,
+                        ),
+                        job_message=outcome_message)
+                    terminal_outcome_persisted = True
                     try:
                         _refresh_current_evidence_after_import(
                             db,
@@ -521,22 +572,7 @@ def dispatch_import_core(
                             "after import for request %s",
                             request_id,
                         )
-                    if decision in ("import", "preflight_existing"):
-                        if prev_br is not None or new_br is not None:
-                            try:
-                                transitions.require_transition_applied(finalize_request(
-                                    db,
-                                    request_id,
-                                    transitions.RequestTransition.to_imported(
-                                        from_status="imported",
-                                        prev_min_bitrate=prev_br,
-                                        min_bitrate=new_br,
-                                    ),
-                                ))
-                            except Exception:
-                                logger.exception("Failed to update upgrade delta")
                     outcome_success = True
-                    outcome_message = "Import successful"
                 elif action.record_rejection:
                     if decision == "downgrade":
                         fail_scenario = "quality_downgrade"
@@ -692,6 +728,14 @@ def dispatch_import_core(
                                 "Failed to inspect search_filetype_override"
                                 " before lossless_source_locked narrow")
 
+                    outcome_message = (
+                        f"Rejected: {fail_scenario} — {fail_detail}"
+                    )
+                    denylist_reason = _dispatch_denylist_reason(decision, new_br)
+                    denylist = tuple(
+                        DenylistWrite(username=username, reason=denylist_reason)
+                        for username in sorted(usernames)
+                    )
                     _record_rejection_and_maybe_requeue(
                         db, request_id, dl_info,
                         detail=fail_detail,
@@ -708,27 +752,24 @@ def dispatch_import_core(
                                                source_dirs=source_dirs,
                                            ).to_json()),
                         staged_path=path,
-                        attempt_result=attempt_result)
+                        attempt_result=attempt_result,
+                        import_job_id=candidate_import_job_id,
+                        denylist=denylist,
+                        job_result=ImportJobOutcomeResult(
+                            success=False,
+                            message=outcome_message,
+                            deferred=False,
+                            code=None,
+                        ),
+                        job_error=outcome_message,
+                        job_message=outcome_message)
+                    terminal_outcome_persisted = True
                     if narrowed_override is not None:
                         logger.info(
                             f"  Narrowed search_filetype_override '{current_override}'"
                             f" -> '{narrowed_override}' after downgrade")
-                    outcome_message = f"Rejected: {fail_scenario} — {fail_detail}"
-
                 # --- Common actions driven by flags ---
                 if action.denylist:
-                    if decision == "downgrade":
-                        reason = "quality downgrade prevented"
-                    elif decision == "provisional_lossless_upgrade":
-                        reason = "provisional lossless source imported"
-                    elif decision.startswith("suspect_lossless"):
-                        reason = "suspect lossless source not an upgrade"
-                    elif decision.startswith("transcode"):
-                        reason = f"transcode: {new_br}kbps" if new_br else "transcode detected"
-                    elif decision == "duplicate_remove_guard_failed":
-                        reason = "duplicate remove guard failed"
-                    else:
-                        reason = f"rejected: {decision}"
                     if (decision == "duplicate_remove_guard_failed"
                             and not usernames):
                         logger.error(
@@ -737,31 +778,10 @@ def dispatch_import_core(
                             request_id,
                         )
                     for username in usernames:
-                        db.add_denylist(request_id, username, reason)
                         if cooled_down_users is not None:
                             if db.check_and_apply_cooldown(username):
                                 cooled_down_users.add(username)
                     logger.info(f"  Denylisted {usernames} for request {request_id}")
-
-                # Rejected auto-imports are already requeued by
-                # _record_rejection_and_maybe_requeue(), which preserves retry
-                # counters and records the validation attempt. This second
-                # requeue is only for successful imports that intentionally go
-                # back to wanted to keep searching for a better source.
-                if action.requeue and action.mark_done:
-                    requeue_fields: dict[str, object] = {
-                        "search_filetype_override": QUALITY_UPGRADE_TIERS,
-                    }
-                    if action.mark_done and new_br is not None:
-                        requeue_fields["min_bitrate"] = new_br
-                    transitions.require_transition_applied(finalize_request(
-                        db,
-                        request_id,
-                        transitions.RequestTransition.to_wanted_fields(
-                            from_status="imported",
-                            fields=requeue_fields,
-                        ),
-                    ))
 
                 if action.run_quality_gate:
                     quality_gate_fn(
@@ -824,6 +844,7 @@ def dispatch_import_core(
                     )
         except sp.TimeoutExpired:
             logger.error(f"{mode} TIMEOUT: {label}")
+            outcome_message = "Import timed out"
             _record_rejection_and_maybe_requeue(
                 db, request_id, dl_info,
                 detail="import_one.py timed out", error="timeout",
@@ -836,10 +857,31 @@ def dispatch_import_core(
                     source_dirs=source_dirs,
                 ).to_json(),
                 staged_path=path,
-                attempt_result=attempt_result)
-            outcome_message = "Import timed out"
+                attempt_result=attempt_result,
+                import_job_id=candidate_import_job_id,
+                job_result=ImportJobOutcomeResult(
+                    success=False,
+                    message=outcome_message,
+                    deferred=False,
+                    code=None,
+                ),
+                job_error="timeout",
+                job_message=outcome_message)
+            terminal_outcome_persisted = True
         except Exception:
             logger.exception(f"{mode} ERROR: {label}")
+            if terminal_outcome_persisted:
+                logger.error(
+                    "%s post-terminal side effect failed for request %s; "
+                    "preserving the committed terminal outcome",
+                    mode,
+                    request_id,
+                )
+                return DispatchOutcome(
+                    success=outcome_success,
+                    message=outcome_message,
+                )
+            outcome_message = "Unhandled exception"
             _record_rejection_and_maybe_requeue(
                 db, request_id, dl_info,
                 detail="unhandled exception in auto-import", error="exception",
@@ -852,8 +894,17 @@ def dispatch_import_core(
                     source_dirs=source_dirs,
                 ).to_json(),
                 staged_path=path,
-                attempt_result=attempt_result)
-            outcome_message = "Unhandled exception"
+                attempt_result=attempt_result,
+                import_job_id=candidate_import_job_id,
+                job_result=ImportJobOutcomeResult(
+                    success=False,
+                    message=outcome_message,
+                    deferred=False,
+                    code=None,
+                ),
+                job_error="exception",
+                job_message=outcome_message)
+            terminal_outcome_persisted = True
         finally:
             _remove_quality_evidence_action_file(quality_evidence_action_file)
 

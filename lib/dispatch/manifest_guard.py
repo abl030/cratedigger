@@ -22,6 +22,7 @@ from lib.quality import ValidationResult
 from lib.dispatch.types import (DISPATCH_CODE_IMPORT_MANIFEST_REJECTED,
                                 DispatchOutcome, ImportAttemptResult)
 from lib.dispatch.outcome_actions import _record_rejection_and_maybe_requeue
+from lib.terminal_outcomes import ImportJobOutcomeResult
 
 if TYPE_CHECKING:
     from lib.pipeline_db import PipelineDB
@@ -64,6 +65,7 @@ def _guard_reject(
     attempt_result: ImportAttemptResult,
     detail: str,
     scenario: str,
+    import_job_id: int | None,
 ) -> DispatchOutcome:
     """Reject a force/manual import at the manifest guard.
 
@@ -98,6 +100,11 @@ def _guard_reject(
     logger.error("IMPORT GUARD REJECT (%s): path=%s %s", scenario, failed_path, detail)
     # No beets distance was measured — this guard fires before beets can
     # even run (#550 defect #4). Record NULL, not a fabricated 0.0.
+    outcome = DispatchOutcome(
+        success=False,
+        message=detail,
+        code=DISPATCH_CODE_IMPORT_MANIFEST_REJECTED,
+    )
     _record_rejection_and_maybe_requeue(
         db,
         request_id,
@@ -114,12 +121,17 @@ def _guard_reject(
         outcome_label="rejected",
         staged_path=failed_path,
         attempt_result=attempt_result,
+        import_job_id=import_job_id,
+        job_result=ImportJobOutcomeResult(
+            success=outcome.success,
+            message=outcome.message,
+            deferred=outcome.deferred,
+            code=outcome.code,
+        ),
+        job_error=outcome.message,
+        job_message=outcome.message,
     )
-    return DispatchOutcome(
-        success=False,
-        message=detail,
-        code=DISPATCH_CODE_IMPORT_MANIFEST_REJECTED,
-    )
+    return outcome
 
 
 def _guard_force_manual_audio_manifest(
@@ -130,6 +142,7 @@ def _guard_force_manual_audio_manifest(
     download_log_id: int | None,
     source_username: str | None,
     attempt_result: ImportAttemptResult,
+    import_job_id: int | None = None,
 ) -> DispatchOutcome | None:
     """Reconcile the staged source against its validated audio reference.
 
@@ -167,13 +180,15 @@ def _guard_force_manual_audio_manifest(
         return _guard_reject(
             db, request_id=request_id, failed_path=failed_path,
             source_username=source_username, detail=detail,
-            scenario="incomplete_fileset", attempt_result=attempt_result)
+            scenario="incomplete_fileset", attempt_result=attempt_result,
+            import_job_id=import_job_id)
 
     def extra(detail: str, *, scenario: str = "untracked_audio") -> DispatchOutcome:
         return _guard_reject(
             db, request_id=request_id, failed_path=failed_path,
             source_username=source_username, detail=detail,
-            scenario=scenario, attempt_result=attempt_result)
+            scenario=scenario, attempt_result=attempt_result,
+            import_job_id=import_job_id)
 
     # Empty source: the canonical empty_fileset early-exit in the evidence
     # pipeline self-heals this. Returning None lets the import flow reach it.

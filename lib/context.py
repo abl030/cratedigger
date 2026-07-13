@@ -46,6 +46,7 @@ class PipelineDBSource(Protocol):
         download_info: Any = None,
         search_filetype_override: Any = None,
         cooled_down_users: set[str] | None = None,
+        import_job_id: int | None = None,
     ) -> int | None: ...
     def close(self) -> None: ...
 

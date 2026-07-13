@@ -55,11 +55,6 @@ IMPORT_JOB_PREVIEW_STATUSES = frozenset({
     IMPORT_JOB_PREVIEW_MEASUREMENT_FAILED,
     IMPORT_JOB_PREVIEW_ERROR,
 })
-IMPORT_JOB_PREVIEW_FAILURE_STATUSES = frozenset({
-    IMPORT_JOB_PREVIEW_CONFIDENT_REJECT,
-    IMPORT_JOB_PREVIEW_MEASUREMENT_FAILED,
-    IMPORT_JOB_PREVIEW_ERROR,
-})
 IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES = frozenset({
     IMPORT_JOB_PREVIEW_EVIDENCE_READY,
     IMPORT_JOB_PREVIEW_WOULD_IMPORT,
@@ -244,19 +239,6 @@ def validate_job_type(job_type: str) -> str:
 def validate_status(status: str) -> str:
     if status not in IMPORT_JOB_STATUSES:
         raise ValueError(f"Invalid import job status: {status}")
-    return status
-
-
-def validate_preview_status(status: str) -> str:
-    if status not in IMPORT_JOB_PREVIEW_STATUSES:
-        raise ValueError(f"Invalid import job preview status: {status}")
-    return status
-
-
-def validate_preview_failure_status(status: str) -> str:
-    validate_preview_status(status)
-    if status not in IMPORT_JOB_PREVIEW_FAILURE_STATUSES:
-        raise ValueError(f"Invalid import job preview failure status: {status}")
     return status
 
 

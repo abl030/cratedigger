@@ -17,6 +17,7 @@ from lib.import_manifest import (
 )
 from lib.processing_paths import source_dirs_for_album
 from lib.quality import ValidationResult, rejection_backfill_override
+from lib.terminal_outcomes import ImportJobOutcomeResult
 from lib.staged_album import StagedAlbum
 from lib.util import log_validation_result
 from lib.wrong_match_policy import rejection_scenario_is_wrong_match_candidate
@@ -122,6 +123,7 @@ def _reject_request_auto_import(
     detail: str,
     scenario: str | None,
     error: str,
+    import_job_id: int | None = None,
 ) -> DispatchOutcome:
     """Reject a request auto-import when ownership can be proven safely."""
     db, request_id = _resolved_request_rejection_id(album_data, ctx)
@@ -166,6 +168,7 @@ def _reject_request_auto_import(
         dl_info.existing_min_bitrate = album_data.current_min_bitrate
         dl_info.slskd_filetype = dl_info.filetype
         dl_info.actual_filetype = dl_info.filetype
+    outcome = DispatchOutcome(success=False, message=detail)
     download_log_id = _record_rejection_and_maybe_requeue(
         db,
         request_id,
@@ -174,13 +177,22 @@ def _reject_request_auto_import(
         error=failed_result.error,
         validation_result=failed_result.to_json(),
         requeue=True,
+        import_job_id=import_job_id,
+        job_result=ImportJobOutcomeResult(
+            success=outcome.success,
+            message=outcome.message,
+            deferred=outcome.deferred,
+            code=outcome.code,
+        ),
+        job_error=outcome.message,
+        job_message=outcome.message,
     )
     _run_post_rejection_wrong_match_cleanup(
         ctx,
         download_log_id,
         scenario=failed_result.scenario,
     )
-    return DispatchOutcome(success=False, message=detail)
+    return outcome
 
 
 def _handle_rejected_result(
@@ -217,6 +229,7 @@ def _handle_rejected_result(
         download_info=dl_info,
         search_filetype_override=_compute_rejection_backfill(album_data, ctx),
         cooled_down_users=ctx.cooled_down_users,
+        import_job_id=import_job_id,
     )
     _run_post_rejection_wrong_match_cleanup(
         ctx,

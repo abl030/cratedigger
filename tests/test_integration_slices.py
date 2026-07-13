@@ -1591,7 +1591,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         logged = ImportResult.from_json(logged_raw)
         self.assertEqual(logged.spectral, audit)
 
-    def test_post_result_exception_preserves_full_import_result_and_audit(self):
+    def test_post_terminal_exception_preserves_committed_success_outcome(self):
         from lib.dispatch import dispatch_import_core
         from lib.dispatch.types import ImportOneRun
         from lib.quality import (
@@ -1661,9 +1661,11 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-        failure_log = db.download_logs[-1]
-        self.assertEqual(failure_log.outcome, "failed")
-        logged_raw = failure_log.import_result
+        self.assertEqual(len(db.download_logs), 1)
+        success_log = db.download_logs[-1]
+        self.assertEqual(success_log.outcome, "success")
+        self.assertEqual(db.request(42)["status"], "imported")
+        logged_raw = success_log.import_result
         assert logged_raw is not None
         logged = ImportResult.from_json(logged_raw)
         self.assertEqual(logged, result)
@@ -6076,17 +6078,14 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
             source_path="",
         )
 
-        # Spy on finalize_request to prove it is NOT called.
-        with patch("lib.dispatch.outcome_actions.finalize_request") as mock_finalize:
-            with self.assertRaises(ValueError):
-                _record_preview_measurement_failed(
-                    cast(Any, db),
-                    request_id=None,
-                    import_job_id=job.id,
-                    payload=payload,
-                    denylist_username="bob",
-                )
-            mock_finalize.assert_not_called()
+        with self.assertRaises(ValueError):
+            _record_preview_measurement_failed(
+                cast(Any, db),
+                request_id=None,
+                import_job_id=job.id,
+                payload=payload,
+                denylist_username="bob",
+            )
 
         # No audit row, no denylist — the raise happens before both.
         self.assertEqual(len(db.download_logs), 0)
@@ -6307,10 +6306,13 @@ class TestU5PreviewWorkerSelfHealSlice(unittest.TestCase):
         self.assertEqual(db.request(43)["status"], "wanted")
 
     def test_request_not_found_no_finalize_subcase(self):
-        """request_id=None subcase: the self-heal helper raises (the
-        audit row cannot carry a NULL request_id), the worker's
-        try/except absorbs it, and the job still lands failed from the
-        worker's own step 1. No exception bubbles up."""
+        """An orphan preview job fails closed without a partial terminal row.
+
+        The mandatory audit cannot carry a NULL request_id, so the atomic
+        boundary raises and leaves the claimed job retryable for startup
+        recovery. It must not preserve the old job-failed/request-unresolved
+        split-brain outcome.
+        """
         from lib.import_preview import ImportPreviewResult
         from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
         from lib.quality import MeasurementFailure
@@ -6347,17 +6349,19 @@ class TestU5PreviewWorkerSelfHealSlice(unittest.TestCase):
             "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
             return_value=preview_result,
         ):
-            updated = import_preview_worker.process_claimed_preview_job(
-                cast(Any, db), claimed,
-            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "cannot persist preview terminal outcome without request_id",
+            ):
+                import_preview_worker.process_claimed_preview_job(
+                    cast(Any, db), claimed,
+                )
 
-        assert updated is not None
-        self.assertEqual(updated.preview_status, "measurement_failed")
-        self.assertEqual(updated.status, "failed")
-        # The audit row cannot be written without a request_id; the
-        # worker absorbed the helper's raise (PREVIEW_SELF_HEAL_PARTIAL_FAILURE).
-        outcomes = [log.outcome for log in db.download_logs]
-        self.assertNotIn("measurement_failed", outcomes)
+        unchanged = db.get_import_job(claimed.id)
+        assert unchanged is not None
+        self.assertEqual(unchanged.preview_status, "running")
+        self.assertEqual(unchanged.status, "queued")
+        self.assertEqual(db.download_logs, [])
 
 
 class TestU5PreviewEvidenceReadySlice(unittest.TestCase):

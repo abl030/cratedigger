@@ -2582,6 +2582,21 @@ class TestPreMatchRejectRecordsNullDistance(unittest.TestCase):
                 album_title="Wrong Match Test",
                 mb_release_id="test-mbid-2812",
             ))
+            from lib.import_queue import (
+                IMPORT_JOB_AUTOMATION,
+                automation_import_payload,
+            )
+            job = db.enqueue_import_job(
+                IMPORT_JOB_AUTOMATION,
+                request_id=2812,
+                payload=automation_import_payload(),
+            )
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"test": "untracked-audio terminal path"},
+            )
+            claimed_job = db.claim_next_import_job(worker_id="test-importer")
+            assert claimed_job is not None
 
             cfg = MagicMock()
             cfg.slskd_download_dir = download_root
@@ -2607,7 +2622,11 @@ class TestPreMatchRejectRecordsNullDistance(unittest.TestCase):
             with open(os.path.join(canonical_path, "leftover.mp3"), "wb") as fp:
                 fp.write(b"stale leftover audio from a different attempt")
 
-            result = process_completed_album(album, ctx, import_job_id=1)
+            result = process_completed_album(
+                album,
+                ctx,
+                import_job_id=claimed_job.id,
+            )
 
         self.assertIsInstance(result, CompletionDispatched)
         self.assertEqual(len(db.download_logs), 1)

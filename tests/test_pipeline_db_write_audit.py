@@ -59,8 +59,6 @@ ALLOWLIST: dict[str, str] = {
         "status transition only",
     "mark_import_job_failed":
         "status transition only",
-    "mark_import_job_preview_failed":
-        "status transition only",
     "mark_import_job_preview_importable":
         "status transition only",
     "mark_import_subprocess_started":

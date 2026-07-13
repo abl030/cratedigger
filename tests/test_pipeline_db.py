@@ -1279,40 +1279,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertIsNotNone(marked.preview_completed_at)
         self.assertIsNotNone(marked.importable_at)
 
-    def test_preview_rejection_fails_job_with_audit(self):
-        """Post-U5: preview failures use ``preview_status='measurement_failed'``.
-
-        ``'uncertain'`` is no longer in ``IMPORT_JOB_PREVIEW_FAILURE_STATUSES``;
-        production code writes ``'measurement_failed'`` via the U4 self-healing
-        helper.
-        """
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
-
-        queued = self.db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
-            request_id=self.req_id,
-            dedupe_key="manual:preview-reject",
-            payload=manual_import_payload(failed_path="/tmp/manual"),
-        )
-
-        failed = self.db.mark_import_job_preview_failed(
-            queued.id,
-            preview_status="measurement_failed",
-            error="path_missing",
-            preview_result={"verdict": "measurement_failed", "reason": "path_missing"},
-            message="Preview failed: path_missing",
-        )
-        assert failed is not None
-        assert failed.preview_result is not None
-        self.assertEqual(failed.status, "failed")
-        self.assertEqual(failed.preview_status, "measurement_failed")
-        self.assertEqual(failed.preview_error, "path_missing")
-        self.assertEqual(failed.preview_result["reason"], "path_missing")
-        self.assertEqual(failed.message, "Preview failed: path_missing")
-        self.assertEqual(failed.error, "path_missing")
-        self.assertIsNotNone(failed.preview_completed_at)
-        self.assertIsNotNone(failed.completed_at)
-
     def test_two_sessions_cannot_claim_same_preview_job(self):
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
         from lib import pipeline_db

@@ -28,7 +28,6 @@ from lib.import_queue import (
     IMPORT_JOB_PREVIEW_EVIDENCE_READY,
     IMPORT_JOB_PREVIEW_WAITING,
     validate_job_type,
-    validate_preview_failure_status,
     validate_payload,
     validate_status,
 )
@@ -65,6 +64,19 @@ from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
                              TransferIdOwnership,
                              TransferLedgerRow,
                              WantedReconciliationCandidate)
+from lib.terminal_outcomes import (
+    DenylistWrite,
+    DownloadAuditWrite,
+    ImportJobOutcomeSupplement,
+    ImportSuccessOutcome,
+    ImporterRejectionOutcome,
+    PreviewMeasurementFailureOutcome,
+    TerminalOutcomeApplied,
+    TerminalOutcomeBoundary,
+    TerminalOutcomeConflict,
+    canonicalize_download_audit,
+)
+from lib.transitions import validate_transition
 from lib.pipeline_db._shared import (
     validate_request_metadata_fields,
 )
@@ -238,8 +250,9 @@ class FakePipelineDB:
         self.advisory_lock_calls: list[tuple[int, int]] = []
         self.closed = False
         self._next_request_id = 0
-        self._next_download_log_id = 0
+        self._next_download_log_id: int = 0
         self._next_import_job_id = 0
+        self._terminal_outcome_fault_after: TerminalOutcomeBoundary | None = None
         self._next_search_log_id = 0
         self._cooldown_result: bool | Callable[[str], bool] = False
         self._advisory_lock_result: (
@@ -600,6 +613,456 @@ class FakePipelineDB:
         yield acquired
 
     # --- import_jobs queue ---
+
+    def set_terminal_outcome_fault_after(
+        self,
+        boundary: TerminalOutcomeBoundary | None,
+    ) -> None:
+        """Configure one injected failure for generated atomicity tests."""
+        self._terminal_outcome_fault_after = boundary
+
+    def _terminal_outcome_boundary(
+        self,
+        boundary: TerminalOutcomeBoundary,
+    ) -> None:
+        if boundary == self._terminal_outcome_fault_after:
+            raise RuntimeError(
+                f"injected terminal outcome failure after {boundary.value}"
+            )
+
+    def _terminal_snapshot(self) -> tuple[
+        dict[int, dict[str, Any]],
+        list[dict[str, Any]],
+        list[DownloadLogRow],
+        list[DenylistEntry],
+        list[tuple[int, str]],
+        list[tuple[int, str]],
+        int,
+    ]:
+        return copy.deepcopy((
+            self._requests,
+            self._import_jobs,
+            self.download_logs,
+            self.denylist,
+            self.status_history,
+            self.recorded_attempts,
+            self._next_download_log_id,
+        ))
+
+    def _restore_terminal_snapshot(
+        self,
+        snapshot: tuple[
+            dict[int, dict[str, Any]],
+            list[dict[str, Any]],
+            list[DownloadLogRow],
+            list[DenylistEntry],
+            list[tuple[int, str]],
+            list[tuple[int, str]],
+            int,
+        ],
+    ) -> None:
+        (
+            self._requests,
+            self._import_jobs,
+            self.download_logs,
+            self.denylist,
+            self.status_history,
+            self.recorded_attempts,
+            self._next_download_log_id,
+        ) = copy.deepcopy(snapshot)
+
+    def _terminal_request_status(self, request_id: int) -> str:
+        row = self._requests.get(request_id)
+        if row is None:
+            raise TerminalOutcomeConflict(f"request {request_id} not found")
+        status = str(row.get("status") or "")
+        if status == "replaced":
+            raise TerminalOutcomeConflict(
+                f"request {request_id} is replaced and immutable"
+            )
+        return status
+
+    def _terminal_job_row(
+        self,
+        *,
+        import_job_id: int,
+        request_id: int,
+        preview: bool,
+    ) -> dict[str, Any]:
+        row = next(
+            (candidate for candidate in self._import_jobs
+             if int(candidate["id"]) == import_job_id),
+            None,
+        )
+        if row is None:
+            raise TerminalOutcomeConflict(f"import job {import_job_id} not found")
+        if row.get("request_id") != request_id:
+            raise TerminalOutcomeConflict(
+                f"import job {import_job_id} does not belong to request {request_id}"
+            )
+        if preview:
+            if (
+                row.get("status") != "queued"
+                or row.get("preview_status") not in ("waiting", "running")
+            ):
+                raise TerminalOutcomeConflict(
+                    f"preview job {import_job_id} is no longer active"
+                )
+        elif row.get("status") not in ("queued", "running"):
+            raise TerminalOutcomeConflict(
+                f"import job {import_job_id} is no longer active"
+            )
+        return row
+
+    def _fake_terminal_log(
+        self,
+        request_id: int,
+        audit: DownloadAuditWrite,
+    ) -> int:
+        audit = canonicalize_download_audit(audit)
+        if audit.outcome not in DOWNLOAD_LOG_OUTCOMES:
+            import psycopg2.errors
+
+            raise psycopg2.errors.CheckViolation(
+                "terminal audit violates download_log_outcome_check"
+            )
+        new_log_id = self._mint_download_log_id()
+        self.download_logs.append(DownloadLogRow(
+            request_id=request_id,
+            outcome=audit.outcome,
+            soulseek_username=audit.soulseek_username,
+            filetype=audit.filetype,
+            beets_distance=audit.beets_distance,
+            beets_scenario=audit.beets_scenario,
+            beets_detail=audit.beets_detail,
+            staged_path=audit.staged_path,
+            error_message=audit.error_message,
+            validation_result=audit.validation_result_json,
+            import_result=audit.import_result_json,
+            id=new_log_id,
+            extra={
+                "download_path": audit.download_path,
+                "valid": audit.valid,
+                "bitrate": audit.bitrate,
+                "sample_rate": audit.sample_rate,
+                "bit_depth": audit.bit_depth,
+                "is_vbr": audit.is_vbr,
+                "was_converted": audit.was_converted,
+                "original_filetype": audit.original_filetype,
+                "slskd_filetype": audit.slskd_filetype,
+                "actual_filetype": audit.actual_filetype,
+                "actual_min_bitrate": audit.actual_min_bitrate,
+                "spectral_grade": audit.spectral_grade,
+                "spectral_bitrate": audit.spectral_bitrate,
+                "existing_min_bitrate": audit.existing_min_bitrate,
+                "existing_spectral_bitrate": audit.existing_spectral_bitrate,
+                "final_format": audit.final_format,
+                "v0_probe_kind": audit.v0_probe_kind,
+                "v0_probe_min_bitrate": audit.v0_probe_min_bitrate,
+                "v0_probe_avg_bitrate": audit.v0_probe_avg_bitrate,
+                "v0_probe_median_bitrate": audit.v0_probe_median_bitrate,
+                "existing_v0_probe_kind": audit.existing_v0_probe_kind,
+                "existing_v0_probe_min_bitrate": (
+                    audit.existing_v0_probe_min_bitrate
+                ),
+                "existing_v0_probe_avg_bitrate": (
+                    audit.existing_v0_probe_avg_bitrate
+                ),
+                "existing_v0_probe_median_bitrate": (
+                    audit.existing_v0_probe_median_bitrate
+                ),
+            },
+        ))
+        return new_log_id
+
+    def _fake_terminal_denylist(
+        self,
+        request_id: int,
+        entries: tuple[DenylistWrite, ...],
+    ) -> None:
+        for entry in entries:
+            username = entry.username
+            if any(
+                existing.request_id == request_id
+                and existing.username == username
+                for existing in self.denylist
+            ):
+                continue
+            self.add_denylist(request_id, username, entry.reason)
+
+    def persist_import_success(
+        self,
+        outcome: ImportSuccessOutcome,
+    ) -> TerminalOutcomeApplied:
+        snapshot = self._terminal_snapshot()
+        try:
+            source_status = self._terminal_request_status(outcome.request_id)
+            if not validate_transition(source_status, "imported"):
+                raise TerminalOutcomeConflict("invalid imported transition")
+            if outcome.import_job_id is not None:
+                self._terminal_job_row(
+                    import_job_id=outcome.import_job_id,
+                    request_id=outcome.request_id,
+                    preview=False,
+                )
+            request = outcome.request
+            fields: dict[str, object] = {
+                "beets_distance": request.beets_distance,
+                "beets_scenario": request.beets_scenario,
+                "imported_path": request.imported_path,
+                "verified_lossless": request.verified_lossless,
+                "final_format": request.final_format,
+            }
+            if request.write_spectral:
+                fields.update({
+                    "last_download_spectral_grade": (
+                        request.last_download_spectral_grade
+                    ),
+                    "last_download_spectral_bitrate": (
+                        request.last_download_spectral_bitrate
+                    ),
+                    "current_spectral_grade": request.current_spectral_grade,
+                    "current_spectral_bitrate": request.current_spectral_bitrate,
+                })
+            if request.write_v0_probe:
+                fields.update({
+                    "current_lossless_source_v0_probe_min_bitrate": (
+                        request.current_lossless_source_v0_probe_min_bitrate
+                    ),
+                    "current_lossless_source_v0_probe_avg_bitrate": (
+                        request.current_lossless_source_v0_probe_avg_bitrate
+                    ),
+                    "current_lossless_source_v0_probe_median_bitrate": (
+                        request.current_lossless_source_v0_probe_median_bitrate
+                    ),
+                })
+            if request.write_quality_delta:
+                fields.update({
+                    "prev_min_bitrate": request.prev_min_bitrate,
+                    "min_bitrate": request.min_bitrate,
+                })
+            if not self.mark_imported_with_rescue(
+                outcome.request_id,
+                expected_status=source_status,
+                **fields,
+            ):
+                raise TerminalOutcomeConflict("request changed before import write")
+            self._terminal_outcome_boundary(TerminalOutcomeBoundary.request)
+            download_log_id = self._fake_terminal_log(
+                outcome.request_id,
+                outcome.audit,
+            )
+            self._terminal_outcome_boundary(TerminalOutcomeBoundary.audit)
+            if outcome.denylist:
+                self._fake_terminal_denylist(outcome.request_id, outcome.denylist)
+                self._terminal_outcome_boundary(TerminalOutcomeBoundary.denylist)
+            if outcome.requeue_after_import:
+                if outcome.requeue_min_bitrate is not None:
+                    self.reset_to_wanted(
+                        outcome.request_id,
+                        expected_status="imported",
+                        search_filetype_override=(
+                            outcome.requeue_search_filetype_override
+                        ),
+                        min_bitrate=outcome.requeue_min_bitrate,
+                    )
+                else:
+                    self.reset_to_wanted(
+                        outcome.request_id,
+                        expected_status="imported",
+                        search_filetype_override=(
+                            outcome.requeue_search_filetype_override
+                        ),
+                    )
+                self._terminal_outcome_boundary(
+                    TerminalOutcomeBoundary.final_request
+                )
+            if outcome.import_job_id is not None:
+                result = msgspec.to_builtins(outcome.job_result)
+                assert isinstance(result, dict)
+                if self.mark_import_job_completed(
+                    outcome.import_job_id,
+                    result=result,
+                    message=outcome.job_message,
+                ) is None:
+                    raise TerminalOutcomeConflict("job changed before completion")
+                self._terminal_outcome_boundary(TerminalOutcomeBoundary.job)
+            return TerminalOutcomeApplied(
+                request_id=outcome.request_id,
+                download_log_id=download_log_id,
+                import_job_id=outcome.import_job_id,
+            )
+        except Exception:
+            self._restore_terminal_snapshot(snapshot)
+            raise
+
+    def supplement_terminal_import_job_result(
+        self,
+        supplement: ImportJobOutcomeSupplement,
+    ) -> None:
+        payload = msgspec.json.decode(supplement.payload_json)
+        for row in self._import_jobs:
+            if (
+                row["id"] == supplement.import_job_id
+                and row["status"] in ("completed", "failed")
+            ):
+                result = row.get("result")
+                if not isinstance(result, dict):
+                    result = {}
+                result[supplement.key.value] = payload
+                row["result"] = result
+                row["updated_at"] = _utcnow()
+                return
+        raise TerminalOutcomeConflict(
+            f"import job {supplement.import_job_id} is not terminal"
+        )
+
+    def persist_importer_rejection(
+        self,
+        outcome: ImporterRejectionOutcome,
+    ) -> TerminalOutcomeApplied:
+        snapshot = self._terminal_snapshot()
+        try:
+            source_status = self._terminal_request_status(outcome.request_id)
+            if outcome.import_job_id is not None:
+                self._terminal_job_row(
+                    import_job_id=outcome.import_job_id,
+                    request_id=outcome.request_id,
+                    preview=False,
+                )
+            if outcome.requeue_to_wanted:
+                if source_status == "downloading":
+                    if outcome.write_search_filetype_override:
+                        applied = self.reset_downloading_to_wanted(
+                            outcome.request_id,
+                            expected_status=source_status,
+                            search_filetype_override=(
+                                outcome.search_filetype_override
+                            ),
+                        )
+                    else:
+                        applied = self.reset_downloading_to_wanted(
+                            outcome.request_id,
+                            expected_status=source_status,
+                        )
+                else:
+                    if outcome.write_search_filetype_override:
+                        applied = self.reset_to_wanted(
+                            outcome.request_id,
+                            expected_status=source_status,
+                            search_filetype_override=(
+                                outcome.search_filetype_override
+                            ),
+                        )
+                    else:
+                        applied = self.reset_to_wanted(
+                            outcome.request_id,
+                            expected_status=source_status,
+                        )
+                if not applied:
+                    raise TerminalOutcomeConflict("request changed before requeue")
+                if outcome.record_validation_attempt:
+                    if not self.record_attempt(
+                        outcome.request_id,
+                        "validation",
+                        expected_status="wanted",
+                    ):
+                        raise TerminalOutcomeConflict("attempt CAS lost request")
+                self._terminal_outcome_boundary(TerminalOutcomeBoundary.request)
+            download_log_id = self._fake_terminal_log(
+                outcome.request_id,
+                outcome.audit,
+            )
+            self._terminal_outcome_boundary(TerminalOutcomeBoundary.audit)
+            if outcome.denylist:
+                self._fake_terminal_denylist(outcome.request_id, outcome.denylist)
+                self._terminal_outcome_boundary(TerminalOutcomeBoundary.denylist)
+            if outcome.import_job_id is not None:
+                result = msgspec.to_builtins(outcome.job_result)
+                assert isinstance(result, dict)
+                if self.mark_import_job_failed(
+                    outcome.import_job_id,
+                    error=outcome.job_error,
+                    result=result,
+                    message=outcome.job_message,
+                ) is None:
+                    raise TerminalOutcomeConflict("job changed before failure")
+                self._terminal_outcome_boundary(TerminalOutcomeBoundary.job)
+            return TerminalOutcomeApplied(
+                request_id=outcome.request_id,
+                download_log_id=download_log_id,
+                import_job_id=outcome.import_job_id,
+            )
+        except Exception:
+            self._restore_terminal_snapshot(snapshot)
+            raise
+
+    def persist_preview_measurement_failure(
+        self,
+        outcome: PreviewMeasurementFailureOutcome,
+    ) -> TerminalOutcomeApplied:
+        snapshot = self._terminal_snapshot()
+        try:
+            source_status = self._terminal_request_status(outcome.request_id)
+            job_row = self._terminal_job_row(
+                import_job_id=outcome.import_job_id,
+                request_id=outcome.request_id,
+                preview=True,
+            )
+            if source_status == "downloading":
+                applied = self.reset_downloading_to_wanted(
+                    outcome.request_id,
+                    expected_status=source_status,
+                )
+            else:
+                applied = self.reset_to_wanted(
+                    outcome.request_id,
+                    expected_status=source_status,
+                )
+            if not applied:
+                raise TerminalOutcomeConflict("request changed before preview requeue")
+            self._terminal_outcome_boundary(TerminalOutcomeBoundary.request)
+            download_log_id = self._fake_terminal_log(
+                outcome.request_id,
+                DownloadAuditWrite(
+                    outcome="measurement_failed",
+                    beets_scenario="measurement_failed",
+                    beets_detail=outcome.detail,
+                    staged_path=outcome.staged_path,
+                    import_result_json=outcome.import_result_json,
+                    validation_result_json=outcome.validation_result_json,
+                ),
+            )
+            self._terminal_outcome_boundary(TerminalOutcomeBoundary.audit)
+            if outcome.denylist:
+                self._fake_terminal_denylist(outcome.request_id, outcome.denylist)
+                self._terminal_outcome_boundary(TerminalOutcomeBoundary.denylist)
+            preview_result = msgspec.json.decode(outcome.preview_result_json)
+            if not isinstance(preview_result, dict):
+                raise ValueError("preview result JSON must encode an object")
+            now = _utcnow()
+            job_row["status"] = "failed"
+            job_row["preview_status"] = outcome.preview_status
+            job_row["preview_result"] = copy.deepcopy(preview_result)
+            job_row["preview_message"] = outcome.preview_message
+            job_row["preview_error"] = outcome.preview_error
+            job_row["result"] = {"preview": copy.deepcopy(preview_result)}
+            job_row["message"] = outcome.preview_message
+            job_row["error"] = outcome.preview_error
+            job_row["preview_completed_at"] = now
+            job_row["completed_at"] = now
+            job_row["preview_worker_id"] = None
+            job_row["preview_heartbeat_at"] = None
+            job_row["updated_at"] = now
+            self._terminal_outcome_boundary(TerminalOutcomeBoundary.job)
+            return TerminalOutcomeApplied(
+                request_id=outcome.request_id,
+                download_log_id=download_log_id,
+                import_job_id=outcome.import_job_id,
+            )
+        except Exception:
+            self._restore_terminal_snapshot(snapshot)
+            raise
 
     def enqueue_import_job(
         self,
@@ -1012,40 +1475,6 @@ class FakePipelineDB:
                 row["preview_error"] = None
                 row["preview_completed_at"] = now
                 row["importable_at"] = row.get("importable_at") or now
-                row["preview_worker_id"] = None
-                row["preview_heartbeat_at"] = None
-                row["updated_at"] = now
-                return ImportJob.from_row(copy.deepcopy(row))
-        return None
-
-    def mark_import_job_preview_failed(
-        self,
-        job_id: int,
-        *,
-        preview_status: str,
-        error: str,
-        preview_result: dict[str, Any] | None = None,
-        message: str | None = None,
-    ) -> ImportJob | None:
-        validate_preview_failure_status(preview_status)
-        result = copy.deepcopy(preview_result or {})
-        for row in self._import_jobs:
-            if (
-                row["id"] == job_id
-                and row.get("status") == "queued"
-                and row.get("preview_status") in ("waiting", "running")
-            ):
-                now = _utcnow()
-                row["status"] = "failed"
-                row["preview_status"] = preview_status
-                row["preview_result"] = result
-                row["preview_message"] = message
-                row["preview_error"] = error
-                row["result"] = {"preview": copy.deepcopy(result)}
-                row["message"] = message
-                row["error"] = error
-                row["preview_completed_at"] = now
-                row["completed_at"] = now
                 row["preview_worker_id"] = None
                 row["preview_heartbeat_at"] = None
                 row["updated_at"] = now
@@ -5618,6 +6047,7 @@ class FakePipelineDBSource:
         download_info: Any = None,
         search_filetype_override: Any = None,
         cooled_down_users: set[str] | None = None,
+        import_job_id: int | None = None,
     ) -> int | None:
         self.reject_and_requeue_calls.append({
             "album_record": album_record,
@@ -5626,6 +6056,7 @@ class FakePipelineDBSource:
             "download_info": download_info,
             "search_filetype_override": search_filetype_override,
             "cooled_down_users": cooled_down_users,
+            "import_job_id": import_job_id,
         })
         return None
 

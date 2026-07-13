@@ -373,23 +373,12 @@ def _handle_measurement_failed(
     job: ImportJob,
     result: ImportPreviewResult,
 ) -> ImportJob | None:
-    """Route a ``verdict='measurement_failed'`` result through U4's self-healer.
+    """Atomically persist every ``measurement_failed`` terminal field.
 
-    Two-step ownership:
-
-      1. ``mark_import_job_preview_failed`` writes the preview-side fields
-         (``preview_status='measurement_failed'``, ``preview_result``,
-         ``preview_error``, ``preview_message``) AND flips ``status='failed'``.
-         This is the operator-facing surface — the recents UI grep-classifies
-         on ``preview_status`` to render the badge.
-      2. ``_record_preview_measurement_failed`` (U4) writes the
-         ``download_log`` row with ``outcome='measurement_failed'``,
-         finalizes the parent request to ``wanted``, and (if a denylist rule
-         applied) writes the denylist. Its internal ``mark_import_job_failed``
-         call is a no-op because step 1 already set ``status='failed'`` — the
-         WHERE clause requires ``status IN ('queued', 'running')``.
-
-    Returns the refreshed ``ImportJob`` row.
+    PipelineDB owns the request self-heal, mandatory audit, optional denylist,
+    preview fields, and terminal job failure in one transaction. Any write
+    failure therefore leaves the queued preview retryable instead of creating
+    a stuck partial terminal outcome.
 
     ``denylist_username`` is currently always None — the per-user 5-strikes
     rule lives in the importer-side reject path (U6). Preview measurement
@@ -407,48 +396,15 @@ def _handle_measurement_failed(
             detail=result.detail or result.reason or "measurement_failed",
             source_path=result.source_path or "",
         )
-    # Step 1: surface preview-side fields for the operator UI.
-    preview_payload = _preview_result_dict(result)
-    updated = db.mark_import_job_preview_failed(
-        job.id,
-        preview_status=PREVIEW_VERDICT_MEASUREMENT_FAILED,
-        error=payload.reason,
-        preview_result=preview_payload,
-        message=f"Preview measurement failed: {payload.reason}",
+    _record_preview_measurement_failed(
+        db,
+        request_id=job.request_id,
+        import_job_id=job.id,
+        payload=payload,
+        import_result=result.import_result,
+        preview_result_json=result.to_json(),
     )
-    # Step 2: U4's self-healing side effects (download_log, request→wanted).
-    # If this raises, step 1 has already committed status='failed' but
-    # the parent request stays 'downloading' with no download_log row -
-    # exactly the #250 stuck-forever shape. The bug class is rare-rare
-    # (transient PG blip during the helper's writes), but we make it
-    # observable: log loudly with the job + request IDs so operators can
-    # query for orphans via `pipeline-cli` after the fact. The job's
-    # already-failed state means the next worker tick won't re-claim it.
-    try:
-        _record_preview_measurement_failed(
-            db,
-            request_id=job.request_id,
-            import_job_id=job.id,
-            payload=payload,
-            import_result=result.import_result,
-        )
-    except Exception:
-        logger.exception(
-            "PREVIEW_SELF_HEAL_PARTIAL_FAILURE: job %s status=failed but "
-            "self-heal step 2 raised - parent request %s may be stuck "
-            "in 'downloading'. Recover with: pipeline-cli query \"UPDATE "
-            "album_requests SET status='wanted' WHERE id=%s AND "
-            "status='downloading'\"",
-            job.id,
-            job.request_id,
-            job.request_id,
-        )
-    if updated is not None:
-        return updated
-    refreshed = getattr(db, "get_import_job", None)
-    if callable(refreshed):
-        return cast(ImportJob | None, refreshed(job.id))
-    return None
+    return cast(ImportJob | None, db.get_import_job(job.id))
 
 
 PreviewFn = Callable[[Any, ImportJob], ImportPreviewResult]

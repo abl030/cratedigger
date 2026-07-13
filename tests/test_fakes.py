@@ -3341,28 +3341,6 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(importable.preview_result, {"verdict": "would_import"})
         self.assertIsNotNone(importable.importable_at)
 
-        rejected = db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
-            request_id=43,
-            dedupe_key="manual:preview-reject",
-            payload=manual_import_payload(failed_path="/tmp/reject"),
-        )
-        failed = db.mark_import_job_preview_failed(
-            rejected.id,
-            preview_status="confident_reject",
-            error="spectral_reject",
-            preview_result={
-                "verdict": "confident_reject",
-                "reason": "spectral_reject",
-            },
-            message="Preview rejected: spectral_reject",
-        )
-        assert failed is not None
-        self.assertEqual(failed.status, "failed")
-        self.assertEqual(failed.preview_status, "confident_reject")
-        self.assertEqual(failed.preview_error, "spectral_reject")
-        self.assertEqual(failed.error, "spectral_reject")
-
     def test_add_request_assigns_monotonic_id(self):
         db = FakePipelineDB()
         rid1 = db.add_request("Artist A", "Album A", source="request")
@@ -4462,6 +4440,7 @@ class TestPipelineDBFakeContract(unittest.TestCase):
             "set_update_download_state_error",
             "set_stamp_terminal_failures_error",
             "set_claim_terminal_failures_error",
+            "set_terminal_outcome_fault_after",
             "queue_execute_results",
             "seed_youtube_album_mapping",
         }

@@ -147,6 +147,7 @@ def _process_beets_validation(
             detail=manifest_detail,
             scenario="untracked_audio",
             error=manifest_detail,
+            import_job_id=import_job_id,
         )
     bv_result = _bv(
         ctx.cfg.beets_harness_path,
@@ -241,6 +242,7 @@ def _handle_valid_result(
             ),
             scenario="request_missing_request_id",
             error="missing_request_id",
+            import_job_id=import_job_id,
         )
 
     current_path_location = download_materialization.classify_staged_album_location(
@@ -258,6 +260,7 @@ def _handle_valid_result(
             detail="Request auto-import requires a MusicBrainz release ID",
             scenario="request_missing_mbid",
             error="missing_mbid",
+            import_job_id=import_job_id,
         )
 
     will_auto_import = wants_auto_import

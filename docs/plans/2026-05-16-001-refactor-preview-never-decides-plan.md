@@ -213,7 +213,7 @@ The horizontal symmetry — preview's `measurement_failed` and importer's `rejec
 - Modify: `lib/quality.py` (AlbumQualityEvidence, AlbumQualityEvidenceFile, AudioQualityMeasurement-adjacent Structs as needed)
 - Modify: `lib/pipeline_db.py` (`upsert_album_quality_evidence`, `_album_quality_evidence_from_row`, `log_download`'s outcome validation)
 - Modify: `lib/quality_evidence.py` (`evidence_from_import_result`, `persist_candidate_evidence_from_import_result` — populate new fields)
-- Modify: `lib/import_queue.py` (extend `IMPORT_JOB_PREVIEW_STATUSES` with `'measurement_failed'`; replace `IMPORT_JOB_PREVIEW_UNCERTAIN` membership in `IMPORT_JOB_PREVIEW_FAILURE_STATUSES` with `'measurement_failed'`)
+- Modify: `lib/import_queue.py` (extend `IMPORT_JOB_PREVIEW_STATUSES` with `'measurement_failed'`; terminal failure validation now belongs to the typed DB-owned outcome command)
 - Modify: `tests/fakes.py::FakePipelineDB` (mirror the new fields in the in-memory store; accept the new `preview_status` value)
 - Test: `tests/test_migrator.py` (assert 019 applies cleanly)
 - Test: `tests/test_pipeline_db.py` (upsert + load round-trip the new fields; CHECK constraints accept the new `preview_status` and `outcome` values)

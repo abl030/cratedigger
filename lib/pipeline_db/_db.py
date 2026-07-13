@@ -1,6 +1,7 @@
 """The composed PipelineDB class."""
 from lib.pipeline_db._core import _CoreMixin
 from lib.pipeline_db.import_jobs import _ImportJobsMixin
+from lib.pipeline_db.terminal_outcomes import _TerminalOutcomesMixin
 from lib.pipeline_db.requests import _RequestsMixin
 from lib.pipeline_db.evidence import _EvidenceMixin
 from lib.pipeline_db.download_log import _DownloadLogMixin
@@ -16,6 +17,7 @@ from lib.pipeline_db.transfer_ledger import _TransferLedgerMixin
 
 class PipelineDB(
     _CoreMixin,
+    _TerminalOutcomesMixin,
     _ImportJobsMixin,
     _RequestsMixin,
     _EvidenceMixin,

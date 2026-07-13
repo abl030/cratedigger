@@ -1,8 +1,8 @@
 """Small pure helpers for the dispatch package.
 
 Cleanup, DownloadInfo assembly, ImportResult -> DownloadInfo population,
-V0-probe log-field extraction, postflight logging, and the duplicate-remove
-guard quarantine. No import decisions live here.
+postflight logging, and the duplicate-remove guard quarantine. No import
+decisions live here.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-from typing import TypedDict, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from lib.quality import DownloadInfo, SpectralMeasurement
 
@@ -47,47 +47,6 @@ def _should_cleanup_path(scenario: str, action: "DispatchAction") -> bool:
     if scenario not in FORCE_MANUAL_SCENARIOS:
         return True
     return action.mark_done
-
-
-class _V0ProbeLogFields(TypedDict):
-    """V0-probe kwargs splatted into ``log_download`` — TypedDict so the
-    unpack type-checks against the annotated signature per key."""
-
-    v0_probe_kind: str | None
-    v0_probe_min_bitrate: int | None
-    v0_probe_avg_bitrate: int | None
-    v0_probe_median_bitrate: int | None
-    existing_v0_probe_kind: str | None
-    existing_v0_probe_min_bitrate: int | None
-    existing_v0_probe_avg_bitrate: int | None
-    existing_v0_probe_median_bitrate: int | None
-
-
-def _v0_probe_log_fields(dl_info: DownloadInfo) -> _V0ProbeLogFields:
-    probe = dl_info.v0_probe
-    existing = dl_info.existing_v0_probe
-    return {
-        "v0_probe_kind": probe.kind if probe else None,
-        "v0_probe_min_bitrate": (
-            probe.min_bitrate_kbps if probe else None
-        ),
-        "v0_probe_avg_bitrate": (
-            probe.avg_bitrate_kbps if probe else None
-        ),
-        "v0_probe_median_bitrate": (
-            probe.median_bitrate_kbps if probe else None
-        ),
-        "existing_v0_probe_kind": existing.kind if existing else None,
-        "existing_v0_probe_min_bitrate": (
-            existing.min_bitrate_kbps if existing else None
-        ),
-        "existing_v0_probe_avg_bitrate": (
-            existing.avg_bitrate_kbps if existing else None
-        ),
-        "existing_v0_probe_median_bitrate": (
-            existing.median_bitrate_kbps if existing else None
-        ),
-    }
 
 
 def _populate_dl_info_from_import_result(dl_info: DownloadInfo,

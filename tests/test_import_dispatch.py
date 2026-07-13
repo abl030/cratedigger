@@ -313,11 +313,7 @@ class TestCleanupStagedDir(unittest.TestCase):
 class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
     """Seam tests for the shared rejection finalizer."""
 
-    @patch("lib.dispatch.outcome_actions.finalize_request")
-    def test_requeue_defers_from_status_lookup_to_finalize_request(
-        self,
-        mock_finalize,
-    ) -> None:
+    def test_requeue_locks_current_status_inside_db_owned_transaction(self) -> None:
         from lib.dispatch import _record_rejection_and_maybe_requeue
 
         db = FakePipelineDB()
@@ -337,12 +333,10 @@ class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
             requeue=True,
         )
 
-        mock_finalize.assert_called_once()
-        _db_arg, request_id, outcome = mock_finalize.call_args.args
-        self.assertEqual(request_id, 42)
-        self.assertIsNone(outcome.from_status)
-        self.assertEqual(outcome.attempt_type, "validation")
-        self.assertEqual(db.request(42)["validation_attempts"], 0)
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["validation_attempts"], 1)
+        self.assertEqual(len(db.download_logs), 1)
 
     def test_requeue_only_forwards_fields_persisted_by_wanted_transition(self) -> None:
         from lib.dispatch import _record_rejection_and_maybe_requeue

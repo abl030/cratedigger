@@ -96,10 +96,10 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/download_log.py", 599, "d87a36ba1d1768e7"): (
         "JSON path key is selected from a closed server-owned vocabulary"
     ),
-    ("lib/pipeline_db/import_jobs.py", 105, "ecf3d1844c67f653"): (
+    ("lib/pipeline_db/import_jobs.py", 104, "ecf3d1844c67f653"): (
         "optional job filter is a fixed literal WHERE clause"
     ),
-    ("lib/pipeline_db/import_jobs.py", 166, "5583c4b8f7ee9536"): (
+    ("lib/pipeline_db/import_jobs.py", 165, "5583c4b8f7ee9536"): (
         "claim exclusion predicate is assembled from fixed literal clauses"
     ),
     ("lib/pipeline_db/misc.py", 188, "12cfdd83a367c90e"): (
@@ -173,6 +173,15 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/requests.py", 1133, "186e1c3ba3188478"): (
         "plan-aware download claim uses an exact wanted source predicate"
     ),
+    ("lib/pipeline_db/terminal_outcomes.py", 195, "787fcefe100c6e7e"): (
+        "atomic downloading rejection recovery CASes the locked source status"
+    ),
+    ("lib/pipeline_db/terminal_outcomes.py", 236, "111a43fe79ed054e"): (
+        "atomic non-downloading recovery CASes the locked source status"
+    ),
+    ("lib/pipeline_db/terminal_outcomes.py", 285, "1f113981f76368df"): (
+        "atomic import success CASes the locked source status"
+    ),
 }
 
 
@@ -185,6 +194,8 @@ _STATUS_MUTATING_SEAMS = frozenset({
     "reset_downloading_to_wanted",
     "set_downloading",
     "set_downloading_if_plan_current",
+    "_write_imported_terminal_request",
+    "_write_wanted_terminal_request",
 })
 
 

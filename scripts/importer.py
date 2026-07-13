@@ -41,6 +41,8 @@ from lib.import_queue import (
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORTER,
     DEFAULT_DSN,
+    ImportJobOutcomeSupplement,
+    ImportJobSupplementKey,
     PipelineDB,
 )
 from lib.import_manifest import audio_relative_paths
@@ -59,6 +61,29 @@ def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
         "deferred": outcome.deferred,
         "code": outcome.code,
     }
+
+
+def _supplement_terminal_job(
+    db: PipelineDB,
+    *,
+    job_id: int,
+    key: ImportJobSupplementKey,
+    payload: dict[str, object],
+) -> None:
+    try:
+        db.supplement_terminal_import_job_result(
+            ImportJobOutcomeSupplement(
+                import_job_id=job_id,
+                key=key,
+                payload_json=msgspec.json.encode(payload).decode(),
+            )
+        )
+    except Exception:
+        logger.exception(
+            "Failed to append %s audit to terminal import job %s",
+            key.value,
+            job_id,
+        )
 
 
 def _force_job_wrong_match_payload(job: ImportJob) -> tuple[int, str | None] | None:
@@ -481,6 +506,12 @@ def process_claimed_job(
         outcome = execute_import_job(db, job, ctx=ctx)
     except Exception as exc:
         logger.exception("Import job %s crashed", job.id)
+        persisted_after_crash = db.get_import_job(job.id)
+        if (
+            persisted_after_crash is not None
+            and persisted_after_crash.status in ("completed", "failed")
+        ):
+            return persisted_after_crash
         return db.mark_import_job_failed(
             job.id,
             error=type(exc).__name__,
@@ -489,6 +520,30 @@ def process_claimed_job(
         )
 
     result = _job_result(outcome)
+    persisted = db.get_import_job(job.id)
+    if persisted is not None and persisted.status in ("completed", "failed"):
+        # Domain terminal writers already committed request + mandatory audit
+        # + denylist + this job together. Only append best-effort filesystem
+        # convergence audit; never terminalize the same job a second time.
+        if outcome.success:
+            dismissal = _dismiss_successful_force_import(db, job)
+            if dismissal is not None:
+                _supplement_terminal_job(
+                    db,
+                    job_id=job.id,
+                    key=ImportJobSupplementKey.wrong_match_dismissal,
+                    payload=dismissal,
+                )
+        else:
+            cleanup = _cleanup_failed_force_import(db, job, outcome)
+            if cleanup is not None:
+                _supplement_terminal_job(
+                    db,
+                    job_id=job.id,
+                    key=ImportJobSupplementKey.cleanup,
+                    payload=cleanup,
+                )
+        return db.get_import_job(job.id)
     if outcome.success:
         dismissal = _dismiss_successful_force_import(db, job)
         if dismissal is not None:

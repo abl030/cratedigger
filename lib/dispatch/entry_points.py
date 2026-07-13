@@ -166,6 +166,7 @@ def _dispatch_import_from_db_locked(
         download_log_id=download_log_id,
         source_username=source_username,
         attempt_result=attempt_result,
+        import_job_id=import_job_id,
     )
     if manifest_reject is not None:
         return manifest_reject

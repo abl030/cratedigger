@@ -5,6 +5,20 @@ previously top-level name, and ``import lib.pipeline_db`` exposes the
 composed ``PipelineDB`` class.
 """
 from lib.pipeline_db._db import PipelineDB
+from lib.terminal_outcomes import (
+    DenylistWrite,
+    DownloadAuditWrite,
+    ImportJobOutcomeResult,
+    ImportJobOutcomeSupplement,
+    ImportJobSupplementKey,
+    ImportedRequestWrite,
+    ImportSuccessOutcome,
+    ImporterRejectionOutcome,
+    PreviewMeasurementFailureOutcome,
+    TerminalOutcomeApplied,
+    TerminalOutcomeBoundary,
+    TerminalOutcomeConflict,
+)
 from lib.pipeline_db.download_log import (
     DOWNLOAD_LOG_OUTCOMES,
     DownloadLogCounts,
@@ -103,6 +117,18 @@ from lib.pipeline_db._shared import (
 
 __all__ = [
     "PipelineDB",
+    "DenylistWrite",
+    "DownloadAuditWrite",
+    "ImportJobOutcomeResult",
+    "ImportJobOutcomeSupplement",
+    "ImportJobSupplementKey",
+    "ImportedRequestWrite",
+    "ImportSuccessOutcome",
+    "ImporterRejectionOutcome",
+    "PreviewMeasurementFailureOutcome",
+    "TerminalOutcomeApplied",
+    "TerminalOutcomeBoundary",
+    "TerminalOutcomeConflict",
     "ADVISORY_LOCK_NAMESPACE_IMPORT",
     "ADVISORY_LOCK_NAMESPACE_IMPORTER",
     "ADVISORY_LOCK_NAMESPACE_PLAN",

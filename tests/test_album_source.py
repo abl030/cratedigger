@@ -126,10 +126,7 @@ class TestDatabaseSourceRejectAndRequeueSeam(unittest.TestCase):
         self.assertEqual(row["validation_attempts"], 1)
 
     def test_conflict_stops_attempt_and_audit_side_effects(self) -> None:
-        from lib.transitions import (
-            RequestTransitionConflict,
-            TransitionConflictKind,
-        )
+        from lib.terminal_outcomes import TerminalOutcomeConflict
 
         fake_db = FakePipelineDB()
         fake_db.seed_request(make_request_row(id=42, status="replaced"))
@@ -142,17 +139,13 @@ class TestDatabaseSourceRejectAndRequeueSeam(unittest.TestCase):
             distance=0.35,
             scenario="high_distance",
         )
-        with self.assertRaises(RequestTransitionConflict) as raised:
+        with self.assertRaises(TerminalOutcomeConflict):
             source.reject_and_requeue(
                 album_record,
                 bv_result,
                 usernames={"peer"},
             )
 
-        self.assertEqual(
-            raised.exception.conflict.kind,
-            TransitionConflictKind.invalid_edge,
-        )
         self.assertEqual(fake_db.request(42), before)
         self.assertEqual(fake_db.recorded_attempts, [])
         self.assertEqual(fake_db.download_logs, [])

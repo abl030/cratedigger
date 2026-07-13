@@ -1878,6 +1878,7 @@ class TestImportPreviewWorker(unittest.TestCase):
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
         db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
@@ -1912,6 +1913,7 @@ class TestImportPreviewWorker(unittest.TestCase):
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
         db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,

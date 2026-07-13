@@ -140,11 +140,39 @@ does not write denylist, wrong-match, or bad-audio evidence. The audit
 row and `downloading` to `wanted` reset are committed together only when
 the request still owns the same `active_download_state.current_path`.
 
+### Terminal import/preview transaction ownership
+
+`PipelineDB.persist_import_success`, `persist_importer_rejection`, and
+`persist_preview_measurement_failure` are the only terminal bundle writers.
+Each accepts a typed `msgspec.Struct` command and owns one explicit PostgreSQL
+transaction. Callers never compose the public committing request, audit,
+denylist, or job helpers.
+
+- Import success commits the request import/rescue and quality fields, the
+  mandatory `download_log` row, any denylist entries, an optional intentional
+  imported-to-wanted quality requeue, and job completion together.
+- Import rejection commits the optional request self-heal plus validation
+  attempt, mandatory audit, denylist entries, and job failure together.
+- Preview measurement failure commits the parent self-heal, mandatory audit,
+  optional denylist, all preview failure fields, and job failure together.
+
+The transaction locks both the request and related job before writing. A
+missing/replaced request, mismatched or already-terminal job, invalid status
+edge, mandatory audit failure, or concurrent Replace race aborts the whole
+bundle. There is no catch-and-suppress path in the preview worker: rollback
+leaves the active job retryable. Post-terminal filesystem cleanup/dismissal
+may append a supplemental job-result audit, but cannot re-finalize the job.
+
 ## `import_jobs` — shared importer queue
 
 All beets-mutating import work is submitted to `import_jobs` and drained by
 `cratedigger-importer`. Web force-import, web/manual import, automation
 completed-download processing, and CLI force/manual import all share this table.
+
+The domain terminal transaction finalizes the queue row. The importer worker
+reloads the row after dispatch and skips its legacy fallback finalizers when a
+domain writer has already set `completed` or `failed`, preventing a second
+terminal write for the same result.
 
 Key fields:
 
@@ -665,7 +693,7 @@ review list.
 3. Look up `mb_release_id` from `album_requests` via `request_id`.
 4. Enqueue `import_jobs(job_type='force_import')` with a dedupe key for the `download_log` row.
 5. `cratedigger-importer` claims the job and calls the existing dispatch path, including `import_one.py --force` (sets `MAX_DISTANCE=999` — everything else runs normally: conversion, spectral, quality comparison).
-6. The worker marks the job `completed` or `failed`; the import internals still write `download_log` and `album_requests` outcomes.
+6. The DB-owned terminal transaction writes the `album_requests` outcome, mandatory `download_log` audit, denylist effects, and job `completed`/`failed` status together. The worker observes that terminal row and does not finalize it again.
 7. If a queued force-import fails with a terminal, non-deferred pipeline rejection, the worker deletes the reviewed source directory and clears the actionable `failed_path` pointer from the original wrong-match row plus duplicate rejected rows for the same request/path. The failed job and `download_log` audit rows remain.
 
 ```bash
