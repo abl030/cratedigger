@@ -22,6 +22,73 @@ from tests.fakes import FakePipelineDB
 class TestAttemptSpectralAudit(unittest.TestCase):
     """Attempt audit scans ordinary HAVE and preserves lossless provenance."""
 
+    def test_shared_owner_keeps_lookup_and_analyzer_failures_independent(self):
+        from lib.measurement import (
+            ExistingSpectralAuditLookup,
+            collect_release_attempt_spectral_audit,
+        )
+        from lib.quality import SpectralAnalysisDetail
+
+        persisted = SpectralAnalysisDetail(attempted=False)
+
+        def resolve(_mbid):
+            return ExistingSpectralAuditLookup(path="existing")
+
+        def candidate_fails(path: str) -> SpectralAnalysisDetail:
+            if path == "candidate":
+                raise RuntimeError("candidate failed")
+            return SpectralAnalysisDetail(attempted=True, grade="suspect")
+
+        candidate_failure = collect_release_attempt_spectral_audit(
+            "candidate",
+            "mbid",
+            existing_spectral_evidence=persisted,
+            preserve_existing_source_spectral=False,
+            analyzer=candidate_fails,
+            existing_resolver=resolve,
+        )[0]
+        assert candidate_failure.candidate is not None
+        assert candidate_failure.existing is not None
+        self.assertIn("candidate failed", candidate_failure.candidate.error or "")
+        self.assertEqual(candidate_failure.existing.grade, "suspect")
+
+        def existing_fails(path: str) -> SpectralAnalysisDetail:
+            if path == "existing":
+                raise RuntimeError("existing failed")
+            return SpectralAnalysisDetail(attempted=True, grade="genuine")
+
+        existing_failure = collect_release_attempt_spectral_audit(
+            "candidate",
+            "mbid",
+            existing_spectral_evidence=persisted,
+            preserve_existing_source_spectral=False,
+            analyzer=existing_fails,
+            existing_resolver=resolve,
+        )[0]
+        assert existing_failure.candidate is not None
+        assert existing_failure.existing is not None
+        self.assertEqual(existing_failure.candidate.grade, "genuine")
+        self.assertIn("existing failed", existing_failure.existing.error or "")
+
+        def lookup_fails(_mbid):
+            raise RuntimeError("lookup failed")
+
+        lookup_failure = collect_release_attempt_spectral_audit(
+            "candidate",
+            "mbid",
+            existing_spectral_evidence=persisted,
+            preserve_existing_source_spectral=False,
+            analyzer=lambda _path: SpectralAnalysisDetail(
+                attempted=True,
+                grade="genuine",
+            ),
+            existing_resolver=lookup_fails,
+        )[0]
+        assert lookup_failure.candidate is not None
+        assert lookup_failure.existing is not None
+        self.assertEqual(lookup_failure.candidate.grade, "genuine")
+        self.assertIn("lookup failed", lookup_failure.existing.error or "")
+
     def test_ordinary_existing_mp3_is_scanned_on_disk(self):
         """Non-lossless-converted HAVE is measured from the exact files."""
         from lib.beets_db import AlbumInfo
@@ -177,7 +244,7 @@ class TestAttemptSpectralAudit(unittest.TestCase):
 
     def test_malformed_track_preserves_album_facts_and_prior_track_detail(self):
         from lib.config import CratediggerConfig
-        from lib.measurement import _spectral_analysis_detail, measure_preimport_state
+        from lib.measurement import analyze_spectral_audit_path, measure_preimport_state
 
         result = SimpleNamespace(
             grade="suspect", estimated_bitrate_kbps=160,
@@ -196,7 +263,7 @@ class TestAttemptSpectralAudit(unittest.TestCase):
             ],
         )
         with patch("lib.measurement.spectral_analyze", return_value=result):
-            detail = _spectral_analysis_detail("/candidate")
+            detail = analyze_spectral_audit_path("/candidate")
 
         self.assertEqual(detail.grade, "suspect")
         self.assertEqual(detail.bitrate_kbps, 160)

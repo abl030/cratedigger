@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -60,7 +61,7 @@ def spectral_analyze(folder: str, trim_seconds: int = 30) -> Any:
     return analyze_album(folder, trim_seconds=trim_seconds)
 
 
-def _spectral_analysis_detail(path: str) -> SpectralAnalysisDetail:
+def analyze_spectral_audit_path(path: str) -> SpectralAnalysisDetail:
     """Analyze one path into display-only attempt audit evidence."""
     grade: str | None = None
     bitrate_kbps: int | None = None
@@ -104,52 +105,101 @@ def collect_attempt_spectral_audit(
     existing_path: str | None,
 ) -> SpectralDetail:
     """Measure candidate and exact-release installed files independently."""
-    candidate = _spectral_analysis_detail(candidate_path)
+    candidate = analyze_spectral_audit_path(candidate_path)
     existing = (
-        _spectral_analysis_detail(existing_path)
+        analyze_spectral_audit_path(existing_path)
         if existing_path is not None
         else SpectralAnalysisDetail(attempted=False)
     )
     return SpectralDetail(candidate=candidate, existing=existing)
 
 
-def _collect_release_attempt_spectral_audit(
+SpectralDetailAnalyzer = Callable[[str], SpectralAnalysisDetail]
+
+
+@dataclass(frozen=True)
+class ExistingSpectralAuditLookup:
+    """Exact-release path, policy bitrate, and fail-soft lookup audit."""
+
+    path: str | None = None
+    min_bitrate_kbps: int | None = None
+    failure: SpectralAnalysisDetail | None = None
+
+
+ExistingSpectralResolver = Callable[
+    [str],
+    ExistingSpectralAuditLookup,
+]
+
+
+def _fail_soft_spectral_analysis(
+    path: str,
+    analyzer: SpectralDetailAnalyzer,
+) -> SpectralAnalysisDetail:
+    try:
+        return analyzer(path)
+    except Exception as exc:
+        logger.exception("SPECTRAL AUDIT: failed for %s", path)
+        return SpectralAnalysisDetail(
+            attempted=True,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+
+def collect_release_attempt_spectral_audit(
     candidate_path: str,
     mb_release_id: str,
-    cfg: "CratediggerConfig",
     *,
     existing_spectral_evidence: SpectralAnalysisDetail,
     preserve_existing_source_spectral: bool,
-) -> SpectralDetail:
-    """Collect both attempt sides, except for lossless-source derivatives.
+    analyzer: SpectralDetailAnalyzer,
+    existing_resolver: ExistingSpectralResolver,
+    candidate_detail: SpectralAnalysisDetail | None = None,
+) -> tuple[SpectralDetail, ExistingSpectralAuditLookup]:
+    """Own conditional HAVE collection for every attempted-import adapter.
 
     A lossless source converted to Opus/V0 keeps the source-side spectral
     measurement as its authoritative HAVE provenance; analyzing that installed
     derivative can rewrite a transcode-like FLAC as apparently genuine. Every
     other exact-release copy is analyzed from the files currently on disk.
     """
-    if preserve_existing_source_spectral:
-        audit = collect_attempt_spectral_audit(candidate_path, None)
-        audit.existing = existing_spectral_evidence
-        return audit
-
-    existing_path, lookup_failure = resolve_existing_spectral_audit_path(
-        mb_release_id,
-        cfg,
+    candidate = (
+        candidate_detail
+        if candidate_detail is not None
+        else _fail_soft_spectral_analysis(candidate_path, analyzer)
     )
-    audit = collect_attempt_spectral_audit(candidate_path, existing_path)
-    if lookup_failure is not None:
-        audit.existing = lookup_failure
-    return audit
+    try:
+        lookup = (
+            existing_resolver(mb_release_id)
+            if mb_release_id
+            else ExistingSpectralAuditLookup()
+        )
+    except Exception as exc:
+        logger.exception("SPECTRAL AUDIT: exact-release lookup failed")
+        lookup = ExistingSpectralAuditLookup(
+            failure=SpectralAnalysisDetail(
+                attempted=True,
+                error=f"{type(exc).__name__}: {exc}",
+            ),
+        )
+    if preserve_existing_source_spectral:
+        existing = existing_spectral_evidence
+    elif lookup.failure is not None:
+        existing = lookup.failure
+    elif lookup.path is not None:
+        existing = _fail_soft_spectral_analysis(lookup.path, analyzer)
+    else:
+        existing = SpectralAnalysisDetail(attempted=False)
+    return SpectralDetail(candidate=candidate, existing=existing), lookup
 
 
-def resolve_existing_spectral_audit_path(
+def resolve_existing_spectral_audit(
     mb_release_id: str,
     cfg: "CratediggerConfig",
-) -> tuple[str | None, SpectralAnalysisDetail | None]:
+) -> ExistingSpectralAuditLookup:
     """Resolve exact-release files, preserving lookup failure as audit data."""
     if not mb_release_id:
-        return None, None
+        return ExistingSpectralAuditLookup()
     from lib.beets_db import BeetsDB
 
     try:
@@ -158,15 +208,27 @@ def resolve_existing_spectral_audit_path(
                 mb_release_id,
                 cfg.quality_ranks,
             )
-        if existing_info is not None and os.path.isdir(existing_info.album_path):
-            return existing_info.album_path, None
+        if existing_info is not None:
+            return ExistingSpectralAuditLookup(
+                path=(existing_info.album_path
+                      if os.path.isdir(existing_info.album_path or "") else None),
+                min_bitrate_kbps=existing_info.min_bitrate_kbps,
+            )
     except Exception as exc:
         logger.exception("SPECTRAL AUDIT: failed to resolve existing exact release")
-        return None, SpectralAnalysisDetail(
-            attempted=True,
-            error=f"{type(exc).__name__}: {exc}",
+        return ExistingSpectralAuditLookup(
+            failure=SpectralAnalysisDetail(
+                attempted=True,
+                error=f"{type(exc).__name__}: {exc}",
+            ),
         )
-    return None, None
+    return ExistingSpectralAuditLookup()
+
+
+def existing_spectral_resolver_for_config(
+    cfg: "CratediggerConfig",
+) -> ExistingSpectralResolver:
+    return lambda release_id: resolve_existing_spectral_audit(release_id, cfg)
 
 
 def spectral_detail_from_persisted_source(
@@ -342,56 +404,6 @@ def _needs_spectral_check(
     return avg_bitrate_kbps < vbr_threshold_kbps
 
 
-def _load_existing_quality(
-    mb_release_id: str,
-    cfg: "CratediggerConfig",
-    spectral_evidence: SpectralAnalysisDetail,
-    *,
-    preserve_existing_source_spectral: bool,
-) -> tuple[int | None, SpectralMeasurement | None, SpectralAnalysisDetail]:
-    """Look up existing bitrate and gather the correct HAVE spectral side.
-
-    Lossless-source derivatives use persisted pre-conversion provenance.
-    Every other exact-release copy is analyzed from its current files.
-    """
-    from lib.beets_db import BeetsDB
-
-    existing_min: int | None = None
-    existing_spectral: SpectralMeasurement | None = None
-    audit = SpectralAnalysisDetail(attempted=False)
-    if preserve_existing_source_spectral:
-        audit = spectral_evidence
-        existing_spectral = SpectralMeasurement.from_parts(
-            spectral_evidence.grade,
-            spectral_evidence.bitrate_kbps,
-        )
-    try:
-        with BeetsDB(library_root=getattr(cfg, "beets_directory", "")) as beets:
-            existing_info = beets.get_album_info(
-                mb_release_id, cfg.quality_ranks)
-        if existing_info:
-            existing_min = existing_info.min_bitrate_kbps
-            if (
-                not preserve_existing_source_spectral
-                and os.path.isdir(existing_info.album_path)
-            ):
-                audit = _spectral_analysis_detail(existing_info.album_path)
-                existing_spectral = SpectralMeasurement.from_parts(
-                    audit.grade,
-                    audit.bitrate_kbps,
-                )
-                logger.info(
-                    "SPECTRAL: existing on disk: grade=%s, "
-                    "estimated_bitrate=%skbps, beets_min=%skbps",
-                    audit.grade,
-                    audit.bitrate_kbps,
-                    existing_min,
-                )
-    except Exception:
-        logger.exception("SPECTRAL: failed to check existing files")
-    return existing_min, existing_spectral, audit
-
-
 def _persist_spectral_state(
     *,
     db: "PipelineDB",
@@ -529,6 +541,8 @@ def measure_preimport_state(
     preserve_existing_source_spectral: bool = False,
     propagate_download_to_existing: bool = True,
     precomputed_inspection: "LocalFileInspection | None" = None,
+    spectral_detail_analyzer: SpectralDetailAnalyzer | None = None,
+    existing_spectral_resolver: ExistingSpectralResolver | None = None,
 ) -> PreimportMeasurement:
     """Collect pre-import measurement facts. Returns ``PreimportMeasurement``.
 
@@ -579,6 +593,11 @@ def measure_preimport_state(
         existing_spectral_evidence
         or SpectralAnalysisDetail(attempted=False)
     )
+    audit_analyzer = spectral_detail_analyzer or analyze_spectral_audit_path
+    audit_resolver = (
+        existing_spectral_resolver
+        or existing_spectral_resolver_for_config(cfg)
+    )
     spectral_audit = SpectralDetail(
         candidate=SpectralAnalysisDetail(attempted=False),
         existing=persisted_existing,
@@ -595,15 +614,16 @@ def measure_preimport_state(
             logger.warning(
                 f"AUDIO CORRUPT: {label} "
                 f"({len(corrupt_files)} files failed ffmpeg decode)")
-            spectral_audit = _collect_release_attempt_spectral_audit(
+            spectral_audit = collect_release_attempt_spectral_audit(
                 path,
                 mb_release_id,
-                cfg,
                 existing_spectral_evidence=persisted_existing,
                 preserve_existing_source_spectral=(
                     preserve_existing_source_spectral
                 ),
-            )
+                analyzer=audit_analyzer,
+                existing_resolver=audit_resolver,
+            )[0]
             return PreimportMeasurement(
                 corrupt_files=corrupt_files,
                 audio_corrupt=audio_corrupt,
@@ -644,15 +664,16 @@ def measure_preimport_state(
                 logger.warning(
                     f"BAD HASH MATCH: {label} "
                     f"hash_id={match.bad_hash_id} track={match.track_path}")
-                spectral_audit = _collect_release_attempt_spectral_audit(
+                spectral_audit = collect_release_attempt_spectral_audit(
                     path,
                     mb_release_id,
-                    cfg,
                     existing_spectral_evidence=persisted_existing,
                     preserve_existing_source_spectral=(
                         preserve_existing_source_spectral
                     ),
-                )
+                    analyzer=audit_analyzer,
+                    existing_resolver=audit_resolver,
+                )[0]
                 return PreimportMeasurement(
                     corrupt_files=[],
                     audio_corrupt=False,
@@ -731,7 +752,18 @@ def measure_preimport_state(
         avg_bitrate_kbps=avg_bitrate_kbps,
         vbr_threshold_kbps=cfg.quality_ranks.mp3_vbr.excellent,
     ):
-        candidate_audit = _spectral_analysis_detail(path)
+        spectral_audit, existing_lookup = collect_release_attempt_spectral_audit(
+            path,
+            mb_release_id,
+            existing_spectral_evidence=persisted_existing,
+            preserve_existing_source_spectral=(
+                preserve_existing_source_spectral
+            ),
+            analyzer=audit_analyzer,
+            existing_resolver=audit_resolver,
+        )
+        candidate_audit = spectral_audit.candidate
+        assert candidate_audit is not None
         download_spectral = SpectralMeasurement.from_parts(
             candidate_audit.grade, candidate_audit.bitrate_kbps)
         if download_spectral is not None:
@@ -745,31 +777,19 @@ def measure_preimport_state(
                 f"suspect={candidate_audit.suspect_pct or 0:.0f}%, "
                 f"cliffs={cliff_count}")
 
-        existing_audit = persisted_existing
-        measured_existing_min: int | None = None
-        measured_existing: SpectralMeasurement | None = None
-        if mb_release_id:
-            measured_existing_min, measured_existing, existing_audit = (
-                _load_existing_quality(
-                    mb_release_id,
-                    cfg,
-                    persisted_existing,
-                    preserve_existing_source_spectral=(
-                        preserve_existing_source_spectral
-                    ),
-                )
-            )
+        existing_audit = spectral_audit.existing
+        assert existing_audit is not None
+        measured_existing_min = existing_lookup.min_bitrate_kbps
+        measured_existing = SpectralMeasurement.from_parts(
+            existing_audit.grade,
+            existing_audit.bitrate_kbps,
+        )
         # Preserve the old policy input: an existing spectral measurement was
         # considered only when candidate spectral analysis succeeded. The
         # independently gathered existing audit remains display-only.
         if download_spectral is not None:
             existing_min_bitrate = measured_existing_min
             existing_spectral = measured_existing
-        spectral_audit = SpectralDetail(
-            candidate=candidate_audit,
-            existing=existing_audit,
-        )
-
         # --- Fall back to persisted spectral state when BeetsDB couldn't walk ---
         beets_knows_album = existing_min_bitrate is not None
         if (download_spectral is not None
@@ -799,18 +819,17 @@ def measure_preimport_state(
         # Normal harness-bound codecs collect the candidate inside
         # import_one.py before conversion. Fill only HAVE here so the attempt
         # remains two-sided without paying for a duplicate candidate scan.
-        _, _, existing_audit = _load_existing_quality(
+        spectral_audit = collect_release_attempt_spectral_audit(
+            path,
             mb_release_id,
-            cfg,
-            persisted_existing,
+            existing_spectral_evidence=persisted_existing,
             preserve_existing_source_spectral=(
                 preserve_existing_source_spectral
             ),
-        )
-        spectral_audit = SpectralDetail(
-            candidate=spectral_audit.candidate,
-            existing=existing_audit,
-        )
+            analyzer=audit_analyzer,
+            existing_resolver=audit_resolver,
+            candidate_detail=spectral_audit.candidate,
+        )[0]
 
     # --- Persist spectral state to DB (issue #90 propagation) ---
     # This MUST fire on every measurement where spectral was collected,
