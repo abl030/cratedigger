@@ -719,7 +719,11 @@ def purge_completed_transfers(ctx: CratediggerContext) -> CompletedPurgeSummary:
     db = ctx.pipeline_db_source._get_db()
     id_sets = db.get_owned_transfer_id_sets()
     classification = find_completed_transfers_to_purge(
-        downloads, id_sets.stamped, id_sets.unstamped)
+        downloads,
+        id_sets.path_stamped,
+        id_sets.pathless_stamped,
+        id_sets.unstamped,
+    )
 
     observed_at = datetime.now(timezone.utc)
     exact_failure_ids = {
@@ -790,7 +794,6 @@ def purge_completed_transfers(ctx: CratediggerContext) -> CompletedPurgeSummary:
         success_waiting=classification.success_waiting_count,
         foreign_count=(
             classification.foreign_count
-            + len(classification.to_claim_failures) - len(confirmed_claims)
         ),
         nonterminal_count=classification.nonterminal_count,
     )

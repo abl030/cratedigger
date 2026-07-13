@@ -1089,19 +1089,16 @@ class TransferLedgerRow(msgspec.Struct, kw_only=True):
 
 @dataclass(frozen=True)
 class TransferIdOwnership:
-    """Ledger ``transfer_id`` membership, partitioned by completion stamp
-    (#571 PR 5) -- what ``lib.slskd_transfers.purge_completed_transfers``
-    needs to classify a live completed slskd transfer without a second
-    query per row.
+    """Owned IDs partitioned by authoritative path and terminal stamps.
 
-    ``stamped`` -- transfer_ids whose ledger row has ``completed_at`` set
-    and may be removed. ``unstamped`` -- known owned IDs still awaiting a
-    terminal stamp: successes wait for event/local-path ingestion; failures
-    are stamped from the terminal snapshot before removal. An ID in neither
-    set is not yet owned; a failure may only cross that boundary through an
-    atomic causal T1-row claim.
+    ``path_stamped`` rows have the success event's non-NULL ``local_path``
+    and may authorize removal for any terminal snapshot. ``pathless_stamped``
+    rows carry only a failure observation and may authorize removal only
+    while slskd still reports failure. ``unstamped`` rows are owned but await
+    one of those terminal writes.
     """
-    stamped: set[str]
+    path_stamped: set[str]
+    pathless_stamped: set[str]
     unstamped: set[str]
 
 

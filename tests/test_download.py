@@ -6134,6 +6134,42 @@ class TestPurgeCompletedTransfers(unittest.TestCase):
                     [(transfer_id, True)],
                 )
 
+    def test_pathless_failure_stamp_never_authorizes_success_removal(self):
+        """A later success must wait for and accept its exact-ID event path."""
+        from lib.slskd_transfers import purge_completed_transfers
+        filename = "Music\\Retry\\01.flac"
+        initial = FakeSlskdAPI()
+        ctx = self._make_ctx(initial, ledger_rows=[
+            ("peer1", filename, "t-same", False),
+        ])
+        db = ctx.pipeline_db_source._get_db()
+        db.stamp_terminal_failures(
+            {"t-same"}, datetime.now(timezone.utc))
+        success = FakeSlskdAPI()
+        success.add_transfer(
+            username="peer1", directory="Music\\Retry", filename=filename,
+            id="t-same", state="Completed, Succeeded")
+        ctx.slskd = success
+
+        waiting = purge_completed_transfers(ctx)
+
+        self.assertEqual(waiting.success_waiting, 1)
+        self.assertEqual(waiting.removed, 0)
+        self.assertEqual(success.transfers.cancel_download_calls, [])
+        event_at = datetime.now(timezone.utc)
+        self.assertEqual(db.stamp_transfer_completion(
+            "peer1", filename, "/downloads/Retry/01.flac", event_at,
+            transfer_id="t-same"), 1)
+
+        ready = purge_completed_transfers(ctx)
+
+        self.assertEqual(ready.removed, 1)
+        self.assertEqual(
+            [(call.id, call.remove)
+             for call in success.transfers.cancel_download_calls],
+            [("t-same", True)],
+        )
+
     def test_terminal_failure_stamp_write_error_fails_closed(self):
         """A failed persistence write never authorizes slskd removal."""
         from lib.slskd_transfers import purge_completed_transfers
@@ -6191,6 +6227,62 @@ class TestPurgeCompletedTransfers(unittest.TestCase):
         self.assertEqual(
             [call.id for call in slskd.transfers.cancel_download_calls],
             ["t-old"],
+        )
+
+    def test_unbound_failure_missing_requested_at_cannot_use_enqueued_at(self):
+        """Fallback requires requestedAt even when slskd reports enqueuedAt."""
+        from lib.slskd_transfers import purge_completed_transfers
+        filename = "Music\\Retry\\01.flac"
+        slskd = FakeSlskdAPI()
+        slskd.add_transfer(
+            username="peer1", directory="Music\\Retry", filename=filename,
+            id="t-old", state="Completed, TimedOut",
+            enqueuedAt="2026-07-13T01:05:00+00:00")
+        slskd.add_transfer(
+            username="peer1", directory="Music\\Retry", filename=filename,
+            id="t-new", state="InProgress",
+            requestedAt="2026-07-13T01:10:00+00:00")
+        ctx = self._make_ctx(slskd, ledger_rows=[
+            ("peer1", filename, "", False),
+        ])
+        db = ctx.pipeline_db_source._get_db()
+        row = next(iter(db._transfer_ledger.values()))
+        row.enqueued_at = datetime(
+            2026, 7, 13, 1, 8, tzinfo=timezone.utc)
+
+        summary = purge_completed_transfers(ctx)
+
+        self.assertEqual(summary.failure_unconfirmed, 1)
+        self.assertEqual(summary.foreign_count, 0)
+        self.assertEqual(summary.removed, 0)
+        self.assertIsNone(row.transfer_id)
+        self.assertIsNone(row.completed_at)
+        self.assertEqual(slskd.transfers.cancel_download_calls, [])
+
+    def test_summary_terminal_categories_are_disjoint(self):
+        """Unresolved failures are not also counted as foreign rows."""
+        from lib.slskd_transfers import purge_completed_transfers
+        slskd = FakeSlskdAPI()
+        slskd.add_transfer(
+            username="human1", directory="Music", filename="Music\\a.flac",
+            id="failure", state="Completed, Errored",
+            requestedAt="2026-07-13T01:00:00+00:00")
+        slskd.add_transfer(
+            username="human2", directory="Music", filename="Music\\b.flac",
+            id="success", state="Completed, Succeeded")
+        ctx = self._make_ctx(slskd)
+
+        summary = purge_completed_transfers(ctx)
+
+        self.assertEqual(summary.failure_unconfirmed, 1)
+        self.assertEqual(summary.foreign_count, 1)
+        self.assertEqual(summary.removed, 0)
+        self.assertEqual(
+            summary.removed
+            + summary.success_waiting
+            + summary.failure_unconfirmed
+            + summary.foreign_count,
+            2,
         )
 
     def test_foreign_record_is_never_removed(self):

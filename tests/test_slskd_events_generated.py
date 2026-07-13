@@ -256,6 +256,7 @@ def _build_harness(world: EventWorld) -> tuple[FakePipelineDB, FakeSlskdAPI, lis
                 username=event.username,
                 filename=event.filename,
                 local_filename=event.local_filename,
+                transfer_id=f"transfer-{event.id}",
             )
         else:
             data = "{not-json"

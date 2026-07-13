@@ -33,7 +33,7 @@ from hypothesis import strategies as st
 
 from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
-from lib.pipeline_db import TransferLedgerRow
+from lib.pipeline_db import TerminalFailureClaim, TransferLedgerRow
 from lib.slskd_transfers import purge_completed_transfers
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 
@@ -48,14 +48,15 @@ _TERMINAL_STATES = (
 )
 _ALL_STATES = _LIVE_STATES + _TERMINAL_STATES
 
-_OWNERSHIPS = ("stamped", "unstamped", "unbound", "foreign")
+_OWNERSHIPS = (
+    "stamped", "failure_stamped", "unstamped", "unbound", "foreign")
 
 
 @dataclass(frozen=True)
 class CompletedTransferWorld:
     key: int
     state: str
-    ownership: str  # "stamped" | "unstamped" | "unbound" | "foreign"
+    ownership: str
 
 
 @st.composite
@@ -95,7 +96,9 @@ def _build_world_fakes(
             username=username, directory=f"Music\\Album{w.key}",
             filename=filename, id=transfer_id, state=w.state,
             requestedAt=(datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat())
-        if w.ownership in ("stamped", "unstamped", "unbound"):
+        if w.ownership in (
+            "stamped", "failure_stamped", "unstamped", "unbound",
+        ):
             db.record_transfer_enqueue([
                 TransferLedgerRow(
                     request_id=w.key + 1, username=username,
@@ -106,6 +109,10 @@ def _build_world_fakes(
                     username, filename, "/downloads/complete/x",
                     datetime.now(timezone.utc),
                     transfer_id=transfer_id)
+            elif w.ownership == "failure_stamped":
+                db.stamp_transfer_id(username, filename, transfer_id)
+                db.stamp_terminal_failures(
+                    {transfer_id}, datetime.now(timezone.utc))
             elif w.ownership == "unstamped":
                 db.stamp_transfer_id(username, filename, transfer_id)
         # "foreign" -- no ledger row at all.
@@ -159,7 +166,7 @@ def assert_unstamped_success_waits_for_event(
     """An unstamped success awaits the authoritative event/local path."""
     for w in worlds:
         if not (
-            w.ownership in ("unstamped", "unbound")
+            w.ownership in ("failure_stamped", "unstamped", "unbound")
             and w.state == "Completed, Succeeded"
         ):
             continue
@@ -195,9 +202,16 @@ def assert_stamped_owned_completed_is_removed(
 ) -> None:
     """P3: a stamped, ledger-owned, COMPLETED transfer IS removed."""
     for w in worlds:
-        if w.ownership != "stamped":
-            continue
         if not w.state.startswith("Completed"):
+            continue
+        if w.ownership == "stamped":
+            pass
+        elif (
+            w.ownership == "failure_stamped"
+            and w.state != "Completed, Succeeded"
+        ):
+            pass
+        else:
             continue
         transfer_id = f"t-{w.key}"
         if transfer_id not in removed_ids:
@@ -232,6 +246,43 @@ def assert_failed_stamp_write_fails_closed(
             f"failed persistence still mutated {transfer_id!r}")
 
 
+def assert_failure_stamp_success_gate(
+    removed_before_event: set[str],
+    removed_after_event: set[str],
+    transfer_id: str,
+) -> None:
+    """A pathless failure stamp cannot authorize a live success."""
+    if transfer_id in removed_before_event or transfer_id not in removed_after_event:
+        raise AssertionError(
+            f"failure-stamped success gate violated for {transfer_id!r}")
+
+
+def assert_terminal_summary_is_disjoint(
+    worlds: tuple[CompletedTransferWorld, ...],
+    *,
+    removed: int,
+    success_waiting: int,
+    failure_unconfirmed: int,
+    foreign: int,
+) -> None:
+    terminal_count = sum(
+        world.state.startswith("Completed,") for world in worlds)
+    accounted = removed + success_waiting + failure_unconfirmed + foreign
+    if accounted != terminal_count:
+        raise AssertionError(
+            f"terminal accounting overlaps or omits rows: "
+            f"expected={terminal_count} accounted={accounted}")
+
+
+def assert_transfer_id_claim_is_globally_unique(
+    transfer_id: str,
+    ledger_transfer_ids: list[str | None],
+) -> None:
+    if ledger_transfer_ids.count(transfer_id) > 1:
+        raise AssertionError(
+            f"transfer ID {transfer_id!r} was claimed by multiple rows")
+
+
 class TestGeneratedPurgeCompletedTransfers(unittest.TestCase):
     """P1 + P2 + P3 properties over generated worlds, through the REAL
     ``purge_completed_transfers`` entry point."""
@@ -244,7 +295,7 @@ class TestGeneratedPurgeCompletedTransfers(unittest.TestCase):
             if row.transfer_id is not None and row.completed_at is not None
         }
 
-        purge_completed_transfers(_ctx(db, slskd))
+        summary = purge_completed_transfers(_ctx(db, slskd))
 
         stamped_ids = {
             row.transfer_id for row in db._transfer_ledger.values()
@@ -262,6 +313,13 @@ class TestGeneratedPurgeCompletedTransfers(unittest.TestCase):
         assert_owned_terminal_failure_is_stamped_and_removed(
             worlds, newly_stamped_ids, removed_ids)
         assert_stamped_owned_completed_is_removed(worlds, removed_ids)
+        assert_terminal_summary_is_disjoint(
+            worlds,
+            removed=summary.removed,
+            success_waiting=summary.success_waiting,
+            failure_unconfirmed=summary.failure_unconfirmed,
+            foreign=summary.foreign_count,
+        )
 
     @given(worlds=completed_transfer_worlds())
     def test_purge_is_idempotent_second_pass_removes_nothing_new(
@@ -399,6 +457,95 @@ class TestGeneratedPurgeCompletedTransfers(unittest.TestCase):
         )
         self.assertEqual(removed, expected)
 
+    @given(state=st.sampled_from(_TERMINAL_STATES[1:]))
+    def test_failure_stamp_then_success_requires_event_path(self, state):
+        db = FakePipelineDB()
+        filename = "Music\\Retry\\track.flac"
+        db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=1, username="peer", filename=filename),
+        ])
+        db.stamp_transfer_id("peer", filename, "same-id")
+        db.stamp_terminal_failures(
+            {"same-id"}, datetime.now(timezone.utc))
+        slskd = FakeSlskdAPI()
+        slskd.add_transfer(
+            username="peer", directory="Music\\Retry", filename=filename,
+            id="same-id", state="Completed, Succeeded")
+
+        purge_completed_transfers(_ctx(db, slskd))
+        removed_before = {
+            call.id for call in slskd.transfers.cancel_download_calls
+            if call.remove
+        }
+        db.stamp_transfer_completion(
+            "peer", filename, "/downloads/track.flac",
+            datetime.now(timezone.utc), transfer_id="same-id")
+        purge_completed_transfers(_ctx(db, slskd))
+        removed_after = {
+            call.id for call in slskd.transfers.cancel_download_calls
+            if call.remove
+        }
+
+        assert_failure_stamp_success_gate(
+            removed_before, removed_after, "same-id")
+
+    @given(state=st.sampled_from(_TERMINAL_STATES[1:]))
+    def test_missing_requested_at_never_claims_newer_retry(self, state):
+        db = FakePipelineDB()
+        filename = "Music\\Retry\\track.flac"
+        base = datetime(2026, 7, 13, tzinfo=timezone.utc)
+        db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=1, username="peer", filename=filename),
+        ])
+        row = next(iter(db._transfer_ledger.values()))
+        row.enqueued_at = base + timedelta(minutes=3)
+        slskd = FakeSlskdAPI()
+        slskd.add_transfer(
+            username="peer", directory="Music\\Retry", filename=filename,
+            id="old-terminal", state=state, requestedAt=None,
+            enqueuedAt=(base + timedelta(minutes=4)).isoformat())
+        slskd.add_transfer(
+            username="peer", directory="Music\\Retry", filename=filename,
+            id="new-retry", state="InProgress",
+            requestedAt=(base + timedelta(minutes=3)).isoformat())
+
+        purge_completed_transfers(_ctx(db, slskd))
+
+        self.assertIsNone(row.transfer_id)
+        self.assertIsNone(row.completed_at)
+        self.assertEqual(slskd.transfers.cancel_download_calls, [])
+
+    @given(
+        ledger_count=st.integers(min_value=1, max_value=6),
+        repeat_count=st.integers(min_value=1, max_value=6),
+    )
+    def test_repeated_claim_of_same_transfer_id_mutates_one_row(
+        self, ledger_count, repeat_count,
+    ):
+        db = FakePipelineDB()
+        requested_at = datetime(2026, 7, 13, tzinfo=timezone.utc)
+        for index in range(ledger_count):
+            db.record_transfer_enqueue([
+                TransferLedgerRow(
+                    request_id=index + 1, username="peer",
+                    filename="Music\\same.flac"),
+            ])
+            newest = max(db._transfer_ledger.values(), key=lambda row: row.id)
+            newest.enqueued_at = requested_at - timedelta(minutes=1)
+        claim = TerminalFailureClaim(
+            transfer_id="same-id", username="peer",
+            filename="Music\\same.flac", requested_at=requested_at)
+
+        for _ in range(repeat_count):
+            db.claim_terminal_failures([claim], requested_at)
+
+        assert_transfer_id_claim_is_globally_unique(
+            "same-id",
+            [row.transfer_id for row in db._transfer_ledger.values()],
+        )
+
 
 class TestPurgeCheckersTripOnViolations(unittest.TestCase):
     """Known-bad self-tests: each checker must trip on a planted
@@ -445,6 +592,31 @@ class TestPurgeCheckersTripOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_failed_stamp_write_fails_closed(
                 "failure", newly_stamped_ids=set(), removed_ids={"failure"})
+
+    def test_failure_stamp_success_checker_trips_on_early_removal(self):
+        with self.assertRaises(AssertionError):
+            assert_failure_stamp_success_gate(
+                removed_before_event={"same-id"},
+                removed_after_event={"same-id"},
+                transfer_id="same-id",
+            )
+
+    def test_terminal_accounting_checker_trips_on_overlap(self):
+        worlds = (CompletedTransferWorld(
+            key=0, state="Completed, Errored", ownership="foreign"),)
+        with self.assertRaises(AssertionError):
+            assert_terminal_summary_is_disjoint(
+                worlds,
+                removed=0,
+                success_waiting=0,
+                failure_unconfirmed=1,
+                foreign=1,
+            )
+
+    def test_global_transfer_id_checker_trips_on_duplicate_claim(self):
+        with self.assertRaises(AssertionError):
+            assert_transfer_id_claim_is_globally_unique(
+                "same-id", ["same-id", "same-id"])
 
     def test_p3_checker_trips_when_a_removable_record_survives(self):
         worlds = (CompletedTransferWorld(

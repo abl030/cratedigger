@@ -406,7 +406,7 @@ class TestFindCompletedTransfersToPurge(unittest.TestCase):
 
     def test_stamped_owned_transfer_is_removable(self):
         ownership = find_completed_transfers_to_purge(
-            self._snapshot(), {"t-1"}, set())
+            self._snapshot(), {"t-1"}, set(), set())
         self.assertEqual(len(ownership.to_remove), 1)
         self.assertEqual(ownership.to_remove[0].username, "peer1")
         self.assertEqual(ownership.to_remove[0].transfer_id, "t-1")
@@ -419,7 +419,7 @@ class TestFindCompletedTransfersToPurge(unittest.TestCase):
     def test_unstamped_owned_success_waits_for_authoritative_event(self):
         """An unstamped success still needs the event/local-path stamp."""
         ownership = find_completed_transfers_to_purge(
-            self._snapshot(), set(), {"t-1"})
+            self._snapshot(), set(), set(), {"t-1"})
         self.assertEqual(ownership.to_remove, [])
         self.assertEqual(ownership.to_stamp_failures, [])
         self.assertEqual(ownership.success_waiting_count, 1)
@@ -436,7 +436,7 @@ class TestFindCompletedTransfersToPurge(unittest.TestCase):
         ):
             with self.subTest(state=state):
                 ownership = find_completed_transfers_to_purge(
-                    self._snapshot(state=state), set(), {"t-1"})
+                    self._snapshot(state=state), set(), set(), {"t-1"})
                 self.assertEqual(ownership.to_remove, [])
                 self.assertEqual(
                     [item.transfer_id for item in ownership.to_stamp_failures],
@@ -448,7 +448,7 @@ class TestFindCompletedTransfersToPurge(unittest.TestCase):
     def test_unbound_terminal_failure_is_an_atomic_claim_candidate(self):
         """A failed T1.5 can claim an exact-key causal open T1 row in DB."""
         ownership = find_completed_transfers_to_purge(
-            self._snapshot(state="Completed, Errored"), set(), set())
+            self._snapshot(state="Completed, Errored"), set(), set(), set())
         self.assertEqual(ownership.to_remove, [])
         self.assertEqual(ownership.to_stamp_failures, [])
         self.assertEqual(
@@ -461,7 +461,7 @@ class TestFindCompletedTransfersToPurge(unittest.TestCase):
         """P1: absent from both sets entirely -- a human's completed
         download on a shared instance."""
         ownership = find_completed_transfers_to_purge(
-            self._snapshot(), set(), set())
+            self._snapshot(), set(), set(), set())
         self.assertEqual(ownership.to_remove, [])
         self.assertEqual(ownership.to_stamp_failures, [])
         self.assertEqual(ownership.to_claim_failures, [])
@@ -475,7 +475,7 @@ class TestFindCompletedTransfersToPurge(unittest.TestCase):
         reached a terminal state (shouldn't happen in practice, but the
         classifier must not misreport it either way)."""
         ownership = find_completed_transfers_to_purge(
-            self._snapshot(state="InProgress"), {"t-1"}, set())
+            self._snapshot(state="InProgress"), {"t-1"}, set(), set())
         self.assertEqual(ownership.to_remove, [])
         self.assertEqual(ownership.to_stamp_failures, [])
         self.assertEqual(ownership.success_waiting_count, 0)
@@ -492,7 +492,7 @@ class TestFindCompletedTransfersToPurge(unittest.TestCase):
             + self._snapshot(transfer_id="t-new", state="Completed, Succeeded")
         )
         ownership = find_completed_transfers_to_purge(
-            snapshot, {"t-new"}, set())
+            snapshot, {"t-new"}, set(), set())
         self.assertEqual(len(ownership.to_remove), 1)
         self.assertEqual(ownership.to_remove[0].transfer_id, "t-new")
         self.assertEqual(
@@ -502,7 +502,8 @@ class TestFindCompletedTransfersToPurge(unittest.TestCase):
 
     def test_completed_transfer_with_no_id_is_skipped(self):
         snapshot = self._snapshot(transfer_id="")
-        ownership = find_completed_transfers_to_purge(snapshot, set(), set())
+        ownership = find_completed_transfers_to_purge(
+            snapshot, set(), set(), set())
         self.assertEqual(ownership.to_remove, [])
         self.assertEqual(ownership.to_claim_failures, [])
         self.assertEqual(ownership.foreign_count, 0)
@@ -519,7 +520,7 @@ class TestFindCompletedTransfersToPurge(unittest.TestCase):
                              state="InProgress")  # live, not our concern
         )
         ownership = find_completed_transfers_to_purge(
-            snapshot, {"t-1"}, {"t-2"})
+            snapshot, {"t-1"}, set(), {"t-2"})
         self.assertEqual(len(ownership.to_remove), 1)
         self.assertEqual(ownership.to_remove[0].transfer_id, "t-1")
         self.assertEqual(ownership.to_stamp_failures, [])
@@ -529,13 +530,28 @@ class TestFindCompletedTransfersToPurge(unittest.TestCase):
         self.assertEqual(ownership.nonterminal_count, 1)
 
     def test_empty_snapshot(self):
-        ownership = find_completed_transfers_to_purge([], {"t-1"}, {"t-2"})
+        ownership = find_completed_transfers_to_purge(
+            [], {"t-1"}, set(), {"t-2"})
         self.assertEqual(ownership.to_remove, [])
         self.assertEqual(ownership.to_stamp_failures, [])
         self.assertEqual(ownership.to_claim_failures, [])
         self.assertEqual(ownership.success_waiting_count, 0)
         self.assertEqual(ownership.foreign_count, 0)
         self.assertEqual(ownership.nonterminal_count, 0)
+
+    def test_pathless_failure_stamp_waits_when_live_state_is_success(self):
+        ownership = find_completed_transfers_to_purge(
+            self._snapshot(state="Completed, Succeeded"),
+            set(), {"t-1"}, set())
+        self.assertEqual(ownership.to_remove, [])
+        self.assertEqual(ownership.success_waiting_count, 1)
+
+    def test_pathless_failure_stamp_removes_when_live_state_is_failure(self):
+        ownership = find_completed_transfers_to_purge(
+            self._snapshot(state="Completed, TimedOut"),
+            set(), {"t-1"}, set())
+        self.assertEqual(
+            [item.transfer_id for item in ownership.to_remove], ["t-1"])
 
 
 class TestSuggestRepair(unittest.TestCase):

@@ -257,7 +257,8 @@ class CompletedTransferOwnership:
 
 def find_completed_transfers_to_purge(
     downloads: list[DownloadUser],
-    stamped_owned_ids: set[str],
+    path_stamped_owned_ids: set[str],
+    pathless_stamped_owned_ids: set[str],
     unstamped_owned_ids: set[str],
 ) -> CompletedTransferOwnership:
     """Classify the live slskd snapshot for terminal convergence. Pure.
@@ -267,17 +268,17 @@ def find_completed_transfers_to_purge(
             False)`` snapshot (username → directories → files groups),
             already decoded via ``lib.slskd_client.parse_downloads_
             envelope`` (issue #507).
-        stamped_owned_ids: ``transfer_id`` values from cratedigger's
-            write-ahead ``slskd_transfer_ledger`` whose row already
-            carries a durable terminal stamp
+        path_stamped_owned_ids: owned IDs carrying the authoritative
+            success-event ``local_path``.
+        pathless_stamped_owned_ids: owned IDs carrying only a terminal
+            failure stamp.
+        unstamped_owned_ids: owned IDs with neither terminal stamp.
             (``lib.pipeline_db.transfer_ledger.get_owned_transfer_id_
             sets``).
-        unstamped_owned_ids: ``transfer_id`` values ledgered but not yet
-            completion-stamped.
-
     Nonterminal records are counted but never mutated. Stamped terminal
-    IDs are removable. Unstamped successful IDs wait for the authoritative
-    event/local-path write; unstamped failed IDs require an exact-ID stamp.
+    failures are removable; successes require a path-backed stamp. A success
+    over a pathless failure stamp waits for its authoritative event upgrade.
+    Unstamped failed IDs require an exact-ID stamp.
     An unknown failed ID is only a claim candidate: the database must still
     atomically bind it to one causal exact-key T1 row before removal. An
     unknown success is foreign and never uses that fallback. A record with
@@ -305,23 +306,30 @@ def find_completed_transfers_to_purge(
                     transfer_id=transfer_id,
                     filename=transfer.filename,
                 )
-                if transfer_id in stamped_owned_ids:
-                    to_remove.append(item)
-                elif transfer_id in unstamped_owned_ids:
-                    if transfer.state == "Completed, Succeeded":
+                if transfer.state == "Completed, Succeeded":
+                    if transfer_id in path_stamped_owned_ids:
+                        to_remove.append(item)
+                    elif (
+                        transfer_id in pathless_stamped_owned_ids
+                        or transfer_id in unstamped_owned_ids
+                    ):
                         success_waiting_count += 1
                     else:
-                        to_stamp_failures.append(item)
-                elif transfer.state != "Completed, Succeeded":
+                        foreign_count += 1
+                elif (
+                    transfer_id in path_stamped_owned_ids
+                    or transfer_id in pathless_stamped_owned_ids
+                ):
+                    to_remove.append(item)
+                elif transfer_id in unstamped_owned_ids:
+                    to_stamp_failures.append(item)
+                else:
                     to_claim_failures.append(CompletedTransferToRemove(
                         username=username,
                         transfer_id=transfer_id,
                         filename=transfer.filename,
-                        requested_at=(
-                            transfer.requested_at or transfer.enqueued_at),
+                        requested_at=transfer.requested_at,
                     ))
-                else:
-                    foreign_count += 1
     return CompletedTransferOwnership(
         to_remove=to_remove,
         to_stamp_failures=to_stamp_failures,

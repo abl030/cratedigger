@@ -5997,17 +5997,34 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
         ])
         completed_at = datetime.now(timezone.utc)
         stamped = db.stamp_transfer_completion(
-            "p0", "a.flac", "/downloads/complete/a.flac", completed_at)
+            "p0", "a.flac", "/downloads/complete/a.flac", completed_at,
+            transfer_id="tid-a")
         self.assertEqual(stamped, 1)
         row = next(iter(db._transfer_ledger.values()))
         self.assertEqual(row.local_path, "/downloads/complete/a.flac")
         self.assertEqual(row.completed_at, completed_at)
 
+    def test_success_event_upgrades_pathless_failure_stamp_by_exact_id(self):
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+        db.stamp_transfer_id("p0", "a.flac", "tid-a")
+        db.stamp_terminal_failures({"tid-a"}, datetime.now(timezone.utc))
+
+        stamped = db.stamp_transfer_completion(
+            "p0", "a.flac", "/downloads/a.flac",
+            datetime.now(timezone.utc), transfer_id="tid-a")
+
+        self.assertEqual(stamped, 1)
+        row = next(iter(db._transfer_ledger.values()))
+        self.assertEqual(row.local_path, "/downloads/a.flac")
+
     def test_stamp_transfer_completion_unledgered_pair_is_a_noop(self):
         db = FakePipelineDB()
         stamped = db.stamp_transfer_completion(
             "foreign-peer", "foreign.flac", "/downloads/x",
-            datetime.now(timezone.utc))
+            datetime.now(timezone.utc), transfer_id="foreign-id")
         self.assertEqual(stamped, 0)
         self.assertEqual(db.get_owned_local_paths(), set())
 
@@ -6026,7 +6043,8 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
         ])
         completed_at = datetime.now(timezone.utc)
         db.stamp_transfer_completion(
-            "p0", "a.flac", "/downloads/complete/a.flac", completed_at)
+            "p0", "a.flac", "/downloads/complete/a.flac", completed_at,
+            transfer_id="tid-newest")
         rows = db._transfer_ledger.values()
         stamped_rows = [r for r in rows if r.completed_at is not None]
         self.assertEqual(len(stamped_rows), 1)
@@ -6049,6 +6067,18 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
         db = FakePipelineDB()
         stamped = db.stamp_transfer_id("foreign-peer", "foreign.flac", "tid-x")
         self.assertEqual(stamped, 0)
+
+    def test_stamp_transfer_id_replay_does_not_duplicate_id(self):
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+
+        self.assertEqual(db.stamp_transfer_id("p0", "a.flac", "tid-1"), 1)
+        self.assertEqual(db.stamp_transfer_id("p0", "a.flac", "tid-1"), 0)
+        rows = db._transfer_ledger.values()
+        self.assertEqual(sum(r.transfer_id == "tid-1" for r in rows), 1)
 
     def test_stamp_transfer_id_prefers_newest_open_row(self):
         db = FakePipelineDB()
@@ -6093,7 +6123,8 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
 
     def test_get_owned_transfer_id_sets_empty_before_any_record(self):
         result = FakePipelineDB().get_owned_transfer_id_sets()
-        self.assertEqual(result.stamped, set())
+        self.assertEqual(result.path_stamped, set())
+        self.assertEqual(result.pathless_stamped, set())
         self.assertEqual(result.unstamped, set())
 
     def test_get_owned_transfer_id_sets_partitions_by_completion_stamp(self):
@@ -6106,12 +6137,28 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
         db.stamp_transfer_id("p0", "a.flac", "tid-a")
         db.stamp_transfer_id("p0", "b.flac", "tid-b")
         db.stamp_transfer_completion(
-            "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc))
+            "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc),
+            transfer_id="tid-a")
 
         result = db.get_owned_transfer_id_sets()
 
-        self.assertEqual(result.stamped, {"tid-a"})
+        self.assertEqual(result.path_stamped, {"tid-a"})
+        self.assertEqual(result.pathless_stamped, set())
         self.assertEqual(result.unstamped, {"tid-b"})
+
+    def test_get_owned_transfer_id_sets_separates_pathless_failure_stamp(self):
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+        db.stamp_transfer_id("p0", "a.flac", "tid-a")
+        db.stamp_terminal_failures({"tid-a"}, datetime.now(timezone.utc))
+
+        result = db.get_owned_transfer_id_sets()
+
+        self.assertEqual(result.path_stamped, set())
+        self.assertEqual(result.pathless_stamped, {"tid-a"})
+        self.assertEqual(result.unstamped, set())
 
     def test_stamp_terminal_failures_matches_real_exact_open_row_semantics(self):
         db = FakePipelineDB()
@@ -6183,6 +6230,28 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
         self.assertIsNone(row.transfer_id)
         self.assertIsNone(row.completed_at)
 
+    def test_claim_terminal_failures_repeat_cannot_duplicate_transfer_id(self):
+        db = FakePipelineDB()
+        requested_at = datetime.now(timezone.utc)
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+        for row in db._transfer_ledger.values():
+            row.enqueued_at = requested_at - timedelta(minutes=1)
+        claim = TerminalFailureClaim(
+            transfer_id="tid-one", username="p0", filename="a.flac",
+            requested_at=requested_at)
+
+        first = db.claim_terminal_failures([claim], requested_at)
+        second = db.claim_terminal_failures([claim], requested_at)
+
+        self.assertEqual(first, {"tid-one"})
+        self.assertEqual(second, set())
+        self.assertEqual(sum(
+            row.transfer_id == "tid-one"
+            for row in db._transfer_ledger.values()), 1)
+
     def test_get_owned_local_paths_only_returns_stamped_rows(self):
         db = FakePipelineDB()
         db.record_transfer_enqueue([
@@ -6190,7 +6259,8 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
             TransferLedgerRow(request_id=1, username="p0", filename="b.flac"),
         ])
         db.stamp_transfer_completion(
-            "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc))
+            "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc),
+            transfer_id="tid-a")
         self.assertEqual(db.get_owned_local_paths(), {"/downloads/a.flac"})
 
     def test_get_owned_transfer_keys_empty_before_any_record(self):
@@ -6206,7 +6276,8 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
             TransferLedgerRow(request_id=2, username="p1", filename="b.flac"),
         ])
         db.stamp_transfer_completion(
-            "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc))
+            "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc),
+            transfer_id="tid-a")
         self.assertEqual(
             db.get_owned_transfer_keys(),
             {("p0", "a.flac"), ("p1", "b.flac")})

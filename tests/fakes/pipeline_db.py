@@ -4399,10 +4399,15 @@ class FakePipelineDB:
         real UPDATE ... WHERE transfer_id IS NULL ORDER BY enqueued_at
         DESC LIMIT 1."""
         self.stamp_transfer_id_calls.append((username, filename, transfer_id))
+        if any(
+            row.transfer_id == transfer_id
+            for row in self._transfer_ledger.values()
+        ):
+            return 0
         candidates = [
             r for r in self._transfer_ledger.values()
             if r.username == username and r.filename == filename
-            and r.transfer_id is None
+            and r.transfer_id is None and r.completed_at is None
         ]
         if not candidates:
             return 0
@@ -4417,25 +4422,34 @@ class FakePipelineDB:
         local_path: str,
         completed_at: datetime,
         *,
-        transfer_id: str | None = None,
+        transfer_id: str,
     ) -> int:
-        """Stamp the newest not-yet-stamped row for (username, filename) --
-        mirrors the real UPDATE ... ORDER BY enqueued_at DESC LIMIT 1.
-        ``transfer_id`` (issue #571 PR 5, T2 fallback) is COALESCEd in --
-        set only when the row doesn't already carry one, mirroring the
-        real ``COALESCE(transfer_id, %s)``."""
-        candidates = [
-            r for r in self._transfer_ledger.values()
-            if r.username == username and r.filename == filename
-            and r.completed_at is None
+        """Mirror exact-ID success stamping and its guarded key fallback.
+
+        A success event upgrades an exact-ID pathless failure stamp. Only
+        when the event ID is globally absent may it bind the newest open,
+        ID-less exact-key row; replays are no-ops.
+        """
+        exact = [
+            row for row in self._transfer_ledger.values()
+            if row.transfer_id == transfer_id
         ]
-        if not candidates:
-            return 0
-        newest = max(candidates, key=lambda r: r.enqueued_at)
+        if exact:
+            newest = exact[0]
+            if newest.local_path is not None:
+                return 0
+        else:
+            candidates = [
+                row for row in self._transfer_ledger.values()
+                if row.username == username and row.filename == filename
+                and row.transfer_id is None and row.completed_at is None
+            ]
+            if not candidates:
+                return 0
+            newest = max(candidates, key=lambda row: row.enqueued_at)
+            newest.transfer_id = transfer_id
         newest.local_path = local_path
         newest.completed_at = completed_at
-        if newest.transfer_id is None:
-            newest.transfer_id = transfer_id
         return 1
 
     def get_owned_transfer_keys(self) -> set[tuple[str, str]]:
@@ -4447,17 +4461,25 @@ class FakePipelineDB:
         }
 
     def get_owned_transfer_id_sets(self) -> TransferIdOwnership:
-        """Mirrors the real SELECT transfer_id, completed_at ... WHERE
-        transfer_id IS NOT NULL -- (issue #571 PR 5) split by completion
-        stamp for the completed-transfer purge."""
-        stamped: set[str] = set()
+        """Mirror the real success-ready/failure-only/open ID partition."""
+        path_stamped: set[str] = set()
+        pathless_stamped: set[str] = set()
         unstamped: set[str] = set()
         for r in self._transfer_ledger.values():
             if r.transfer_id is None:
                 continue
-            target = stamped if r.completed_at is not None else unstamped
+            if r.local_path is not None:
+                target = path_stamped
+            elif r.completed_at is not None:
+                target = pathless_stamped
+            else:
+                target = unstamped
             target.add(r.transfer_id)
-        return TransferIdOwnership(stamped=stamped, unstamped=unstamped)
+        return TransferIdOwnership(
+            path_stamped=path_stamped,
+            pathless_stamped=pathless_stamped,
+            unstamped=unstamped,
+        )
 
     def set_stamp_terminal_failures_error(self, error: Exception) -> None:
         """Inject a persistence failure before any fake row mutates."""
@@ -4500,6 +4522,11 @@ class FakePipelineDB:
             claims, key=lambda item: (item.requested_at, item.transfer_id),
         ):
             if claim.transfer_id in confirmed:
+                continue
+            if any(
+                row.transfer_id == claim.transfer_id
+                for row in self._transfer_ledger.values()
+            ):
                 continue
             candidates = [
                 row for row in self._transfer_ledger.values()
