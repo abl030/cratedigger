@@ -8,6 +8,8 @@ import os
 import sys
 import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from unittest.mock import patch
@@ -15,7 +17,12 @@ from unittest.mock import patch
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — bootstraps TEST_DB_DSN for the live-db test
 
-from scripts.web_dev_server import DevConfig, DevHandler, DevHTTPServer
+from scripts.web_dev_server import (
+    DevConfig,
+    DevHandler,
+    DevHTTPServer,
+    create_server,
+)
 
 
 class WebDevServerTest(unittest.TestCase):
@@ -26,6 +33,8 @@ class WebDevServerTest(unittest.TestCase):
             prod_base_url="https://music.ablz.au",
             dsn=None,
             beets_db=None,
+            mb_api=None,
+            discogs_api=None,
             redis_host=None,
             redis_port=6379,
         )
@@ -109,6 +118,8 @@ class WebDevServerProxyTest(unittest.TestCase):
             prod_base_url="http://upstream.test",
             dsn=None,
             beets_db=None,
+            mb_api=None,
+            discogs_api=None,
             redis_host=None,
             redis_port=6379,
         )
@@ -175,6 +186,8 @@ class WebDevServerLiveDbErrorMappingTest(unittest.TestCase):
             prod_base_url="https://music.ablz.au",
             dsn=None,
             beets_db=None,
+            mb_api=None,
+            discogs_api=None,
             redis_host=None,
             redis_port=6379,
         )
@@ -209,6 +222,180 @@ class WebDevServerLiveDbErrorMappingTest(unittest.TestCase):
 
         with self.assertRaises(HTTPError) as raised:
             urlopen(f"{self.base}{probe_path}")
+        self.assertEqual(raised.exception.code, 503)
+
+
+class _MetadataMirrorServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, kind: str):
+        super().__init__(("127.0.0.1", 0), _MetadataMirrorHandler)
+        self.kind = kind
+        self.requests: list[str] = []
+
+    @property
+    def origin(self) -> str:
+        return f"http://127.0.0.1:{self.server_port}"
+
+
+class _MetadataMirrorHandler(BaseHTTPRequestHandler):
+    server: _MetadataMirrorServer  # pyright: ignore[reportIncompatibleVariableOverride]
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        return
+
+    def do_GET(self) -> None:
+        self.server.requests.append(self.path)
+        parsed = urlparse(self.path)
+        if self.server.kind == "mb":
+            if parsed.path == "/ws/2/release-group":
+                payload = {"release-groups": [], "release-group-count": 0}
+            elif parsed.path == "/ws/2/release":
+                payload = {"releases": [], "release-count": 0}
+            elif parsed.path == "/ws/2/artist/test-mbid":
+                payload = {"id": "test-mbid", "name": "Synthetic Artist"}
+            else:
+                self.send_error(404)
+                return
+        elif parsed.path in (
+            "/api/artists/60/masters/all",
+            "/api/artists/60/appearances",
+        ):
+            payload = {
+                "results": [], "total": 0, "page": 1, "per_page": 100,
+            }
+        elif parsed.path == "/api/artists/60":
+            payload = {"id": 60, "name": "Synthetic Artist"}
+        else:
+            self.send_error(404)
+            return
+
+        body = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class WebDevServerLiveDbMetadataIntegrationTest(unittest.TestCase):
+    """The real live-db compare route must use its configured mirrors."""
+
+    def setUp(self) -> None:
+        import web.discogs
+        import web.mb
+        import web.server
+
+        self.dsn = os.environ.get("TEST_DB_DSN")
+        self.web_discogs = web.discogs
+        self.web_mb = web.mb
+        self.web_server = web.server
+        self.saved_metadata = (
+            web.mb.MB_API_BASE,
+            web.discogs.DISCOGS_API_BASE,
+        )
+        self.saved_server = (
+            web.server._db_dsn,
+            web.server.db,
+            web.server._try_reconnect_db,
+            web.server.beets_db_path,
+            web.server._beets,
+        )
+        self.running: list[tuple[ThreadingHTTPServer, threading.Thread]] = []
+
+    def tearDown(self) -> None:
+        for server, thread in reversed(self.running):
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        if (
+            self.web_server.db is not None
+            and self.web_server.db is not self.saved_server[1]
+        ):
+            self.web_server.db.close()
+        (
+            self.web_server._db_dsn,
+            self.web_server.db,
+            self.web_server._try_reconnect_db,
+            self.web_server.beets_db_path,
+            self.web_server._beets,
+        ) = self.saved_server
+        (
+            self.web_mb.MB_API_BASE,
+            self.web_discogs.DISCOGS_API_BASE,
+        ) = self.saved_metadata
+
+    def _start(self, server: ThreadingHTTPServer) -> threading.Thread:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.running.append((server, thread))
+        return thread
+
+    def _live_config(
+        self, *, mb_api: str | None, discogs_api: str | None,
+    ) -> DevConfig:
+        return DevConfig(
+            data="live-db",
+            scenario="peers",
+            prod_base_url="https://music.ablz.au",
+            dsn=self.dsn,
+            beets_db=None,
+            mb_api=mb_api,
+            discogs_api=discogs_api,
+            redis_host=None,
+            redis_port=6379,
+        )
+
+    def _start_live_server(self, config: DevConfig) -> str:
+        server = create_server("127.0.0.1", 0, config)
+        self._start(server)
+        return f"http://127.0.0.1:{server.server_port}"
+
+    def test_configured_compare_reaches_both_origins_then_missing_discogs_503s(
+        self,
+    ) -> None:
+        mb = _MetadataMirrorServer("mb")
+        discogs = _MetadataMirrorServer("discogs")
+        self._start(mb)
+        self._start(discogs)
+
+        base = self._start_live_server(self._live_config(
+            mb_api=f"{mb.origin}/ws/2",
+            discogs_api=discogs.origin,
+        ))
+        path = (
+            "/api/artist/compare?name=Synthetic%20Artist&"
+            "mbid=test-mbid&discogs_id=60"
+        )
+        with urlopen(f"{base}{path}") as response:
+            payload = json.loads(response.read())
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["mb_artist"]["name"], "Synthetic Artist")
+        self.assertEqual(payload["discogs_artist"]["name"], "Synthetic Artist")
+        self.assertTrue(any(
+            request.startswith("/ws/2/release-group?artist=test-mbid&")
+            for request in mb.requests
+        ), mb.requests)
+        self.assertTrue(any(
+            request.startswith("/ws/2/release?track_artist=test-mbid&")
+            for request in mb.requests
+        ), mb.requests)
+        self.assertIn("/ws/2/artist/test-mbid?fmt=json", mb.requests)
+        self.assertIn("/api/artists/60/masters/all", discogs.requests)
+        self.assertIn("/api/artists/60/appearances", discogs.requests)
+        self.assertIn("/api/artists/60", discogs.requests)
+
+        # A second live-db configuration in the same process must clear the
+        # first session's Discogs origin. Otherwise screenshot QA can false-
+        # green after an earlier configured server populated the module global.
+        missing_base = self._start_live_server(self._live_config(
+            mb_api=f"{mb.origin}/ws/2",
+            discogs_api=None,
+        ))
+        with self.assertRaises(HTTPError) as raised:
+            urlopen(f"{missing_base}{path}")
         self.assertEqual(raised.exception.code, 503)
 
 
@@ -252,6 +439,8 @@ class ConfigureLiveDbReadOnlyTest(unittest.TestCase):
             prod_base_url="https://music.ablz.au",
             dsn=self.dsn,
             beets_db=None,
+            mb_api=None,
+            discogs_api=None,
             redis_host=None,
             redis_port=6379,
         )

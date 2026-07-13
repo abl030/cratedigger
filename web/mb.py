@@ -30,7 +30,8 @@ from web.artist_search import merge_exact_artist_identities
 # --mb-api flag in favor of config.ini as the one production source — the
 # flag itself survives as a dev-only override). The value includes the
 # /ws/2 prefix.
-MB_API_BASE = "https://musicbrainz.org/ws/2"
+DEFAULT_MB_API_BASE = "https://musicbrainz.org/ws/2"
+MB_API_BASE = DEFAULT_MB_API_BASE
 USER_AGENT = "cratedigger-web/1.0"
 
 # Canonical Various Artists MBID. Used by the resolver and the browse-tab

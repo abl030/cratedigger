@@ -3,7 +3,10 @@
 Use `scripts/web_dev_server.py` in two layers:
 
 - `--data live-db` runs local route code against a real read-only PostgreSQL
-  session and the backend host's filesystem.
+  session and the backend host's filesystem. Pass `--mb-api` and
+  `--discogs-api` to exercise the same metadata mirrors as production;
+  without `--discogs-api`, Discogs-backed and cross-source routes fail closed
+  with HTTP 503.
 - `--data prod-api` serves your checked-out frontend files locally while
   proxying `/api/*` to another read-only backend. Despite the name, it can
   target any remote base URL, not just prod.
@@ -21,7 +24,16 @@ Canonical remote-dev flow from any machine with SSH access:
    ```bash
    ssh -N -L 15432:10.20.0.11:5432 doc2
    PIPELINE_DB_DSN=postgresql://cratedigger@127.0.0.1:15432/cratedigger \
-     nix-shell --run "python3 scripts/web_dev_server.py --data live-db --host 127.0.0.1 --port 8096"
+     nix-shell --run "python3 scripts/web_dev_server.py --data live-db \
+       --host 127.0.0.1 --port 8096 \
+       --mb-api http://192.168.1.35:5200/ws/2 \
+       --discogs-api https://discogs.ablz.au"
+   ```
+   Before inspecting cross-source UI pixels, require its real route to pass:
+   ```bash
+   test "$(curl --silent --show-error --output /tmp/artist-compare.json \
+     --write-out '%{http_code}' --get --data-urlencode 'name=Deloris' \
+     http://127.0.0.1:8096/api/artist/compare)" = 200
    ```
 2. Tunnel that backend to your local machine if `8096` is not already reachable:
    ```bash

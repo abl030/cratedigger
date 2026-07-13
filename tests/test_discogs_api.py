@@ -753,12 +753,19 @@ class TestGetArtistReleases(unittest.TestCase):
 
     def test_null_primary_artist_id_normalizes_to_empty_string(self):
         null_artist = {
-            **self.MASTERS_DATA,
             "results": [{
-                **self.MASTERS_DATA["results"][0],
+                "id": 60,
+                "title": "Mixed appearance master",
+                "type": "EP",
+                "primary_types": ["EP", "Single"],
+                "first_release_date": "2005",
+                "artist_credit": "",
                 "primary_artist_id": None,
+                "is_masterless": False,
             }],
             "total": 1,
+            "page": 1,
+            "per_page": 100,
         }
         with _mock_urlopen_by_url({
             "/masters": null_artist,
