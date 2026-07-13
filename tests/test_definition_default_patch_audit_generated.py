@@ -22,11 +22,17 @@ _WORLDS = st.builds(
     AuditWorld,
     captured_patch=st.booleans(),
     injected=st.booleans(),
-    default_style=st.sampled_from(("local_name", "module_attribute")),
-    call_style=st.sampled_from(("from_import", "module_alias")),
-    patch_style=st.sampled_from(("string", "object")),
+    default_style=st.sampled_from(
+        ("local_name", "module_attribute", "wrapper", "tuple"),
+    ),
+    callable_shape=st.sampled_from(("function", "constructor", "instance")),
+    call_style=st.sampled_from(
+        ("from_import", "module_alias", "conflicting_import", "shadowed_import"),
+    ),
+    patch_style=st.sampled_from(("string", "object", "alias_object", "dict")),
     patch_api=st.sampled_from(("direct", "qualified")),
-    activation=st.sampled_from(("with", "decorator")),
+    activation=st.sampled_from(("with", "decorator", "later_context")),
+    production_conflict=st.booleans(),
 )
 
 
@@ -34,15 +40,23 @@ class TestDefinitionDefaultPatchAuditGenerated(unittest.TestCase):
     @given(world=_WORLDS)
     def test_pin_pair_holds_across_canonical_worlds(self, world: AuditWorld) -> None:
         rendered = render_world(world)
-        findings = find_ineffective_default_patches(
-            rendered.production,
-            rendered.tests,
-        )
-        assert_world_contract(self, world, findings)
+        try:
+            findings = find_ineffective_default_patches(
+                rendered.production,
+                rendered.tests,
+            )
+        except ValueError as error:
+            assert_world_contract(self, world, (), error)
+        else:
+            assert_world_contract(self, world, findings)
 
     @given(world=_WORLDS)
     def test_known_bad_verdicts_are_rejected(self, world: AuditWorld) -> None:
         rendered = render_world(world)
+        if world.expected_error:
+            with self.assertRaises(AssertionError):
+                assert_world_contract(self, world, (), None)
+            return
         findings = find_ineffective_default_patches(
             rendered.production,
             rendered.tests,

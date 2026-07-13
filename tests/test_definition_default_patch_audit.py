@@ -14,21 +14,47 @@ from tests._definition_default_patch_audit import (
 )
 
 
+_ENQUEUE_CAPTURE_TARGET = "lib.enqueue.check_for_match"
+_FIRST_CAPTURE_TARGET = "lib.first.check_for_match"
+
+
 @dataclass(frozen=True)
 class AuditWorld:
     """One authored world shared by deterministic and generated tiers."""
 
     captured_patch: bool
     injected: bool
-    default_style: Literal["local_name", "module_attribute"] = "local_name"
-    call_style: Literal["from_import", "module_alias"] = "from_import"
-    patch_style: Literal["string", "object"] = "string"
+    default_style: Literal[
+        "local_name",
+        "module_attribute",
+        "wrapper",
+        "tuple",
+    ] = "local_name"
+    callable_shape: Literal["function", "constructor", "instance"] = "function"
+    call_style: Literal[
+        "from_import",
+        "module_alias",
+        "conflicting_import",
+        "shadowed_import",
+    ] = "from_import"
+    patch_style: Literal["string", "object", "alias_object", "dict"] = "string"
     patch_api: Literal["direct", "qualified"] = "direct"
-    activation: Literal["with", "decorator"] = "with"
+    activation: Literal["with", "decorator", "later_context"] = "with"
+    production_conflict: bool = False
+
+    @property
+    def expected_error(self) -> bool:
+        return self.captured_patch and (
+            self.default_style in {"wrapper", "tuple"}
+            or self.callable_shape == "instance"
+            or self.patch_style in {"alias_object", "dict"}
+            or self.call_style in {"conflicting_import", "shadowed_import"}
+            or self.production_conflict
+        )
 
     @property
     def expected_valid(self) -> bool:
-        return not self.captured_patch or self.injected
+        return not self.expected_error and (not self.captured_patch or self.injected)
 
 
 @dataclass(frozen=True)
@@ -36,38 +62,88 @@ class RenderedWorld:
     production: dict[str, str]
     tests: dict[str, str]
     expected_valid: bool
+    expected_error: bool
 
 
 def render_world(world: AuditWorld) -> RenderedWorld:
     """Render only repository-native canonical shapes."""
-    if world.default_style == "local_name":
+    if world.production_conflict:
+        production_import = (
+            "from lib.first import check_for_match\n"
+            "from lib.second import check_for_match"
+        )
+        default = "check_for_match"
+        captured_target = "lib.enqueue.check_for_match"
+    elif world.default_style == "local_name":
         production_import = "from lib.matching import check_for_match"
         default = "check_for_match"
         captured_target = "lib.enqueue.check_for_match"
-    else:
+    elif world.default_style == "module_attribute":
         production_import = "import lib.matching as matching"
         default = "matching.check_for_match"
         captured_target = "lib.matching.check_for_match"
-    production = {
-        "lib/enqueue.py": (
-            f"{production_import}\n\n"
+    else:
+        production_import = "from lib.matching import check_for_match"
+        default = (
+            "bind(check_for_match)"
+            if world.default_style == "wrapper"
+            else "(check_for_match,)"
+        )
+        captured_target = "lib.enqueue.check_for_match"
+    helper = (
+        "\ndef bind(value):\n    return value\n"
+        if world.default_style == "wrapper"
+        else ""
+    )
+    if world.callable_shape == "function":
+        definition = (
             f"def try_enqueue(tracks, *, match_fn={default}):\n"
             "    return match_fn(tracks)\n"
-        ),
+        )
+        exported_name = "try_enqueue"
+        member = ""
+    elif world.callable_shape == "constructor":
+        definition = (
+            "class Worker:\n"
+            f"    def __init__(self, tracks, *, match_fn={default}):\n"
+            "        self.result = match_fn(tracks)\n"
+        )
+        exported_name = "Worker"
+        member = ""
+    else:
+        definition = (
+            "class Worker:\n"
+            f"    def run(self, tracks, *, match_fn={default}):\n"
+            "        return match_fn(tracks)\n"
+        )
+        exported_name = "Worker"
+        member = ".run"
+    production = {
+        "lib/enqueue.py": (f"{production_import}\n{helper}\n{definition}"),
     }
 
     if world.call_style == "from_import":
-        call_import = "from lib.enqueue import try_enqueue"
-        callable_expression = "try_enqueue"
+        call_prelude = f"from lib.enqueue import {exported_name}"
+        callable_expression = exported_name
+    elif world.call_style == "module_alias":
+        call_prelude = "import lib.enqueue as enqueue"
+        callable_expression = f"enqueue.{exported_name}"
+    elif world.call_style == "conflicting_import":
+        call_prelude = (
+            f"from lib.other import {exported_name}\n"
+            f"from lib.enqueue import {exported_name}"
+        )
+        callable_expression = exported_name
     else:
-        call_import = "import lib.enqueue as enqueue"
-        callable_expression = "enqueue.try_enqueue"
+        call_prelude = f"from lib.enqueue import {exported_name}\n"
+        if exported_name == "Worker":
+            call_prelude += "class Worker:\n    pass"
+        else:
+            call_prelude += "def try_enqueue(*args, **kwargs):\n    return None"
+        callable_expression = exported_name
+    scoped_prelude = "".join(f"    {line}\n" for line in call_prelude.splitlines())
 
-    patch_target = (
-        captured_target
-        if world.captured_patch
-        else "lib.unrelated.observe"
-    )
+    patch_target = captured_target if world.captured_patch else "lib.unrelated.observe"
     if world.patch_api == "direct":
         patch_import = "from unittest.mock import patch"
         patch_expression = "patch"
@@ -77,32 +153,58 @@ def render_world(world: AuditWorld) -> RenderedWorld:
     if world.patch_style == "string":
         patch_call = f'{patch_expression}("{patch_target}")'
         owner_import = ""
-    else:
+    elif world.patch_style == "object":
         owner_path, attribute = patch_target.rsplit(".", 1)
         patch_call = f'{patch_expression}.object(owner, "{attribute}")'
         owner_import = f"import {owner_path} as owner\n"
+    elif world.patch_style == "alias_object":
+        owner_path, attribute = patch_target.rsplit(".", 1)
+        patch_call = f'{patch_expression}.object(owner, "{attribute}")'
+        owner_import = (
+            f"import {owner_path} as dependency_owner\nowner = dependency_owner\n"
+        )
+    else:
+        owner_path, attribute = patch_target.rsplit(".", 1)
+        patch_call = f"{patch_expression}.dict(owner.__dict__, {attribute}=object())"
+        owner_import = f"import {owner_path} as owner\n"
 
     injection = ", match_fn=object()" if world.injected else ""
+    setup = ""
+    if world.callable_shape == "instance":
+        setup = f"    worker = {callable_expression}()\n"
+        callable_expression = f"worker{member}"
     call = f"{callable_expression}([]{injection})"
     if world.activation == "with":
         test = (
             f"{patch_import}\n{owner_import}\n"
             "def test_subject():\n"
-            f"    {call_import}\n"
+            f"{scoped_prelude}"
+            f"{setup}"
             f"    with {patch_call}:\n"
             f"        {call}\n"
         )
-    else:
+    elif world.activation == "decorator":
         test = (
-            f"{patch_import}\n{owner_import}{call_import}\n\n"
+            f"{patch_import}\n{owner_import}{call_prelude}\n\n"
             f"@{patch_call}\n"
             "def test_subject(mock_dependency):\n"
+            f"{setup}"
             f"    {call}\n"
+        )
+    else:
+        test = (
+            f"{patch_import}\nfrom contextlib import nullcontext\n{owner_import}\n"
+            "def test_subject():\n"
+            f"{scoped_prelude}"
+            f"{setup}"
+            f"    with {patch_call}, nullcontext({call}):\n"
+            "        pass\n"
         )
     return RenderedWorld(
         production=production,
         tests={"tests/test_subject.py": test},
         expected_valid=world.expected_valid,
+        expected_error=world.expected_error,
     )
 
 
@@ -110,8 +212,13 @@ def assert_world_contract(
     case: unittest.TestCase,
     world: AuditWorld,
     findings: tuple[DefaultPatchFinding, ...],
+    error: ValueError | None = None,
 ) -> None:
     """Compare the checker with the independent world oracle."""
+    if world.expected_error:
+        case.assertIsNotNone(error, msg=world)
+        return
+    case.assertIsNone(error, msg=(world, error))
     case.assertEqual(not findings, world.expected_valid, msg=(world, findings))
 
 
@@ -129,7 +236,7 @@ class TestDefinitionDefaultPatchAudit(unittest.TestCase):
                 "from unittest.mock import patch\n\n"
                 "def test_non_cooled_user_proceeds():\n"
                 "    from lib.enqueue import try_enqueue\n"
-                "    with patch(\"lib.enqueue.check_for_match\"):\n"
+                f'    with patch("{_ENQUEUE_CAPTURE_TARGET}"):\n'
                 "        try_enqueue([])\n"
             ),
         }
@@ -217,7 +324,7 @@ class TestDefinitionDefaultPatchAudit(unittest.TestCase):
             "tests/test_subject.py": (
                 "from unittest.mock import patch\n"
                 "from lib.enqueue import try_enqueue\n\n"
-                "with patch(\"lib.enqueue.check_for_match\"):\n"
+                f'with patch("{_ENQUEUE_CAPTURE_TARGET}"):\n'
                 "    invoke = try_enqueue\n"
                 "    invoke([])\n"
             ),
@@ -239,7 +346,7 @@ class TestDefinitionDefaultPatchAudit(unittest.TestCase):
                 "from unittest.mock import patch\n"
                 "from lib.enqueue import try_enqueue\n\n"
                 "def test_subject():\n"
-                "    patcher = patch(\"lib.enqueue.check_for_match\")\n"
+                f'    patcher = patch("{_ENQUEUE_CAPTURE_TARGET}")\n'
                 "    patcher.start()\n"
                 "    try_enqueue([])\n"
             ),
@@ -250,6 +357,217 @@ class TestDefinitionDefaultPatchAudit(unittest.TestCase):
             r"tests/test_subject\.py:5: unsupported definition-default patch "
             r"syntax: captured-default patches must be direct with-items or "
             r"test decorators",
+        ):
+            find_ineffective_default_patches(production, tests)
+
+    def test_wrapper_and_tuple_defaults_fail_closed_at_production_source(self) -> None:
+        for default_style in ("wrapper", "tuple"):
+            world = AuditWorld(
+                captured_patch=True,
+                injected=True,
+                default_style=default_style,
+            )
+            rendered = render_world(world)
+            with (
+                self.subTest(default_style=default_style),
+                self.assertRaisesRegex(
+                    ValueError,
+                    r"lib/enqueue\.py:\d+: unsupported definition-default "
+                    r"expression for lib\.enqueue\.try_enqueue\.match_fn "
+                    r"overlaps patched target lib\.enqueue\.check_for_match",
+                ),
+            ):
+                find_ineffective_default_patches(
+                    rendered.production,
+                    rendered.tests,
+                )
+
+    def test_direct_constructor_call_is_checked_as_init(self) -> None:
+        world = AuditWorld(
+            captured_patch=True,
+            injected=False,
+            callable_shape="constructor",
+        )
+        rendered = render_world(world)
+
+        self.assertEqual(
+            find_ineffective_default_patches(rendered.production, rendered.tests),
+            (
+                DefaultPatchFinding(
+                    test_path="tests/test_subject.py",
+                    line=6,
+                    callable_path="lib.enqueue.Worker.__init__",
+                    patched_target="lib.enqueue.check_for_match",
+                    injectable_keyword="match_fn",
+                ),
+            ),
+        )
+
+    def test_constructor_positional_override_fails_closed(self) -> None:
+        production = {
+            "lib/enqueue.py": (
+                "from lib.matching import check_for_match\n\n"
+                "class Worker:\n"
+                "    def __init__(self, tracks, match_fn=check_for_match):\n"
+                "        self.result = match_fn(tracks)\n"
+            ),
+        }
+        tests = {
+            "tests/test_subject.py": (
+                "from unittest.mock import patch\n"
+                "from lib.enqueue import Worker\n\n"
+                f'with patch("{_ENQUEUE_CAPTURE_TARGET}"):\n'
+                "    Worker([], object())\n"
+            ),
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"tests/test_subject\.py:5: unsupported definition-default patch "
+            r"syntax: inject match_fn as an explicit keyword",
+        ):
+            find_ineffective_default_patches(production, tests)
+
+    def test_assigned_instance_member_call_fails_closed(self) -> None:
+        world = AuditWorld(
+            captured_patch=True,
+            injected=True,
+            callable_shape="instance",
+        )
+        rendered = render_world(world)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"tests/test_subject\.py:\d+: unsupported definition-default patch "
+            r"syntax: assigned instance call worker\.run cannot be proven",
+        ):
+            find_ineffective_default_patches(rendered.production, rendered.tests)
+
+    def test_alias_owned_patch_object_fails_closed_when_attribute_overlaps(
+        self,
+    ) -> None:
+        production = render_world(
+            AuditWorld(captured_patch=True, injected=False),
+        ).production
+        tests = {
+            "tests/test_subject.py": (
+                "from unittest.mock import patch\n"
+                "import lib.enqueue as enqueue\n"
+                "owner = enqueue\n\n"
+                "def test_subject():\n"
+                '    with patch.object(owner, "check_for_match"):\n'
+                "        enqueue.try_enqueue([])\n"
+            ),
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"tests/test_subject\.py:6: unsupported definition-default patch "
+            r"syntax: patch\.object owner must be a direct import",
+        ):
+            find_ineffective_default_patches(production, tests)
+
+    def test_patch_dict_key_overlap_fails_closed(self) -> None:
+        production = render_world(
+            AuditWorld(captured_patch=True, injected=False),
+        ).production
+        tests = {
+            "tests/test_subject.py": (
+                "from unittest.mock import patch\n"
+                "import lib.enqueue as enqueue\n\n"
+                "def test_subject():\n"
+                "    with patch.dict(enqueue.__dict__, check_for_match=object()):\n"
+                "        enqueue.try_enqueue([])\n"
+            ),
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"tests/test_subject\.py:5: unsupported definition-default patch "
+            r"syntax: patch\.dict overlaps captured target check_for_match",
+        ):
+            find_ineffective_default_patches(production, tests)
+
+    def test_patch_dict_control_keywords_do_not_count_as_dict_keys(self) -> None:
+        production = {
+            "lib/enqueue.py": (
+                "from lib.matching import clear\n\n"
+                "def try_enqueue(tracks, *, match_fn=clear):\n"
+                "    return match_fn(tracks)\n"
+            ),
+        }
+        tests = {
+            "tests/test_subject.py": (
+                "from unittest.mock import patch\n"
+                "from lib.enqueue import try_enqueue\n"
+                "import lib.unrelated as unrelated\n\n"
+                "with patch.dict(unrelated.__dict__, clear=True):\n"
+                "    try_enqueue([], match_fn=object())\n"
+            ),
+        }
+
+        self.assertEqual(find_ineffective_default_patches(production, tests), ())
+
+    def test_later_with_context_executes_inside_earlier_patch(self) -> None:
+        world = AuditWorld(
+            captured_patch=True,
+            injected=False,
+            activation="later_context",
+        )
+        rendered = render_world(world)
+
+        findings = find_ineffective_default_patches(
+            rendered.production,
+            rendered.tests,
+        )
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].callable_path, "lib.enqueue.try_enqueue")
+
+    def test_conflicting_production_imports_fail_at_default_source(self) -> None:
+        production = {
+            "lib/enqueue.py": (
+                "from lib.first import check_for_match\n"
+                "from lib.second import check_for_match\n\n"
+                "def try_enqueue(tracks, *, match_fn=check_for_match):\n"
+                "    return match_fn(tracks)\n"
+            ),
+        }
+        tests = {
+            "tests/test_subject.py": (
+                "from unittest.mock import patch\n"
+                "from lib.enqueue import try_enqueue\n\n"
+                f'with patch("{_FIRST_CAPTURE_TARGET}"):\n'
+                "    try_enqueue([])\n"
+            ),
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"lib/enqueue\.py:4: unsupported definition-default expression "
+            r"for lib\.enqueue\.try_enqueue\.match_fn: binding "
+            r"check_for_match has conflicting imports",
+        ):
+            find_ineffective_default_patches(production, tests)
+
+    def test_local_callable_declaration_shadows_import_fail_closed(self) -> None:
+        production = render_world(
+            AuditWorld(captured_patch=True, injected=False),
+        ).production
+        tests = {
+            "tests/test_subject.py": (
+                "from unittest.mock import patch\n"
+                "from lib.enqueue import try_enqueue\n\n"
+                "def try_enqueue(tracks):\n"
+                "    return tracks\n\n"
+                f'with patch("{_ENQUEUE_CAPTURE_TARGET}"):\n'
+                "    try_enqueue([])\n"
+            ),
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"tests/test_subject\.py:4: unsupported definition-default patch "
+            r"syntax: imported callable binding try_enqueue is rebound",
         ):
             find_ineffective_default_patches(production, tests)
 
