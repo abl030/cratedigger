@@ -21,7 +21,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from lib.config import CratediggerConfig, read_runtime_config
+from lib.config import read_runtime_config
 from lib.dispatch import _record_preview_measurement_failed
 from lib.import_preview import (
     PREVIEW_VERDICT_EVIDENCE_READY,
@@ -44,8 +44,12 @@ from lib.import_queue import (
 )
 from lib.pipeline_db import DEFAULT_DSN, PipelineDB
 from lib.measurement import (
-    collect_attempt_spectral_audit,
-    resolve_existing_spectral_audit_path,
+    ExistingSpectralAuditLookup,
+    ExistingSpectralResolver,
+    SpectralDetailAnalyzer,
+    analyze_spectral_audit_path,
+    collect_release_attempt_spectral_audit,
+    existing_spectral_resolver_for_config,
 )
 from lib.quality import (
     ActiveDownloadState,
@@ -53,7 +57,6 @@ from lib.quality import (
     MeasurementFailure,
     ImportResult,
     SpectralAnalysisDetail,
-    SpectralDetail,
 )
 from lib.quality_evidence import (
     EvidenceBuildResult,
@@ -448,85 +451,15 @@ def _handle_measurement_failed(
     return None
 
 
-SpectralAuditCollector = Callable[
-    [str, str | None],
-    SpectralDetail,
-]
-ExistingSpectralPathResolver = Callable[
-    [str, CratediggerConfig],
-    tuple[str | None, SpectralAnalysisDetail | None],
-]
 PreviewFn = Callable[[Any, ImportJob], ImportPreviewResult]
-
-
-def _collect_reused_evidence_spectral_audit(
-    db: Any,
-    request_id: int | None,
-    source_path: str,
-    collector: SpectralAuditCollector,
-    existing_path_resolver: ExistingSpectralPathResolver,
-) -> SpectralDetail:
-    """Collect reused-candidate audit with the same conditional HAVE rule."""
-    persisted_existing = SpectralAnalysisDetail(attempted=False)
-    preserve_have_source = False
-    existing_path: str | None = None
-    lookup_failure: SpectralAnalysisDetail | None = None
-    if request_id is not None:
-        try:
-            req = db.get_request(request_id) or {}
-            current_evidence, persisted_existing, _ = (
-                load_persisted_existing_spectral(
-                    db,
-                    request_id,
-                    req,
-                )
-            )
-            preserve_have_source = preserve_existing_source_spectral(
-                current_evidence,
-            )
-            if not preserve_have_source:
-                existing_path, lookup_failure = (
-                    existing_path_resolver(
-                        str(req.get("mb_release_id") or ""),
-                        read_runtime_config(),
-                    )
-                )
-        except Exception:
-            logger.exception(
-                "Unable to resolve reused HAVE audit for request %s",
-                request_id,
-            )
-    try:
-        audit = collector(source_path, existing_path)
-        if preserve_have_source:
-            audit.existing = persisted_existing
-        elif lookup_failure is not None:
-            audit.existing = lookup_failure
-        return audit
-    except Exception as exc:
-        logger.exception(
-            "Reused-evidence spectral audit failed for %s", source_path)
-        error = f"{type(exc).__name__}: {exc}"
-        return SpectralDetail(
-            candidate=SpectralAnalysisDetail(attempted=True, error=error),
-            existing=(
-                persisted_existing
-                if preserve_have_source
-                else lookup_failure or SpectralAnalysisDetail(attempted=False)
-            ),
-        )
 
 
 def process_claimed_preview_job(
     db: Any,
     job: ImportJob,
     *,
-    spectral_audit_collector: SpectralAuditCollector = (
-        collect_attempt_spectral_audit
-    ),
-    existing_path_resolver: ExistingSpectralPathResolver = (
-        resolve_existing_spectral_audit_path
-    ),
+    spectral_detail_analyzer: SpectralDetailAnalyzer | None = None,
+    existing_spectral_resolver: ExistingSpectralResolver | None = None,
     preview_fn: PreviewFn | None = None,
 ) -> ImportJob | None:
     # Front-gate: if stored candidate evidence already passes the cheap
@@ -540,13 +473,53 @@ def process_claimed_preview_job(
         and front_gate_result.evidence is not None
         and front_gate_source is not None
     ):
-        audit = _collect_reused_evidence_spectral_audit(
-            db,
-            job.request_id,
+        persisted_existing = SpectralAnalysisDetail(attempted=False)
+        preserve_have_source = False
+        mb_release_id = ""
+        if job.request_id is not None:
+            try:
+                req = db.get_request(job.request_id) or {}
+                mb_release_id = str(req.get("mb_release_id") or "")
+                current_evidence, persisted_existing, _ = (
+                    load_persisted_existing_spectral(
+                        db,
+                        job.request_id,
+                        req,
+                    )
+                )
+                preserve_have_source = preserve_existing_source_spectral(
+                    current_evidence,
+                )
+            except Exception:
+                logger.exception(
+                    "Unable to load reused HAVE evidence for request %s",
+                    job.request_id,
+                )
+        audit_resolver = existing_spectral_resolver
+        if audit_resolver is None:
+            try:
+                audit_cfg = read_runtime_config()
+            except Exception as exc:
+                logger.exception("Unable to load config for reused HAVE audit")
+                failed_lookup = ExistingSpectralAuditLookup(
+                    failure=SpectralAnalysisDetail(
+                        attempted=True,
+                        error=f"{type(exc).__name__}: {exc}",
+                    ),
+                )
+                audit_resolver = lambda _release_id: failed_lookup
+            else:
+                audit_resolver = existing_spectral_resolver_for_config(audit_cfg)
+        audit = collect_release_attempt_spectral_audit(
             front_gate_source,
-            spectral_audit_collector,
-            existing_path_resolver,
-        )
+            mb_release_id,
+            existing_spectral_evidence=persisted_existing,
+            preserve_existing_source_spectral=preserve_have_source,
+            analyzer=(
+                spectral_detail_analyzer or analyze_spectral_audit_path
+            ),
+            existing_resolver=audit_resolver,
+        )[0]
         reused_payload = _reused_evidence_preview_payload(
             job,
             front_gate_result.evidence,

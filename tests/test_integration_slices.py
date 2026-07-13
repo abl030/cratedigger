@@ -5573,6 +5573,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
         )
         from scripts import import_preview_worker
         from lib.dispatch import dispatch_import_from_db
+        from lib.measurement import ExistingSpectralAuditLookup
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
         from tests.helpers import noop_quality_gate
 
@@ -5620,16 +5621,13 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                     "measure_preimport_state must not be called when evidence is valid"
                 )
 
-            audit_calls: list[
-                tuple[str, str | None]
-            ] = []
+            audit_calls: list[str] = []
 
-            def collect_audit(
-                path: str,
-                existing_path: str | None,
-            ) -> SpectralDetail:
-                audit_calls.append((path, existing_path))
-                return audit
+            def analyze(path: str) -> SpectralAnalysisDetail:
+                audit_calls.append(path)
+                detail = audit.existing if path == "existing" else audit.candidate
+                assert detail is not None
+                return detail
 
             with patch(
                 "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
@@ -5641,10 +5639,13 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 updated = import_preview_worker.process_claimed_preview_job(
                     cast(Any, db),
                     claimed,
-                    spectral_audit_collector=collect_audit,
+                    spectral_detail_analyzer=analyze,
+                    existing_spectral_resolver=lambda _mbid: (
+                        ExistingSpectralAuditLookup(path="existing")
+                    ),
                 )
 
-            self.assertEqual(len(audit_calls), 1)
+            self.assertEqual(audit_calls, [source, "existing"])
             assert updated is not None
             assert updated.preview_result is not None
             preview_ir = ImportResult.from_dict(
@@ -5751,16 +5752,12 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 existing=SpectralAnalysisDetail(attempted=False),
             )
 
-            audit_calls: list[
-                tuple[str, str | None]
-            ] = []
+            audit_calls: list[str] = []
 
-            def collect_audit(
-                path: str,
-                existing_path: str | None,
-            ) -> SpectralDetail:
-                audit_calls.append((path, existing_path))
-                return audit
+            def analyze(path: str) -> SpectralAnalysisDetail:
+                audit_calls.append(path)
+                assert audit.candidate is not None
+                return audit.candidate
 
             with patch(
                 "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
@@ -5775,7 +5772,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 updated = import_preview_worker.process_claimed_preview_job(
                     cast(Any, db),
                     claimed,
-                    spectral_audit_collector=collect_audit,
+                    spectral_detail_analyzer=analyze,
                 )
 
             self.assertEqual(len(audit_calls), 1)
