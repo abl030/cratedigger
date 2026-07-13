@@ -15,10 +15,12 @@ import { awstDateTime, esc } from './util.js';
  *   still legible.
  * @param {number|string} avg
  * @param {string|undefined} kind
+ * @param {number|string|undefined} min
  * @returns {string}
  */
-function formatV0Probe(avg, kind) {
-  const base = `${esc(avg)}kbps avg`;
+function formatV0Probe(avg, kind, min = undefined) {
+  const floor = min !== null && min !== undefined ? ` · min ${esc(min)}kbps` : '';
+  const base = `${esc(avg)}kbps avg${floor}`;
   if (!kind || kind === 'lossless_source_v0') {
     return base;
   }
@@ -36,10 +38,12 @@ function formatV0Probe(avg, kind) {
  * qualified "(from lossy)" — same vocabulary as formatV0Probe.
  * @param {number|string} avg
  * @param {string|undefined} kind
+ * @param {number|string|undefined} min
  * @returns {string}
  */
-function stripV0Phrase(avg, kind) {
-  const base = `V0 ${esc(avg)}k avg`;
+function stripV0Phrase(avg, kind, min = undefined) {
+  const floor = min !== null && min !== undefined ? ` (min ${esc(min)}k)` : '';
+  const base = `V0 ${esc(avg)}k avg${floor}`;
   if (!kind || kind === 'lossless_source_v0') return base;
   if (kind === 'native_lossy_research_v0') return `${base} (from lossy)`;
   if (kind === 'on_disk_research_v0') return `${base} (on-disk re-encode)`;
@@ -178,7 +182,16 @@ export function renderEvidenceStrip(h) {
     // Labelled "min": bare numbers on a card that also shows avg-labelled
     // basis and V0 values invite exactly the min-vs-avg confusion the
     // basis exists to kill (request 8781 operator report).
-    if (h.actual_min_bitrate) inParts.push(`min ${esc(h.actual_min_bitrate)}k`);
+    const minIsLosslessSourceProbe = (
+      (h.v0_probe_kind === 'lossless_source_v0'
+        || h.v0_probe_kind === 'lossless_source')
+      && h.v0_probe_min_bitrate !== null
+      && h.v0_probe_min_bitrate !== undefined
+      && Number(h.actual_min_bitrate) === Number(h.v0_probe_min_bitrate)
+    );
+    if (h.actual_min_bitrate && !minIsLosslessSourceProbe) {
+      inParts.push(`min ${esc(h.actual_min_bitrate)}k`);
+    }
   }
   const materialized = materializedOutputPhrase(h);
   if (materialized) inParts.push(materialized);
@@ -200,7 +213,8 @@ export function renderEvidenceStrip(h) {
   // V0 on every candidate: whichever probe ran, show it (qualified when
   // it's a research probe of a lossy source, so lineages stay legible).
   if (h.v0_probe_avg_bitrate) {
-    inParts.push(stripV0Phrase(h.v0_probe_avg_bitrate, h.v0_probe_kind));
+    inParts.push(stripV0Phrase(
+      h.v0_probe_avg_bitrate, h.v0_probe_kind, h.v0_probe_min_bitrate));
   }
 
   const haveParts = [];
@@ -230,7 +244,9 @@ export function renderEvidenceStrip(h) {
   }
   if (h.existing_v0_probe_avg_bitrate) {
     haveParts.push(stripV0Phrase(
-      h.existing_v0_probe_avg_bitrate, h.existing_v0_probe_kind));
+      h.existing_v0_probe_avg_bitrate,
+      h.existing_v0_probe_kind,
+      h.existing_v0_probe_min_bitrate));
   }
 
   if (inParts.length === 0 && haveParts.length === 0) return '';
@@ -336,13 +352,16 @@ export function renderDownloadHistoryItem(h) {
   // V0-probe avg next to a container min bitrate reads as a fake
   // upgrade (e.g. "239kbps avg (was 92kbps)" compares two different
   // metrics). When there's no existing probe, the row shows the
-  // candidate alone; the Min bitrate row below already carries the
-  // min-vs-min comparison.
+  // candidate alone. Each probe owns its own optional minimum so a temporary
+  // V0 floor can never be mistaken for the source container's bitrate.
   if (h.v0_probe_avg_bitrate) {
-    const candidate = formatV0Probe(h.v0_probe_avg_bitrate, h.v0_probe_kind);
+    const candidate = formatV0Probe(
+      h.v0_probe_avg_bitrate, h.v0_probe_kind, h.v0_probe_min_bitrate);
     const was = h.existing_v0_probe_avg_bitrate
       ? formatV0Probe(
-        h.existing_v0_probe_avg_bitrate, h.existing_v0_probe_kind)
+        h.existing_v0_probe_avg_bitrate,
+        h.existing_v0_probe_kind,
+        h.existing_v0_probe_min_bitrate)
       : null;
     rows.push(['V0 probe', withWas(candidate, was)]);
   }
