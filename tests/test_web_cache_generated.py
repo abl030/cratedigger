@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 import sys
 import threading
-import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -20,7 +19,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import tests._hypothesis_profiles  # noqa: F401
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 from tests.test_web_cache import FakeRedis
@@ -29,6 +28,53 @@ from web import cache
 
 class _GeneratedAbort(BaseException):
     """Non-Exception generated leader failure."""
+
+
+class _ObservedDoneEvent(threading.Event):
+    """Test event that proves followers entered the production wait seam."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._waiter_count = 0
+        self._waiters_changed = threading.Condition()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        with self._waiters_changed:
+            self._waiter_count += 1
+            self._waiters_changed.notify_all()
+        return super().wait(timeout)
+
+    def wait_for_waiters(self, count: int, timeout: float = 5) -> bool:
+        with self._waiters_changed:
+            return self._waiters_changed.wait_for(
+                lambda: self._waiter_count >= count,
+                timeout=timeout,
+            )
+
+
+class _ObservedMetadataFlight(cache._MetadataFlight):
+    """Production flight with only its completion event instrumented."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.done = _ObservedDoneEvent()
+
+
+def _wait_for_actual_followers(
+    case: unittest.TestCase, key: str, expected: int,
+) -> None:
+    """Wait until every declared follower is inside ``flight.done.wait``."""
+    with cache._metadata_flights_lock:
+        flight = cache._metadata_flights.get(key)
+    case.assertIsNotNone(flight, f"no active metadata flight for {key}")
+    assert flight is not None
+    case.assertIsInstance(flight.done, _ObservedDoneEvent)
+    done = flight.done
+    assert isinstance(done, _ObservedDoneEvent)
+    case.assertTrue(
+        done.wait_for_waiters(expected),
+        f"only some followers reached the active flight for {key}",
+    )
 
 
 def assert_singleflight_wave(
@@ -91,6 +137,12 @@ class TestGeneratedMetadataSingleFlight(unittest.TestCase):
                 expected_fetches[key] = expected_fetches.get(key, 0) + 1
 
             start = threading.Barrier(len(keys) + 1)
+            entered = {
+                key: threading.Event() for key in expected_wave_fetches
+            }
+            release = {
+                key: threading.Event() for key in expected_wave_fetches
+            }
 
             def call(key: str) -> dict[str, Any]:
                 start.wait(timeout=5)
@@ -99,17 +151,30 @@ class TestGeneratedMetadataSingleFlight(unittest.TestCase):
                     with lock:
                         fetches[key] = fetches.get(key, 0) + 1
                         fill = fetches[key]
-                    # Keep the leader in-flight so duplicate-key callers
-                    # exercise the follower path instead of a later warm hit.
-                    time.sleep(0.002)
+                    entered[key].set()
+                    if not release[key].wait(timeout=5):
+                        raise AssertionError(f"fill for {key} was not released")
                     return {"key": key, "rows": [{"fill": fill}]}
 
                 return cache.memoize_meta(key, fetch)
 
-            with ThreadPoolExecutor(max_workers=len(keys)) as pool:
-                futures = [pool.submit(call, key) for key in keys]
-                start.wait(timeout=5)
-                results = [future.result(timeout=5) for future in futures]
+            with patch.object(cache, "_MetadataFlight", _ObservedMetadataFlight):
+                with ThreadPoolExecutor(max_workers=len(keys)) as pool:
+                    futures = [pool.submit(call, key) for key in keys]
+                    start.wait(timeout=5)
+                    try:
+                        for key in expected_wave_fetches:
+                            self.assertTrue(
+                                entered[key].wait(timeout=5),
+                                f"no leader entered the fill for {key}",
+                            )
+                            _wait_for_actual_followers(
+                                self, key, keys.count(key) - 1,
+                            )
+                    finally:
+                        for gate in release.values():
+                            gate.set()
+                    results = [future.result(timeout=5) for future in futures]
 
             assert_singleflight_wave(
                 expected_fetches, fetches, keys, results,
@@ -145,6 +210,7 @@ class TestGeneratedMetadataSingleFlight(unittest.TestCase):
         callers=st.integers(min_value=1, max_value=5),
         abort=st.booleans(),
     )
+    @example(key="artist:b", callers=2, abort=False)
     def test_failure_wave_is_shared_and_arbitrary_keys_retry(
         self, key: str, callers: int, abort: bool,
     ) -> None:
@@ -156,6 +222,8 @@ class TestGeneratedMetadataSingleFlight(unittest.TestCase):
         )
         fetches = 0
         started = threading.Barrier(callers + 1)
+        entered = threading.Event()
+        release = threading.Event()
 
         def call() -> Any:
             started.wait(timeout=5)
@@ -163,20 +231,28 @@ class TestGeneratedMetadataSingleFlight(unittest.TestCase):
             def fail() -> Any:
                 nonlocal fetches
                 fetches += 1
-                time.sleep(0.002)
+                entered.set()
+                if not release.wait(timeout=5):
+                    raise AssertionError("failing fill was not released")
                 raise failure
 
             return cache.memoize_meta(key, fail)
 
-        with ThreadPoolExecutor(max_workers=callers) as pool:
-            futures = [pool.submit(call) for _ in range(callers)]
-            started.wait(timeout=5)
-            raised: list[BaseException] = []
-            for future in futures:
+        with patch.object(cache, "_MetadataFlight", _ObservedMetadataFlight):
+            with ThreadPoolExecutor(max_workers=callers) as pool:
+                futures = [pool.submit(call) for _ in range(callers)]
+                started.wait(timeout=5)
                 try:
-                    future.result(timeout=5)
-                except BaseException as exc:
-                    raised.append(exc)
+                    self.assertTrue(entered.wait(timeout=5))
+                    _wait_for_actual_followers(self, key, callers - 1)
+                finally:
+                    release.set()
+                raised: list[BaseException] = []
+                for future in futures:
+                    try:
+                        future.result(timeout=5)
+                    except BaseException as exc:
+                        raised.append(exc)
 
         self.assertEqual(fetches, 1)
         self.assertEqual(len(raised), callers)
@@ -190,12 +266,15 @@ class TestGeneratedMetadataSingleFlight(unittest.TestCase):
         key=st.sampled_from(("artist:a", "artist:b", "artist:c")),
         callers=st.integers(min_value=1, max_value=5),
     )
+    @example(key="artist:c", callers=2)
     def test_redis_down_shares_each_overlap_then_refetches(
         self, key: str, callers: int,
     ) -> None:
         cache._redis = None
         fetches = 0
         started = threading.Barrier(callers + 1)
+        entered = threading.Event()
+        release = threading.Event()
 
         def call() -> dict[str, Any]:
             started.wait(timeout=5)
@@ -203,15 +282,23 @@ class TestGeneratedMetadataSingleFlight(unittest.TestCase):
             def fetch() -> dict[str, Any]:
                 nonlocal fetches
                 fetches += 1
-                time.sleep(0.002)
+                entered.set()
+                if not release.wait(timeout=5):
+                    raise AssertionError("Redis-down fill was not released")
                 return {"key": key, "rows": []}
 
             return cache.memoize_meta(key, fetch)
 
-        with ThreadPoolExecutor(max_workers=callers) as pool:
-            futures = [pool.submit(call) for _ in range(callers)]
-            started.wait(timeout=5)
-            results = [future.result(timeout=5) for future in futures]
+        with patch.object(cache, "_MetadataFlight", _ObservedMetadataFlight):
+            with ThreadPoolExecutor(max_workers=callers) as pool:
+                futures = [pool.submit(call) for _ in range(callers)]
+                started.wait(timeout=5)
+                try:
+                    self.assertTrue(entered.wait(timeout=5))
+                    _wait_for_actual_followers(self, key, callers - 1)
+                finally:
+                    release.set()
+                results = [future.result(timeout=5) for future in futures]
 
         self.assertEqual(fetches, 1)
         self.assertEqual(len({id(result) for result in results}), callers)
@@ -226,6 +313,52 @@ class TestGeneratedMetadataSingleFlight(unittest.TestCase):
 
 
 class TestSingleFlightCheckerKnownBad(unittest.TestCase):
+    def setUp(self) -> None:
+        self._saved_redis = cache._redis
+        cache._redis = None
+
+    def tearDown(self) -> None:
+        cache._redis = self._saved_redis
+
+    def test_start_barrier_does_not_prove_cache_overlap(self) -> None:
+        """A caller can leave the start barrier yet arrive after the flight."""
+        key = "artist:old-harness-known-bad"
+        start = threading.Barrier(3)
+        allow_late_caller = threading.Event()
+        first_finished = threading.Event()
+        fetches = 0
+
+        def fetch() -> dict[str, str]:
+            nonlocal fetches
+            fetches += 1
+            return {"key": key}
+
+        def first_call() -> dict[str, str]:
+            start.wait(timeout=5)
+            result = cache.memoize_meta(key, fetch)
+            first_finished.set()
+            return result
+
+        def late_call() -> dict[str, str]:
+            start.wait(timeout=5)
+            if not allow_late_caller.wait(timeout=5):
+                raise AssertionError("late caller was not released")
+            return cache.memoize_meta(key, fetch)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(first_call)
+            late = pool.submit(late_call)
+            start.wait(timeout=5)
+            self.assertTrue(first_finished.wait(timeout=5))
+            allow_late_caller.set()
+            self.assertEqual(first.result(timeout=5), {"key": key})
+            self.assertEqual(late.result(timeout=5), {"key": key})
+
+        self.assertEqual(
+            fetches, 2,
+            "the old start barrier mislabeled a legitimate sequential retry",
+        )
+
     def test_checker_rejects_duplicate_fetch(self) -> None:
         with self.assertRaises(AssertionError):
             assert_singleflight_wave(
