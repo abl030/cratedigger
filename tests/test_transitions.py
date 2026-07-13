@@ -420,6 +420,34 @@ class TestFinalizeRequest(unittest.TestCase):
         self.assertEqual(row["prev_min_bitrate"], 320)
         self.assertEqual(row["download_attempts"], 1)
 
+    def test_explicit_previous_bitrate_survives_manual_requeue(self):
+        """The typed wanted command's public fields reach the reset CAS."""
+        db = FakePipelineDB()
+        db.seed_request(
+            make_request_row(
+                id=42,
+                status="manual",
+                min_bitrate=320,
+                prev_min_bitrate=192,
+            ),
+        )
+
+        result = finalize_request(
+            cast(Any, db),
+            42,
+            RequestTransition.to_wanted(
+                from_status="manual",
+                min_bitrate=245,
+                prev_min_bitrate=256,
+            ),
+        )
+
+        self.assertIsInstance(result, TransitionApplied)
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["min_bitrate"], 245)
+        self.assertEqual(row["prev_min_bitrate"], 256)
+
     def test_rejects_direct_constructor_wrong_fields_at_finalization(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="wanted"))

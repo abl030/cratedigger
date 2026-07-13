@@ -181,6 +181,27 @@ def assert_read_only_cas_result(
         raise AssertionError(f"read-only CAS mutated row: {before} -> {after}")
 
 
+def assert_wanted_quality_fields(
+    row: dict,
+    *,
+    min_bitrate: int | None,
+    prev_min_bitrate: int | None,
+) -> None:
+    """A typed wanted transition preserves both explicit quality fields."""
+    if row["status"] != "wanted":
+        raise AssertionError(f"wanted transition landed as {row['status']!r}")
+    if row.get("min_bitrate") != min_bitrate:
+        raise AssertionError(
+            f"min_bitrate drifted: {row.get('min_bitrate')!r} != "
+            f"{min_bitrate!r}"
+        )
+    if row.get("prev_min_bitrate") != prev_min_bitrate:
+        raise AssertionError(
+            f"prev_min_bitrate drifted: {row.get('prev_min_bitrate')!r} != "
+            f"{prev_min_bitrate!r}"
+        )
+
+
 class TestReadOnlyMetadataCasGenerated(unittest.TestCase):
     @given(
         exists=st.booleans(),
@@ -278,6 +299,67 @@ class TestReadOnlyMetadataCasGenerated(unittest.TestCase):
             db.update_request_fields(request_id, **{field: value})
 
         self.assertEqual(db.get_request(request_id), before)
+
+
+class TestWantedQualityFieldsGenerated(unittest.TestCase):
+    @given(
+        source_status=st.sampled_from(["downloading", "imported", "manual"]),
+        current_min_bitrate=st.one_of(st.none(), st.integers(1, 2000)),
+        current_prev_min_bitrate=st.one_of(st.none(), st.integers(1, 2000)),
+        next_min_bitrate=st.one_of(st.none(), st.integers(1, 2000)),
+        explicit_prev_min_bitrate=st.one_of(st.none(), st.integers(1, 2000)),
+    )
+    @example(
+        source_status="manual",
+        current_min_bitrate=320,
+        current_prev_min_bitrate=192,
+        next_min_bitrate=245,
+        explicit_prev_min_bitrate=256,
+    )
+    @example(
+        source_status="downloading",
+        current_min_bitrate=245,
+        current_prev_min_bitrate=128,
+        next_min_bitrate=192,
+        explicit_prev_min_bitrate=None,
+    )
+    def test_explicit_wanted_quality_fields_match_typed_contract(
+        self,
+        *,
+        source_status: str,
+        current_min_bitrate: int | None,
+        current_prev_min_bitrate: int | None,
+        next_min_bitrate: int | None,
+        explicit_prev_min_bitrate: int | None,
+    ) -> None:
+        db = FakePipelineDB()
+        request_id = db.add_request(
+            "Artist",
+            "Album",
+            "request",
+            mb_release_id="wanted-quality-contract",
+            status=source_status,
+        )
+        row = db.request(request_id)
+        row["min_bitrate"] = current_min_bitrate
+        row["prev_min_bitrate"] = current_prev_min_bitrate
+
+        result = finalize_request(
+            db,
+            request_id,
+            RequestTransition.to_wanted(
+                from_status=source_status,
+                min_bitrate=next_min_bitrate,
+                prev_min_bitrate=explicit_prev_min_bitrate,
+            ),
+        )
+
+        self.assertIsInstance(result, TransitionApplied)
+        assert_wanted_quality_fields(
+            db.request(request_id),
+            min_bitrate=next_min_bitrate,
+            prev_min_bitrate=explicit_prev_min_bitrate,
+        )
 
 
 class TestResolverSourceStatusGenerated(unittest.TestCase):
@@ -796,6 +878,18 @@ class TestLifecycleCheckersTripOnViolations(unittest.TestCase):
             assert_download_state_coherent(
                 {"id": 1, "status": "imported",
                  "active_download_state": "{}"})
+
+    def test_trips_on_dropped_explicit_previous_bitrate(self):
+        with self.assertRaises(AssertionError):
+            assert_wanted_quality_fields(
+                {
+                    "status": "wanted",
+                    "min_bitrate": 245,
+                    "prev_min_bitrate": 320,
+                },
+                min_bitrate=245,
+                prev_min_bitrate=256,
+            )
 
     def test_trips_on_missing_descendant(self):
         with self.assertRaises(AssertionError):

@@ -3631,6 +3631,28 @@ class TestResetToWanted(unittest.TestCase):
         self.assertEqual(req["min_bitrate"], 320)
         self.assertEqual(req["prev_min_bitrate"], 192)
 
+    def test_explicit_previous_bitrate_wins_over_derived_history(self):
+        req_id = self._make_request("explicit-prev-br")
+        self.db.update_request_fields(
+            req_id,
+            min_bitrate=192,
+            prev_min_bitrate=128,
+        )
+
+        applied = self.db.reset_to_wanted(
+            req_id,
+            expected_status="imported",
+            min_bitrate=320,
+            prev_min_bitrate=256,
+        )
+
+        self.assertTrue(applied)
+        req = self.db.get_request(req_id)
+        assert req is not None
+        self.assertEqual(req["status"], "wanted")
+        self.assertEqual(req["min_bitrate"], 320)
+        self.assertEqual(req["prev_min_bitrate"], 256)
+
     def test_clears_manual_reason(self):
         """U6: re-queue clears ``manual_reason`` alongside attempt counters.
 
@@ -4906,6 +4928,37 @@ class TestDownloadingStatus(unittest.TestCase):
         self.assertIsNone(req["active_download_state"])
         self.assertEqual(req["download_attempts"], 1)
         self.assertEqual(blocked_req["status"], "wanted")
+
+    def test_reset_downloading_accepts_explicit_previous_bitrate(self):
+        req_id = self.db.add_request(
+            mb_release_id="rdtw-prev-br",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        self.db.update_request_fields(
+            req_id,
+            min_bitrate=245,
+            prev_min_bitrate=128,
+        )
+        self.assertTrue(self.db.set_downloading(req_id, json.dumps({
+            "filetype": "flac",
+            "enqueued_at": "2026-04-03T12:00:00+00:00",
+            "files": [],
+        })))
+
+        applied = self.db.reset_downloading_to_wanted(
+            req_id,
+            min_bitrate=192,
+            prev_min_bitrate=None,
+        )
+
+        self.assertTrue(applied)
+        req = self.db.get_request(req_id)
+        assert req is not None
+        self.assertEqual(req["status"], "wanted")
+        self.assertEqual(req["min_bitrate"], 192)
+        self.assertIsNone(req["prev_min_bitrate"])
 
     def test_update_download_state_current_path(self):
         """update_download_state_current_path() rewrites only the path field."""

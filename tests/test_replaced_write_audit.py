@@ -55,10 +55,13 @@ class _AlbumRequestUpdate:
 
 
 # Every unresolved production SQL builder is an exact, reviewed exception.
-# The key includes path, source line, and the exact execute SQL/params AST;
-# dynamic calls additionally bind the whole enclosing scope. The ratchet does
-# not infer parameter dataflow: transition SQL must use the canonical direct
-# call grammar below.
+# The key includes path, source line, and the exact execute SQL/params AST.
+# Dynamic calls bind the whole enclosing scope. Reviewed lifecycle calls go
+# further: their fingerprint also binds the normalized enclosing method AST,
+# path, and method name, so any same-method control-flow or binding change
+# invalidates review even when the execute call itself is byte-identical.
+# The ratchet does not infer parameter dataflow: transition SQL must use the
+# canonical direct call grammar below.
 _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/beets_db.py", 329, "8f86dc625b889913"): (
         "SQLite IN list is generated only from '?' value placeholders"
@@ -125,13 +128,13 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "metadata keys are validated identifiers, lifecycle fields are reserved, "
         "and values use one typed JSONB record parameter"
     ),
-    ("lib/pipeline_db/requests.py", 1268, "0e292421052b4282"): (
+    ("lib/pipeline_db/requests.py", 1282, "0e292421052b4282"): (
         "optional LIMIT is normalized through int before interpolation"
     ),
-    ("lib/pipeline_db/requests.py", 1283, "f027e891f4828e53"): (
+    ("lib/pipeline_db/requests.py", 1297, "f027e891f4828e53"): (
         "ORDER is selected from two literals and LIMIT remains a value placeholder"
     ),
-    ("lib/pipeline_db/requests.py", 1468, "714da98640ff84f0"): (
+    ("lib/pipeline_db/requests.py", 1482, "714da98640ff84f0"): (
         "attempt kind is validated against the fixed retry-counter vocabulary"
     ),
     ("lib/pipeline_db/search_plan.py", 949, "3df0db818cab2f3c"): (
@@ -146,28 +149,28 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
 # beside the implementation they review; movement or SQL-shape drift fails the
 # ratchet just like the dynamic-SQL exceptions above.
 _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/download_log.py", 253, "ca5eb59bc2d6e4e8"): (
+    ("lib/pipeline_db/download_log.py", 253, "b04c5ae9eb3423c1"): (
         "atomic abandoned-import recovery performs downloading-to-wanted CAS"
     ),
-    ("lib/pipeline_db/requests.py", 245, "2285e26c181b40d3"): (
+    ("lib/pipeline_db/requests.py", 245, "558917722283199d"): (
         "Replace holds the row lock and CASes the captured active source status"
     ),
-    ("lib/pipeline_db/requests.py", 745, "2f7c69bcb8096b6b"): (
+    ("lib/pipeline_db/requests.py", 745, "cb4bc190bb194188"): (
         "ordinary typed transitions CAS the source status selected by the DAG"
     ),
-    ("lib/pipeline_db/requests.py", 843, "6e1f871f294ee820"): (
+    ("lib/pipeline_db/requests.py", 843, "c99b75cd27718b63"): (
         "typed imported transition CASes status with rescue audit atomically"
     ),
-    ("lib/pipeline_db/requests.py", 978, "94fb96ce52c23ac6"): (
+    ("lib/pipeline_db/requests.py", 983, "624291485d30cd9b"): (
         "typed reset-to-wanted transition CASes its captured source status"
     ),
-    ("lib/pipeline_db/requests.py", 1040, "6bcc3a051cbbcf5e"): (
+    ("lib/pipeline_db/requests.py", 1052, "96c221e77f54ca60"): (
         "automatic recovery accepts only downloading as its exact source"
     ),
-    ("lib/pipeline_db/requests.py", 1083, "275d73c5af507f9d"): (
+    ("lib/pipeline_db/requests.py", 1097, "2b2c27302b2ab78e"): (
         "typed download claim accepts only the explicit wanted source status"
     ),
-    ("lib/pipeline_db/requests.py", 1119, "999b5b9401d772d2"): (
+    ("lib/pipeline_db/requests.py", 1133, "186e1c3ba3188478"): (
         "plan-aware download claim uses an exact wanted source predicate"
     ),
 }
@@ -789,8 +792,11 @@ def _sql_call_fingerprint(
     sql_argument: ast.expr,
     params_argument: ast.expr | None,
     scope: ast.AST,
+    *,
+    source_path: str,
+    bind_lifecycle_scope: bool,
 ) -> str:
-    """Hash the exact call; dynamic builders additionally hash their scope."""
+    """Hash a reviewed SQL seam at the strongest applicable boundary."""
     parts = [
         "SQL",
         ast.dump(sql_argument, include_attributes=False),
@@ -801,7 +807,21 @@ def _sql_call_fingerprint(
             else "<none>"
         ),
     ]
-    if not (
+    if bind_lifecycle_scope:
+        scope_name = (
+            scope.name
+            if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef))
+            else "<module>"
+        )
+        parts.extend((
+            "LIFECYCLE_PATH",
+            source_path,
+            "LIFECYCLE_SCOPE_NAME",
+            scope_name,
+            "LIFECYCLE_SCOPE_AST",
+            ast.dump(scope, include_attributes=False),
+        ))
+    elif not (
         isinstance(sql_argument, ast.Constant)
         and isinstance(sql_argument.value, str)
     ):
@@ -812,7 +832,11 @@ def _sql_call_fingerprint(
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
 
 
-def _unguarded_album_request_update_findings(source: str) -> list[_SqlFinding]:
+def _unguarded_album_request_update_findings(
+    source: str,
+    *,
+    source_path: str = "<memory>",
+) -> list[_SqlFinding]:
     tree = ast.parse(source)
     parents = {
         child: parent
@@ -840,11 +864,6 @@ def _unguarded_album_request_update_findings(source: str) -> list[_SqlFinding]:
         direct_params = _direct_execute_params(node)
         variants, unresolved = _sql_variants(sql_argument, values)
         scope = _enclosing_scope(node, parents)
-        fingerprint = _sql_call_fingerprint(
-            sql_argument,
-            params_argument,
-            scope,
-        )
         scope_name = (
             scope.name
             if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -853,6 +872,16 @@ def _unguarded_album_request_update_findings(source: str) -> list[_SqlFinding]:
         expression_sets_status = _expression_mentions_status_assignment(
             sql_argument,
             values,
+        )
+        fingerprint = _sql_call_fingerprint(
+            sql_argument,
+            params_argument,
+            scope,
+            source_path=source_path,
+            bind_lifecycle_scope=(
+                expression_sets_status
+                or scope_name in _STATUS_MUTATING_SEAMS
+            ),
         )
         canonical_params = direct_params is not None
         direct_static_sql = (
@@ -1119,7 +1148,8 @@ class TestReplacedWriteAudit(unittest.TestCase):
             for path in sorted((REPO_ROOT / root_name).rglob("*.py")):
                 rel = path.relative_to(REPO_ROOT).as_posix()
                 for finding in _unguarded_album_request_update_findings(
-                    path.read_text(encoding="utf-8")
+                    path.read_text(encoding="utf-8"),
+                    source_path=rel,
                 ):
                     key = (rel, finding.line, finding.fingerprint)
                     if finding.category.startswith("status"):
@@ -1412,7 +1442,7 @@ def thaw(cur, request_id, source_status, target_status):
         self.assertTrue(source_finding.exact_source_status_cas)
         self.assertFalse(target_finding.exact_source_status_cas)
 
-    def test_source_status_alias_is_rejected_without_dataflow_inference(self):
+    def test_status_scope_fingerprint_covers_alias_definition(self):
         source_definition = """
 def thaw(cur, request_id, expected_status, target_status):
     source_status = expected_status
@@ -1432,12 +1462,130 @@ def thaw(cur, request_id, expected_status, target_status):
         target_finding = _unguarded_album_request_update_findings(
             target_definition,
         )[0]
-        self.assertEqual(
+        self.assertNotEqual(
             source_finding.fingerprint,
             target_finding.fingerprint,
         )
         self.assertFalse(source_finding.exact_source_status_cas)
         self.assertFalse(target_finding.exact_source_status_cas)
+
+    def test_status_scope_fingerprint_covers_match_capture(self):
+        canonical = """
+def thaw(cur, request_id, expected_status, target_status):
+    cur.execute(
+        "UPDATE album_requests SET status = %s "
+        "WHERE id = %s AND status = %s",
+        (target_status, request_id, expected_status),
+    )
+"""
+        captured = canonical.replace(
+            "    cur.execute(",
+            "    match target_status:\n"
+            "        case expected_status:\n"
+            "            pass\n"
+            "    cur.execute(",
+        )
+        canonical_finding = _unguarded_album_request_update_findings(
+            canonical,
+            source_path="lib/example.py",
+        )[0]
+        captured_finding = _unguarded_album_request_update_findings(
+            captured,
+            source_path="lib/example.py",
+        )[0]
+
+        # Match captures are not ast.Name(Store), so the narrow canonical-call
+        # check alone cannot see this reassignment. Whole-method review does.
+        self.assertTrue(canonical_finding.exact_source_status_cas)
+        self.assertTrue(captured_finding.exact_source_status_cas)
+        self.assertNotEqual(
+            canonical_finding.fingerprint,
+            captured_finding.fingerprint,
+        )
+
+    def test_status_scope_fingerprint_covers_nested_nonlocal_reassignment(self):
+        canonical = """
+def thaw(cur, request_id, expected_status, target_status):
+    cur.execute(
+        "UPDATE album_requests SET status = %s "
+        "WHERE id = %s AND status = %s",
+        (target_status, request_id, expected_status),
+    )
+"""
+        reassigned = canonical.replace(
+            "    cur.execute(",
+            "    def rewrite_source():\n"
+            "        nonlocal expected_status\n"
+            "        expected_status = target_status\n"
+            "    rewrite_source()\n"
+            "    cur.execute(",
+        )
+        canonical_finding = _unguarded_album_request_update_findings(
+            canonical,
+            source_path="lib/example.py",
+        )[0]
+        reassigned_finding = _unguarded_album_request_update_findings(
+            reassigned,
+            source_path="lib/example.py",
+        )[0]
+
+        # The canonical-call walk intentionally does not enter nested scopes;
+        # the normalized outer-method AST still makes the review key fail.
+        self.assertTrue(canonical_finding.exact_source_status_cas)
+        self.assertTrue(reassigned_finding.exact_source_status_cas)
+        self.assertNotEqual(
+            canonical_finding.fingerprint,
+            reassigned_finding.fingerprint,
+        )
+
+    def test_production_lifecycle_review_rejects_same_line_helper_insertion(self):
+        rel = "lib/pipeline_db/requests.py"
+        source = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        baseline = next(
+            finding
+            for finding in _unguarded_album_request_update_findings(
+                source,
+                source_path=rel,
+            )
+            if finding.scope == "reset_to_wanted"
+            and finding.category == "status"
+        )
+        self.assertIn(
+            (rel, baseline.line, baseline.fingerprint),
+            _REVIEWED_STATUS_SQL_CALLS,
+        )
+        needle = (
+            '        if expected_status == "replaced":\n'
+            "            return False\n"
+            "        now = datetime.now(timezone.utc)\n"
+        )
+        replacement = (
+            '        if expected_status == "replaced":\n'
+            "            return False\n"
+            "        helper = lambda value: value; "
+            "now = datetime.now(timezone.utc)\n"
+        )
+        self.assertEqual(source.count(needle), 1)
+        mutated_source = source.replace(needle, replacement)
+        mutated = next(
+            finding
+            for finding in _unguarded_album_request_update_findings(
+                mutated_source,
+                source_path=rel,
+            )
+            if finding.scope == "reset_to_wanted"
+            and finding.category == "status"
+        )
+
+        self.assertEqual(mutated.line, baseline.line)
+        self.assertTrue(mutated.exact_source_status_cas)
+        self.assertTrue(mutated.canonical_params)
+        self.assertTrue(mutated.direct_static_sql)
+        self.assertNotEqual(mutated.fingerprint, baseline.fingerprint)
+        self.assertNotIn(
+            (rel, mutated.line, mutated.fingerprint),
+            _REVIEWED_STATUS_SQL_CALLS,
+        )
 
     def test_params_alias_is_noncanonical(self):
         source = """

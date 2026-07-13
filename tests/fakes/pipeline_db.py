@@ -1228,7 +1228,11 @@ class FakePipelineDB:
         **fields: Any,
     ) -> bool:
         unknown = sorted(
-            set(fields) - {"search_filetype_override", "min_bitrate"}
+            set(fields) - {
+                "search_filetype_override",
+                "min_bitrate",
+                "prev_min_bitrate",
+            }
         )
         if unknown:
             raise ValueError(
@@ -1254,9 +1258,14 @@ class FakePipelineDB:
         row["updated_at"] = now
         if "search_filetype_override" in fields:
             row["search_filetype_override"] = fields["search_filetype_override"]
+        if "prev_min_bitrate" in fields:
+            row["prev_min_bitrate"] = fields["prev_min_bitrate"]
         if "min_bitrate" in fields:
             current_min_bitrate = row.get("min_bitrate")
-            if current_min_bitrate is not None:
+            if (
+                "prev_min_bitrate" not in fields
+                and current_min_bitrate is not None
+            ):
                 row["prev_min_bitrate"] = current_min_bitrate
             row["min_bitrate"] = fields["min_bitrate"]
         self.status_history.append((request_id, "wanted"))
@@ -1270,7 +1279,11 @@ class FakePipelineDB:
         **fields: Any,
     ) -> bool:
         unknown = sorted(
-            set(fields) - {"search_filetype_override", "min_bitrate"}
+            set(fields) - {
+                "search_filetype_override",
+                "min_bitrate",
+                "prev_min_bitrate",
+            }
         )
         if unknown:
             raise ValueError(
@@ -1291,9 +1304,14 @@ class FakePipelineDB:
         row["updated_at"] = now
         if "search_filetype_override" in fields:
             row["search_filetype_override"] = fields["search_filetype_override"]
+        if "prev_min_bitrate" in fields:
+            row["prev_min_bitrate"] = fields["prev_min_bitrate"]
         if "min_bitrate" in fields:
             current_min_bitrate = row.get("min_bitrate")
-            if current_min_bitrate is not None:
+            if (
+                "prev_min_bitrate" not in fields
+                and current_min_bitrate is not None
+            ):
                 row["prev_min_bitrate"] = current_min_bitrate
             row["min_bitrate"] = fields["min_bitrate"]
         self.status_history.append((request_id, "wanted"))

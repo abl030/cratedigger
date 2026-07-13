@@ -886,6 +886,39 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertEqual(row["search_attempts"], 0)
         self.assertIsNone(row["manual_reason"])
 
+    def test_wanted_resets_accept_explicit_previous_bitrate(self):
+        """Fake parity: explicit history wins over derived old-min capture."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="manual",
+            min_bitrate=320,
+            prev_min_bitrate=192,
+        ))
+        db.seed_request(make_request_row(
+            id=43,
+            status="downloading",
+            min_bitrate=245,
+            prev_min_bitrate=128,
+        ))
+
+        self.assertTrue(db.reset_to_wanted(
+            42,
+            expected_status="manual",
+            min_bitrate=224,
+            prev_min_bitrate=256,
+        ))
+        self.assertTrue(db.reset_downloading_to_wanted(
+            43,
+            min_bitrate=192,
+            prev_min_bitrate=None,
+        ))
+
+        self.assertEqual(db.request(42)["min_bitrate"], 224)
+        self.assertEqual(db.request(42)["prev_min_bitrate"], 256)
+        self.assertEqual(db.request(43)["min_bitrate"], 192)
+        self.assertIsNone(db.request(43)["prev_min_bitrate"])
+
 
 # ---------------------------------------------------------------------------
 # Field resolutions (migration 030) — fake parity

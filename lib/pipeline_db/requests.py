@@ -953,7 +953,11 @@ class _RequestsMixin(_PipelineDBBase):
         write here covers web UI, CLI, and importer requeue paths.
         """
         unknown = sorted(
-            set(fields) - {"search_filetype_override", "min_bitrate"}
+            set(fields) - {
+                "search_filetype_override",
+                "min_bitrate",
+                "prev_min_bitrate",
+            }
         )
         if unknown:
             raise ValueError(
@@ -975,6 +979,7 @@ class _RequestsMixin(_PipelineDBBase):
         now = datetime.now(timezone.utc)
         override_present = "search_filetype_override" in fields
         min_bitrate_present = "min_bitrate" in fields
+        prev_min_bitrate_present = "prev_min_bitrate" in fields
         cur = self._execute(
             "UPDATE album_requests "
             "SET status = 'wanted', active_download_state = NULL, "
@@ -984,8 +989,8 @@ class _RequestsMixin(_PipelineDBBase):
             "validation_attempts = CASE WHEN %s THEN 0 ELSE validation_attempts END, "
             "next_retry_after = CASE WHEN %s THEN NULL ELSE next_retry_after END, "
             "last_attempt_at = CASE WHEN %s THEN NULL ELSE last_attempt_at END, "
-            "prev_min_bitrate = CASE WHEN %s "
-            "THEN COALESCE(min_bitrate, prev_min_bitrate) "
+            "prev_min_bitrate = CASE WHEN %s THEN %s "
+            "WHEN %s THEN COALESCE(min_bitrate, prev_min_bitrate) "
             "ELSE prev_min_bitrate END, "
             "min_bitrate = CASE WHEN %s THEN %s ELSE min_bitrate END, "
             "search_filetype_override = CASE WHEN %s THEN %s "
@@ -998,6 +1003,8 @@ class _RequestsMixin(_PipelineDBBase):
                 clear_retry_counters,
                 clear_retry_counters,
                 clear_retry_counters,
+                prev_min_bitrate_present,
+                fields.get("prev_min_bitrate"),
                 min_bitrate_present,
                 min_bitrate_present,
                 fields.get("min_bitrate"),
@@ -1025,7 +1032,11 @@ class _RequestsMixin(_PipelineDBBase):
         Retry counters are preserved so automatic backoff keeps growing.
         """
         unknown = sorted(
-            set(fields) - {"search_filetype_override", "min_bitrate"}
+            set(fields) - {
+                "search_filetype_override",
+                "min_bitrate",
+                "prev_min_bitrate",
+            }
         )
         if unknown:
             raise ValueError(
@@ -1037,12 +1048,13 @@ class _RequestsMixin(_PipelineDBBase):
         now = datetime.now(timezone.utc)
         override_present = "search_filetype_override" in fields
         min_bitrate_present = "min_bitrate" in fields
+        prev_min_bitrate_present = "prev_min_bitrate" in fields
         cur = self._execute(
             "UPDATE album_requests "
             "SET status = 'wanted', active_download_state = NULL, "
             "manual_reason = NULL, updated_at = %s, "
-            "prev_min_bitrate = CASE WHEN %s "
-            "THEN COALESCE(min_bitrate, prev_min_bitrate) "
+            "prev_min_bitrate = CASE WHEN %s THEN %s "
+            "WHEN %s THEN COALESCE(min_bitrate, prev_min_bitrate) "
             "ELSE prev_min_bitrate END, "
             "min_bitrate = CASE WHEN %s THEN %s ELSE min_bitrate END, "
             "search_filetype_override = CASE WHEN %s THEN %s "
@@ -1050,6 +1062,8 @@ class _RequestsMixin(_PipelineDBBase):
             "WHERE id = %s AND status = %s AND status != 'replaced'",
             (
                 now,
+                prev_min_bitrate_present,
+                fields.get("prev_min_bitrate"),
                 min_bitrate_present,
                 min_bitrate_present,
                 fields.get("min_bitrate"),
