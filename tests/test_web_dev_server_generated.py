@@ -3,8 +3,14 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
+import json
+import threading
 import unittest
+import urllib.error
 import urllib.parse
+import urllib.request
 from collections.abc import Callable
 from typing import Any
 
@@ -17,9 +23,12 @@ from web.api_bases import PUBLIC_MB_ORIGIN
 import web.api_bases
 import web.discogs
 import web.mb
+import web.routes.browse
 from web.routes.browse import get_artist_compare
 from scripts.web_dev_server import (
     DevConfig,
+    DevHTTPServer,
+    DevHandler,
     configure_live_db_metadata,
 )
 
@@ -42,6 +51,87 @@ def assert_missing_discogs_blocks(call_route: Callable[[], None]) -> None:
     raise AssertionError("warm metadata cache bypassed missing Discogs config")
 
 
+_DISCOGS_ROUTE_CACHE_USERS = {
+    "get_artist_compare",
+    "get_browse_resolve",
+}
+
+
+def assert_discogs_route_cache_inventory(source: str) -> None:
+    """Every route-level cache with a transitive Discogs call guards first."""
+    tree = ast.parse(source)
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    def calls_discogs(
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+        seen: set[str],
+    ) -> bool:
+        if node.name in seen:
+            return False
+        seen.add(node.name)
+        for descendant in ast.walk(node):
+            if not isinstance(descendant, ast.Call):
+                continue
+            fn = descendant.func
+            if (
+                isinstance(fn, ast.Attribute)
+                and isinstance(fn.value, ast.Name)
+                and fn.value.id == "discogs_api"
+                and fn.attr != "require_mirror_configured"
+            ):
+                return True
+            if (
+                isinstance(fn, ast.Name)
+                and fn.id in functions
+                and calls_discogs(functions[fn.id], seen)
+            ):
+                return True
+        return False
+
+    cached_routes: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    for name, node in functions.items():
+        has_route_cache = any(
+            isinstance(descendant, ast.Call)
+            and isinstance(descendant.func, ast.Attribute)
+            and descendant.func.attr == "memoize_meta"
+            for descendant in ast.walk(node)
+        )
+        if has_route_cache and calls_discogs(node, set()):
+            cached_routes[name] = node
+
+    if set(cached_routes) != _DISCOGS_ROUTE_CACHE_USERS:
+        raise AssertionError(
+            "Discogs-dependent route cache inventory drifted: "
+            f"{sorted(cached_routes)} != {sorted(_DISCOGS_ROUTE_CACHE_USERS)}"
+        )
+
+    for name, node in cached_routes.items():
+        guard_lines = [
+            descendant.lineno
+            for descendant in ast.walk(node)
+            if isinstance(descendant, ast.Call)
+            and isinstance(descendant.func, ast.Attribute)
+            and isinstance(descendant.func.value, ast.Name)
+            and descendant.func.value.id == "discogs_api"
+            and descendant.func.attr == "require_mirror_configured"
+        ]
+        cache_lines = [
+            descendant.lineno
+            for descendant in ast.walk(node)
+            if isinstance(descendant, ast.Call)
+            and isinstance(descendant.func, ast.Attribute)
+            and descendant.func.attr == "memoize_meta"
+        ]
+        if not guard_lines or min(guard_lines) >= min(cache_lines):
+            raise AssertionError(
+                f"{name} must validate Discogs before route-cache dispatch"
+            )
+
+
 class _RouteHandler:
     def __init__(self) -> None:
         self.payload: dict[str, Any] | None = None
@@ -53,6 +143,11 @@ class _RouteHandler:
 
     def _error(self, message: str, status: int = 400) -> None:
         raise AssertionError(f"unexpected route error {status}: {message}")
+
+
+class _QuietDevHandler(DevHandler):
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        del format, args
 
 
 _HOST = st.text(
@@ -146,6 +241,80 @@ class TestLiveDbMetadataWiringGenerated(unittest.TestCase):
             lambda: get_artist_compare(handler, params),  # type: ignore[arg-type]
         )
         self.assertIsNone(handler.payload)
+
+
+class TestBrowseResolveWarmCacheGenerated(unittest.TestCase):
+    def setUp(self) -> None:
+        self.saved_base = web.discogs.DISCOGS_API_BASE
+        self.saved_mb_base = web.mb.MB_API_BASE
+        self.saved_redis = cache._redis
+        configure_live_db_metadata(_config(mb_api=None, discogs_api=None))
+        cache._redis = FakeRedis()
+        self.server = DevHTTPServer(
+            ("127.0.0.1", 0),
+            _QuietDevHandler,
+            _config(mb_api=None, discogs_api=None),
+        )
+        self.thread = threading.Thread(
+            target=self.server.serve_forever,
+            daemon=True,
+        )
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+        web.discogs.DISCOGS_API_BASE = self.saved_base
+        web.mb.MB_API_BASE = self.saved_mb_base
+        cache._redis = self.saved_redis
+
+    @given(
+        discogs_id=st.integers(min_value=1, max_value=2_000_000_000),
+        kind=st.sampled_from(("release", "master", "unknown")),
+        marker=_HOST,
+    )
+    def test_missing_discogs_returns_503_before_arbitrary_warm_resolver_cache(
+        self, discogs_id: int, kind: str, marker: str,
+    ) -> None:
+        cache._redis = FakeRedis()
+        cache_key = f"browse-resolve:discogs:{kind}:{discogs_id}"
+        cache.meta_set(cache_key, {
+            "source": "discogs",
+            "kind": "master" if kind == "master" else "release",
+            "artist_id": marker,
+            "artist_name": marker,
+            "is_va": False,
+            "expand_id": str(discogs_id),
+            "leaf_id": None if kind == "master" else str(discogs_id),
+        })
+        self.assertIn(f"meta:{cache_key}", cache._redis._store)  # type: ignore[union-attr]
+
+        url = (
+            f"{self.base}/api/browse/resolve?source=discogs&"
+            f"id={discogs_id}&kind={kind}"
+        )
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(url, timeout=2)
+        self.assertEqual(raised.exception.code, 503)
+        raised.exception.close()
+
+
+class TestDiscogsRouteCacheInventory(unittest.TestCase):
+    def test_exact_discogs_dependent_route_cache_inventory_is_guarded(self) -> None:
+        assert_discogs_route_cache_inventory(inspect.getsource(web.routes.browse))
+
+    def test_checker_rejects_resolver_guard_removed(self) -> None:
+        source = inspect.getsource(web.routes.browse)
+        guard = (
+            '    if source == "discogs":\n'
+            "        discogs_api.require_mirror_configured()\n"
+        )
+        mutant = source.replace(guard, "", 1)
+        self.assertNotEqual(mutant, source)
+        with self.assertRaises(AssertionError):
+            assert_discogs_route_cache_inventory(mutant)
 
 
 class TestMetadataWiringCheckerKnownBad(unittest.TestCase):
