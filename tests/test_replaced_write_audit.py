@@ -46,6 +46,7 @@ class _AlbumRequestUpdate:
     guarded: bool
     sets_status: bool
     exact_source_status_cas: bool
+    invalid_status_cas: bool = False
 
 
 # Every unresolved production SQL builder is an exact, reviewed exception.
@@ -53,91 +54,91 @@ class _AlbumRequestUpdate:
 # plus all reachable local/module definitions. Moving or changing a builder
 # therefore fails the audit until its bounded construction is reviewed again.
 _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/beets_db.py", 329, "954611b895ed3d2e"): (
+    ("lib/beets_db.py", 329, "7e42491a58dc56d0"): (
         "SQLite IN list is generated only from '?' value placeholders"
     ),
-    ("lib/beets_db.py", 340, "bae84f633b79f37f"): (
+    ("lib/beets_db.py", 340, "fe92f0e2d9ac9884"): (
         "SQLite IN list is generated only from '?' value placeholders"
     ),
-    ("lib/beets_db.py", 569, "918c850cccb2485a"): (
+    ("lib/beets_db.py", 569, "db58c0dd12fed8c8"): (
         "SQLite IN list is generated only from '?' value placeholders"
     ),
-    ("lib/beets_db.py", 577, "0d55058205434484"): (
+    ("lib/beets_db.py", 577, "16d84727206b34ed"): (
         "SQLite IN list is generated only from '?' value placeholders"
     ),
-    ("lib/pipeline_db/dashboard.py", 481, "26e89c7f809ee743"): (
+    ("lib/pipeline_db/dashboard.py", 481, "08adb269f8845965"): (
         "dashboard WHERE and ORDER fragments come from closed enum branches"
     ),
-    ("lib/pipeline_db/download_log.py", 123, "261f1904b74e1dc8"): (
+    ("lib/pipeline_db/download_log.py", 123, "cf5255de40904f8a"): (
         "download outcome filter appends closed literal clauses only"
     ),
-    ("lib/pipeline_db/download_log.py", 430, "a33aeaa09fea2658"): (
+    ("lib/pipeline_db/download_log.py", 430, "ddd21ee649f88eb4"): (
         "request batch IN list contains only psycopg value placeholders"
     ),
-    ("lib/pipeline_db/download_log.py", 512, "bd2fd6f9349d6eb2"): (
+    ("lib/pipeline_db/download_log.py", 512, "417613ed343e7095"): (
         "validation key is selected from a closed server-owned vocabulary"
     ),
-    ("lib/pipeline_db/download_log.py", 564, "f16cd364862cb173"): (
+    ("lib/pipeline_db/download_log.py", 564, "ae46b91225dde227"): (
         "validation key is selected from a closed server-owned vocabulary"
     ),
-    ("lib/pipeline_db/download_log.py", 582, "5030ce9174c5a459"): (
+    ("lib/pipeline_db/download_log.py", 582, "c19db123568bf107"): (
         "validation key is closed vocabulary and IN list is value placeholders"
     ),
-    ("lib/pipeline_db/download_log.py", 599, "bf11d54d404789b2"): (
+    ("lib/pipeline_db/download_log.py", 599, "dc4634b2c67c03f5"): (
         "JSON path key is selected from a closed server-owned vocabulary"
     ),
-    ("lib/pipeline_db/import_jobs.py", 105, "22811037a85650e7"): (
+    ("lib/pipeline_db/import_jobs.py", 105, "3af67fae80413763"): (
         "optional job filter is a fixed literal WHERE clause"
     ),
-    ("lib/pipeline_db/import_jobs.py", 166, "aa163c872b5db255"): (
+    ("lib/pipeline_db/import_jobs.py", 166, "5b0af33186bdc9a4"): (
         "claim exclusion predicate is assembled from fixed literal clauses"
     ),
-    ("lib/pipeline_db/misc.py", 188, "4ea7fe952b4d8012"): (
+    ("lib/pipeline_db/misc.py", 188, "cbcdb5250c697329"): (
         "track-count batch IN list contains only psycopg value placeholders"
     ),
-    ("lib/pipeline_db/misc.py", 381, "e5c8a7e1d1b3c342"): (
+    ("lib/pipeline_db/misc.py", 381, "785a4fa4d82eaa2a"): (
         "bulk VALUES fragment contains only fixed value-placeholder tuples"
     ),
-    ("lib/pipeline_db/misc.py", 555, "829107b20b4fdbd1"): (
+    ("lib/pipeline_db/misc.py", 555, "fcac0c0ace91bd54"): (
         "triage joins and predicates are selected from closed service enums"
     ),
-    ("lib/pipeline_db/requests.py", 68, "7e66fa5f6c7684d8"): (
+    ("lib/pipeline_db/requests.py", 68, "3773501ff135b28d"): (
         "INSERT columns derive from the fixed AddRequestInput schema"
     ),
-    ("lib/pipeline_db/requests.py", 96, "57ae317777970714"): (
+    ("lib/pipeline_db/requests.py", 96, "ecd445b5e1db6c2d"): (
         "request batch IN list contains only psycopg value placeholders"
     ),
-    ("lib/pipeline_db/requests.py", 205, "e870bfc2cb9e7b91"): (
+    ("lib/pipeline_db/requests.py", 205, "b456c96fc9477ad3"): (
         "release-id lookup selects one of two fixed identity predicates"
     ),
-    ("lib/pipeline_db/requests.py", 443, "c34bc26f73d2723f"): (
+    ("lib/pipeline_db/requests.py", 443, "b93917f93b5266f3"): (
         "internal kwargs use value placeholders and runtime-reserve lifecycle fields"
     ),
-    ("lib/pipeline_db/requests.py", 449, "b9427c9081bad3cd"): (
+    ("lib/pipeline_db/requests.py", 449, "776b21cd19d9abcc"): (
         "internal kwargs use value placeholders and runtime-reserve lifecycle fields"
     ),
-    ("lib/pipeline_db/requests.py", 689, "10f12056e4e32076"): (
+    ("lib/pipeline_db/requests.py", 689, "4a1ac4e2eeccd919"): (
         "transition SET list is produced by typed internal transition fields"
     ),
-    ("lib/pipeline_db/requests.py", 827, "7889f03d4bd9a080"): (
+    ("lib/pipeline_db/requests.py", 827, "154515c9ef3afda7"): (
         "rescue SET list is produced by typed internal outcome fields"
     ),
-    ("lib/pipeline_db/requests.py", 939, "2d65aab3efaad95c"): (
+    ("lib/pipeline_db/requests.py", 939, "b238c0bfc456fdd2"): (
         "atomic retry SET list is fixed and guarded by exact source status"
     ),
-    ("lib/pipeline_db/requests.py", 979, "2d65aab3efaad95c"): (
+    ("lib/pipeline_db/requests.py", 979, "be30b022a52b1d51"): (
         "atomic retry SET list is fixed and guarded by exact source status"
     ),
-    ("lib/pipeline_db/requests.py", 1190, "bb09785d41dce4ce"): (
+    ("lib/pipeline_db/requests.py", 1190, "17f28a86b8756f82"): (
         "optional LIMIT is normalized through int before interpolation"
     ),
-    ("lib/pipeline_db/requests.py", 1205, "2dc543213d9d7e2b"): (
+    ("lib/pipeline_db/requests.py", 1205, "267319042331ea26"): (
         "ORDER is selected from two literals and LIMIT remains a value placeholder"
     ),
-    ("lib/pipeline_db/requests.py", 1390, "c6c60c526c37fdd6"): (
+    ("lib/pipeline_db/requests.py", 1390, "62b664622f3d232b"): (
         "attempt kind is validated against the fixed retry-counter vocabulary"
     ),
-    ("lib/pipeline_db/search_plan.py", 949, "9c0a24417e47169d"): (
+    ("lib/pipeline_db/search_plan.py", 949, "4f7388c59e6ea57b"): (
         "optional LIMIT is normalized through int before interpolation"
     ),
 }
@@ -149,28 +150,28 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
 # beside the implementation they review; movement or SQL-shape drift fails the
 # ratchet just like the dynamic-SQL exceptions above.
 _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/download_log.py", 253, "b0b281d8842b0ff5"): (
+    ("lib/pipeline_db/download_log.py", 253, "ef4f8591efc85e8a"): (
         "atomic abandoned-import recovery performs downloading-to-wanted CAS"
     ),
-    ("lib/pipeline_db/requests.py", 301, "1aaccc4a4f5acaaa"): (
+    ("lib/pipeline_db/requests.py", 301, "f5751285b0ba3bb8"): (
         "Replace holds the row lock and CASes the captured active source status"
     ),
-    ("lib/pipeline_db/requests.py", 689, "10f12056e4e32076"): (
+    ("lib/pipeline_db/requests.py", 689, "4a1ac4e2eeccd919"): (
         "ordinary typed transitions CAS the source status selected by the DAG"
     ),
-    ("lib/pipeline_db/requests.py", 827, "7889f03d4bd9a080"): (
+    ("lib/pipeline_db/requests.py", 827, "154515c9ef3afda7"): (
         "typed imported transition CASes status with rescue audit atomically"
     ),
-    ("lib/pipeline_db/requests.py", 939, "2d65aab3efaad95c"): (
+    ("lib/pipeline_db/requests.py", 939, "b238c0bfc456fdd2"): (
         "typed reset-to-wanted transition CASes its captured source status"
     ),
-    ("lib/pipeline_db/requests.py", 979, "2d65aab3efaad95c"): (
+    ("lib/pipeline_db/requests.py", 979, "be30b022a52b1d51"): (
         "automatic recovery accepts only downloading as its exact source"
     ),
-    ("lib/pipeline_db/requests.py", 1005, "7819aab0f6b7e289"): (
+    ("lib/pipeline_db/requests.py", 1005, "74163b2a4d93116e"): (
         "typed download claim accepts only the explicit wanted source status"
     ),
-    ("lib/pipeline_db/requests.py", 1041, "0f2e049084ae2453"): (
+    ("lib/pipeline_db/requests.py", 1041, "e1a54383a5bfea13"): (
         "plan-aware download claim uses an exact wanted source predicate"
     ),
 }
@@ -373,6 +374,207 @@ def _sql_argument(node: ast.Call) -> ast.expr | None:
     return None
 
 
+def _execute_params_argument(node: ast.Call) -> ast.expr | None:
+    """Return an execute call's value-parameter expression, if present."""
+    if len(node.args) >= 2:
+        return node.args[1]
+    for keyword in node.keywords:
+        if keyword.arg in {"params", "parameters", "vars"}:
+            return keyword.value
+    return None
+
+
+def _collection_mutations(
+    tree: ast.Module,
+    call: ast.Call,
+    parents: dict[ast.AST, ast.AST],
+) -> dict[str, tuple[ast.Call, ...]]:
+    """Collect local list append/extend operations visible at ``call``."""
+    call_scope = _enclosing_scope(call, parents)
+    mutations: dict[str, list[ast.Call]] = {}
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.attr in {"append", "extend"}
+            and node.lineno < call.lineno
+            and _enclosing_scope(node, parents) is call_scope
+        ):
+            continue
+        mutations.setdefault(node.func.value.id, []).append(node)
+    return {
+        name: tuple(sorted(calls, key=lambda candidate: candidate.lineno))
+        for name, calls in mutations.items()
+    }
+
+
+def _parameter_variants(
+    node: ast.expr,
+    values: dict[str, tuple[ast.expr, ...]],
+    mutations: dict[str, tuple[ast.Call, ...]],
+    resolving: frozenset[str] = frozenset(),
+) -> tuple[tuple[ast.expr | None, ...], ...]:
+    """Resolve execute parameters conservatively, retaining unknown segments."""
+    if isinstance(node, (ast.List, ast.Tuple)):
+        elements: list[ast.expr | None] = []
+        for element in node.elts:
+            if isinstance(element, ast.Starred):
+                elements.append(None)
+            else:
+                elements.append(element)
+        return (tuple(elements),)
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"list", "tuple"}
+        and len(node.args) == 1
+        and not node.keywords
+    ):
+        return _parameter_variants(
+            node.args[0], values, mutations, resolving,
+        )
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _parameter_variants(node.left, values, mutations, resolving)
+        right = _parameter_variants(node.right, values, mutations, resolving)
+        return tuple(a + b for a in left for b in right)
+    if not isinstance(node, ast.Name):
+        return ((None,),)
+    if node.id in resolving:
+        return ((None,),)
+    definitions = values.get(node.id)
+    if not definitions:
+        return ((None,),)
+    variants: list[tuple[ast.expr | None, ...]] = []
+    for definition in definitions:
+        base_variants = _parameter_variants(
+            definition,
+            values,
+            mutations,
+            resolving | {node.id},
+        )
+        for base in base_variants:
+            elements = list(base)
+            for mutation in mutations.get(node.id, ()):
+                if not isinstance(mutation.func, ast.Attribute):
+                    elements.append(None)
+                    continue
+                if mutation.func.attr == "append":
+                    elements.append(
+                        mutation.args[0] if len(mutation.args) == 1 else None
+                    )
+                    continue
+                if len(mutation.args) != 1:
+                    elements.append(None)
+                    continue
+                extension = _parameter_variants(
+                    mutation.args[0],
+                    values,
+                    mutations,
+                    resolving | {node.id},
+                )
+                if len(extension) == 1:
+                    elements.extend(extension[0])
+                else:
+                    elements.append(None)
+            variants.append(tuple(elements))
+    return tuple(variants) or ((None,),)
+
+
+_ACTIVE_REQUEST_STATUSES = frozenset({
+    "wanted", "downloading", "imported", "manual",
+})
+_SOURCE_STATUS_NAMES = frozenset({
+    "source_status", "expected_status", "old_status", "current_status",
+})
+
+
+def _is_proven_source_status(
+    node: ast.expr | None,
+    values: dict[str, tuple[ast.expr, ...]],
+    resolving: frozenset[str] = frozenset(),
+) -> bool:
+    """Prove a status binding is an active literal or source snapshot."""
+    if node is None:
+        return False
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value in _ACTIVE_REQUEST_STATUSES
+    if isinstance(node, ast.IfExp):
+        return (
+            _is_proven_source_status(node.body, values, resolving)
+            and _is_proven_source_status(node.orelse, values, resolving)
+        )
+    if isinstance(node, ast.Name):
+        if node.id in resolving:
+            return False
+        definitions = values.get(node.id, ())
+        if definitions:
+            return all(
+                _is_proven_source_status(
+                    definition, values, resolving | {node.id},
+                )
+                for definition in definitions
+            )
+        if node.id in _SOURCE_STATUS_NAMES:
+            # A source-named function argument is an explicit caller snapshot.
+            return True
+        return False
+    if isinstance(node, ast.Subscript):
+        return (
+            isinstance(node.value, ast.Name)
+            and node.value.id in {"row", "old_row", "request_row"}
+            and isinstance(node.slice, ast.Constant)
+            and node.slice.value == "status"
+        )
+    if isinstance(node, ast.Call):
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "str"
+            and len(node.args) == 1
+        ):
+            return _is_proven_source_status(node.args[0], values, resolving)
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_status_for_cas"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in {"self", "cls"}
+        ):
+            return True
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "pop"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "extra"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == "expected_status"
+        ):
+            return True
+    return False
+
+
+def _placeholder_binds_source_status(
+    tokens: list[tuple[str, int]],
+    placeholder_index: int,
+    parameter_variants: tuple[tuple[ast.expr | None, ...], ...],
+    values: dict[str, tuple[ast.expr, ...]],
+) -> bool:
+    """Map a SQL placeholder from the end and validate every binding world."""
+    placeholders_after = sum(
+        token == "%s" for token, _ in tokens[placeholder_index + 1:]
+    )
+    offset = placeholders_after + 1
+    bindings: list[ast.expr | None] = []
+    for variant in parameter_variants:
+        if len(variant) < offset:
+            return False
+        bindings.append(variant[-offset])
+    return bool(bindings) and all(
+        _is_proven_source_status(binding, values)
+        for binding in bindings
+    )
+
+
 def _strip_sql_comments(sql: str) -> str:
     """Remove SQL comments without treating comment text as a predicate."""
     output: list[str] = []
@@ -455,8 +657,10 @@ def _target_status_predicates(
     depth: int,
     target_alias: str,
     target_name: str,
-) -> tuple[bool, bool]:
-    """Return terminal guard and exact-source CAS on the target status."""
+    parameter_variants: tuple[tuple[ast.expr | None, ...], ...],
+    values: dict[str, tuple[ast.expr, ...]],
+) -> tuple[bool, bool, bool]:
+    """Return terminal guard, exact-source CAS, and invalid status CAS."""
     active_values = {"'wanted'", "'downloading'", "'imported'", "'manual'"}
     if any(
         token_depth == depth and token.lower() == "or"
@@ -464,9 +668,10 @@ def _target_status_predicates(
     ):
         # A top-level OR can make a textual target guard non-constraining:
         # ``status != 'replaced' OR status = 'replaced'``.
-        return False, False
+        return False, False, True
     terminal_guard = False
     exact_source_status_cas = False
+    invalid_status_cas = False
     index = start
     while index < end:
         token, token_depth = tokens[index]
@@ -505,12 +710,23 @@ def _target_status_predicates(
         if operator_depth == depth and value_depth == depth:
             if operator in {"!=", "<>"} and normalized_value == "'replaced'":
                 terminal_guard = True
-            if operator == "=" and (
-                normalized_value in active_values or normalized_value == "%s"
-            ):
-                exact_source_status_cas = True
+            if operator == "=":
+                if normalized_value in active_values:
+                    exact_source_status_cas = True
+                elif normalized_value == "%s":
+                    if _placeholder_binds_source_status(
+                        tokens,
+                        left_end + 2,
+                        parameter_variants,
+                        values,
+                    ):
+                        exact_source_status_cas = True
+                    else:
+                        invalid_status_cas = True
+                else:
+                    invalid_status_cas = True
         index = left_end + 1
-    return terminal_guard, exact_source_status_cas
+    return terminal_guard, exact_source_status_cas, invalid_status_cas
 
 
 def _set_clause_assigns_status(
@@ -544,8 +760,14 @@ def _set_clause_assigns_status(
     return False
 
 
-def _album_request_update_details(sql: str) -> list[_AlbumRequestUpdate]:
+def _album_request_update_details(
+    sql: str,
+    parameter_variants: tuple[tuple[ast.expr | None, ...], ...] = ((None,),),
+    values: dict[str, tuple[ast.expr, ...]] | None = None,
+) -> list[_AlbumRequestUpdate]:
     """Describe guards and status mutation for every targeted UPDATE."""
+    if values is None:
+        values = {}
     tokens = _sql_tokens(sql)
     results: list[_AlbumRequestUpdate] = []
     for update_index, (token, depth) in enumerate(tokens):
@@ -615,21 +837,26 @@ def _album_request_update_details(sql: str) -> list[_AlbumRequestUpdate]:
         )
         terminal_guard = False
         exact_source_status_cas = False
+        invalid_status_cas = False
         if where_index is not None:
-            terminal_guard, exact_source_status_cas = (
+            terminal_guard, exact_source_status_cas, invalid_status_cas = (
                 _target_status_predicates(
                 tokens,
                 start=where_index + 1,
                 end=statement_end,
-                depth=depth,
-                target_alias=target_alias,
-                target_name=target_name,
+                    depth=depth,
+                    target_alias=target_alias,
+                    target_name=target_name,
+                    parameter_variants=parameter_variants,
+                    values=values,
+                )
             )
-        )
         results.append(_AlbumRequestUpdate(
-            guarded=terminal_guard or exact_source_status_cas,
+            guarded=(terminal_guard or exact_source_status_cas)
+            and not invalid_status_cas,
             sets_status=sets_status,
             exact_source_status_cas=exact_source_status_cas,
+            invalid_status_cas=invalid_status_cas,
         ))
     return results
 
@@ -675,11 +902,24 @@ def _expression_mentions_status_assignment(
 
 def _sql_call_fingerprint(
     sql_argument: ast.expr,
+    params_argument: ast.expr | None,
     values: dict[str, tuple[ast.expr, ...]],
+    mutations: dict[str, tuple[ast.Call, ...]],
 ) -> str:
-    """Hash the SQL expression plus all statically reachable definitions."""
-    parts = [ast.dump(sql_argument, include_attributes=False)]
+    """Hash normalized SQL/parameter AST plus all reaching definitions."""
+    parts = [
+        "SQL",
+        ast.dump(sql_argument, include_attributes=False),
+        "PARAMS",
+        (
+            ast.dump(params_argument, include_attributes=False)
+            if params_argument is not None
+            else "<none>"
+        ),
+    ]
     pending = list(ast.walk(sql_argument))
+    if params_argument is not None:
+        pending.extend(ast.walk(params_argument))
     seen: set[str] = set()
     while pending:
         node = pending.pop()
@@ -688,14 +928,21 @@ def _sql_call_fingerprint(
             else node.attr if isinstance(node, ast.Attribute)
             else None
         )
-        if name is None or name in seen or name not in values:
+        if (
+            name is None
+            or name in seen
+            or (name not in values and name not in mutations)
+        ):
             continue
         seen.add(name)
-        definitions = values[name]
+        definitions = values.get(name, ())
         parts.append(name)
         for definition in definitions:
             parts.append(ast.dump(definition, include_attributes=False))
             pending.extend(ast.walk(definition))
+        for mutation in mutations.get(name, ()):
+            parts.append(ast.dump(mutation, include_attributes=False))
+            pending.extend(ast.walk(mutation))
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
 
 
@@ -722,9 +969,21 @@ def _unguarded_album_request_update_findings(source: str) -> list[_SqlFinding]:
         sql_argument = _sql_argument(node)
         if sql_argument is None:
             continue
+        params_argument = _execute_params_argument(node)
         values = _simple_assignments(tree, node, parents)
+        mutations = _collection_mutations(tree, node, parents)
+        parameter_variants = (
+            _parameter_variants(params_argument, values, mutations)
+            if params_argument is not None
+            else ((None,),)
+        )
         variants, unresolved = _sql_variants(sql_argument, values)
-        fingerprint = _sql_call_fingerprint(sql_argument, values)
+        fingerprint = _sql_call_fingerprint(
+            sql_argument,
+            params_argument,
+            values,
+            mutations,
+        )
         scope = _enclosing_scope(node, parents)
         scope_name = (
             scope.name
@@ -757,7 +1016,11 @@ def _unguarded_album_request_update_findings(source: str) -> list[_SqlFinding]:
             continue
         for sql in sorted(variants):
             normalized = " ".join(sql.lower().split())
-            details = _album_request_update_details(sql)
+            details = _album_request_update_details(
+                sql,
+                parameter_variants,
+                values,
+            )
             sets_status = bool(details) and (
                 expression_sets_status
                 or any(detail.sets_status for detail in details)
@@ -1140,6 +1403,125 @@ def thaw(cur, request_id, source_status):
         self.assertEqual(findings[0].category, "status")
         self.assertTrue(findings[0].exact_source_status_cas)
 
+    def test_status_cas_bound_to_target_status_is_not_exact_source(self):
+        source = """
+def thaw(cur, request_id, source_status, target_status):
+    cur.execute(
+        "UPDATE album_requests SET status = %s "
+        "WHERE id = %s AND status = %s AND status != 'replaced'",
+        (target_status, request_id, target_status),
+    )
+"""
+        findings = _unguarded_album_request_update_findings(source)
+        self.assertEqual(len(findings), 1)
+        self.assertFalse(findings[0].exact_source_status_cas)
+
+    def test_swapped_status_cas_parameters_are_not_exact_source(self):
+        source = """
+def thaw(cur, request_id, source_status, target_status):
+    cur.execute(
+        "UPDATE album_requests SET status = %s "
+        "WHERE id = %s AND status = %s AND status != 'replaced'",
+        (target_status, source_status, request_id),
+    )
+"""
+        findings = _unguarded_album_request_update_findings(source)
+        self.assertEqual(len(findings), 1)
+        self.assertFalse(findings[0].exact_source_status_cas)
+
+    def test_dynamic_status_cas_parameters_are_not_exact_source(self):
+        source = """
+def thaw(cur, request_id, source_status, target_status):
+    cur.execute(
+        "UPDATE album_requests SET status = %s "
+        "WHERE id = %s AND status = %s AND status != 'replaced'",
+        build_params(target_status, request_id, source_status),
+    )
+"""
+        findings = _unguarded_album_request_update_findings(source)
+        self.assertEqual(len(findings), 1)
+        self.assertFalse(findings[0].exact_source_status_cas)
+
+    def test_valid_source_status_binding_is_exact_source(self):
+        source = """
+def thaw(cur, request_id, source_status, target_status):
+    cur.execute(
+        "UPDATE album_requests SET status = %s "
+        "WHERE id = %s AND status = %s AND status != 'replaced'",
+        (target_status, request_id, source_status),
+    )
+"""
+        findings = _unguarded_album_request_update_findings(source)
+        self.assertEqual(len(findings), 1)
+        self.assertTrue(findings[0].exact_source_status_cas)
+
+    def test_source_named_binding_derived_from_target_is_not_exact(self):
+        source = """
+def thaw(cur, request_id, target_status):
+    source_status = target_status
+    cur.execute(
+        "UPDATE album_requests SET status = %s "
+        "WHERE id = %s AND status = %s AND status != 'replaced'",
+        (target_status, request_id, source_status),
+    )
+"""
+        findings = _unguarded_album_request_update_findings(source)
+        self.assertEqual(len(findings), 1)
+        self.assertFalse(findings[0].exact_source_status_cas)
+
+    def test_status_seam_fingerprint_includes_parameter_bindings(self):
+        source_binding = """
+def thaw(cur, request_id, source_status, target_status):
+    cur.execute(
+        "UPDATE album_requests SET status = %s "
+        "WHERE id = %s AND status = %s AND status != 'replaced'",
+        (target_status, request_id, source_status),
+    )
+"""
+        target_binding = source_binding.replace(
+            "(target_status, request_id, source_status)",
+            "(target_status, request_id, target_status)",
+        )
+        source_finding = _unguarded_album_request_update_findings(
+            source_binding,
+        )[0]
+        target_finding = _unguarded_album_request_update_findings(
+            target_binding,
+        )[0]
+        self.assertNotEqual(
+            source_finding.fingerprint,
+            target_finding.fingerprint,
+        )
+        self.assertTrue(source_finding.exact_source_status_cas)
+        self.assertFalse(target_finding.exact_source_status_cas)
+
+    def test_status_seam_fingerprint_includes_param_reaching_definition(self):
+        source_definition = """
+def thaw(cur, request_id, expected_status, target_status):
+    source_status = expected_status
+    cur.execute(
+        "UPDATE album_requests SET status = %s "
+        "WHERE id = %s AND status = %s AND status != 'replaced'",
+        (target_status, request_id, source_status),
+    )
+"""
+        target_definition = source_definition.replace(
+            "source_status = expected_status",
+            "source_status = target_status",
+        )
+        source_finding = _unguarded_album_request_update_findings(
+            source_definition,
+        )[0]
+        target_finding = _unguarded_album_request_update_findings(
+            target_definition,
+        )[0]
+        self.assertNotEqual(
+            source_finding.fingerprint,
+            target_finding.fingerprint,
+        )
+        self.assertTrue(source_finding.exact_source_status_cas)
+        self.assertFalse(target_finding.exact_source_status_cas)
+
     def test_dynamic_status_assignment_is_rejected(self):
         source = """
 def thaw(cur, request_id, source_status, target_status):
@@ -1191,6 +1573,39 @@ def thaw(cur, request_id):
         "UPDATE album_requests SET current_evidence_id = %s "
         "WHERE id = %s AND status = %s",
         (9, request_id, "imported"),
+    )
+'''
+        self.assertEqual(_unguarded_album_request_updates(source), [])
+
+    def test_metadata_status_guard_bound_to_replaced_is_rejected(self):
+        source = '''
+def thaw(cur, request_id):
+    cur.execute(
+        "UPDATE album_requests SET current_evidence_id = %s "
+        "WHERE id = %s AND status != 'replaced' AND status = %s",
+        (9, request_id, "replaced"),
+    )
+'''
+        self.assertEqual(len(_unguarded_album_request_updates(source)), 1)
+
+    def test_metadata_status_guard_bound_to_target_is_rejected(self):
+        source = '''
+def thaw(cur, request_id, target_status):
+    cur.execute(
+        "UPDATE album_requests SET current_evidence_id = %s "
+        "WHERE id = %s AND status != 'replaced' AND status = %s",
+        (9, request_id, target_status),
+    )
+'''
+        self.assertEqual(len(_unguarded_album_request_updates(source)), 1)
+
+    def test_metadata_status_guard_bound_to_source_is_accepted(self):
+        source = '''
+def thaw(cur, request_id, source_status):
+    cur.execute(
+        "UPDATE album_requests SET current_evidence_id = %s "
+        "WHERE id = %s AND status != 'replaced' AND status = %s",
+        (9, request_id, source_status),
     )
 '''
         self.assertEqual(_unguarded_album_request_updates(source), [])
