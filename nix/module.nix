@@ -419,7 +419,7 @@
   # embeds any plaintext secrets (issue #117 — they're *File paths now), there's
   # no chmod dance, no sed substitution, and no group-ownership hack. The
   # secrets themselves still need to be readable by cfg.user at whatever paths
-  # slskd.apiKeyFile / notifiers.*.{username,password,token}File point to.
+  # slskd.apiKeyFile / notifiers.*.tokenFile point to.
   preStartScript = pkgs.writeShellScript "cratedigger-prestart" ''
     set -euo pipefail
     config_dir="${cfg.stateDir}"
@@ -1339,7 +1339,7 @@ in {
     # Since config.ini no longer embeds plaintext secrets (issue #117), the
     # state directory and the rendered config can both be world-readable. The
     # secrets themselves live at operator-chosen paths (see slskd.apiKeyFile
-    # / notifiers.*.{username,password,token}File) and retain their own
+    # / notifiers.*.tokenFile) and retain their own
     # restrictive modes from whatever provisioned them (sops-nix, agenix, etc).
     systemd.tmpfiles.rules =
       [
