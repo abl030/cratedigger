@@ -12,6 +12,7 @@ passed as kwargs (the DI seam pattern).
 
 from __future__ import annotations
 
+import copy
 import socket
 import threading
 import unittest
@@ -1100,7 +1101,8 @@ class TestResolveAll(unittest.TestCase):
         self.assertEqual(result.release_group_id, "98765")
 
         apply_resolve_all_result(
-            db, 803, result, existing_mb_release_group_id=None,
+            db, 803, result, expected_status="wanted",
+            existing_mb_release_group_id=None,
         )
         _req_id, fields = db.update_request_fields_calls[-1]
         self.assertEqual(fields["mb_release_group_id"], "98765")
@@ -1138,7 +1140,8 @@ class TestResolveAll(unittest.TestCase):
         self.assertIsNone(result.release_group_id)
 
         apply_resolve_all_result(
-            db, 804, result, existing_mb_release_group_id=None,
+            db, 804, result, expected_status="wanted",
+            existing_mb_release_group_id=None,
         )
         _req_id, fields = db.update_request_fields_calls[-1]
         self.assertNotIn("mb_release_group_id", fields)
@@ -1525,7 +1528,10 @@ class TestApplyResolveAllResult(unittest.TestCase):
             is_va_compilation=False,
         )
 
-        apply_resolve_all_result(db, 42, result, existing_mb_release_group_id=None)
+        apply_resolve_all_result(
+            db, 42, result, expected_status="wanted",
+            existing_mb_release_group_id=None,
+        )
 
         self.assertEqual(len(db.update_request_fields_calls), 1)
         req_id, fields = db.update_request_fields_calls[0]
@@ -1544,7 +1550,7 @@ class TestApplyResolveAllResult(unittest.TestCase):
             is_va_compilation=True,
         )
 
-        apply_resolve_all_result(db, 7, result)
+        apply_resolve_all_result(db, 7, result, expected_status="wanted")
 
         self.assertEqual(len(db.update_request_fields_calls), 1)
         req_id, fields = db.update_request_fields_calls[0]
@@ -1570,6 +1576,7 @@ class TestApplyResolveAllResult(unittest.TestCase):
 
         apply_resolve_all_result(
             db, 9, result,
+            expected_status="wanted",
             existing_mb_release_group_id="upstream-known-rg",
         )
 
@@ -1586,6 +1593,7 @@ class TestApplyResolveAllResult(unittest.TestCase):
 
         apply_resolve_all_result(
             db, 11, result,
+            expected_status="wanted",
             existing_mb_release_group_id=None,
         )
 
@@ -1607,7 +1615,11 @@ class TestApplyResolveAllResult(unittest.TestCase):
                 raise RuntimeError("db boom")
 
             def update_track_artists(
-                self, request_id: int, track_artists: list[str | None],
+                self,
+                request_id: int,
+                track_artists: list[str | None],
+                *,
+                expected_status: str | None = None,
             ) -> bool:
                 # Never reached: update_request_fields raises first.
                 raise AssertionError("unexpected call")
@@ -1617,6 +1629,7 @@ class TestApplyResolveAllResult(unittest.TestCase):
             apply_resolve_all_result(
                 FailingDB(), 99,
                 ResolveAllResult(is_va_compilation=False),
+                expected_status="wanted",
             )
 
     def test_scalar_conflict_aborts_track_artist_write(self):
@@ -1629,7 +1642,11 @@ class TestApplyResolveAllResult(unittest.TestCase):
                 return False
 
             def update_track_artists(
-                self, request_id: int, track_artists: list[str | None],
+                self,
+                request_id: int,
+                track_artists: list[str | None],
+                *,
+                expected_status: str | None = None,
             ) -> bool:
                 self.track_calls += 1
                 return True
@@ -1642,10 +1659,43 @@ class TestApplyResolveAllResult(unittest.TestCase):
                 is_va_compilation=False,
                 track_artists=["Late Artist"],
             ),
+            expected_status="wanted",
         )
 
         self.assertFalse(applied)
         self.assertEqual(db.track_calls, 0)
+
+    def test_stale_wanted_snapshot_cannot_write_manual_parent_or_tracks(self):
+        db = FakePipelineDB()
+        request_id = db.add_request(
+            "Artist", "Album", "request", mb_release_id="resolver-stale",
+        )
+        db.set_tracks(request_id, [{
+            "disc_number": 1,
+            "track_number": 1,
+            "title": "Track",
+            "track_artist": None,
+        }])
+        self.assertTrue(db.update_status(
+            request_id, "manual", expected_status="wanted",
+        ))
+        before_row = copy.deepcopy(db.get_request(request_id))
+        before_tracks = db.get_tracks(request_id)
+
+        applied = apply_resolve_all_result(
+            db,
+            request_id,
+            ResolveAllResult(
+                release_group_year=1999,
+                is_va_compilation=True,
+                track_artists=["Late Artist"],
+            ),
+            expected_status="wanted",
+        )
+
+        self.assertFalse(applied)
+        self.assertEqual(db.get_request(request_id), before_row)
+        self.assertEqual(db.get_tracks(request_id), before_tracks)
 
     def test_in_flight_resolver_cannot_rewrite_replaced_tracks(self):
         db = FakePipelineDB()
@@ -1672,6 +1722,7 @@ class TestApplyResolveAllResult(unittest.TestCase):
                     is_va_compilation=False,
                     track_artists=["Late Artist"],
                 ),
+                expected_status="wanted",
             ))
 
         worker = threading.Thread(target=late_apply)

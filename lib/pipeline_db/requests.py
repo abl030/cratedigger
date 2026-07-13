@@ -399,7 +399,25 @@ class _RequestsMixin(_PipelineDBBase):
             raise TypeError("expected_status must be a string or None")
         expected_status = expected_status_raw
         if not extra:
-            return True
+            # A control-only/empty update still has a meaningful CAS result.
+            # Returning True without consulting the row lets a dependent
+            # adapter report success for a deleted, replaced, or stale
+            # request.  Keep this branch read-only (including ``updated_at``)
+            # while applying the same existence/lifecycle predicate as the
+            # UPDATE below.
+            if expected_status is not None:
+                cur = self._execute(
+                    "SELECT 1 FROM album_requests "
+                    "WHERE id = %s AND status != 'replaced' AND status = %s",
+                    (request_id, expected_status),
+                )
+            else:
+                cur = self._execute(
+                    "SELECT 1 FROM album_requests "
+                    "WHERE id = %s AND status != 'replaced'",
+                    (request_id,),
+                )
+            return cur.fetchone() is not None
         now = datetime.now(timezone.utc)
         sets = ["updated_at = %s"]
         params: list[object] = [now]

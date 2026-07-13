@@ -112,7 +112,11 @@ class _MiscMixin(_PipelineDBBase):
 
 
     def update_track_artists(
-        self, request_id: int, track_artists: list[str | None],
+        self,
+        request_id: int,
+        track_artists: list[str | None],
+        *,
+        expected_status: str | None = None,
     ) -> bool:
         """Update ``album_tracks.track_artist`` for ``request_id`` row-by-row.
 
@@ -133,20 +137,28 @@ class _MiscMixin(_PipelineDBBase):
         resolver's per-track output — sorted by ``(disc_number,
         track_number)`` via ``_tracks_titles_and_artists`` — lines up.
 
-        Returns ``False`` when the parent is missing or frozen as
-        ``replaced``. The parent lock linearizes this child write with
-        Replace.
+        Returns ``False`` when the parent is missing, frozen as
+        ``replaced``, or no longer has ``expected_status``. The parent lock
+        linearizes this child write with every lifecycle transition.
         """
-        if not track_artists:
-            return True
         with self._atomic():
             parent = self._execute(
                 "SELECT status FROM album_requests WHERE id = %s FOR UPDATE",
                 (request_id,),
             ).fetchone()
-            if parent is None or parent["status"] == "replaced":
+            if (
+                parent is None
+                or parent["status"] == "replaced"
+                or (
+                    expected_status is not None
+                    and parent["status"] != expected_status
+                )
+            ):
                 self.conn.commit()
                 return False
+            if not track_artists:
+                self.conn.commit()
+                return True
 
             cur = self._execute(
                 "SELECT id FROM album_tracks WHERE request_id = %s "

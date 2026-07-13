@@ -42,7 +42,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 
-from hypothesis import strategies as st
+from hypothesis import example, given, strategies as st
 from hypothesis.stateful import (
     RuleBasedStateMachine,
     invariant,
@@ -161,6 +161,168 @@ def assert_transition_result_matches(
         raise AssertionError(
             f"conflicted transition mutated request {before['id']}: "
             f"{before} -> {after}")
+
+
+def assert_read_only_cas_result(
+    *,
+    applied: bool,
+    expected_applied: bool,
+    before: dict | None,
+    after: dict | None,
+) -> None:
+    """An empty metadata CAS tells the truth and never mutates the row."""
+    if applied is not expected_applied:
+        raise AssertionError(
+            f"read-only CAS reported applied={applied}, "
+            f"expected={expected_applied}"
+        )
+    if after != before:
+        raise AssertionError(f"read-only CAS mutated row: {before} -> {after}")
+
+
+class TestReadOnlyMetadataCasGenerated(unittest.TestCase):
+    @given(
+        exists=st.booleans(),
+        status=st.sampled_from(sorted(LEGAL_STATUSES)),
+        include_expected_status=st.booleans(),
+        expected_status=st.sampled_from(sorted(LEGAL_STATUSES)),
+    )
+    @example(
+        exists=True,
+        status="wanted",
+        include_expected_status=False,
+        expected_status="manual",
+    )
+    @example(
+        exists=True,
+        status="wanted",
+        include_expected_status=True,
+        expected_status="manual",
+    )
+    @example(
+        exists=True,
+        status="replaced",
+        include_expected_status=False,
+        expected_status="replaced",
+    )
+    @example(
+        exists=False,
+        status="wanted",
+        include_expected_status=True,
+        expected_status="wanted",
+    )
+    def test_empty_and_control_only_updates_match_truth_table(
+        self,
+        *,
+        exists: bool,
+        status: str,
+        include_expected_status: bool,
+        expected_status: str,
+    ) -> None:
+        db = FakePipelineDB()
+        request_id = 1
+        if exists:
+            db.add_request(
+                "Artist",
+                "Album",
+                "request",
+                mb_release_id="read-only-cas",
+                status=status,
+            )
+        before = copy.deepcopy(db.get_request(request_id))
+        kwargs = (
+            {"expected_status": expected_status}
+            if include_expected_status else {}
+        )
+
+        applied = db.update_request_fields(request_id, **kwargs)
+        expected_applied = (
+            exists
+            and status != "replaced"
+            and (
+                not include_expected_status
+                or status == expected_status
+            )
+        )
+        assert_read_only_cas_result(
+            applied=applied,
+            expected_applied=expected_applied,
+            before=before,
+            after=copy.deepcopy(db.get_request(request_id)),
+        )
+
+
+class TestResolverSourceStatusGenerated(unittest.TestCase):
+    @given(
+        exists=st.booleans(),
+        status=st.sampled_from(
+            ["wanted", "downloading", "imported", "manual"],
+        ),
+        expected_status=st.sampled_from(
+            ["wanted", "downloading", "imported", "manual"],
+        ),
+    )
+    @example(exists=True, status="manual", expected_status="wanted")
+    @example(exists=True, status="wanted", expected_status="wanted")
+    @example(exists=False, status="wanted", expected_status="wanted")
+    def test_stale_source_cannot_mutate_ancestor_or_children(
+        self,
+        *,
+        exists: bool,
+        status: str,
+        expected_status: str,
+    ) -> None:
+        from lib.field_resolver_service import (
+            ResolveAllResult,
+            apply_resolve_all_result,
+        )
+
+        db = FakePipelineDB()
+        request_id = 1
+        if exists:
+            db.add_request(
+                "Artist",
+                "Album",
+                "request",
+                mb_release_id="resolver-source-cas",
+                status=status,
+            )
+            db.set_tracks(request_id, [{
+                "disc_number": 1,
+                "track_number": 1,
+                "title": "Track",
+                "track_artist": None,
+            }])
+        before_row = copy.deepcopy(db.get_request(request_id))
+        before_tracks = db.get_tracks(request_id)
+
+        applied = apply_resolve_all_result(
+            db,
+            request_id,
+            ResolveAllResult(
+                release_group_year=1999,
+                is_va_compilation=True,
+                track_artists=["Late Artist"],
+            ),
+            expected_status=expected_status,
+        )
+        should_apply = exists and status == expected_status
+        if applied is not should_apply:
+            raise AssertionError(
+                f"resolver apply reported {applied}, expected {should_apply}"
+            )
+        after_row = db.get_request(request_id)
+        after_tracks = db.get_tracks(request_id)
+        if should_apply:
+            assert after_row is not None
+            if after_row["release_group_year"] != 1999:
+                raise AssertionError("matching resolver CAS lost parent metadata")
+            if after_tracks[0]["track_artist"] != "Late Artist":
+                raise AssertionError("matching resolver CAS lost child metadata")
+        elif after_row != before_row or after_tracks != before_tracks:
+            raise AssertionError(
+                "stale resolver CAS mutated ancestor or child rows"
+            )
 
 
 class RequestLifecycleMachine(RuleBasedStateMachine):
@@ -630,6 +792,22 @@ class TestLifecycleCheckersTripOnViolations(unittest.TestCase):
         applied = TransitionApplied(1, "wanted", "manual")
         with self.assertRaises(AssertionError):
             assert_transition_result_matches(row, row, "manual", applied)
+
+    def test_read_only_cas_checker_trips_on_false_success_and_mutation(self):
+        with self.assertRaises(AssertionError):
+            assert_read_only_cas_result(
+                applied=True,
+                expected_applied=False,
+                before=None,
+                after=None,
+            )
+        with self.assertRaises(AssertionError):
+            assert_read_only_cas_result(
+                applied=True,
+                expected_applied=True,
+                before={"id": 1, "updated_at": "before"},
+                after={"id": 1, "updated_at": "after"},
+            )
 
 
 if __name__ == "__main__":

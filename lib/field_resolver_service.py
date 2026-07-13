@@ -1620,7 +1620,11 @@ class _ApplyResolveAllRecipient(Protocol):
     ) -> bool: ...
 
     def update_track_artists(
-        self, request_id: int, track_artists: list[str | None],
+        self,
+        request_id: int,
+        track_artists: list[str | None],
+        *,
+        expected_status: str | None = None,
     ) -> bool: ...
 
 
@@ -1629,6 +1633,7 @@ def apply_resolve_all_result(
     req_id: int,
     result: ResolveAllResult,
     *,
+    expected_status: str,
     existing_mb_release_group_id: str | None = None,
 ) -> bool:
     """Persist a ``ResolveAllResult`` into ``album_requests``.
@@ -1646,8 +1651,10 @@ def apply_resolve_all_result(
     from a fresh add (None until the resolver fills it) or from a
     re-resolution where the column is already populated.
 
-    Returns ``False`` when scalar or per-track persistence loses to a
-    concurrent lifecycle change.
+    ``expected_status`` is the lifecycle snapshot taken before resolution.
+    Both the request-row CAS and the parent-locked child write must still see
+    that same status. Returns ``False`` when either loses to a concurrent
+    lifecycle change, so callers abort downstream plan generation.
     """
     update_fields: dict[str, Any] = {
         "is_va_compilation": result.is_va_compilation,
@@ -1661,7 +1668,11 @@ def apply_resolve_all_result(
         update_fields["mb_release_group_id"] = result.release_group_id
     if result.catalog_number is not None:
         update_fields["catalog_number"] = result.catalog_number
-    if not db.update_request_fields(req_id, **update_fields):
+    if not db.update_request_fields(
+        req_id,
+        expected_status=expected_status,
+        **update_fields,
+    ):
         return False
     # Per-track artists land in album_tracks (one column per track),
     # not album_requests. Done after the request-row update so a
@@ -1671,7 +1682,9 @@ def apply_resolve_all_result(
     if result.track_artists:
         try:
             if not db.update_track_artists(
-                req_id, list(result.track_artists),
+                req_id,
+                list(result.track_artists),
+                expected_status=expected_status,
             ):
                 return False
         except Exception:  # noqa: BLE001

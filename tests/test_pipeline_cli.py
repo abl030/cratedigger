@@ -389,7 +389,7 @@ class TestCmdAddPlanGenerationFakeDB(unittest.TestCase):
             "web.mb.get_release_group_year",
             return_value=2014,
         ), redirect_stderr(stderr):
-            pipeline_cli.cmd_add(db, MagicMock(
+            exit_code = pipeline_cli.cmd_add(db, MagicMock(
                 mbid="44438bf9-26d9-4460-9b4f-1a1b015e37a1",
                 source="request",
             ))
@@ -402,6 +402,7 @@ class TestCmdAddPlanGenerationFakeDB(unittest.TestCase):
         self.assertIsNone(db.get_tracks(source["id"])[0]["track_artist"])
         self.assertIsNone(db.get_active_search_plan(source["id"]))
         self.assertIn("skipping plan generation", stderr.getvalue())
+        self.assertEqual(exit_code, 4)
 
 
 class TestCmdList(unittest.TestCase):

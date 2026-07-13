@@ -282,6 +282,7 @@ def _resolve_and_update_after_add(
     try:
         applied = apply_resolve_all_result(
             db, req_id, result,
+            expected_status="wanted",
             existing_mb_release_group_id=mb_release_group_id,
         )
         if not applied:
@@ -361,7 +362,7 @@ def _cmd_add_mb(db, mbid, source):
         mb_release_payload=release,
     )
     if resolved is None:
-        return
+        return 4
     # Re-read tracks from the DB so the per-track ``track_artist``
     # column the resolver just wrote (PR2 Apply #1) flows into the
     # snapshot. The upstream ``tracks`` extracted from the MB payload
@@ -424,7 +425,7 @@ def _cmd_add_discogs(db, discogs_id, source):
         discogs_release_payload=release,
     )
     if resolved is None:
-        return
+        return 4
     # Re-read tracks from the DB so the per-track ``track_artist``
     # column the resolver just wrote (PR2 Apply #1) flows into the
     # snapshot.

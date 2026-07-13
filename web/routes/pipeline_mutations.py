@@ -148,6 +148,7 @@ def _resolve_and_update_after_add(
     try:
         applied = apply_resolve_all_result(
             db, req_id, result,
+            expected_status="wanted",
             existing_mb_release_group_id=mb_release_group_id,
         )
         if not applied:

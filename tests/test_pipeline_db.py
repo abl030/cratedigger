@@ -1666,6 +1666,57 @@ class TestTrackManagement(unittest.TestCase):
     def tearDown(self):
         self.db.close()
 
+    def test_empty_request_field_update_is_a_read_only_cas_truth_table(self):
+        """Empty/control-only metadata writes still validate lifecycle."""
+        from lib import pipeline_db
+
+        replaced_id = self.db.add_request(
+            mb_release_id="empty-cas-replaced-old",
+            artist_name="A",
+            album_title="Old",
+            source="request",
+        )
+        self.db.supersede_request_mbid(
+            replaced_id,
+            new_mb_release_id="empty-cas-replaced-new",
+            new_mb_release_group_id=None,
+            new_mb_artist_id=None,
+            new_artist_name="A",
+            new_album_title="New",
+            new_year=None,
+            new_country=None,
+            new_tracks=[],
+        )
+        active_before = self.db.get_request(self.req_id)
+        replaced_before = self.db.get_request(replaced_id)
+        assert active_before is not None
+        assert replaced_before is not None
+
+        self.assertTrue(self.db.update_request_fields(self.req_id))
+        self.assertTrue(self.db.update_request_fields(
+            self.req_id, expected_status="wanted",
+        ))
+        self.assertFalse(self.db.update_request_fields(
+            self.req_id, expected_status="manual",
+        ))
+        self.assertFalse(self.db.update_request_fields(replaced_id))
+        self.assertFalse(self.db.update_request_fields(
+            replaced_id, expected_status="replaced",
+        ))
+        self.assertFalse(self.db.update_request_fields(999_999))
+        self.assertFalse(self.db.update_request_fields(
+            999_999, expected_status="wanted",
+        ))
+        self.assertFalse(self.db.update_spectral_state(
+            replaced_id, pipeline_db.RequestSpectralStateUpdate(),
+        ))
+        self.assertFalse(self.db.update_spectral_state(
+            999_999, pipeline_db.RequestSpectralStateUpdate(),
+        ))
+
+        self.assertEqual(self.db.get_request(self.req_id), active_before)
+        self.assertEqual(self.db.get_request(replaced_id), replaced_before)
+
     def test_set_get_tracks_roundtrip(self):
         tracks = [
             {"disc_number": 1, "track_number": 1, "title": "Intro", "length_seconds": 120},
@@ -1807,6 +1858,7 @@ class TestTrackManagement(unittest.TestCase):
                         track_artists=["Late Artist"],
                         is_va_compilation=False,
                     ),
+                    expected_status="wanted",
                 ))
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
@@ -1900,6 +1952,58 @@ class TestTrackManagement(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(applied, [False])
         self.assertEqual(self.db.get_request(self.req_id), frozen_row)
+
+    def test_field_resolver_snapshot_loses_to_wanted_manual_transition(self):
+        """Real PG barrier: stale resolver output cannot touch parent/child."""
+        from lib.field_resolver_service import (
+            ResolveAllResult,
+            apply_resolve_all_result,
+        )
+
+        self.db.set_tracks(self.req_id, [{
+            "disc_number": 1,
+            "track_number": 1,
+            "title": "Track",
+            "track_artist": None,
+        }])
+        entered = threading.Event()
+        release = threading.Event()
+        applied: list[bool] = []
+
+        def stale_apply() -> None:
+            entered.set()
+            if not release.wait(timeout=10):
+                raise TimeoutError("field resolver barrier was not released")
+            applied.append(apply_resolve_all_result(
+                self.db,
+                self.req_id,
+                ResolveAllResult(
+                    release_group_year=1999,
+                    is_va_compilation=True,
+                    track_artists=["Late Artist"],
+                ),
+                expected_status="wanted",
+            ))
+
+        worker = threading.Thread(target=stale_apply)
+        worker.start()
+        self.assertTrue(entered.wait(timeout=10))
+        self.assertTrue(self.db.update_status(
+            self.req_id, "manual", expected_status="wanted",
+        ))
+        manual_row = self.db.get_request(self.req_id)
+        manual_tracks = self.db.get_tracks(self.req_id)
+        assert manual_row is not None
+        release.set()
+        worker.join(timeout=10)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(applied, [False])
+        self.assertEqual(self.db.get_request(self.req_id), manual_row)
+        self.assertEqual(self.db.get_tracks(self.req_id), manual_tracks)
+        self.assertIsNone(manual_row["release_group_year"])
+        self.assertFalse(manual_row["is_va_compilation"])
+        self.assertIsNone(manual_tracks[0]["track_artist"])
 
 
 @requires_postgres

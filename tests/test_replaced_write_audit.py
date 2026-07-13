@@ -17,10 +17,6 @@ _UPDATE_ALBUM_REQUESTS = re.compile(
     r'(?:"album_requests"|album_requests)(?=\s|$)',
     re.IGNORECASE,
 )
-_STATUS_REF = (
-    rf'(?<![\w$])(?:{_SQL_IDENT}\s*\.\s*)?'
-    r'(?:"status"|status)(?![\w$])'
-)
 _GUARDED_WRITE_METHODS = frozenset({
     "record_field_resolution",
     "update_request_fields",
@@ -56,6 +52,21 @@ def _simple_assignments(
             target, value = node.targets[0], node.value
         elif isinstance(node, ast.AnnAssign):
             target, value = node.target, node.value
+        elif (
+            isinstance(node, ast.AugAssign)
+            and isinstance(node.target, ast.Name)
+        ):
+            # Retain the mutation as a reaching definition.  Referring back
+            # to the same name deliberately resolves as partial/unknown;
+            # ``sql = 'SELECT 1'; sql += dynamic`` must not be mistaken for
+            # the original static SELECT.
+            if isinstance(node.value, (ast.Name, ast.Attribute)):
+                target = node.target
+                value = ast.BinOp(
+                    left=ast.Name(id=node.target.id, ctx=ast.Load()),
+                    op=node.op,
+                    right=node.value,
+                )
         if not isinstance(target, ast.Name) or value is None:
             continue
         scope = _enclosing_scope(node, parents)
@@ -185,6 +196,275 @@ def _scope_sets_read_only(scope: ast.AST) -> bool:
     return False
 
 
+def _sql_argument(node: ast.Call) -> ast.expr | None:
+    """Return an execute call's SQL expression, positional or keyword."""
+    if node.args:
+        return node.args[0]
+    for keyword in node.keywords:
+        if keyword.arg in {"sql", "query"}:
+            return keyword.value
+    return None
+
+
+def _strip_sql_comments(sql: str) -> str:
+    """Remove SQL comments without treating comment text as a predicate."""
+    output: list[str] = []
+    index = 0
+    quote: str | None = None
+    while index < len(sql):
+        char = sql[index]
+        following = sql[index + 1] if index + 1 < len(sql) else ""
+        if quote is not None:
+            output.append(char)
+            if char == quote:
+                if following == quote:
+                    output.append(following)
+                    index += 2
+                    continue
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            output.append(char)
+            index += 1
+            continue
+        if char == "-" and following == "-":
+            index += 2
+            while index < len(sql) and sql[index] not in "\r\n":
+                index += 1
+            output.append(" ")
+            continue
+        if char == "/" and following == "*":
+            index += 2
+            while index + 1 < len(sql):
+                if sql[index] == "*" and sql[index + 1] == "/":
+                    index += 2
+                    break
+                index += 1
+            output.append(" ")
+            continue
+        output.append(char)
+        index += 1
+    return "".join(output)
+
+
+_SQL_TOKEN = re.compile(
+    r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|<>|!=|"
+    r"[a-z_][\w$]*|\{dynamic\}|[().,;=*{}]",
+    re.IGNORECASE,
+)
+
+
+def _sql_tokens(sql: str) -> list[tuple[str, int]]:
+    """Tokenise enough PostgreSQL UPDATE syntax to correlate its guard."""
+    tokens: list[tuple[str, int]] = []
+    depth = 0
+    for match in _SQL_TOKEN.finditer(_strip_sql_comments(sql)):
+        token = match.group(0)
+        if token == ")":
+            depth = max(0, depth - 1)
+        tokens.append((token, depth))
+        if token == "(":
+            depth += 1
+    return tokens
+
+
+def _identifier(token: str) -> str | None:
+    if token.startswith("'"):
+        return None
+    if token.startswith('"') and token.endswith('"'):
+        return token[1:-1].replace('""', '"').lower()
+    if re.fullmatch(r"[a-z_][\w$]*", token, re.IGNORECASE):
+        return token.lower()
+    return None
+
+
+def _target_status_predicate(
+    tokens: list[tuple[str, int]],
+    *,
+    start: int,
+    end: int,
+    depth: int,
+    target_alias: str,
+    target_name: str,
+) -> bool:
+    """Only accept a top-level predicate on the UPDATE target's status."""
+    active_values = {"'wanted'", "'downloading'", "'imported'", "'manual'"}
+    index = start
+    while index < end:
+        token, token_depth = tokens[index]
+        if token_depth != depth:
+            index += 1
+            continue
+        left_end = index
+        left_is_target = False
+        if (
+            _identifier(token) == "status"
+            and not (
+                index > start
+                and tokens[index - 1] == (".", depth)
+            )
+        ):
+            left_is_target = True
+        elif index + 2 < end:
+            qualifier = _identifier(token)
+            dot, dot_depth = tokens[index + 1]
+            column, column_depth = tokens[index + 2]
+            if (
+                qualifier in {target_alias, target_name}
+                and dot == "."
+                and dot_depth == depth
+                and _identifier(column) == "status"
+                and column_depth == depth
+            ):
+                left_is_target = True
+                left_end = index + 2
+        if not left_is_target or left_end + 2 >= end:
+            index += 1
+            continue
+        operator, operator_depth = tokens[left_end + 1]
+        value, value_depth = tokens[left_end + 2]
+        normalized_value = value.lower()
+        if operator_depth == depth and value_depth == depth:
+            if operator in {"!=", "<>"} and normalized_value == "'replaced'":
+                return True
+            if operator == "=" and normalized_value in active_values:
+                return True
+        index = left_end + 1
+    return False
+
+
+def _album_request_update_guards(sql: str) -> list[bool]:
+    """Return guard validity for every statically targeted request UPDATE."""
+    tokens = _sql_tokens(sql)
+    results: list[bool] = []
+    for update_index, (token, depth) in enumerate(tokens):
+        if token.lower() != "update":
+            continue
+        cursor = update_index + 1
+        if cursor < len(tokens) and tokens[cursor][0].lower() == "only":
+            cursor += 1
+        target_parts: list[str] = []
+        identifier = (
+            _identifier(tokens[cursor][0])
+            if cursor < len(tokens) and tokens[cursor][1] == depth
+            else None
+        )
+        if identifier is None:
+            continue
+        target_parts.append(identifier)
+        cursor += 1
+        while (
+            cursor + 1 < len(tokens)
+            and tokens[cursor] == (".", depth)
+            and tokens[cursor + 1][1] == depth
+            and _identifier(tokens[cursor + 1][0]) is not None
+        ):
+            target_parts.append(_identifier(tokens[cursor + 1][0]) or "")
+            cursor += 2
+        target_name = target_parts[-1]
+        if target_name != "album_requests":
+            continue
+
+        target_alias = target_name
+        if cursor < len(tokens) and tokens[cursor][1] == depth:
+            if tokens[cursor][0].lower() == "as":
+                cursor += 1
+                if cursor < len(tokens):
+                    target_alias = _identifier(tokens[cursor][0]) or target_name
+                    cursor += 1
+            elif tokens[cursor][0].lower() != "set":
+                possible_alias = _identifier(tokens[cursor][0])
+                if possible_alias is not None:
+                    target_alias = possible_alias
+                    cursor += 1
+
+        set_index = next((
+            index for index in range(cursor, len(tokens))
+            if tokens[index][1] == depth and tokens[index][0].lower() == "set"
+        ), None)
+        if set_index is None:
+            results.append(False)
+            continue
+        statement_end = next((
+            index for index in range(set_index + 1, len(tokens))
+            if (
+                tokens[index][1] < depth
+                or (tokens[index][1] == depth and tokens[index][0] == ";")
+            )
+        ), len(tokens))
+        where_index = next((
+            index for index in range(set_index + 1, statement_end)
+            if tokens[index][1] == depth and tokens[index][0].lower() == "where"
+        ), None)
+        results.append(
+            where_index is not None
+            and _target_status_predicate(
+                tokens,
+                start=where_index + 1,
+                end=statement_end,
+                depth=depth,
+                target_alias=target_alias,
+                target_name=target_name,
+            )
+        )
+    return results
+
+
+def _unresolved_sql_is_bounded_to_guarded_set(sql: str) -> bool:
+    """Allow only the production pattern: dynamic SET, static target/WHERE."""
+    normalized = " ".join(_strip_sql_comments(sql).lower().split())
+    if "{dynamic}" not in normalized:
+        return True
+    guards = _album_request_update_guards(normalized)
+    if not guards:
+        # Unknown fragments in statically unrelated statements stay outside
+        # this target-table audit. Direct concatenation and augmented-
+        # assignment escapes are rejected from their source AST below.
+        return (
+            not normalized.startswith("{dynamic}")
+            and not re.search(r"\bupdate\s+\{dynamic\}(?=\s|$)", normalized)
+        )
+    if guards != [True]:
+        return False
+    update_at = normalized.find("update")
+    set_at = normalized.find(" set ", update_at)
+    if not (update_at >= 0 and set_at >= 0):
+        return False
+    dynamic_positions = [
+        match.start() for match in re.finditer(r"\{dynamic\}", normalized)
+    ]
+    return bool(dynamic_positions) and all(
+        position > set_at for position in dynamic_positions
+    )
+
+
+def _is_unbounded_dynamic_composition(
+    sql_argument: ast.expr,
+    values: dict[str, tuple[ast.expr, ...]],
+) -> bool:
+    """Catch append/concatenation forms that can smuggle another statement."""
+    if isinstance(sql_argument, ast.BinOp):
+        return (
+            isinstance(sql_argument.left, ast.Constant)
+            and isinstance(sql_argument.left.value, str)
+            and isinstance(sql_argument.right, (ast.Name, ast.Attribute))
+        ) or (
+            isinstance(sql_argument.right, ast.Constant)
+            and isinstance(sql_argument.right.value, str)
+            and isinstance(sql_argument.left, (ast.Name, ast.Attribute))
+        )
+    if not isinstance(sql_argument, ast.Name):
+        return False
+    return any(
+        isinstance(definition, ast.BinOp)
+        and isinstance(definition.left, ast.Name)
+        and definition.left.id == sql_argument.id
+        for definition in values.get(sql_argument.id, ())
+    )
+
+
 def _unguarded_album_request_updates(source: str) -> list[tuple[int, str]]:
     tree = ast.parse(source)
     parents = {
@@ -194,7 +474,7 @@ def _unguarded_album_request_updates(source: str) -> list[tuple[int, str]]:
     }
     offending: list[tuple[int, str]] = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not node.args:
+        if not isinstance(node, ast.Call):
             continue
         name = (
             node.func.attr
@@ -205,13 +485,16 @@ def _unguarded_album_request_updates(source: str) -> list[tuple[int, str]]:
         )
         if name not in {"execute", "_execute"}:
             continue
+        sql_argument = _sql_argument(node)
+        if sql_argument is None:
+            continue
         values = _simple_assignments(tree, node, parents)
-        variants, _unresolved = _sql_variants(node.args[0], values)
+        variants, unresolved = _sql_variants(sql_argument, values)
         scope = _enclosing_scope(node, parents)
         if not variants:
             if (
-                _is_execute_forwarder(node.args[0], scope)
-                or _name_is_file_read(node.args[0], values)
+                _is_execute_forwarder(sql_argument, scope)
+                or _name_is_file_read(sql_argument, values)
                 or _scope_sets_read_only(scope)
             ):
                 continue
@@ -222,35 +505,101 @@ def _unguarded_album_request_updates(source: str) -> list[tuple[int, str]]:
             continue
         for sql in sorted(variants):
             normalized = " ".join(sql.lower().split())
-            if normalized.startswith("{dynamic}"):
+            guards = _album_request_update_guards(sql)
+            if guards and not all(guards):
                 offending.append((node.lineno, normalized))
                 continue
-            if re.search(r"\bupdate\s+\{dynamic\}(?=\s|$)", normalized):
+            if (
+                unresolved
+                and (
+                    _is_unbounded_dynamic_composition(sql_argument, values)
+                    or not _unresolved_sql_is_bounded_to_guarded_set(sql)
+                )
+            ):
                 offending.append((node.lineno, normalized))
                 continue
-            if not _UPDATE_ALBUM_REQUESTS.search(normalized):
+            if guards:
                 continue
-            _, separator, where_clause = normalized.partition(" where ")
-            if not separator:
-                offending.append((node.lineno, normalized))
-                continue
-            has_terminal_guard = bool(re.search(
-                rf"{_STATUS_REF}\s*(?:!=|<>)\s*'replaced'",
-                where_clause,
-                re.IGNORECASE,
-            ))
-            has_exact_active_guard = bool(re.search(
-                rf"{_STATUS_REF}\s*=\s*'(?:wanted|downloading|imported|manual)'",
-                where_clause,
-                re.IGNORECASE,
-            ))
-            if not (has_terminal_guard or has_exact_active_guard):
+            if _UPDATE_ALBUM_REQUESTS.search(_strip_sql_comments(normalized)):
+                # The lexical matcher saw the target but the bounded parser
+                # could not prove which UPDATE owns it.
                 offending.append((node.lineno, normalized))
     return offending
 
 
+def _guarded_result_controls_handling(
+    node: ast.Call,
+    parents: dict[ast.AST, ast.AST],
+) -> bool:
+    """Prove a guarded result reaches a condition, assertion, or return."""
+    current: ast.AST = node
+    while current in parents and not isinstance(current, ast.stmt):
+        parent = parents[current]
+        if isinstance(parent, ast.Return):
+            return True
+        if isinstance(parent, ast.Assert) and current is parent.test:
+            return True
+        if isinstance(parent, (ast.If, ast.While)) and current is parent.test:
+            return True
+        current = parent
+
+    statement = current
+    target: ast.Name | None = None
+    if (
+        isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Name)
+    ):
+        target = statement.targets[0]
+    elif isinstance(statement, ast.AnnAssign) and isinstance(
+        statement.target, ast.Name,
+    ):
+        target = statement.target
+    if target is None:
+        return False
+
+    scope = _enclosing_scope(node, parents)
+    assigned_line = getattr(statement, "lineno", 0)
+    candidate_uses = [
+        use
+        for use in ast.walk(scope)
+        if (
+            isinstance(use, ast.Name)
+            and isinstance(use.ctx, ast.Load)
+            and use.id == target.id
+            and use.lineno > assigned_line
+            and _enclosing_scope(use, parents) is scope
+        )
+    ]
+    stores = [
+        store
+        for store in ast.walk(scope)
+        if (
+            isinstance(store, ast.Name)
+            and isinstance(store.ctx, ast.Store)
+            and store.id == target.id
+            and store.lineno > assigned_line
+            and _enclosing_scope(store, parents) is scope
+        )
+    ]
+    for use in candidate_uses:
+        if any(assigned_line < store.lineno < use.lineno for store in stores):
+            continue
+        current = use
+        while current in parents and not isinstance(current, ast.stmt):
+            parent = parents[current]
+            if isinstance(parent, ast.Return):
+                return True
+            if isinstance(parent, ast.Assert) and current is parent.test:
+                return True
+            if isinstance(parent, (ast.If, ast.While)) and current is parent.test:
+                return True
+            current = parent
+    return False
+
+
 def _ignored_guarded_write_results(source: str) -> list[tuple[int, str]]:
-    """Find guarded writers invoked as bare expressions."""
+    """Find guarded writes without proven success/conflict handling."""
     tree = ast.parse(source)
     parents = {
         child: parent
@@ -274,10 +623,7 @@ def _ignored_guarded_write_results(source: str) -> list[tuple[int, str]]:
             # succeeds; only its later `pdb.record_field_resolution` flush is
             # a guarded database write.
             continue
-        current: ast.AST = node
-        while current in parents and not isinstance(current, ast.stmt):
-            current = parents[current]
-        if isinstance(current, ast.Expr):
+        if not _guarded_result_controls_handling(node, parents):
             ignored.append((node.lineno, node.func.attr))
     return ignored
 
@@ -321,6 +667,46 @@ def thaw(db, request_id):
     db.update_request_fields(request_id, release_group_year=1999)
 '''
         self.assertEqual(len(_ignored_guarded_write_results(source)), 1)
+
+    def test_assigned_but_unchecked_guarded_write_is_rejected(self):
+        source = '''
+def thaw(db, request_id):
+    applied = db.update_request_fields(request_id, release_group_year=1999)
+    log(applied)
+'''
+        self.assertEqual(len(_ignored_guarded_write_results(source)), 1)
+
+    def test_tuple_assigned_guarded_write_is_rejected(self):
+        source = '''
+def thaw(db, request_id):
+    applied, label = (
+        db.update_request_fields(request_id, release_group_year=1999),
+        "metadata",
+    )
+'''
+        self.assertEqual(len(_ignored_guarded_write_results(source)), 1)
+
+    def test_unchecked_walrus_guarded_write_is_rejected(self):
+        source = '''
+def thaw(db, request_id):
+    (applied := db.update_request_fields(
+        request_id, release_group_year=1999,
+    ))
+'''
+        self.assertEqual(len(_ignored_guarded_write_results(source)), 1)
+
+    def test_checked_assignment_and_returned_result_are_accepted(self):
+        source = '''
+def guarded(db, request_id):
+    applied = db.update_request_fields(request_id, release_group_year=1999)
+    if not applied:
+        return conflict()
+    return True
+
+def forwarded(db, request_id):
+    return db.update_request_fields(request_id, release_group_year=1999)
+'''
+        self.assertEqual(_ignored_guarded_write_results(source), [])
 
     def test_known_bad_unguarded_update_is_rejected(self):
         source = """
@@ -399,6 +785,31 @@ def thaw(cur):
 '''
         self.assertEqual(len(_unguarded_album_request_updates(source)), 1)
 
+    def test_keyword_dynamic_sql_fails_closed(self):
+        source = '''
+def thaw(db, dynamic):
+    db._execute(sql=dynamic)
+'''
+        self.assertEqual(len(_unguarded_album_request_updates(source)), 1)
+
+    def test_augmented_dynamic_sql_fails_closed(self):
+        source = '''
+def thaw(db, dynamic_suffix):
+    sql = "SELECT 1"
+    sql += dynamic_suffix
+    db._execute(sql)
+'''
+        self.assertGreaterEqual(
+            len(_unguarded_album_request_updates(source)), 1,
+        )
+
+    def test_select_plus_dynamic_clause_fails_closed(self):
+        source = '''
+def thaw(db, dynamic_clause):
+    db._execute("SELECT 1 " + dynamic_clause)
+'''
+        self.assertEqual(len(_unguarded_album_request_updates(source)), 1)
+
     def test_unresolved_sql_parameter_fails_closed(self):
         source = '''
 def thaw(cur, sql):
@@ -437,6 +848,39 @@ def thaw(cur, request_id, guarded):
             "WHERE id = %s AND status != 'replaced'"
         )
     cur.execute(sql, (9, request_id))
+'''
+        self.assertEqual(len(_unguarded_album_request_updates(source)), 1)
+
+    def test_other_table_status_guard_does_not_guard_target(self):
+        source = '''
+def thaw(cur, request_id):
+    cur.execute(
+        "UPDATE album_requests ar SET reasoning = jobs.reason "
+        "FROM jobs WHERE ar.id = %s AND jobs.status != 'replaced'",
+        (request_id,),
+    )
+'''
+        self.assertEqual(len(_unguarded_album_request_updates(source)), 1)
+
+    def test_subquery_status_guard_does_not_guard_target(self):
+        source = '''
+def thaw(cur, request_id):
+    cur.execute(
+        "UPDATE album_requests SET reasoning = 'late' WHERE id = %s "
+        "AND EXISTS (SELECT 1 FROM jobs WHERE status != 'replaced')",
+        (request_id,),
+    )
+'''
+        self.assertEqual(len(_unguarded_album_request_updates(source)), 1)
+
+    def test_comment_status_guard_does_not_guard_target(self):
+        source = '''
+def thaw(cur, request_id):
+    cur.execute(
+        "UPDATE album_requests SET reasoning = 'late' WHERE id = %s "
+        "/* status != 'replaced' */",
+        (request_id,),
+    )
 '''
         self.assertEqual(len(_unguarded_album_request_updates(source)), 1)
 

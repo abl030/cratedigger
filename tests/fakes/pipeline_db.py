@@ -2324,6 +2324,10 @@ class FakePipelineDB:
             )
         ):
             return False
+        if not fields:
+            # Mirror production's control-only CAS: validate the row and
+            # expected status, but do not manufacture an ``updated_at`` write.
+            return True
         if fields.get("mb_release_id") is not None:
             # Production's UPDATE hits the same UNIQUE(mb_release_id)
             # as the INSERT — re-pointing a row at another row's mbid
@@ -3173,16 +3177,25 @@ class FakePipelineDB:
     def update_track_artists(
         self, request_id: int,
         track_artists: list[str | None],
+        *,
+        expected_status: str | None = None,
     ) -> bool:
         """Mirror of ``PipelineDB.update_track_artists`` — apply per-track
         artists in (disc, track) order. Length mismatches are tolerated
         (fewer keeps existing, more drops extras) — same shape as real.
         """
+        request = self._requests.get(request_id)
+        if (
+            request is None
+            or request.get("status") == "replaced"
+            or (
+                expected_status is not None
+                and request.get("status") != expected_status
+            )
+        ):
+            return False
         if not track_artists:
             return True
-        request = self._requests.get(request_id)
-        if request is None or request.get("status") == "replaced":
-            return False
         rows = self._tracks.get(request_id, [])
         if not rows:
             return True

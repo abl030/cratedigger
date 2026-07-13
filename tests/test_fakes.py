@@ -463,6 +463,42 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertEqual(row["current_spectral_grade"], "genuine")
         self.assertIsNone(row["current_spectral_bitrate"])
 
+    def test_empty_request_field_update_is_a_read_only_cas(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=41, status="wanted"))
+        db.seed_request(make_request_row(id=42, status="replaced"))
+        active_before = copy.deepcopy(db.request(41))
+        replaced_before = copy.deepcopy(db.request(42))
+
+        self.assertTrue(db.update_request_fields(41))
+        self.assertTrue(db.update_request_fields(
+            41, expected_status="wanted",
+        ))
+        self.assertFalse(db.update_request_fields(
+            41, expected_status="manual",
+        ))
+        self.assertFalse(db.update_request_fields(42))
+        self.assertFalse(db.update_request_fields(
+            42, expected_status="replaced",
+        ))
+        self.assertFalse(db.update_request_fields(999))
+        self.assertFalse(db.update_request_fields(
+            999, expected_status="wanted",
+        ))
+
+        self.assertEqual(db.request(41), active_before)
+        self.assertEqual(db.request(42), replaced_before)
+
+    def test_empty_spectral_adapter_cannot_report_missing_or_replaced_success(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="replaced"))
+        before = copy.deepcopy(db.request(42))
+        empty = RequestSpectralStateUpdate()
+
+        self.assertFalse(db.update_spectral_state(42, empty))
+        self.assertFalse(db.update_spectral_state(999, empty))
+        self.assertEqual(db.request(42), before)
+
     def test_clear_on_disk_quality_fields_matches_real_db(self):
         """FakePipelineDB must mirror PipelineDB.clear_on_disk_quality_fields:
         zero the on-disk spectral + verified_lossless + imported_path,

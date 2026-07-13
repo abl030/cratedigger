@@ -10243,7 +10243,9 @@ class TestVaPlanRoundTripsThroughDB(unittest.TestCase):
             is_va_compilation=True,
             track_artists=["Artist A", "Artist B", "Artist C"],
         )
-        apply_resolve_all_result(db, req_id, result)
+        apply_resolve_all_result(
+            db, req_id, result, expected_status="wanted",
+        )
 
         # Verify track_artist landed in the DB (Finding #1d wired this).
         rows = db.get_tracks(req_id)
