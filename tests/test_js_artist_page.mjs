@@ -6,8 +6,8 @@
  *  I1 Partition totality — every input release-group lands in exactly one
  *     of {inLibrary, missing, appearances, bootlegs}; nothing dropped,
  *     nothing duplicated.
- *  I2 Bootleg precedence — !has_official → bootlegs, regardless of
- *     ownership or library state.
+ *  I2 Appearance provenance precedence — is_appearance rows never become
+ *     mainline albums or bootlegs; otherwise !has_official → bootlegs.
  *  I3 Appearance split — has_official && !own → appearances, where "own"
  *     is the exact port of the old renderArtistDiscography credit logic.
  *  I4 Library split — has_official && own && in_library === true →
@@ -25,6 +25,7 @@ import {
   ownedTypeSections,
   renderArtistSections,
   renderOtherSourceSection,
+  splitAppearanceRows,
 } from '../web/js/artist_page.js';
 
 let passed = 0;
@@ -78,6 +79,7 @@ function rg(id, overrides = {}) {
     artist_credit: ARTIST_NAME,
     primary_artist_id: ARTIST_ID,
     has_official: true,
+    is_appearance: false,
     in_library: false,
     ...overrides,
   };
@@ -150,6 +152,25 @@ console.log('I1 — partition totality: every rg in exactly one section');
   assertEqual(s.missing.map(r => r.id).join(','), 'b', 'own+official+not-in-library → missing');
   assertEqual(s.appearances.map(r => r.id).join(','), 'c,d', 'official non-own → appearances');
   assertEqual(s.bootlegs.map(r => r.id).join(','), 'e,f,g,h', 'I2: bootleg precedence beats own/library');
+}
+
+console.log('I2 — explicit appearance provenance beats bootleg and ownership');
+{
+  const s = classify([
+    rg('mb-va-comp', {
+      has_official: false,
+      in_library: true,
+      is_appearance: true,
+      artist_credit: 'Various Artists',
+      primary_artist_id: 'va',
+    }),
+  ]);
+  assertEqual(s.appearances.map(r => r.id).join(','), 'mb-va-comp',
+    'track appearance is classified as an appearance');
+  assertEqual(s.bootlegs.length, 0,
+    'missing direct-artist official status cannot turn an appearance into a bootleg');
+  assertEqual(s.inLibrary.length, 0,
+    'an owned compilation appearance is not promoted to the mainline library section');
 }
 
 console.log('I3 — ownership credit logic (port of renderArtistDiscography)');
@@ -290,6 +311,48 @@ console.log('renderOtherSourceSection — complement rows force the other source
     'empty bucket -> empty string');
   const mbSide = renderOtherSourceSection([rows[0]], { artistName: ARTIST_NAME, source: 'mb' });
   assertContains(mbSide, 'Only on MusicBrainz', 'mb complement label');
+}
+
+console.log('renderOtherSourceSection — appearances are not mainline albums');
+{
+  const rows = [
+    rg('discogs-own-album', {
+      title: 'The Pointless Gift',
+      in_library: true,
+    }),
+    rg('discogs-va-one', {
+      title: 'The Big Noise',
+      secondary_types: ['Compilation'],
+      artist_credit: 'Various',
+      primary_artist_id: '194',
+      is_appearance: true,
+    }),
+    rg('discogs-va-two', {
+      title: 'The Sandringham Sessions',
+      secondary_types: ['Compilation'],
+      artist_credit: 'Various',
+      primary_artist_id: '194',
+      is_appearance: true,
+    }),
+  ];
+  const split = splitAppearanceRows(rows);
+  assertEqual(split.mainline.map(row => row.id).join(','), 'discogs-own-album',
+    'only the artist-credited release remains mainline');
+  assertEqual(split.appearances.map(row => row.id).join(','),
+    'discogs-va-one,discogs-va-two', 'VA compilations stay findable as appearances');
+
+  const html = renderOtherSourceSection(rows, {
+    artistName: ARTIST_NAME,
+    source: 'discogs',
+  });
+  assertContains(html, 'Albums <span class="type-count">1</span>',
+    'mainline Albums count excludes VA compilations');
+  assertExcludes(html, 'Albums <span class="type-count">3</span>',
+    'VA compilations are not flattened into Albums');
+  assertContains(html, 'Appears on <span class="type-count">2</span>',
+    'appearance bucket remains discoverable');
+  assertContains(html, 'Compilations <span class="type-count">2</span>',
+    'appearance rows retain their release-type grouping');
 }
 
 console.log('owned exceptional sections open only their owned release types');

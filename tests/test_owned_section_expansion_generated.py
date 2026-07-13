@@ -66,6 +66,31 @@ process.stdout.write(JSON.stringify(ownedTypeSections(JSON.parse(input))));
     return json.loads(proc.stdout)
 
 
+def _real_appearance_split(
+    rows: list[dict[str, object]],
+) -> dict[str, list[int]]:
+    indexed = [{**row, "_index": index} for index, row in enumerate(rows)]
+    script = """
+import { splitAppearanceRows } from './web/js/artist_page.js';
+let input = '';
+for await (const chunk of process.stdin) input += chunk;
+const split = splitAppearanceRows(JSON.parse(input));
+process.stdout.write(JSON.stringify({
+  mainline: split.mainline.map(row => row._index),
+  appearances: split.appearances.map(row => row._index),
+}));
+"""
+    proc = subprocess.run(
+        ["node", "--input-type=module", "--eval", script],
+        cwd=ROOT,
+        input=json.dumps(indexed),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return json.loads(proc.stdout)
+
+
 def assert_owned_type_contract(
     rows: list[dict[str, object]],
     actual: list[str],
@@ -81,17 +106,39 @@ def assert_owned_type_contract(
         )
 
 
+def assert_appearance_partition(
+    rows: list[dict[str, object]],
+    actual: dict[str, list[int]],
+) -> None:
+    expected_appearances = [
+        index for index, row in enumerate(rows)
+        if row.get("is_appearance") is True
+    ]
+    expected_mainline = [
+        index for index, row in enumerate(rows)
+        if row.get("is_appearance") is not True
+    ]
+    if actual != {
+        "mainline": expected_mainline,
+        "appearances": expected_appearances,
+    }:
+        raise AssertionError("appearance provenance leaked across the partition")
+
+
 row_strategy = st.builds(
-    lambda row_type, secondary_types, in_library, pipeline_status: {
+    lambda row_type, secondary_types, in_library, pipeline_status,
+           is_appearance: {
         "type": row_type,
         "secondary_types": list(secondary_types),
         "in_library": in_library,
         "pipeline_status": pipeline_status,
+        "is_appearance": is_appearance,
     },
     row_type=st.sampled_from(TYPES),
     secondary_types=st.sampled_from(SECONDARY_TYPES),
     in_library=st.one_of(st.none(), st.booleans()),
     pipeline_status=st.sampled_from([None, "wanted", "downloading", "imported"]),
+    is_appearance=st.one_of(st.none(), st.booleans()),
 )
 
 
@@ -126,6 +173,28 @@ class TestGeneratedOwnedSectionExpansion(unittest.TestCase):
         }]
         with self.assertRaisesRegex(AssertionError, "owned type expansion"):
             assert_owned_type_contract(rows, ["Albums"])
+
+    @given(rows=st.lists(row_strategy, min_size=0, max_size=16))
+    @example(rows=[{
+        "type": "Album",
+        "secondary_types": ["Compilation"],
+        "in_library": False,
+        "pipeline_status": None,
+        "is_appearance": True,
+    }])
+    def test_appearance_provenance_never_leaks_into_mainline(
+        self,
+        rows: list[dict[str, object]],
+    ) -> None:
+        assert_appearance_partition(rows, _real_appearance_split(rows))
+
+    def test_appearance_checker_rejects_flattened_compilation(self) -> None:
+        rows: list[dict[str, object]] = [{"is_appearance": True}]
+        with self.assertRaisesRegex(AssertionError, "appearance provenance"):
+            assert_appearance_partition(rows, {
+                "mainline": [0],
+                "appearances": [],
+            })
 
 
 if __name__ == "__main__":

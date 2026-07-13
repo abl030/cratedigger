@@ -121,10 +121,38 @@ def search_artists(query):
     return _cache.memoize_meta(f"mb:search:artists:{query}", _fetch)
 
 
+def _normalize_artist_release_group(
+    rg: dict,
+    *,
+    is_appearance: bool,
+) -> dict:
+    """Shape direct and track-appearance MB rows into one artist-page contract."""
+    ac = rg.get("artist-credit", [])
+    credit_name = " / ".join(a.get("name", "?") for a in ac) if ac else ""
+    primary_artist_id = ac[0].get("artist", {}).get("id") if ac else None
+    return {
+        "id": rg["id"],
+        "title": rg.get("title", ""),
+        "type": rg.get("primary-type", ""),
+        "secondary_types": rg.get("secondary-types", []),
+        "first_release_date": rg.get("first-release-date", ""),
+        "artist_credit": credit_name,
+        "primary_artist_id": primary_artist_id,
+        "is_appearance": is_appearance,
+    }
+
+
 def get_artist_release_groups(artist_mbid):
-    """Get all release groups for an artist. Returns list of {id, title, type, first_release_date}."""
+    """Get directly credited release groups plus track-level appearances.
+
+    MusicBrainz has no combined artist-discography endpoint. Direct work comes
+    from the release-group artist browse; VA compilations and guest spots come
+    from the release ``track_artist`` browse. Direct rows win deduplication so
+    a release group is never downgraded merely because another pressing also
+    contains an appearance.
+    """
     def _fetch() -> list[dict]:
-        results = []
+        entries: dict[str, dict] = {}
         offset = 0
         while True:
             data = _get(
@@ -132,26 +160,46 @@ def get_artist_release_groups(artist_mbid):
                 f"&inc=artist-credits&fmt=json&limit=100&offset={offset}"
             )
             for rg in data.get("release-groups", []):
-                ac = rg.get("artist-credit", [])
-                credit_name = " / ".join(a.get("name", "?") for a in ac) if ac else ""
-                # Extract primary artist ID from credit for reliable own-work detection
-                primary_artist_id = ac[0].get("artist", {}).get("id") if ac else None
-                results.append({
-                    "id": rg["id"],
-                    "title": rg.get("title", ""),
-                    "type": rg.get("primary-type", ""),
-                    "secondary_types": rg.get("secondary-types", []),
-                    "first_release_date": rg.get("first-release-date", ""),
-                    "artist_credit": credit_name,
-                    "primary_artist_id": primary_artist_id,
-                })
+                entry = _normalize_artist_release_group(
+                    rg, is_appearance=False,
+                )
+                entries.setdefault(entry["id"], entry)
             total = data.get("release-group-count", 0)
             offset += 100
             if offset >= total:
                 break
-        return results
 
-    return _cache.memoize_meta(f"mb:artist:{artist_mbid}:release_groups", _fetch)
+        offset = 0
+        while True:
+            data = _get(
+                f"{MB_API_BASE}/release?track_artist={artist_mbid}"
+                "&inc=release-groups+artist-credits"
+                f"&fmt=json&limit=100&offset={offset}"
+            )
+            for release in data.get("releases", []):
+                rg = release.get("release-group")
+                if not isinstance(rg, dict) or not rg.get("id"):
+                    continue
+                entry = _normalize_artist_release_group(
+                    rg, is_appearance=True,
+                )
+                entries.setdefault(entry["id"], entry)
+            total = data.get("release-count", 0)
+            offset += 100
+            if offset >= total:
+                break
+
+        return sorted(
+            entries.values(),
+            key=lambda row: (
+                row.get("first_release_date") or "",
+                row.get("id") or "",
+            ),
+        )
+
+    return _cache.memoize_meta(
+        f"mb:artist:{artist_mbid}:release_groups:v2", _fetch,
+    )
 
 
 def get_official_release_group_ids(artist_mbid):
