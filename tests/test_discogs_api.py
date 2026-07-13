@@ -384,7 +384,7 @@ class TestSearchArtists(unittest.TestCase):
             results = search_artists("Radiohead")
 
         # Verify the new endpoint was hit (not the old release-search hack)
-        called_url = mock.call_args[0][0].full_url
+        called_url = mock.call_args_list[0][0][0].full_url
         self.assertIn("/api/artists?name=", called_url)
         self.assertNotIn("/api/search?artist=", called_url)
 
@@ -404,6 +404,34 @@ class TestSearchArtists(unittest.TestCase):
         self.assertTrue(cache_key.startswith("discogs:search:artists:"))
         self.assertIn(f":#{len(long_query)}:", cache_key)
         self.assertLess(len(cache_key), len(f"discogs:search:artists:{long_query}"))
+
+    def test_exact_four_tet_search_surfaces_symbol_alias(self):
+        symbol_name = "⣎⡇ꉺლ༽இ•̛)ྀ◞ ༎ຶ ༽ৣৢ؞ৢ؞ؖ ꉺლ"
+        search_data = {
+            "results": [
+                {"id": 3543, "name": "Four Tet", "score": 1.0},
+                {"id": 2039081, "name": "The Urge Four Tet", "score": 0.09},
+            ],
+        }
+        detail = {
+            "id": 3543,
+            "name": "Four Tet",
+            "aliases": [
+                {"id": 60342, "name": "Kieran Hebden"},
+                {"id": 6400214, "name": symbol_name},
+            ],
+        }
+        with _mock_urlopen_by_url({
+            "/api/artists?name=Four%20Tet": search_data,
+            "/api/artists/3543": detail,
+        }):
+            results = search_artists("Four Tet")
+
+        self.assertEqual(
+            [row["id"] for row in results[:4]],
+            ["3543", "60342", "6400214", "2039081"],
+        )
+        self.assertEqual(results[2]["name"], symbol_name)
 
 
 def _mock_urlopen_by_url(responses: dict):

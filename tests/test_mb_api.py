@@ -13,7 +13,11 @@ import urllib.parse
 from unittest.mock import MagicMock, patch
 
 from lib.va_identity import MB_VA_ARTIST_MBID
-from web.mb import get_artist_release_groups, search_release_groups
+from web.mb import (
+    get_artist_release_groups,
+    search_artists,
+    search_release_groups,
+)
 
 
 def _mock_urlopen(response_data):
@@ -71,6 +75,21 @@ def _requested_query(mock_urlopen: MagicMock) -> str:
     return urllib.parse.parse_qs(qs)["query"][0]
 
 
+def _mock_urlopen_by_url(responses: dict[str, dict]):
+    """Return canned JSON selected by a substring of each requested URL."""
+    def _side_effect(req, *args, **kwargs):
+        for needle, payload in responses.items():
+            if needle in req.full_url:
+                mock_resp = MagicMock()
+                mock_resp.read.return_value = json.dumps(payload).encode()
+                mock_resp.__enter__ = lambda s: s
+                mock_resp.__exit__ = MagicMock(return_value=False)
+                return mock_resp
+        raise AssertionError(f"unexpected URL: {req.full_url}")
+
+    return patch("web.mb.urllib.request.urlopen", side_effect=_side_effect)
+
+
 class TestSearchReleaseGroupsVaRewrite(unittest.TestCase):
     def test_va_query_pins_arid_and_strips_tokens(self) -> None:
         with _mock_urlopen(_EMPTY) as m:
@@ -116,6 +135,58 @@ class TestSearchReleaseGroupsVaRewrite(unittest.TestCase):
         self.assertEqual(results[0]["artist_name"], "Various Artists")
         self.assertEqual(results[0]["primary_type"], "Album")
         self.assertEqual(results[0]["score"], 100)
+
+
+class TestSearchArtistsRelatedIdentities(unittest.TestCase):
+    def test_exact_four_tet_search_surfaces_symbol_identity(self) -> None:
+        four_tet_id = "3bcff06f-675a-451f-9075-99e8657047e8"
+        person_id = "cb661251-3bc2-4373-bd7c-4b1531275c4c"
+        symbol_id = "2d9745dd-5dc6-4145-9453-fec582cfa9b8"
+        symbol_name = "⣎⡇ꉺლ༽இ•̛)ྀ◞ ༎ຶ ༽ৣৢ؞ৢ؞ؖ ꉺლ"
+        responses = {
+            "/artist?query=Four%20Tet": {
+                "artists": [
+                    {"id": four_tet_id, "name": "Four Tet", "score": 100},
+                    {"id": "other", "name": "Four Tops", "score": 45},
+                ],
+            },
+            f"/artist/{four_tet_id}": {
+                "id": four_tet_id,
+                "name": "Four Tet",
+                "relations": [{
+                    "type": "is person",
+                    "direction": "backward",
+                    "artist": {"id": person_id, "name": "Kieran Hebden"},
+                }],
+            },
+            f"/artist/{person_id}": {
+                "id": person_id,
+                "name": "Kieran Hebden",
+                "relations": [
+                    {
+                        "type": "is person", "direction": "forward",
+                        "artist": {"id": four_tet_id, "name": "Four Tet"},
+                    },
+                    {
+                        "type": "is person", "direction": "forward",
+                        "artist": {
+                            "id": symbol_id, "name": symbol_name,
+                            "disambiguation": "Kieran Hebden",
+                        },
+                    },
+                ],
+            },
+        }
+
+        with _mock_urlopen_by_url(responses):
+            results = search_artists("Four Tet")
+
+        self.assertEqual(
+            [row["id"] for row in results],
+            [four_tet_id, person_id, symbol_id, "other"],
+        )
+        self.assertEqual(results[2]["name"], symbol_name)
+        self.assertEqual(results[2]["disambiguation"], "Kieran Hebden")
 
 
 class TestArtistReleaseGroupsWithAppearances(unittest.TestCase):

@@ -1,5 +1,7 @@
 """Tests for ``lib/processing_paths.py``."""
 
+import os
+import tempfile
 import unittest
 
 from lib.grab_list import DownloadFile, GrabListEntry
@@ -7,6 +9,7 @@ from lib.processing_paths import (
     attempt_fingerprint,
     canonical_folder_for_row,
     canonical_processing_path,
+    stage_to_ai_path,
 )
 
 
@@ -149,6 +152,57 @@ class TestCanonicalFolderForRow(unittest.TestCase):
             canonical_folder_for_row(_row(files=files), "/tmp/downloads"),
             "/tmp/downloads/Test Artist - Test Album (2020) "
             f"[{fingerprint}]",
+        )
+
+
+class TestStageToAiPathComponentLimit(unittest.TestCase):
+    """Long Unicode metadata must remain stageable on ext4."""
+
+    def test_four_tet_style_title_fits_and_can_be_created(self):
+        artist = "⣎⡇ꉺლ༽இ•̛)ྀ◞ ༎ຶ ༽ৣৢ؞ৢ؞ؖ ꉺლ"
+        # The real release title is 365 UTF-8 bytes and is dominated by
+        # combining marks. This smaller readable fixture preserves that
+        # filesystem shape without copying the whole title into the test.
+        title = "ʅ" + "͡" * 182
+
+        with tempfile.TemporaryDirectory() as staging_dir:
+            path = stage_to_ai_path(
+                artist=artist,
+                title=title,
+                staging_dir=staging_dir,
+                request_id=42,
+                auto_import=True,
+            )
+            album_component = os.path.basename(path)
+
+            self.assertLessEqual(len(album_component.encode("utf-8")), 255)
+            self.assertTrue(album_component.endswith(" [request-42]"))
+            os.makedirs(path)
+            self.assertTrue(os.path.isdir(path))
+
+    def test_long_titles_with_the_same_prefix_remain_distinct(self):
+        common = "ʅ" + "͡" * 180
+        first = stage_to_ai_path(
+            artist="Artist", title=f"{common}A", staging_dir="/staging",
+            request_id=42, auto_import=True,
+        )
+        second = stage_to_ai_path(
+            artist="Artist", title=f"{common}B", staging_dir="/staging",
+            request_id=42, auto_import=True,
+        )
+
+        self.assertNotEqual(first, second)
+
+    def test_short_path_is_unchanged(self):
+        self.assertEqual(
+            stage_to_ai_path(
+                artist="Test Artist",
+                title="Test Album",
+                staging_dir="/staging",
+                request_id=42,
+                auto_import=True,
+            ),
+            "/staging/auto-import/Test Artist/Test Album [request-42]",
         )
 
 
