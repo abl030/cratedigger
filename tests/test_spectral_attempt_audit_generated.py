@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 import logging
 import os
+from pathlib import Path
 import subprocess as sp
 import tempfile
 import unittest
@@ -49,6 +50,17 @@ def _have_preserves_persisted_source(
         and existing.bitrate_kbps == expected_bitrate
         and analyzer_calls == ["candidate"]
     )
+
+
+def _have_scan_boundary_holds(
+    analyzer_calls: list[str],
+    *,
+    preserve_existing_source: bool,
+) -> bool:
+    expected = ["candidate"] if preserve_existing_source else [
+        "candidate", "existing",
+    ]
+    return analyzer_calls == expected
 
 
 def _authoritative_have_matches(detail, grade, bitrate) -> bool:
@@ -246,6 +258,18 @@ class TestAttemptAuditCheckerQualification(unittest.TestCase):
             analyzer_calls=["candidate", "installed-opus"],
         ))
 
+    def test_have_boundary_checker_rejects_blanket_persisted_mutant(self):
+        self.assertFalse(_have_scan_boundary_holds(
+            ["candidate"],
+            preserve_existing_source=False,
+        ))
+
+    def test_have_boundary_checker_rejects_blanket_scan_mutant(self):
+        self.assertFalse(_have_scan_boundary_holds(
+            ["candidate", "existing"],
+            preserve_existing_source=True,
+        ))
+
 
 class TestAttemptAuditGenerated(unittest.TestCase):
     def test_authoritative_evidence_checker_rejects_scalar_fallback_mutant(self):
@@ -322,59 +346,151 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         ))
 
     @given(
+        converted_from=st.one_of(
+            st.none(),
+            st.sampled_from((
+                "flac", "FLAC", "alac", "wav", "m4a", "mp3", "aac",
+            )),
+        ),
+        lossless_v0_lineage=st.booleans(),
         persisted_grade=st.sampled_from((
             "genuine", "suspect", "likely_transcode",
         )),
         persisted_bitrate=st.one_of(
             st.none(), st.integers(min_value=32, max_value=400),
         ),
-        derivative_grade=st.sampled_from((
+        scanned_grade=st.sampled_from((
             "genuine", "suspect", "likely_transcode",
         )),
-        derivative_bitrate=st.one_of(
+        scanned_bitrate=st.one_of(
             st.none(), st.integers(min_value=32, max_value=400),
         ),
     )
-    def test_have_always_uses_persisted_source_not_derivative_analysis(
+    def test_have_scan_boundary_matches_lossless_conversion_provenance(
         self,
+        converted_from: str | None,
+        lossless_v0_lineage: bool,
         persisted_grade: str,
         persisted_bitrate: int | None,
-        derivative_grade: str,
-        derivative_bitrate: int | None,
+        scanned_grade: str,
+        scanned_bitrate: int | None,
     ):
-        from lib.measurement import collect_attempt_spectral_audit
-        from lib.quality import SpectralAnalysisDetail
+        from lib.beets_db import AlbumInfo
+        from lib.config import CratediggerConfig
+        from lib.import_preview import preserve_existing_source_spectral
+        from lib.measurement import LocalFileInspection, measure_preimport_state
+        from lib.quality import (
+            LOSSLESS_CODECS,
+            V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
+            AlbumQualityV0Metric,
+            AudioQualityMeasurement,
+            SpectralAnalysisDetail,
+        )
+        from tests.fakes import FakeBeetsDB
+        from tests.helpers import make_album_quality_evidence
 
+        beets = FakeBeetsDB()
+        beets.set_album_info("mbid", AlbumInfo(
+            album_id=1,
+            track_count=1,
+            min_bitrate_kbps=320,
+            avg_bitrate_kbps=320,
+            median_bitrate_kbps=320,
+            is_cbr=True,
+            album_path="existing",
+            format="MP3",
+        ))
         persisted = SpectralAnalysisDetail(
             attempted=True,
             grade=persisted_grade,
             bitrate_kbps=persisted_bitrate,
         )
-        calls: list[object] = []
+        current_evidence = make_album_quality_evidence(
+            mb_release_id="mbid",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                spectral_grade=persisted_grade,
+                spectral_bitrate_kbps=persisted_bitrate,
+                was_converted_from=converted_from,
+            ),
+            v0_metric=(
+                AlbumQualityV0Metric(
+                    min_bitrate_kbps=200,
+                    avg_bitrate_kbps=228,
+                    median_bitrate_kbps=225,
+                    source_lineage=V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
+                    source_provenance="generated",
+                )
+                if lossless_v0_lineage
+                else None
+            ),
+        )
+        preserve_existing_source = preserve_existing_source_spectral(
+            current_evidence,
+        )
+        self.assertEqual(
+            preserve_existing_source,
+            (
+                (converted_from or "").lower() in LOSSLESS_CODECS
+                or (
+                    (converted_from or "").lower() == "m4a"
+                    and lossless_v0_lineage
+                )
+            ),
+        )
+        calls: list[str] = []
 
-        def analyze(path: object, trim_seconds: int = 30):
+        def analyze(path: str, trim_seconds: int = 30):
             del trim_seconds
             calls.append(path)
             return SimpleNamespace(
-                grade=(
-                    "genuine" if path == "candidate" else derivative_grade
-                ),
+                grade=(scanned_grade if path == "existing" else "genuine"),
                 estimated_bitrate_kbps=(
-                    None if path == "candidate" else derivative_bitrate
+                    scanned_bitrate if path == "existing" else None
                 ),
                 suspect_pct=0.0,
                 tracks=[],
             )
 
-        with patch("lib.measurement.spectral_analyze", side_effect=analyze):
-            audit = collect_attempt_spectral_audit("candidate", persisted)
+        with patch("lib.beets_db.BeetsDB", return_value=beets), patch(
+            "lib.measurement.spectral_analyze", side_effect=analyze,
+        ), patch(
+            "lib.measurement._iter_audio_files",
+            return_value=[Path("candidate", "01.mp3")],
+        ), patch("lib.measurement.os.path.isdir", return_value=True):
+            measured = measure_preimport_state(
+                path="candidate",
+                mb_release_id="mbid",
+                label="generated",
+                download_filetype="mp3",
+                download_min_bitrate_bps=219_000,
+                download_is_vbr=False,
+                cfg=CratediggerConfig(audio_check_mode="off"),
+                existing_spectral_evidence=persisted,
+                preserve_existing_source_spectral=preserve_existing_source,
+                precomputed_inspection=LocalFileInspection(
+                    filetype="mp3",
+                    min_bitrate_bps=219_000,
+                    is_vbr=False,
+                ),
+            )
 
-        self.assertTrue(_have_preserves_persisted_source(
-            audit,
-            expected_grade=persisted_grade,
-            expected_bitrate=persisted_bitrate,
-            analyzer_calls=calls,
+        self.assertTrue(_have_scan_boundary_holds(
+            calls,
+            preserve_existing_source=preserve_existing_source,
         ))
+        assert measured.spectral_audit.existing is not None
+        if preserve_existing_source:
+            self.assertEqual(measured.spectral_audit.existing, persisted)
+        else:
+            self.assertEqual(measured.spectral_audit.existing.grade, scanned_grade)
+            self.assertEqual(
+                measured.spectral_audit.existing.bitrate_kbps,
+                scanned_bitrate,
+            )
 
     @given(
         mode=st.sampled_from((

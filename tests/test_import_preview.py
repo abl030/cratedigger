@@ -31,6 +31,27 @@ from tests.helpers import make_album_quality_evidence, make_request_row
 
 
 class TestSpectralAuditMerge(unittest.TestCase):
+    def test_wav_conversion_preserves_source_spectral(self):
+        """WAV→Opus is a lossless-source derivative, just like FLAC→Opus."""
+        from lib.import_preview import preserve_existing_source_spectral
+
+        evidence = make_album_quality_evidence(
+            mb_release_id="wav-derived",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=128,
+                format="Opus",
+                spectral_grade="genuine",
+                was_converted_from="wav",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+
+        self.assertTrue(preserve_existing_source_spectral(evidence))
+
     def test_candidate_measured_error_yields_to_harness_success(self):
         measured = SpectralAnalysisDetail(
             attempted=True, error="RuntimeError: measured failed")
@@ -40,7 +61,7 @@ class TestSpectralAuditMerge(unittest.TestCase):
         self.assertIs(
             _prefer_successful_spectral_detail(measured, harness), harness)
 
-    def test_composition_keeps_persisted_have_over_harness_derivative(self):
+    def test_composition_keeps_preview_have_over_harness_duplicate(self):
         measured = SpectralDetail(
             candidate=SpectralAnalysisDetail(
                 attempted=True, grade="likely_transcode", bitrate_kbps=224),

@@ -21,6 +21,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+from lib.config import CratediggerConfig, read_runtime_config
 from lib.dispatch import _record_preview_measurement_failed
 from lib.import_preview import (
     PREVIEW_VERDICT_EVIDENCE_READY,
@@ -28,6 +29,7 @@ from lib.import_preview import (
     ImportPreviewResult,
     load_persisted_existing_spectral,
     measure_and_persist_candidate_evidence,
+    preserve_existing_source_spectral,
 )
 from lib.import_evidence import (
     CANDIDATE_STATUS_REUSED,
@@ -43,6 +45,7 @@ from lib.import_queue import (
 from lib.pipeline_db import DEFAULT_DSN, PipelineDB
 from lib.measurement import (
     collect_attempt_spectral_audit,
+    resolve_existing_spectral_audit_path,
 )
 from lib.quality import (
     ActiveDownloadState,
@@ -446,8 +449,12 @@ def _handle_measurement_failed(
 
 
 SpectralAuditCollector = Callable[
-    [str, SpectralAnalysisDetail | None],
+    [str, str | None],
     SpectralDetail,
+]
+ExistingSpectralPathResolver = Callable[
+    [str, CratediggerConfig],
+    tuple[str | None, SpectralAnalysisDetail | None],
 ]
 PreviewFn = Callable[[Any, ImportJob], ImportPreviewResult]
 
@@ -457,29 +464,56 @@ def _collect_reused_evidence_spectral_audit(
     request_id: int | None,
     source_path: str,
     collector: SpectralAuditCollector,
+    existing_path_resolver: ExistingSpectralPathResolver,
 ) -> SpectralDetail:
-    """Pair a candidate scan with the installed release's source evidence."""
-    existing = SpectralAnalysisDetail(attempted=False)
+    """Collect reused-candidate audit with the same conditional HAVE rule."""
+    persisted_existing = SpectralAnalysisDetail(attempted=False)
+    preserve_have_source = False
+    existing_path: str | None = None
+    lookup_failure: SpectralAnalysisDetail | None = None
     if request_id is not None:
         try:
             req = db.get_request(request_id) or {}
-            _, existing, _ = load_persisted_existing_spectral(
-                db, request_id, req,
+            current_evidence, persisted_existing, _ = (
+                load_persisted_existing_spectral(
+                    db,
+                    request_id,
+                    req,
+                )
             )
+            preserve_have_source = preserve_existing_source_spectral(
+                current_evidence,
+            )
+            if not preserve_have_source:
+                existing_path, lookup_failure = (
+                    existing_path_resolver(
+                        str(req.get("mb_release_id") or ""),
+                        read_runtime_config(),
+                    )
+                )
         except Exception:
             logger.exception(
-                "Unable to load reused HAVE provenance for request %s",
+                "Unable to resolve reused HAVE audit for request %s",
                 request_id,
             )
     try:
-        return collector(source_path, existing)
+        audit = collector(source_path, existing_path)
+        if preserve_have_source:
+            audit.existing = persisted_existing
+        elif lookup_failure is not None:
+            audit.existing = lookup_failure
+        return audit
     except Exception as exc:
         logger.exception(
             "Reused-evidence spectral audit failed for %s", source_path)
         error = f"{type(exc).__name__}: {exc}"
         return SpectralDetail(
             candidate=SpectralAnalysisDetail(attempted=True, error=error),
-            existing=existing,
+            existing=(
+                persisted_existing
+                if preserve_have_source
+                else lookup_failure or SpectralAnalysisDetail(attempted=False)
+            ),
         )
 
 
@@ -489,6 +523,9 @@ def process_claimed_preview_job(
     *,
     spectral_audit_collector: SpectralAuditCollector = (
         collect_attempt_spectral_audit
+    ),
+    existing_path_resolver: ExistingSpectralPathResolver = (
+        resolve_existing_spectral_audit_path
     ),
     preview_fn: PreviewFn | None = None,
 ) -> ImportJob | None:
@@ -508,6 +545,7 @@ def process_claimed_preview_job(
             job.request_id,
             front_gate_source,
             spectral_audit_collector,
+            existing_path_resolver,
         )
         reused_payload = _reused_evidence_preview_payload(
             job,
