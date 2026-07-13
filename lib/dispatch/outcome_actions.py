@@ -23,6 +23,7 @@ from lib.terminal_outcomes import (
     ImportSuccessOutcome,
     ImporterRejectionOutcome,
     PreviewMeasurementFailureOutcome,
+    TerminalAttemptType,
 )
 from lib.validation_envelope import derive_validation_log_columns
 
@@ -438,7 +439,9 @@ def _record_rejection_and_maybe_requeue(
         ImporterRejectionOutcome(
             request_id=request_id,
             requeue_to_wanted=requeue,
-            record_validation_attempt=True,
+            attempt_type=(
+                TerminalAttemptType.validation if requeue else None
+            ),
             write_search_filetype_override=search_filetype_override is not None,
             search_filetype_override=search_filetype_override,
             audit=_download_audit_write(

@@ -19,6 +19,7 @@ from lib.terminal_outcomes import (
     TerminalOutcomeApplied,
     TerminalOutcomeBoundary,
     TerminalOutcomeConflict,
+    TerminalAttemptType,
     canonicalize_download_audit,
 )
 from lib.transitions import validate_transition
@@ -179,7 +180,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
         *,
         request_id: int,
         source_status: str,
-        record_validation_attempt: bool,
+        attempt_type: TerminalAttemptType | None,
         write_search_filetype_override: bool,
         search_filetype_override: str | None,
         write_min_bitrate: bool = False,
@@ -204,10 +205,15 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                     validation_attempts = CASE WHEN %s
                         THEN COALESCE(validation_attempts, 0) + 1
                         ELSE validation_attempts END,
+                    download_attempts = CASE WHEN %s
+                        THEN COALESCE(download_attempts, 0) + 1
+                        ELSE download_attempts END,
                     last_attempt_at = CASE WHEN %s THEN %s ELSE last_attempt_at END,
                     next_retry_after = CASE WHEN %s THEN %s + (
                         LEAST(
-                            %s * POWER(2, COALESCE(validation_attempts, 0)),
+                            %s * POWER(2, CASE WHEN %s
+                                THEN COALESCE(download_attempts, 0)
+                                ELSE COALESCE(validation_attempts, 0) END),
                             %s
                         ) * INTERVAL '1 minute'
                     ) ELSE next_retry_after END,
@@ -220,12 +226,14 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                     search_filetype_override,
                     write_min_bitrate,
                     min_bitrate,
-                    record_validation_attempt,
-                    record_validation_attempt,
+                    attempt_type == TerminalAttemptType.validation,
+                    attempt_type == TerminalAttemptType.download,
+                    attempt_type is not None,
                     now,
-                    record_validation_attempt,
+                    attempt_type is not None,
                     now,
                     BACKOFF_BASE_MINUTES,
+                    attempt_type == TerminalAttemptType.download,
                     BACKOFF_MAX_MINUTES,
                     now,
                     request_id,
@@ -240,8 +248,8 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                     active_download_state = NULL,
                     manual_reason = NULL,
                     search_attempts = 0,
-                    download_attempts = 0,
                     validation_attempts = CASE WHEN %s THEN 1 ELSE 0 END,
+                    download_attempts = CASE WHEN %s THEN 1 ELSE 0 END,
                     last_attempt_at = CASE WHEN %s THEN %s ELSE NULL END,
                     next_retry_after = CASE WHEN %s
                         THEN %s + (%s * INTERVAL '1 minute') ELSE NULL END,
@@ -253,10 +261,11 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 RETURNING id
                 """,
                 (
-                    record_validation_attempt,
-                    record_validation_attempt,
+                    attempt_type == TerminalAttemptType.validation,
+                    attempt_type == TerminalAttemptType.download,
+                    attempt_type is not None,
                     now,
-                    record_validation_attempt,
+                    attempt_type is not None,
                     now,
                     BACKOFF_BASE_MINUTES,
                     write_search_filetype_override,
@@ -300,11 +309,11 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                     WHEN ar.unfindable_category IS NOT NULL THEN %s
                     ELSE ar.unfindable_categorised_at END,
                 unfindable_category = NULL,
-                beets_distance = %s,
-                beets_scenario = %s,
-                imported_path = %s,
-                verified_lossless = %s,
-                final_format = %s,
+                beets_distance = CASE WHEN %s THEN %s ELSE ar.beets_distance END,
+                beets_scenario = CASE WHEN %s THEN %s ELSE ar.beets_scenario END,
+                imported_path = CASE WHEN %s THEN %s ELSE ar.imported_path END,
+                verified_lossless = CASE WHEN %s THEN %s ELSE ar.verified_lossless END,
+                final_format = CASE WHEN %s THEN %s ELSE ar.final_format END,
                 last_download_spectral_grade = CASE WHEN %s THEN %s
                     ELSE ar.last_download_spectral_grade END,
                 last_download_spectral_bitrate = CASE WHEN %s THEN %s
@@ -328,10 +337,15 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 now,
                 now,
                 now,
+                request.write_import_metadata,
                 request.beets_distance,
+                request.write_import_metadata,
                 request.beets_scenario,
+                request.write_import_metadata,
                 request.imported_path,
+                request.write_import_metadata,
                 request.verified_lossless,
+                request.write_import_metadata,
                 request.final_format,
                 request.write_spectral,
                 request.last_download_spectral_grade,
@@ -399,7 +413,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 self._write_wanted_terminal_request(
                     request_id=outcome.request_id,
                     source_status="imported",
-                    record_validation_attempt=False,
+                    attempt_type=None,
                     write_search_filetype_override=True,
                     search_filetype_override=(
                         outcome.requeue_search_filetype_override
@@ -463,7 +477,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 self._write_wanted_terminal_request(
                     request_id=outcome.request_id,
                     source_status=source_status,
-                    record_validation_attempt=outcome.record_validation_attempt,
+                    attempt_type=outcome.attempt_type,
                     write_search_filetype_override=(
                         outcome.write_search_filetype_override
                     ),
@@ -532,7 +546,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
             self._write_wanted_terminal_request(
                 request_id=outcome.request_id,
                 source_status=source_status,
-                record_validation_attempt=False,
+                attempt_type=None,
                 write_search_filetype_override=False,
                 search_filetype_override=None,
             )

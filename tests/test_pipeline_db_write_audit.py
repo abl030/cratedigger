@@ -55,10 +55,6 @@ ALLOWLIST: dict[str, str] = {
         "scalar timestamps + username, no dict payload",
     "add_denylist":
         "scalar args, single-column writes",
-    "mark_import_job_completed":
-        "status transition only",
-    "mark_import_job_failed":
-        "status transition only",
     "mark_import_job_preview_importable":
         "status transition only",
     "mark_import_subprocess_started":

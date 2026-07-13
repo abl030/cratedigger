@@ -222,7 +222,7 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
             _evidence(source, audio_corrupt=True),
         )
         self.db.set_import_job_candidate_evidence(job.id, evidence_id)
-        self.db.mark_import_job_completed(job.id)
+        self.db._mark_import_job_completed(job.id)
 
         result = cleanup_wrong_match(self.db, log_id, cfg=_cfg())
 

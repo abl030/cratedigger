@@ -173,13 +173,13 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/requests.py", 1133, "186e1c3ba3188478"): (
         "plan-aware download claim uses an exact wanted source predicate"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 195, "787fcefe100c6e7e"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 196, "73a240282db32a62"): (
         "atomic downloading rejection recovery CASes the locked source status"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 236, "111a43fe79ed054e"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 244, "a3cf2d6fb0fe10c2"): (
         "atomic non-downloading recovery CASes the locked source status"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 285, "1f113981f76368df"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 294, "1cdcb280c17539e0"): (
         "atomic import success CASes the locked source status"
     ),
 }

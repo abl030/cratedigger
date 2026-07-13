@@ -10,7 +10,8 @@ import shutil
 import socket
 import sys
 import time
-from typing import Any, assert_never
+from dataclasses import replace
+from typing import Any, assert_never, Protocol
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
@@ -47,6 +48,16 @@ from lib.pipeline_db import (
 )
 from lib.import_manifest import audio_relative_paths
 from lib.quality import ActiveDownloadFileState, ActiveDownloadState
+from lib.terminal_outcomes import (
+    DownloadAuditWrite,
+    ImportedRequestWrite,
+    ImportJobOutcomeResult,
+    ImportJobRequestAction,
+    ImportSuccessOutcome,
+    ImporterRejectionOutcome,
+    TerminalAttemptType,
+    TerminalOutcomeConflict,
+)
 from lib.youtube_ingest_service import YoutubeImportPayload
 
 logger = logging.getLogger("cratedigger-importer")
@@ -54,13 +65,14 @@ RESTART_REQUEUE_MESSAGE = "Importer restarted while job was running; retry queue
 YOUTUBE_IMPORT_ALLOWED_REQUEST_STATUSES = frozenset({"wanted", "manual"})
 
 
-def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
-    return {
-        "success": outcome.success,
-        "message": outcome.message,
-        "deferred": outcome.deferred,
-        "code": outcome.code,
-    }
+class ExecuteImportJobFn(Protocol):
+    def __call__(
+        self,
+        db: PipelineDB,
+        job: ImportJob,
+        *,
+        ctx: Any = None,
+    ) -> DispatchOutcome: ...
 
 
 def _supplement_terminal_job(
@@ -216,7 +228,7 @@ def execute_import_job(
         source_username = payload.get("source_username")
         source_dirs = payload.get("source_dirs")
         download_log_id = payload.get("download_log_id")
-        return dispatch_import_from_db(
+        outcome = dispatch_import_from_db(
             db,
             request_id=job.request_id,
             failed_path=failed_path,
@@ -239,6 +251,12 @@ def execute_import_job(
                 else None
             ),
         )
+        if outcome.success:
+            return replace(
+                outcome,
+                request_action=ImportJobRequestAction.imported,
+            )
+        return outcome
 
     if job.job_type == IMPORT_JOB_AUTOMATION:
         return execute_automation_import_job(db, job, ctx=ctx)
@@ -269,6 +287,7 @@ def _dispatch_outcome_from_completion(
     deferred_message: str,
     completed_message: str,
     failed_message: str,
+    failure_request_action: ImportJobRequestAction,
 ) -> DispatchOutcome:
     """Map the completion-processing tag to the queue's DispatchOutcome.
 
@@ -299,11 +318,29 @@ def _dispatch_outcome_from_completion(
             deferred=True,
         )
     if isinstance(result, CompletionDispatched):
-        return result.outcome
+        # Evidence-gate requeues are deliberately non-terminal: dispatch owns
+        # the queued/preview-lane write, but no request/audit/job terminal
+        # bundle should exist yet. Every other dispatched result must already
+        # have committed that mandatory bundle.
+        return replace(
+            result.outcome,
+            terminal_outcome_expected=result.outcome.code not in (
+                DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
+                DISPATCH_CODE_REQUEUE_FAILED,
+            ),
+        )
     if isinstance(result, Completed):
-        return DispatchOutcome(success=True, message=completed_message)
+        return DispatchOutcome(
+            success=True,
+            message=completed_message,
+            request_action=ImportJobRequestAction.imported,
+        )
     if isinstance(result, CompletionFailed):
-        return DispatchOutcome(success=False, message=failed_message)
+        return DispatchOutcome(
+            success=False,
+            message=f"{failed_message}: {result.reason}",
+            request_action=failure_request_action,
+        )
     assert_never(result)
 
 
@@ -354,6 +391,9 @@ def execute_automation_import_job(
         ),
         completed_message="Automation import processing completed",
         failed_message="Automation import processing failed",
+        failure_request_action=(
+            ImportJobRequestAction.wanted_after_download_failure
+        ),
     )
 
 
@@ -376,11 +416,11 @@ def execute_youtube_import_job(
     observes a ready local staging path with no slskd-resume state
     attached.
 
-    R17: terminal status flips run through
-    ``transitions.finalize_request → mark_imported_with_rescue`` (the
-    single source-agnostic write site), so YT rescues populate
-    ``rescued_at`` + ``prior_unfindable_category`` atomically when the
-    request had a prior ``unfindable_category``.
+    R17: terminal status flips run through the DB-owned import-success
+    transaction, whose request write carries the same rescue fields. YT
+    rescues therefore populate ``rescued_at`` +
+    ``prior_unfindable_category`` atomically with their mandatory audit and
+    import-job completion when the request had an ``unfindable_category``.
 
     No cooldown side effects: the slskd cooldown machinery is keyed on
     peer usernames; YT has no peers. We never call ``denylist_user`` /
@@ -465,6 +505,7 @@ def execute_youtube_import_job(
         ),
         completed_message="YouTube import processing completed",
         failed_message="YouTube import processing failed",
+        failure_request_action=ImportJobRequestAction.unchanged,
     )
 
 
@@ -486,11 +527,84 @@ def _youtube_active_download_files(staged_path: str) -> list[ActiveDownloadFileS
     return out
 
 
+def _persist_worker_terminal_outcome(
+    db: PipelineDB,
+    job: ImportJob,
+    outcome: DispatchOutcome,
+) -> None:
+    """Persist a non-dispatch terminal result through one mandatory bundle."""
+    request_id = job.request_id
+    if request_id is None:
+        raise TerminalOutcomeConflict(
+            f"import job {job.id} has no request for mandatory terminal audit"
+        )
+    job_result = ImportJobOutcomeResult(
+        success=outcome.success,
+        message=outcome.message,
+        deferred=outcome.deferred,
+        code=outcome.code,
+    )
+    audit = DownloadAuditWrite(
+        outcome=(
+            job.job_type
+            if outcome.success
+            and job.job_type in (IMPORT_JOB_FORCE, IMPORT_JOB_MANUAL)
+            else "success" if outcome.success else "failed"
+        ),
+        beets_scenario=f"{job.job_type}_worker_terminal",
+        beets_detail=outcome.message,
+        error_message=None if outcome.success else outcome.message,
+    )
+    if outcome.success:
+        if outcome.request_action != ImportJobRequestAction.imported:
+            raise TerminalOutcomeConflict(
+                f"successful import job {job.id} lacks an imported request action"
+            )
+        db.persist_import_success(
+            ImportSuccessOutcome(
+                request_id=request_id,
+                import_job_id=job.id,
+                request=ImportedRequestWrite(
+                    beets_distance=None,
+                    beets_scenario=None,
+                    imported_path=None,
+                    verified_lossless=False,
+                    final_format=None,
+                    write_import_metadata=False,
+                ),
+                audit=audit,
+                job_result=job_result,
+                job_message=outcome.message,
+            )
+        )
+        return
+
+    requeue = (
+        outcome.request_action
+        == ImportJobRequestAction.wanted_after_download_failure
+    )
+    db.persist_importer_rejection(
+        ImporterRejectionOutcome(
+            request_id=request_id,
+            import_job_id=job.id,
+            requeue_to_wanted=requeue,
+            attempt_type=(TerminalAttemptType.download if requeue else None),
+            write_search_filetype_override=False,
+            search_filetype_override=None,
+            audit=audit,
+            job_result=job_result,
+            job_error=outcome.message,
+            job_message=outcome.message,
+        )
+    )
+
+
 def process_claimed_job(
     db: PipelineDB,
     job: ImportJob,
     *,
     ctx: Any = None,
+    execute_fn: ExecuteImportJobFn | None = None,
 ) -> ImportJob | None:
     """Execute a claimed job and persist its terminal queue status.
 
@@ -502,24 +616,19 @@ def process_claimed_job(
     completion-result -> DispatchOutcome conversion is instead scoped to
     just automation + youtube, issue #510).
     """
+    resolved_execute = execute_fn if execute_fn is not None else execute_import_job
     try:
-        outcome = execute_import_job(db, job, ctx=ctx)
-    except Exception as exc:
-        logger.exception("Import job %s crashed", job.id)
-        persisted_after_crash = db.get_import_job(job.id)
-        if (
-            persisted_after_crash is not None
-            and persisted_after_crash.status in ("completed", "failed")
-        ):
-            return persisted_after_crash
-        return db.mark_import_job_failed(
+        outcome = resolved_execute(db, job, ctx=ctx)
+    except Exception:
+        # Fail closed. In particular, a beets-success terminal transaction
+        # that rolls back must not be translated into a second rejection or
+        # a job-only failure. The running row is recovered on worker restart.
+        logger.exception(
+            "Import job %s crashed; preserving its pre-terminal DB state",
             job.id,
-            error=type(exc).__name__,
-            message=str(exc),
-            result={"success": False},
         )
+        raise
 
-    result = _job_result(outcome)
     persisted = db.get_import_job(job.id)
     if persisted is not None and persisted.status in ("completed", "failed"):
         # Domain terminal writers already committed request + mandatory audit
@@ -544,14 +653,10 @@ def process_claimed_job(
                     payload=cleanup,
                 )
         return db.get_import_job(job.id)
-    if outcome.success:
-        dismissal = _dismiss_successful_force_import(db, job)
-        if dismissal is not None:
-            result["wrong_match_dismissal"] = dismissal
-        return db.mark_import_job_completed(
-            job.id,
-            result=result,
-            message=outcome.message,
+    if outcome.terminal_outcome_expected:
+        raise TerminalOutcomeConflict(
+            f"import job {job.id} returned a dispatched terminal outcome "
+            "without committing its request, audit, and job bundle"
         )
     # U2: dispatch flipped this row back to the preview lane (or tried to).
     # We do NOT write a terminal failed status, do NOT bump retry counters,
@@ -566,33 +671,43 @@ def process_claimed_job(
         )
         return None
     if outcome.code == DISPATCH_CODE_REQUEUE_FAILED:
-        # The requeue UPDATE itself failed (DB transient). Mark the job
-        # terminally failed so it surfaces to ops rather than leaving it in
-        # 'running' for startup recovery, which would just re-claim and hit
-        # the same condition (REL-001). The operator can re-trigger the
-        # import once the underlying DB issue is resolved.
+        # The requeue UPDATE itself failed. Leave the job running so startup
+        # recovery can retry it; any terminal fallback here would bypass the
+        # mandatory request + audit + job transaction.
         logger.error(
             "Import job %s (request %s) requeue to preview failed; "
-            "marking job failed (operator must investigate): %s",
+            "leaving it recoverable without a terminal write: %s",
             job.id,
             job.request_id,
             outcome.message,
         )
-        return db.mark_import_job_failed(
-            job.id,
-            error=outcome.message,
-            message=f"requeue-to-preview failed: {outcome.message}",
-            result=result,
+        return None
+
+    _persist_worker_terminal_outcome(db, job, outcome)
+    persisted = db.get_import_job(job.id)
+    if persisted is None or persisted.status not in ("completed", "failed"):
+        raise TerminalOutcomeConflict(
+            f"terminal bundle did not finalize import job {job.id}"
         )
+    if outcome.success:
+        dismissal = _dismiss_successful_force_import(db, job)
+        if dismissal is not None:
+            _supplement_terminal_job(
+                db,
+                job_id=job.id,
+                key=ImportJobSupplementKey.wrong_match_dismissal,
+                payload=dismissal,
+            )
+        return db.get_import_job(job.id)
     cleanup = _cleanup_failed_force_import(db, job, outcome)
     if cleanup is not None:
-        result["cleanup"] = cleanup
-    return db.mark_import_job_failed(
-        job.id,
-        error=outcome.message,
-        message=outcome.message,
-        result=result,
-    )
+        _supplement_terminal_job(
+            db,
+            job_id=job.id,
+            key=ImportJobSupplementKey.cleanup,
+            payload=cleanup,
+        )
+    return db.get_import_job(job.id)
 
 
 def run_once(

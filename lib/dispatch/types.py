@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Protocol, Sequence, TYPE_CHECKING
 
 from lib.wrong_match_policy import PREIMPORT_FACT_REJECTION_SCENARIOS
+from lib.terminal_outcomes import ImportJobRequestAction
 
 logger = logging.getLogger("cratedigger")
 
@@ -78,6 +79,8 @@ class DispatchOutcome:
     message: str
     deferred: bool = False
     code: str | None = None
+    request_action: ImportJobRequestAction = ImportJobRequestAction.unchanged
+    terminal_outcome_expected: bool = False
 
 
 class DispatchCoreFn(Protocol):

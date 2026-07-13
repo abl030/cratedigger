@@ -21,10 +21,7 @@ import msgspec
 
 from lib import download_processing
 from lib.download_processing import (
-    Completed,
     CompletionDeferred,
-    CompletionDispatched,
-    CompletionFailed,
     CompletionResult,
     ProcessAlbumFn,
 )
@@ -79,6 +76,10 @@ from lib.staged_album import StagedAlbum
 if TYPE_CHECKING:
     from lib.context import CratediggerContext
     from lib.pipeline_db import DownloadLogOutcome
+    from lib.terminal_outcomes import (
+        ImporterRejectionOutcome,
+        TerminalOutcomeApplied,
+    )
 
 logger = logging.getLogger("cratedigger")
 
@@ -166,6 +167,11 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
         error_message: str,
         validation_result: str | None,
     ) -> int | None: ...
+
+    def persist_importer_rejection(
+        self,
+        outcome: ImporterRejectionOutcome,
+    ) -> TerminalOutcomeApplied: ...
 
 
 MAX_FILE_RETRIES = 5
@@ -522,54 +528,13 @@ def _run_completed_processing(
                          f"— will retry local processing next cycle")
         return CompletionDeferred(detail="unhandled_exception_during_local_processing")
 
-    # Ownership return from ``process_completed_album`` (see
-    # ``CompletionResult`` in lib/download_processing.py):
-    # - Completed           → processing succeeded; flip to 'imported' if
-    #   status is still 'downloading'.
-    # - CompletionFailed    → a non-deferred failure path returned; reset
-    #   to 'wanted' only if the request row is still 'downloading'.
-    # - CompletionDispatched → dispatch/finalization already owned request
-    #   transitions; return the summary to the queue owner only.
-    # - CompletionDeferred  → leave the row untouched. This covers
-    #   release-lock contention, guarded post-move staged paths, and
-    #   ownership-less request rejects that require manual recovery. Do
-    #   NOT touch state here.
-    if isinstance(result, CompletionDeferred):
-        return result
-
-    if isinstance(result, CompletionDispatched):
-        return result
-
-    if isinstance(result, Completed):
-        refreshed = db.get_request(request_id)
-        if refreshed and refreshed["status"] == "downloading":
-            logger.info(f"  process_completed_album succeeded without "
-                        f"setting status — setting imported")
-            transitions.require_transition_applied(transitions.finalize_request(
-                db,
-                request_id,
-                transitions.RequestTransition.to_imported(
-                    from_status="downloading",
-                ),
-            ))
-        return result
-
-    if isinstance(result, CompletionFailed):
-        refreshed = db.get_request(request_id)
-        if refreshed and refreshed["status"] == "downloading":
-            logger.warning(f"  process_completed_album failed without "
-                           f"setting status — resetting to wanted")
-            transitions.require_transition_applied(transitions.finalize_request(
-                db,
-                request_id,
-                transitions.RequestTransition.to_wanted(
-                    from_status="downloading",
-                    attempt_type="download",
-                ),
-            ))
-        return result
-
-    assert_never(result)
+    # Request + mandatory download audit + import-job status are terminalized
+    # together by ``scripts/importer.process_claimed_job`` for Completed and
+    # CompletionFailed. CompletionDispatched means the domain dispatch path
+    # already committed that same bundle. This layer only owns the resumable
+    # processing-start marker; it must never split a terminal request write
+    # from the queue job write.
+    return result
 
 
 def _active_import_job_for_request(

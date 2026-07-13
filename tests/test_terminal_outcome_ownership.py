@@ -50,6 +50,27 @@ def assert_db_owned_terminal_writer(source: str) -> None:
         )
 
 
+def assert_no_legacy_importer_terminal_fallback(source: str) -> None:
+    calls = called_attribute_names(source)
+    legacy = sorted(calls & {
+        "mark_import_job_completed",
+        "mark_import_job_failed",
+        "finalize_request",
+    })
+    if legacy:
+        raise AssertionError(
+            "importer terminal path bypasses atomic bundle: "
+            + ", ".join(legacy)
+        )
+    if not {
+        "persist_import_success",
+        "persist_importer_rejection",
+    }.issubset(called_attribute_names(
+        inspect.getsource(importer._persist_worker_terminal_outcome)
+    )):
+        raise AssertionError("worker terminal mapper lacks atomic bundle writers")
+
+
 class TestTerminalOutcomeOwnership(unittest.TestCase):
     def test_every_terminal_writer_owns_transaction_without_public_helpers(self) -> None:
         for method_name in TERMINAL_WRITERS:
@@ -69,14 +90,11 @@ class TestTerminalOutcomeOwnership(unittest.TestCase):
         )
         self.assertEqual(source.count("_record_preview_measurement_failed("), 1)
 
-    def test_importer_observes_terminal_job_before_legacy_finalizers(self) -> None:
+    def test_importer_has_no_legacy_terminal_finalizer_fallback(self) -> None:
         source = textwrap.dedent(inspect.getsource(importer.process_claimed_job))
-        observed_at = source.index("persisted = db.get_import_job(job.id)")
-        completed_at = source.index("return db.mark_import_job_completed(")
-        failed_at = source.rindex("return db.mark_import_job_failed(")
-        self.assertLess(observed_at, completed_at)
-        self.assertLess(observed_at, failed_at)
-        self.assertIn('persisted.status in ("completed", "failed")', source)
+        assert_no_legacy_importer_terminal_fallback(source)
+        self.assertIn("_persist_worker_terminal_outcome", source)
+        self.assertIn("terminal_outcome_expected", source)
 
 
 class TestTerminalOwnershipCheckerTrips(unittest.TestCase):
@@ -96,6 +114,14 @@ class TestTerminalOwnershipCheckerTrips(unittest.TestCase):
         """
         with self.assertRaisesRegex(AssertionError, "explicit transaction"):
             assert_db_owned_terminal_writer(planted)
+
+    def test_checker_rejects_planted_importer_job_only_fallback(self) -> None:
+        planted = """
+        def process_claimed_job(db, job):
+            return db.mark_import_job_failed(job.id, error="boom")
+        """
+        with self.assertRaisesRegex(AssertionError, "bypasses atomic bundle"):
+            assert_no_legacy_importer_terminal_fallback(planted)
 
 
 if __name__ == "__main__":

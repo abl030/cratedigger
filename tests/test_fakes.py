@@ -3034,7 +3034,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(claimed.attempts, 2)
         self.assertEqual(claimed.worker_id, "fake-worker-2")
 
-        completed = db.mark_import_job_completed(
+        completed = db._mark_import_job_completed(
             claimed.id,
             result={"success": True},
             message="done",
@@ -3049,7 +3049,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             payload=manual_import_payload(failed_path="/tmp/manual"),
         )
         self.assertNotEqual(first.id, later.id)
-        failed = db.mark_import_job_failed(
+        failed = db._mark_import_job_failed(
             later.id,
             error="boom",
             message="failed",
@@ -4272,7 +4272,7 @@ class TestFakeActiveImportJobForRequest(unittest.TestCase):
         )
         claimed = db.claim_next_import_job(worker_id="w")
         assert claimed is not None
-        db.mark_import_job_completed(claimed.id, result={"ok": True})
+        db._mark_import_job_completed(claimed.id, result={"ok": True})
         self.assertIsNone(db.get_active_import_job_for_request(42))
 
     def test_returns_none_for_failed_job(self):
@@ -4285,7 +4285,7 @@ class TestFakeActiveImportJobForRequest(unittest.TestCase):
         )
         claimed = db.claim_next_import_job(worker_id="w")
         assert claimed is not None
-        db.mark_import_job_failed(claimed.id, error="boom")
+        db._mark_import_job_failed(claimed.id, error="boom")
         self.assertIsNone(db.get_active_import_job_for_request(42))
 
     def test_returns_only_jobs_for_the_requested_request_id(self):
@@ -4355,7 +4355,7 @@ class TestFakeActiveImportJobsForWrongMatch(unittest.TestCase):
         )
         claimed = db.claim_next_import_job(worker_id="w")
         assert claimed is not None
-        db.mark_import_job_completed(claimed.id, result={"ok": True})
+        db._mark_import_job_completed(claimed.id, result={"ok": True})
 
         rows = db.list_active_import_jobs_for_wrong_match(
             download_log_id=10,

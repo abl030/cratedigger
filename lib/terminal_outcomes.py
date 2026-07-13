@@ -25,6 +25,21 @@ class TerminalOutcomeBoundary(str, Enum):
     job = "job"
 
 
+class ImportJobRequestAction(str, Enum):
+    """Request mutation owned by a non-dispatch import-job terminal bundle."""
+
+    unchanged = "unchanged"
+    imported = "imported"
+    wanted_after_download_failure = "wanted_after_download_failure"
+
+
+class TerminalAttemptType(str, Enum):
+    """Retry counter advanced by an atomic terminal rejection bundle."""
+
+    download = "download"
+    validation = "validation"
+
+
 class ImportJobSupplementKey(str, Enum):
     cleanup = "cleanup"
     wrong_match_dismissal = "wrong_match_dismissal"
@@ -112,6 +127,7 @@ class ImportedRequestWrite(msgspec.Struct, frozen=True, kw_only=True):
     imported_path: str | None
     verified_lossless: bool
     final_format: str | None
+    write_import_metadata: bool = True
     write_spectral: bool = False
     last_download_spectral_grade: str | None = None
     last_download_spectral_bitrate: int | None = None
@@ -149,7 +165,7 @@ class ImportSuccessOutcome(msgspec.Struct, frozen=True, kw_only=True):
 class ImporterRejectionOutcome(msgspec.Struct, frozen=True, kw_only=True):
     request_id: int
     requeue_to_wanted: bool
-    record_validation_attempt: bool
+    attempt_type: TerminalAttemptType | None
     write_search_filetype_override: bool
     search_filetype_override: str | None
     audit: DownloadAuditWrite

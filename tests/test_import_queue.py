@@ -16,7 +16,11 @@ from lib.dispatch import (
     DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
     DispatchOutcome,
 )
-from lib.download_processing import Completed, CompletionDispatched
+from lib.download_processing import (
+    Completed,
+    CompletionDispatched,
+    CompletionFailed,
+)
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
@@ -36,6 +40,7 @@ from lib.quality import (
 )
 from lib.quality_evidence import snapshot_audio_files
 from lib.staged_album import StagedAlbum
+from lib.terminal_outcomes import ImportJobRequestAction
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
     make_album_quality_evidence,
@@ -327,6 +332,11 @@ class TestImporterWorker(unittest.TestCase):
         failed_path: str,
         username: str = "alice",
     ) -> int:
+        if db.get_request(request_id) is None:
+            db.seed_request(make_request_row(
+                id=request_id,
+                status="manual",
+            ))
         db.log_download(
             request_id,
             soulseek_username=username,
@@ -416,6 +426,7 @@ class TestImporterWorker(unittest.TestCase):
         from scripts import importer
 
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="manual"))
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
@@ -456,6 +467,7 @@ class TestImporterWorker(unittest.TestCase):
         from scripts import importer
 
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="manual"))
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
@@ -497,6 +509,7 @@ class TestImporterWorker(unittest.TestCase):
             source_measurement=AudioQualityMeasurement(min_bitrate_kbps=245),
         )
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="manual"))
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
@@ -581,6 +594,7 @@ class TestImporterWorker(unittest.TestCase):
         from scripts import importer
 
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="manual"))
         job = db.enqueue_import_job(
             IMPORT_JOB_MANUAL,
             request_id=42,
@@ -919,17 +933,8 @@ class TestImporterWorker(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_force_import_requeue_failed_marks_job_failed(self):
-        """REL-001: when dispatch returns DISPATCH_CODE_REQUEUE_FAILED (its
-        requeue UPDATE itself raised), the importer must mark the job
-        terminally failed rather than leaving it running. Leaving the job
-        running would let `requeue_running_import_jobs` on next worker boot
-        reclaim it — but the importer's claim query still matches
-        preview_status='evidence_ready', so it would re-claim, hit the same
-        requeue condition, fail again, and spin forever. Failing terminally
-        surfaces the issue to ops; the operator re-triggers once the DB
-        problem is resolved.
-        """
+    def test_force_import_requeue_failed_stays_recoverable_without_fallback(self):
+        """A failed preview requeue cannot become a job-only terminal write."""
         from scripts import importer
         from lib.dispatch import DISPATCH_CODE_REQUEUE_FAILED
 
@@ -969,11 +974,9 @@ class TestImporterWorker(unittest.TestCase):
             # situation is a DB issue, not a quality decision).
             cleanup.assert_not_called()
             row = next(r for r in db._import_jobs if r["id"] == job.id)
-            self.assertEqual(row["status"], "failed")
-            self.assertIn("requeue", row["message"])
+            self.assertEqual(row["status"], "running")
             self.assertTrue(os.path.isdir(source))
-            assert updated is not None
-            self.assertEqual(updated.status, "failed")
+            self.assertIsNone(updated)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -1151,6 +1154,7 @@ class TestImporterWorker(unittest.TestCase):
         from scripts import importer
 
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="manual"))
         job = db.enqueue_import_job(
             IMPORT_JOB_MANUAL,
             request_id=42,
@@ -1236,8 +1240,9 @@ class TestImporterWorker(unittest.TestCase):
         self.assertEqual(updated.status, "completed")
         self.assertEqual(updated.message, "Automation import processing completed")
 
-    def test_automation_job_completes_from_dispatch_outcome(self):
+    def test_automation_dispatched_success_requires_domain_terminal_bundle(self):
         from scripts import importer
+        from lib.terminal_outcomes import TerminalOutcomeConflict
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1264,25 +1269,24 @@ class TestImporterWorker(unittest.TestCase):
         claimed = db.claim_next_import_job(worker_id="worker")
         assert claimed is not None
 
-        with patch(
-            "lib.download._run_completed_processing",
-            return_value=CompletionDispatched(
-                outcome=DispatchOutcome(True, "Imported by dispatch")),
-        ) as processing:
-            updated = importer.process_claimed_job(
-                cast(Any, db),
-                claimed,
-                ctx=object(),
-            )
+        with (
+            patch(
+                "lib.download._run_completed_processing",
+                return_value=CompletionDispatched(
+                    outcome=DispatchOutcome(True, "Imported by dispatch")),
+            ) as processing,
+            self.assertRaises(TerminalOutcomeConflict),
+        ):
+            importer.process_claimed_job(cast(Any, db), claimed, ctx=object())
 
         self.assertEqual(processing.call_args.kwargs["import_job_id"], job.id)
-        assert updated is not None
-        self.assertEqual(updated.status, "completed")
-        self.assertEqual(updated.message, "Imported by dispatch")
-        self.assertEqual(self._result(updated)["success"], True)
+        self.assertEqual(db.get_import_job(job.id).status, "running")  # type: ignore[union-attr]
+        self.assertEqual(db.get_request(42)["status"], "downloading")  # type: ignore[index]
+        self.assertEqual(db.download_logs, [])
 
-    def test_automation_job_fails_from_dispatch_outcome(self):
+    def test_automation_dispatched_failure_requires_domain_terminal_bundle(self):
         from scripts import importer
+        from lib.terminal_outcomes import TerminalOutcomeConflict
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1309,22 +1313,84 @@ class TestImporterWorker(unittest.TestCase):
         claimed = db.claim_next_import_job(worker_id="worker")
         assert claimed is not None
 
-        with patch(
-            "lib.download._run_completed_processing",
-            return_value=CompletionDispatched(
-                outcome=DispatchOutcome(False, "Pre-import gate rejected")),
+        with (
+            patch(
+                "lib.download._run_completed_processing",
+                return_value=CompletionDispatched(
+                    outcome=DispatchOutcome(False, "Pre-import gate rejected")),
+            ),
+            self.assertRaises(TerminalOutcomeConflict),
         ):
-            updated = importer.process_claimed_job(
-                cast(Any, db),
-                claimed,
-                ctx=object(),
+            importer.process_claimed_job(cast(Any, db), claimed, ctx=object())
+
+        self.assertEqual(db.get_import_job(job.id).status, "running")  # type: ignore[union-attr]
+        self.assertEqual(db.get_request(42)["status"], "downloading")  # type: ignore[index]
+        self.assertEqual(db.download_logs, [])
+
+    def test_automation_dispatched_preview_requeue_is_not_terminal(self):
+        from scripts import importer
+        from lib.dispatch import DISPATCH_CODE_REQUEUED_FOR_PREVIEW
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={
+                "filetype": "flac",
+                "enqueued_at": "2026-04-25T00:00:00+00:00",
+                "files": [{
+                    "username": "alice",
+                    "filename": "Artist\\Album\\01.flac",
+                    "file_dir": "Artist\\Album",
+                    "size": 123,
+                }],
+            },
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=42,
+            dedupe_key=automation_import_dedupe_key(42),
+            payload={},
+        )
+        self._mark_importable(db, job)
+        claimed = db.claim_next_import_job(worker_id="worker")
+        assert claimed is not None
+
+        def requeue_from_dispatch(*_args, **_kwargs):
+            db.requeue_import_job_for_preview(
+                job.id,
+                reason="candidate evidence missing",
+            )
+            return importer._dispatch_outcome_from_completion(
+                CompletionDispatched(
+                    outcome=DispatchOutcome(
+                        False,
+                        "Candidate evidence unavailable; requeued for preview",
+                        code=DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
+                    )
+                ),
+                deferred_message="deferred",
+                completed_message="completed",
+                failed_message="failed",
+                failure_request_action=(
+                    ImportJobRequestAction.wanted_after_download_failure
+                ),
             )
 
-        assert updated is not None
-        self.assertEqual(updated.status, "failed")
-        self.assertEqual(updated.message, "Pre-import gate rejected")
-        self.assertEqual(updated.error, "Pre-import gate rejected")
-        self.assertEqual(self._result(updated)["success"], False)
+        updated = importer.process_claimed_job(
+            cast(Any, db),
+            claimed,
+            ctx=object(),
+            execute_fn=requeue_from_dispatch,
+        )
+
+        self.assertIsNone(updated)
+        current = db.get_import_job(job.id)
+        assert current is not None
+        self.assertEqual(current.status, "queued")
+        self.assertEqual(current.preview_status, "waiting")
+        self.assertEqual(db.get_request(42)["status"], "downloading")  # type: ignore[index]
+        self.assertEqual(db.download_logs, [])
 
     def test_requeued_automation_job_abandons_interrupted_auto_import(self):
         from scripts import importer
@@ -1392,6 +1458,8 @@ class TestImporterWorker(unittest.TestCase):
             assert updated is not None
             self.assertEqual(updated.status, "failed")
             self.assertEqual(db.request(42)["status"], "wanted")
+            self.assertEqual(db.request(42)["download_attempts"], 1)
+            self.assertEqual(db.request(42)["validation_attempts"], 0)
             self.assertEqual(db.get_active_import_job_for_request(42), None)
             self.assertFalse(os.path.exists(staged_path))
             failed_parent = os.path.join(os.path.dirname(staged_path), "failed_imports")
@@ -2858,8 +2926,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
 
             with patch(
                 "lib.download_processing.process_completed_album",
-                return_value=CompletionDispatched(
-                    outcome=DispatchOutcome(True, "Imported by dispatch")),
+                return_value=Completed(),
             ) as proc:
                 updated = importer.process_claimed_job(
                     cast(Any, db),
@@ -2880,7 +2947,9 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
         # Terminal queue state reflects the DispatchOutcome.
         assert updated is not None
         self.assertEqual(updated.status, "completed")
-        self.assertEqual(updated.message, "Imported by dispatch")
+        self.assertEqual(updated.message, "YouTube import processing completed")
+        self.assertEqual(db.get_request(42)["status"], "imported")  # type: ignore[index]
+        self.assertEqual(len(db.download_logs), 1)
 
     def test_youtube_staged_audio_manifest_uses_real_files(self):
         """Real dispatcher + process_completed_album reaches beets reject
@@ -2949,13 +3018,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
             )
 
     def test_happy_path_finalizes_request_to_imported_via_rescue(self):
-        """AE7: when process_completed_album returns True (legacy non-
-        DispatchOutcome path), the dispatcher reports success and the
-        request row remains untouched here — the actual status flip
-        happens inside the dispatch path via finalize_request →
-        mark_imported_with_rescue. We assert success-mapping without
-        re-deriving the status flip (which is covered separately by
-        TestRescueAuditChain below)."""
+        """AE7: Completed becomes one request + audit + job success bundle."""
         from scripts import importer
 
         with tempfile.TemporaryDirectory() as staged:
@@ -2986,19 +3049,12 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
         self.assertEqual(updated.status, "completed")
         self.assertEqual(updated.message, "YouTube import processing completed")
 
-    def test_rescue_audit_chain_wanted_to_imported_via_finalize_request(self):
+    def test_rescue_audit_chain_wanted_to_imported_via_terminal_bundle(self):
         """AE8: a YT import on a previously-unfindable request populates
         ``rescued_at`` + ``prior_unfindable_category`` atomically. The
-        dispatcher invokes the pipeline; the pipeline invokes
-        ``finalize_request`` which routes to ``mark_imported_with_rescue``.
-
-        We drive the rescue capture seam directly by having the patched
-        pipeline call ``finalize_request(to_imported)`` against the fake DB,
-        which mirrors what the production pipeline does inside
-        ``dispatch_import_from_db`` on import success.
+        non-dispatch completion is finalized by the worker's atomic bundle.
         """
         from scripts import importer
-        from lib import transitions
 
         with tempfile.TemporaryDirectory() as staged:
             db = FakePipelineDB()
@@ -3017,22 +3073,9 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
             self._mark_importable(db, job)
             claimed = self._claim(db)
 
-            def _run_real_finalize(*args: Any, **kwargs: Any) -> CompletionDispatched:
-                # Mirror the production seam: dispatch_import_from_db
-                # would call finalize_request(to_imported) on auto-import
-                # success. That call routes to mark_imported_with_rescue.
-                transitions.finalize_request(
-                    cast(Any, db),
-                    42,
-                    transitions.RequestTransition.to_imported(
-                        from_status="wanted",
-                    ),
-                )
-                return CompletionDispatched(outcome=DispatchOutcome(True, "Imported"))
-
             with patch(
                 "lib.download_processing.process_completed_album",
-                side_effect=_run_real_finalize,
+                return_value=Completed(),
             ):
                 updated = importer.process_claimed_job(
                     cast(Any, db),
@@ -3055,10 +3098,8 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
 
     def test_rescue_from_manual_transitions_manual_to_imported(self):
         """AE9: a request started in ``manual`` status transitions
-        ``manual → imported`` through the same single source-agnostic
-        write site (``mark_imported_with_rescue``)."""
+        ``manual → imported`` through the same DB-owned terminal bundle."""
         from scripts import importer
-        from lib import transitions
 
         with tempfile.TemporaryDirectory() as staged:
             db = FakePipelineDB()
@@ -3077,20 +3118,9 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
             self._mark_importable(db, job)
             claimed = self._claim(db)
 
-            def _run_real_finalize(*args: Any, **kwargs: Any) -> CompletionDispatched:
-                transitions.finalize_request(
-                    cast(Any, db),
-                    42,
-                    transitions.RequestTransition.to_imported(
-                        from_status="manual",
-                    ),
-                )
-                return CompletionDispatched(
-                    outcome=DispatchOutcome(True, "Imported from manual"))
-
             with patch(
                 "lib.download_processing.process_completed_album",
-                side_effect=_run_real_finalize,
+                return_value=Completed(),
             ):
                 updated = importer.process_claimed_job(
                     cast(Any, db),
@@ -3131,8 +3161,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
             # Simulate a wrong-matches reject from the pipeline.
             with patch(
                 "lib.download_processing.process_completed_album",
-                return_value=CompletionDispatched(outcome=DispatchOutcome(
-                    False, "Rejected: high_distance")),
+                return_value=CompletionFailed(reason="high_distance"),
             ):
                 updated = importer.process_claimed_job(
                     cast(Any, db),
@@ -3168,11 +3197,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
 
             with patch(
                 "lib.download_processing.process_completed_album",
-                return_value=CompletionDispatched(outcome=DispatchOutcome(
-                    False,
-                    "Quality pipeline rejected",
-                    code=DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
-                )),
+                return_value=CompletionFailed(reason="quality downgrade"),
             ):
                 updated = importer.process_claimed_job(
                     cast(Any, db),
@@ -3225,8 +3250,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
 
             with patch(
                 "lib.download_processing.process_completed_album",
-                return_value=CompletionDispatched(
-                    outcome=DispatchOutcome(True, "ok")),
+                return_value=CompletionFailed(reason="test stop"),
             ) as proc:
                 importer.process_claimed_job(
                     cast(Any, db),
@@ -3247,6 +3271,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
 
     def test_missing_request_returns_failed_dispatch_outcome(self):
         from scripts import importer
+        from lib.terminal_outcomes import TerminalOutcomeConflict
 
         db = FakePipelineDB()
         # Enqueue against a request_id that has no row.
@@ -3257,15 +3282,15 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
         self._mark_importable(db, job)
         claimed = self._claim(db)
 
-        updated = importer.process_claimed_job(
-            cast(Any, db),
-            claimed,
-            ctx=object(),
-        )
+        with self.assertRaises(TerminalOutcomeConflict):
+            importer.process_claimed_job(
+                cast(Any, db),
+                claimed,
+                ctx=object(),
+            )
 
-        assert updated is not None
-        self.assertEqual(updated.status, "failed")
-        self.assertIn("not found", str(updated.message))
+        self.assertEqual(db.get_import_job(job.id).status, "running")  # type: ignore[union-attr]
+        self.assertEqual(db.download_logs, [])
 
     def test_missing_request_id_returns_failed_dispatch_outcome(self):
         from scripts import importer

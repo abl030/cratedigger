@@ -273,7 +273,49 @@ def _commit_abandoned_auto_import(
     dl_info: Any,
     detail: str,
     validation_result: str | None,
+    import_job_id: int | None,
 ) -> bool:
+    if import_job_id is not None:
+        from lib.terminal_outcomes import (
+            DownloadAuditWrite,
+            ImportJobOutcomeResult,
+            ImporterRejectionOutcome,
+            TerminalAttemptType,
+        )
+
+        message = (
+            "Automation import processing failed: "
+            "abandoned_interrupted_auto_import"
+        )
+        db.persist_importer_rejection(
+            ImporterRejectionOutcome(
+                request_id=request_id,
+                import_job_id=import_job_id,
+                requeue_to_wanted=True,
+                attempt_type=TerminalAttemptType.download,
+                write_search_filetype_override=False,
+                search_filetype_override=None,
+                audit=DownloadAuditWrite(
+                    outcome="failed",
+                    soulseek_username=dl_info.username,
+                    filetype=dl_info.filetype,
+                    beets_scenario=ABANDONED_AUTO_IMPORT_SCENARIO,
+                    beets_detail=detail,
+                    staged_path=current_path,
+                    error_message=detail,
+                    validation_result_json=validation_result,
+                ),
+                job_result=ImportJobOutcomeResult(
+                    success=False,
+                    message=message,
+                    deferred=False,
+                    code=None,
+                ),
+                job_error=message,
+                job_message=message,
+            )
+        )
+        return True
     log_id = db.abandon_auto_import_request(
         request_id=request_id,
         current_path=current_path,
@@ -295,6 +337,7 @@ def _abandon_interrupted_auto_import(
     current_path: str,
     db: DownloadDB,
     detail: str,
+    import_job_id: int | None,
 ) -> bool:
     """Quarantine an interrupted auto-import attempt and redownload later."""
     path_state = _probe_abandon_path_liveness(current_path)
@@ -344,6 +387,7 @@ def _abandon_interrupted_auto_import(
             dl_info=dl_info,
             detail=detail,
             validation_result=validation_result,
+            import_job_id=import_job_id,
         )
     except Exception:
         _restore_abandoned_auto_import(
@@ -379,6 +423,7 @@ def _abandon_request_scoped_auto_import(
     current_path_kind: str,
     db: DownloadDB | None,
     detail: str,
+    import_job_id: int | None = None,
 ) -> bool:
     if (
         request_id is None
@@ -424,6 +469,7 @@ def _abandon_request_scoped_auto_import(
                 current_path=current_path,
                 db=db,
                 detail=detail,
+                import_job_id=import_job_id,
             )
     except Exception:
         logger.exception(
@@ -439,6 +485,8 @@ def _evaluate_staged_path_readiness(
     staged_album: StagedAlbum,
     current_path_location: ProcessingPathLocation,
     db: DownloadDB | None,
+    *,
+    import_job_id: int | None = None,
 ) -> MaterializeResult:
     """Decide whether a NON-canonical staged path is safe to resume.
 
@@ -484,6 +532,7 @@ def _evaluate_staged_path_readiness(
                     "Abandoned interrupted auto-import; queued for "
                     "redownload"
                 ),
+                import_job_id=import_job_id,
             )
             if handled:
                 return MaterializeFailed(
@@ -586,6 +635,7 @@ def _materialize_processing_dir(
     ctx: CratediggerContext,
     *,
     persist_current_path: bool = True,
+    import_job_id: int | None = None,
 ) -> MaterializeResult:
     """Ensure ``staged_album.current_path`` holds the album's local files."""
     canonical_path = canonical_folder_for_row(
@@ -625,6 +675,7 @@ def _materialize_processing_dir(
     if current_path_location.kind != "canonical":
         return _evaluate_staged_path_readiness(
             album_data, staged_album, current_path_location, db,
+            import_job_id=import_job_id,
         )
 
     # Pre-flight: every file must carry a stamped, on-disk local_path from

@@ -227,10 +227,11 @@ class DatabaseSource:
         ]
 
     def mark_done(self, album_record, bv_result, dest_path=None,
-                  download_info=None):
+                  download_info=None, import_job_id: int | None = None):
         """Mark album as imported."""
         from lib.dispatch import _do_mark_done
         from lib.quality import DownloadInfo
+        from lib.terminal_outcomes import ImportJobOutcomeResult
         request_id = getattr(album_record, "db_request_id", None)
         if not request_id:
             return
@@ -245,6 +246,14 @@ class DatabaseSource:
             scenario=bv_result.scenario,
             dest_path=dest_path,
             detail=bv_result.detail,
+            import_job_id=import_job_id,
+            job_result=ImportJobOutcomeResult(
+                success=True,
+                message="Import processing completed",
+                deferred=False,
+                code=None,
+            ),
+            job_message="Import processing completed",
         )
 
     def reject_and_requeue(self, album_record, bv_result, usernames=None,

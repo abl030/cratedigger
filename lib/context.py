@@ -37,6 +37,7 @@ class PipelineDBSource(Protocol):
         bv_result: Any,
         dest_path: Any = None,
         download_info: Any = None,
+        import_job_id: int | None = None,
     ) -> None: ...
     def reject_and_requeue(
         self,

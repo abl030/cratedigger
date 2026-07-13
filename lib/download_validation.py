@@ -429,6 +429,7 @@ def _handle_valid_result(
             bv_result,
             dest_path=dest,
             download_info=dl_info,
+            import_job_id=import_job_id,
         )
         return None
 

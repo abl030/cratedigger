@@ -74,6 +74,7 @@ from lib.terminal_outcomes import (
     TerminalOutcomeApplied,
     TerminalOutcomeBoundary,
     TerminalOutcomeConflict,
+    TerminalAttemptType,
     canonicalize_download_audit,
 )
 from lib.transitions import validate_transition
@@ -806,13 +807,15 @@ class FakePipelineDB:
                     preview=False,
                 )
             request = outcome.request
-            fields: dict[str, object] = {
-                "beets_distance": request.beets_distance,
-                "beets_scenario": request.beets_scenario,
-                "imported_path": request.imported_path,
-                "verified_lossless": request.verified_lossless,
-                "final_format": request.final_format,
-            }
+            fields: dict[str, object] = {}
+            if request.write_import_metadata:
+                fields.update({
+                    "beets_distance": request.beets_distance,
+                    "beets_scenario": request.beets_scenario,
+                    "imported_path": request.imported_path,
+                    "verified_lossless": request.verified_lossless,
+                    "final_format": request.final_format,
+                })
             if request.write_spectral:
                 fields.update({
                     "last_download_spectral_grade": (
@@ -880,7 +883,7 @@ class FakePipelineDB:
             if outcome.import_job_id is not None:
                 result = msgspec.to_builtins(outcome.job_result)
                 assert isinstance(result, dict)
-                if self.mark_import_job_completed(
+                if self._mark_import_job_completed(
                     outcome.import_job_id,
                     result=result,
                     message=outcome.job_message,
@@ -961,10 +964,10 @@ class FakePipelineDB:
                         )
                 if not applied:
                     raise TerminalOutcomeConflict("request changed before requeue")
-                if outcome.record_validation_attempt:
+                if outcome.attempt_type is not None:
                     if not self.record_attempt(
                         outcome.request_id,
-                        "validation",
+                        outcome.attempt_type.value,
                         expected_status="wanted",
                     ):
                         raise TerminalOutcomeConflict("attempt CAS lost request")
@@ -980,7 +983,7 @@ class FakePipelineDB:
             if outcome.import_job_id is not None:
                 result = msgspec.to_builtins(outcome.job_result)
                 assert isinstance(result, dict)
-                if self.mark_import_job_failed(
+                if self._mark_import_job_failed(
                     outcome.import_job_id,
                     error=outcome.job_error,
                     result=result,
@@ -1327,7 +1330,7 @@ class FakePipelineDB:
         row["updated_at"] = now
         return ImportJob.from_row(copy.deepcopy(row))
 
-    def mark_import_job_completed(
+    def _mark_import_job_completed(
         self,
         job_id: int,
         *,
@@ -1346,7 +1349,7 @@ class FakePipelineDB:
                 return ImportJob.from_row(copy.deepcopy(row))
         return None
 
-    def mark_import_job_failed(
+    def _mark_import_job_failed(
         self,
         job_id: int,
         *,
@@ -6031,13 +6034,48 @@ class FakePipelineDBSource:
         bv_result: Any,
         dest_path: Any = None,
         download_info: Any = None,
+        import_job_id: int | None = None,
     ) -> None:
         self.mark_done_calls.append({
             "album_record": album_record,
             "bv_result": bv_result,
             "dest_path": dest_path,
             "download_info": download_info,
+            "import_job_id": import_job_id,
         })
+        request_id = getattr(album_record, "db_request_id", None)
+        if (
+            isinstance(request_id, int)
+            and import_job_id is not None
+            and self.db.get_request(request_id) is not None
+            and self.db.get_import_job(import_job_id) is not None
+        ):
+            from lib.dispatch import _do_mark_done
+            from lib.quality import DownloadInfo
+            from lib.terminal_outcomes import ImportJobOutcomeResult
+
+            info = (
+                download_info
+                if isinstance(download_info, DownloadInfo)
+                else DownloadInfo()
+            )
+            _do_mark_done(
+                db=self.db,  # type: ignore[arg-type]
+                request_id=request_id,
+                dl_info=info,
+                distance=bv_result.distance,
+                scenario=bv_result.scenario,
+                dest_path=dest_path,
+                detail=bv_result.detail,
+                import_job_id=import_job_id,
+                job_result=ImportJobOutcomeResult(
+                    success=True,
+                    message="Import processing completed",
+                    deferred=False,
+                    code=None,
+                ),
+                job_message="Import processing completed",
+            )
 
     def reject_and_requeue(
         self,
@@ -6058,7 +6096,53 @@ class FakePipelineDBSource:
             "cooled_down_users": cooled_down_users,
             "import_job_id": import_job_id,
         })
-        return None
+        request_id = getattr(album_record, "db_request_id", None)
+        if (
+            not isinstance(request_id, int)
+            or import_job_id is None
+            or self.db.get_request(request_id) is None
+            or self.db.get_import_job(import_job_id) is None
+        ):
+            return None
+        from lib.dispatch import _record_rejection_and_maybe_requeue
+        from lib.quality import DownloadInfo
+        from lib.terminal_outcomes import (
+            DenylistWrite,
+            ImportJobOutcomeResult,
+        )
+
+        info = (
+            download_info
+            if isinstance(download_info, DownloadInfo)
+            else DownloadInfo()
+        )
+        message = bv_result.detail or bv_result.error or "beets validation rejected"
+        return _record_rejection_and_maybe_requeue(
+            self.db,  # type: ignore[arg-type]
+            request_id,
+            info,
+            detail=bv_result.detail,
+            error=bv_result.error,
+            validation_result=info.validation_result or bv_result.to_json(),
+            requeue=True,
+            search_filetype_override=search_filetype_override,
+            import_job_id=import_job_id,
+            denylist=tuple(
+                DenylistWrite(
+                    username=username,
+                    reason="beets validation rejected",
+                )
+                for username in sorted(usernames or ())
+            ),
+            job_result=ImportJobOutcomeResult(
+                success=False,
+                message=message,
+                deferred=False,
+                code=None,
+            ),
+            job_error=message,
+            job_message=message,
+        )
 
     def close(self) -> None:
         self.close_calls += 1

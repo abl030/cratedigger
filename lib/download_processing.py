@@ -90,6 +90,7 @@ def process_completed_album(
         album_data,
         staged_album,
         ctx,
+        import_job_id=import_job_id,
     )
     if isinstance(materialized, download_materialization.MaterializeFailed):
         return CompletionFailed(reason=materialized.reason)

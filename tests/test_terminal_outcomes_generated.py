@@ -21,12 +21,15 @@ from lib.import_queue import (
     youtube_import_payload,
 )
 from lib.terminal_outcomes import (
+    ImportJobRequestAction,
     TerminalOutcomeBoundary,
     TerminalOutcomeConflict,
 )
+from lib.dispatch import DispatchOutcome
+from scripts import importer
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
-from tests.test_terminal_outcomes import _preview_failure, _rejection, _success
+from tests.test_terminal_outcomes import _preview_failure
 
 
 @dataclass(frozen=True)
@@ -65,6 +68,16 @@ def assert_terminal_outcome_all_or_none(
             raise AssertionError("committed terminal outcome lacks exactly one audit row")
         if after.job == before.job:
             raise AssertionError("committed terminal outcome did not finalize its job")
+
+
+def assert_failed_success_persist_has_no_alternate_terminal(
+    before: TerminalState,
+    after: TerminalState,
+) -> None:
+    if after != before:
+        raise AssertionError(
+            "failed success persistence was replaced by an alternate terminal outcome"
+        )
 
 
 def _prepare(job_type: str, *, preview: bool) -> tuple[FakePipelineDB, int, int]:
@@ -152,9 +165,31 @@ class TestGeneratedTerminalOutcomeAtomicity(unittest.TestCase):
         committed = False
         try:
             if outcome_kind == "success":
-                db.persist_import_success(_success(request_id, job_id))
+                claimed = db.get_import_job(job_id)
+                assert claimed is not None
+                importer.process_claimed_job(
+                    db,  # type: ignore[arg-type]
+                    claimed,
+                    execute_fn=lambda *_args, **_kwargs: DispatchOutcome(
+                        success=True,
+                        message="generated success",
+                        request_action=ImportJobRequestAction.imported,
+                    ),
+                )
             elif outcome_kind == "rejection":
-                db.persist_importer_rejection(_rejection(request_id, job_id))
+                claimed = db.get_import_job(job_id)
+                assert claimed is not None
+                importer.process_claimed_job(
+                    db,  # type: ignore[arg-type]
+                    claimed,
+                    execute_fn=lambda *_args, **_kwargs: DispatchOutcome(
+                        success=False,
+                        message="generated rejection",
+                        request_action=(
+                            ImportJobRequestAction.wanted_after_download_failure
+                        ),
+                    ),
+                )
             else:
                 db.persist_preview_measurement_failure(
                     _preview_failure(request_id, job_id)
@@ -187,6 +222,35 @@ class TestTerminalOutcomeInvariantCheckersTrip(unittest.TestCase):
 
         with self.assertRaisesRegex(AssertionError, "did not finalize its job"):
             assert_terminal_outcome_all_or_none(before, after, committed=True)
+
+    def test_success_failure_checker_rejects_planted_alternate_rejection(self) -> None:
+        db, request_id, job_id = _prepare(IMPORT_JOB_AUTOMATION, preview=False)
+        before = snapshot_terminal_state(
+            db,
+            request_id=request_id,
+            job_id=job_id,
+        )
+        claimed = db.get_import_job(job_id)
+        assert claimed is not None
+        importer.process_claimed_job(
+            db,  # type: ignore[arg-type]
+            claimed,
+            execute_fn=lambda *_args, **_kwargs: DispatchOutcome(
+                success=False,
+                message="planted alternate rejection",
+                request_action=(
+                    ImportJobRequestAction.wanted_after_download_failure
+                ),
+            ),
+        )
+        after = snapshot_terminal_state(
+            db,
+            request_id=request_id,
+            job_id=job_id,
+        )
+
+        with self.assertRaisesRegex(AssertionError, "alternate terminal"):
+            assert_failed_success_persist_has_no_alternate_terminal(before, after)
 
 
 if __name__ == "__main__":

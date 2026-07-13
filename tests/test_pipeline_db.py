@@ -82,6 +82,34 @@ def make_db():
     return db
 
 
+def set_import_job_terminal_for_test(
+    db: Any,
+    job_id: int,
+    status: str,
+    *,
+    result: dict[str, object] | None = None,
+    message: str | None = None,
+    error: str | None = None,
+):
+    """Seed a terminal queue row without exposing a production bypass API."""
+    if status not in {"completed", "failed"}:
+        raise ValueError(f"unsupported terminal test status: {status}")
+    db._execute(
+        """
+        UPDATE import_jobs
+        SET status = %s,
+            result = %s::jsonb,
+            message = %s,
+            error = %s,
+            completed_at = NOW(),
+            updated_at = NOW()
+        WHERE id = %s
+        """,
+        (status, json.dumps(result or {}), message, error, job_id),
+    )
+    return db.get_import_job(job_id)
+
+
 @requires_postgres
 class TestAddRequestRoundTrip(unittest.TestCase):
     """Rule A round-trip for add_request (#382 Layer 1). Every column the
@@ -1020,8 +1048,10 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertFalse(first.deduped)
         self.assertTrue(duplicate.deduped)
 
-        self.db.mark_import_job_completed(
+        set_import_job_terminal_for_test(
+            self.db,
             first.id,
+            "completed",
             result={"success": True},
             message="done",
         )
@@ -1055,7 +1085,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertEqual(job.request_id, self.req_id)
         self.assertEqual(job.payload["browse_id"], "MPREb_pg_constraint")
 
-    def test_claim_complete_and_fail_lifecycle(self):
+    def test_claim_and_terminal_visibility_lifecycle(self):
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
 
         job = self.db.enqueue_import_job(
@@ -1076,21 +1106,16 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertEqual(claimed.attempts, 1)
         self.assertIsNone(self.db.claim_next_import_job(worker_id="other"))
 
-        completed = self.db.mark_import_job_completed(
+        completed = set_import_job_terminal_for_test(
+            self.db,
             claimed.id,
+            "completed",
             result={"success": True},
             message="imported",
         )
         assert completed is not None
         self.assertEqual(completed.status, "completed")
         self.assertEqual(completed.result, {"success": True})
-
-        missing = self.db.mark_import_job_failed(
-            999999,
-            error="missing",
-            message="missing",
-        )
-        self.assertIsNone(missing)
 
     def test_two_sessions_cannot_claim_same_job(self):
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
@@ -1222,13 +1247,13 @@ class TestImportJobQueueAPI(unittest.TestCase):
             dedupe_key="manual:timeline-new-terminal",
             payload=manual_import_payload(failed_path="/tmp/new"),
         )
-        self.db.mark_import_job_failed(
-            older.id,
+        set_import_job_terminal_for_test(
+            self.db, older.id, "failed",
             error="old",
             message="old",
         )
-        self.db.mark_import_job_failed(
-            newer.id,
+        set_import_job_terminal_for_test(
+            self.db, newer.id, "failed",
             error="new",
             message="new",
         )
@@ -6135,7 +6160,9 @@ class TestActiveImportJobForRequest(unittest.TestCase):
         """, (job.id,))
         claimed = self.db.claim_next_import_job(worker_id="w")
         assert claimed is not None
-        self.db.mark_import_job_completed(claimed.id, result={"ok": True})
+        set_import_job_terminal_for_test(
+            self.db, claimed.id, "completed", result={"ok": True}
+        )
         self.assertIsNone(
             self.db.get_active_import_job_for_request(self.req_id))
 
@@ -6150,7 +6177,9 @@ class TestActiveImportJobForRequest(unittest.TestCase):
         """, (job.id,))
         claimed = self.db.claim_next_import_job(worker_id="w")
         assert claimed is not None
-        self.db.mark_import_job_failed(claimed.id, error="boom")
+        set_import_job_terminal_for_test(
+            self.db, claimed.id, "failed", error="boom"
+        )
         self.assertIsNone(
             self.db.get_active_import_job_for_request(self.req_id))
 
@@ -6254,7 +6283,9 @@ class TestActiveImportJobsForWrongMatch(unittest.TestCase):
             dedupe_key="wm:completed",
             payload=force_import_payload(download_log_id=77, failed_path=path),
         )
-        self.db.mark_import_job_completed(completed.id, result={"ok": True})
+        set_import_job_terminal_for_test(
+            self.db, completed.id, "completed", result={"ok": True}
+        )
 
         jobs = self.db.list_active_import_jobs_for_wrong_match(
             download_log_id=77,

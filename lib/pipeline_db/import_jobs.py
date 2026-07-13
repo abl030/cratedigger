@@ -237,53 +237,6 @@ class _ImportJobsMixin(_PipelineDBBase):
         return ImportJob.from_row(dict(row)) if row else None
 
 
-    def mark_import_job_completed(
-        self,
-        job_id: int,
-        *,
-        result: dict[str, Any] | None = None,
-        message: str | None = None,
-    ) -> ImportJob | None:
-        cur = self._execute("""
-            UPDATE import_jobs
-            SET status = 'completed',
-                result = %s,
-                message = %s,
-                error = NULL,
-                completed_at = NOW(),
-                updated_at = NOW()
-            WHERE id = %s
-              AND status IN ('queued', 'running')
-            RETURNING *
-        """, (psycopg2.extras.Json(result or {}), message, job_id))
-        row = cur.fetchone()
-        return ImportJob.from_row(dict(row)) if row else None
-
-
-    def mark_import_job_failed(
-        self,
-        job_id: int,
-        *,
-        error: str,
-        result: dict[str, Any] | None = None,
-        message: str | None = None,
-    ) -> ImportJob | None:
-        cur = self._execute("""
-            UPDATE import_jobs
-            SET status = 'failed',
-                result = %s,
-                message = %s,
-                error = %s,
-                completed_at = NOW(),
-                updated_at = NOW()
-            WHERE id = %s
-              AND status IN ('queued', 'running')
-            RETURNING *
-        """, (psycopg2.extras.Json(result or {}), message, error, job_id))
-        row = cur.fetchone()
-        return ImportJob.from_row(dict(row)) if row else None
-
-
     def requeue_running_import_jobs(
         self,
         *,

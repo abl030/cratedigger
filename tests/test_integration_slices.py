@@ -3025,9 +3025,8 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         # apply_transition at all.
         self.assertEqual(db.status_history, [])
 
-    def test_completed_outcome_flips_to_imported(self):
-        """Happy path: ``process_completed_album`` returns ``Completed`` and
-        status was 'downloading' → flip to 'imported'."""
+    def test_completed_outcome_defers_terminal_write_to_importer_bundle(self):
+        """Completed is a worker command; this layer leaves state untouched."""
         from lib import download as dl_mod
         from lib.download_processing import Completed
         db = FakePipelineDB()
@@ -3042,12 +3041,11 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
             [call.import_job_id for call in process_album.calls],
             [1],
         )
-        self.assertEqual(db.request(42)["status"], "imported")
+        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(db.status_history, [])
 
-    def test_completion_failed_resets_to_wanted_with_attempt(self):
-        """Failure: ``process_completed_album`` returns ``CompletionFailed``
-        → reset to 'wanted' with an attempt increment (genuine failure
-        DOES deserve a backoff-scored attempt)."""
+    def test_completion_failed_defers_terminal_write_to_importer_bundle(self):
+        """CompletionFailed leaves request/backoff writes to the DB bundle."""
         from lib import download as dl_mod
         from lib.download_processing import CompletionFailed
         db = FakePipelineDB()
@@ -3064,7 +3062,8 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
             [call.import_job_id for call in process_album.calls],
             [1],
         )
-        self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(db.status_history, [])
 
     def test_completion_failed_after_inner_rejection_does_not_double_transition(self):
         """If ``process_completed_album`` already requeued the row, the outer
@@ -3151,11 +3150,11 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         self.assertEqual(db.request(42)["status"], "downloading")
         self.assertEqual(db.status_history, [])
 
-    def test_real_process_completed_album_success_flips_to_imported(self):
+    def test_real_process_completed_album_success_returns_worker_command(self):
         """Integration slice: no DI stub — the REAL ``process_completed_album``
         (materialize + validation-disabled path) runs through
         ``_run_completed_processing`` end to end, and the ``Completed`` tag
-        it returns drives the status flip to 'imported'."""
+        it returns leaves the terminal write for the importer bundle."""
         from lib import download as dl_mod
         from tests.helpers import make_download_file
 
@@ -3187,7 +3186,7 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
 
         from lib.download_processing import Completed
         self.assertIsInstance(result, Completed)
-        self.assertEqual(db.request(42)["status"], "imported")
+        self.assertEqual(db.request(42)["status"], "downloading")
 
     def test_default_process_album_fn_honors_patched_download_processing(self):
         """Regression guard (#536): with no ``process_album_fn`` override,
@@ -3215,7 +3214,7 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
 
         patched.assert_called_once()
         self.assertIsInstance(result, Completed)
-        self.assertEqual(db.request(42)["status"], "imported")
+        self.assertEqual(db.request(42)["status"], "downloading")
 
 
 class TestBadAudioHashSlice(unittest.TestCase):
@@ -5973,18 +5972,15 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
 class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
     """Integration slice for the preview-side measurement_failed entry point.
 
-    Validates the four self-healing side effects own the same sub-helper as
-    the importer-side ``_record_rejection_and_maybe_requeue``:
+    Validates the four self-healing writes share one DB-owned transaction:
 
       (a) ``download_log`` row written with ``outcome='measurement_failed'``
       (b) ``source_denylist`` write when the per-user rule applies
-      (c) parent request transitioned to ``status='wanted'`` via
-          ``transitions.finalize_request``
-      (d) ``import_jobs.status='failed'`` via ``mark_import_job_failed``
+      (c) parent request transitioned to ``status='wanted'``
+      (d) ``import_jobs.status='failed'``
 
-    Also covers the ``request_not_found`` no-finalize subcase — the helper
-    writes the log + marks the job failed but skips the request transition
-    (there is nothing to finalize).
+    Also covers the request-less fail-closed subcase, where none of those
+    writes can be committed because the mandatory audit has no owner.
     """
 
     def test_measurement_failed_happy_path_fires_all_four_side_effects(self):
@@ -6002,9 +5998,8 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
             request_id=42,
             payload=automation_import_payload(),
         )
-        # Move job to 'running' to mimic an importer claim — or rather,
-        # the preview worker scenario where the job was claimed by preview.
-        # mark_import_job_failed accepts queued or running.
+        # Preview terminalization accepts the queued job's waiting/running
+        # preview lane, matching a real preview-worker claim.
 
         payload = MeasurementFailure(
             reason="snapshot_stale",

@@ -139,6 +139,7 @@ def dispatch_import_core(
     outcome_success = False
     outcome_message = ""
     terminal_outcome_persisted = False
+    success_terminal_selected = False
 
     # Acquire the RELEASE (per-MBID) advisory lock for the duration of
     # the ``import_one.py`` subprocess. This is the funnel every path
@@ -497,6 +498,12 @@ def dispatch_import_core(
 
                 # --- Mark done or failed with decision-specific details ---
                 if action.mark_done:
+                    # Beets has selected a successful terminal outcome. From
+                    # this point a persistence failure must escape unchanged:
+                    # converting it to the generic exception rejection would
+                    # create a second, contradictory domain outcome after the
+                    # filesystem/library mutation already succeeded.
+                    success_terminal_selected = True
                     logger.info(f"{mode} OK: {label} (decision={decision})")
                     mark_scenario = (
                         decision
@@ -870,6 +877,14 @@ def dispatch_import_core(
             terminal_outcome_persisted = True
         except Exception:
             logger.exception(f"{mode} ERROR: {label}")
+            if success_terminal_selected and not terminal_outcome_persisted:
+                logger.error(
+                    "%s success persistence failed for request %s; "
+                    "propagating without an alternate rejection",
+                    mode,
+                    request_id,
+                )
+                raise
             if terminal_outcome_persisted:
                 logger.error(
                     "%s post-terminal side effect failed for request %s; "

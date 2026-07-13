@@ -6,6 +6,7 @@ import copy
 import os
 import sys
 import threading
+import tempfile
 import time
 import unittest
 from unittest.mock import patch
@@ -21,12 +22,21 @@ from lib.import_queue import (
     IMPORT_JOB_FORCE,
     IMPORT_JOB_MANUAL,
     IMPORT_JOB_YOUTUBE,
+    ImportJob,
     automation_import_payload,
     force_import_payload,
     manual_import_payload,
     youtube_import_payload,
 )
 from lib.dispatch import DispatchOutcome
+from lib.config import CratediggerConfig
+from lib.dispatch import dispatch_import_core
+from lib.dispatch.types import ImportOneRun
+from lib.import_evidence import (
+    ActionEvidenceProvenance,
+    CandidateEvidenceActionResult,
+)
+from lib.quality import DownloadInfo
 from scripts import importer
 from lib.pipeline_db import PipelineDB
 from lib.terminal_outcomes import (
@@ -39,9 +49,15 @@ from lib.terminal_outcomes import (
     PreviewMeasurementFailureOutcome,
     TerminalOutcomeBoundary,
     TerminalOutcomeConflict,
+    TerminalAttemptType,
 )
-from tests.fakes import FakePipelineDB
-from tests.helpers import make_request_row
+from tests.fakes import FakeBeetsDB, FakePipelineDB
+from tests.helpers import (
+    make_album_quality_evidence,
+    make_import_result,
+    make_request_row,
+    noop_quality_gate,
+)
 
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
@@ -106,7 +122,7 @@ def _rejection(request_id: int, job_id: int | None) -> ImporterRejectionOutcome:
         request_id=request_id,
         import_job_id=job_id,
         requeue_to_wanted=True,
-        record_validation_attempt=True,
+        attempt_type=TerminalAttemptType.validation,
         write_search_filetype_override=True,
         search_filetype_override="flac",
         audit=_audit("rejected"),
@@ -210,11 +226,140 @@ class TestTerminalOutcomeFakeContracts(unittest.TestCase):
                 db.persist_import_success(_success(request_id, job_id))
                 self.assertEqual(db.get_import_job(job_id).status, "completed")  # type: ignore[union-attr]
 
+    def test_worker_materialization_failure_bundles_download_attempt_and_job(self) -> None:
+        from lib.terminal_outcomes import ImportJobRequestAction
+
+        db, request_id, job_id = _prepare_fake_import_job(
+            IMPORT_JOB_AUTOMATION
+        )
+        db.request(request_id)["active_download_state"] = {
+            "filetype": "mp3",
+            "enqueued_at": "2026-07-14T00:00:00+00:00",
+            "files": [],
+        }
+        claimed = db.get_import_job(job_id)
+        assert claimed is not None
+
+        persisted = importer.process_claimed_job(
+            cast(Any, db),
+            claimed,
+            execute_fn=lambda *_args, **_kwargs: DispatchOutcome(
+                success=False,
+                message="materialization failed: event_path_missing",
+                request_action=(
+                    ImportJobRequestAction.wanted_after_download_failure
+                ),
+            ),
+        )
+
+        assert persisted is not None
+        row = db.get_request(request_id)
+        assert row is not None
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["download_attempts"], 1)
+        self.assertEqual(row["validation_attempts"], 0)
+        self.assertEqual(persisted.status, "failed")
+        self.assertEqual(len(db.download_logs), 1)
+
+    def test_worker_success_without_dispatch_preserves_import_metadata(self) -> None:
+        from lib.terminal_outcomes import ImportJobRequestAction
+
+        db, request_id, job_id = _prepare_fake_import_job(
+            IMPORT_JOB_AUTOMATION
+        )
+        row = db.request(request_id)
+        row.update({
+            "beets_distance": 0.07,
+            "beets_scenario": "validation_disabled",
+            "imported_path": "/already/staged",
+            "verified_lossless": True,
+            "final_format": "flac",
+        })
+        claimed = db.get_import_job(job_id)
+        assert claimed is not None
+
+        persisted = importer.process_claimed_job(
+            cast(Any, db),
+            claimed,
+            execute_fn=lambda *_args, **_kwargs: DispatchOutcome(
+                success=True,
+                message="processing completed without dispatch",
+                request_action=ImportJobRequestAction.imported,
+            ),
+        )
+
+        assert persisted is not None
+        after = db.get_request(request_id)
+        assert after is not None
+        self.assertEqual(after["status"], "imported")
+        self.assertEqual(after["beets_distance"], 0.07)
+        self.assertEqual(after["beets_scenario"], "validation_disabled")
+        self.assertEqual(after["imported_path"], "/already/staged")
+        self.assertEqual(after["verified_lossless"], True)
+        self.assertEqual(after["final_format"], "flac")
+        self.assertEqual(persisted.status, "completed")
+        self.assertEqual(len(db.download_logs), 1)
+
+    def test_redownload_stage_completion_threads_job_into_atomic_bundle(self) -> None:
+        from lib.download_validation import _handle_valid_result
+        from lib.quality import ValidationResult
+        from lib.staged_album import StagedAlbum
+        from tests.helpers import make_ctx_with_fake_db, make_grab_list_entry
+
+        db, request_id, job_id = _prepare_fake_import_job(
+            IMPORT_JOB_AUTOMATION
+        )
+        db.request(request_id)["active_download_state"] = {
+            "filetype": "mp3",
+            "enqueued_at": "2026-07-14T00:00:00+00:00",
+            "files": [],
+        }
+        with tempfile.TemporaryDirectory() as root:
+            staged_path = os.path.join(root, "redownload")
+            os.makedirs(staged_path)
+            with open(os.path.join(staged_path, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            album = make_grab_list_entry(
+                artist="Artist",
+                title="Album",
+                mb_release_id="test-redownload-mbid",
+                db_request_id=request_id,
+                db_source="redownload",
+            )
+            album.import_folder = staged_path
+            staged_album = StagedAlbum.from_entry(
+                album,
+                default_path=staged_path,
+            )
+            ctx = make_ctx_with_fake_db(db)
+            ctx.cfg.beets_staging_dir = os.path.join(root, "Incoming")
+            ctx.cfg.beets_tracking_file = os.path.join(root, "tracking.jsonl")
+
+            outcome = _handle_valid_result(
+                album,
+                ValidationResult(
+                    valid=True,
+                    distance=0.02,
+                    scenario="strong_match",
+                ),
+                staged_album,
+                ctx,
+                import_job_id=job_id,
+            )
+
+        self.assertIsNone(outcome)
+        row = db.get_request(request_id)
+        job = db.get_import_job(job_id)
+        assert row is not None and job is not None
+        self.assertEqual(row["status"], "imported")
+        self.assertEqual(job.status, "completed")
+        self.assertEqual(len(db.download_logs), 1)
+
     def test_importer_does_not_terminalize_a_domain_terminal_job_twice(self) -> None:
         db, request_id, job_id = _prepare_fake_import_job(IMPORT_JOB_AUTOMATION)
         claimed = db.get_import_job(job_id)
         assert claimed is not None
-        original_mark_failed = db.mark_import_job_failed
+        original_mark_failed = db._mark_import_job_failed
 
         def execute_and_persist(*_args: object, **_kwargs: object) -> DispatchOutcome:
             db.persist_importer_rejection(_rejection(request_id, job_id))
@@ -224,7 +369,7 @@ class TestTerminalOutcomeFakeContracts(unittest.TestCase):
             patch.object(importer, "execute_import_job", side_effect=execute_and_persist),
             patch.object(
                 db,
-                "mark_import_job_failed",
+                "_mark_import_job_failed",
                 wraps=original_mark_failed,
             ) as mark_failed,
         ):
@@ -419,16 +564,22 @@ class TestTerminalOutcomeRealPgAtomicity(unittest.TestCase):
         return claimed.id
 
     def _snapshot(self, request_id: int, job_id: int) -> tuple[object, ...]:
-        return (
-            self.db.get_request(request_id),
-            self.db.get_import_job(job_id),
-            self.db._execute(
-                "SELECT * FROM download_log ORDER BY id"
-            ).fetchall(),
-            self.db._execute(
-                "SELECT * FROM source_denylist ORDER BY username"
-            ).fetchall(),
-        )
+        # Observe rollback durability from a fresh connection. Reading on the
+        # transaction's own connection can hide an uncommitted partial write.
+        observer = PipelineDB(TEST_DSN)
+        try:
+            return (
+                observer.get_request(request_id),
+                observer.get_import_job(job_id),
+                observer._execute(
+                    "SELECT * FROM download_log ORDER BY id"
+                ).fetchall(),
+                observer._execute(
+                    "SELECT * FROM source_denylist ORDER BY username"
+                ).fetchall(),
+            )
+        finally:
+            observer.close()
 
     def _assert_rollback_at_every_boundary(
         self,
@@ -525,6 +676,84 @@ class TestTerminalOutcomeRealPgAtomicity(unittest.TestCase):
 
         with self.assertRaises(Exception):
             self.db.persist_import_success(outcome)
+
+        self.assertEqual(self._snapshot(request_id, job_id), before)
+
+    def test_dispatch_success_audit_failure_has_no_alternate_terminal_write(self) -> None:
+        """A beets success whose audit is rejected stays wholly pre-terminal."""
+        request_id = self._seed_request()
+        job_id = self._claimed_import_job(request_id)
+        candidate = make_album_quality_evidence(
+            mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        )
+        candidate = msgspec.structs.replace(
+            candidate,
+            audio_file_count=1,
+            filetype_band="lossy",
+        )
+        candidate_result = CandidateEvidenceActionResult(
+            evidence=candidate,
+            provenance=ActionEvidenceProvenance(
+                candidate_status="reused",
+                current_status="missing",
+                snapshot_guard="matched",
+            ),
+        )
+        before = self._snapshot(request_id, job_id)
+        imported = make_import_result(decision="import")
+
+        def run_import(**_kwargs: object) -> ImportOneRun:
+            return ImportOneRun(
+                command=("import_one",),
+                returncode=0,
+                stdout="",
+                stderr="",
+                import_result=imported,
+            )
+
+        claimed = self.db.get_import_job(job_id)
+        assert claimed is not None
+
+        def execute_dispatch(
+            db: PipelineDB,
+            job: ImportJob,
+            *,
+            ctx: Any = None,
+        ) -> DispatchOutcome:
+            del db, job, ctx
+            return dispatch_import_core(
+                path=staged,
+                mb_release_id=(
+                    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+                ),
+                request_id=request_id,
+                label="Artist - Album",
+                force=True,
+                beets_harness_path="/nix/store/fake/import-one",
+                db=self.db,
+                dl_info=DownloadInfo(filetype="mp3"),
+                scenario="force_import",
+                cfg=CratediggerConfig(
+                    beets_harness_path="/nix/store/fake/beets-harness",
+                    pipeline_db_enabled=True,
+                ),
+                outcome_label="not_allowed",  # type: ignore[arg-type]
+                candidate_import_job_id=job_id,
+                prevalidated_candidate_result=candidate_result,
+                quality_gate_fn=noop_quality_gate,
+                run_import_fn=run_import,
+            )
+
+        with tempfile.TemporaryDirectory() as staged:
+            with (
+                patch("lib.beets_db.BeetsDB", return_value=FakeBeetsDB()),
+                self.assertRaises(Exception),
+            ):
+                importer.process_claimed_job(
+                    self.db,
+                    claimed,
+                    execute_fn=execute_dispatch,
+                )
 
         self.assertEqual(self._snapshot(request_id, job_id), before)
 
