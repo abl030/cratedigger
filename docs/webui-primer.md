@@ -88,6 +88,10 @@ Browser → https://music.ablz.au
     into the visible list with a `promo`/`bootleg` provenance chip
     (`splitPressings` in `web/js/discography.js`; an owned pressing is never
     hidden, whatever its status)
+  - Exceptional artist-page sections stay quiet unless they contain something
+    owned. An in-library Bootleg-only or other-source-only row opens its outer
+    section and only the Albums/EPs/Singles/Other type buckets containing
+    in-library rows; a pipeline request alone never auto-expands them.
   - Releases already in pipeline DB or beets library are badged
   - Click release metadata to open MB release page in new tab
 - **Add button** — adds release to pipeline DB (same logic as `pipeline-cli add`)

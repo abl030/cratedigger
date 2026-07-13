@@ -106,6 +106,24 @@ const closedHtml = renderTypedSections(rows, (r) => '', { defaultOpen: null });
 assertEqual(closedHtml.includes('<div class="type-body open">'), false,
   'no section is open when defaultOpen=null');
 
+console.log('renderTypedSections() with multiple explicit open sections');
+const selectedHtml = renderTypedSections(rows, (r) => `<div>${r.title}</div>`, {
+  defaultOpen: null,
+  openSections: ['EPs', 'Singles'],
+});
+function typeIsOpen(html, type) {
+  const start = html.indexOf(`${type} <span class="type-count">`);
+  if (start < 0) return false;
+  const body = html.slice(start).match(/<div class="type-body([^"]*)">/);
+  return Boolean(body && body[1].split(/\s+/).includes('open'));
+}
+assertEqual(typeIsOpen(selectedHtml, 'Albums'), false,
+  'Albums stays closed when it is not selected');
+assertEqual(typeIsOpen(selectedHtml, 'EPs'), true,
+  'EPs opens when selected');
+assertEqual(typeIsOpen(selectedHtml, 'Singles'), true,
+  'Singles opens when selected');
+
 console.log('renderTypedSections() empty input');
 const emptyHtml = renderTypedSections([], (r) => '');
 assertEqual(emptyHtml, '', 'empty input -> empty output');

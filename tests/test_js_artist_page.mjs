@@ -20,7 +20,12 @@
  * Run with: node tests/test_js_artist_page.mjs
  */
 
-import { classifyArtistRows, renderArtistSections, renderOtherSourceSection } from '../web/js/artist_page.js';
+import {
+  classifyArtistRows,
+  ownedTypeSections,
+  renderArtistSections,
+  renderOtherSourceSection,
+} from '../web/js/artist_page.js';
 
 let passed = 0;
 let failed = 0;
@@ -50,6 +55,13 @@ function assertExcludes(haystack, needle, msg) {
     failed++;
     console.error(`  FAIL: ${msg} - unexpectedly found '${needle}'`);
   }
+}
+
+function bodyIsOpenAfter(html, marker) {
+  const start = html.indexOf(marker);
+  if (start < 0) return false;
+  const body = html.slice(start).match(/<div class="type-body([^"]*)">/);
+  return Boolean(body && body[1].split(/\s+/).includes('open'));
 }
 
 const ARTIST_ID = 'aaaaaaaa-1111-2222-3333-444444444444';
@@ -278,6 +290,83 @@ console.log('renderOtherSourceSection — complement rows force the other source
     'empty bucket -> empty string');
   const mbSide = renderOtherSourceSection([rows[0]], { artistName: ARTIST_NAME, source: 'mb' });
   assertContains(mbSide, 'Only on MusicBrainz', 'mb complement label');
+}
+
+console.log('owned exceptional sections open only their owned release types');
+{
+  // Live Deloris shape: an owned unofficial RG with no primary type lands
+  // in Bootleg-only → Other. An unowned Album remains present but collapsed.
+  const sections = classify([
+    rg('owned-bootleg', {
+      title: 'The Point In The War When We Knew We Were Lost',
+      has_official: false,
+      in_library: true,
+      type: null,
+    }),
+    rg('unowned-bootleg', {
+      title: 'Audience Tape',
+      has_official: false,
+      in_library: false,
+      type: 'Album',
+      pipeline_status: 'wanted',
+    }),
+  ]);
+  assertEqual(ownedTypeSections(sections.bootlegs).join(','), 'Other',
+    'strict library ownership selects only the Deloris Other bucket');
+  const html = renderArtistSections(sections, {
+    artistId: ARTIST_ID,
+    artistName: ARTIST_NAME,
+  });
+  assertEqual(bodyIsOpenAfter(html, 'Bootleg-only releases'), true,
+    'owned bootleg opens the outer exceptional section');
+  assertEqual(bodyIsOpenAfter(html, 'Other <span class="type-count">'), true,
+    'the owned bootleg type opens');
+  assertEqual(bodyIsOpenAfter(html, 'Albums <span class="type-count">'), false,
+    'unowned bootleg type remains collapsed even with an active request');
+
+  const complement = renderOtherSourceSection([
+    rg('discogs-album', { in_library: true, type: 'Album' }),
+    rg('discogs-other', { in_library: true, type: 'Other' }),
+    rg('discogs-single', {
+      in_library: false,
+      type: 'Single',
+      pipeline_status: 'wanted',
+    }),
+  ], { artistName: ARTIST_NAME, source: 'discogs' });
+  assertEqual(bodyIsOpenAfter(complement, 'Only on Discogs'), true,
+    'owned complement row opens the outer source-only section');
+  assertEqual(bodyIsOpenAfter(complement, 'Albums <span class="type-count">'), true,
+    'owned complement Album type opens');
+  assertEqual(bodyIsOpenAfter(complement, 'Other <span class="type-count">'), true,
+    'owned complement Other type opens');
+  assertEqual(bodyIsOpenAfter(complement, 'Singles <span class="type-count">'), false,
+    'pipeline-only complement type remains collapsed');
+}
+
+console.log('unowned exceptional sections stay fully collapsed');
+{
+  const sections = classify([
+    rg('queued-bootleg', {
+      has_official: false,
+      in_library: false,
+      pipeline_status: 'wanted',
+    }),
+  ]);
+  const html = renderArtistSections(sections, {
+    artistId: ARTIST_ID,
+    artistName: ARTIST_NAME,
+  });
+  assertEqual(bodyIsOpenAfter(html, 'Bootleg-only releases'), false,
+    'an active request alone does not auto-expand Bootleg-only');
+
+  const complement = renderOtherSourceSection([
+    rg('queued-discogs', {
+      in_library: false,
+      pipeline_status: 'wanted',
+    }),
+  ], { artistName: ARTIST_NAME, source: 'discogs' });
+  assertEqual(bodyIsOpenAfter(complement, 'Only on Discogs'), false,
+    'an active request alone does not auto-expand the complement');
 }
 
 console.log('renderArtistSections — section headers, counts, defaults');

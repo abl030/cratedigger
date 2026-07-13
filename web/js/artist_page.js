@@ -29,7 +29,7 @@
  *      from the source discography renders as an orphan album row
  *      inside the In library section.
  */
-import { renderTypedSections } from './grouping.js';
+import { classify, renderTypedSections, SECTION_ORDER } from './grouping.js';
 import { renderRgRow } from './discography.js';
 import { renderLibraryAlbumRow } from './library.js';
 
@@ -105,6 +105,23 @@ function sectionWrap(title, count, bodyHtml, opts = {}) {
 }
 
 /**
+ * Return the release-type sections containing at least one owned row.
+ *
+ * Strict ``in_library === true`` keeps wanted/downloading rows from opening
+ * exceptional buckets merely because the pipeline is still searching.
+ * SECTION_ORDER makes the result stable for rendering and tests.
+ *
+ * @param {Object[]} rows
+ * @returns {string[]}
+ */
+export function ownedTypeSections(rows) {
+  const owned = new Set((rows || [])
+    .filter(row => row.in_library === true)
+    .map(classify));
+  return SECTION_ORDER.filter(section => owned.has(section));
+}
+
+/**
  * Render the unified artist page body. Empty sections are omitted.
  * @param {{inLibrary: Object[], inFlight: Object[], missing: Object[],
  *          appearances: Object[], bootlegs: Object[]}} sections
@@ -114,8 +131,14 @@ function sectionWrap(title, count, bodyHtml, opts = {}) {
 export function renderArtistSections(sections, ctx) {
   const nameLC = (ctx.artistName || '').toLowerCase();
   const rgRow = (rg) => renderRgRow(rg, { artistName: ctx.artistName, nameLC });
-  const typed = (rgs, defaultOpen) => renderTypedSections(rgs, rgRow,
-    { defaultOpen: defaultOpen ? 'Albums' : null });
+  const typed = (rgs, defaultOpen, openSections) => renderTypedSections(
+    rgs,
+    rgRow,
+    {
+      defaultOpen: defaultOpen ? 'Albums' : null,
+      ...(openSections ? { openSections } : {}),
+    },
+  );
 
   let html = '';
   const orphans = sections.inLibraryOrphans || [];
@@ -144,8 +167,12 @@ export function renderArtistSections(sections, ctx) {
       typed(sections.appearances, false), { color: '#777' });
   }
   if (sections.bootlegs.length > 0) {
+    const ownedTypes = ownedTypeSections(sections.bootlegs);
     html += sectionWrap('Bootleg-only releases', sections.bootlegs.length,
-      typed(sections.bootlegs, false), { color: '#555' });
+      typed(sections.bootlegs, false, ownedTypes), {
+        color: '#555',
+        open: ownedTypes.length > 0,
+      });
   }
   return html;
 }
@@ -165,7 +192,15 @@ export function renderOtherSourceSection(rows, ctx) {
   const rgRow = (rg) => renderRgRow(rg, {
     artistName: ctx.artistName, nameLC, source: ctx.source,
   });
+  const ownedTypes = ownedTypeSections(rows);
   return sectionWrap(`Only on ${label}`, rows.length,
-    renderTypedSections(rows, rgRow, {}),
-    { color: '#a96', id: 'only-other-source' });
+    renderTypedSections(rows, rgRow, {
+      defaultOpen: null,
+      openSections: ownedTypes,
+    }),
+    {
+      color: '#a96',
+      id: 'only-other-source',
+      open: ownedTypes.length > 0,
+    });
 }
