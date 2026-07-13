@@ -115,6 +115,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         req = make_request_row(
             id=42, status="downloading",
             min_bitrate=180, current_spectral_bitrate=128,
+            active_download_state={"files": [], "filetype": "flac"},
             **(request_overrides or {}),
         )
         db.seed_request(req)
@@ -175,6 +176,59 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         self.assertEqual(len(r["db"].download_logs), 1)
         self.assertEqual(r["db"].download_logs[0].outcome, "success")
 
+    def test_stale_request_stops_before_import_subprocess(self):
+        from lib.dispatch import dispatch_import_core
+
+        class StaleDB(FakePipelineDB):
+            def mark_import_subprocess_started(
+                self,
+                request_id: int,
+                timestamp: str,
+            ) -> bool:
+                return False
+
+        db = StaleDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "flac"},
+        ))
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch_dispatch_externals() as ext:
+                outcome = dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="mbid-123",
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    force=False,
+                    override_min_bitrate=None,
+                    target_format=None,
+                    verified_lossless_target="",
+                    beets_harness_path=cfg.beets_harness_path,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=DownloadInfo(username="user1"),
+                    distance=0.05,
+                    scenario="strong_match",
+                    files=[MagicMock(username="user1", filename="01.mp3")],
+                    cfg=cfg,
+                    quality_gate_fn=noop_quality_gate,
+                )
+
+        self.assertFalse(outcome.success)
+        self.assertTrue(outcome.deferred)
+        self.assertEqual(
+            outcome.message,
+            "Request state changed before import launch",
+        )
+        ext.run.assert_not_called()
+        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(db.download_logs, [])
+
     def test_outcome_label_in_download_log(self):
         r = self._dispatch(outcome_label="force_import")
         self.assertEqual(r["db"].download_logs[0].outcome, "force_import")
@@ -206,7 +260,11 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "flac"},
+        ))
         log_id = db.log_download(request_id=42, outcome="rejected")
 
         tmpdir = tempfile.mkdtemp()
@@ -302,7 +360,11 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "flac"},
+        ))
 
         tmpdir = tempfile.mkdtemp()
         current_dir = tempfile.mkdtemp()
@@ -463,7 +525,11 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "flac"},
+        ))
 
         tmpdir = tempfile.mkdtemp()
         try:
@@ -842,7 +908,11 @@ class TestDispatchCoreSeams(unittest.TestCase):
         ir = kwargs.pop("ir", make_import_result())
         beets_directory = kwargs.pop("beets_directory", "")
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "flac"},
+        ))
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             beets_directory=beets_directory,

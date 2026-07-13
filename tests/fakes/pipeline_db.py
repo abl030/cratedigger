@@ -52,6 +52,7 @@ from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
                              PLAN_STATUS_SUPERSEDED,
                              PersistedYoutubeRow,
                              RequestSpectralStateUpdate,
+                             ReplacedRequestMutationError,
                              SEARCH_LOG_STAGE_ACCEPTED,
                              SEARCH_LOG_STAGE_PRE_ATTEMPT,
                              SEARCH_LOG_STAGE_STALE_COMPLETION,
@@ -1331,7 +1332,13 @@ class FakePipelineDB:
         self.status_history.append((request_id, "downloading"))
         return True
 
-    def update_download_state(self, request_id: int, state_json: str) -> None:
+    def update_download_state(
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        expected_status: str = "downloading",
+    ) -> bool:
         row = self._requests.get(request_id)
         self.update_download_state_calls.append((request_id, state_json))
         injected = self._update_download_state_errors.get(request_id)
@@ -1340,12 +1347,14 @@ class FakePipelineDB:
             # recorded (like FakeSlskdAPI's failing calls) but the row
             # is never mutated. See set_update_download_state_error.
             raise injected
-        if row:
+        if row and row.get("status") == expected_status:
             try:
                 row["active_download_state"] = json.loads(state_json)
             except json.JSONDecodeError:
                 row["active_download_state"] = state_json
             row["updated_at"] = _utcnow()
+            return True
+        return False
 
     def update_download_state_if_downloading(
         self,
@@ -1355,14 +1364,17 @@ class FakePipelineDB:
         row = self._requests.get(request_id)
         if row is None or row["status"] != "downloading":
             return False
-        self.update_download_state(request_id, state_json)
-        return True
+        return self.update_download_state(
+            request_id,
+            state_json,
+            expected_status="downloading",
+        )
 
     def update_download_state_current_path(
         self,
         request_id: int,
         current_path: str | None,
-    ) -> None:
+    ) -> bool:
         self.update_download_state_current_path_calls.append(
             (request_id, current_path),
         )
@@ -1383,12 +1395,14 @@ class FakePipelineDB:
             state["current_path"] = current_path
             row["active_download_state"] = state
             row["updated_at"] = _utcnow()
+            return True
+        return False
 
     def mark_import_subprocess_started(
         self,
         request_id: int,
         timestamp: str,
-    ) -> None:
+    ) -> bool:
         """Stamp ``import_subprocess_started_at`` on the active download
         state. No-op when the row has no ``active_download_state``
         (force/manual paths). See ``docs/advisory-locks.md``.
@@ -1397,19 +1411,24 @@ class FakePipelineDB:
             (request_id, timestamp),
         )
         row = self._requests.get(request_id)
-        if not row or row.get("active_download_state") is None:
-            return
+        if (
+            not row
+            or row.get("status") != "downloading"
+            or row.get("active_download_state") is None
+        ):
+            return False
         state = row.get("active_download_state")
         if isinstance(state, str):
             try:
                 state = json.loads(state)
             except json.JSONDecodeError:
-                return
+                return False
         if not isinstance(state, dict):
-            return
+            return False
         state["import_subprocess_started_at"] = timestamp
         row["active_download_state"] = state
         row["updated_at"] = _utcnow()
+        return True
 
     def log_download(self, request_id: int,
                      soulseek_username: str | None = None,
@@ -1720,7 +1739,11 @@ class FakePipelineDB:
         row["manual_reason"] = None
         row["updated_at"] = now
         self.status_history.append((request_id, "wanted"))
-        self.record_attempt(request_id, "download")
+        self.record_attempt(
+            request_id,
+            "download",
+            expected_status="wanted",
+        )
         log_kwargs: dict[str, Any] = {}
         if validation_result is None:
             log_kwargs["beets_scenario"] = "abandoned_auto_import"
@@ -1830,10 +1853,16 @@ class FakePipelineDB:
             return self._cooldown_result(username)
         return self._cooldown_result
 
-    def record_attempt(self, request_id: int, attempt_type: str) -> None:
+    def record_attempt(
+        self,
+        request_id: int,
+        attempt_type: str,
+        *,
+        expected_status: str,
+    ) -> bool:
         self.recorded_attempts.append((request_id, attempt_type))
         row = self._requests.get(request_id)
-        if row:
+        if row and row.get("status") == expected_status != "replaced":
             col = f"{attempt_type}_attempts"
             now = _utcnow()
             row[col] = (row.get(col) or 0) + 1
@@ -1844,6 +1873,8 @@ class FakePipelineDB:
                 BACKOFF_MAX_MINUTES,
             )
             row["next_retry_after"] = now + timedelta(minutes=backoff_minutes)
+            return True
+        return False
 
     def record_field_resolution(
         self,
@@ -2200,11 +2231,22 @@ class FakePipelineDB:
         self,
         request_id: int,
         evidence_id: int | None,
-    ) -> None:
+        *,
+        expected_status: str | None = None,
+    ) -> bool:
         row = self._requests.get(request_id)
-        if row is not None:
+        if (
+            row is not None
+            and row.get("status") != "replaced"
+            and (
+                expected_status is None
+                or row.get("status") == expected_status
+            )
+        ):
             row["current_evidence_id"] = evidence_id
             row["updated_at"] = _utcnow()
+            return True
+        return False
 
     def get_import_job_candidate_evidence_id(
         self,
@@ -4681,6 +4723,8 @@ class FakePipelineDB:
                 "use create_failed_search_plan for empty results.")
         if request_id not in self._requests:
             raise ValueError(f"request {request_id} not found")
+        if self._requests[request_id].get("status") == "replaced":
+            raise ReplacedRequestMutationError(request_id)
         # Mirror the partial unique index "one active plan per request".
         if set_active:
             for existing in self.search_plans.values():
@@ -4748,6 +4792,8 @@ class FakePipelineDB:
     ) -> int:
         if request_id not in self._requests:
             raise ValueError(f"request {request_id} not found")
+        if self._requests[request_id].get("status") == "replaced":
+            raise ReplacedRequestMutationError(request_id)
         status = (
             PLAN_STATUS_FAILED_TRANSIENT if transient
             else PLAN_STATUS_FAILED_DETERMINISTIC
@@ -4783,6 +4829,8 @@ class FakePipelineDB:
         if request_id not in self._requests:
             raise ValueError(f"request {request_id} not found")
         row = self._requests[request_id]
+        if row.get("status") == "replaced":
+            raise ReplacedRequestMutationError(request_id)
         old_id = row.get("active_plan_id")
         now = _utcnow()
         if old_id is not None:
@@ -4929,6 +4977,8 @@ class FakePipelineDB:
         row = self._requests.get(request_id)
         if row is None:
             raise ValueError(f"request {request_id} not found")
+        if row.get("status") == "replaced":
+            raise ReplacedRequestMutationError(request_id)
         active_plan_id = row.get("active_plan_id")
         if active_plan_id is None:
             raise ValueError(
@@ -5181,7 +5231,8 @@ class FakePipelineDB:
                 f"plan_item_id={attempt.plan_item_id} does not belong to "
                 f"plan_id={attempt.plan_id} for request_id={attempt.request_id}")
         is_stale = (
-            active_plan_id != attempt.plan_id
+            row.get("status") == "replaced"
+            or active_plan_id != attempt.plan_id
             or next_ordinal != attempt.plan_ordinal
             or cycle_count != attempt.cycle_count_snapshot
         )
@@ -5196,7 +5247,11 @@ class FakePipelineDB:
             if is_stale:
                 cursor_update_status = CURSOR_UPDATE_STALE
                 execution_stage = SEARCH_LOG_STAGE_STALE_COMPLETION
-                stale_reason: str | None = "regenerated"
+                stale_reason: str | None = (
+                    "request_replaced"
+                    if row.get("status") == "replaced"
+                    else "regenerated"
+                )
                 new_next_ordinal = next_ordinal
                 new_cycle = cycle_count
             else:
@@ -5366,7 +5421,7 @@ class FakePipelineDB:
             matcher_score_top1=attempt.matcher_score_top1,
             query_template=attempt.query_template,
         ))
-        if attempt.apply_scheduler_attempt:
+        if attempt.apply_scheduler_attempt and row.get("status") != "replaced":
             now = _utcnow()
             new_count = (row.get("search_attempts") or 0) + 1
             row["search_attempts"] = new_count

@@ -324,10 +324,11 @@ def _finalize_request_and_log_rejection(
             db,
             request_id,
             transitions.RequestTransition.to_wanted_fields(
+                attempt_type=(
+                    "validation" if record_validation_attempt else None
+                ),
                 fields=transition_kwargs),
         ))
-        if record_validation_attempt:
-            db.record_attempt(request_id, "validation")
 
     if request_id is None:
         # Same control flow as the NotNullViolation this used to raise at

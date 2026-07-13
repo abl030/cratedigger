@@ -1,6 +1,6 @@
 """album_requests CRUD, status state machine, and Replace/rescue."""
 import dataclasses
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 import psycopg2
 import psycopg2.extras
@@ -998,16 +998,25 @@ class _RequestsMixin(_PipelineDBBase):
         return cur.rowcount > 0
 
 
-    def update_download_state(self, request_id: int, state_json: str) -> None:
-        """Rewrite active_download_state without changing status or attempt counters."""
+    def update_download_state(
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        expected_status: str = "downloading",
+    ) -> bool:
+        """CAS active download state while the worker still owns the row."""
         now = datetime.now(timezone.utc)
-        self._execute("""
+        cur = self._execute("""
             UPDATE album_requests
             SET active_download_state = %s::jsonb,
                 updated_at = %s
             WHERE id = %s
-        """, (state_json, now, request_id))
+              AND status = %s
+              AND status != 'replaced'
+        """, (state_json, now, request_id, expected_status))
         self.conn.commit()
+        return cur.rowcount > 0
 
 
     def update_download_state_if_downloading(
@@ -1032,10 +1041,10 @@ class _RequestsMixin(_PipelineDBBase):
         self,
         request_id: int,
         current_path: str | None,
-    ) -> None:
+    ) -> bool:
         """Rewrite only ``active_download_state.current_path`` on downloading rows."""
         now = datetime.now(timezone.utc)
-        self._execute("""
+        cur = self._execute("""
             UPDATE album_requests
             SET active_download_state = jsonb_set(
                     COALESCE(active_download_state, '{}'::jsonb),
@@ -1049,13 +1058,14 @@ class _RequestsMixin(_PipelineDBBase):
               AND active_download_state IS NOT NULL
         """, (current_path, now, request_id))
         self.conn.commit()
+        return cur.rowcount > 0
 
 
     def mark_import_subprocess_started(
         self,
         request_id: int,
         timestamp: str,
-    ) -> None:
+    ) -> bool:
         """Stamp ``active_download_state.import_subprocess_started_at``.
 
         Called immediately before launching ``import_one.py`` on the
@@ -1068,7 +1078,7 @@ class _RequestsMixin(_PipelineDBBase):
         See ``docs/advisory-locks.md``.
         """
         now = datetime.now(timezone.utc)
-        self._execute("""
+        cur = self._execute("""
             UPDATE album_requests
             SET active_download_state = jsonb_set(
                     active_download_state,
@@ -1078,9 +1088,11 @@ class _RequestsMixin(_PipelineDBBase):
                 ),
                 updated_at = %s
             WHERE id = %s
+              AND status = 'downloading'
               AND active_download_state IS NOT NULL
         """, (timestamp, now, request_id))
         self.conn.commit()
+        return cur.rowcount > 0
 
 
     def get_downloading(self) -> list[dict[str, Any]]:
@@ -1302,32 +1314,44 @@ class _RequestsMixin(_PipelineDBBase):
 
     # --- Retry logic ---
 
-    def record_attempt(self, request_id: int, attempt_type: str) -> None:
+    def record_attempt(
+        self,
+        request_id: int,
+        attempt_type: str,
+        *,
+        expected_status: str,
+    ) -> bool:
+        if attempt_type not in {"search", "download", "validation"}:
+            raise ValueError(f"Unknown attempt type: {attempt_type!r}")
         col = f"{attempt_type}_attempts"
         now = datetime.now(timezone.utc)
 
-        # Atomic increment + fetch in single statement (avoids TOCTOU race)
+        # Counter + backoff are one CAS. A Replace that wins before this
+        # statement leaves the frozen ancestor byte-identical.
         cur = self._execute(f"""
             UPDATE album_requests
             SET {col} = COALESCE({col}, 0) + 1,
                 last_attempt_at = %s,
+                next_retry_after = %s + (
+                    LEAST(
+                        %s * POWER(2, COALESCE({col}, 0)),
+                        %s
+                    ) * INTERVAL '1 minute'
+                ),
                 updated_at = %s
             WHERE id = %s
+              AND status = %s
+              AND status != 'replaced'
             RETURNING {col}
-        """, (now, now, request_id))
-        row = cur.fetchone()
-        assert row is not None, f"Request {request_id} not found"
-        new_count: int = int(row[col])
-
-        # Exponential backoff: base * 2^(attempts-1), capped
-        backoff_minutes = min(
-            BACKOFF_BASE_MINUTES * (2 ** (new_count - 1)),
+        """, (
+            now,
+            now,
+            BACKOFF_BASE_MINUTES,
             BACKOFF_MAX_MINUTES,
-        )
-        next_retry = now + timedelta(minutes=backoff_minutes)
-
-        self._execute("""
-            UPDATE album_requests
-            SET next_retry_after = %s
-            WHERE id = %s
-        """, (next_retry, request_id))
+            now,
+            request_id,
+            expected_status,
+        ))
+        row = cur.fetchone()
+        self.conn.commit()
+        return row is not None

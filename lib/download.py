@@ -105,8 +105,12 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
     ) -> bool: ...
 
     def update_download_state(
-        self, request_id: int, state_json: str,
-    ) -> None: ...
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        expected_status: str = "downloading",
+    ) -> bool: ...
 
     def update_download_state_if_downloading(
         self, request_id: int, state_json: str,
@@ -114,7 +118,7 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
 
     def update_download_state_current_path(
         self, request_id: int, current_path: str | None,
-    ) -> None: ...
+    ) -> bool: ...
 
     def log_download(
         self,
@@ -358,9 +362,9 @@ def _persist_updated_download_state(
     request_id: int,
     entry: GrabListEntry,
     state: ActiveDownloadState,
-) -> None:
+) -> bool:
     """Persist retry counters or processing markers back to JSONB."""
-    db.update_download_state(
+    return db.update_download_state(
         request_id,
         build_active_download_state(
             entry,
@@ -372,6 +376,7 @@ def _persist_updated_download_state(
             ),
             current_path=entry.import_folder,
         ).to_json(),
+        expected_status="downloading",
     )
 
 
@@ -501,7 +506,10 @@ def _run_completed_processing(
                 ctx.cfg.slskd_download_dir,
             )
         state.processing_started_at = datetime.now(timezone.utc).isoformat()
-        _persist_updated_download_state(db, request_id, entry, state)
+        if not _persist_updated_download_state(db, request_id, entry, state):
+            return CompletionDeferred(
+                detail="request_state_changed_before_local_processing",
+            )
 
     try:
         result = _process(

@@ -2972,18 +2972,18 @@ class TestRetryLogic(unittest.TestCase):
         self.db.close()
 
     def test_record_attempt_increments_counters(self):
-        self.db.record_attempt(self.req_id, "search")
+        self.db.record_attempt(self.req_id, "search", expected_status="wanted")
         req = self.db.get_request(self.req_id)
         assert req is not None
         self.assertEqual(req["search_attempts"], 1)
 
-        self.db.record_attempt(self.req_id, "search")
+        self.db.record_attempt(self.req_id, "search", expected_status="wanted")
         req = self.db.get_request(self.req_id)
         assert req is not None
         self.assertEqual(req["search_attempts"], 2)
 
     def test_record_attempt_sets_backoff(self):
-        self.db.record_attempt(self.req_id, "download")
+        self.db.record_attempt(self.req_id, "download", expected_status="wanted")
         req = self.db.get_request(self.req_id)
         assert req is not None
         self.assertEqual(req["download_attempts"], 1)
@@ -2991,12 +2991,12 @@ class TestRetryLogic(unittest.TestCase):
         self.assertGreater(req["next_retry_after"], datetime.now(timezone.utc))
 
     def test_exponential_backoff(self):
-        self.db.record_attempt(self.req_id, "search")
+        self.db.record_attempt(self.req_id, "search", expected_status="wanted")
         req1 = self.db.get_request(self.req_id)
         assert req1 is not None
         retry1 = req1["next_retry_after"]
 
-        self.db.record_attempt(self.req_id, "search")
+        self.db.record_attempt(self.req_id, "search", expected_status="wanted")
         req2 = self.db.get_request(self.req_id)
         assert req2 is not None
         retry2 = req2["next_retry_after"]
@@ -3011,7 +3011,7 @@ class TestRetryLogic(unittest.TestCase):
         # until commit 1d84037 lowered it to raise steady-state search
         # frequency from ~4 to ~6 searches/release/day).
         for _ in range(6):
-            self.db.record_attempt(self.req_id, "search")
+            self.db.record_attempt(self.req_id, "search", expected_status="wanted")
 
         req = self.db.get_request(self.req_id)
         assert req is not None
@@ -3087,9 +3087,9 @@ class TestResetToWanted(unittest.TestCase):
 
     def test_reset_to_wanted_can_preserve_retry_counters(self):
         req_id = self._make_request("preserve-counters")
-        self.db.record_attempt(req_id, "search")
-        self.db.record_attempt(req_id, "download")
-        self.db.record_attempt(req_id, "validation")
+        self.db.record_attempt(req_id, "search", expected_status="imported")
+        self.db.record_attempt(req_id, "download", expected_status="imported")
+        self.db.record_attempt(req_id, "validation", expected_status="imported")
         before = self.db.get_request(req_id)
         assert before is not None
         before_retry = before["next_retry_after"]
@@ -3524,6 +3524,122 @@ class TestApplyTransitionDB(unittest.TestCase):
         self.assertFalse(self.db.set_downloading(
             old_id, "{}", expected_status="wanted"))
         self.assertEqual(self.db.get_request(old_id), before)
+
+    def test_replace_wins_between_requeue_and_late_retry_write(self):
+        """Real-PG barrier pin for the former two-write thaw race."""
+        from lib.pipeline_db import PipelineDB
+
+        request_id = self.db.add_request(
+            mb_release_id="transition-late-retry-old",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        self.assertTrue(self.db.set_downloading(
+            request_id,
+            '{"files": [], "filetype": "flac"}',
+            expected_status="wanted",
+        ))
+        worker_db = PipelineDB(TEST_DSN)
+        replace_db = PipelineDB(TEST_DSN)
+        reset_done = threading.Barrier(2)
+        replace_done = threading.Barrier(2)
+
+        def late_worker() -> bool:
+            self.assertTrue(worker_db.reset_downloading_to_wanted(
+                request_id,
+                expected_status="downloading",
+            ))
+            reset_done.wait(timeout=5)
+            replace_done.wait(timeout=5)
+            return worker_db.record_attempt(
+                request_id,
+                "download",
+                expected_status="wanted",
+            )
+
+        def replace() -> int:
+            reset_done.wait(timeout=5)
+            new_id = replace_db.supersede_request_mbid(
+                request_id,
+                new_mb_release_id="transition-late-retry-new",
+                new_mb_release_group_id=None,
+                new_mb_artist_id=None,
+                new_artist_name="A",
+                new_album_title="B2",
+                new_year=None,
+                new_country=None,
+                new_tracks=[],
+            )
+            replace_done.wait(timeout=5)
+            return new_id
+
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                worker_future = pool.submit(late_worker)
+                replace_future = pool.submit(replace)
+                self.assertGreater(replace_future.result(timeout=10), request_id)
+                self.assertFalse(worker_future.result(timeout=10))
+        finally:
+            worker_db.close()
+            replace_db.close()
+
+        row = self.db.get_request(request_id)
+        assert row is not None
+        self.assertEqual(row["status"], "replaced")
+        self.assertEqual(row["download_attempts"], 0)
+        self.assertIsNone(row["next_retry_after"])
+
+    def test_replace_from_downloading_freezes_metadata_writers(self):
+        request_id = self.db.add_request(
+            mb_release_id="transition-metadata-old",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        self.assertTrue(self.db.set_downloading(
+            request_id,
+            '{"files": [], "filetype": "flac", "current_path": "/old"}',
+            expected_status="wanted",
+        ))
+        self.db.supersede_request_mbid(
+            request_id,
+            new_mb_release_id="transition-metadata-new",
+            new_mb_release_group_id=None,
+            new_mb_artist_id=None,
+            new_artist_name="A",
+            new_album_title="B2",
+            new_year=None,
+            new_country=None,
+            new_tracks=[],
+        )
+        frozen = self.db.get_request(request_id)
+        assert frozen is not None
+
+        self.assertFalse(self.db.update_download_state(
+            request_id,
+            '{"files": [], "filetype": "mp3"}',
+            expected_status="downloading",
+        ))
+        self.assertFalse(self.db.update_download_state_current_path(
+            request_id,
+            "/late",
+        ))
+        self.assertFalse(self.db.mark_import_subprocess_started(
+            request_id,
+            "2026-07-13T15:00:00+00:00",
+        ))
+        self.assertFalse(self.db.set_request_current_evidence(
+            request_id,
+            999,
+            expected_status="downloading",
+        ))
+        self.assertFalse(self.db.record_attempt(
+            request_id,
+            "download",
+            expected_status="wanted",
+        ))
+        self.assertEqual(self.db.get_request(request_id), frozen)
 
 
 @requires_postgres
@@ -4412,7 +4528,7 @@ class TestDownloadingStatus(unittest.TestCase):
             "files": [],
         })
         self.db.set_downloading(req_id, state_json)
-        self.db.record_attempt(req_id, "download")
+        self.db.record_attempt(req_id, "download", expected_status="downloading")
 
         reset = self.db.reset_downloading_to_wanted(req_id)
         blocked = self.db.reset_downloading_to_wanted(blocked_id)
@@ -6002,6 +6118,98 @@ class TestPersistedSearchPlanCRUD(unittest.TestCase):
         assert active is not None
         self.assertEqual(active.plan.id, plan_id)
         self.assertEqual(active.items, [])
+
+    def test_replaced_request_rejects_every_plan_mutation(self):
+        from lib.pipeline_db import (
+            ConsumedAttemptInput,
+            NonConsumingAttemptInput,
+            ReplacedRequestMutationError,
+        )
+
+        plan_id = self.db.create_successful_search_plan(
+            request_id=self.req_id,
+            generator_id="g1",
+            items=self._items("Q1", "Q2"),
+        )
+        active = self.db.get_active_search_plan(self.req_id)
+        assert active is not None
+        first = active.items[0]
+        self.db.supersede_request_mbid(
+            self.req_id,
+            new_mb_release_id="plan-crud-replacement",
+            new_mb_release_group_id=None,
+            new_mb_artist_id=None,
+            new_artist_name="Plan",
+            new_album_title="Replacement",
+            new_year=None,
+            new_country=None,
+            new_tracks=[],
+        )
+        frozen = self.db.get_request(self.req_id)
+        assert frozen is not None
+
+        with self.assertRaises(ReplacedRequestMutationError):
+            self.db.create_failed_search_plan(
+                request_id=self.req_id,
+                generator_id="g2",
+                failure_class="dependency_failure",
+                transient=True,
+            )
+        with self.assertRaises(ReplacedRequestMutationError):
+            self.db.create_successful_search_plan(
+                request_id=self.req_id,
+                generator_id="g2",
+                items=self._items("Q3"),
+            )
+        with self.assertRaises(ReplacedRequestMutationError):
+            self.db.supersede_search_plan_with_replacement(
+                request_id=self.req_id,
+                generator_id="g2",
+                items=self._items("Q3"),
+            )
+        with self.assertRaises(ReplacedRequestMutationError):
+            self.db.advance_search_plan_cursor(
+                self.req_id,
+                target_ordinal=1,
+                plan_item_count=2,
+            )
+
+        consumed = self.db.record_consumed_search_attempt(
+            ConsumedAttemptInput(
+                request_id=self.req_id,
+                plan_id=plan_id,
+                plan_item_id=first.id,
+                plan_ordinal=first.ordinal,
+                plan_strategy=first.strategy,
+                plan_canonical_query_key=first.canonical_query_key,
+                plan_repeat_group=first.repeat_group,
+                plan_generator_id="g1",
+                query=first.query,
+                outcome="no_results",
+                plan_item_count=2,
+                cycle_count_snapshot=0,
+                elapsed_s=0.1,
+                result_count=0,
+                apply_scheduler_attempt=True,
+                scheduler_success=False,
+            )
+        )
+        self.assertTrue(consumed.is_stale)
+        stale_log = self.db._execute(
+            "SELECT stale_reason FROM search_log WHERE id = %s",
+            (consumed.search_log_id,),
+        ).fetchone()
+        assert stale_log is not None
+        self.assertEqual(stale_log["stale_reason"], "request_replaced")
+
+        self.db.record_non_consuming_search_attempt(
+            NonConsumingAttemptInput(
+                request_id=self.req_id,
+                outcome="error",
+                apply_scheduler_attempt=True,
+            )
+        )
+        self.assertEqual(self.db.get_request(self.req_id), frozen)
 
 
 @requires_postgres

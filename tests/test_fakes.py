@@ -313,7 +313,7 @@ class TestFakePipelineDB(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="wanted"))
 
-        db.record_attempt(42, "validation")
+        db.record_attempt(42, "validation", expected_status="wanted")
 
         row = db.request(42)
         self.assertEqual(row["validation_attempts"], 1)

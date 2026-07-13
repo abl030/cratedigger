@@ -267,10 +267,10 @@ class DatabaseSource:
                 db,
                 request_id,
                 transitions.RequestTransition.to_wanted_fields(
+                    attempt_type="validation",
                     fields=transition_kwargs),
             )
         )
-        db.record_attempt(request_id, "validation")
 
         validation_result = dl.validation_result or bv_result.to_json()
 

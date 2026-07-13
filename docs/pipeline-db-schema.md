@@ -83,6 +83,22 @@ that audit trail.
   fail-closed and use SQL compare-and-set against the exact observed/declared
   source status. `replaced` has no outgoing edge and is created only by the
   one-way `supersede_request_mbid` transaction.
+
+  The explicit transition graph has 13 edges: `wanted → downloading/manual/
+  imported`; `downloading → wanted/manual/imported`; `imported → wanted/manual/
+  imported`; `manual → wanted/manual/imported`; and `wanted → wanted`.
+  Status-only self-transitions for `wanted`, `imported`, and `manual` are true
+  no-ops: they do not change `updated_at` or any other byte. There is no
+  `downloading → downloading` edge because acquiring download ownership must
+  remain an explicit compare-and-set operation.
+
+  Once a row becomes `replaced`, its lifecycle, retry counters, scheduler
+  fields, active download metadata, evidence pointer, and active search-plan
+  pointer are frozen. Late workers use exact-status compare-and-set writes and
+  stop when ownership has changed. A completed search may still append a stale
+  forensic `search_log` row (`stale_reason='request_replaced'`), but it cannot
+  advance the ancestor cursor or backoff. Search-plan generation, supersession,
+  and manual cursor advance reject the replaced ancestor.
 - `search_filetype_override TEXT` — transient CSV filetype list (e.g. `"lossless,mp3 v0,mp3 320"` or just `"lossless"`). Overrides global `allowed_filetypes` for search. Set by quality gate requeue paths and backfill. Cleared on quality gate accept. The `"lossless"` virtual tier matches FLAC, ALAC, and WAV.
 - `target_format TEXT` — persistent user intent for desired format on disk (`"lossless"` or NULL). Set only by user action (CLI/web set-intent toggle). Never cleared by quality gate. When set, keeps lossless on disk (normalizes ALAC/WAV → FLAC) instead of converting to V0/target.
 - `min_bitrate INTEGER` — current min track bitrate in kbps (from beets).

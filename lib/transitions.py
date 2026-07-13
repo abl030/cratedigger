@@ -49,7 +49,13 @@ class TransitionsDB(Protocol):
         **fields: Any,
     ) -> bool: ...
 
-    def record_attempt(self, request_id: int, attempt_type: str) -> None: ...
+    def record_attempt(
+        self,
+        request_id: int,
+        attempt_type: str,
+        *,
+        expected_status: str,
+    ) -> bool: ...
 
     def mark_imported_with_rescue(
         self,
@@ -434,6 +440,7 @@ VALID_TRANSITIONS: dict[tuple[str, str], TransitionSideEffects] = {
 
     # Manual status changes
     ("wanted", "manual"): TransitionSideEffects(),
+    ("imported", "manual"): TransitionSideEffects(),
     # Idempotent reset (re-queue from wanted, field-only update)
     ("wanted", "wanted"): TransitionSideEffects(clear_retry_counters=True),
 
@@ -443,6 +450,7 @@ VALID_TRANSITIONS: dict[tuple[str, str], TransitionSideEffects] = {
 
     # In-place update (quality gate accept, bitrate update)
     ("imported", "imported"): TransitionSideEffects(),
+    ("manual", "manual"): TransitionSideEffects(),
 
     # Admin overrides (force-import, web accept)
     ("manual", "imported"): TransitionSideEffects(),
@@ -522,6 +530,17 @@ def apply_transition(
 
     fx = VALID_TRANSITIONS[(from_status, to_status)]
 
+    # Status-only operator repeats are idempotent success. Field-bearing
+    # same-status commands still take their ordinary CAS writer path.
+    if (
+        from_status == to_status
+        and not transition_fields
+        and state_json is None
+        and attempt_type is None
+        and not extra
+    ):
+        return TransitionApplied(request_id, from_status, to_status)
+
     def _cas_result(applied: bool) -> TransitionResult:
         if applied:
             return TransitionApplied(request_id, from_status, to_status)
@@ -556,8 +575,12 @@ def apply_transition(
             expected_status=from_status,
             **transition_fields,
         )
-        if applied and fx.record_attempt and attempt_type:
-            db.record_attempt(request_id, attempt_type)
+        if applied and attempt_type and not db.record_attempt(
+            request_id,
+            attempt_type,
+            expected_status="wanted",
+        ):
+            return _cas_result(False)
         return _cas_result(applied)
 
     # downloading → wanted: clear active download state, preserve retry counters,
@@ -570,8 +593,12 @@ def apply_transition(
                 **transition_fields,
             )
         )
-        if reset_ok and attempt_type:
-            db.record_attempt(request_id, attempt_type)
+        if reset_ok and attempt_type and not db.record_attempt(
+            request_id,
+            attempt_type,
+            expected_status="wanted",
+        ):
+            return _cas_result(False)
         return _cas_result(reset_ok)
 
     # All other transitions: use update_status

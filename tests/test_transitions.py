@@ -42,8 +42,14 @@ class TestValidateTransition(unittest.TestCase):
     def test_imported_to_imported(self):
         self.assertTrue(validate_transition("imported", "imported"))
 
+    def test_imported_to_manual(self):
+        self.assertTrue(validate_transition("imported", "manual"))
+
     def test_manual_to_wanted(self):
         self.assertTrue(validate_transition("manual", "wanted"))
+
+    def test_manual_to_manual(self):
+        self.assertTrue(validate_transition("manual", "manual"))
 
     # Invalid transitions
     def test_imported_to_downloading_invalid(self):
@@ -111,8 +117,8 @@ class TestTransitionTable(unittest.TestCase):
             self.assertIsInstance(fx, TransitionSideEffects,
                                  f"({from_s}, {to_s}) is not TransitionSideEffects")
 
-    def test_exactly_11_transitions(self):
-        self.assertEqual(len(VALID_TRANSITIONS), 11)
+    def test_exactly_13_transitions(self):
+        self.assertEqual(len(VALID_TRANSITIONS), 13)
 
     def test_all_statuses_reachable(self):
         """Every status appears as a target at least once."""
@@ -271,6 +277,23 @@ class TestApplyTransition(unittest.TestCase):
             cast(Any, db), 1, "manual", from_status="wanted")
         self.assertIsInstance(result, TransitionApplied)
         self.assertEqual(db.request(1)["status"], "manual")
+
+    def test_imported_to_manual_sets_status(self):
+        db = self._make_db("imported")
+        result = apply_transition(
+            cast(Any, db), 1, "manual", from_status="imported")
+        self.assertIsInstance(result, TransitionApplied)
+        self.assertEqual(db.request(1)["status"], "manual")
+
+    def test_operator_same_status_is_byte_identical_success(self):
+        for status in ("wanted", "imported", "manual"):
+            with self.subTest(status=status):
+                db = self._make_db(status)
+                before = db.request(1)
+                result = apply_transition(
+                    cast(Any, db), 1, status, from_status=status)
+                self.assertIsInstance(result, TransitionApplied)
+                self.assertEqual(db.request(1), before)
 
     def test_explicit_source_is_validated_against_the_actual_row(self):
         db = self._make_db("imported")

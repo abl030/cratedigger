@@ -43,6 +43,7 @@ from lib.pipeline_db import (
     SearchLogHistoryPage,
     SearchPlanInspection,
     SearchPlanItemInput,
+    ReplacedRequestMutationError,
 )
 from lib.release_snapshot import (
     ReleaseSnapshot,
@@ -162,6 +163,7 @@ RESULT_NOOP_ACTIVE_PLAN_EXISTS = "noop_active_plan_exists"
 RESULT_FAILED_DETERMINISTIC = "failed_deterministic"
 RESULT_FAILED_TRANSIENT = "failed_transient"
 RESULT_REQUEST_NOT_FOUND = "request_not_found"
+RESULT_REQUEST_REPLACED = "request_replaced"
 # advance_for_request outcomes (forward-only cursor mutation, no plan write).
 RESULT_ADVANCED = "advanced"
 RESULT_NO_ACTIVE_PLAN = "no_active_plan"
@@ -518,6 +520,14 @@ class SearchPlanService:
             # See docs/advisory-locks.md (PLAN namespace).
             if not acquired:
                 return self._lock_contention_result()
+            row = self.db.get_request(request_id)
+            if row is None:
+                return ServiceResult(
+                    outcome=RESULT_REQUEST_NOT_FOUND,
+                    error_message=f"request {request_id} not found",
+                )
+            if row.get("status") == "replaced":
+                return self._replaced_result(request_id)
             snapshot = snapshot_from_add_payload(
                 artist_name=artist_name,
                 album_title=album_title,
@@ -621,6 +631,12 @@ class SearchPlanService:
                     request_id=request_id,
                     error_message=f"request {request_id} not found",
                 )
+            if row.get("status") == "replaced":
+                return AdvanceResult(
+                    outcome=RESULT_REQUEST_REPLACED,
+                    request_id=request_id,
+                    error_message=f"request {request_id} is replaced",
+                )
             active = self.db.get_active_search_plan(request_id)
             if active is None:
                 return AdvanceResult(
@@ -648,6 +664,14 @@ class SearchPlanService:
                 _, prev, new = self.db.advance_search_plan_cursor(
                     request_id, target_ordinal=target,
                     plan_item_count=len(active.items),
+                )
+            except ReplacedRequestMutationError:
+                return AdvanceResult(
+                    outcome=RESULT_REQUEST_REPLACED,
+                    request_id=request_id,
+                    plan_id=active.plan.id,
+                    previous_ordinal=current,
+                    error_message=f"request {request_id} is replaced",
                 )
             except ValueError as e:
                 return AdvanceResult(
@@ -908,6 +932,8 @@ class SearchPlanService:
                 outcome=RESULT_REQUEST_NOT_FOUND,
                 error_message=f"request {request_id} not found",
             )
+        if row.get("status") == "replaced":
+            return self._replaced_result(request_id)
 
         if not regenerate:
             existing = self.db.get_active_search_plan(request_id)
@@ -1119,6 +1145,13 @@ class SearchPlanService:
             ),
         )
 
+    @staticmethod
+    def _replaced_result(request_id: int) -> ServiceResult:
+        return ServiceResult(
+            outcome=RESULT_REQUEST_REPLACED,
+            error_message=f"request {request_id} is replaced",
+        )
+
     def _persist_locked(
         self,
         request_id: int,
@@ -1175,6 +1208,8 @@ class SearchPlanService:
                     metadata_snapshot=metadata_snapshot,
                     provenance=provenance,
                 )
+            except ReplacedRequestMutationError:
+                return self._replaced_result(request_id)
             except Exception as exc:  # noqa: BLE001
                 return self._record_failure(
                     request_id,
@@ -1198,6 +1233,8 @@ class SearchPlanService:
                 provenance=provenance,
                 set_active=True,
             )
+        except ReplacedRequestMutationError:
+            return self._replaced_result(request_id)
         except Exception as exc:  # noqa: BLE001
             return self._record_failure(
                 request_id,
@@ -1233,6 +1270,8 @@ class SearchPlanService:
                 metadata_snapshot=metadata_snapshot,
                 provenance=sanitized_prov,
             )
+        except ReplacedRequestMutationError:
+            return self._replaced_result(request_id)
         except Exception as exc:  # noqa: BLE001
             # If we can't even persist the failure row, surface that as
             # a transient outcome but do not raise — callers (CLI/web)

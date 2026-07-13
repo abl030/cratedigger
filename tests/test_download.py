@@ -1669,6 +1669,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             db.seed_request(make_request_row(
                 id=42,
                 status="downloading",
+                active_download_state={"files": [], "filetype": "mp3"},
                 artist_name="Artist",
                 album_title="Album",
                 year=2024,
@@ -2576,6 +2577,7 @@ class TestPreMatchRejectRecordsNullDistance(unittest.TestCase):
             db = FakePipelineDB()
             db.seed_request(make_request_row(
                 id=2812, status="downloading",
+                active_download_state={"files": [], "filetype": "mp3"},
                 artist_name="Palo Santo Reject",
                 album_title="Wrong Match Test",
                 mb_release_id="test-mbid-2812",

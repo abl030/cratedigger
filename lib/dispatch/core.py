@@ -378,17 +378,26 @@ def dispatch_import_core(
             # ``lib/download.py::_import_subprocess_already_started``.
             if scenario not in FORCE_MANUAL_SCENARIOS:
                 try:
-                    db.mark_import_subprocess_started(
+                    stamped = db.mark_import_subprocess_started(
                         request_id,
                         datetime.now(timezone.utc).isoformat(),
                     )
                 except Exception:
                     logger.exception(
                         "Failed to stamp import_subprocess_started_at "
-                        "for request %s; continuing with subprocess "
-                        "launch (resume guard may fail-open until "
-                        "completion)",
+                        "for request %s; deferring before subprocess launch",
                         request_id,
+                    )
+                    return DispatchOutcome(
+                        success=False,
+                        message="Could not claim request before import launch",
+                        deferred=True,
+                    )
+                if not stamped:
+                    return DispatchOutcome(
+                        success=False,
+                        message="Request state changed before import launch",
+                        deferred=True,
                     )
             # Force/manual import operates on the user's only copy of the source
             # material (typically failed_imports/…). Tell the harness to keep

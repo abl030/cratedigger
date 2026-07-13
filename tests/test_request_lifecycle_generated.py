@@ -17,7 +17,8 @@ lifecycle invariants after every step:
 * every replaced row has a linked descendant pointing back via
   ``replaces_request_id`` (unique structurally — a replaced row cannot be
   superseded again) — Replace creates a new row, not a mutation;
-* ``active_download_state`` exists only on ``downloading`` rows;
+* ``active_download_state`` exists only on ``downloading`` rows or frozen
+  ``replaced`` rows that preserve their in-flight historical snapshot;
 * the guarded transitions really guard: a download claim on a non-wanted
   row and a downloading→wanted requeue on a non-downloading row are
   no-ops that leave the row untouched.
@@ -56,6 +57,17 @@ from lib.transitions import (
     TransitionConflict,
     TransitionResult,
     finalize_request,
+)
+from lib.config import CratediggerConfig
+from lib.pipeline_db import (
+    ConsumedAttemptInput,
+    NonConsumingAttemptInput,
+    ReplacedRequestMutationError,
+    SearchPlanItemInput,
+)
+from lib.search_plan_service import (
+    RESULT_REQUEST_REPLACED,
+    SearchPlanService,
 )
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_active_download_state_json
@@ -100,7 +112,10 @@ def assert_identity_immutable(identity: tuple, row: dict) -> None:
 
 
 def assert_download_state_coherent(row: dict) -> None:
-    if row["status"] != "downloading" and row.get("active_download_state"):
+    if (
+        row["status"] not in {"downloading", "replaced"}
+        and row.get("active_download_state")
+    ):
         raise AssertionError(
             f"request {row['id']} carries active_download_state while "
             f"{row['status']!r}")
@@ -326,18 +341,39 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
                 f"invalid/stale {actual!r}->{target_status!r} applied: {result}")
         assert_transition_result_matches(before, after, target_status, result)
 
-    @precondition(
-        lambda self: self._ids_with_status("wanted", "imported", "manual"))
+    @precondition(lambda self: self._ids_with_status(
+        "wanted", "downloading", "imported", "manual"))
     @rule(data=st.data())
     def replace(self, data) -> None:
         """Replace (issue-#282 shape): the old row flips to 'replaced' and
-        freezes; a NEW linked row is created. Downloading rows are excluded
-        because the replace service converges active downloads before the
-        supersede (Phase 0) — the machine mirrors that caller guard."""
+        freezes; a NEW linked row is created. Replace deliberately accepts
+        downloading rows, so in-flight writers must lose their later CAS."""
         rid = data.draw(
             st.sampled_from(
-                self._ids_with_status("wanted", "imported", "manual")),
+                self._ids_with_status(
+                    "wanted", "downloading", "imported", "manual")),
             label="replace target")
+        if self._row(rid).get("active_plan_id") is None:
+            self.db.create_successful_search_plan(
+                request_id=rid,
+                generator_id="lifecycle-generator",
+                items=[
+                    SearchPlanItemInput(
+                        ordinal=0,
+                        strategy="album",
+                        query="Lifecycle Artist Album",
+                        canonical_query_key="lifecycle artist album",
+                        repeat_group=None,
+                    ),
+                    SearchPlanItemInput(
+                        ordinal=1,
+                        strategy="track",
+                        query="Lifecycle Artist Track",
+                        canonical_query_key="lifecycle artist track",
+                        repeat_group=None,
+                    ),
+                ],
+            )
         new_id = self.db.supersede_request_mbid(
             rid,
             new_mb_release_id=self._unique_mbid(),
@@ -358,6 +394,88 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
         self.frozen[rid] = copy.deepcopy(old_row)
         assert_replacement_linked(
             rid, self.db.get_request_by_replaces_request_id(rid))
+
+    @precondition(lambda self: bool(self.frozen))
+    @rule(data=st.data())
+    def late_writers_cannot_mutate_replaced_ancestor(self, data) -> None:
+        """Exercise real metadata/search-plan writers after supersede."""
+        rid = data.draw(st.sampled_from(sorted(self.frozen)), label="frozen row")
+        snapshot = copy.deepcopy(self._row(rid))
+
+        if self.db.update_download_state(
+            rid,
+            make_active_download_state_json([]),
+            expected_status="downloading",
+        ):
+            raise AssertionError("late download-state write thawed replaced row")
+        if self.db.update_download_state_current_path(rid, "/late/path"):
+            raise AssertionError("late path write thawed replaced row")
+        if self.db.mark_import_subprocess_started(rid, "late"):
+            raise AssertionError("late import stamp thawed replaced row")
+        if self.db.set_request_current_evidence(
+            rid,
+            999,
+            expected_status="downloading",
+        ):
+            raise AssertionError("late evidence link thawed replaced row")
+        if self.db.record_attempt(
+            rid,
+            "download",
+            expected_status="wanted",
+        ):
+            raise AssertionError("late retry write thawed replaced row")
+
+        try:
+            self.db.create_failed_search_plan(
+                request_id=rid,
+                generator_id="late-generator",
+                failure_class="dependency_failure",
+                transient=True,
+            )
+        except ReplacedRequestMutationError:
+            pass
+        else:
+            raise AssertionError("late plan generation accepted replaced row")
+
+        active = self.db.get_active_search_plan(rid)
+        assert active is not None
+        first = active.items[0]
+        consumed = self.db.record_consumed_search_attempt(
+            ConsumedAttemptInput(
+                request_id=rid,
+                plan_id=active.plan.id,
+                plan_item_id=first.id,
+                plan_ordinal=first.ordinal,
+                plan_strategy=first.strategy,
+                plan_canonical_query_key=first.canonical_query_key,
+                plan_repeat_group=first.repeat_group,
+                plan_generator_id=active.plan.generator_id,
+                query=first.query,
+                outcome="no_results",
+                plan_item_count=len(active.items),
+                cycle_count_snapshot=active.cycle_count,
+                apply_scheduler_attempt=True,
+            )
+        )
+        if not consumed.is_stale:
+            raise AssertionError("replaced-row consumed attempt was accepted")
+        self.db.record_non_consuming_search_attempt(
+            NonConsumingAttemptInput(
+                request_id=rid,
+                outcome="error",
+                apply_scheduler_attempt=True,
+            )
+        )
+
+        result = SearchPlanService(
+            self.db,
+            CratediggerConfig(),
+        ).generate_for_request(rid, regenerate=True)
+        if result.outcome != RESULT_REQUEST_REPLACED:
+            raise AssertionError(
+                f"service generated plan for replaced row: {result.outcome}"
+            )
+        assert_replaced_row_frozen(snapshot, self._row(rid))
 
     # -- invariants (checked after every rule) --------------------------
 

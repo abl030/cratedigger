@@ -45,6 +45,14 @@ DASHBOARD_WANTED_TREND_WINDOWS: tuple[tuple[str, int], ...] = (
 DASHBOARD_WANTED_BACKLOG_STATUSES: tuple[str, ...] = ("wanted", "downloading")
 
 
+class ReplacedRequestMutationError(RuntimeError):
+    """Raised when a writer targets a frozen ``replaced`` request row."""
+
+    def __init__(self, request_id: int) -> None:
+        self.request_id = int(request_id)
+        super().__init__(f"request {request_id} is replaced and immutable")
+
+
 def _escape_like_pattern(value: str) -> str:
     """Escape SQL LIKE wildcards for ``... LIKE %s ESCAPE '\'``."""
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

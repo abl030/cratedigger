@@ -499,9 +499,13 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
+        request_overrides = {
+            "active_download_state": {"files": [], "filetype": "mp3"},
+            **(request_overrides or {}),
+        }
         db.seed_request(make_request_row(
             id=42, status="downloading",
-            **(request_overrides or {}),
+            **request_overrides,
         ))
 
         if cfg is None:
@@ -1280,6 +1284,7 @@ class TestLosslessSourceLockedSlice(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42, status="downloading", mb_release_id="mbid-123",
+            active_download_state={"files": [], "filetype": "mp3"},
             current_lossless_source_v0_probe_min_bitrate=210,
             current_lossless_source_v0_probe_avg_bitrate=240,
             current_lossless_source_v0_probe_median_bitrate=235,
@@ -1345,7 +1350,11 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         )
 
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS, pipeline_db_enabled=True)
         audit = SpectralDetail(
@@ -1420,7 +1429,11 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
 
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
 
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
@@ -1468,7 +1481,11 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
 
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS, pipeline_db_enabled=True)
         audit = SpectralDetail(
@@ -1507,7 +1524,11 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
 
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS, pipeline_db_enabled=True)
         audit = SpectralDetail(
@@ -1552,7 +1573,11 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         )
 
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS, pipeline_db_enabled=True)
         audit = SpectralDetail(
@@ -2054,9 +2079,13 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
         from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
+        request_overrides = {
+            "active_download_state": {"files": [], "filetype": "mp3"},
+            **(request_overrides or {}),
+        }
         db.seed_request(make_request_row(
             id=42, status="downloading",
-            **(request_overrides or {}),
+            **request_overrides,
         ))
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
@@ -2296,7 +2325,11 @@ class TestReleaseLockContention(unittest.TestCase):
     def _make_db(self) -> FakePipelineDB:
         db = FakePipelineDB()
         db.seed_request(make_request_row(
-            id=42, mb_release_id=self.MBID, status="downloading"))
+            id=42,
+            mb_release_id=self.MBID,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
         return db
 
     def test_auto_contention_returns_deferred_and_leaves_all_state(self):
@@ -2524,7 +2557,11 @@ class TestReleaseLockContention(unittest.TestCase):
         db = self._make_db()
         # Re-seed with empty mb_release_id.
         db.seed_request(make_request_row(
-            id=43, mb_release_id="", status="downloading"))
+            id=43,
+            mb_release_id="",
+            status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
         ir = make_import_result(decision="import", new_min_bitrate=245)
         beets_info = AlbumInfo(
             album_id=1, track_count=10, min_bitrate_kbps=245,

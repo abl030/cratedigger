@@ -554,6 +554,44 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         _assert_required_fields(self, data, self.UPDATE_REQUIRED_FIELDS,
                                 "pipeline update response")
 
+    def test_pipeline_update_same_status_is_idempotent_for_operator_statuses(self):
+        for index, request_status in enumerate(
+            ("wanted", "imported", "manual"),
+            start=601,
+        ):
+            with self.subTest(status=request_status):
+                self.db.seed_request(make_request_row(
+                    id=index,
+                    status=request_status,
+                    mb_release_id=f"same-status-{index}",
+                ))
+                before = self.db.get_request(index)
+
+                status, data = self._post(
+                    "/api/pipeline/update",
+                    {"id": index, "status": request_status},
+                )
+
+                self.assertEqual(status, 200)
+                self.assertEqual(data["new_status"], request_status)
+                self.assertEqual(self.db.get_request(index), before)
+
+    def test_pipeline_update_imported_to_manual(self):
+        self.db.seed_request(make_request_row(
+            id=604,
+            status="imported",
+            mb_release_id="imported-to-manual",
+        ))
+
+        status, data = self._post(
+            "/api/pipeline/update",
+            {"id": 604, "status": "manual"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["new_status"], "manual")
+        self.assertEqual(self.db.request(604)["status"], "manual")
+
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_pipeline_update_maps_stale_transition_to_409_without_success(
         self, mock_transition,

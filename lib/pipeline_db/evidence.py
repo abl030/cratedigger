@@ -284,12 +284,22 @@ class _EvidenceMixin(_PipelineDBBase):
         self,
         request_id: int,
         evidence_id: int | None,
-    ) -> None:
-        self._execute(
-            "UPDATE album_requests SET current_evidence_id = %s WHERE id = %s",
-            (evidence_id, int(request_id)),
+        *,
+        expected_status: str | None = None,
+    ) -> bool:
+        cur = self._execute(
+            "UPDATE album_requests SET current_evidence_id = %s "
+            "WHERE id = %s AND status != 'replaced' "
+            "AND (%s IS NULL OR status = %s)",
+            (
+                evidence_id,
+                int(request_id),
+                expected_status,
+                expected_status,
+            ),
         )
         self.conn.commit()
+        return cur.rowcount > 0
 
 
     def get_import_job_candidate_evidence_id(

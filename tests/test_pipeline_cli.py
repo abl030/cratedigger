@@ -464,6 +464,33 @@ class TestCmdCancel(unittest.TestCase):
 
 
 class TestCmdSet(unittest.TestCase):
+    def test_same_status_is_idempotent_for_operator_statuses(self):
+        for index, status in enumerate(("wanted", "imported", "manual"), 1):
+            with self.subTest(status=status):
+                db = FakePipelineDB()
+                db.seed_request(make_request_row(id=index, status=status))
+                before = db.get_request(index)
+
+                rc = pipeline_cli.cmd_set(
+                    cast(Any, db),
+                    MagicMock(id=index, status=status),
+                )
+
+                self.assertEqual(rc, 0)
+                self.assertEqual(db.get_request(index), before)
+
+    def test_imported_to_manual_is_supported(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=8, status="imported"))
+
+        rc = pipeline_cli.cmd_set(
+            cast(Any, db),
+            MagicMock(id=8, status="manual"),
+        )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(db.request(8)["status"], "manual")
+
     @patch("builtins.print")
     @patch("scripts.pipeline_cli.album_requests.finalize_request")
     def test_set_routes_dynamic_status_through_shared_finalizer(
@@ -2381,6 +2408,19 @@ class TestCmdSearchPlanRegenerate(unittest.TestCase):
         self.assertEqual(payload["request_status"], "imported")
         self.assertFalse(payload["executable"])
 
+    def test_regenerate_replaced_request_returns_4_without_mutation(self):
+        db, rid, _ = self._seed_with_plan()
+        db._requests[rid]["status"] = "replaced"
+        before = db.request(rid)
+        plans_before = dict(db.search_plans)
+
+        rc, out = self._run(db, rid, json_out=True)
+
+        self.assertEqual(rc, 4)
+        self.assertEqual(json.loads(out)["outcome"], "request_replaced")
+        self.assertEqual(db.request(rid), before)
+        self.assertEqual(db.search_plans, plans_before)
+
     def test_regenerate_deterministic_failure_returns_3_preserves_old_plan(self):
         from tests.fakes import FakePipelineDB
         from lib.pipeline_db import SearchPlanItemInput
@@ -2841,6 +2881,17 @@ class TestCmdSearchPlanAdvance(unittest.TestCase):
         rc, out = self._run(db, rid, to_ordinal=1)
         self.assertEqual(rc, 4)
         self.assertIn("no_active_plan", out)
+
+    def test_advance_returns_4_for_replaced_request_without_mutation(self):
+        db, rid = self._seed_plan()
+        db._requests[rid]["status"] = "replaced"
+        before = db.request(rid)
+
+        rc, out = self._run(db, rid, to_ordinal=5, json_out=True)
+
+        self.assertEqual(rc, 4)
+        self.assertEqual(json.loads(out)["outcome"], "request_replaced")
+        self.assertEqual(db.request(rid), before)
 
     def test_advance_json_output_carries_full_payload(self):
         db, rid = self._seed_plan()

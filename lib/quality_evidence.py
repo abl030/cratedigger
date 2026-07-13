@@ -65,8 +65,12 @@ class QualityEvidenceDB(Protocol):
     ) -> None: ...
 
     def set_request_current_evidence(
-        self, request_id: int, evidence_id: int | None,
-    ) -> None: ...
+        self,
+        request_id: int,
+        evidence_id: int | None,
+        *,
+        expected_status: str | None = None,
+    ) -> bool: ...
 
     def get_import_job_candidate_evidence_id(
         self, import_job_id: int,
@@ -1016,7 +1020,24 @@ def propagate_candidate_evidence_to_current(
         snapshot_fingerprint=evidence.snapshot_fingerprint,
     )
     if persisted is not None and persisted.id is not None:
-        db.set_request_current_evidence(request_id, persisted.id)
+        request_row = db.get_request(request_id)
+        if request_row is None:
+            return EvidenceBuildResult(
+                evidence,
+                "stale_request",
+                "request disappeared before current evidence link",
+            )
+        expected_status = str(request_row["status"])
+        if expected_status == "replaced" or not db.set_request_current_evidence(
+            request_id,
+            persisted.id,
+            expected_status=expected_status,
+        ):
+            return EvidenceBuildResult(
+                evidence,
+                "stale_request",
+                "request state changed before current evidence link",
+            )
     return EvidenceBuildResult(evidence, "ready")
 
 
@@ -1062,7 +1083,23 @@ def backfill_current_evidence_from_album_info(
             snapshot_fingerprint=result.evidence.snapshot_fingerprint,
         )
         if persisted is not None and persisted.id is not None:
-            db.set_request_current_evidence(request_id, persisted.id)
+            if request_row is None:
+                return EvidenceBuildResult(
+                    result.evidence,
+                    "stale_request",
+                    "request disappeared before current evidence link",
+                )
+            expected_status = str(request_row["status"])
+            if expected_status == "replaced" or not db.set_request_current_evidence(
+                request_id,
+                persisted.id,
+                expected_status=expected_status,
+            ):
+                return EvidenceBuildResult(
+                    result.evidence,
+                    "stale_request",
+                    "request state changed before current evidence link",
+                )
     return result
 
 
