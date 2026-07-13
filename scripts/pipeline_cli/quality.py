@@ -125,11 +125,15 @@ def cmd_quality(db, args):
     if min_br is not None:
         if final_format:
             try:
-                target_contract = TargetQualityContract.from_format(
-                    str(final_format),
-                    projected_is_cbr=(
-                        info.is_cbr if info is not None else None
-                    ),
+                target_contract = (
+                    TargetQualityContract.from_projection(
+                        str(final_format),
+                        projected_is_cbr=info.is_cbr,
+                    )
+                    if info is not None
+                    else TargetQualityContract.from_explicit_label(
+                        str(final_format)
+                    )
                 )
             except ValueError:
                 gate_unavailable_reason = "materialized MP3 mode unknown"

@@ -82,7 +82,7 @@ def load_quality_gate_state(
     target_contract = None
     verified_lossless = bool(req.get("verified_lossless")) if req else False
     if req and req.get("final_format"):
-        target_contract = TargetQualityContract.from_format(
+        target_contract = TargetQualityContract.from_projection(
             str(req["final_format"]),
             # Bare MP3 is not self-describing. At the post-import gate the
             # materialized album is the available confirmation of the

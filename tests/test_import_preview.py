@@ -718,7 +718,9 @@ class TestImportPreviewPath(unittest.TestCase):
                             format="FLAC",
                         ),
                         target_quality_contract=(
-                            TargetQualityContract.from_format("opus 128")
+                            TargetQualityContract.from_explicit_label(
+                                "opus 128"
+                            )
                         ),
                     )
                 ),
