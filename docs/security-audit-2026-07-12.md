@@ -152,7 +152,10 @@ confirmation values only. The service rejects a mismatch before mutation and
 the HTTP/CLI adapters map that semantic conflict to 422/exit 3. A beets album
 row carrying both a valid MusicBrainz UUID and a distinct valid Discogs ID is
 not collapsed to one source: it is ambiguous authority and fails closed before
-pipeline lookup, lock acquisition, or mutation.
+pipeline lookup, lock acquisition, or mutation. Any nonempty malformed identity
+field fails closed for the same reason: importer code may use that raw truthy
+value as its RELEASE lock key. Empty, whitespace, and zero sentinels remain
+absence; the same valid numeric Discogs ID in both columns remains one identity.
 
 Two destructive workflows accept multiple independently trusted identifiers
 without proving they describe the same release:

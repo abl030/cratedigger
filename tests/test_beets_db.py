@@ -1185,6 +1185,38 @@ class TestGetAlbumDetail(unittest.TestCase):
         )
         self.assertEqual(detail["discogs_albumid"], "12856590")
 
+    def test_preserves_nonempty_malformed_identity_for_fail_closed_authority(
+        self,
+    ) -> None:
+        for mb_albumid, discogs_albumid in (
+            ("malformed-provider-id", 12856590),
+            ("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "malformed-provider-id"),
+        ):
+            with self.subTest(
+                mb_albumid=mb_albumid,
+                discogs_albumid=discogs_albumid,
+            ):
+                conn = sqlite3.connect(self.db_path)
+                try:
+                    conn.execute(
+                        "UPDATE albums SET mb_albumid = ?, discogs_albumid = ? "
+                        "WHERE id = 1",
+                        (mb_albumid, discogs_albumid),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+
+                with BeetsDB(self.db_path) as db:
+                    detail = db.get_album_detail(1)
+
+                assert detail is not None
+                self.assertEqual(detail["mb_albumid"], str(mb_albumid))
+                self.assertEqual(
+                    detail["discogs_albumid"],
+                    str(discogs_albumid),
+                )
+
 
 class TestGetAlbumsByArtist(unittest.TestCase):
     """Test get_albums_by_artist — albums by artist name."""

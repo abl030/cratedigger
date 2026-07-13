@@ -349,7 +349,7 @@ session and returns False — revisit the ordering rules.
 | Auto + force/manual inner | `lib/dispatch/core.py` | `dispatch_import_core` | RELEASE | `release_id_to_lock_key(mb_release_id)` |
 | Force/manual outer | `lib/dispatch/entry_points.py` | `dispatch_import_from_db` | IMPORT | `request_id` |
 | Ban-source destructive action | `lib/destructive_release_service.py` | `ban_source` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(server release id)` |
-| Library-delete destructive action | `lib/destructive_release_service.py` | `delete_release_from_library` | IMPORT then RELEASE, or RELEASE only without a pipeline row; ambiguous dual MB+Discogs album identity rejects before locks | server-derived pipeline request id; `release_id_to_lock_key(server release id)` |
+| Library-delete destructive action | `lib/destructive_release_service.py` | `delete_release_from_library` | IMPORT then RELEASE, or RELEASE only without a pipeline row; ambiguous dual or malformed-nonempty album identity rejects before locks | server-derived pipeline request id; `release_id_to_lock_key(server release id)` |
 | Replace operator action | `lib/mbid_replace_service.py` | `MbidReplaceService.replace_request_mbid` | IMPORT | `request_id` |
 | Importer worker singleton | `scripts/importer.py` | `main` | IMPORTER | `1` |
 | Import queue dedupe | `lib/pipeline_db/` | `enqueue_import_job` | unique index | `dedupe_key` |

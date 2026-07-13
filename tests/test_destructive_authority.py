@@ -35,6 +35,7 @@ from tests.test_pipeline_db import TEST_DSN, make_db, requires_postgres
 RELEASE_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 RELEASE_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 DISCOGS_A = "12856590"
+MALFORMED_ID = "malformed-provider-id"
 
 
 def _album(album_id: int = 7, release_id: str = RELEASE_A) -> dict[str, object]:
@@ -137,6 +138,39 @@ class TestBanSourceAuthority(unittest.TestCase):
 
         self.assertIsInstance(result, BanSourceReleaseMismatch)
         self._assert_no_mutation()
+
+    def test_nonempty_malformed_request_identity_fails_before_release_lock(
+        self,
+    ) -> None:
+        for mb_release_id, discogs_release_id in (
+            (MALFORMED_ID, DISCOGS_A),
+            (RELEASE_A, MALFORMED_ID),
+        ):
+            with self.subTest(
+                mb_release_id=mb_release_id,
+                discogs_release_id=discogs_release_id,
+            ):
+                self.db = FakePipelineDB()
+                self.db.seed_request(make_request_row(
+                    id=41,
+                    status="imported",
+                    mb_release_id=mb_release_id,
+                    discogs_release_id=discogs_release_id,
+                ))
+                self.beets = FakeBeetsDB()
+
+                result = ban_source(
+                    pipeline_db=self.db,
+                    beets_db=self.beets,
+                    request=BanSourceRequest(request_id=41),
+                )
+
+                self.assertIsInstance(result, BanSourceReleaseMismatch)
+                self.assertEqual(
+                    self.db.advisory_lock_calls,
+                    [(ADVISORY_LOCK_NAMESPACE_IMPORT, 41)],
+                )
+                self._assert_no_mutation()
 
 
 class TestLibraryDeleteAuthority(unittest.TestCase):
@@ -267,6 +301,40 @@ class TestLibraryDeleteAuthority(unittest.TestCase):
                     self.assertIsNotNone(db.get_request(41))
                 if pipeline_world in ("discogs", "both"):
                     self.assertIsNotNone(db.get_request(42))
+
+    def test_nonempty_malformed_album_identity_fails_before_any_lock(self) -> None:
+        for mb_albumid, discogs_albumid in (
+            (MALFORMED_ID, DISCOGS_A),
+            (RELEASE_A, MALFORMED_ID),
+        ):
+            with self.subTest(
+                mb_albumid=mb_albumid,
+                discogs_albumid=discogs_albumid,
+            ):
+                self.db = FakePipelineDB()
+                self.db.seed_request(make_request_row(
+                    id=41,
+                    status="imported",
+                    mb_release_id=RELEASE_A,
+                ))
+                self.beets = FakeBeetsDB()
+                self.beets.set_album_detail(7, {
+                    **_album(),
+                    "mb_albumid": mb_albumid,
+                    "discogs_albumid": discogs_albumid,
+                })
+
+                result = delete_release_from_library(
+                    pipeline_db=self.db,
+                    beets_db=self.beets,
+                    request=DeleteRequest(album_id=7, purge_pipeline=True),
+                )
+
+                self.assertIsInstance(result, DeleteReleaseMismatch)
+                self.assertEqual(self.db.advisory_lock_calls, [])
+                self.assertEqual(self.beets.delete_album_calls, [])
+                self.assertIsNotNone(self.beets.get_album_detail(7))
+                self.assertIsNotNone(self.db.get_request(41))
 
 
 @requires_postgres
@@ -420,7 +488,7 @@ class TestDestructiveAuthorityRealPostgres(unittest.TestCase):
         finally:
             db1.close()
 
-    def test_import_lock_remains_held_during_instrumented_beets_mutation(
+    def test_both_importer_locks_remain_held_during_beets_mutation(
         self,
     ) -> None:
         db1 = make_db()
@@ -464,6 +532,11 @@ class TestDestructiveAuthorityRealPostgres(unittest.TestCase):
                     request_id,
                 ) as acquired_during_delete:
                     self.assertFalse(acquired_during_delete)
+                with db1.advisory_lock(
+                    ADVISORY_LOCK_NAMESPACE_RELEASE,
+                    release_id_to_lock_key(RELEASE_A),
+                ) as release_acquired_during_delete:
+                    self.assertFalse(release_acquired_during_delete)
                 allow_delete.set()
                 result = future.result(timeout=5)
 

@@ -94,12 +94,22 @@ class FinalizeRequestFn(Protocol):
     ) -> bool: ...
 
 
-def _distinct_identities(*values: object | None) -> tuple[ReleaseIdentity, ...]:
-    """Return every distinct canonical identity carried by server state."""
+def _distinct_identities(
+    *values: object | None,
+) -> tuple[ReleaseIdentity, ...] | None:
+    """Return distinct identities, or ``None`` for malformed server state."""
     identities: list[ReleaseIdentity] = []
     for value in values:
-        identity = ReleaseIdentity.from_id(value)
-        if identity is not None and identity not in identities:
+        normalized = normalize_release_id(value)
+        if not normalized:
+            continue
+        identity = ReleaseIdentity.from_id(normalized)
+        if identity is None:
+            # A nonempty field is authority-bearing even when malformed.  It
+            # cannot be silently treated as absent: importer code may still
+            # use the raw truthy value to choose a different RELEASE lock.
+            return None
+        if identity not in identities:
             identities.append(identity)
     return tuple(identities)
 
@@ -109,7 +119,9 @@ def _request_identity(row: dict[str, Any]) -> ReleaseIdentity | None:
         row.get("mb_release_id"),
         row.get("discogs_release_id"),
     )
-    return identities[0] if len(identities) == 1 else None
+    if identities is None or len(identities) != 1:
+        return None
+    return identities[0]
 
 
 def _album_identity(row: dict[str, object]) -> ReleaseIdentity | None:
@@ -118,7 +130,9 @@ def _album_identity(row: dict[str, object]) -> ReleaseIdentity | None:
         row.get("mb_albumid"),
         row.get("discogs_albumid"),
     )
-    return identities[0] if len(identities) == 1 else None
+    if identities is None or len(identities) != 1:
+        return None
+    return identities[0]
 
 
 def resolve_pipeline_request(

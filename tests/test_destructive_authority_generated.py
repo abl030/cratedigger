@@ -101,6 +101,64 @@ def _different_release(release_id: str) -> str:
 
 MB_RELEASE_IDS = st.uuids().map(str)
 DISCOGS_RELEASE_IDS = st.integers(min_value=1, max_value=2_000_000_000).map(str)
+INVALID_SERVER_IDS = st.text(max_size=24).map(lambda suffix: f"invalid:{suffix}")
+ABSENT_SENTINELS = st.sampled_from((None, "", " ", 0, "0", " 0 "))
+IDENTITY_SHAPES = (
+    "mb",
+    "discogs",
+    "discogs_dual_layout",
+    "dual",
+    "invalid_primary_valid_discogs",
+    "valid_mb_invalid_secondary",
+    "invalid_only",
+    "sentinel_primary_valid_discogs",
+    "valid_mb_sentinel_secondary",
+    "sentinel_only",
+)
+VALID_AUTHORITY_SHAPES = {
+    "mb",
+    "discogs",
+    "discogs_dual_layout",
+    "sentinel_primary_valid_discogs",
+    "valid_mb_sentinel_secondary",
+}
+
+
+def _identity_fields(
+    shape: str,
+    *,
+    mb_id: str,
+    discogs_id: str,
+    invalid_id: str,
+    sentinel: object | None,
+) -> tuple[object | None, object | None]:
+    return {
+        "mb": (mb_id, None),
+        "discogs": (None, discogs_id),
+        "discogs_dual_layout": (discogs_id, discogs_id),
+        "dual": (mb_id, discogs_id),
+        "invalid_primary_valid_discogs": (invalid_id, discogs_id),
+        "valid_mb_invalid_secondary": (mb_id, invalid_id),
+        "invalid_only": (invalid_id, None),
+        "sentinel_primary_valid_discogs": (sentinel, discogs_id),
+        "valid_mb_sentinel_secondary": (mb_id, sentinel),
+        "sentinel_only": (sentinel, None),
+    }[shape]
+
+
+def _authoritative_release(
+    shape: str,
+    *,
+    mb_id: str,
+    discogs_id: str,
+) -> str | None:
+    if shape not in VALID_AUTHORITY_SHAPES:
+        return None
+    if shape in ("mb", "valid_mb_sentinel_secondary"):
+        return mb_id
+    return discogs_id
+
+
 def _configure_lock_world(
     db: FakePipelineDB,
     *,
@@ -137,6 +195,18 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
     @example(
         mb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         discogs_id="12856590",
+        invalid_id="invalid:provider",
+        sentinel="0",
+        identity_shape="invalid_primary_valid_discogs",
+        identity_matches=True,
+        lock_failure="none",
+        job_race=False,
+    )
+    @example(
+        mb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        discogs_id="12856590",
+        invalid_id="invalid:provider",
+        sentinel="0",
         identity_shape="discogs_dual_layout",
         identity_matches=True,
         lock_failure="none",
@@ -145,6 +215,8 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
     @example(
         mb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         discogs_id="12856590",
+        invalid_id="invalid:provider",
+        sentinel=None,
         identity_shape="dual",
         identity_matches=True,
         lock_failure="none",
@@ -153,9 +225,9 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
     @given(
         mb_id=MB_RELEASE_IDS,
         discogs_id=DISCOGS_RELEASE_IDS,
-        identity_shape=st.sampled_from((
-            "mb", "discogs", "discogs_dual_layout", "dual",
-        )),
+        invalid_id=INVALID_SERVER_IDS,
+        sentinel=ABSENT_SENTINELS,
+        identity_shape=st.sampled_from(IDENTITY_SHAPES),
         identity_matches=st.booleans(),
         lock_failure=st.sampled_from(("none", "import", "release")),
         job_race=st.booleans(),
@@ -164,25 +236,31 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
         self,
         mb_id: str,
         discogs_id: str,
+        invalid_id: str,
+        sentinel: object | None,
         identity_shape: str,
         identity_matches: bool,
         lock_failure: str,
         job_race: bool,
     ) -> None:
-        release_id = mb_id if identity_shape in ("mb", "dual") else discogs_id
+        primary, secondary = _identity_fields(
+            identity_shape,
+            mb_id=mb_id,
+            discogs_id=discogs_id,
+            invalid_id=invalid_id,
+            sentinel=sentinel,
+        )
+        authoritative_release = _authoritative_release(
+            identity_shape,
+            mb_id=mb_id,
+            discogs_id=discogs_id,
+        )
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=41,
             status="imported",
-            mb_release_id=(
-                mb_id if identity_shape in ("mb", "dual")
-                else discogs_id
-            ),
-            discogs_release_id=(
-                discogs_id
-                if identity_shape in ("discogs", "discogs_dual_layout", "dual")
-                else None
-            ),
+            mb_release_id=primary,
+            discogs_release_id=secondary,
         ))
         beets = FakeBeetsDB()
         _configure_lock_world(
@@ -191,7 +269,11 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
             lock_failure=lock_failure,
             job_race=job_race,
         )
-        expected = release_id if identity_matches else _different_release(release_id)
+        expected = (
+            authoritative_release
+            if identity_matches
+            else _different_release(mb_id)
+        )
         before = snapshot_state(db, beets, request_ids=(41,), album_id=7)
 
         result = ban_source(
@@ -207,7 +289,7 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
             rejected=not isinstance(result, BanSourceSuccess),
         )
         should_succeed = (
-            identity_shape != "dual"
+            authoritative_release is not None
             and identity_matches
             and lock_failure == "none"
             and not job_race
@@ -217,6 +299,8 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
     @example(
         mb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         discogs_id="12856590",
+        invalid_id="invalid:provider",
+        sentinel="0",
         album_shape="mb",
         seed_mb_pipeline=True,
         seed_discogs_pipeline=False,
@@ -229,8 +313,26 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
         sidecar=False,
     )
     @example(
+        mb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        discogs_id="12856590",
+        invalid_id="invalid:provider",
+        sentinel=" 0 ",
+        album_shape="sentinel_primary_valid_discogs",
+        seed_mb_pipeline=False,
+        seed_discogs_pipeline=True,
+        release_confirmation="same",
+        pipeline_confirmation="same",
+        lock_failure="none",
+        job_race=False,
+        purge_pipeline=False,
+        file_payloads=[b"sentinel-track"],
+        sidecar=False,
+    )
+    @example(
         mb_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
         discogs_id="12856590",
+        invalid_id="invalid:provider",
+        sentinel=None,
         album_shape="discogs",
         seed_mb_pipeline=False,
         seed_discogs_pipeline=True,
@@ -245,9 +347,9 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
     @given(
         mb_id=MB_RELEASE_IDS,
         discogs_id=DISCOGS_RELEASE_IDS,
-        album_shape=st.sampled_from((
-            "mb", "discogs", "discogs_dual_layout", "dual",
-        )),
+        invalid_id=INVALID_SERVER_IDS,
+        sentinel=ABSENT_SENTINELS,
+        album_shape=st.sampled_from(IDENTITY_SHAPES),
         seed_mb_pipeline=st.booleans(),
         seed_discogs_pipeline=st.booleans(),
         release_confirmation=st.sampled_from(("same", "different", "absent")),
@@ -262,6 +364,8 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
         self,
         mb_id: str,
         discogs_id: str,
+        invalid_id: str,
+        sentinel: object | None,
         album_shape: str,
         seed_mb_pipeline: bool,
         seed_discogs_pipeline: bool,
@@ -286,20 +390,29 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                 discogs_release_id=discogs_id,
             ))
 
-        authoritative_release = (
-            mb_id if album_shape in ("mb", "dual") else discogs_id
+        mb_albumid, discogs_albumid = _identity_fields(
+            album_shape,
+            mb_id=mb_id,
+            discogs_id=discogs_id,
+            invalid_id=invalid_id,
+            sentinel=sentinel,
+        )
+        authoritative_release = _authoritative_release(
+            album_shape,
+            mb_id=mb_id,
+            discogs_id=discogs_id,
         )
         current_pipeline_id = (
-            41 if album_shape == "mb" and seed_mb_pipeline
+            41 if authoritative_release == mb_id and seed_mb_pipeline
             else 42 if (
-                album_shape in ("discogs", "discogs_dual_layout")
+                authoritative_release == discogs_id
                 and seed_discogs_pipeline
             )
             else None
         )
         expected_release = {
             "same": authoritative_release,
-            "different": _different_release(authoritative_release),
+            "different": _different_release(mb_id),
             "absent": None,
         }[release_confirmation]
         other_pipeline_id = (
@@ -339,16 +452,8 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                 "id": 7,
                 "album": "A",
                 "artist": "B",
-                "mb_albumid": (
-                    mb_id if album_shape in ("mb", "dual")
-                    else discogs_id if album_shape == "discogs_dual_layout"
-                    else None
-                ),
-                "discogs_albumid": (
-                    discogs_id
-                    if album_shape in ("discogs", "discogs_dual_layout", "dual")
-                    else None
-                ),
+                "mb_albumid": mb_albumid,
+                "discogs_albumid": discogs_albumid,
                 "tracks": tracks,
             })
             before = snapshot_state(
@@ -402,7 +507,7 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
             )
             job_ok = current_pipeline_id is None or not job_race
             should_succeed = (
-                album_shape != "dual"
+                authoritative_release is not None
                 and confirmation_ok
                 and locks_ok
                 and job_ok
