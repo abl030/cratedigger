@@ -11,6 +11,8 @@ from typing import Protocol, Sequence
 AUTO_IMPORT_STAGING_SUBDIR = "auto-import"
 POST_VALIDATION_STAGING_SUBDIR = "post-validation"
 DUPLICATE_REMOVE_GUARD_SUBDIR = "duplicate-remove-guard"
+MAX_PATH_COMPONENT_BYTES = 255
+_TRUNCATED_COMPONENT_HASH_CHARS = 12
 
 
 class CanonicalFolderFile(Protocol):
@@ -56,6 +58,33 @@ class SourceDirectoryAlbum(Protocol):
 def sanitize_processing_folder_name(folder_name: str) -> str:
     """Sanitize a filesystem path component for local processing paths."""
     return re.sub(r'[<>:."/\\|?*]', "", folder_name).strip()
+
+
+def _bounded_processing_component(value: str, *, suffix: str = "") -> str:
+    """Fit one sanitized staging component within ext4's byte limit.
+
+    Truncation works on UTF-8 bytes and decodes with ``errors="ignore"`` so
+    it never cuts a multibyte code point in half. A digest of the complete
+    sanitized value prevents two long names with the same retained prefix
+    from collapsing onto one directory. ``suffix`` is reserved verbatim for
+    request ownership markers such as `` [request-42]``.
+    """
+    sanitized = sanitize_processing_folder_name(value)
+    complete = f"{sanitized}{suffix}"
+    if len(complete.encode("utf-8")) <= MAX_PATH_COMPONENT_BYTES:
+        return complete
+
+    digest = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()[
+        :_TRUNCATED_COMPONENT_HASH_CHARS
+    ]
+    reserved = f"~{digest}{suffix}"
+    max_prefix_bytes = MAX_PATH_COMPONENT_BYTES - len(reserved.encode("utf-8"))
+    if max_prefix_bytes < 0:
+        raise ValueError("processing path suffix exceeds filesystem limit")
+    prefix = sanitized.encode("utf-8")[:max_prefix_bytes].decode(
+        "utf-8", errors="ignore",
+    ).rstrip()
+    return f"{prefix}{reserved}"
 
 
 def normalize_source_dirs(values: Sequence[object]) -> list[str]:
@@ -206,10 +235,11 @@ def stage_to_ai_path(
     auto_import: bool | None = None,
 ) -> str:
     """Return the beets staging destination for an album."""
-    artist_dir = sanitize_processing_folder_name(artist)
-    album_dir = sanitize_processing_folder_name(title)
-    if request_id is not None:
-        album_dir = f"{album_dir} [request-{request_id}]"
+    artist_dir = _bounded_processing_component(artist)
+    request_suffix = (
+        f" [request-{request_id}]" if request_id is not None else ""
+    )
+    album_dir = _bounded_processing_component(title, suffix=request_suffix)
     return os.path.join(
         stage_to_ai_root(staging_dir=staging_dir, auto_import=auto_import),
         artist_dir,
