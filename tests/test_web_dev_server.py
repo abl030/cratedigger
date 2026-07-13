@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — bootstraps TEST_DB_DSN for the live-db test
+from tests.test_web_cache import FakeRedis
 
 from scripts.web_dev_server import (
     DevConfig,
@@ -283,13 +284,18 @@ class WebDevServerLiveDbMetadataIntegrationTest(unittest.TestCase):
 
     def setUp(self) -> None:
         import web.discogs
+        import web.cache
         import web.mb
         import web.server
 
         self.dsn = os.environ.get("TEST_DB_DSN")
         self.web_discogs = web.discogs
+        self.web_cache = web.cache
         self.web_mb = web.mb
         self.web_server = web.server
+        self.saved_redis = web.cache._redis
+        self.metadata_cache = FakeRedis()
+        web.cache._redis = self.metadata_cache
         self.saved_metadata = (
             web.mb.MB_API_BASE,
             web.discogs.DISCOGS_API_BASE,
@@ -325,6 +331,7 @@ class WebDevServerLiveDbMetadataIntegrationTest(unittest.TestCase):
             self.web_mb.MB_API_BASE,
             self.web_discogs.DISCOGS_API_BASE,
         ) = self.saved_metadata
+        self.web_cache._redis = self.saved_redis
 
     def _start(self, server: ThreadingHTTPServer) -> threading.Thread:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -382,14 +389,26 @@ class WebDevServerLiveDbMetadataIntegrationTest(unittest.TestCase):
             request.startswith("/ws/2/release?track_artist=test-mbid&")
             for request in mb.requests
         ), mb.requests)
+        self.assertTrue(any(
+            request.startswith(
+                "/ws/2/release?artist=test-mbid&status=official&"
+            )
+            for request in mb.requests
+        ), mb.requests)
         self.assertIn("/ws/2/artist/test-mbid?fmt=json", mb.requests)
         self.assertIn("/api/artists/60/masters/all", discogs.requests)
         self.assertIn("/api/artists/60/appearances", discogs.requests)
         self.assertIn("/api/artists/60", discogs.requests)
+        self.assertTrue({
+            "meta:artist:compare:v4:test-mbid:60",
+            "meta:mb:artist:test-mbid:name",
+            "meta:discogs:artist:60:name",
+        }.issubset(self.metadata_cache._store))
 
         # A second live-db configuration in the same process must clear the
-        # first session's Discogs origin. Otherwise screenshot QA can false-
-        # green after an earlier configured server populated the module global.
+        # first session's Discogs origin and reject BEFORE reading the fully
+        # warm compare/name cache. Otherwise screenshot QA can false-green
+        # after an earlier configured server populated both process surfaces.
         missing_base = self._start_live_server(self._live_config(
             mb_api=f"{mb.origin}/ws/2",
             discogs_api=None,

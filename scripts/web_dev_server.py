@@ -363,8 +363,9 @@ def _api_fixture_slug(path: str) -> str:
 def configure_live_db_metadata(config: DevConfig) -> None:
     """Replace process-global mirror origins for one live-db dev session."""
     from web import discogs, mb
+    from web.api_bases import PUBLIC_MB_WS2_BASE
 
-    mb.MB_API_BASE = config.mb_api or mb.DEFAULT_MB_API_BASE
+    mb.MB_API_BASE = config.mb_api or PUBLIC_MB_WS2_BASE
     discogs.DISCOGS_API_BASE = config.discogs_api
 
 

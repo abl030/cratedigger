@@ -4,12 +4,20 @@
 from __future__ import annotations
 
 import unittest
+import urllib.parse
+from collections.abc import Callable
+from typing import Any
 
 from hypothesis import given, strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers suite/push/fuzz
+from tests.test_web_cache import FakeRedis
+from web import cache
+from web.api_bases import PUBLIC_MB_ORIGIN
+import web.api_bases
 import web.discogs
 import web.mb
+from web.routes.browse import get_artist_compare
 from scripts.web_dev_server import (
     DevConfig,
     configure_live_db_metadata,
@@ -18,9 +26,33 @@ from scripts.web_dev_server import (
 
 def assert_metadata_wiring(config: DevConfig) -> None:
     """Configured origins must be exact and missing values must not stay stale."""
-    expected_mb = config.mb_api or web.mb.DEFAULT_MB_API_BASE
+    expected_mb = config.mb_api or urllib.parse.urljoin(
+        f"{PUBLIC_MB_ORIGIN.rstrip('/')}/", "ws/2",
+    )
     assert web.mb.MB_API_BASE == expected_mb
     assert web.discogs.DISCOGS_API_BASE == config.discogs_api
+
+
+def assert_missing_discogs_blocks(call_route: Callable[[], None]) -> None:
+    """A missing mirror must reject before any warm-cache route result."""
+    try:
+        call_route()
+    except web.discogs.DiscogsMirrorNotConfigured:
+        return
+    raise AssertionError("warm metadata cache bypassed missing Discogs config")
+
+
+class _RouteHandler:
+    def __init__(self) -> None:
+        self.payload: dict[str, Any] | None = None
+
+    def _json(self, payload: dict[str, Any], status: int = 200) -> None:
+        if status != 200:
+            raise AssertionError(f"unexpected route status {status}")
+        self.payload = payload
+
+    def _error(self, message: str, status: int = 400) -> None:
+        raise AssertionError(f"unexpected route error {status}: {message}")
 
 
 _HOST = st.text(
@@ -56,9 +88,11 @@ class TestLiveDbMetadataWiringGenerated(unittest.TestCase):
             web.mb.MB_API_BASE,
             web.discogs.DISCOGS_API_BASE,
         )
+        self.saved_redis = cache._redis
 
     def tearDown(self) -> None:
         web.mb.MB_API_BASE, web.discogs.DISCOGS_API_BASE = self.saved
+        cache._redis = self.saved_redis
 
     @given(
         stale_mb=_ORIGIN,
@@ -83,6 +117,35 @@ class TestLiveDbMetadataWiringGenerated(unittest.TestCase):
         )
         configure_live_db_metadata(config)
         assert_metadata_wiring(config)
+
+    @given(
+        mbid=_HOST,
+        discogs_id=st.integers(min_value=1, max_value=2_000_000_000),
+        artist_name=_HOST,
+    )
+    def test_missing_discogs_rejects_before_arbitrary_warm_compare_cache(
+        self, mbid: str, discogs_id: int, artist_name: str,
+    ) -> None:
+        config = _config(mb_api=None, discogs_api=None)
+        configure_live_db_metadata(config)
+        cache._redis = FakeRedis()
+        cache.meta_set(
+            f"artist:compare:v4:{mbid}:{discogs_id}",
+            {"both": [], "mb_only": [], "discogs_only": []},
+        )
+        cache.meta_set(f"mb:artist:{mbid}:name", artist_name)
+        cache.meta_set(f"discogs:artist:{discogs_id}:name", artist_name)
+        handler = _RouteHandler()
+        params = {
+            "name": [artist_name],
+            "mbid": [mbid],
+            "discogs_id": [str(discogs_id)],
+        }
+
+        assert_missing_discogs_blocks(
+            lambda: get_artist_compare(handler, params),  # type: ignore[arg-type]
+        )
+        self.assertIsNone(handler.payload)
 
 
 class TestMetadataWiringCheckerKnownBad(unittest.TestCase):
@@ -109,10 +172,27 @@ class TestMetadataWiringCheckerKnownBad(unittest.TestCase):
         self,
     ) -> None:
         config = _config(mb_api=None, discogs_api=None)
-        web.mb.MB_API_BASE = web.mb.DEFAULT_MB_API_BASE
+        web.mb.MB_API_BASE = urllib.parse.urljoin(
+            f"{PUBLIC_MB_ORIGIN.rstrip('/')}/", "ws/2",
+        )
         web.discogs.DISCOGS_API_BASE = "https://stale-discogs.test"
         with self.assertRaises(AssertionError):
             assert_metadata_wiring(config)
+
+    def test_missing_mb_uses_the_canonical_public_ws2_declaration(self) -> None:
+        config = _config(mb_api=None, discogs_api=None)
+        sentinel = "https://canonical-mb.test/custom-ws2"
+        saved_public_base = web.api_bases.PUBLIC_MB_WS2_BASE
+        try:
+            web.api_bases.PUBLIC_MB_WS2_BASE = sentinel
+            configure_live_db_metadata(config)
+        finally:
+            web.api_bases.PUBLIC_MB_WS2_BASE = saved_public_base
+        self.assertEqual(web.mb.MB_API_BASE, sentinel)
+
+    def test_warm_cache_guard_checker_rejects_a_silent_route(self) -> None:
+        with self.assertRaises(AssertionError):
+            assert_missing_discogs_blocks(lambda: None)
 
 
 if __name__ == "__main__":

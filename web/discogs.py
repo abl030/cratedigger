@@ -1,6 +1,7 @@
 """Discogs mirror API helpers — shared between pipeline_cli and web server.
 
-All queries hit the local Discogs mirror (DISCOGS_API_BASE; mirror-required, see _api_base).
+All queries hit the local Discogs mirror (DISCOGS_API_BASE; mirror-required,
+see require_mirror_configured).
 Response shapes are normalized to match what the frontend expects,
 mirroring web/mb.py where possible.
 
@@ -45,7 +46,8 @@ class DiscogsMirrorNotConfigured(RuntimeError):
     fetch."""
 
 
-def _api_base() -> str:
+def require_mirror_configured() -> str:
+    """Return the mirror base or reject before any cached work is dispatched."""
     if not DISCOGS_API_BASE:
         raise DiscogsMirrorNotConfigured(
             "Discogs browse requires a Discogs mirror: this API speaks the "
@@ -197,7 +199,7 @@ def search_releases(query: str) -> list[dict]:
 
     def _fetch() -> list[dict]:
         q = urllib.parse.quote(effective_query)
-        url = f"{_api_base()}/api/search?title={q}&per_page=25"
+        url = f"{require_mirror_configured()}/api/search?title={q}&per_page=25"
         if va_pin:
             url += f"&artist_id={VA_ARTIST_ID}"
         data = _get(url)
@@ -243,7 +245,7 @@ def search_artists(query: str) -> list[dict]:
     """
     def _fetch() -> list[dict]:
         q = urllib.parse.quote(query)
-        data = _get(f"{_api_base()}/api/artists?name={q}&per_page=20")
+        data = _get(f"{require_mirror_configured()}/api/artists?name={q}&per_page=20")
         results = [
             {
                 "id": str(r["id"]),
@@ -260,7 +262,7 @@ def search_artists(query: str) -> list[dict]:
         if exact is None:
             return results
         try:
-            detail = _get(f"{_api_base()}/api/artists/{exact['id']}")
+            detail = _get(f"{require_mirror_configured()}/api/artists/{exact['id']}")
         except (urllib.error.HTTPError, urllib.error.URLError):
             return results
         related = [
@@ -387,7 +389,7 @@ def get_artist_releases(artist_id: int) -> list[dict]:
         entries: dict[tuple[str, str], dict] = {}
 
         masters = msgspec.convert(
-            _get(f"{_api_base()}/api/artists/{artist_id}/masters/all"),
+            _get(f"{require_mirror_configured()}/api/artists/{artist_id}/masters/all"),
             type=_DiscogsArtistMastersResponse,
         )
         _require_complete_artist_catalogue(masters, endpoint="masters/all")
@@ -399,7 +401,7 @@ def get_artist_releases(artist_id: int) -> list[dict]:
             entries.setdefault((namespace, entry["id"]), entry)
 
         appearances = msgspec.convert(
-            _get(f"{_api_base()}/api/artists/{artist_id}/appearances"),
+            _get(f"{require_mirror_configured()}/api/artists/{artist_id}/appearances"),
             type=_DiscogsArtistMastersResponse,
         )
         _require_complete_artist_catalogue(appearances, endpoint="appearances")
@@ -421,7 +423,7 @@ def get_artist_releases(artist_id: int) -> list[dict]:
 def get_master_releases(master_id: int) -> dict:
     """Get all releases (pressings) for a master. Mirrors mb.get_release_group_releases()."""
     def _fetch() -> dict:
-        data = _get(f"{_api_base()}/api/masters/{master_id}")
+        data = _get(f"{require_mirror_configured()}/api/masters/{master_id}")
         releases = []
         for r in data.get("releases", []):
             formats = r.get("formats", [])
@@ -458,7 +460,7 @@ def get_release(release_id: int, *, fresh: bool = False) -> dict:
     artist/title/track data into `album_requests` / `request_tracks`.
     """
     def _fetch() -> dict:
-        data = _get(f"{_api_base()}/api/releases/{release_id}")
+        data = _get(f"{require_mirror_configured()}/api/releases/{release_id}")
         artists = data.get("artists", [])
         artist_name = _primary_artist_name(artists)
         artist_id = _primary_artist_id(artists)
@@ -497,7 +499,7 @@ def get_release(release_id: int, *, fresh: bool = False) -> dict:
 def get_artist_name(artist_id: int) -> str:
     """Look up an artist's name by Discogs ID."""
     def _fetch() -> str:
-        data = _get(f"{_api_base()}/api/artists/{artist_id}")
+        data = _get(f"{require_mirror_configured()}/api/artists/{artist_id}")
         return data.get("name", "")
 
     return _cache.memoize_meta(f"discogs:artist:{artist_id}:name", _fetch)
@@ -698,7 +700,7 @@ def search_labels(query: str, *, page: int = 1, per_page: int = 25) -> list[Labe
     def _fetch() -> list[dict]:
         q = urllib.parse.quote(query)
         raw = _get(
-            f"{_api_base()}/api/labels"
+            f"{require_mirror_configured()}/api/labels"
             f"?name={q}&page={page}&per_page={per_page}"
         )
         decoded = msgspec.convert(raw, type=_DiscogsLabelSearchResponse)
@@ -721,7 +723,7 @@ def get_label(label_id: int | str) -> LabelEntity:
     label_id_str = _assert_discogs_label_id(label_id)
 
     def _fetch() -> dict:
-        raw = _get(f"{_api_base()}/api/labels/{label_id_str}")
+        raw = _get(f"{require_mirror_configured()}/api/labels/{label_id_str}")
         decoded = msgspec.convert(raw, type=_DiscogsLabelDetail)
         return msgspec.to_builtins(_label_entity_from_detail(decoded))
 
@@ -749,7 +751,7 @@ def get_label_releases(label_id: int | str, *, include_sublabels: bool = True,
     def _fetch() -> dict:
         sub_flag = "true" if include_sublabels else "false"
         raw = _get(
-            f"{_api_base()}/api/labels/{label_id_str}/releases"
+            f"{require_mirror_configured()}/api/labels/{label_id_str}/releases"
             f"?include_sublabels={sub_flag}&page={page}&per_page={per_page}",
             timeout=(
                 LABEL_RELEASES_INCLUDE_TIMEOUT_SECONDS

@@ -568,6 +568,7 @@ def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     if not name:
         h._error("Missing parameter 'name'")  # type: ignore[attr-defined]
         return
+    discogs_api.require_mirror_configured()
     mbid = params.get("mbid", [""])[0].strip()
     discogs_id = params.get("discogs_id", [""])[0].strip()
 

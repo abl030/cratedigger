@@ -20,6 +20,7 @@ import urllib.error
 # Use the `web.` package-qualified path to keep the web metadata cache
 # separate from the pipeline's peer-cache implementation.
 from web import cache as _cache
+from web.api_bases import PUBLIC_MB_WS2_BASE
 from web.artist_search import merge_exact_artist_identities
 
 # Default: public MusicBrainz (functional but rate-limited ~1 req/s).
@@ -30,8 +31,7 @@ from web.artist_search import merge_exact_artist_identities
 # --mb-api flag in favor of config.ini as the one production source — the
 # flag itself survives as a dev-only override). The value includes the
 # /ws/2 prefix.
-DEFAULT_MB_API_BASE = "https://musicbrainz.org/ws/2"
-MB_API_BASE = DEFAULT_MB_API_BASE
+MB_API_BASE = PUBLIC_MB_WS2_BASE
 USER_AGENT = "cratedigger-web/1.0"
 
 # Canonical Various Artists MBID. Used by the resolver and the browse-tab
