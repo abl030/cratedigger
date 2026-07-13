@@ -15,12 +15,44 @@ from lib.artist_compare import (
 )
 
 
-def _mb(title: str, year: str = "", id: str = "rg") -> dict:
-    return {"id": id, "title": title, "first_release_date": year, "type": "Album"}
+def _mb(
+    title: str,
+    year: str = "",
+    id: str = "rg",
+    *,
+    type_: str = "Album",
+    is_appearance: bool = False,
+) -> dict:
+    return {
+        "id": id,
+        "title": title,
+        "first_release_date": year,
+        "type": type_,
+        "is_appearance": is_appearance,
+    }
 
 
-def _dg(title: str, year: str = "", id: str = "1") -> dict:
-    return {"id": id, "title": title, "first_release_date": year, "type": "Album"}
+def _dg(
+    title: str,
+    year: str = "",
+    id: str = "1",
+    *,
+    type_: str = "Album",
+    primary_types: list[str] | None = None,
+    is_appearance: bool = False,
+) -> dict:
+    return {
+        "id": id,
+        "title": title,
+        "first_release_date": year,
+        "type": type_,
+        "primary_types": (
+            [type_]
+            if primary_types is None and type_ in {"Album", "EP", "Single"}
+            else (primary_types or [])
+        ),
+        "is_appearance": is_appearance,
+    }
 
 
 class TestNormalizeTitle(unittest.TestCase):
@@ -64,9 +96,7 @@ class TestMergeDiscographies(unittest.TestCase):
         self.assertEqual(result.mb_only, [])
         self.assertEqual(result.discogs_only, [])
 
-    def test_any_year_mismatch_splits(self):
-        """Exact year required. Year-tolerance produced false positives
-        like MB Album 1964 matching Discogs EP 1963 for 'Twist and Shout'."""
+    def test_year_delta_greater_than_one_splits(self):
         result = merge_discographies(
             [_mb("A Working Title in Green", "2002")],
             [_dg("A Working Title In Green", "2000")],
@@ -189,21 +219,17 @@ class TestMergeDiscographies(unittest.TestCase):
         """EP 1963 and Album 1963 of the same name are legitimately
         different release groups even when the title normalises to the
         same thing. Dedup must NOT collapse them."""
-        ep = {**_dg("Twist And Shout", "1963", id="dg-ep"), "type": "EP"}
-        album = {**_dg("Twist And Shout", "1963", id="dg-album"), "type": "Album"}
+        ep = _dg("Twist And Shout", "1963", id="dg-ep", type_="EP")
+        album = _dg("Twist And Shout", "1963", id="dg-album", type_="Album")
         result = merge_discographies([], [ep, album])
         self.assertEqual(len(result.discogs_only), 2)
 
     def test_beatles_mb_album_picks_discogs_album_over_ep(self):
-        """The root user bug: MB 'Twist and Shout' Album 1964 was
-        matching Discogs 'Twist And Shout' EP 1963 (within year
-        tolerance, first in input order) instead of Discogs Album 1964.
-        Exact-year requirement + same-type scoring fixes it."""
-        mb = {**_mb("Twist and Shout", "1964", id="mb-album"), "type": "Album"}
-        dg_ep_63 = {**_dg("Twist And Shout", "1963", id="dg-ep"), "type": "EP"}
-        dg_single_64 = {**_dg("Twist And Shout", "1964", id="dg-single"), "type": "Single"}
-        dg_album_64 = {**_dg("Twist And Shout", "1964", id="dg-album"), "type": "Album"}
-        # EP comes first in input order — previously would have matched.
+        """Structural type boundaries preserve the three distinct works."""
+        mb = _mb("Twist and Shout", "1964", id="mb-album", type_="Album")
+        dg_ep_63 = _dg("Twist And Shout", "1963", id="dg-ep", type_="EP")
+        dg_single_64 = _dg("Twist And Shout", "1964", id="dg-single", type_="Single")
+        dg_album_64 = _dg("Twist And Shout", "1964", id="dg-album", type_="Album")
         result = merge_discographies([mb], [dg_ep_63, dg_single_64, dg_album_64])
         self.assertEqual(len(result.both), 1)
         self.assertEqual(result.both[0]["discogs"]["id"], "dg-album")
@@ -211,14 +237,151 @@ class TestMergeDiscographies(unittest.TestCase):
         self.assertEqual({r["id"] for r in result.discogs_only},
                          {"dg-ep", "dg-single"})
 
-    def test_exact_year_without_same_type_still_matches(self):
-        """When only one exact-year candidate exists, it matches even
-        if types don't match — type is a preference, not a requirement."""
-        mb = {**_mb("Side Project", "2020", id="mb-1"), "type": "Album"}
-        dg = {**_dg("Side Project", "2020", id="dg-1"), "type": "EP"}
+    def test_known_disjoint_exact_year_stays_separate(self):
+        mb = _mb("Side Project", "2020", id="mb-1", type_="Album")
+        dg = _dg("Side Project", "2020", id="dg-1", type_="EP")
         result = merge_discographies([mb], [dg])
+        self.assertEqual(result.both, [])
+
+    def test_pointless_gift_adjacent_album_years_pair(self):
+        result = merge_discographies(
+            [_mb("The Pointless Gift", "2000-12-05", id="mb-pointless")],
+            [_dg("The Pointless Gift", "2001", id="dg-pointless")],
+        )
         self.assertEqual(len(result.both), 1)
-        self.assertEqual(result.both[0]["discogs"]["id"], "dg-1")
+        self.assertEqual(result.both[0]["discogs"]["id"], "dg-pointless")
+
+    def test_mixed_discogs_types_overlap_mb_single(self):
+        result = merge_discographies(
+            [_mb("Mystery of Love", "2017", type_="Single")],
+            [_dg("Mystery of Love", "2018", primary_types=["EP", "Single"])],
+        )
+        self.assertEqual(len(result.both), 1)
+
+    def test_unknown_discogs_type_exact_year_can_pair(self):
+        result = merge_discographies(
+            [_mb("Compilation", "2004")],
+            [_dg("Compilation", "2004", type_="Album", primary_types=[])],
+        )
+        self.assertEqual(len(result.both), 1)
+
+    def test_legacy_discogs_scalar_does_not_authorize_adjacent_year(self):
+        result = merge_discographies(
+            [_mb("Compilation", "2004")],
+            [_dg("Compilation", "2005", type_="Album", primary_types=[])],
+        )
+        self.assertEqual(result.both, [])
+
+    def test_appearance_and_mainline_never_pair(self):
+        result = merge_discographies(
+            [_mb("Indie Sampler", "2001", is_appearance=True)],
+            [_dg("Indie Sampler", "2001", is_appearance=False)],
+        )
+        self.assertEqual(result.both, [])
+
+    def test_exact_year_candidate_beats_adjacent_year(self):
+        result = merge_discographies(
+            [_mb("Airbag", "1998", type_="EP")],
+            [
+                _dg("Airbag", "1997", id="adjacent", type_="EP"),
+                _dg("Airbag", "1998", id="exact", type_="EP"),
+            ],
+        )
+        self.assertEqual(result.both[0]["discogs"]["id"], "exact")
+
+    def test_exact_edge_beats_earlier_mb_adjacent_edge(self):
+        result = merge_discographies(
+            [
+                _mb("Airbag", "1997", id="adjacent-mb", type_="EP"),
+                _mb("Airbag", "1998", id="exact-mb", type_="EP"),
+            ],
+            [_dg("Airbag", "1998", id="discogs", type_="EP")],
+        )
+        self.assertEqual(result.both[0]["mb"]["id"], "exact-mb")
+        self.assertEqual(result.mb_only[0]["id"], "adjacent-mb")
+
+    def test_stable_first_input_tie_policy(self):
+        result = merge_discographies(
+            [_mb("Same", "2000")],
+            [
+                _dg("Same", "2000", id="first", primary_types=["Album", "EP"]),
+                _dg("Same", "2000", id="second", primary_types=["Album", "Single"]),
+            ],
+        )
+        self.assertEqual(result.both[0]["discogs"]["id"], "first")
+
+    def test_overlapping_type_evidence_wins_exact_year_tie(self):
+        result = merge_discographies(
+            [_mb("Same", "2000", type_="Album")],
+            [
+                _dg("Same", "2000", id="unknown", primary_types=[]),
+                _dg("Same", "2000", id="overlap", primary_types=["Album"]),
+            ],
+        )
+        self.assertEqual(result.both[0]["discogs"]["id"], "overlap")
+
+    def test_within_source_dedup_keeps_appearance_boundary(self):
+        result = merge_discographies(
+            [],
+            [
+                _dg("Sampler", "2000", id="main", is_appearance=False),
+                _dg("Sampler", "2000", id="appearance", is_appearance=True),
+            ],
+        )
+        self.assertEqual(len(result.discogs_only), 2)
+
+    def test_within_source_dedup_keeps_different_structural_sets(self):
+        result = merge_discographies(
+            [],
+            [
+                _dg("Mixed Master", "2000", id="single", primary_types=["Single"]),
+                _dg("Mixed Master", "2000", id="mixed", primary_types=["EP", "Single"]),
+            ],
+        )
+        self.assertEqual(len(result.discogs_only), 2)
+
+    def test_discogs_unknown_types_keep_legacy_scalar_boundaries(self):
+        result = merge_discographies(
+            [],
+            [
+                _dg(
+                    "Unknown Evidence", "2000", id="album",
+                    type_="Album", primary_types=[],
+                ),
+                _dg(
+                    "Unknown Evidence", "2000", id="ep",
+                    type_="EP", primary_types=[],
+                ),
+            ],
+        )
+        self.assertEqual(len(result.discogs_only), 2)
+
+    def test_mb_within_source_dedup_keeps_type_and_appearance_boundaries(self):
+        result = merge_discographies(
+            [
+                _mb("Same", "2000", id="album", type_="Album"),
+                _mb("Same", "2000", id="ep", type_="EP"),
+                _mb(
+                    "Same", "2000", id="appearance", type_="Album",
+                    is_appearance=True,
+                ),
+            ],
+            [],
+        )
+        self.assertEqual(len(result.mb_only), 3)
+
+    def test_mb_unknown_types_keep_legacy_scalar_boundaries(self):
+        result = merge_discographies(
+            [
+                _mb("Unknown Evidence", "2000", id="other", type_="Other"),
+                _mb(
+                    "Unknown Evidence", "2000", id="compilation",
+                    type_="Compilation",
+                ),
+            ],
+            [],
+        )
+        self.assertEqual(len(result.mb_only), 2)
 
 
 class TestAnnotateInLibrary(unittest.TestCase):

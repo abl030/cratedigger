@@ -32,7 +32,8 @@ A self-hosted mirror of the Discogs music database, serving a JSON API at `https
 | GET | `/api/releases/{id}` | Full release: tracks, genres, styles, identifiers |
 | GET | `/api/masters/{id}` | Master release with all child releases |
 | GET | `/api/artists/{id}` | Artist profile, aliases, name variations |
-| GET | `/api/artists/{id}/releases?page=1&per_page=100` | Paginated releases for an artist (includes masterless) |
+| GET | `/api/artists/{id}/masters?page=1&per_page=100` | Paginated primary-credit masters and masterless releases; each row includes required sorted/deduplicated `primary_types` (`Album`, `EP`, `Single`) aggregated across every child pressing, with `[]` meaning unknown |
+| GET | `/api/artists/{id}/appearances` | Track-credit appearances in the same strict row shape as `/masters`, including required `primary_types` |
 | GET | `/api/labels?name=X&page=1&per_page=25` | Label search with release counts and parent-label context |
 | GET | `/api/labels/{id}` | Label profile, direct release count, parent, and direct sub-labels |
 | GET | `/api/labels/{id}/releases?page=1&per_page=100&include_sublabels=true` | Paginated releases for a label, optionally including recursive sub-label releases |
