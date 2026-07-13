@@ -23,6 +23,7 @@ from lib.quality import (
     ImportResult,
     SpectralAnalysisDetail,
     SpectralDetail,
+    TargetQualityContract,
     full_pipeline_decision,
 )
 
@@ -385,7 +386,7 @@ class TestImportPreviewPath(unittest.TestCase):
                     min_bitrate_kbps=245,
                     avg_bitrate_kbps=245,
                     median_bitrate_kbps=245,
-                    format="mp3 v0",
+                    format="MP3",
                 ),
             )
         )
@@ -442,7 +443,8 @@ class TestImportPreviewPath(unittest.TestCase):
                 min_bitrate_kbps=320,
                 avg_bitrate_kbps=320,
                 median_bitrate_kbps=320,
-                format="MP3 320",
+                format="MP3",
+                is_cbr=True,
                 spectral_grade=None,
                 spectral_bitrate_kbps=None,
             ),
@@ -499,7 +501,7 @@ class TestImportPreviewPath(unittest.TestCase):
                                    min_bitrate_kbps=245,
                                    avg_bitrate_kbps=245,
                                    median_bitrate_kbps=245,
-                                   format="mp3 v0",
+                                   format="MP3",
                                ),
                                spectral=SpectralDetail(
                                    candidate=SpectralAnalysisDetail(
@@ -584,7 +586,7 @@ class TestImportPreviewPath(unittest.TestCase):
                                    min_bitrate_kbps=245,
                                    avg_bitrate_kbps=245,
                                    median_bitrate_kbps=245,
-                                   format="mp3 v0",
+                                   format="MP3",
                                ),
                            )
                        )):
@@ -641,7 +643,7 @@ class TestImportPreviewPath(unittest.TestCase):
                                    min_bitrate_kbps=245,
                                    avg_bitrate_kbps=245,
                                    median_bitrate_kbps=245,
-                                   format="mp3 v0",
+                                   format="MP3",
                                ),
                            )
                        )):
@@ -662,6 +664,83 @@ class TestImportPreviewPath(unittest.TestCase):
             loaded = db.load_album_quality_evidence_by_id(evidence_id)
             assert loaded is not None
             self.assertEqual(loaded.measurement.avg_bitrate_kbps, 245)
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_configured_target_round_trips_when_request_target_is_null(self):
+        db = self._db()
+        download_log_id = db.log_download(
+            request_id=42,
+            outcome="rejected",
+            validation_result={
+                "scenario": "high_distance",
+                "failed_path": "/tmp/config-target",
+            },
+        )
+        source = tempfile.mkdtemp()
+        with open(os.path.join(source, "01.flac"), "wb") as handle:
+            handle.write(b"flac")
+        try:
+            with patch(
+                "lib.config.read_runtime_config",
+                return_value=CratediggerConfig(
+                    beets_harness_path="/fake/harness/run_beets_harness.sh",
+                    pipeline_db_enabled=True,
+                    verified_lossless_target="opus 128",
+                ),
+            ), patch(
+                "lib.import_preview.inspect_local_files",
+                return_value=LocalFileInspection(
+                    filetype="flac",
+                    min_bitrate_bps=800000,
+                    is_vbr=False,
+                ),
+            ), patch(
+                "lib.import_preview.measure_preimport_state",
+                return_value=PreimportMeasurement(
+                    folder_layout="flat",
+                    audio_file_count=1,
+                ),
+            ), patch(
+                "lib.import_preview.run_import_one",
+                return_value=SimpleNamespace(
+                    import_result=ImportResult(
+                        decision="downgrade",
+                        source_measurement=AudioQualityMeasurement(
+                            min_bitrate_kbps=800,
+                            avg_bitrate_kbps=820,
+                            median_bitrate_kbps=810,
+                            format="FLAC",
+                        ),
+                        target_quality_contract=(
+                            TargetQualityContract.from_format("opus 128")
+                        ),
+                    )
+                ),
+            ):
+                preview_import_from_path(
+                    db,
+                    request_id=42,
+                    path=source,
+                    force=True,
+                    download_log_id=download_log_id,
+                    persist_candidate_evidence=True,
+                )
+
+            evidence_id = db.get_download_log_candidate_evidence_id(
+                download_log_id
+            )
+            loaded = db.load_album_quality_evidence_by_id(evidence_id)
+            assert loaded is not None
+            self.assertEqual(loaded.measurement.format, "FLAC")
+            self.assertEqual(loaded.target_format, "opus 128")
+            self.assertEqual(loaded.lineage_version, 3)
+            wrong_match = db.get_wrong_matches()[0]
+            self.assertEqual(
+                wrong_match["evidence_target_format"], "opus 128"
+            )
+            self.assertEqual(wrong_match["evidence_lineage_version"], 3)
         finally:
             import shutil
             shutil.rmtree(source, ignore_errors=True)
@@ -773,7 +852,7 @@ class TestImportPreviewPath(unittest.TestCase):
                         min_bitrate_kbps=245,
                         avg_bitrate_kbps=245,
                         median_bitrate_kbps=245,
-                        format="mp3 v0",
+                        format="MP3",
                     ),
                 )
             )

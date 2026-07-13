@@ -539,7 +539,8 @@ def measurement_rank(
     """
     bitrate, _metric = _selected_quality_bitrate_with_source(m, cfg, v0_probe)
     format_hint = target_contract.format if target_contract is not None else m.format
-    return quality_rank(format_hint, bitrate, m.is_cbr, cfg)
+    is_cbr = target_contract.is_cbr if target_contract is not None else m.is_cbr
+    return quality_rank(format_hint, bitrate, is_cbr, cfg)
 
 
 def _selected_quality_bitrate_with_source(

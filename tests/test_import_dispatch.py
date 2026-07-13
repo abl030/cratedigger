@@ -209,7 +209,7 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
                 min_bitrate_kbps=191,
                 avg_bitrate_kbps=224,
                 median_bitrate_kbps=237,
-                format="opus 128",
+                format="Opus",
             ),
             materialized_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=102,

@@ -172,6 +172,10 @@ Browser → https://music.ablz.au
   source codec, configured target contract, and temporary V0 probe separate.
   A lossless candidate destined for Opus therefore reads `FLAC → OPUS 128
   contract` beside `V0 ≈ 224 kbps`, never `OPUS 128 avg 224k · min 191k`.
+  New evidence rows (`quality_lineage_version=3`) use only the explicit
+  `target_format`; the old explicit-label fallback is restricted to rows
+  marked `quality_lineage_version=1`. The UI never guesses legacy lineage from
+  a version-3 storage label.
 - **Comparison basis rendering (request 6039)** — rows whose
   `import_result` JSONB carries the persisted `comparison_basis` render the
   decision's own comparison: the verdict line names the deciding metric or

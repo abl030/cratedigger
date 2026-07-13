@@ -112,7 +112,7 @@ def cmd_quality(db, args):
     median_br = None
     existing_format_hint = None
     target_contract = (
-        TargetQualityContract(format=str(final_format))
+        TargetQualityContract.from_format(str(final_format))
         if final_format else None
     )
     if min_br is not None:

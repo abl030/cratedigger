@@ -514,7 +514,6 @@ def evidence_from_import_result(
     source_path: str,
     import_result: ImportResult | None,
     measured_at: datetime | None = None,
-    target_format: str | None = None,
     files: list[AlbumQualityEvidenceFile] | None = None,
     measurement: "PreimportMeasurement | None" = None,
 ) -> EvidenceBuildResult:
@@ -530,6 +529,10 @@ def evidence_from_import_result(
 
     if import_result is None or import_result.source_measurement is None:
         return EvidenceBuildResult(None, "incomplete", "missing source measurement")
+    try:
+        import_result.validate_new_row()
+    except ValueError as exc:
+        return EvidenceBuildResult(None, "incomplete", str(exc))
     if files is None:
         try:
             files = snapshot_audio_files(source_path)
@@ -540,6 +543,13 @@ def evidence_from_import_result(
     if measurement is not None and measurement.audio_corrupt:
         files = _apply_measurement_facts_to_files(files, measurement)
     audio_measurement = import_result.source_measurement
+    target_contract = import_result.target_quality_contract
+    # V3 target policy is owned by the harness result. The request row often
+    # has no explicit target because the configured verified-lossless target
+    # supplies it; trusting the request here loses the contract end-to-end.
+    target_format = (
+        target_contract.format if target_contract is not None else None
+    )
     proof = verified_lossless_proof_from_import_result(import_result)
     audio_corrupt = any(not file.decode_ok for file in files)
     if measurement is not None:
@@ -571,6 +581,7 @@ def evidence_from_import_result(
         container=files[0].container,
         storage_format=audio_measurement.format,
         target_format=target_format,
+        lineage_version=3,
         v0_metric=(
             neutral_v0_metric_from_probe(import_result.v0_probe)
         ),
@@ -666,6 +677,7 @@ def evidence_from_measurement(
         container=container,
         storage_format=audio_measurement.format,
         target_format=target_format,
+        lineage_version=3,
         v0_metric=None,
         verified_lossless_proof=None,
         audio_corrupt=measurement.audio_corrupt,
@@ -729,6 +741,7 @@ def evidence_from_album_info(
         codec=files[0].codec,
         container=files[0].container,
         storage_format=measurement.format,
+        lineage_version=3,
         v0_metric=legacy_current_v0_metric_from_request(request_row),
         verified_lossless_proof=proof,
         audio_corrupt=any(not file.decode_ok for file in files),
@@ -750,7 +763,6 @@ def persist_candidate_evidence_from_import_result(
     import_result: ImportResult | None,
     download_log_id: int | None = None,
     import_job_id: int | None = None,
-    target_format: str | None = None,
     files: list[AlbumQualityEvidenceFile] | None = None,
     measurement: "PreimportMeasurement | None" = None,
 ) -> EvidenceBuildResult:
@@ -772,7 +784,6 @@ def persist_candidate_evidence_from_import_result(
         mb_release_id=mb_release_id,
         source_path=source_path,
         import_result=import_result,
-        target_format=target_format,
         files=files,
         measurement=measurement,
     )
@@ -936,8 +947,12 @@ def propagate_candidate_evidence_to_current(
         candidate_measurement.format or source_codec or ""
     ).strip().lower()
     output_source_format = (
-        candidate_measurement.was_converted_from
-        or (measured_source_format if is_transcode else None)
+        (measured_source_format if is_transcode else None)
+        if candidate_evidence.lineage_version == 3
+        else (
+            candidate_measurement.was_converted_from
+            or (measured_source_format if is_transcode else None)
+        )
     )
     measurement = AudioQualityMeasurement(
         min_bitrate_kbps=getattr(album_info, "min_bitrate_kbps", None),
@@ -970,6 +985,7 @@ def propagate_candidate_evidence_to_current(
         container=library_container_from_files,
         storage_format=measurement.format,
         target_format=None,
+        lineage_version=3,
         v0_metric=None if strip_source_fields else candidate_evidence.v0_metric,
         verified_lossless_proof=candidate_evidence.verified_lossless_proof,
         audio_corrupt=any(not file.decode_ok for file in files),

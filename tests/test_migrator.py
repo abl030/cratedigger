@@ -3263,7 +3263,7 @@ class TestPinStatusDomainMigration(unittest.TestCase):
         dsn = _create_fresh_database(name)
         try:
             applied = apply_migrations(dsn, DEFAULT_MIGRATIONS_DIR)
-            self.assertEqual(applied[-1].version, 49)
+            self.assertEqual(applied[-1].version, 50)
             self.assertEqual(
                 self._query(
                     dsn,
@@ -3447,6 +3447,82 @@ class TestUniqueSlskdTransferIdsMigration(unittest.TestCase):
                 indexdef = index_row[0]
                 self.assertIn("UNIQUE", indexdef)
                 self.assertIn("WHERE (transfer_id IS NOT NULL)", indexdef)
+        finally:
+            conn.close()
+
+
+@requires_postgres
+class TestQualityEvidenceLineageVersionMigration(unittest.TestCase):
+    """Migration 050 marks historical evidence without value heuristics."""
+
+    def _copy_through(self, target: str, version: int) -> None:
+        for migration in discover_migrations(DEFAULT_MIGRATIONS_DIR):
+            if migration.version <= version:
+                shutil.copy2(migration.path, target)
+
+    def test_existing_rows_are_explicitly_marked_legacy(self) -> None:
+        name = "cratedigger_test_quality_lineage_050"
+        dsn = _create_fresh_database(name)
+        try:
+            with tempfile.TemporaryDirectory() as migrations_dir:
+                self._copy_through(migrations_dir, 49)
+                apply_migrations(dsn, migrations_dir)
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO album_quality_evidence (
+                                mb_release_id, snapshot_fingerprint,
+                                source_path, measured_at, storage_format, format
+                            ) VALUES (
+                                'legacy-050', 'snapshot-050', '/legacy', NOW(),
+                                'opus 128', 'opus 128'
+                            )
+                        """)
+                finally:
+                    conn.close()
+
+                self._copy_through(migrations_dir, 50)
+                applied = apply_migrations(dsn, migrations_dir)
+                self.assertEqual([migration.version for migration in applied], [50])
+
+                conn = psycopg2.connect(dsn)
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT lineage_version
+                            FROM album_quality_evidence
+                            WHERE mb_release_id = 'legacy-050'
+                        """)
+                        self.assertEqual(cur.fetchone(), (1,))
+                        cur.execute(
+                            "SELECT name FROM schema_migrations WHERE version = 50"
+                        )
+                        self.assertEqual(
+                            cur.fetchone(),
+                            ("quality_evidence_lineage_version",),
+                        )
+                finally:
+                    conn.close()
+        finally:
+            _drop_database(name)
+
+    def test_lineage_version_domain_rejects_spoofed_versions(self) -> None:
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                with self.assertRaises(psycopg2.errors.CheckViolation):
+                    cur.execute("""
+                        INSERT INTO album_quality_evidence (
+                            mb_release_id, snapshot_fingerprint,
+                            source_path, measured_at, lineage_version
+                        ) VALUES (
+                            'invalid-050', 'snapshot-invalid-050', '/invalid',
+                            NOW(), 2
+                        )
+                    """)
         finally:
             conn.close()
 

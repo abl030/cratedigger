@@ -655,7 +655,12 @@ def quality_gate_decision(
 
     if rank == QualityRank.UNKNOWN or rank < cfg.gate_min_rank:
         return "requeue_upgrade"
-    if (not current.verified_lossless and current.is_cbr
+    effective_is_cbr = (
+        target_contract.is_cbr
+        if target_contract is not None
+        else current.is_cbr
+    )
+    if (not current.verified_lossless and effective_is_cbr
             and rank < QualityRank.LOSSLESS):
         return "requeue_lossless"
     return "accept"

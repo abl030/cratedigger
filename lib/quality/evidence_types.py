@@ -71,6 +71,22 @@ class AudioQualityMeasurement(msgspec.Struct, frozen=True):
     verified_lossless: bool = False
     was_converted_from: Optional[str] = None
 
+    def new_row_validation_errors(self, *, source: bool = False) -> list[str]:
+        """Validate the unambiguous measurement shape emitted by v3 writers."""
+
+        errors: list[str] = []
+        if self.format is not None:
+            label = self.format.strip()
+            if not label or len(label.split()) != 1:
+                errors.append(
+                    "measurement.format must be a bare measured codec label"
+                )
+        if source and self.was_converted_from is not None:
+            errors.append(
+                "source measurement must not carry was_converted_from"
+            )
+        return errors
+
 
 class TargetQualityContract(msgspec.Struct, frozen=True):
     """Configured quality of a projected/materialized target.
@@ -81,6 +97,21 @@ class TargetQualityContract(msgspec.Struct, frozen=True):
     """
 
     format: str
+    is_cbr: bool
+
+    @classmethod
+    def from_format(cls, format_hint: str) -> "TargetQualityContract":
+        """Build target bitrate mode from policy, never from source bytes."""
+
+        parts = format_hint.strip().lower().split()
+        return cls(
+            format=format_hint,
+            is_cbr=(
+                len(parts) == 2
+                and parts[0] == "mp3"
+                and parts[1].isdigit()
+            ),
+        )
 
 
 _LEGACY_POLICY_V0_PROBE_KINDS: tuple[str, ...] = (
@@ -200,6 +231,9 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
     container: str | None = None
     storage_format: str | None = None
     target_format: str | None = None
+    # Migration 050 marks the interpretation of storage/target fields.
+    # Existing rows are v1; every new separated-lineage writer emits v3.
+    lineage_version: int = 3
     v0_metric: AlbumQualityV0Metric | None = None
     verified_lossless_proof: VerifiedLosslessProof | None = None
     # U1 (migration 019) preview-evidence facts. The unified decider
@@ -228,6 +262,7 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
             container=self.container,
             storage_format=self.storage_format,
             target_format=self.target_format,
+            lineage_version=self.lineage_version,
             v0_metric=self.v0_metric,
             verified_lossless_proof=self.verified_lossless_proof,
             audio_corrupt=self.audio_corrupt,
@@ -246,6 +281,28 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
             errors.append("snapshot_fingerprint must be a non-empty string")
         if self.measured_at is None:
             errors.append("measured_at is required")
+        if self.lineage_version not in (1, 3):
+            errors.append("lineage_version must be 1 or 3")
+        if self.lineage_version == 3:
+            errors.extend(self.measurement.new_row_validation_errors())
+            if self.storage_format is not None:
+                storage_label = self.storage_format.strip()
+                if not storage_label or len(storage_label.split()) != 1:
+                    errors.append(
+                        "storage_format must be a bare measured codec label"
+                    )
+                measurement_label = (
+                    self.measurement.format.strip().lower()
+                    if self.measurement.format is not None
+                    else None
+                )
+                if (
+                    measurement_label is not None
+                    and storage_label.lower() != measurement_label
+                ):
+                    errors.append(
+                        "storage_format must match measurement.format"
+                    )
         # Empty snapshot is a storable fact ONLY when audio_file_count=0
         # (the explicit empty-inventory signal). When a fileset is present
         # but ``files`` is empty, the evidence row is incomplete.

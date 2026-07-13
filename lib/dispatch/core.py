@@ -319,7 +319,9 @@ def dispatch_import_core(
                             else None
                         ),
                         target_quality_contract=(
-                            TargetQualityContract(format=target_final_format)
+                            TargetQualityContract.from_format(
+                                target_final_format
+                            )
                             if isinstance(target_final_format, str)
                             and target_final_format
                             else None

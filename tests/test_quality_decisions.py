@@ -1127,7 +1127,7 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
             fmt="AAC",
             container="m4a",
             codec="aac",
-            storage_format="m4a",
+            storage_format="AAC",
         )
         result = full_pipeline_decision_from_evidence(
             candidate,

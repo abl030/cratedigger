@@ -960,7 +960,6 @@ def measure_and_persist_candidate_evidence(
                 import_result=run.import_result,
                 download_log_id=download_log_id,
                 import_job_id=import_job_id,
-                target_format=req.get("target_format"),
                 files=source_snapshot,
                 measurement=measurement,
             )
@@ -1319,7 +1318,6 @@ def preview_import_from_path(
                     import_result=run.import_result,
                     download_log_id=download_log_id,
                     import_job_id=import_job_id,
-                    target_format=req.get("target_format") if req else None,
                     files=source_snapshot,
                 )
                 evidence_status = evidence.status

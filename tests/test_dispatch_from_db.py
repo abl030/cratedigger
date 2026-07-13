@@ -182,7 +182,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 ),
                 codec="mp3",
                 container="mp3",
-                storage_format="mp3 320",
+                storage_format="MP3",
             )
             # Seed current (on-disk) evidence so override-min-bitrate
             # derivation flows through the same grade-aware logic the
@@ -373,12 +373,12 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                     min_bitrate_kbps=245,
                     avg_bitrate_kbps=256,
                     median_bitrate_kbps=252,
-                    format="MP3 V0",
+                    format="MP3",
                     spectral_grade="genuine",
                 ),
                 codec="mp3",
                 container="mp3",
-                storage_format="mp3 v0",
+                storage_format="MP3",
             )
             _seed_current_for_request(
                 db, 42,
@@ -392,7 +392,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 ),
                 codec="mp3",
                 container="mp3",
-                storage_format="mp3 128",
+                storage_format="MP3",
             )
             with patch_dispatch_externals() as ext, \
                  patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
@@ -463,12 +463,12 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                     min_bitrate_kbps=245,
                     avg_bitrate_kbps=256,
                     median_bitrate_kbps=252,
-                    format="MP3 V0",
+                    format="MP3",
                     spectral_grade="genuine",
                 ),
                 codec="mp3",
                 container="mp3",
-                storage_format="mp3 v0",
+                storage_format="MP3",
             )
             _seed_current_for_request(
                 db, 42,
@@ -482,7 +482,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 ),
                 codec="mp3",
                 container="mp3",
-                storage_format="mp3 128",
+                storage_format="MP3",
             )
             with patch_dispatch_externals() as ext, \
                  patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
@@ -559,12 +559,12 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                     min_bitrate_kbps=245,
                     avg_bitrate_kbps=256,
                     median_bitrate_kbps=252,
-                    format="MP3 V0",
+                    format="MP3",
                     spectral_grade="genuine",
                 ),
                 codec="mp3",
                 container="mp3",
-                storage_format="mp3 v0",
+                storage_format="MP3",
             )
             # Mutate file so the snapshot now mismatches.
             with open(track, "ab") as handle:
@@ -1025,7 +1025,7 @@ class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
                 ),
                 codec="mp3",
                 container="mp3",
-                storage_format="mp3 320",
+                storage_format="MP3",
             )
             with patch_dispatch_externals(), \
                  patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \

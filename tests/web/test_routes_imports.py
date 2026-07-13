@@ -225,6 +225,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         source_codec: str | None = "mp3",
         source_container: str | None = "mp3",
         target_format: str | None = None,
+        lineage_version: int = 3,
     ) -> None:
         """Attach a real album_quality_evidence row to a download_log row
         — the route reads it through the fake's LEFT-JOIN mirror."""
@@ -240,6 +241,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
             codec=source_codec,
             container=source_container,
             target_format=target_format,
+            lineage_version=lineage_version,
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=min_bitrate,
                 avg_bitrate_kbps=(
@@ -698,12 +700,12 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         """A FLAC V0 probe must not wear the configured Opus label."""
         self._seed_entry_evidence(
             self.default_log_id,
-            storage_format="opus 128",
+            storage_format="FLAC",
             min_bitrate=191,
             avg_bitrate=224,
             source_codec="flac",
             source_container="flac",
-            target_format=None,
+            target_format="opus 128",
             v0_probe_kind="lossless_source",
             v0_probe_avg_bitrate=224,
         )
@@ -714,9 +716,26 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertEqual(entry["source_container"], "flac")
         self.assertEqual(
             entry["target_format"], "opus 128",
-            "explicit storage_format is the effective target contract",
+            "v3 evidence carries explicit target policy",
         )
+        self.assertEqual(entry["format"], "FLAC")
+        self.assertEqual(entry["quality_lineage_version"], 3)
         self.assertEqual(entry["v0_probe_avg_bitrate"], 224)
+
+    def test_legacy_evidence_uses_marked_storage_projection_only(self):
+        self._seed_entry_evidence(
+            self.default_log_id,
+            storage_format="opus 128",
+            min_bitrate=191,
+            avg_bitrate=224,
+            target_format=None,
+            lineage_version=1,
+        )
+
+        _, data = self._get("/api/wrong-matches")
+        entry = data["groups"][0]["entries"][0]
+        self.assertEqual(entry["target_format"], "opus 128")
+        self.assertEqual(entry["quality_lineage_version"], 1)
 
     def test_entries_sort_best_quality_first(self):
         """Entries within a group sort lossless → transparent → ... → unknown.

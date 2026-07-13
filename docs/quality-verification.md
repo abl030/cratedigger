@@ -274,7 +274,9 @@ Version 3 import results persist four disjoint facts:
 - `source_measurement` is measured from the downloaded bytes before mutation;
 - `v0_probe` is the temporary research/provisional encode;
 - `target_quality_contract` is configured policy used explicitly by comparison
-  and gate ranking; and
+  and gate ranking. It owns the target bitrate mode (`is_cbr`) as well as its
+  label, so source/output CBR observations cannot change projected MP3 rank;
+  and
 - `materialized_measurement` is built
 from the postflight Beets album info after conversion and import. It records the
 actual stored codec plus min/avg/median bitrate. This is deliberately separate
@@ -284,6 +286,14 @@ about output bytes and must leave historical output unknown when that field is
 absent. V1/v2 rows pass through the explicit legacy projection and carry
 `legacy_projection_version`; only that quarantined reader preserves their
 historically ambiguous `new_measurement` shape.
+
+Every new measured format is a bare codec label (`FLAC`, `MP3`, `Opus`):
+profile/bitrate labels such as `mp3 v0` and `opus 128` belong only to the
+target contract. Source measurements cannot carry `was_converted_from`; that
+field describes materialized output lineage. These rules are enforced at the
+v3 wire decoder/encoder and again before evidence persistence. Active evidence
+rows carry `lineage_version=3`; migration 050 marks older ambiguous rows as
+version 1 instead of guessing their meaning from values.
 
 **Motivation (request 6039 / download_log 36608):** a genuine avg 196→288
 rank upgrade (GOOD → TRANSPARENT) rendered as "Upgrade: MP3 V2 to MP3 V2"

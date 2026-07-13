@@ -68,7 +68,7 @@ def _verified_lossless_evidence(**overrides):
         measurement=measurement,
         codec="opus",
         container="ogg",
-        storage_format="opus 128",
+        storage_format="Opus",
         target_format="opus",
         v0_metric=AlbumQualityV0Metric(
             min_bitrate_kbps=950,
@@ -127,7 +127,7 @@ class TestBuildSidecar(unittest.TestCase):
         q = self.sidecar.quality
         self.assertEqual(q.codec, "opus")
         self.assertEqual(q.container, "ogg")
-        self.assertEqual(q.storage_format, "opus 128")
+        self.assertEqual(q.storage_format, "Opus")
         self.assertEqual(q.target_format, "opus")
         self.assertEqual(q.spectral_grade, "genuine")
         self.assertEqual(q.min_bitrate_kbps, 900)

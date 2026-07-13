@@ -3959,6 +3959,9 @@ class FakePipelineDB:
                 "evidence_target_format": (
                     ev.target_format if ev is not None else None
                 ),
+                "evidence_lineage_version": (
+                    ev.lineage_version if ev is not None else None
+                ),
                 "evidence_min_bitrate": (
                     ev_measurement.min_bitrate_kbps
                     if ev_measurement is not None else None

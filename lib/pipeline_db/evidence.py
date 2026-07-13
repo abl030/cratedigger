@@ -57,7 +57,8 @@ class _EvidenceMixin(_PipelineDBBase):
                 INSERT INTO album_quality_evidence (
                     mb_release_id, snapshot_fingerprint, source_path,
                     measured_at, codec, container,
-                    storage_format, target_format, min_bitrate_kbps,
+                    storage_format, target_format, lineage_version,
+                    min_bitrate_kbps,
                     avg_bitrate_kbps, median_bitrate_kbps, format, is_cbr,
                     spectral_grade, spectral_bitrate_kbps,
                     verified_lossless, was_converted_from,
@@ -75,7 +76,7 @@ class _EvidenceMixin(_PipelineDBBase):
                 VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s,
                     NOW()
                 )
                 ON CONFLICT (mb_release_id, snapshot_fingerprint)
@@ -86,6 +87,7 @@ class _EvidenceMixin(_PipelineDBBase):
                     container = EXCLUDED.container,
                     storage_format = EXCLUDED.storage_format,
                     target_format = EXCLUDED.target_format,
+                    lineage_version = EXCLUDED.lineage_version,
                     min_bitrate_kbps = EXCLUDED.min_bitrate_kbps,
                     avg_bitrate_kbps = EXCLUDED.avg_bitrate_kbps,
                     median_bitrate_kbps = EXCLUDED.median_bitrate_kbps,
@@ -161,6 +163,7 @@ class _EvidenceMixin(_PipelineDBBase):
                 evidence.container,
                 evidence.storage_format,
                 evidence.target_format,
+                evidence.lineage_version,
                 m.min_bitrate_kbps,
                 m.avg_bitrate_kbps,
                 m.median_bitrate_kbps,
@@ -389,6 +392,7 @@ class _EvidenceMixin(_PipelineDBBase):
             container=row.get("container"),
             storage_format=row.get("storage_format"),
             target_format=row.get("target_format"),
+            lineage_version=int(row.get("lineage_version") or 1),
             v0_metric=v0_metric,
             verified_lossless_proof=proof,
             audio_corrupt=bool(row.get("audio_corrupt", False)),

@@ -28,8 +28,15 @@ Key fields:
 - `UNIQUE (mb_release_id, snapshot_fingerprint)` plus
   `INDEX (mb_release_id)` for prefix lookups.
 - `measured_at TIMESTAMPTZ` — when this evidence snapshot was measured.
-- `codec`, `container`, `storage_format`, `target_format` — album-level
-  intrinsic storage facts.
+- `codec`, `container`, `storage_format` — measured source/storage facts.
+  For lineage-v3 rows, `storage_format` is the same bare codec label as
+  `format`; bitrate/profile labels never live in either field.
+- `target_format` — projected target policy from the typed import contract,
+  independent of the measured source. It may be NULL.
+- `lineage_version SMALLINT` — `1` marks historical rows whose storage/target
+  projection is ambiguous; `3` marks separated source and target facts.
+  Migration 050 explicitly marks all pre-existing rows as version 1, and new
+  writers always persist version 3.
 - `min_bitrate_kbps`, `avg_bitrate_kbps`, `median_bitrate_kbps`, `format`,
   `is_cbr`, `spectral_grade`, `spectral_bitrate_kbps`,
   `was_converted_from` — the wrapped `AudioQualityMeasurement` facts.

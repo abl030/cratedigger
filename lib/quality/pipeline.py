@@ -282,6 +282,7 @@ def full_pipeline_decision(
     if is_flac and target_format in ("flac", "lossless"):
         # FLAC kept on disk (no conversion).
         stage2_new_format = new_format or "flac"
+        result["target_final_format"] = stage2_new_format
         candidate_probe_min = candidate_v0_probe_min
         candidate_probe_full = V0ProbeEvidence(
             kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
@@ -408,8 +409,16 @@ def full_pipeline_decision(
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate)
         target_contract = (
-            TargetQualityContract(format=stage2_new_format)
+            TargetQualityContract.from_format(stage2_new_format)
             if stage2_new_format is not None
+            else None
+        )
+        # The audit target names only an output policy that would actually be
+        # materialized. The temporary V0 comparison proxy and a rejected
+        # transcode are not final targets.
+        result["target_final_format"] = (
+            verified_lossless_target
+            if will_be_verified and verified_lossless_target
             else None
         )
         provisional_probe_avg = (
@@ -510,7 +519,7 @@ def full_pipeline_decision(
         else:
             gate_format = stage2_new_format
         gate_contract = (
-            TargetQualityContract(format=gate_format)
+            TargetQualityContract.from_format(gate_format)
             if gate_format is not None
             else None
         )

@@ -118,7 +118,7 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
                     decision="import",
                     source_measurement=AudioQualityMeasurement(
                         min_bitrate_kbps=245,
-                        format="mp3 v0",
+                        format="MP3",
                     ),
                 ),
             )
@@ -357,7 +357,7 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
                 decision="import",
                 source_measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=245,
-                    format="mp3 v0",
+                    format="MP3",
                 ),
             ),
         )

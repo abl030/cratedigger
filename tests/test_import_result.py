@@ -18,7 +18,7 @@ from lib.quality import (
     SpectralTrackDetail, PostflightInfo,
     AudioQualityMeasurement, DuplicateRemoveCandidate,
     DuplicateRemoveGuardInfo,
-    DownloadInfo, SpectralMeasurement, V0ProbeEvidence,
+    DownloadInfo, SpectralMeasurement, TargetQualityContract, V0ProbeEvidence,
     parse_import_result, IMPORT_RESULT_SENTINEL,
 )
 
@@ -369,6 +369,44 @@ class TestImportResultConstruction(unittest.TestCase):
                 {"version": 3, "new_measurement": {"format": "MP3"}}
             )
 
+    def test_v3_rows_cannot_spoof_legacy_projection_marker(self):
+        with self.assertRaisesRegex(ValueError, "reserved for the v1/v2 reader"):
+            ImportResult.from_dict(
+                {"version": 3, "legacy_projection_version": 2}
+            )
+        spoofed = ImportResult(legacy_projection_version=2)
+        with self.assertRaisesRegex(ValueError, "reserved for the v1/v2 reader"):
+            spoofed.to_json()
+
+    def test_old_version_cannot_reach_new_evidence_persistence(self):
+        legacy_shaped = ImportResult(
+            version=1,
+            source_measurement=AudioQualityMeasurement(format="FLAC"),
+        )
+        with self.assertRaisesRegex(ValueError, "version 3"):
+            legacy_shaped.validate_new_row()
+
+    def test_explicit_source_label_is_rejected_without_target_contract(self):
+        result = ImportResult(
+            source_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                format="opus 128",
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "bare measured codec label"):
+            result.to_json()
+
+    def test_source_measurement_rejects_output_lineage(self):
+        result = ImportResult(
+            source_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=800,
+                format="FLAC",
+                was_converted_from="flac",
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "was_converted_from"):
+            result.to_json()
+
     def test_postflight_moved_siblings_wrong_element_type_raises(self):
         """Issue #99 wire-boundary contract: if a harness change ever
         emits a ``MovedSibling`` with a wrong-typed field (e.g.
@@ -715,9 +753,9 @@ class TestImportResultProductionFixtures(unittest.TestCase):
         self.assertEqual(r.current_measurement.spectral_bitrate_kbps, 160)
         self.assertEqual(len(r.spectral.per_track), 2)
         self.assertEqual(r.spectral.suspect_pct, 80.0)
-        # Round-trip via to_json preserves everything.
-        r2 = ImportResult.from_json(r.to_json())
-        self.assertEqual(r, r2)
+        # Legacy projections are read-only and cannot spoof a new v3 row.
+        with self.assertRaisesRegex(ValueError, "reserved for the v1/v2 reader"):
+            r.to_json()
 
     def test_production_v2_with_moved_siblings_roundtrip(self):
         """v2 row with populated moved_siblings. Same row schema, but the
@@ -770,8 +808,8 @@ class TestImportResultProductionFixtures(unittest.TestCase):
                          "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")
         assert r.source_measurement is not None
         self.assertTrue(r.source_measurement.verified_lossless)
-        r2 = ImportResult.from_json(r.to_json())
-        self.assertEqual(r, r2)
+        with self.assertRaisesRegex(ValueError, "reserved for the v1/v2 reader"):
+            r.to_json()
 
     def test_production_v1_row_roundtrip(self):
         """Verbatim v1 row captured from prod (226 such rows live in
@@ -821,9 +859,8 @@ class TestImportResultProductionFixtures(unittest.TestCase):
         self.assertEqual(r.current_measurement.min_bitrate_kbps, 128)
         self.assertEqual(r.postflight.beets_id, 9026)
         self.assertEqual(r.postflight.track_count, 13)
-        # And v1 migrates cleanly to v2 JSON, which round-trips as v2.
-        r2 = ImportResult.from_json(r.to_json())
-        self.assertEqual(r, r2)
+        with self.assertRaisesRegex(ValueError, "reserved for the v1/v2 reader"):
+            r.to_json()
 
     def test_production_v2_pre_133_disambiguation_failure_roundtrip(self):
         """Pre-#133 production shape: disambiguation_failure is populated
@@ -854,13 +891,9 @@ class TestImportResultProductionFixtures(unittest.TestCase):
         self.assertEqual(df.reason, "nonzero_rc")
         self.assertIn("ModuleNotFoundError", df.detail)
         self.assertEqual(df.selector, "")
-        # Round-trip via to_json → from_json — new JSON carries the
-        # default-materialised selector="" but the semantic object is equal.
-        r2 = ImportResult.from_json(r.to_json())
-        assert r2.postflight.disambiguation_failure is not None
-        self.assertEqual(r2.postflight.disambiguation_failure.reason,
-                         "nonzero_rc")
-        self.assertEqual(r2.postflight.disambiguation_failure.selector, "")
+        # Historical adapters are read-only; re-emission as v3 is forbidden.
+        with self.assertRaisesRegex(ValueError, "reserved for the v1/v2 reader"):
+            r.to_json()
 
     def test_all_observed_production_null_shapes_decode(self):
         """Issue #141 codex round 3 documented-equivalence.
@@ -1171,9 +1204,17 @@ class TestDownloadInfo(unittest.TestCase):
             decision="import",
             source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245, spectral_grade="genuine",
-                verified_lossless=True, was_converted_from="flac"),
+                format="FLAC", verified_lossless=True),
             current_measurement=AudioQualityMeasurement(
                 spectral_bitrate_kbps=128),
+            target_quality_contract=TargetQualityContract.from_format(
+                "mp3 v0"
+            ),
+            materialized_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245,
+                format="MP3",
+                was_converted_from="flac",
+            ),
             conversion=ConversionInfo(
                 converted=10, was_converted=True,
                 original_filetype="flac", target_filetype="mp3"),

@@ -674,6 +674,17 @@ class TestConversionTarget(unittest.TestCase):
     def test_target_format_lossless_keeps_lossless(self):
         self.assertEqual(self._target(target_format="lossless"), "lossless")
 
+    def test_native_flac_keep_lossless_emits_typed_target_contract(self):
+        from harness.import_one import projected_target_quality_contract
+
+        contract = projected_target_quality_contract(
+            "flac", converted_count=0, keep_lossless=True
+        )
+        self.assertIsNotNone(contract)
+        assert contract is not None
+        self.assertEqual(contract.format, "flac")
+        self.assertFalse(contract.is_cbr)
+
     def test_verified_with_target_returns_target(self):
         self.assertEqual(self._target(verified=True, vl_target="opus 128"),
                          "opus 128")
@@ -1405,7 +1416,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                 avg_bitrate_kbps=224,
                 median_bitrate_kbps=237,
             ),
-            target_quality_contract=TargetQualityContract(format="opus 128"),
+            target_quality_contract=TargetQualityContract.from_format("opus 128"),
             conversion=ConversionInfo(
                 was_converted=True,
                 original_filetype="flac",

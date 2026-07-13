@@ -383,14 +383,16 @@ def _build_wrong_match_groups(
         evidence_min_bitrate = row.get("evidence_min_bitrate")
         evidence_avg_bitrate = row.get("evidence_avg_bitrate")
         configured_target = row.get("evidence_target_format")
+        evidence_lineage_version = row.get("evidence_lineage_version")
         # New evidence stores downloaded-source format in storage_format and
-        # target policy in target_format. The explicit-label fallback below is
-        # solely for historical evidence rows that predate that separation.
+        # target policy in target_format. Only explicitly marked historical
+        # rows may use the old storage-label projection.
         evidence_contract = (
             configured_target
             if isinstance(configured_target, str) and configured_target
             else evidence_format
-            if isinstance(evidence_format, str)
+            if evidence_lineage_version == 1
+            and isinstance(evidence_format, str)
             and _is_explicit_label(evidence_format)
             else None
         )
@@ -420,6 +422,7 @@ def _build_wrong_match_groups(
             "source_codec": row.get("evidence_source_codec"),
             "source_container": row.get("evidence_source_container"),
             "target_format": evidence_contract,
+            "quality_lineage_version": evidence_lineage_version,
             "format": evidence_format
                 if isinstance(evidence_format, str) else None,
             "min_bitrate": evidence_min_bitrate

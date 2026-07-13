@@ -382,6 +382,19 @@ def conversion_target(target_format: str | None,
     return None
 
 
+def projected_target_quality_contract(
+    format_hint: str | None,
+    *,
+    converted_count: int,
+    keep_lossless: bool,
+) -> TargetQualityContract | None:
+    """Typed target policy for the direct harness producer path."""
+
+    if format_hint is None or (converted_count <= 0 and not keep_lossless):
+        return None
+    return TargetQualityContract.from_format(format_hint)
+
+
 def should_run_target_conversion(conv_target: str | None) -> bool:
     """Should we run the second conversion pass for a target format? (pure)
 
@@ -1454,8 +1467,8 @@ def _run_quality_evidence_authorized_import(
         )
         target_final_format = payload.decision.get("target_final_format")
         if isinstance(target_final_format, str) and target_final_format:
-            r.target_quality_contract = TargetQualityContract(
-                format=target_final_format
+            r.target_quality_contract = TargetQualityContract.from_format(
+                target_final_format
             )
         r.quality_evidence_provenance = QualityEvidenceActionProvenance(
             candidate_status=payload.provenance.candidate_status,
@@ -1500,8 +1513,8 @@ def _run_quality_evidence_authorized_import(
             and r.target_quality_contract is None
             and r.final_format
         ):
-            r.target_quality_contract = TargetQualityContract(
-                format=r.final_format
+            r.target_quality_contract = TargetQualityContract.from_format(
+                r.final_format
             )
     except Exception as exc:
         r.exit_code = 5
@@ -1993,10 +2006,10 @@ def main():
         spectral_bitrate_kbps=spectral_bitrate,
         verified_lossless=will_be_verified_lossless,
     )
-    target_contract = (
-        TargetQualityContract(format=new_format_label)
-        if converted > 0 and new_format_label is not None
-        else None
+    target_contract = projected_target_quality_contract(
+        new_format_label,
+        converted_count=converted,
+        keep_lossless=keep_lossless,
     )
     existing_m = build_existing_measurement(
         existing_info,
@@ -2039,7 +2052,9 @@ def main():
                     native_codec_family=native_codec_family,
                 )
                 if new_format_label is not None:
-                    target_contract = TargetQualityContract(format=new_format_label)
+                    target_contract = TargetQualityContract.from_format(
+                        new_format_label
+                    )
                     r.target_quality_contract = target_contract
     else:
         qd = quality_decision_stage(
@@ -2171,8 +2186,8 @@ def main():
                 int(sum(target_bitrates) / len(target_bitrates))
                 if target_bitrates else None
             )
-            r.target_quality_contract = TargetQualityContract(
-                format=target_spec.label
+            r.target_quality_contract = TargetQualityContract.from_format(
+                target_spec.label
             )
             r.conversion.target_filetype = target_spec.extension
             r.final_format = target_spec.label

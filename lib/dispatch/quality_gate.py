@@ -82,7 +82,9 @@ def load_quality_gate_state(
     target_contract = None
     verified_lossless = bool(req.get("verified_lossless")) if req else False
     if req and req.get("final_format"):
-        target_contract = TargetQualityContract(format=str(req["final_format"]))
+        target_contract = TargetQualityContract.from_format(
+            str(req["final_format"])
+        )
 
     current = AudioQualityMeasurement(
         min_bitrate_kbps=min_br_kbps,

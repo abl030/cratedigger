@@ -326,7 +326,14 @@ def compare_quality(
     )
     if shared is not None:
         clamped_new_br, clamped_existing_br = shared
-        new_rank = quality_rank(new_format, clamped_new_br, new.is_cbr, cfg)
+        projected_is_cbr = (
+            new_target_contract.is_cbr
+            if new_target_contract is not None
+            else new.is_cbr
+        )
+        new_rank = quality_rank(
+            new_format, clamped_new_br, projected_is_cbr, cfg
+        )
         existing_rank = quality_rank(
             existing.format, clamped_existing_br, existing.is_cbr, cfg)
         rank_new_value, rank_existing_value = clamped_new_br, clamped_existing_br

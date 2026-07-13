@@ -246,23 +246,31 @@ class ImportResult(msgspec.Struct):
         """Serialize to JSON string via msgspec.json.encode."""
         if self.version != 3:
             raise ValueError("new ImportResult rows must use version 3")
-        if self.legacy_projection_version is None:
-            source = self.source_measurement
-            target = self.target_quality_contract
-            if target is not None and not target.format.strip():
-                raise ValueError("target_quality_contract.format is required")
-            if (
-                source is not None
-                and source.format is not None
-                and target is not None
-                and source.format.strip().lower() == target.format.strip().lower()
-                and " " in source.format.strip()
-                and any(char.isdigit() for char in source.format)
-            ):
-                raise ValueError(
-                    "source measurement must not wear target contract label"
-                )
+        self.validate_new_row()
         return msgspec.json.encode(self).decode()
+
+    def validate_new_row(self) -> None:
+        """Reject ambiguous facts on every v3 producer/persistence boundary."""
+
+        if self.version != 3:
+            raise ValueError("new ImportResult rows must use version 3")
+        if self.legacy_projection_version is not None:
+            raise ValueError(
+                "legacy_projection_version is reserved for the v1/v2 reader"
+            )
+        target = self.target_quality_contract
+        if target is not None and not target.format.strip():
+            raise ValueError("target_quality_contract.format is required")
+        for field_name, measurement, source in (
+            ("source_measurement", self.source_measurement, True),
+            ("current_measurement", self.current_measurement, False),
+            ("materialized_measurement", self.materialized_measurement, False),
+        ):
+            if measurement is None:
+                continue
+            errors = measurement.new_row_validation_errors(source=source)
+            if errors:
+                raise ValueError(f"{field_name}: {'; '.join(errors)}")
 
     def to_sentinel_line(self) -> str:
         """Format as the stdout sentinel line for subprocess communication."""
@@ -416,9 +424,15 @@ class ImportResult(msgspec.Struct):
             "new_measurement" in d or "existing_measurement" in d
         ):
             raise ValueError("v3 ImportResult must use source/current measurements")
+        if version == 3 and d.get("legacy_projection_version") is not None:
+            raise ValueError(
+                "legacy_projection_version is reserved for the v1/v2 reader"
+            )
         if version == 2 or "new_measurement" in d:
             return cls._project_legacy_v2(d)
-        return msgspec.convert(d, type=cls)
+        result = msgspec.convert(d, type=cls)
+        result.validate_new_row()
+        return result
 
     @classmethod
     def from_json(cls, s: str) -> "ImportResult":

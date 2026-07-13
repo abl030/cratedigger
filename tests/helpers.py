@@ -136,8 +136,9 @@ def make_album_quality_evidence(
     verified_lossless_proof: VerifiedLosslessProof | None = None,
     codec: str | None = "mp3",
     container: str | None = "mp3",
-    storage_format: str | None = "mp3 v0",
+    storage_format: str | None = "MP3",
     target_format: str | None = None,
+    lineage_version: int = 3,
 ) -> AlbumQualityEvidence:
     """Build production-shaped active album-quality evidence.
 
@@ -164,7 +165,7 @@ def make_album_quality_evidence(
             min_bitrate_kbps=245,
             avg_bitrate_kbps=256,
             median_bitrate_kbps=252,
-            format="mp3 v0",
+            format="MP3",
             spectral_grade="genuine",
             spectral_bitrate_kbps=None,
         )
@@ -179,6 +180,7 @@ def make_album_quality_evidence(
         container=container,
         storage_format=storage_format,
         target_format=target_format,
+        lineage_version=lineage_version,
         v0_metric=v0_metric,
         verified_lossless_proof=verified_lossless_proof,
     )
@@ -214,22 +216,21 @@ def build_parity_candidate_evidence(
     both consume it, so a divergence between the decision twins can never
     hide behind two different world encodings.
     """
-    # For a FLAC source post-conversion, the candidate measurement
-    # reflects the V0 output the importer compares against.
+    # Candidate evidence always describes the downloaded source bytes.
+    # Conversion policy/output stay on the target contract and decision facts;
+    # a temporary V0 probe must never make a FLAC source wear an MP3 label.
     if is_flac and post_conversion_min_bitrate is not None:
-        fmt = "MP3"
         container = "flac"
         codec = "flac"
         storage_format = "flac"
         measurement = AudioQualityMeasurement(
-            min_bitrate_kbps=post_conversion_min_bitrate,
-            avg_bitrate_kbps=candidate_v0_probe_avg or post_conversion_min_bitrate,
-            median_bitrate_kbps=candidate_v0_probe_avg or post_conversion_min_bitrate,
-            format=fmt,
+            min_bitrate_kbps=min_bitrate or 900,
+            avg_bitrate_kbps=min_bitrate or 900,
+            median_bitrate_kbps=min_bitrate or 900,
+            format="FLAC",
             is_cbr=False,
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate,
-            was_converted_from="flac",
         )
     elif is_flac:
         container = codec = "flac"
@@ -245,10 +246,7 @@ def build_parity_candidate_evidence(
         )
     else:
         container = codec = native_codec
-        if native_codec == "mp3":
-            storage_format = "mp3 v0" if not is_cbr else "mp3 320"
-        else:
-            storage_format = native_format.lower()
+        storage_format = native_format.lower()
         _avg = avg_bitrate if avg_bitrate is not None else min_bitrate
         measurement = AudioQualityMeasurement(
             min_bitrate_kbps=min_bitrate,
@@ -469,7 +467,7 @@ def make_import_result(
         ),
         final_format=final_format,
         target_quality_contract=(
-            TargetQualityContract(format=final_format)
+            TargetQualityContract.from_format(final_format)
             if was_converted and final_format
             else None
         ),

@@ -765,16 +765,16 @@ def wild_ready_candidate_evidence(draw) -> AlbumQualityEvidence:
             classifier="generated")
         if verified_lossless else None
     )
+    measured_format = draw(st.sampled_from(("MP3", "FLAC", "Opus", "AAC")))
     measurement = AudioQualityMeasurement(
         min_bitrate_kbps=draw(_bitrates(max_value=4000)),
         avg_bitrate_kbps=draw(_optional_bitrates(max_value=4000)),
         median_bitrate_kbps=draw(_optional_bitrates(max_value=4000)),
-        format=draw(st.sampled_from(("MP3", "FLAC", "Opus", "AAC", "mp3 v0"))),
+        format=measured_format,
         is_cbr=draw(st.booleans()),
         spectral_grade=draw(st.sampled_from(_GRADES)),
         spectral_bitrate_kbps=draw(_optional_bitrates(max_value=400)),
         verified_lossless=verified_lossless,
-        was_converted_from=draw(st.sampled_from((None, "flac", "alac", "wav"))),
     )
     has_bad_hash = draw(st.booleans())
     return AlbumQualityEvidence(
@@ -786,8 +786,7 @@ def wild_ready_candidate_evidence(draw) -> AlbumQualityEvidence:
         files=files,
         codec=draw(st.sampled_from(_EVIDENCE_EXTS)),
         container=draw(st.sampled_from(_EVIDENCE_EXTS)),
-        storage_format=draw(st.sampled_from(
-            ("mp3 320", "mp3 v0", "flac", "opus", "aac", "lossless"))),
+        storage_format=measured_format,
         v0_metric=v0_metric,
         verified_lossless_proof=proof,
         audio_corrupt=draw(st.booleans()),

@@ -1200,8 +1200,8 @@ class TestDownloadedLabel(unittest.TestCase):
                     avg_bitrate_kbps=224,
                     median_bitrate_kbps=237,
                 ),
-                target_quality_contract=TargetQualityContract(
-                    format="opus 128"
+                target_quality_contract=TargetQualityContract.from_format(
+                    "opus 128"
                 ),
                 materialized_measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=102,

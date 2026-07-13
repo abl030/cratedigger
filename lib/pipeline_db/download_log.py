@@ -525,6 +525,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                 e.container AS evidence_source_container,
                 e.storage_format AS evidence_storage_format,
                 e.target_format AS evidence_target_format,
+                e.lineage_version AS evidence_lineage_version,
                 e.min_bitrate_kbps AS evidence_min_bitrate,
                 e.avg_bitrate_kbps AS evidence_avg_bitrate,
                 e.verified_lossless AS evidence_verified_lossless,
