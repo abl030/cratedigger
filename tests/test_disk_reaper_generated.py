@@ -197,7 +197,8 @@ def _ledger_seed(
     ])
     for (username, filename), local_path in (local_paths or {}).items():
         fake_db.stamp_transfer_completion(
-            username, filename, local_path, datetime.now(timezone.utc))
+            username, filename, local_path, datetime.now(timezone.utc),
+            transfer_id=f"owned-{username}-{filename}")
 
 
 def _seed_active_downloading(

@@ -10,20 +10,22 @@ The methods this mixin adds:
 * ``stamp_transfer_id`` -- enqueue-response write (T1.5, issue #571 PR 5):
   called right after ``slskd_enqueue_with_outcome`` reconciles a POST's
   transfer id, stamping it onto the row T1 just inserted.
-* ``stamp_transfer_completion`` -- event-ingestion write: T2. Called from
-  the SAME pass ``lib/slskd_events.py`` already stamps
-  ``active_download_state`` from (issue #146), matching ledger rows by
-  the same (username, remote filename) key. Also COALESCEs ``transfer_id``
-  in from the completion event when T1.5 hasn't set it yet (a reconciled-
-  timeout fallback -- see ``transfer_id`` parameter below) -- never
-  clobbers an already-known value.
+* ``stamp_transfer_completion`` -- event-ingestion success write: T2. Called
+  from the SAME pass ``lib/slskd_events.py`` already stamps
+  ``active_download_state`` from (issue #146). The event's exact transfer ID
+  upgrades a prior pathless failure stamp; only when that ID is globally
+  absent may the exact-key fallback bind it to an open row.
+* ``stamp_terminal_failures`` / ``claim_terminal_failures`` -- end-of-cycle
+  terminal stamps for non-success ``Completed,*`` snapshots. Exact-ID rows
+  stamp in bulk; a failure that raced T1.5 may claim one causal, exact-key,
+  ID-less T1 row. Both return only IDs whose durable write succeeded.
 * ``get_owned_transfer_keys`` / ``get_owned_transfer_id_sets`` /
   ``get_owned_local_paths`` -- purpose-shaped read surfaces for the
   reaper/convergence/purge flips: the bare "is this (username, filename)
   mine?" membership set the #571 PR 3 convergence flip consumes each
-  cycle, the stamped/unstamped ``transfer_id`` membership sets the #571
-  PR 5 completed-transfer purge consumes each cycle, and "is this
-  local_path mine?".
+  cycle, the path-stamped/pathless/unstamped ``transfer_id`` sets the
+  completed-transfer purge consumes each cycle, and "is this local_path
+  mine?".
 * ``get_owned_attempt_folders`` -- read surface for the disk-reaper
   flip (issue #571 PR 4): "which canonical processing folders are
   mine?", joined to each ledgered attempt's request identity so the
@@ -44,7 +46,12 @@ import msgspec
 import psycopg2.extras
 
 from lib.pipeline_db._core import _PipelineDBBase
-from lib.pipeline_db._shared import TransferIdOwnership, TransferLedgerRow
+from lib.pipeline_db._shared import (
+    TERMINAL_FAILURE_CLAIM_MAX_SKEW,
+    TerminalFailureClaim,
+    TransferIdOwnership,
+    TransferLedgerRow,
+)
 
 # Requests still active (in-flight) can't be pruned regardless of age --
 # a future reaper/convergence flip may still need the ledger row while
@@ -104,26 +111,37 @@ class _TransferLedgerMixin(_PipelineDBBase):
         older still-open one.
 
         Returns 1 if a row was stamped, 0 if no ledgered row matched (an
-        unledgered/foreign transfer, or every matching row already has a
-        transfer_id) -- never raises for a miss. Per-attempt data races
-        with completion stamping are resolved the same way: whichever
-        write lands first sticks (``stamp_transfer_completion`` COALESCEs
-        rather than overwriting), so calling this after a completion has
-        already arrived is a safe no-op, not a corruption.
+        unledgered/foreign transfer, a replay, or every matching row already
+        has a transfer ID) -- never raises for a miss. Migration 049's global
+        unique index is the equal-ID concurrency backstop. The outer UPDATE
+        reasserts that the chosen row is still open after any lock wait, so a
+        different-ID writer cannot be overwritten while both report success.
         """
-        cur = self._execute(
-            """
-            UPDATE slskd_transfer_ledger
-            SET transfer_id = %s
-            WHERE id = (
-                SELECT id FROM slskd_transfer_ledger
-                WHERE username = %s AND filename = %s AND transfer_id IS NULL
-                ORDER BY enqueued_at DESC
-                LIMIT 1
+        try:
+            cur = self._execute(
+                """
+                UPDATE slskd_transfer_ledger
+                SET transfer_id = %s
+                WHERE id = (
+                    SELECT id FROM slskd_transfer_ledger
+                    WHERE username = %s
+                      AND filename = %s
+                      AND transfer_id IS NULL
+                      AND completed_at IS NULL
+                    ORDER BY enqueued_at DESC
+                    LIMIT 1
+                )
+                  AND transfer_id IS NULL
+                  AND completed_at IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM slskd_transfer_ledger
+                      WHERE transfer_id = %s
+                  )
+                """,
+                (transfer_id, username, filename, transfer_id),
             )
-            """,
-            (transfer_id, username, filename),
-        )
+        except psycopg2.errors.UniqueViolation:
+            return 0
         return cur.rowcount
 
     def stamp_transfer_completion(
@@ -133,49 +151,62 @@ class _TransferLedgerMixin(_PipelineDBBase):
         local_path: str,
         completed_at: datetime,
         *,
-        transfer_id: str | None = None,
+        transfer_id: str,
     ) -> int:
-        """Event-ingestion write (T2): stamp ``local_path``/``completed_at``
-        onto the newest not-yet-stamped ledger row for
-        ``(username, filename)``.
+        """Persist an authoritative success event by exact transfer ID.
 
-        Most-recent-attempt tie-break: among rows still open
-        (``completed_at IS NULL``) for this key, the one with the latest
-        ``enqueued_at`` wins -- a retried file mints a fresh ledger row
-        (T1), so the retry's row is the one the completion event belongs
-        to. Gating on ``completed_at IS NULL`` also makes re-processing
-        the same event idempotent: once a row is stamped it drops out of
-        the candidate set, so replaying the event finds nothing left to
-        stamp for that key (unless a NEWER un-stamped attempt exists, in
-        which case that is the correct row to stamp).
-
-        ``transfer_id`` (issue #571 PR 5, T2 fallback) is COALESCEd in --
-        it fills the column only when T1.5 (``stamp_transfer_id``) hasn't
-        already captured it (a reconciliation timeout at enqueue time),
-        and never overwrites an existing value even when the caller
-        passes a different one. Every completion event carries slskd's
-        own transfer id, so this closes the gap T1.5 alone can leave: by
-        the time a row is completion-stamped, its transfer_id is
-        durably known one way or the other.
+        An exact-ID row wins even when it already has a pathless failure
+        stamp; the success event upgrades it with ``local_path``. If T1.5
+        missed the ID entirely, the newest open exact-key row is used only
+        when that ID is absent globally. Replays against an already path-
+        stamped row are no-ops, and the unique transfer-ID boundary makes
+        concurrent/retried writes fail closed without raising. The outer
+        compare-and-set permits either the same exact ID or a still-null/open
+        fallback row; a different ID that wins the row lock is never replaced.
 
         Returns 1 if a row was stamped, 0 if no ledgered row matched
         (an unledgered/foreign transfer, or every matching row was
         already stamped) -- never raises for a miss.
         """
-        cur = self._execute(
-            """
-            UPDATE slskd_transfer_ledger
-            SET local_path = %s, completed_at = %s,
-                transfer_id = COALESCE(transfer_id, %s)
-            WHERE id = (
-                SELECT id FROM slskd_transfer_ledger
-                WHERE username = %s AND filename = %s AND completed_at IS NULL
-                ORDER BY enqueued_at DESC
-                LIMIT 1
+        try:
+            cur = self._execute(
+                """
+                WITH target AS (
+                    SELECT id, 0 AS priority, enqueued_at
+                    FROM slskd_transfer_ledger
+                    WHERE transfer_id = %s
+                    UNION ALL
+                    SELECT id, 1 AS priority, enqueued_at
+                    FROM slskd_transfer_ledger
+                    WHERE username = %s
+                      AND filename = %s
+                      AND transfer_id IS NULL
+                      AND completed_at IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM slskd_transfer_ledger
+                          WHERE transfer_id = %s
+                      )
+                    ORDER BY priority, enqueued_at DESC
+                    LIMIT 1
+                )
+                UPDATE slskd_transfer_ledger
+                SET local_path = %s,
+                    completed_at = %s,
+                    transfer_id = COALESCE(transfer_id, %s)
+                WHERE id = (SELECT id FROM target)
+                  AND local_path IS NULL
+                  AND (
+                      transfer_id = %s
+                      OR (transfer_id IS NULL AND completed_at IS NULL)
+                  )
+                """,
+                (
+                    transfer_id, username, filename, transfer_id,
+                    local_path, completed_at, transfer_id, transfer_id,
+                ),
             )
-            """,
-            (local_path, completed_at, transfer_id, username, filename),
-        )
+        except psycopg2.errors.UniqueViolation:
+            return 0
         return cur.rowcount
 
     def get_owned_transfer_keys(self) -> set[tuple[str, str]]:
@@ -194,10 +225,12 @@ class _TransferLedgerMixin(_PipelineDBBase):
         return {(r["username"], r["filename"]) for r in cur.fetchall()}
 
     def get_owned_transfer_id_sets(self) -> TransferIdOwnership:
-        """Ledger ``transfer_id`` membership, split by completion stamp --
-        the completed-transfer purge's (#571 PR 5) "is this live
-        completed transfer mine, and has its completion stamp landed
-        yet?" lookup in one query.
+        """Ledger IDs split into success-ready, failure-only, and open sets.
+
+        A ``local_path`` is authoritative success evidence. ``completed_at``
+        without a path records only a terminal failure observation and must
+        never authorize removal of a later success snapshot with the same ID.
+        The completed-transfer purge consumes all three sets in one query.
 
         Purpose-shaped like ``get_owned_transfer_keys``: only rows with a
         known ``transfer_id`` are relevant (a row still awaiting BOTH
@@ -205,15 +238,116 @@ class _TransferLedgerMixin(_PipelineDBBase):
         since the purge matches live transfers by id).
         """
         cur = self._execute(
-            "SELECT transfer_id, completed_at FROM slskd_transfer_ledger "
+            "SELECT transfer_id, completed_at, local_path "
+            "FROM slskd_transfer_ledger "
             "WHERE transfer_id IS NOT NULL",
         )
-        stamped: set[str] = set()
+        path_stamped: set[str] = set()
+        pathless_stamped: set[str] = set()
         unstamped: set[str] = set()
         for row in cur.fetchall():
-            target = stamped if row["completed_at"] is not None else unstamped
+            if row["local_path"] is not None:
+                target = path_stamped
+            elif row["completed_at"] is not None:
+                target = pathless_stamped
+            else:
+                target = unstamped
             target.add(row["transfer_id"])
-        return TransferIdOwnership(stamped=stamped, unstamped=unstamped)
+        return TransferIdOwnership(
+            path_stamped=path_stamped,
+            pathless_stamped=pathless_stamped,
+            unstamped=unstamped,
+        )
+
+    def stamp_terminal_failures(
+        self,
+        transfer_ids: set[str],
+        observed_at: datetime,
+    ) -> set[str]:
+        """Stamp exact-ID owned terminal failures and return confirmed IDs.
+
+        Only still-open ledger rows can transition.  The returned IDs are
+        the authorization boundary for the caller's per-ID slskd removal:
+        absent/foreign IDs and already-stamped rows never appear.
+        """
+        if not transfer_ids:
+            return set()
+        cur = self._execute(
+            """
+            UPDATE slskd_transfer_ledger
+            SET completed_at = %s
+            WHERE completed_at IS NULL
+              AND transfer_id = ANY(%s)
+            RETURNING transfer_id
+            """,
+            (observed_at, sorted(transfer_ids)),
+        )
+        return {row["transfer_id"] for row in cur.fetchall()}
+
+    def claim_terminal_failures(
+        self,
+        claims: list[TerminalFailureClaim],
+        observed_at: datetime,
+    ) -> set[str]:
+        """Atomically claim causal ID-less T1 rows for terminal failures.
+
+        Each claim consumes at most one exact ``(username, filename)``
+        ledger row written within five minutes before slskd's request.
+        Claims run oldest-first so duplicate retry keys bind one-to-one in
+        lifecycle order. The outer compare-and-set rechecks that a row remains
+        ID-less and open after its ``FOR UPDATE`` wait, so a competing T1.5 or
+        event writer cannot leave the returned authorization stale. Successes
+        never call this method.
+        """
+        confirmed: set[str] = set()
+        ordered = sorted(
+            claims,
+            key=lambda claim: (claim.requested_at, claim.transfer_id),
+        )
+        for claim in ordered:
+            if claim.transfer_id in confirmed:
+                continue
+            try:
+                cur = self._execute(
+                    """
+                    UPDATE slskd_transfer_ledger
+                    SET transfer_id = %s, completed_at = %s
+                    WHERE id = (
+                        SELECT id FROM slskd_transfer_ledger
+                        WHERE username = %s
+                          AND filename = %s
+                          AND transfer_id IS NULL
+                          AND completed_at IS NULL
+                          AND enqueued_at >= %s
+                          AND enqueued_at <= %s
+                        ORDER BY enqueued_at DESC, id DESC
+                        LIMIT 1
+                        FOR UPDATE
+                    )
+                      AND transfer_id IS NULL
+                      AND completed_at IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM slskd_transfer_ledger
+                          WHERE transfer_id = %s
+                      )
+                    RETURNING transfer_id
+                    """,
+                    (
+                        claim.transfer_id,
+                        observed_at,
+                        claim.username,
+                        claim.filename,
+                        claim.requested_at - TERMINAL_FAILURE_CLAIM_MAX_SKEW,
+                        claim.requested_at,
+                        claim.transfer_id,
+                    ),
+                )
+            except psycopg2.errors.UniqueViolation:
+                continue
+            row = cur.fetchone()
+            if row is not None:
+                confirmed.add(row["transfer_id"])
+        return confirmed
 
     def get_owned_local_paths(self) -> set[str]:
         """Every completion-stamped ``local_path`` in the ledger -- the
