@@ -29,7 +29,7 @@ def _silence_logs():
 
 
 def _policy_snapshot(result):
-    return (result.decision, result.new_measurement, result.existing_measurement)
+    return (result.decision, result.source_measurement, result.current_measurement)
 
 
 def _policy_snapshot_unchanged(before, after) -> bool:
@@ -690,10 +690,10 @@ class TestAttemptAuditGenerated(unittest.TestCase):
 
         result = ImportResult(
             decision="import" if new_bitrate > existing_bitrate else "downgrade",
-            new_measurement=AudioQualityMeasurement(
+            source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=new_bitrate, avg_bitrate_kbps=new_bitrate,
                 median_bitrate_kbps=new_bitrate, format="MP3"),
-            existing_measurement=AudioQualityMeasurement(
+            current_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=existing_bitrate,
                 avg_bitrate_kbps=existing_bitrate,
                 median_bitrate_kbps=existing_bitrate, format="MP3"),
@@ -721,7 +721,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
 
         result = ImportResult(
             decision="import",
-            new_measurement=AudioQualityMeasurement(
+            source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=320, avg_bitrate_kbps=320,
                 median_bitrate_kbps=320, format="MP3"),
         )
@@ -730,7 +730,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         before = _policy_snapshot(result)
         mutant = ImportResult(
             decision=result.decision,
-            new_measurement=AudioQualityMeasurement(
+            source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=96, avg_bitrate_kbps=96,
                 median_bitrate_kbps=96, format="MP3",
                 spectral_grade=audit.candidate.grade if audit.candidate else None,

@@ -94,9 +94,9 @@ def _populate_dl_info_from_import_result(dl_info: DownloadInfo,
                                          ir: ImportResult) -> None:
     """Populate a DownloadInfo from an ImportResult (pure, no I/O)."""
     conv = ir.conversion
-    new_m = ir.new_measurement
+    new_m = ir.source_measurement
     materialized_m = ir.materialized_measurement
-    existing_m = ir.existing_measurement
+    existing_m = ir.current_measurement
     if conv.was_converted:
         dl_info.was_converted = True
         dl_info.original_filetype = conv.original_filetype
@@ -109,7 +109,7 @@ def _populate_dl_info_from_import_result(dl_info: DownloadInfo,
         dl_info.actual_filetype = dl_info.filetype
     # ``actual_*`` means the materialized output, not the candidate/proxy
     # measurement used to authorize it. Legacy/non-mutating results without a
-    # separate output retain the historical new_measurement fallback.
+    # separate output retain the historical source-measurement fallback.
     actual_m = materialized_m or new_m
     if actual_m and actual_m.min_bitrate_kbps is not None:
         dl_info.bitrate = actual_m.min_bitrate_kbps * 1000

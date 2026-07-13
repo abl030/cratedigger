@@ -11,6 +11,7 @@ from lib.quality.evidence_types import (
     AudioQualityMeasurement,
     QualityComparisonBasis,
     SPECTRAL_TRANSCODE_GRADES,
+    TargetQualityContract,
     V0ProbeEvidence,
     is_comparable_lossless_source_probe,
 )
@@ -137,6 +138,9 @@ def import_quality_decision(
     existing: "AudioQualityMeasurement | None",
     is_transcode: bool = False,
     cfg: "QualityRankConfig | None" = None,
+    *,
+    target_contract: TargetQualityContract | None = None,
+    v0_probe: V0ProbeEvidence | None = None,
 ) -> ImportQualityDecision:
     """Decide whether to import based on codec-aware quality comparison (issue #60).
 
@@ -178,7 +182,13 @@ def import_quality_decision(
         return ImportQualityDecision(
             decision="transcode_first" if is_transcode else "import")
 
-    basis = compare_quality(new, existing, cfg)
+    basis = compare_quality(
+        new,
+        existing,
+        cfg,
+        new_target_contract=target_contract,
+        new_v0_probe=v0_probe,
+    )
     verdict = basis.verdict
 
     # verified_lossless is a soft preference: "better" or "equivalent" still
@@ -211,9 +221,11 @@ class MeasuredImportDecisionInput(msgspec.Struct, frozen=True):
     and the real import harness once files have been measured. It deliberately
     contains no filesystem, database, or subprocess concerns.
     """
-    new_measurement: AudioQualityMeasurement
-    existing_measurement: Optional[AudioQualityMeasurement] = None
+    source_measurement: AudioQualityMeasurement
+    current_measurement: Optional[AudioQualityMeasurement] = None
     is_transcode: bool = False
+    target_contract: TargetQualityContract | None = None
+    v0_probe: V0ProbeEvidence | None = None
 
 
 class MeasuredImportDecisionResult(msgspec.Struct, frozen=True):
@@ -428,10 +440,12 @@ def measured_import_decision(
 ) -> MeasuredImportDecisionResult:
     """Reduce measured import facts to a decision and preview classification."""
     quality = import_quality_decision(
-        measured.new_measurement,
-        measured.existing_measurement,
+        measured.source_measurement,
+        measured.current_measurement,
         measured.is_transcode,
         cfg=cfg,
+        target_contract=measured.target_contract,
+        v0_probe=measured.v0_probe,
     )
     decision = quality.decision
     exit_code = 0
@@ -453,7 +467,7 @@ def measured_import_decision(
         DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
     }
     reason = decision
-    if measured.existing_measurement is None:
+    if measured.current_measurement is None:
         reason = f"{decision}: no existing album"
     elif confident_reject:
         reason = (
@@ -620,6 +634,8 @@ def is_verified_lossless(was_converted: bool, original_filetype: Optional[str],
 def quality_gate_decision(
     current: AudioQualityMeasurement,
     cfg: "QualityRankConfig | None" = None,
+    *,
+    target_contract: TargetQualityContract | None = None,
 ) -> str:
     """Codec-aware post-import quality gate (issue #60).
 
@@ -635,7 +651,7 @@ def quality_gate_decision(
     if cfg is None:
         cfg = QualityRankConfig.defaults()
 
-    rank = gate_rank(current, cfg)
+    rank = gate_rank(current, cfg, target_contract=target_contract)
 
     if rank == QualityRank.UNKNOWN or rank < cfg.gate_min_rank:
         return "requeue_upgrade"

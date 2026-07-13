@@ -22,7 +22,8 @@ finalize_request = transitions.finalize_request
 
 from lib.processing_paths import normalize_source_dirs
 from lib.quality import (AlbumQualityEvidenceDecisionFacts, DownloadInfo,
-                         ImportResult, QUALITY_UPGRADE_TIERS, ValidationResult,
+                         ImportResult, QUALITY_UPGRADE_TIERS,
+                         TargetQualityContract, ValidationResult,
                          comparison_basis_from_decision,
                          dispatch_action, evidence_decision_name,
                          extract_usernames,
@@ -302,16 +303,25 @@ def dispatch_import_core(
                 )
                 if not _import_allowed_by_evidence_pipeline(evidence_decision):
                     decision = evidence_decision_name(evidence_decision)
+                    target_final_format = evidence_decision.get(
+                        "target_final_format"
+                    )
                     detail = (
                         "import-time persisted evidence rejected candidate "
                         f"(decision={decision})"
                     )
                     attempt_result.merge(ImportResult(
                         decision=decision,
-                        new_measurement=evidence_gate.candidate.measurement,
-                        existing_measurement=(
+                        source_measurement=evidence_gate.candidate.measurement,
+                        current_measurement=(
                             evidence_gate.current.measurement
                             if evidence_gate.current is not None
+                            else None
+                        ),
+                        target_quality_contract=(
+                            TargetQualityContract(format=target_final_format)
+                            if isinstance(target_final_format, str)
+                            and target_final_format
                             else None
                         ),
                         v0_probe=audit_v0_probe_from_metric(
@@ -438,8 +448,8 @@ def dispatch_import_core(
                 narrowed_override = None
                 current_override = None
 
-                new_br = ir.new_measurement.min_bitrate_kbps if ir.new_measurement else None
-                prev_br = ir.existing_measurement.min_bitrate_kbps if ir.existing_measurement else None
+                new_br = ir.source_measurement.min_bitrate_kbps if ir.source_measurement else None
+                prev_br = ir.current_measurement.min_bitrate_kbps if ir.current_measurement else None
 
                 # --- Mark done or failed with decision-specific details ---
                 if action.mark_done:

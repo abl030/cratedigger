@@ -173,7 +173,7 @@ export function renderEvidenceStrip(h) {
     // render it instead of re-deriving labels from min bitrate (request
     // 6039: min-derived labels turned a real avg 196→288 rank upgrade
     // into "IN MP3 V2 · 194k HAVE MP3 194k").
-    const sourceFormat = h.slskd_filetype || h.original_filetype;
+    const sourceFormat = h.source_format || h.slskd_filetype || h.original_filetype;
     const sourcePrefix = h.was_converted && sourceFormat
       ? `${esc(String(sourceFormat).toUpperCase())} → ` : '';
     inParts.push(`${sourcePrefix}${basisSidePhrase(basis, 'new')}`);
@@ -183,7 +183,8 @@ export function renderEvidenceStrip(h) {
     // basis and V0 values invite exactly the min-vs-avg confusion the
     // basis exists to kill (request 8781 operator report).
     const minIsLosslessSourceProbe = (
-      (h.v0_probe_kind === 'lossless_source_v0'
+      h.legacy_projection_version != null
+      && (h.v0_probe_kind === 'lossless_source_v0'
         || h.v0_probe_kind === 'lossless_source')
       && h.v0_probe_min_bitrate !== null
       && h.v0_probe_min_bitrate !== undefined
@@ -318,7 +319,24 @@ export function renderDownloadHistoryItem(h) {
 
   const rows = [];
 
-  rows.push(['Source', h.downloaded_label ? esc(h.downloaded_label) : '—']);
+  if (h.source_format) {
+    const sourceMetric = h.source_avg_bitrate != null
+      ? `avg ${esc(h.source_avg_bitrate)}kbps`
+      : h.source_median_bitrate != null
+        ? `median ${esc(h.source_median_bitrate)}kbps`
+        : h.source_min_bitrate != null
+          ? `min ${esc(h.source_min_bitrate)}kbps` : '';
+    const sourceFloor = h.source_min_bitrate != null
+      && h.source_avg_bitrate != null
+      ? ` · min ${esc(h.source_min_bitrate)}kbps` : '';
+    rows.push([
+      'Source',
+      `${esc(String(h.source_format).toUpperCase())}`
+        + `${sourceMetric ? ` ${sourceMetric}` : ''}${sourceFloor}`,
+    ]);
+  } else {
+    rows.push(['Source', h.downloaded_label ? esc(h.downloaded_label) : '—']);
+  }
 
   if (h.spectral_grade || h.existing_spectral_grade || h.existing_spectral_bitrate
       || h.spectral_error || h.existing_spectral_error) {
@@ -385,12 +403,13 @@ export function renderDownloadHistoryItem(h) {
   // made 191k of MP3 proof appear as an Opus minimum.
   rows.push(['Output', materializedOutputPhrase(h, true) || '—']);
 
-  if (h.final_format) {
-    const finalFormat = String(h.final_format);
+  const targetContract = h.target_contract_format || h.final_format;
+  if (targetContract) {
+    const finalFormat = String(targetContract);
     const explicitContract = h.comparison_basis?.new_metric === 'contract'
       || /(?:\bv\d+\b|\b\d+\b)/i.test(finalFormat);
     rows.push([
-      'Stored as',
+      h.target_contract_format ? 'Target contract' : 'Stored as',
       `${esc(finalFormat.toUpperCase())}${explicitContract ? ' contract' : ''}`,
     ]);
   }

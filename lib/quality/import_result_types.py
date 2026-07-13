@@ -11,6 +11,7 @@ import msgspec
 from lib.quality.evidence_types import (
     AudioQualityMeasurement,
     QualityComparisonBasis,
+    TargetQualityContract,
     V0ProbeEvidence,
 )
 
@@ -69,7 +70,7 @@ class SpectralDetail(msgspec.Struct):
     """Per-track spectral analysis detail.
 
     The album-level spectral grades and bitrates now live on
-    AudioQualityMeasurement (new_measurement/existing_measurement on ImportResult).
+    AudioQualityMeasurement (source/current measurements on ImportResult).
     This carries the per-track detail data that doesn't fit on a measurement.
     Wire-boundary type per ``.claude/rules/code-quality.md``.
     """
@@ -78,7 +79,7 @@ class SpectralDetail(msgspec.Struct):
     per_track: list[SpectralTrackDetail] = []
     existing_suspect_pct: float = 0.0
     # Attempt-local display audit. These are deliberately disjoint from
-    # new_measurement/existing_measurement, which remain the decision inputs.
+    # source/current measurements, which remain the decision inputs.
     candidate: Optional[SpectralAnalysisDetail] = None
     existing: Optional[SpectralAnalysisDetail] = None
 
@@ -195,8 +196,9 @@ class ImportResult(msgspec.Struct):
     from import_one.py back to cratedigger.py. Stored in download_log.import_result
     for complete auditability.
 
-    ``new_measurement`` / ``existing_measurement`` carry the decision-time
-    candidate/current state. ``materialized_measurement`` is deliberately
+    ``source_measurement`` / ``current_measurement`` carry the downloaded
+    source/current state. ``target_quality_contract`` is policy, while
+    ``materialized_measurement`` is deliberately
     separate: it describes the bytes that actually landed in Beets after any
     target conversion. A lossless candidate may be decided through a
     temporary MP3 V0 probe, then stored as Opus; collapsing those measurements
@@ -209,13 +211,17 @@ class ImportResult(msgspec.Struct):
     ``@dataclass`` so ``asdict`` could recurse; unifying on
     ``msgspec.json.encode`` let every type become a Struct with one rule.
     """
-    version: int = 2
+    version: int = 3
     exit_code: int = 0
     decision: Optional[str] = None      # from import_quality_decision() or error label
     already_in_beets: bool = False
-    new_measurement: Optional[AudioQualityMeasurement] = None
-    existing_measurement: Optional[AudioQualityMeasurement] = None
+    source_measurement: Optional[AudioQualityMeasurement] = None
+    current_measurement: Optional[AudioQualityMeasurement] = None
+    target_quality_contract: Optional[TargetQualityContract] = None
     materialized_measurement: Optional[AudioQualityMeasurement] = None
+    # Set only by the quarantined v1/v2 reader.  New v3 producers never infer
+    # lineage from historical equality or label heuristics.
+    legacy_projection_version: Optional[int] = None
     conversion: ConversionInfo = msgspec.field(default_factory=ConversionInfo)
     spectral: SpectralDetail = msgspec.field(default_factory=SpectralDetail)
     postflight: PostflightInfo = msgspec.field(default_factory=PostflightInfo)
@@ -238,6 +244,24 @@ class ImportResult(msgspec.Struct):
 
     def to_json(self) -> str:
         """Serialize to JSON string via msgspec.json.encode."""
+        if self.version != 3:
+            raise ValueError("new ImportResult rows must use version 3")
+        if self.legacy_projection_version is None:
+            source = self.source_measurement
+            target = self.target_quality_contract
+            if target is not None and not target.format.strip():
+                raise ValueError("target_quality_contract.format is required")
+            if (
+                source is not None
+                and source.format is not None
+                and target is not None
+                and source.format.strip().lower() == target.format.strip().lower()
+                and " " in source.format.strip()
+                and any(char.isdigit() for char in source.format)
+            ):
+                raise ValueError(
+                    "source measurement must not wear target contract label"
+                )
         return msgspec.json.encode(self).decode()
 
     def to_sentinel_line(self) -> str:
@@ -246,12 +270,12 @@ class ImportResult(msgspec.Struct):
 
     @classmethod
     def _migrate_v1(cls, d: dict) -> "ImportResult":
-        """Migrate version 1 (QualityInfo + SpectralInfo) to version 2 (measurements).
+        """Project version 1 (QualityInfo + SpectralInfo) into the v3 model.
 
         v1 rows in production (~226 on doc2 as of 2026-04) carry
         ``quality`` and ``spectral`` sub-objects instead of measurements.
-        This method reshapes the dict into v2 form, then routes through
-        ``from_dict`` so the strict-typed decode happens in one place.
+        This method first reconstructs the historical v2 shape, then routes it
+        through the quarantined legacy projection in ``from_dict``.
         """
         quality = d.get("quality") or {}
         spectral = d.get("spectral") or {}
@@ -302,16 +326,70 @@ class ImportResult(msgspec.Struct):
             "beets_log": d.get("beets_log", []),
             "error": d.get("error"),
         }
-        return cls.from_dict(normalised)
+        return cls._project_legacy_v2(normalised, source_version=1)
+
+    @classmethod
+    def _project_legacy_v2(
+        cls,
+        d: dict[str, Any],
+        *,
+        source_version: int = 2,
+    ) -> "ImportResult":
+        """Quarantine the ambiguous v1/v2 measurement shape.
+
+        Historical ``new_measurement`` sometimes combined V0-probe numbers
+        with a target label.  Preserve that historical projection for reads,
+        mark its origin explicitly, and never run this adapter for v3 rows.
+        """
+
+        projected = cls._normalise_legacy_postflight(d)
+        projected["version"] = 3
+        projected["legacy_projection_version"] = source_version
+        projected["source_measurement"] = projected.pop("new_measurement", None)
+        projected["current_measurement"] = projected.pop(
+            "existing_measurement", None
+        )
+        projected.setdefault("target_quality_contract", None)
+        return msgspec.convert(projected, type=cls)
+
+    @staticmethod
+    def _normalise_legacy_postflight(d: dict[str, Any]) -> dict[str, Any]:
+        """Preserve only the malformed-row tolerances required by v1/v2."""
+
+        projected = dict(d)
+        if "postflight" not in projected:
+            return projected
+        pf = projected["postflight"]
+        if not isinstance(pf, dict):
+            projected["postflight"] = {}
+            return projected
+        if (
+            "moved_siblings" in pf
+            and not isinstance(pf["moved_siblings"], list)
+        ):
+            pf = {**pf, "moved_siblings": []}
+        guard = pf.get("duplicate_remove_guard")
+        if guard is not None:
+            if not isinstance(guard, dict):
+                pf = {**pf, "duplicate_remove_guard": None}
+            elif not isinstance(guard.get("candidates", []), list):
+                pf = {
+                    **pf,
+                    "duplicate_remove_guard": {
+                        **guard,
+                        "candidates": [],
+                    },
+                }
+        projected["postflight"] = pf
+        return projected
 
     @classmethod
     def from_dict(cls, d: dict) -> "ImportResult":
         """Construct from a dict (e.g. parsed JSON).
 
-        Handles both old (v1 with quality/spectral sub-objects) and new
-        (v2 with measurements) formats for backward compat with existing
-        download_log JSONB rows. The v2 path uses ``msgspec.convert`` for
-        strict-typed decode; two pre-convert hedges preserve the
+        Handles historical v1/v2 rows through a quarantined projection and
+        decodes v3 rows strictly. The legacy path uses ``msgspec.convert`` for
+        typed decode; two pre-convert hedges preserve the
         pre-#141 ``_postflight_from_dict`` tolerance:
 
         1. A falsy non-object ``postflight`` (``null``, ``[]``, ``""``) —
@@ -325,34 +403,21 @@ class ImportResult(msgspec.Struct):
         2. A non-list ``postflight.moved_siblings`` (malformed legacy
            JSONB) falls back to ``[]``.
 
-        Both hedges fire only for data shapes we've actually seen in
-        production; genuine type drift on a declared field still raises
-        ``msgspec.ValidationError`` at the boundary.
+        Both hedges fire only inside the historical reader for data shapes
+        observed in production. New v3 rows receive no malformed-row repair.
         """
-        # Old format: has "quality" key, no "new_measurement"
+        # Old format: has "quality" key, no "new_measurement".
         if "quality" in d and "new_measurement" not in d:
             return cls._migrate_v1(d)
-        if "postflight" in d:
-            pf = d["postflight"]
-            if not isinstance(pf, dict):
-                d = {**d, "postflight": {}}
-            else:
-                if ("moved_siblings" in pf
-                        and not isinstance(pf["moved_siblings"], list)):
-                    pf = {**pf, "moved_siblings": []}
-                guard = pf.get("duplicate_remove_guard")
-                if guard is not None:
-                    if not isinstance(guard, dict):
-                        pf = {**pf, "duplicate_remove_guard": None}
-                    elif not isinstance(guard.get("candidates", []), list):
-                        pf = {
-                            **pf,
-                            "duplicate_remove_guard": {
-                                **guard,
-                                "candidates": [],
-                            },
-                        }
-                d = {**d, "postflight": pf}
+        version = d.get("version", 2 if "new_measurement" in d else 3)
+        if version not in (2, 3):
+            raise ValueError(f"unsupported ImportResult version: {version!r}")
+        if version == 3 and (
+            "new_measurement" in d or "existing_measurement" in d
+        ):
+            raise ValueError("v3 ImportResult must use source/current measurements")
+        if version == 2 or "new_measurement" in d:
+            return cls._project_legacy_v2(d)
         return msgspec.convert(d, type=cls)
 
     @classmethod
@@ -375,7 +440,7 @@ def parse_import_result(stdout_text: str) -> Optional[ImportResult]:
         if line.startswith(IMPORT_RESULT_SENTINEL):
             try:
                 return ImportResult.from_json(line[len(IMPORT_RESULT_SENTINEL):])
-            except (json.JSONDecodeError, TypeError, KeyError,
+            except (json.JSONDecodeError, TypeError, KeyError, ValueError,
                     msgspec.ValidationError):
                 return None
     return None

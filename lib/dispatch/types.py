@@ -21,7 +21,8 @@ if TYPE_CHECKING:
     from lib.import_evidence import CandidateEvidenceActionResult
     from lib.pipeline_db import DownloadLogOutcome, PipelineDB
     from lib.quality import (AlbumQualityEvidence, AudioQualityMeasurement,
-                             DownloadInfo, ImportResult, SpectralDetail)
+                             DownloadInfo, ImportResult, SpectralDetail,
+                             TargetQualityContract)
 
 
 # U2: when the importer claim arrives without valid candidate evidence
@@ -66,6 +67,7 @@ class QualityGateState:
     min_bitrate_kbps: int
     spectral_bitrate_kbps: int | None
     spectral_grade: str | None
+    target_contract: TargetQualityContract | None = None
 
 
 @dataclass(frozen=True)

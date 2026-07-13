@@ -492,7 +492,7 @@ class TestImporterWorker(unittest.TestCase):
 
         preview_ir = ImportResult(
             decision="import",
-            new_measurement=AudioQualityMeasurement(min_bitrate_kbps=245),
+            source_measurement=AudioQualityMeasurement(min_bitrate_kbps=245),
         )
         db = FakePipelineDB()
         job = db.enqueue_import_job(
@@ -530,7 +530,7 @@ class TestImporterWorker(unittest.TestCase):
         preview_ir = ImportResult(
             decision="import",
             already_in_beets=False,
-            new_measurement=AudioQualityMeasurement(min_bitrate_kbps=141),
+            source_measurement=AudioQualityMeasurement(min_bitrate_kbps=141),
         )
         db = FakePipelineDB()
         db.seed_request(make_request_row(

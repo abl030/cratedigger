@@ -3511,7 +3511,6 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
                 format="flac",
                 spectral_grade="genuine",
                 verified_lossless=True,
-                was_converted_from="flac",
             ),
             files=[
                 AlbumQualityEvidenceFile(

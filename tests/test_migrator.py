@@ -1420,14 +1420,14 @@ class TestReplaceSupersedeSchema(unittest.TestCase):
 class TestBackfillV0MetricFromMeasurementSchema(unittest.TestCase):
     """Migration 024 backfills v0_metric on album_quality_evidence and
     v0_probe_* columns on download_log from the row's own
-    ``import_result.new_measurement`` JSONB. Without it, every non-lossless
+    ``import_result.source_measurement`` JSONB. Without it, every non-lossless
     candidate (MP3 V0, Opus, CBR 320) had NULL V0 probe fields and the
     audit/UI surface showed a blank "V0 probe" row.
 
     Validates:
     - schema_migrations records 024
     - the backfill UPDATE fills NULL v0_* fields on evidence rows that have
-      a linked download_log with ``import_result.new_measurement``
+      a linked download_log with ``import_result.source_measurement``
     - the backfill UPDATE fills NULL v0_probe_* columns on download_log
       rows whose own JSONB carries ``new_measurement``
     - rows that already have v0_metric / v0_probe_* set are left untouched

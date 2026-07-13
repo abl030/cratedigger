@@ -32,6 +32,7 @@ from lib.quality import (
     QualityRankConfig,
     RankBitrateMetric,
     SpectralMeasurement,
+    TargetQualityContract,
     V0ProbeEvidence,
     ValidationResult,
     VerifiedLosslessProof,
@@ -442,16 +443,16 @@ def make_import_result(
     return ImportResult(
         decision=decision,
         error=error,
-        new_measurement=AudioQualityMeasurement(
+        source_measurement=AudioQualityMeasurement(
             min_bitrate_kbps=new_min_bitrate,
             avg_bitrate_kbps=new_min_bitrate,
             median_bitrate_kbps=new_min_bitrate,
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate,
             verified_lossless=verified_lossless,
-            was_converted_from=original_filetype if was_converted else None,
+            format=(original_filetype or "FLAC").upper() if was_converted else None,
         ),
-        existing_measurement=(AudioQualityMeasurement(
+        current_measurement=(AudioQualityMeasurement(
                                   min_bitrate_kbps=prev_min_bitrate,
                                   avg_bitrate_kbps=prev_min_bitrate,
                                   median_bitrate_kbps=prev_min_bitrate)
@@ -467,6 +468,11 @@ def make_import_result(
             disambiguation_failure=disambiguation_failure,
         ),
         final_format=final_format,
+        target_quality_contract=(
+            TargetQualityContract(format=final_format)
+            if was_converted and final_format
+            else None
+        ),
         v0_probe=v0_probe,
         existing_v0_probe=existing_v0_probe,
     )

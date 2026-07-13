@@ -441,7 +441,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     source_candidate=None,
                     import_result=ImportResult(
                         decision="import",
-                        new_measurement=AudioQualityMeasurement(
+                        source_measurement=AudioQualityMeasurement(
                             min_bitrate_kbps=245,
                             avg_bitrate_kbps=256,
                             median_bitrate_kbps=252,

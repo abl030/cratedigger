@@ -10,7 +10,12 @@ from dataclasses import dataclass, field, asdict
 from enum import IntEnum, StrEnum
 from typing import Any, Optional
 
-from lib.quality.evidence_types import AudioQualityMeasurement
+from lib.quality.evidence_types import (
+    AudioQualityMeasurement,
+    TargetQualityContract,
+    V0_PROBE_LOSSLESS_SOURCE,
+    V0ProbeEvidence,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -518,6 +523,9 @@ def quality_rank(
 def measurement_rank(
     m: AudioQualityMeasurement,
     cfg: QualityRankConfig,
+    *,
+    target_contract: TargetQualityContract | None = None,
+    v0_probe: V0ProbeEvidence | None = None,
 ) -> QualityRank:
     """Pick the configured bitrate metric from m and classify it.
 
@@ -529,7 +537,28 @@ def measurement_rank(
     None — so legacy measurements (which only populate min) continue to
     classify correctly regardless of the configured policy.
     """
-    return quality_rank(m.format, _selected_bitrate(m, cfg), m.is_cbr, cfg)
+    bitrate, _metric = _selected_quality_bitrate_with_source(m, cfg, v0_probe)
+    format_hint = target_contract.format if target_contract is not None else m.format
+    return quality_rank(format_hint, bitrate, m.is_cbr, cfg)
+
+
+def _selected_quality_bitrate_with_source(
+    measurement: AudioQualityMeasurement,
+    cfg: QualityRankConfig,
+    v0_probe: V0ProbeEvidence | None = None,
+) -> tuple[Optional[int], str]:
+    """Select a statistic without copying probe values into a measurement."""
+
+    if v0_probe is None or v0_probe.kind != V0_PROBE_LOSSLESS_SOURCE:
+        return _selected_bitrate_with_source(measurement, cfg)
+    if cfg.bitrate_metric == RankBitrateMetric.AVG and v0_probe.avg_bitrate_kbps is not None:
+        return v0_probe.avg_bitrate_kbps, RankBitrateMetric.AVG.value
+    if (
+        cfg.bitrate_metric == RankBitrateMetric.MEDIAN
+        and v0_probe.median_bitrate_kbps is not None
+    ):
+        return v0_probe.median_bitrate_kbps, RankBitrateMetric.MEDIAN.value
+    return v0_probe.min_bitrate_kbps, RankBitrateMetric.MIN.value
 
 
 def _selected_bitrate(m: AudioQualityMeasurement,
@@ -579,6 +608,8 @@ def _selected_bitrate_with_source(
 def gate_rank(
     current: AudioQualityMeasurement,
     cfg: "QualityRankConfig",
+    *,
+    target_contract: TargetQualityContract | None = None,
 ) -> QualityRank:
     """Rank used by ``quality_gate_decision()`` — measurement rank with the
     spectral clamp applied.
@@ -599,7 +630,7 @@ def gate_rank(
     VBR band table and take the lower rank. This catches fake 320s and
     legacy low-spectral transcodes.
     """
-    rank = measurement_rank(current, cfg)
+    rank = measurement_rank(current, cfg, target_contract=target_contract)
     if current.verified_lossless:
         return rank
     if current.spectral_bitrate_kbps is not None:

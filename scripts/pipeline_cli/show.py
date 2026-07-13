@@ -11,6 +11,8 @@ import json
 
 import msgspec
 
+from lib.quality import ImportResult
+
 from scripts.pipeline_cli._format import _fmt_br, _fmt_measurement
 
 
@@ -19,21 +21,28 @@ def _render_import_result(ir_raw):
     if not ir_raw:
         return []
     try:
-        ir = ir_raw if isinstance(ir_raw, dict) else json.loads(ir_raw)
-    except (json.JSONDecodeError, TypeError):
+        typed = (
+            ImportResult.from_dict(ir_raw)
+            if isinstance(ir_raw, dict)
+            else ImportResult.from_json(ir_raw)
+        )
+        ir = msgspec.to_builtins(typed)
+    except (json.JSONDecodeError, TypeError, ValueError, msgspec.ValidationError):
         return []
 
     lines = []
     decision = ir.get("decision", "?")
     lines.append(f"      decision:  {decision}")
 
-    # v2: measurements
-    new_m = ir.get("new_measurement")
-    if new_m:
-        lines.append(f"      new:       {_fmt_measurement(new_m)}")
-        existing_m = ir.get("existing_measurement")
+    source_m = ir.get("source_measurement")
+    if source_m:
+        lines.append(f"      source:    {_fmt_measurement(source_m)}")
+        target = ir.get("target_quality_contract") or {}
+        if target.get("format"):
+            lines.append(f"      target:    {target['format']} (contract)")
+        existing_m = ir.get("current_measurement")
         if existing_m:
-            lines.append(f"      existing:  {_fmt_measurement(existing_m)}")
+            lines.append(f"      current:   {_fmt_measurement(existing_m)}")
 
         conv = ir.get("conversion") or {}
         if conv.get("was_converted"):
@@ -45,7 +54,7 @@ def _render_import_result(ir_raw):
                 extra = " (TRANSCODE)"
             lines.append(f"      converted: {src} -> {tgt} ({n} files){extra}")
     else:
-        # v1 fallback
+        # A v1 row with no projected measurement at all.
         quality = ir.get("quality") or {}
         spectral = ir.get("spectral") or {}
         if quality.get("new_min_bitrate") is not None:

@@ -29,7 +29,7 @@ class AudioQualityMeasurement(msgspec.Struct, frozen=True):
     Ground truth from ffprobe and spectral analysis. Used by decision functions
     to compare new downloads against existing files and determine quality gate
     outcomes. Wire-boundary type per ``.claude/rules/code-quality.md`` —
-    appears in ``ImportResult.{new_measurement,existing_measurement}`` and
+    appears in ``ImportResult.{source_measurement,current_measurement}`` and
     crosses both the harness stdout and ``download_log.import_result`` JSONB
     boundaries.
 
@@ -48,17 +48,18 @@ class AudioQualityMeasurement(msgspec.Struct, frozen=True):
                                that can pull MIN or AVG away from the typical
                                track quality. measurement_rank() falls back
                                to min when this is None.
-        format:                codec label or bare codec name that drives the
-                               quality_rank() classifier. Accepts either an
-                               explicit label from ImportResult.final_format
-                               ("opus 128", "mp3 v0", "mp3 320", "flac") or a
-                               bare codec string from beets items.format ("MP3",
-                               "Opus", "FLAC", "AAC"). None → UNKNOWN rank.
+        format:                measured source/output codec or container label,
+                               such as a bare codec string from ffprobe or Beets
+                               ("MP3", "Opus", "FLAC", "AAC"). Projected target
+                               labels belong in ``TargetQualityContract``.
+                               None means the measured codec is unknown.
         is_cbr:                True if all tracks have the same bitrate
         spectral_grade:        spectral analysis result (genuine/marginal/suspect)
         spectral_bitrate_kbps: estimated original bitrate from spectral cliff
         verified_lossless:     True if imported from spectral-verified genuine lossless
-        was_converted_from:    source format before conversion (flac/m4a/wav), None if MP3
+        was_converted_from:    output-only lineage: source format before
+                               conversion (flac/m4a/wav). New source
+                               measurements leave this None.
     """
     min_bitrate_kbps: Optional[int] = None
     avg_bitrate_kbps: Optional[int] = None
@@ -69,6 +70,17 @@ class AudioQualityMeasurement(msgspec.Struct, frozen=True):
     spectral_bitrate_kbps: Optional[int] = None
     verified_lossless: bool = False
     was_converted_from: Optional[str] = None
+
+
+class TargetQualityContract(msgspec.Struct, frozen=True):
+    """Configured quality of a projected/materialized target.
+
+    A contract is policy, not a measurement.  Its explicit label drives rank
+    classification without borrowing bitrate statistics from the source or a
+    temporary V0 probe.
+    """
+
+    format: str
 
 
 _LEGACY_POLICY_V0_PROBE_KINDS: tuple[str, ...] = (

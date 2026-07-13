@@ -181,10 +181,12 @@ as live queue work.
 
 ## `download_log.import_result` JSONB
 
-`import_one.py` emits an `ImportResult` JSON blob (`__IMPORT_RESULT__` sentinel on stdout). Contains: decision, conversion details, V0 probe evidence, quality comparison (new vs prev bitrate), postflight verification (beets_id, path), the post-import `materialized_measurement`, and an attempt-local `spectral` audit. Preview analyzes the incoming candidate before conversion, preserving its album grade, spectral floor, suspect percentage, per-track grade/HF deficit/cliff detail, or error. `HAVE` analyzes the exact requested release's current Beets files on every attempt unless `album_requests.current_evidence_id` proves those files are a derivative converted from a lossless source; only that lossless-conversion case uses the persisted pre-conversion source evidence because scanning the derivative would rewrite source provenance. These audit fields are display-only and deliberately separate from `new_measurement` / `existing_measurement` (decision inputs) and `materialized_measurement` (the bytes actually stored after conversion). An explicit target such as `opus 128` is persisted in `comparison_basis` as a `contract` metric; a temporary V0 probe must never be presented as the target codec's measured bitrate. Every import path (success, downgrade, transcode, provisional, suspect-lossless rejection, error, timeout, crash) logs to download_log.
+`import_one.py` emits an `ImportResult` JSON blob (`__IMPORT_RESULT__` sentinel on stdout). Version 3 contains the downloaded `source_measurement`, the prior `current_measurement`, typed `target_quality_contract`, typed V0 probe evidence, the quality comparison, postflight verification (beets_id, path), the post-import `materialized_measurement`, and an attempt-local `spectral` audit. Source measurements always describe the downloaded bytes; a target such as `opus 128` is policy and V0 min/avg/median remain exclusively under `v0_probe`. `materialized_measurement` describes the bytes Beets actually stored. Historical v1/v2 rows are decoded only by `ImportResult`'s marked legacy projection (`legacy_projection_version`); new v3 rows never infer lineage from equality between values. Every import path (success, downgrade, transcode, provisional, suspect-lossless rejection, error, timeout, crash) logs to download_log.
 
 ```sql
 SELECT import_result->>'decision',
+       import_result->'source_measurement'->>'format',
+       import_result->'target_quality_contract'->>'format',
        import_result->'comparison_basis'->>'new_metric',
        import_result->'v0_probe'->>'avg_bitrate_kbps',
        import_result->'materialized_measurement'->>'avg_bitrate_kbps',

@@ -381,7 +381,7 @@ class TestImportPreviewPath(unittest.TestCase):
         run = SimpleNamespace(
             import_result=ImportResult(
                 decision="import",
-                new_measurement=AudioQualityMeasurement(
+                source_measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=245,
                     avg_bitrate_kbps=245,
                     median_bitrate_kbps=245,
@@ -495,7 +495,7 @@ class TestImportPreviewPath(unittest.TestCase):
                        return_value=SimpleNamespace(
                            import_result=ImportResult(
                                decision="import",
-                               new_measurement=AudioQualityMeasurement(
+                               source_measurement=AudioQualityMeasurement(
                                    min_bitrate_kbps=245,
                                    avg_bitrate_kbps=245,
                                    median_bitrate_kbps=245,
@@ -580,7 +580,7 @@ class TestImportPreviewPath(unittest.TestCase):
                        return_value=SimpleNamespace(
                            import_result=ImportResult(
                                decision="import",
-                               new_measurement=AudioQualityMeasurement(
+                               source_measurement=AudioQualityMeasurement(
                                    min_bitrate_kbps=245,
                                    avg_bitrate_kbps=245,
                                    median_bitrate_kbps=245,
@@ -637,7 +637,7 @@ class TestImportPreviewPath(unittest.TestCase):
                        return_value=SimpleNamespace(
                            import_result=ImportResult(
                                decision="import",
-                               new_measurement=AudioQualityMeasurement(
+                               source_measurement=AudioQualityMeasurement(
                                    min_bitrate_kbps=245,
                                    avg_bitrate_kbps=245,
                                    median_bitrate_kbps=245,
@@ -769,7 +769,7 @@ class TestImportPreviewPath(unittest.TestCase):
             return SimpleNamespace(
                 import_result=ImportResult(
                     decision="import",
-                    new_measurement=AudioQualityMeasurement(
+                    source_measurement=AudioQualityMeasurement(
                         min_bitrate_kbps=245,
                         avg_bitrate_kbps=245,
                         median_bitrate_kbps=245,
@@ -955,7 +955,7 @@ class TestImportPreviewPath(unittest.TestCase):
                        return_value=SimpleNamespace(
                            import_result=ImportResult(
                                decision="import",
-                               new_measurement=AudioQualityMeasurement(
+                               source_measurement=AudioQualityMeasurement(
                                    min_bitrate_kbps=160,
                                    avg_bitrate_kbps=160,
                                    median_bitrate_kbps=160,

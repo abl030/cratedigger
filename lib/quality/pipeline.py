@@ -18,6 +18,7 @@ from lib.quality.evidence_types import (
     AudioQualityMeasurement,
     QualityComparisonBasis,
     SPECTRAL_TRANSCODE_GRADES,
+    TargetQualityContract,
     V0ProbeEvidence,
     V0_PROBE_LOSSLESS_SOURCE,
     V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
@@ -361,13 +362,12 @@ def full_pipeline_decision(
         gate_avg_bitrate = min_bitrate  # FLAC: lossless, avg == min is fine
         gate_cbr = False
         gate_format = stage2_new_format  # "flac"
+        gate_contract = None
     elif is_flac:
         # FLAC path: convert first, then decide
         is_transcode = transcode_detection(
             converted_count, post_conversion_min_bitrate,
             spectral_grade=spectral_grade, cfg=cfg)
-        import_br = post_conversion_min_bitrate if post_conversion_min_bitrate else min_bitrate
-
         candidate_probe_min = (
             candidate_v0_probe_min
             if candidate_v0_probe_min is not None
@@ -377,7 +377,10 @@ def full_pipeline_decision(
             kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
             avg_bitrate_kbps=candidate_v0_probe_avg,
             min_bitrate_kbps=candidate_probe_min,
-        ) if candidate_v0_probe_avg is not None else None
+        ) if (
+            candidate_v0_probe_avg is not None
+            or candidate_probe_min is not None
+        ) else None
         will_be_verified = determine_verified_lossless(
             target_format, spectral_grade,
             converted_count=converted_count,
@@ -399,11 +402,16 @@ def full_pipeline_decision(
         # a fabricated avg=min is how the persisted basis learned to call a
         # min value "avg" (dl 36660).
         new_m = AudioQualityMeasurement(
-            min_bitrate_kbps=import_br,
-            format=stage2_new_format,
+            min_bitrate_kbps=min_bitrate,
+            format=new_format or "flac",
             verified_lossless=will_be_verified,
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate)
+        target_contract = (
+            TargetQualityContract(format=stage2_new_format)
+            if stage2_new_format is not None
+            else None
+        )
         provisional_probe_avg = (
             candidate_v0_probe_avg
             if candidate_v0_probe_avg is not None
@@ -443,7 +451,24 @@ def full_pipeline_decision(
                 result["target_final_format"] = verified_lossless_target
             return result
         measured = measured_import_decision(
-            MeasuredImportDecisionInput(new_m, existing_m, policy_is_transcode),
+            MeasuredImportDecisionInput(
+                new_m,
+                existing_m,
+                policy_is_transcode,
+                target_contract,
+                (
+                    V0ProbeEvidence(
+                        kind=(
+                            candidate_v0_probe_kind
+                            or V0_PROBE_LOSSLESS_SOURCE
+                        ),
+                        min_bitrate_kbps=candidate_probe_min,
+                    )
+                    if converted_count > 0
+                    or post_conversion_min_bitrate is not None
+                    else None
+                ),
+            ),
             cfg=cfg,
         )
         result["stage2_import"] = measured.decision
@@ -484,6 +509,11 @@ def full_pipeline_decision(
             gate_format = verified_lossless_target
         else:
             gate_format = stage2_new_format
+        gate_contract = (
+            TargetQualityContract(format=gate_format)
+            if gate_format is not None
+            else None
+        )
 
         # Use post-conversion bitrate for quality gate. The simulator
         # doesn't take a separate post-conversion avg, so avg == min here;
@@ -557,6 +587,7 @@ def full_pipeline_decision(
         gate_avg_bitrate = avg_bitrate
         gate_cbr = is_cbr
         gate_format = stage2_new_format
+        gate_contract = None
 
     # --- Stage 3: Post-import quality gate ---
     gate_spectral_bitrate = None
@@ -566,16 +597,23 @@ def full_pipeline_decision(
             and effective_gate_bitrate is not None
             and effective_gate_bitrate < gate_bitrate):
         gate_spectral_bitrate = spectral_bitrate
+    gate_measurement_format = (
+        gate_contract.format.split()[0]
+        if gate_contract is not None
+        else gate_format
+    )
     gate_m = AudioQualityMeasurement(
         min_bitrate_kbps=gate_bitrate,
         avg_bitrate_kbps=gate_avg_bitrate,
         median_bitrate_kbps=gate_avg_bitrate,
-        format=gate_format,
+        format=gate_measurement_format,
         is_cbr=gate_cbr,
         verified_lossless=verified_lossless,
         spectral_grade=spectral_grade,
         spectral_bitrate_kbps=gate_spectral_bitrate)
-    result["stage3_quality_gate"] = quality_gate_decision(gate_m, cfg=cfg)
+    result["stage3_quality_gate"] = quality_gate_decision(
+        gate_m, cfg=cfg, target_contract=gate_contract
+    )
 
     if result["stage3_quality_gate"] == "accept":
         result["final_status"] = "imported"

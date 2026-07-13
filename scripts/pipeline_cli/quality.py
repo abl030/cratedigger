@@ -74,7 +74,8 @@ def cmd_quality(db, args):
     from lib.quality import (full_pipeline_decision, quality_gate_decision,
                              AudioQualityMeasurement, gate_rank,
                              rejection_backfill_override,
-                             search_tiers, compute_effective_override_bitrate)
+                             search_tiers, compute_effective_override_bitrate,
+                             TargetQualityContract)
 
     rank_cfg = _load_runtime_rank_config()
 
@@ -109,7 +110,11 @@ def cmd_quality(db, args):
     is_cbr = False
     avg_br = None
     median_br = None
-    existing_format_hint = final_format
+    existing_format_hint = None
+    target_contract = (
+        TargetQualityContract(format=str(final_format))
+        if final_format else None
+    )
     if min_br is not None:
         mbid = req.get("mb_release_id")
         info = _load_beets_album_info(mbid, rank_cfg)
@@ -137,8 +142,12 @@ def cmd_quality(db, args):
         # gate_rank centralizes the spectral clamp the gate applies, so the
         # displayed label always matches the verdict (no more EXCELLENT next
         # to NEEDS UPGRADE on a fake CBR 320).
-        current_rank = gate_rank(current, rank_cfg)
-        gate = quality_gate_decision(current, cfg=rank_cfg)
+        current_rank = gate_rank(
+            current, rank_cfg, target_contract=target_contract
+        )
+        gate = quality_gate_decision(
+            current, cfg=rank_cfg, target_contract=target_contract
+        )
         gate_label = {"accept": "DONE", "requeue_upgrade": "NEEDS UPGRADE",
                       "requeue_lossless": "NEEDS LOSSLESS"}[gate]
         print(f"  Quality gate:  {gate_label}  (rank={current_rank.name})")
@@ -409,7 +418,11 @@ def cmd_repair_spectral(db, args):
 
         # Check what quality gate would decide after clearing stale data
         decision = (
-            quality_gate_decision(state.measurement, cfg=rank_cfg)
+            quality_gate_decision(
+                state.measurement,
+                cfg=rank_cfg,
+                target_contract=state.target_contract,
+            )
             if state is not None
             else "requeue_upgrade"
         )

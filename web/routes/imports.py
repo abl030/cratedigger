@@ -383,10 +383,9 @@ def _build_wrong_match_groups(
         evidence_min_bitrate = row.get("evidence_min_bitrate")
         evidence_avg_bitrate = row.get("evidence_avg_bitrate")
         configured_target = row.get("evidence_target_format")
-        # verified_lossless_target is projected into measurement.format and
-        # therefore storage_format; album_requests.target_format is commonly
-        # NULL. Preserve the explicit label as a contract instead of letting
-        # its V0 proxy numbers wear that codec label in the UI.
+        # New evidence stores downloaded-source format in storage_format and
+        # target policy in target_format. The explicit-label fallback below is
+        # solely for historical evidence rows that predate that separation.
         evidence_contract = (
             configured_target
             if isinstance(configured_target, str) and configured_target

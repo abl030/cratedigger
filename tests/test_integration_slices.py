@@ -1408,8 +1408,8 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         self.assertEqual(logged, result)
         self.assertEqual(logged.spectral, audit)
         self.assertEqual(logged.decision, "import")
-        self.assertIsNotNone(logged.new_measurement)
-        self.assertIsNotNone(logged.existing_measurement)
+        self.assertIsNotNone(logged.source_measurement)
+        self.assertIsNotNone(logged.current_measurement)
         self.assertTrue(logged.conversion.was_converted)
         self.assertEqual(logged.postflight.beets_id, 77)
         self.assertIsNotNone(logged.comparison_basis)
@@ -1616,8 +1616,8 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         self.assertEqual(logged, result)
         self.assertEqual(logged.spectral, audit)
         self.assertEqual(logged.decision, "import")
-        self.assertIsNotNone(logged.new_measurement)
-        self.assertIsNotNone(logged.existing_measurement)
+        self.assertIsNotNone(logged.source_measurement)
+        self.assertIsNotNone(logged.current_measurement)
         self.assertTrue(logged.conversion.was_converted)
         self.assertEqual(logged.postflight.beets_id, 77)
         self.assertEqual(
@@ -2103,8 +2103,8 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
         """
         return ImportResult(
             decision="import",
-            new_measurement=new,
-            existing_measurement=existing,
+            source_measurement=new,
+            current_measurement=existing,
             conversion=ConversionInfo(),
             postflight=PostflightInfo(),
         )
@@ -7194,7 +7194,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             # both the measurement facts and the harness see suspect@96.
             harness_ir = ImportResult(
                 decision="import",
-                new_measurement=AudioQualityMeasurement(
+                source_measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=96,
                     avg_bitrate_kbps=96,
                     median_bitrate_kbps=96,
@@ -7315,7 +7315,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             )
             harness_ir = ImportResult(
                 decision="import",
-                new_measurement=AudioQualityMeasurement(
+                source_measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=256,
                     avg_bitrate_kbps=256,
                     median_bitrate_kbps=256,

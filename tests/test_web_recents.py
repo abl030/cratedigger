@@ -26,6 +26,8 @@ from lib.quality import (
     QualityComparisonBasis,
     SpectralAnalysisDetail,
     SpectralDetail,
+    TargetQualityContract,
+    V0ProbeEvidence,
 )
 
 
@@ -1186,11 +1188,20 @@ class TestDownloadedLabel(unittest.TestCase):
             final_format="opus 128",
             import_result=ImportResult(
                 decision="import",
-                new_measurement=AudioQualityMeasurement(
+                source_measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=742,
+                    avg_bitrate_kbps=811,
+                    median_bitrate_kbps=803,
+                    format="FLAC",
+                ),
+                v0_probe=V0ProbeEvidence(
+                    kind="lossless_source_v0",
                     min_bitrate_kbps=191,
                     avg_bitrate_kbps=224,
                     median_bitrate_kbps=237,
-                    format="opus 128",
+                ),
+                target_quality_contract=TargetQualityContract(
+                    format="opus 128"
                 ),
                 materialized_measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=102,
@@ -1204,6 +1215,12 @@ class TestDownloadedLabel(unittest.TestCase):
         ))
 
         self.assertEqual(result.downloaded_label, "FLAC → OPUS 128")
+        self.assertEqual(result.source_format, "FLAC")
+        self.assertEqual(result.source_min_bitrate, 742)
+        self.assertEqual(result.source_avg_bitrate, 811)
+        self.assertEqual(result.source_median_bitrate, 803)
+        self.assertEqual(result.target_contract_format, "opus 128")
+        self.assertIsNone(result.legacy_projection_version)
         self.assertEqual(result.materialized_format, "Opus")
         self.assertEqual(result.materialized_min_bitrate, 102)
         self.assertEqual(result.materialized_avg_bitrate, 132)

@@ -28,13 +28,14 @@ class TestImportResultConstruction(unittest.TestCase):
 
     def test_default_construction(self):
         r = ImportResult()
-        self.assertEqual(r.version, 2)
+        self.assertEqual(r.version, 3)
         self.assertEqual(r.exit_code, 0)
         self.assertIsNone(r.decision)
         self.assertFalse(r.already_in_beets)
         self.assertIsNone(r.error)
-        self.assertIsNone(r.new_measurement)
-        self.assertIsNone(r.existing_measurement)
+        self.assertIsNone(r.source_measurement)
+        self.assertIsNone(r.current_measurement)
+        self.assertIsNone(r.legacy_projection_version)
         self.assertIsInstance(r.conversion, ConversionInfo)
         self.assertIsInstance(r.spectral, SpectralDetail)
         self.assertIsInstance(r.postflight, PostflightInfo)
@@ -333,8 +334,8 @@ class TestImportResultConstruction(unittest.TestCase):
                 self.assertEqual(r.postflight.moved_siblings, [])
                 # Every other field still decoded.
                 self.assertEqual(r.decision, "import")
-                assert r.new_measurement is not None
-                self.assertEqual(r.new_measurement.min_bitrate_kbps, 245)
+                assert r.source_measurement is not None
+                self.assertEqual(r.source_measurement.min_bitrate_kbps, 245)
 
     def test_postflight_moved_siblings_malformed_value_falls_back_to_empty(self):
         """Wire-boundary robustness: if ``moved_siblings`` arrives as
@@ -357,6 +358,16 @@ class TestImportResultConstruction(unittest.TestCase):
                 }
                 r = ImportResult.from_dict(d)
                 self.assertEqual(r.postflight.moved_siblings, [])
+
+    def test_v3_rows_do_not_receive_legacy_shape_repairs(self):
+        with self.assertRaises(msgspec.ValidationError):
+            ImportResult.from_dict({"version": 3, "postflight": "malformed"})
+
+    def test_v3_rows_reject_historical_measurement_names(self):
+        with self.assertRaisesRegex(ValueError, "source/current"):
+            ImportResult.from_dict(
+                {"version": 3, "new_measurement": {"format": "MP3"}}
+            )
 
     def test_postflight_moved_siblings_wrong_element_type_raises(self):
         """Issue #99 wire-boundary contract: if a harness change ever
@@ -430,10 +441,10 @@ class TestImportResultConstruction(unittest.TestCase):
             exit_code=0,
             decision="import",
             already_in_beets=True,
-            new_measurement=AudioQualityMeasurement(
+            source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245, spectral_grade="genuine",
                 verified_lossless=True, was_converted_from="flac"),
-            existing_measurement=AudioQualityMeasurement(
+            current_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=192, spectral_grade="suspect",
                 spectral_bitrate_kbps=128),
             conversion=ConversionInfo(
@@ -445,10 +456,10 @@ class TestImportResultConstruction(unittest.TestCase):
         )
         self.assertEqual(r.decision, "import")
         self.assertEqual(r.conversion.converted, 10)
-        assert r.new_measurement is not None
-        self.assertTrue(r.new_measurement.verified_lossless)
-        assert r.existing_measurement is not None
-        self.assertEqual(r.existing_measurement.spectral_bitrate_kbps, 128)
+        assert r.source_measurement is not None
+        self.assertTrue(r.source_measurement.verified_lossless)
+        assert r.current_measurement is not None
+        self.assertEqual(r.current_measurement.spectral_bitrate_kbps, 128)
         self.assertEqual(r.postflight.track_count, 12)
 
 
@@ -465,10 +476,10 @@ class TestImportResultSerialization(unittest.TestCase):
         r = ImportResult(
             exit_code=6,
             decision="transcode_upgrade",
-            new_measurement=AudioQualityMeasurement(
+            source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=180, spectral_grade="suspect",
                 spectral_bitrate_kbps=128),
-            existing_measurement=AudioQualityMeasurement(
+            current_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=128, spectral_grade="suspect",
                 spectral_bitrate_kbps=96),
             conversion=ConversionInfo(converted=8, failed=0, was_converted=True,
@@ -515,7 +526,7 @@ class TestImportResultSerialization(unittest.TestCase):
         r = ImportResult(decision="import", exit_code=0)
         parsed = json.loads(r.to_json())
         self.assertEqual(parsed["decision"], "import")
-        self.assertEqual(parsed["version"], 2)
+        self.assertEqual(parsed["version"], 3)
 
     def test_from_dict_missing_optional_sections(self):
         """from_dict should handle missing sub-dicts gracefully."""
@@ -523,7 +534,7 @@ class TestImportResultSerialization(unittest.TestCase):
         r = ImportResult.from_dict(d)
         self.assertEqual(r.decision, "import")
         self.assertEqual(r.conversion.converted, 0)
-        self.assertIsNone(r.new_measurement)
+        self.assertIsNone(r.source_measurement)
 
     def test_from_dict_with_extra_fields_in_sub(self):
         """Unknown fields in sub-dicts are silently ignored (issue #141).
@@ -592,16 +603,17 @@ class TestImportResultSerialization(unittest.TestCase):
             },
         }
         r = ImportResult.from_dict(v1_dict)
-        self.assertEqual(r.version, 2)
-        assert r.new_measurement is not None
-        self.assertEqual(r.new_measurement.min_bitrate_kbps, 245)
-        self.assertEqual(r.new_measurement.spectral_grade, "genuine")
-        self.assertTrue(r.new_measurement.verified_lossless)
-        self.assertEqual(r.new_measurement.was_converted_from, "flac")
-        assert r.existing_measurement is not None
-        self.assertEqual(r.existing_measurement.min_bitrate_kbps, 192)
-        self.assertEqual(r.existing_measurement.spectral_grade, "suspect")
-        self.assertEqual(r.existing_measurement.spectral_bitrate_kbps, 128)
+        self.assertEqual(r.version, 3)
+        self.assertEqual(r.legacy_projection_version, 1)
+        assert r.source_measurement is not None
+        self.assertEqual(r.source_measurement.min_bitrate_kbps, 245)
+        self.assertEqual(r.source_measurement.spectral_grade, "genuine")
+        self.assertTrue(r.source_measurement.verified_lossless)
+        self.assertEqual(r.source_measurement.was_converted_from, "flac")
+        assert r.current_measurement is not None
+        self.assertEqual(r.current_measurement.min_bitrate_kbps, 192)
+        self.assertEqual(r.current_measurement.spectral_grade, "suspect")
+        self.assertEqual(r.current_measurement.spectral_bitrate_kbps, 128)
         # Process data migrated to ConversionInfo
         self.assertEqual(r.conversion.post_conversion_min_bitrate, 240)
         self.assertFalse(r.conversion.is_transcode)
@@ -620,9 +632,9 @@ class TestImportResultSerialization(unittest.TestCase):
             "conversion": {},
         }
         r = ImportResult.from_dict(v1_dict)
-        assert r.new_measurement is not None
-        self.assertEqual(r.new_measurement.min_bitrate_kbps, 245)
-        self.assertIsNone(r.existing_measurement)
+        assert r.source_measurement is not None
+        self.assertEqual(r.source_measurement.min_bitrate_kbps, 245)
+        self.assertIsNone(r.current_measurement)
 
 
 class TestImportResultProductionFixtures(unittest.TestCase):
@@ -691,15 +703,16 @@ class TestImportResultProductionFixtures(unittest.TestCase):
             "v0_verification_bitrate": None,
         }
         r = ImportResult.from_dict(prod_row)
+        self.assertEqual(r.legacy_projection_version, 2)
         self.assertEqual(r.decision, "import")
         self.assertTrue(r.already_in_beets)
         self.assertEqual(r.postflight.beets_id, 10323)
-        assert r.new_measurement is not None
-        self.assertEqual(r.new_measurement.avg_bitrate_kbps, 246)
-        self.assertEqual(r.new_measurement.median_bitrate_kbps, 248)
-        self.assertEqual(r.new_measurement.format, "MP3")
-        assert r.existing_measurement is not None
-        self.assertEqual(r.existing_measurement.spectral_bitrate_kbps, 160)
+        assert r.source_measurement is not None
+        self.assertEqual(r.source_measurement.avg_bitrate_kbps, 246)
+        self.assertEqual(r.source_measurement.median_bitrate_kbps, 248)
+        self.assertEqual(r.source_measurement.format, "MP3")
+        assert r.current_measurement is not None
+        self.assertEqual(r.current_measurement.spectral_bitrate_kbps, 160)
         self.assertEqual(len(r.spectral.per_track), 2)
         self.assertEqual(r.spectral.suspect_pct, 80.0)
         # Round-trip via to_json preserves everything.
@@ -749,13 +762,14 @@ class TestImportResultProductionFixtures(unittest.TestCase):
             "v0_verification_bitrate": 245,
         }
         r = ImportResult.from_dict(prod_row)
+        self.assertEqual(r.legacy_projection_version, 2)
         self.assertEqual(len(r.postflight.moved_siblings), 1)
         sib = r.postflight.moved_siblings[0]
         self.assertEqual(sib.album_id, 10314)
         self.assertEqual(sib.mb_albumid,
                          "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")
-        assert r.new_measurement is not None
-        self.assertTrue(r.new_measurement.verified_lossless)
+        assert r.source_measurement is not None
+        self.assertTrue(r.source_measurement.verified_lossless)
         r2 = ImportResult.from_json(r.to_json())
         self.assertEqual(r, r2)
 
@@ -799,12 +813,12 @@ class TestImportResultProductionFixtures(unittest.TestCase):
         }
         r = ImportResult.from_dict(v1_row)
         # Migrated to v2 in memory.
-        self.assertEqual(r.version, 2)
+        self.assertEqual(r.version, 3)
         self.assertEqual(r.decision, "import")
-        assert r.new_measurement is not None
-        self.assertEqual(r.new_measurement.min_bitrate_kbps, 320)
-        assert r.existing_measurement is not None
-        self.assertEqual(r.existing_measurement.min_bitrate_kbps, 128)
+        assert r.source_measurement is not None
+        self.assertEqual(r.source_measurement.min_bitrate_kbps, 320)
+        assert r.current_measurement is not None
+        self.assertEqual(r.current_measurement.min_bitrate_kbps, 128)
         self.assertEqual(r.postflight.beets_id, 9026)
         self.assertEqual(r.postflight.track_count, 13)
         # And v1 migrates cleanly to v2 JSON, which round-trips as v2.
@@ -878,10 +892,10 @@ class TestImportResultProductionFixtures(unittest.TestCase):
         the current data contains decodes cleanly with no hedge.
         """
         for desc, d in [
-            ("new_measurement=null",
+            ("source_measurement=null",
              {"version": 2, "exit_code": 0, "decision": "import",
               "new_measurement": None}),
-            ("existing_measurement=null",
+            ("current_measurement=null",
              {"version": 2, "exit_code": 0, "decision": "import",
               "existing_measurement": None}),
             ("disambiguation_failure=null",
@@ -895,8 +909,8 @@ class TestImportResultProductionFixtures(unittest.TestCase):
             with self.subTest(desc=desc):
                 r = ImportResult.from_dict(d)
                 self.assertEqual(r.decision, "import")
-                self.assertIsNone(r.new_measurement)
-                self.assertIsNone(r.existing_measurement)
+                self.assertIsNone(r.source_measurement)
+                self.assertIsNone(r.current_measurement)
                 self.assertIsNone(r.postflight.disambiguation_failure)
 
 
@@ -931,7 +945,7 @@ class TestParseImportResult(unittest.TestCase):
         """JSON on last line, human text before it."""
         r = ImportResult(
             decision="transcode_upgrade", exit_code=6,
-            new_measurement=AudioQualityMeasurement(min_bitrate_kbps=180))
+            source_measurement=AudioQualityMeasurement(min_bitrate_kbps=180))
         stdout = (
             "[CONVERT] /tmp/album\n"
             "  Converted 10, failed 0\n"
@@ -943,8 +957,8 @@ class TestParseImportResult(unittest.TestCase):
         parsed = parse_import_result(stdout)
         assert parsed is not None
         self.assertEqual(parsed.decision, "transcode_upgrade")
-        assert parsed.new_measurement is not None
-        self.assertEqual(parsed.new_measurement.min_bitrate_kbps, 180)
+        assert parsed.source_measurement is not None
+        self.assertEqual(parsed.source_measurement.min_bitrate_kbps, 180)
 
     def test_parse_no_sentinel(self):
         """Old import_one.py or crash — no JSON emitted."""
@@ -1007,7 +1021,7 @@ class TestImportResultScenarios(unittest.TestCase):
         r = ImportResult(
             exit_code=0,
             decision="import",
-            new_measurement=AudioQualityMeasurement(
+            source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245, spectral_grade="genuine",
                 verified_lossless=True, was_converted_from="flac"),
             conversion=ConversionInfo(
@@ -1019,8 +1033,8 @@ class TestImportResultScenarios(unittest.TestCase):
         )
         self.assertEqual(r.exit_code, 0)
         self.assertTrue(r.conversion.was_converted)
-        assert r.new_measurement is not None
-        self.assertTrue(r.new_measurement.verified_lossless)
+        assert r.source_measurement is not None
+        self.assertTrue(r.source_measurement.verified_lossless)
         self.assertFalse(r.conversion.is_transcode)
         self.assertIsNone(r.error)
 
@@ -1029,8 +1043,8 @@ class TestImportResultScenarios(unittest.TestCase):
         r = ImportResult(
             exit_code=5,
             decision="downgrade",
-            new_measurement=AudioQualityMeasurement(min_bitrate_kbps=192),
-            existing_measurement=AudioQualityMeasurement(min_bitrate_kbps=320),
+            source_measurement=AudioQualityMeasurement(min_bitrate_kbps=192),
+            current_measurement=AudioQualityMeasurement(min_bitrate_kbps=320),
         )
         self.assertEqual(r.exit_code, 5)
         self.assertEqual(r.decision, "downgrade")
@@ -1041,10 +1055,10 @@ class TestImportResultScenarios(unittest.TestCase):
         r = ImportResult(
             exit_code=6,
             decision="transcode_upgrade",
-            new_measurement=AudioQualityMeasurement(
+            source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=180, spectral_grade="suspect",
                 spectral_bitrate_kbps=128),
-            existing_measurement=AudioQualityMeasurement(min_bitrate_kbps=128),
+            current_measurement=AudioQualityMeasurement(min_bitrate_kbps=128),
             conversion=ConversionInfo(
                 converted=10, failed=0, was_converted=True,
                 original_filetype="flac", target_filetype="mp3",
@@ -1062,8 +1076,8 @@ class TestImportResultScenarios(unittest.TestCase):
         r = ImportResult(
             exit_code=6,
             decision="transcode_downgrade",
-            new_measurement=AudioQualityMeasurement(min_bitrate_kbps=128),
-            existing_measurement=AudioQualityMeasurement(min_bitrate_kbps=180),
+            source_measurement=AudioQualityMeasurement(min_bitrate_kbps=128),
+            current_measurement=AudioQualityMeasurement(min_bitrate_kbps=180),
             conversion=ConversionInfo(is_transcode=True),
         )
         self.assertEqual(r.exit_code, 6)
@@ -1155,18 +1169,18 @@ class TestDownloadInfo(unittest.TestCase):
         """Verify the contract: ImportResult fields map to DownloadInfo fields."""
         ir = ImportResult(
             decision="import",
-            new_measurement=AudioQualityMeasurement(
+            source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245, spectral_grade="genuine",
                 verified_lossless=True, was_converted_from="flac"),
-            existing_measurement=AudioQualityMeasurement(
+            current_measurement=AudioQualityMeasurement(
                 spectral_bitrate_kbps=128),
             conversion=ConversionInfo(
                 converted=10, was_converted=True,
                 original_filetype="flac", target_filetype="mp3"),
         )
-        new_m = ir.new_measurement
+        new_m = ir.source_measurement
         assert new_m is not None
-        existing_m = ir.existing_measurement
+        existing_m = ir.current_measurement
         assert existing_m is not None
         dl = DownloadInfo(
             was_converted=ir.conversion.was_converted,
@@ -1203,10 +1217,10 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
     def test_flac_conversion(self) -> None:
         dl = DownloadInfo(filetype="flac", bitrate=0)
         ir = ImportResult(
-            new_measurement=AudioQualityMeasurement(
+            source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245, spectral_grade="genuine",
                 verified_lossless=True, was_converted_from="flac"),
-            existing_measurement=AudioQualityMeasurement(
+            current_measurement=AudioQualityMeasurement(
                 spectral_bitrate_kbps=128),
             conversion=ConversionInfo(converted=10, was_converted=True,
                                       original_filetype="flac", target_filetype="mp3"),
@@ -1227,7 +1241,7 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
     def test_no_conversion(self) -> None:
         dl = DownloadInfo(filetype="mp3", bitrate=320000)
         ir = ImportResult(
-            new_measurement=AudioQualityMeasurement(
+            source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=320, spectral_grade="genuine"),
             conversion=ConversionInfo(),
         )
@@ -1287,8 +1301,8 @@ class TestImportAttemptResult(unittest.TestCase):
         self.assertIs(merged, harness_result)
         self.assertEqual(merged.spectral, audit)
         self.assertEqual(merged.decision, "import")
-        self.assertIsNotNone(merged.new_measurement)
-        self.assertIsNotNone(merged.existing_measurement)
+        self.assertIsNotNone(merged.source_measurement)
+        self.assertIsNotNone(merged.current_measurement)
         self.assertTrue(merged.conversion.was_converted)
         self.assertEqual(merged.postflight.beets_id, 77)
         self.assertIsNotNone(merged.comparison_basis)

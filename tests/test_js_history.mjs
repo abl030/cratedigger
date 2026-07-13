@@ -659,6 +659,11 @@ console.log('Gas: contract, V0 proof, and materialized Opus output stay distinct
 {
   const strip = renderEvidenceFixture({
     downloaded_label: 'FLAC → OPUS 128',
+    source_format: 'FLAC',
+    source_min_bitrate: 742,
+    source_avg_bitrate: 811,
+    source_median_bitrate: 803,
+    target_contract_format: 'opus 128',
     slskd_filetype: 'flac',
     actual_filetype: 'opus',
     was_converted: true,
@@ -701,6 +706,11 @@ console.log('Gas: contract, V0 proof, and materialized Opus output stay distinct
     soulseek_username: 'Gas-peer',
     created_at: '2026-07-13T01:06:27+00:00',
     downloaded_label: 'FLAC → OPUS 128',
+    source_format: 'FLAC',
+    source_min_bitrate: 742,
+    source_avg_bitrate: 811,
+    source_median_bitrate: 803,
+    target_contract_format: 'opus 128',
     slskd_filetype: 'flac',
     actual_filetype: 'opus',
     was_converted: true,
@@ -735,6 +745,9 @@ console.log('Gas: contract, V0 proof, and materialized Opus output stay distinct
     verdict: 'Force imported after manual review',
   });
   assertContains(detail, 'Output', 'detail grid names the materialized side');
+  assertContains(detail, 'FLAC avg 811kbps · min 742kbps',
+    'detail source uses downloaded source measurements');
+  assertContains(detail, 'Target contract', 'detail names target policy separately');
   assertContains(detail, 'OPUS avg 132kbps · min 102kbps',
     'detail output is codec-aware');
   assertContains(detail, 'OPUS 128 contract', 'detail comparison is contract-aware');
@@ -753,6 +766,7 @@ console.log('Iron & Wine: the temporary V0 minimum never wears the FLAC label');
     spectral_grade: 'likely_transcode',
     spectral_bitrate: 96,
     v0_probe_kind: 'lossless_source_v0',
+    legacy_projection_version: 2,
     v0_probe_min_bitrate: 165,
     v0_probe_avg_bitrate: 171,
     existing_format: 'Opus',

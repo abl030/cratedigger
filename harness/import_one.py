@@ -67,6 +67,7 @@ from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          MeasuredImportDecisionInput,
                          ProvisionalLosslessDecisionInput,
                          ProvisionalLosslessDecisionResult,
+                         TargetQualityContract,
                          V0_PROBE_LOSSLESS_SOURCE,
                          V0_PROBE_NATIVE_LOSSY_RESEARCH,
                          V0ProbeEvidence,
@@ -268,6 +269,9 @@ def quality_decision_stage(
     existing: AudioQualityMeasurement | None,
     is_transcode: bool,
     cfg: QualityRankConfig | None = None,
+    *,
+    target_contract: TargetQualityContract | None = None,
+    v0_probe: V0ProbeEvidence | None = None,
 ) -> StageResult:
     """Run quality comparison and map to exit codes (pure wrapper).
 
@@ -278,7 +282,9 @@ def quality_decision_stage(
     comparison. Falls back to QualityRankConfig.defaults() when omitted.
     """
     result = measured_import_decision(
-        MeasuredImportDecisionInput(new, existing, is_transcode),
+        MeasuredImportDecisionInput(
+            new, existing, is_transcode, target_contract, v0_probe
+        ),
         cfg=cfg,
     )
     decision = result.decision
@@ -332,12 +338,12 @@ def _materialized_measurement_from_album_info(
 ) -> AudioQualityMeasurement:
     """Describe the files Beets actually retained after materialization.
 
-    Decision evidence intentionally stays in ``result.new_measurement``.
+    Decision evidence intentionally stays in ``result.source_measurement``.
     Postflight Beets metadata is authoritative for the output codec and its
     per-track bitrate statistics; source spectral/V0 evidence must not be
     relabelled as an analysis of this derivative.
     """
-    candidate = result.new_measurement
+    candidate = result.source_measurement
     return AudioQualityMeasurement(
         min_bitrate_kbps=album_info.min_bitrate_kbps,
         avg_bitrate_kbps=album_info.avg_bitrate_kbps,
@@ -689,6 +695,21 @@ def _detect_native_codec_family(folder: str) -> str:
              f"audio in {folder}; falling back to MP3-band scoring (a probe "
              f"failure or an unbanded codec such as Vorbis)")
     return "MP3"
+
+
+def _detect_source_format(folder: str) -> str:
+    """Return the bare codec actually present in the downloaded source."""
+
+    for root, _dirs, filenames in os.walk(folder):
+        for fname in sorted(filenames):
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in AUDIO_EXTENSIONS:
+                continue
+            codec = _ffprobe_audio_codec_name(os.path.join(root, fname))
+            if codec:
+                return codec.upper()
+            return ext.lstrip(".").upper()
+    return "UNKNOWN"
 
 
 def _is_lossless_file(fname: str, folder: str = "") -> bool:
@@ -1427,10 +1448,15 @@ def _run_quality_evidence_authorized_import(
     try:
         payload = _load_quality_evidence_action_file(action_file)
         r.decision = _evidence_action_decision_name(payload)
-        r.new_measurement = payload.candidate.measurement
-        r.existing_measurement = (
+        r.source_measurement = payload.candidate.measurement
+        r.current_measurement = (
             payload.current.measurement if payload.current is not None else None
         )
+        target_final_format = payload.decision.get("target_final_format")
+        if isinstance(target_final_format, str) and target_final_format:
+            r.target_quality_contract = TargetQualityContract(
+                format=target_final_format
+            )
         r.quality_evidence_provenance = QualityEvidenceActionProvenance(
             candidate_status=payload.provenance.candidate_status,
             current_status=payload.provenance.current_status,
@@ -1463,11 +1489,20 @@ def _run_quality_evidence_authorized_import(
             _emit_and_exit(r)
 
         _validate_quality_evidence_action_snapshot(args.path, payload)
+        source_was_lossless = bool(_lossless_filenames(args.path))
         quality_is_transcode = _materialize_quality_evidence_action(
             work_path=args.path,
             payload=payload,
             r=r,
         )
+        if (
+            source_was_lossless
+            and r.target_quality_contract is None
+            and r.final_format
+        ):
+            r.target_quality_contract = TargetQualityContract(
+                format=r.final_format
+            )
     except Exception as exc:
         r.exit_code = 5
         r.decision = "quality_evidence_action_failed"
@@ -1696,6 +1731,22 @@ def main():
         _log_timing("dry_run_copy", stage_start)
         _log(f"[DRY-RUN] Previewing isolated copy: {work_path}")
 
+    # Capture downloaded-source truth before any V0 probe or target conversion
+    # mutates the isolated/staged folder.
+    source_bitrates = _get_folder_bitrates(work_path)
+    source_min_br = min(source_bitrates) if source_bitrates else None
+    source_avg_br = (
+        int(sum(source_bitrates) / len(source_bitrates))
+        if source_bitrates else None
+    )
+    source_median_br = (
+        int(statistics.median(source_bitrates)) if source_bitrates else None
+    )
+    source_is_cbr = (
+        len(set(source_bitrates)) == 1 if source_bitrates else False
+    )
+    source_format = _detect_source_format(work_path)
+
     # --- Spectral analysis (pre-conversion) ---
     spectral_grade: str | None = None
     spectral_bitrate: int | None = None
@@ -1854,10 +1905,6 @@ def main():
             _log(f"  native_lossy_research_v0_avg={r.v0_probe.avg_bitrate_kbps}kbps")
     new_min_br = min(new_bitrates) if new_bitrates else None
     new_avg_br = int(sum(new_bitrates) / len(new_bitrates)) if new_bitrates else None
-    new_median_br = (
-        int(statistics.median(new_bitrates)) if new_bitrates else None
-    )
-    new_is_cbr = len(set(new_bitrates)) == 1 if new_bitrates else False
     existing_info = beets.get_album_info(mbid, _rank_cfg)
     _log_timing("quality_measurement", stage_start)
     existing_min_br = existing_info.min_bitrate_kbps if existing_info else None
@@ -1918,9 +1965,7 @@ def main():
              f"min={r.v0_probe.min_bitrate_kbps if r.v0_probe else '?'}kbps "
              "→ verified_lossless=True")
 
-    # Final format label for the NEW measurement. Compute conv_target early
-    # (originally it was computed after the quality decision — hoisted for
-    # issue #60 so the rank model sees the correct target label).
+    # Compute the projected target contract before the quality decision.
     new_conv_target = conversion_target(
         args.target_format, will_be_verified_lossless,
         args.verified_lossless_target)
@@ -1937,17 +1982,21 @@ def main():
         native_codec_family=native_codec_family,
     )
 
-    # --- Build measurements ---
+    # --- Build source/current measurements + separate target policy ---
     new_m = AudioQualityMeasurement(
-        min_bitrate_kbps=new_min_br,
-        avg_bitrate_kbps=new_avg_br,
-        median_bitrate_kbps=new_median_br,
-        format=new_format_label,
-        is_cbr=new_is_cbr,
+        min_bitrate_kbps=source_min_br,
+        avg_bitrate_kbps=source_avg_br,
+        median_bitrate_kbps=source_median_br,
+        format=source_format,
+        is_cbr=source_is_cbr,
         spectral_grade=spectral_grade,
         spectral_bitrate_kbps=spectral_bitrate,
         verified_lossless=will_be_verified_lossless,
-        was_converted_from=(original_ext or "flac") if converted > 0 else None,
+    )
+    target_contract = (
+        TargetQualityContract(format=new_format_label)
+        if converted > 0 and new_format_label is not None
+        else None
     )
     existing_m = build_existing_measurement(
         existing_info,
@@ -1955,8 +2004,9 @@ def main():
         existing_spectral_grade=existing_spectral_grade,
         existing_spectral_bitrate=existing_spectral_bitrate,
     )
-    r.new_measurement = new_m
-    r.existing_measurement = existing_m
+    r.source_measurement = new_m
+    r.current_measurement = existing_m
+    r.target_quality_contract = target_contract
 
     # --- Quality comparison (pure decision) ---
     qd: StageResult | None = None
@@ -1988,24 +2038,16 @@ def main():
                     is_transcode=is_transcode,
                     native_codec_family=native_codec_family,
                 )
-                new_m = AudioQualityMeasurement(
-                    min_bitrate_kbps=new_min_br,
-                    avg_bitrate_kbps=new_avg_br,
-                    median_bitrate_kbps=new_median_br,
-                    format=new_format_label,
-                    is_cbr=new_is_cbr,
-                    spectral_grade=spectral_grade,
-                    spectral_bitrate_kbps=spectral_bitrate,
-                    verified_lossless=False,
-                    was_converted_from=(
-                        (original_ext or "flac") if converted > 0 else None
-                    ),
-                )
-                r.new_measurement = new_m
+                if new_format_label is not None:
+                    target_contract = TargetQualityContract(format=new_format_label)
+                    r.target_quality_contract = target_contract
     else:
         qd = quality_decision_stage(
             new_m, existing_m, is_transcode=quality_is_transcode,
-            cfg=_rank_cfg)
+            cfg=_rank_cfg,
+            target_contract=target_contract,
+            v0_probe=r.v0_probe,
+        )
         decision = qd.decision
         r.decision = decision
         r.comparison_basis = qd.comparison_basis
@@ -2120,31 +2162,17 @@ def main():
                 _remove_files_by_ext(work_path, "." + V0_SPEC.extension)
             # Remove original lossless files (consumed by target conversion)
             _remove_lossless_files(work_path)
-            # Update measurements for the target format — include both the
-            # measured min/avg bitrate and the declared format label so the
-            # rank model classifies against the contract (e.g. "opus 128")
-            # rather than the measured VBR number (which lands 95-150 kbps
-            # depending on material).
+            # Measure the derivative for logs/postflight cross-checking.  The
+            # downloaded source measurement above remains untouched; the target
+            # label stays in ``target_quality_contract``.
             target_bitrates = _get_folder_bitrates(work_path)
             target_min_br = min(target_bitrates) if target_bitrates else None
             target_avg_br = (
                 int(sum(target_bitrates) / len(target_bitrates))
                 if target_bitrates else None
             )
-            target_median_br = (
-                int(statistics.median(target_bitrates)) if target_bitrates else None
-            )
-            target_is_cbr = len(set(target_bitrates)) == 1 if target_bitrates else False
-            r.new_measurement = AudioQualityMeasurement(
-                min_bitrate_kbps=target_min_br,
-                avg_bitrate_kbps=target_avg_br,
-                median_bitrate_kbps=target_median_br,
-                format=target_spec.label,
-                is_cbr=target_is_cbr,
-                spectral_grade=spectral_grade,
-                spectral_bitrate_kbps=spectral_bitrate,
-                verified_lossless=will_be_verified_lossless,
-                was_converted_from=(original_ext or "flac"),
+            r.target_quality_contract = TargetQualityContract(
+                format=target_spec.label
             )
             r.conversion.target_filetype = target_spec.extension
             r.final_format = target_spec.label

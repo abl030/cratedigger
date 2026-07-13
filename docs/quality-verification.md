@@ -269,14 +269,21 @@ action file, and the dispatch-synthesized reject `ImportResult`. Re-typing
 back from the dict goes through `comparison_basis_from_decision()` — the one
 converter.
 
-Successful imports also persist `ImportResult.materialized_measurement`, built
+Version 3 import results persist four disjoint facts:
+
+- `source_measurement` is measured from the downloaded bytes before mutation;
+- `v0_probe` is the temporary research/provisional encode;
+- `target_quality_contract` is configured policy used explicitly by comparison
+  and gate ranking; and
+- `materialized_measurement` is built
 from the postflight Beets album info after conversion and import. It records the
 actual stored codec plus min/avg/median bitrate. This is deliberately separate
-from `new_measurement` (the decision-time candidate projection),
 `comparison_basis` (the policy explanation), and `v0_probe` (a temporary
 research encode). Audit UIs must use the materialized measurement for claims
 about output bytes and must leave historical output unknown when that field is
-absent.
+absent. V1/v2 rows pass through the explicit legacy projection and carry
+`legacy_projection_version`; only that quarantined reader preserves their
+historically ambiguous `new_measurement` shape.
 
 **Motivation (request 6039 / download_log 36608):** a genuine avg 196→288
 rank upgrade (GOOD → TRANSPARENT) rendered as "Upgrade: MP3 V2 to MP3 V2"
