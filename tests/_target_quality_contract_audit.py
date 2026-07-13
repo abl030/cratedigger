@@ -6,6 +6,11 @@ import ast
 from dataclasses import dataclass
 
 
+_TARGET_CONTRACT_MODULES = frozenset(
+    {"lib.quality", "lib.quality.evidence_types"}
+)
+
+
 @dataclass(frozen=True)
 class TargetContractCallViolation:
     """One target-contract call whose format can be bare MP3 without a mode."""
@@ -14,17 +19,39 @@ class TargetContractCallViolation:
     line: int
 
 
-def _target_contract_bindings(tree: ast.Module) -> tuple[set[str], set[str]]:
-    class_names = {"TargetQualityContract"}
+def _resolved_import_from_module(
+    relative_path: str,
+    node: ast.ImportFrom,
+) -> str | None:
+    if node.level == 0:
+        return node.module
+    package_parts = relative_path.replace("\\", "/").split("/")[:-1]
+    retained_count = len(package_parts) - node.level + 1
+    if retained_count < 0:
+        return None
+    parts = package_parts[:retained_count]
+    if node.module:
+        parts.extend(node.module.split("."))
+    return ".".join(parts)
+
+
+def _target_contract_bindings(
+    tree: ast.Module,
+    relative_path: str,
+) -> tuple[set[str], set[str]]:
+    class_names: set[str] = set()
     module_names: set[str] = set()
     for node in tree.body:
         if isinstance(node, ast.ImportFrom):
+            imported_module = _resolved_import_from_module(relative_path, node)
+            if imported_module not in _TARGET_CONTRACT_MODULES:
+                continue
             for alias in node.names:
                 if alias.name == "TargetQualityContract":
                     class_names.add(alias.asname or alias.name)
         elif isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name in {"lib.quality", "lib.quality.evidence_types"}:
+                if alias.name in _TARGET_CONTRACT_MODULES:
                     module_names.add(alias.asname or alias.name)
     return class_names, module_names
 
@@ -80,7 +107,7 @@ def target_contract_call_violations(
     """
 
     tree = ast.parse(source, filename=relative_path)
-    class_names, module_names = _target_contract_bindings(tree)
+    class_names, module_names = _target_contract_bindings(tree, relative_path)
     violations: list[TargetContractCallViolation] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not _is_target_contract_factory(
