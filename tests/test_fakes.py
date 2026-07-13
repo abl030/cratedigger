@@ -510,6 +510,35 @@ class TestFakePipelineDB(unittest.TestCase):
             db.update_request_fields(41, status="manual")
         self.assertEqual(db.request(41), before)
 
+    def test_metadata_writers_reject_malformed_and_lifecycle_fields(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=41, status="wanted"))
+        before = copy.deepcopy(db.request(41))
+
+        for writer in (
+            lambda: db.update_request_fields(
+                41, **{"reasoning, status": "smuggled"},
+            ),
+            lambda: db.update_status(
+                41, "imported", active_download_state="{}",
+            ),
+        ):
+            with self.subTest(writer=writer):
+                with self.assertRaises(ValueError):
+                    writer()
+                self.assertEqual(db.request(41), before)
+
+    def test_reset_writers_reject_noncanonical_metadata(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=41, status="downloading"))
+        before = copy.deepcopy(db.request(41))
+
+        with self.assertRaises(ValueError):
+            db.reset_to_wanted(41, reasoning="smuggled")
+        with self.assertRaises(ValueError):
+            db.reset_downloading_to_wanted(41, reasoning="smuggled")
+        self.assertEqual(db.request(41), before)
+
     def test_empty_spectral_adapter_cannot_report_missing_or_replaced_success(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="replaced"))

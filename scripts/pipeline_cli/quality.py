@@ -512,15 +512,13 @@ def cmd_repair_spectral(db, args):
             expected_after_transition = "imported"
 
         # Clear only if the row is still in the status this repair established.
-        clear_cur = db._execute("""
-            UPDATE album_requests
-            SET last_download_spectral_bitrate = NULL,
-                current_spectral_bitrate = NULL,
-                updated_at = NOW()
-            WHERE id = %s AND status = %s AND status != 'replaced'
-            RETURNING id
-        """, (rid, expected_after_transition))
-        if clear_cur.fetchone() is None:
+        cleared = db.update_request_fields(
+            rid,
+            expected_status=expected_after_transition,
+            last_download_spectral_bitrate=None,
+            current_spectral_bitrate=None,
+        )
+        if not cleared:
             print("         transition conflict: row changed during repair")
             return 4
 

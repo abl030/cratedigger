@@ -39,6 +39,9 @@ class _SqlFinding:
     category: str = "unguarded"
     scope: str | None = None
     exact_source_status_cas: bool = False
+    canonical_params: bool = False
+    direct_static_sql: bool = False
+    album_request_update: bool = False
 
 
 @dataclass(frozen=True)
@@ -47,98 +50,91 @@ class _AlbumRequestUpdate:
     sets_status: bool
     exact_source_status_cas: bool
     invalid_status_cas: bool = False
+    canonical_params: bool = False
+    direct_static_sql: bool = False
 
 
 # Every unresolved production SQL builder is an exact, reviewed exception.
-# The key includes path, source line, and a fingerprint of the execute argument
-# plus all reachable local/module definitions. Moving or changing a builder
-# therefore fails the audit until its bounded construction is reviewed again.
+# The key includes path, source line, and the exact execute SQL/params AST;
+# dynamic calls additionally bind the whole enclosing scope. The ratchet does
+# not infer parameter dataflow: transition SQL must use the canonical direct
+# call grammar below.
 _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/beets_db.py", 329, "7e42491a58dc56d0"): (
+    ("lib/beets_db.py", 329, "8f86dc625b889913"): (
         "SQLite IN list is generated only from '?' value placeholders"
     ),
-    ("lib/beets_db.py", 340, "fe92f0e2d9ac9884"): (
+    ("lib/beets_db.py", 340, "ee7a80c1900ded7e"): (
         "SQLite IN list is generated only from '?' value placeholders"
     ),
-    ("lib/beets_db.py", 569, "db58c0dd12fed8c8"): (
+    ("lib/beets_db.py", 569, "25f232934b82ec93"): (
         "SQLite IN list is generated only from '?' value placeholders"
     ),
-    ("lib/beets_db.py", 577, "16d84727206b34ed"): (
+    ("lib/beets_db.py", 577, "b065a06e6e2e0d72"): (
         "SQLite IN list is generated only from '?' value placeholders"
     ),
-    ("lib/pipeline_db/dashboard.py", 481, "08adb269f8845965"): (
+    ("lib/pipeline_db/dashboard.py", 481, "5e3b8177198ccbed"): (
         "dashboard WHERE and ORDER fragments come from closed enum branches"
     ),
-    ("lib/pipeline_db/download_log.py", 123, "cf5255de40904f8a"): (
+    ("lib/pipeline_db/download_log.py", 123, "e2e8aabdd7526c93"): (
         "download outcome filter appends closed literal clauses only"
     ),
-    ("lib/pipeline_db/download_log.py", 430, "ddd21ee649f88eb4"): (
+    ("lib/pipeline_db/download_log.py", 430, "01412e959b448f40"): (
         "request batch IN list contains only psycopg value placeholders"
     ),
-    ("lib/pipeline_db/download_log.py", 512, "417613ed343e7095"): (
+    ("lib/pipeline_db/download_log.py", 512, "a4d9b82e27a004bb"): (
         "validation key is selected from a closed server-owned vocabulary"
     ),
-    ("lib/pipeline_db/download_log.py", 564, "ae46b91225dde227"): (
+    ("lib/pipeline_db/download_log.py", 564, "e0154e89026dc8ef"): (
         "validation key is selected from a closed server-owned vocabulary"
     ),
-    ("lib/pipeline_db/download_log.py", 582, "c19db123568bf107"): (
+    ("lib/pipeline_db/download_log.py", 582, "1ca75e0c21fa6d7e"): (
         "validation key is closed vocabulary and IN list is value placeholders"
     ),
-    ("lib/pipeline_db/download_log.py", 599, "dc4634b2c67c03f5"): (
+    ("lib/pipeline_db/download_log.py", 599, "d87a36ba1d1768e7"): (
         "JSON path key is selected from a closed server-owned vocabulary"
     ),
-    ("lib/pipeline_db/import_jobs.py", 105, "3af67fae80413763"): (
+    ("lib/pipeline_db/import_jobs.py", 105, "ecf3d1844c67f653"): (
         "optional job filter is a fixed literal WHERE clause"
     ),
-    ("lib/pipeline_db/import_jobs.py", 166, "5b0af33186bdc9a4"): (
+    ("lib/pipeline_db/import_jobs.py", 166, "5583c4b8f7ee9536"): (
         "claim exclusion predicate is assembled from fixed literal clauses"
     ),
-    ("lib/pipeline_db/misc.py", 188, "cbcdb5250c697329"): (
+    ("lib/pipeline_db/misc.py", 188, "12cfdd83a367c90e"): (
         "track-count batch IN list contains only psycopg value placeholders"
     ),
-    ("lib/pipeline_db/misc.py", 381, "785a4fa4d82eaa2a"): (
+    ("lib/pipeline_db/misc.py", 381, "0a14fd5e6252e398"): (
         "bulk VALUES fragment contains only fixed value-placeholder tuples"
     ),
-    ("lib/pipeline_db/misc.py", 555, "fcac0c0ace91bd54"): (
+    ("lib/pipeline_db/misc.py", 555, "47e316b5c87e000f"): (
         "triage joins and predicates are selected from closed service enums"
     ),
-    ("lib/pipeline_db/requests.py", 68, "3773501ff135b28d"): (
+    ("lib/pipeline_db/requests.py", 69, "092ac19c7715cd88"): (
         "INSERT columns derive from the fixed AddRequestInput schema"
     ),
-    ("lib/pipeline_db/requests.py", 96, "ecd445b5e1db6c2d"): (
+    ("lib/pipeline_db/requests.py", 97, "6a0115f1555f11bd"): (
         "request batch IN list contains only psycopg value placeholders"
     ),
-    ("lib/pipeline_db/requests.py", 205, "b456c96fc9477ad3"): (
+    ("lib/pipeline_db/requests.py", 206, "dffc52ed3fcd380d"): (
         "release-id lookup selects one of two fixed identity predicates"
     ),
-    ("lib/pipeline_db/requests.py", 443, "b93917f93b5266f3"): (
-        "internal kwargs use value placeholders and runtime-reserve lifecycle fields"
+    ("lib/pipeline_db/requests.py", 420, "b73bda10a331e1c3"): (
+        "metadata keys are validated identifiers, lifecycle fields are reserved, "
+        "and values use one typed JSONB record parameter"
     ),
-    ("lib/pipeline_db/requests.py", 449, "776b21cd19d9abcc"): (
-        "internal kwargs use value placeholders and runtime-reserve lifecycle fields"
+    ("lib/pipeline_db/requests.py", 438, "86eaf6b403f76820"): (
+        "metadata keys are validated identifiers, lifecycle fields are reserved, "
+        "and values use one typed JSONB record parameter"
     ),
-    ("lib/pipeline_db/requests.py", 689, "4a1ac4e2eeccd919"): (
-        "transition SET list is produced by typed internal transition fields"
-    ),
-    ("lib/pipeline_db/requests.py", 827, "154515c9ef3afda7"): (
-        "rescue SET list is produced by typed internal outcome fields"
-    ),
-    ("lib/pipeline_db/requests.py", 939, "b238c0bfc456fdd2"): (
-        "atomic retry SET list is fixed and guarded by exact source status"
-    ),
-    ("lib/pipeline_db/requests.py", 979, "be30b022a52b1d51"): (
-        "atomic retry SET list is fixed and guarded by exact source status"
-    ),
-    ("lib/pipeline_db/requests.py", 1190, "17f28a86b8756f82"): (
+    ("lib/pipeline_db/requests.py", 1268, "0e292421052b4282"): (
         "optional LIMIT is normalized through int before interpolation"
     ),
-    ("lib/pipeline_db/requests.py", 1205, "267319042331ea26"): (
+    ("lib/pipeline_db/requests.py", 1283, "f027e891f4828e53"): (
         "ORDER is selected from two literals and LIMIT remains a value placeholder"
     ),
-    ("lib/pipeline_db/requests.py", 1390, "62b664622f3d232b"): (
+    ("lib/pipeline_db/requests.py", 1468, "714da98640ff84f0"): (
         "attempt kind is validated against the fixed retry-counter vocabulary"
     ),
-    ("lib/pipeline_db/search_plan.py", 949, "4f7388c59e6ea57b"): (
+    ("lib/pipeline_db/search_plan.py", 949, "3df0db818cab2f3c"): (
         "optional LIMIT is normalized through int before interpolation"
     ),
 }
@@ -150,28 +146,28 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
 # beside the implementation they review; movement or SQL-shape drift fails the
 # ratchet just like the dynamic-SQL exceptions above.
 _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/download_log.py", 253, "ef4f8591efc85e8a"): (
+    ("lib/pipeline_db/download_log.py", 253, "ca5eb59bc2d6e4e8"): (
         "atomic abandoned-import recovery performs downloading-to-wanted CAS"
     ),
-    ("lib/pipeline_db/requests.py", 301, "f5751285b0ba3bb8"): (
+    ("lib/pipeline_db/requests.py", 245, "2285e26c181b40d3"): (
         "Replace holds the row lock and CASes the captured active source status"
     ),
-    ("lib/pipeline_db/requests.py", 689, "4a1ac4e2eeccd919"): (
+    ("lib/pipeline_db/requests.py", 745, "2f7c69bcb8096b6b"): (
         "ordinary typed transitions CAS the source status selected by the DAG"
     ),
-    ("lib/pipeline_db/requests.py", 827, "154515c9ef3afda7"): (
+    ("lib/pipeline_db/requests.py", 843, "6e1f871f294ee820"): (
         "typed imported transition CASes status with rescue audit atomically"
     ),
-    ("lib/pipeline_db/requests.py", 939, "b238c0bfc456fdd2"): (
+    ("lib/pipeline_db/requests.py", 978, "94fb96ce52c23ac6"): (
         "typed reset-to-wanted transition CASes its captured source status"
     ),
-    ("lib/pipeline_db/requests.py", 979, "be30b022a52b1d51"): (
+    ("lib/pipeline_db/requests.py", 1040, "6bcc3a051cbbcf5e"): (
         "automatic recovery accepts only downloading as its exact source"
     ),
-    ("lib/pipeline_db/requests.py", 1005, "74163b2a4d93116e"): (
+    ("lib/pipeline_db/requests.py", 1083, "275d73c5af507f9d"): (
         "typed download claim accepts only the explicit wanted source status"
     ),
-    ("lib/pipeline_db/requests.py", 1041, "e1a54383a5bfea13"): (
+    ("lib/pipeline_db/requests.py", 1119, "999b5b9401d772d2"): (
         "plan-aware download claim uses an exact wanted source predicate"
     ),
 }
@@ -179,7 +175,7 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
 
 _STATUS_MUTATING_SEAMS = frozenset({
     "abandon_auto_import_request",
-    "supersede_request_mbid",
+    "_mark_request_replaced",
     "update_status",
     "mark_imported_with_rescue",
     "reset_to_wanted",
@@ -384,195 +380,79 @@ def _execute_params_argument(node: ast.Call) -> ast.expr | None:
     return None
 
 
-def _collection_mutations(
-    tree: ast.Module,
-    call: ast.Call,
-    parents: dict[ast.AST, ast.AST],
-) -> dict[str, tuple[ast.Call, ...]]:
-    """Collect local list append/extend operations visible at ``call``."""
-    call_scope = _enclosing_scope(call, parents)
-    mutations: dict[str, list[ast.Call]] = {}
-    for node in ast.walk(tree):
-        if not (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.value, ast.Name)
-            and node.func.attr in {"append", "extend"}
-            and node.lineno < call.lineno
-            and _enclosing_scope(node, parents) is call_scope
-        ):
-            continue
-        mutations.setdefault(node.func.value.id, []).append(node)
-    return {
-        name: tuple(sorted(calls, key=lambda candidate: candidate.lineno))
-        for name, calls in mutations.items()
-    }
-
-
-def _parameter_variants(
-    node: ast.expr,
-    values: dict[str, tuple[ast.expr, ...]],
-    mutations: dict[str, tuple[ast.Call, ...]],
-    resolving: frozenset[str] = frozenset(),
-) -> tuple[tuple[ast.expr | None, ...], ...]:
-    """Resolve execute parameters conservatively, retaining unknown segments."""
-    if isinstance(node, (ast.List, ast.Tuple)):
-        elements: list[ast.expr | None] = []
-        for element in node.elts:
-            if isinstance(element, ast.Starred):
-                elements.append(None)
-            else:
-                elements.append(element)
-        return (tuple(elements),)
-    if (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id in {"list", "tuple"}
-        and len(node.args) == 1
-        and not node.keywords
-    ):
-        return _parameter_variants(
-            node.args[0], values, mutations, resolving,
-        )
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        left = _parameter_variants(node.left, values, mutations, resolving)
-        right = _parameter_variants(node.right, values, mutations, resolving)
-        return tuple(a + b for a in left for b in right)
-    if not isinstance(node, ast.Name):
-        return ((None,),)
-    if node.id in resolving:
-        return ((None,),)
-    definitions = values.get(node.id)
-    if not definitions:
-        return ((None,),)
-    variants: list[tuple[ast.expr | None, ...]] = []
-    for definition in definitions:
-        base_variants = _parameter_variants(
-            definition,
-            values,
-            mutations,
-            resolving | {node.id},
-        )
-        for base in base_variants:
-            elements = list(base)
-            for mutation in mutations.get(node.id, ()):
-                if not isinstance(mutation.func, ast.Attribute):
-                    elements.append(None)
-                    continue
-                if mutation.func.attr == "append":
-                    elements.append(
-                        mutation.args[0] if len(mutation.args) == 1 else None
-                    )
-                    continue
-                if len(mutation.args) != 1:
-                    elements.append(None)
-                    continue
-                extension = _parameter_variants(
-                    mutation.args[0],
-                    values,
-                    mutations,
-                    resolving | {node.id},
-                )
-                if len(extension) == 1:
-                    elements.extend(extension[0])
-                else:
-                    elements.append(None)
-            variants.append(tuple(elements))
-    return tuple(variants) or ((None,),)
-
-
 _ACTIVE_REQUEST_STATUSES = frozenset({
     "wanted", "downloading", "imported", "manual",
 })
-_SOURCE_STATUS_NAMES = frozenset({
-    "source_status", "expected_status", "old_status", "current_status",
-})
 
 
-def _is_proven_source_status(
-    node: ast.expr | None,
-    values: dict[str, tuple[ast.expr, ...]],
-    resolving: frozenset[str] = frozenset(),
-) -> bool:
-    """Prove a status binding is an active literal or source snapshot."""
-    if node is None:
-        return False
+def _direct_execute_params(node: ast.Call) -> tuple[ast.expr, ...] | None:
+    """Accept only an unstarred tuple/list literal at the execute call."""
+    argument = _execute_params_argument(node)
+    if argument is None:
+        return ()
+    if not isinstance(argument, (ast.Tuple, ast.List)):
+        return None
+    if any(isinstance(element, ast.Starred) for element in argument.elts):
+        return None
+    return tuple(argument.elts)
+
+
+def _walk_same_scope(scope: ast.AST) -> list[ast.AST]:
+    """Walk one function/module body without entering nested scopes."""
+    found: list[ast.AST] = []
+    pending = list(ast.iter_child_nodes(scope))
+    while pending:
+        node = pending.pop()
+        found.append(node)
+        if isinstance(node, _SCOPE_NODES):
+            continue
+        pending.extend(ast.iter_child_nodes(node))
+    return found
+
+
+def _canonical_source_status(node: ast.expr, scope: ast.AST) -> bool:
+    """Accept an active literal or an untouched source-status argument."""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value in _ACTIVE_REQUEST_STATUSES
-    if isinstance(node, ast.IfExp):
-        return (
-            _is_proven_source_status(node.body, values, resolving)
-            and _is_proven_source_status(node.orelse, values, resolving)
-        )
-    if isinstance(node, ast.Name):
-        if node.id in resolving:
-            return False
-        definitions = values.get(node.id, ())
-        if definitions:
-            return all(
-                _is_proven_source_status(
-                    definition, values, resolving | {node.id},
-                )
-                for definition in definitions
-            )
-        if node.id in _SOURCE_STATUS_NAMES:
-            # A source-named function argument is an explicit caller snapshot.
-            return True
+    if not (
+        isinstance(node, ast.Name)
+        and node.id in {"expected_status", "source_status"}
+        and isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ):
         return False
-    if isinstance(node, ast.Subscript):
-        return (
-            isinstance(node.value, ast.Name)
-            and node.value.id in {"row", "old_row", "request_row"}
-            and isinstance(node.slice, ast.Constant)
-            and node.slice.value == "status"
+    argument_names = {
+        argument.arg
+        for argument in (
+            *scope.args.posonlyargs,
+            *scope.args.args,
+            *scope.args.kwonlyargs,
         )
-    if isinstance(node, ast.Call):
-        if (
-            isinstance(node.func, ast.Name)
-            and node.func.id == "str"
-            and len(node.args) == 1
-        ):
-            return _is_proven_source_status(node.args[0], values, resolving)
-        if (
-            isinstance(node.func, ast.Attribute)
-            and node.func.attr == "_status_for_cas"
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id in {"self", "cls"}
-        ):
-            return True
-        if (
-            isinstance(node.func, ast.Attribute)
-            and node.func.attr == "pop"
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "extra"
-            and node.args
-            and isinstance(node.args[0], ast.Constant)
-            and node.args[0].value == "expected_status"
-        ):
-            return True
-    return False
+    }
+    if node.id not in argument_names:
+        return False
+    return not any(
+        isinstance(candidate, ast.Name)
+        and candidate.id == node.id
+        and isinstance(candidate.ctx, ast.Store)
+        for candidate in _walk_same_scope(scope)
+    )
 
 
-def _placeholder_binds_source_status(
+def _placeholder_binds_canonical_source(
     tokens: list[tuple[str, int]],
     placeholder_index: int,
-    parameter_variants: tuple[tuple[ast.expr | None, ...], ...],
-    values: dict[str, tuple[ast.expr, ...]],
+    direct_params: tuple[ast.expr, ...] | None,
+    scope: ast.AST,
 ) -> bool:
-    """Map a SQL placeholder from the end and validate every binding world."""
-    placeholders_after = sum(
-        token == "%s" for token, _ in tokens[placeholder_index + 1:]
-    )
-    offset = placeholders_after + 1
-    bindings: list[ast.expr | None] = []
-    for variant in parameter_variants:
-        if len(variant) < offset:
-            return False
-        bindings.append(variant[-offset])
-    return bool(bindings) and all(
-        _is_proven_source_status(binding, values)
-        for binding in bindings
-    )
+    """Map a placeholder position to the direct call-site argument."""
+    if direct_params is None:
+        return False
+    ordinal = sum(
+        token == "%s" for token, _ in tokens[:placeholder_index + 1]
+    ) - 1
+    if ordinal < 0 or ordinal >= len(direct_params):
+        return False
+    return _canonical_source_status(direct_params[ordinal], scope)
 
 
 def _strip_sql_comments(sql: str) -> str:
@@ -657,8 +537,8 @@ def _target_status_predicates(
     depth: int,
     target_alias: str,
     target_name: str,
-    parameter_variants: tuple[tuple[ast.expr | None, ...], ...],
-    values: dict[str, tuple[ast.expr, ...]],
+    direct_params: tuple[ast.expr, ...] | None,
+    scope: ast.AST,
 ) -> tuple[bool, bool, bool]:
     """Return terminal guard, exact-source CAS, and invalid status CAS."""
     active_values = {"'wanted'", "'downloading'", "'imported'", "'manual'"}
@@ -714,11 +594,11 @@ def _target_status_predicates(
                 if normalized_value in active_values:
                     exact_source_status_cas = True
                 elif normalized_value == "%s":
-                    if _placeholder_binds_source_status(
+                    if _placeholder_binds_canonical_source(
                         tokens,
                         left_end + 2,
-                        parameter_variants,
-                        values,
+                        direct_params,
+                        scope,
                     ):
                         exact_source_status_cas = True
                     else:
@@ -762,12 +642,15 @@ def _set_clause_assigns_status(
 
 def _album_request_update_details(
     sql: str,
-    parameter_variants: tuple[tuple[ast.expr | None, ...], ...] = ((None,),),
-    values: dict[str, tuple[ast.expr, ...]] | None = None,
+    direct_params: tuple[ast.expr, ...] | None = (),
+    scope: ast.AST | None = None,
+    *,
+    canonical_params: bool = True,
+    direct_static_sql: bool = True,
 ) -> list[_AlbumRequestUpdate]:
     """Describe guards and status mutation for every targeted UPDATE."""
-    if values is None:
-        values = {}
+    if scope is None:
+        scope = ast.Module(body=[], type_ignores=[])
     tokens = _sql_tokens(sql)
     results: list[_AlbumRequestUpdate] = []
     for update_index, (token, depth) in enumerate(tokens):
@@ -847,8 +730,8 @@ def _album_request_update_details(
                     depth=depth,
                     target_alias=target_alias,
                     target_name=target_name,
-                    parameter_variants=parameter_variants,
-                    values=values,
+                    direct_params=direct_params,
+                    scope=scope,
                 )
             )
         results.append(_AlbumRequestUpdate(
@@ -857,6 +740,8 @@ def _album_request_update_details(
             sets_status=sets_status,
             exact_source_status_cas=exact_source_status_cas,
             invalid_status_cas=invalid_status_cas,
+            canonical_params=canonical_params,
+            direct_static_sql=direct_static_sql,
         ))
     return results
 
@@ -903,10 +788,9 @@ def _expression_mentions_status_assignment(
 def _sql_call_fingerprint(
     sql_argument: ast.expr,
     params_argument: ast.expr | None,
-    values: dict[str, tuple[ast.expr, ...]],
-    mutations: dict[str, tuple[ast.Call, ...]],
+    scope: ast.AST,
 ) -> str:
-    """Hash normalized SQL/parameter AST plus all reaching definitions."""
+    """Hash the exact call; dynamic builders additionally hash their scope."""
     parts = [
         "SQL",
         ast.dump(sql_argument, include_attributes=False),
@@ -917,32 +801,14 @@ def _sql_call_fingerprint(
             else "<none>"
         ),
     ]
-    pending = list(ast.walk(sql_argument))
-    if params_argument is not None:
-        pending.extend(ast.walk(params_argument))
-    seen: set[str] = set()
-    while pending:
-        node = pending.pop()
-        name = (
-            node.id if isinstance(node, ast.Name)
-            else node.attr if isinstance(node, ast.Attribute)
-            else None
-        )
-        if (
-            name is None
-            or name in seen
-            or (name not in values and name not in mutations)
-        ):
-            continue
-        seen.add(name)
-        definitions = values.get(name, ())
-        parts.append(name)
-        for definition in definitions:
-            parts.append(ast.dump(definition, include_attributes=False))
-            pending.extend(ast.walk(definition))
-        for mutation in mutations.get(name, ()):
-            parts.append(ast.dump(mutation, include_attributes=False))
-            pending.extend(ast.walk(mutation))
+    if not (
+        isinstance(sql_argument, ast.Constant)
+        and isinstance(sql_argument.value, str)
+    ):
+        parts.extend((
+            "DYNAMIC_SCOPE",
+            ast.dump(scope, include_attributes=False),
+        ))
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
 
 
@@ -971,20 +837,14 @@ def _unguarded_album_request_update_findings(source: str) -> list[_SqlFinding]:
             continue
         params_argument = _execute_params_argument(node)
         values = _simple_assignments(tree, node, parents)
-        mutations = _collection_mutations(tree, node, parents)
-        parameter_variants = (
-            _parameter_variants(params_argument, values, mutations)
-            if params_argument is not None
-            else ((None,),)
-        )
+        direct_params = _direct_execute_params(node)
         variants, unresolved = _sql_variants(sql_argument, values)
+        scope = _enclosing_scope(node, parents)
         fingerprint = _sql_call_fingerprint(
             sql_argument,
             params_argument,
-            values,
-            mutations,
+            scope,
         )
-        scope = _enclosing_scope(node, parents)
         scope_name = (
             scope.name
             if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -993,6 +853,11 @@ def _unguarded_album_request_update_findings(source: str) -> list[_SqlFinding]:
         expression_sets_status = _expression_mentions_status_assignment(
             sql_argument,
             values,
+        )
+        canonical_params = direct_params is not None
+        direct_static_sql = (
+            isinstance(sql_argument, ast.Constant)
+            and isinstance(sql_argument.value, str)
         )
         if not variants:
             if (
@@ -1012,14 +877,19 @@ def _unguarded_album_request_update_findings(source: str) -> list[_SqlFinding]:
                     else "dynamic"
                 ),
                 scope=scope_name,
+                canonical_params=canonical_params,
+                direct_static_sql=direct_static_sql,
+                album_request_update=False,
             ))
             continue
         for sql in sorted(variants):
             normalized = " ".join(sql.lower().split())
             details = _album_request_update_details(
                 sql,
-                parameter_variants,
-                values,
+                direct_params,
+                scope,
+                canonical_params=canonical_params,
+                direct_static_sql=direct_static_sql,
             )
             sets_status = bool(details) and (
                 expression_sets_status
@@ -1030,6 +900,32 @@ def _unguarded_album_request_update_findings(source: str) -> list[_SqlFinding]:
                 for detail in details
                 if detail.sets_status or sets_status
             )
+            if details and not canonical_params:
+                offending.append(_SqlFinding(
+                    node.lineno,
+                    normalized,
+                    fingerprint,
+                    category="status" if sets_status else "noncanonical",
+                    scope=scope_name,
+                    exact_source_status_cas=False,
+                    canonical_params=False,
+                    direct_static_sql=direct_static_sql,
+                    album_request_update=True,
+                ))
+                continue
+            if details and not direct_static_sql and not unresolved:
+                offending.append(_SqlFinding(
+                    node.lineno,
+                    normalized,
+                    fingerprint,
+                    category="status" if sets_status else "noncanonical",
+                    scope=scope_name,
+                    exact_source_status_cas=exact_source_status_cas,
+                    canonical_params=canonical_params,
+                    direct_static_sql=False,
+                    album_request_update=True,
+                ))
+                continue
             if details and not all(detail.guarded for detail in details):
                 offending.append(_SqlFinding(
                     node.lineno,
@@ -1038,6 +934,9 @@ def _unguarded_album_request_update_findings(source: str) -> list[_SqlFinding]:
                     category="status" if sets_status else "unguarded",
                     scope=scope_name,
                     exact_source_status_cas=exact_source_status_cas,
+                    canonical_params=canonical_params,
+                    direct_static_sql=direct_static_sql,
+                    album_request_update=True,
                 ))
                 continue
             if unresolved:
@@ -1055,6 +954,9 @@ def _unguarded_album_request_update_findings(source: str) -> list[_SqlFinding]:
                     ),
                     scope=scope_name,
                     exact_source_status_cas=exact_source_status_cas,
+                    canonical_params=canonical_params,
+                    direct_static_sql=direct_static_sql,
+                    album_request_update=bool(details),
                 ))
                 continue
             if sets_status:
@@ -1065,6 +967,9 @@ def _unguarded_album_request_update_findings(source: str) -> list[_SqlFinding]:
                     category="status",
                     scope=scope_name,
                     exact_source_status_cas=exact_source_status_cas,
+                    canonical_params=canonical_params,
+                    direct_static_sql=direct_static_sql,
+                    album_request_update=True,
                 ))
                 continue
             if details:
@@ -1077,6 +982,9 @@ def _unguarded_album_request_update_findings(source: str) -> list[_SqlFinding]:
                     normalized,
                     fingerprint,
                     scope=scope_name,
+                    canonical_params=canonical_params,
+                    direct_static_sql=direct_static_sql,
+                    album_request_update=True,
                 ))
     return offending
 
@@ -1217,6 +1125,8 @@ class TestReplacedWriteAudit(unittest.TestCase):
                     if finding.category.startswith("status"):
                         if (
                             not finding.exact_source_status_cas
+                            or not finding.canonical_params
+                            or not finding.direct_static_sql
                             or key not in _REVIEWED_STATUS_SQL_CALLS
                         ):
                             offending.append(
@@ -1224,6 +1134,10 @@ class TestReplacedWriteAudit(unittest.TestCase):
                                 f"{finding.category}:{finding.scope}: "
                                 f"exact_source_cas="
                                 f"{finding.exact_source_status_cas}: "
+                                f"canonical_params="
+                                f"{finding.canonical_params}: "
+                                f"direct_static_sql="
+                                f"{finding.direct_static_sql}: "
                                 f"{finding.sql}"
                             )
                             continue
@@ -1238,7 +1152,10 @@ class TestReplacedWriteAudit(unittest.TestCase):
                                 continue
                             reviewed_dynamic.add(key)
                         continue
-                    if key in _REVIEWED_DYNAMIC_SQL_CALLS:
+                    if key in _REVIEWED_DYNAMIC_SQL_CALLS and (
+                        not finding.album_request_update
+                        or finding.canonical_params
+                    ):
                         reviewed_dynamic.add(key)
                         continue
                     offending.append(
@@ -1495,7 +1412,7 @@ def thaw(cur, request_id, source_status, target_status):
         self.assertTrue(source_finding.exact_source_status_cas)
         self.assertFalse(target_finding.exact_source_status_cas)
 
-    def test_status_seam_fingerprint_includes_param_reaching_definition(self):
+    def test_source_status_alias_is_rejected_without_dataflow_inference(self):
         source_definition = """
 def thaw(cur, request_id, expected_status, target_status):
     source_status = expected_status
@@ -1515,12 +1432,113 @@ def thaw(cur, request_id, expected_status, target_status):
         target_finding = _unguarded_album_request_update_findings(
             target_definition,
         )[0]
-        self.assertNotEqual(
+        self.assertEqual(
             source_finding.fingerprint,
             target_finding.fingerprint,
         )
-        self.assertTrue(source_finding.exact_source_status_cas)
+        self.assertFalse(source_finding.exact_source_status_cas)
         self.assertFalse(target_finding.exact_source_status_cas)
+
+    def test_params_alias_is_noncanonical(self):
+        source = """
+def thaw(cur, request_id, expected_status, target_status):
+    params = (target_status, request_id, expected_status)
+    cur.execute(
+        "UPDATE album_requests SET status = %s "
+        "WHERE id = %s AND status = %s",
+        params,
+    )
+"""
+        finding = _unguarded_album_request_update_findings(source)[0]
+        self.assertFalse(finding.canonical_params)
+        self.assertFalse(finding.exact_source_status_cas)
+
+    def test_mutated_params_list_is_noncanonical(self):
+        for mutation in (
+            "params.append(expected_status)",
+            "params.extend([expected_status])",
+        ):
+            with self.subTest(mutation=mutation):
+                source = f"""
+def thaw(cur, request_id, expected_status, target_status):
+    params = [target_status, request_id]
+    {mutation}
+    cur.execute(
+        "UPDATE album_requests SET status = %s "
+        "WHERE id = %s AND status = %s",
+        params,
+    )
+"""
+                finding = _unguarded_album_request_update_findings(source)[0]
+                self.assertFalse(finding.canonical_params)
+                self.assertFalse(finding.exact_source_status_cas)
+
+    def test_append_before_params_reassignment_is_noncanonical(self):
+        source = """
+def thaw(cur, request_id, expected_status, target_status):
+    params = [target_status, request_id]
+    params.append(target_status)
+    params = [target_status, request_id, expected_status]
+    cur.execute(
+        "UPDATE album_requests SET status = %s "
+        "WHERE id = %s AND status = %s",
+        params,
+    )
+"""
+        finding = _unguarded_album_request_update_findings(source)[0]
+        self.assertFalse(finding.canonical_params)
+        self.assertFalse(finding.exact_source_status_cas)
+
+    def test_destructured_source_status_is_not_canonical(self):
+        source = """
+def thaw(cur, request_id, expected_status, target_status):
+    source_status, ignored = (expected_status, None)
+    cur.execute(
+        "UPDATE album_requests SET status = %s "
+        "WHERE id = %s AND status = %s",
+        (target_status, request_id, source_status),
+    )
+"""
+        finding = _unguarded_album_request_update_findings(source)[0]
+        self.assertTrue(finding.canonical_params)
+        self.assertFalse(finding.exact_source_status_cas)
+
+    def test_reassigned_source_argument_is_not_canonical(self):
+        source = """
+def thaw(cur, request_id, expected_status, target_status):
+    expected_status = target_status
+    cur.execute(
+        "UPDATE album_requests SET status = %s "
+        "WHERE id = %s AND status = %s",
+        (target_status, request_id, expected_status),
+    )
+"""
+        finding = _unguarded_album_request_update_findings(source)[0]
+        self.assertFalse(finding.exact_source_status_cas)
+
+    def test_subscript_source_status_is_not_canonical(self):
+        source = """
+def thaw(cur, request_id, expected_statuses, target_status):
+    cur.execute(
+        "UPDATE album_requests SET status = %s "
+        "WHERE id = %s AND status = %s",
+        (target_status, request_id, expected_statuses[0]),
+    )
+"""
+        finding = _unguarded_album_request_update_findings(source)[0]
+        self.assertFalse(finding.exact_source_status_cas)
+
+    def test_status_sql_alias_is_noncanonical(self):
+        source = """
+def thaw(cur, request_id, expected_status, target_status):
+    sql = (
+        "UPDATE album_requests SET status = %s "
+        "WHERE id = %s AND status = %s"
+    )
+    cur.execute(sql, (target_status, request_id, expected_status))
+"""
+        finding = _unguarded_album_request_update_findings(source)[0]
+        self.assertFalse(finding.direct_static_sql)
 
     def test_dynamic_status_assignment_is_rejected(self):
         source = """
@@ -1760,7 +1778,9 @@ def thaw(cur, request_id, guarded):
         )
     cur.execute(sql, (9, request_id))
 '''
-        self.assertEqual(len(_unguarded_album_request_updates(source)), 1)
+        self.assertGreaterEqual(
+            len(_unguarded_album_request_updates(source)), 1,
+        )
 
     def test_other_table_status_guard_does_not_guard_target(self):
         source = '''

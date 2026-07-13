@@ -1585,6 +1585,21 @@ class TestUpdateStatus(unittest.TestCase):
         self.assertAlmostEqual(req["beets_distance"], 0.05)
         self.assertEqual(req["imported_path"], "/Beets/A/2020 - B")
 
+    def test_update_status_metadata_rejects_lifecycle_and_malformed_fields(self):
+        before = self.db.get_request(self.req_id)
+        for fields in (
+            {"active_download_state": "{}"},
+            {"reasoning, status": "smuggled"},
+        ):
+            with self.subTest(fields=fields):
+                with self.assertRaises(ValueError):
+                    self.db.update_status(
+                        self.req_id,
+                        "imported",
+                        **fields,
+                    )
+                self.assertEqual(self.db.get_request(self.req_id), before)
+
 
 @requires_postgres
 class TestGetWanted(unittest.TestCase):
@@ -1740,6 +1755,15 @@ class TestTrackManagement(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             self.db.update_request_fields(self.req_id, status="manual")
+        self.assertEqual(self.db.get_request(self.req_id), before)
+
+    def test_metadata_update_rejects_malformed_identifier(self):
+        before = self.db.get_request(self.req_id)
+        with self.assertRaisesRegex(ValueError, "lowercase SQL identifiers"):
+            self.db.update_request_fields(
+                self.req_id,
+                **{"reasoning, status": "smuggled"},
+            )
         self.assertEqual(self.db.get_request(self.req_id), before)
 
     def test_set_get_tracks_roundtrip(self):

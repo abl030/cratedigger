@@ -65,7 +65,9 @@ from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
                              TransferIdOwnership,
                              TransferLedgerRow,
                              WantedReconciliationCandidate)
-from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS
+from lib.pipeline_db._shared import (
+    validate_request_metadata_fields,
+)
 from lib.quality import (
     AlbumQualityEvidence,
 )
@@ -1153,6 +1155,7 @@ class FakePipelineDB:
         if status == "replaced":
             raise ValueError(
                 "status='replaced' is owned by supersede_request_mbid")
+        validate_request_metadata_fields(dict(extra))
         row = self._requests.get(request_id)
         if row is None or row.get("status") == "replaced":
             return False
@@ -1181,17 +1184,17 @@ class FakePipelineDB:
         ``rescued_at`` + ``prior_unfindable_category``. Reserved
         kwargs the production method rejects are rejected here too.
         """
-        reserved = {
-            "status", "active_download_state", "updated_at",
-            "rescued_at", "prior_unfindable_category", "unfindable_category",
+        rescue_owned = {
+            "unfindable_category",
             "unfindable_categorised_at",
         }
-        bad = set(extra) & reserved
-        if bad:
+        bad_rescue_fields = sorted(set(extra) & rescue_owned)
+        if bad_rescue_fields:
             raise ValueError(
-                "mark_imported_with_rescue: reserved kwargs not allowed: "
-                + ", ".join(sorted(bad))
+                "mark_imported_with_rescue cannot accept rescue-owned fields: "
+                + ", ".join(bad_rescue_fields)
             )
+        validate_request_metadata_fields(dict(extra))
         row = self._requests.get(request_id)
         if row is None or row.get("status") == "replaced":
             return False
@@ -1224,6 +1227,14 @@ class FakePipelineDB:
         clear_retry_counters: bool = True,
         **fields: Any,
     ) -> bool:
+        unknown = sorted(
+            set(fields) - {"search_filetype_override", "min_bitrate"}
+        )
+        if unknown:
+            raise ValueError(
+                "reset_to_wanted does not accept fields: "
+                + ", ".join(unknown)
+            )
         row = self._requests.get(request_id)
         if row is None or row.get("status") == "replaced":
             return False
@@ -1258,6 +1269,14 @@ class FakePipelineDB:
         expected_status: str = "downloading",
         **fields: Any,
     ) -> bool:
+        unknown = sorted(
+            set(fields) - {"search_filetype_override", "min_bitrate"}
+        )
+        if unknown:
+            raise ValueError(
+                "reset_downloading_to_wanted does not accept fields: "
+                + ", ".join(unknown)
+            )
         row = self._requests.get(request_id)
         if (
             row is None
@@ -2314,12 +2333,7 @@ class FakePipelineDB:
         ):
             raise TypeError("expected_status must be a string or None")
         expected_status = expected_status_raw
-        reserved = sorted(set(fields) & REQUEST_METADATA_RESERVED_FIELDS)
-        if reserved:
-            raise ValueError(
-                "update_request_fields cannot mutate reserved lifecycle/"
-                "identity fields: " + ", ".join(reserved)
-            )
+        validate_request_metadata_fields(dict(fields))
         self.update_request_fields_calls.append((request_id, dict(fields)))
         row = self._requests.get(request_id)
         if (

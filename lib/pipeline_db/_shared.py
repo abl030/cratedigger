@@ -13,6 +13,7 @@ Usage:
 import hashlib
 import logging
 import os
+import re
 import zlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -63,6 +64,25 @@ REQUEST_METADATA_RESERVED_FIELDS: frozenset[str] = frozenset({
     "rescued_at",
     "prior_unfindable_category",
 })
+
+
+def validate_request_metadata_fields(fields: dict[str, Any]) -> None:
+    """Reject lifecycle columns and non-canonical SQL identifiers."""
+    reserved = sorted(set(fields) & REQUEST_METADATA_RESERVED_FIELDS)
+    if reserved:
+        raise ValueError(
+            "metadata CAS cannot mutate reserved lifecycle/identity fields: "
+            + ", ".join(reserved)
+        )
+    invalid = sorted(
+        key for key in fields
+        if re.fullmatch(r"[a-z_][a-z0-9_]*", key) is None
+    )
+    if invalid:
+        raise ValueError(
+            "metadata CAS field names must be lowercase SQL identifiers: "
+            + ", ".join(invalid)
+        )
 
 
 class ReplacedRequestMutationError(RuntimeError):

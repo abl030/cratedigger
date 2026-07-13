@@ -1624,11 +1624,8 @@ class TestCmdRepairSpectral(unittest.TestCase):
                 "last_download_spectral_grade": None,
                 "verified_lossless": True,
             }]
-            clear_cur = MagicMock()
             delete_cur = MagicMock()
             delete_cur.fetchall.return_value = []
-            finalize_request = MagicMock()
-
             db = FakePipelineDB()
             db.seed_request(make_request_row(
                 id=42,
@@ -1642,7 +1639,7 @@ class TestCmdRepairSpectral(unittest.TestCase):
                 verified_lossless=True,
                 final_format="mp3 v0",
             ))
-            db.queue_execute_results(candidate_cur, clear_cur, delete_cur)
+            db.queue_execute_results(candidate_cur, delete_cur)
 
             beets_info = AlbumInfo(
                 album_id=1,
@@ -1663,20 +1660,18 @@ class TestCmdRepairSpectral(unittest.TestCase):
             stdout = io.StringIO()
             with patch.dict(os.environ, {"CRATEDIGGER_RUNTIME_CONFIG": cfg_path}), \
                  patch("lib.beets_db.BeetsDB", return_value=mock_beets), \
-                 patch("scripts.pipeline_cli.quality.finalize_request", finalize_request), \
                  redirect_stdout(stdout):
                 pipeline_cli.cmd_repair_spectral(cast(Any, db), args)
 
             output = stdout.getvalue()
             self.assertIn("quality_gate_decision → accept", output)
             self.assertIn("→ transitioned to imported", output)
-            self.assertEqual(len(db.execute_calls), 3)
-            called_db, request_id, transition = finalize_request.call_args.args
-            self.assertIs(called_db, db)
-            self.assertEqual(request_id, 42)
-            self.assertEqual(transition.target_status, "imported")
-            self.assertEqual(transition.from_status, "wanted")
-            self.assertEqual(transition.fields, {"min_bitrate": 207})
+            self.assertEqual(len(db.execute_calls), 2)
+            repaired = db.request(42)
+            self.assertEqual(repaired["status"], "imported")
+            self.assertEqual(repaired["min_bitrate"], 207)
+            self.assertIsNone(repaired["last_download_spectral_bitrate"])
+            self.assertIsNone(repaired["current_spectral_bitrate"])
         finally:
             os.unlink(cfg_path)
 
