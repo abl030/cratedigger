@@ -459,6 +459,26 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
             self.frozen_tracks[rid],
             self.db.get_tracks(rid),
         )
+        if self.db.update_track_artists(rid, ["Late Artist"]):
+            raise AssertionError(
+                "late track-artist resolver thawed replaced tracks"
+            )
+        assert_replaced_tracks_frozen(
+            rid,
+            self.frozen_tracks[rid],
+            self.db.get_tracks(rid),
+        )
+        prior_resolution = self.db.get_field_resolution(rid, "track_artist")
+        if self.db.record_field_resolution(
+            rid, "track_artist", "resolved", None,
+        ):
+            raise AssertionError(
+                "late field-resolution audit thawed replaced child state"
+            )
+        if self.db.get_field_resolution(rid, "track_artist") != prior_resolution:
+            raise AssertionError(
+                "late field-resolution audit mutated replaced child state"
+            )
 
         try:
             self.db.create_failed_search_plan(

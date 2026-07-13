@@ -16,6 +16,7 @@ import msgspec
 from lib.quality import (
     AlbumQualityEvidence,
     AlbumQualityEvidenceFile,
+    AlbumQualityV0Metric,
     AudioQualityMeasurement,
     QualityRankConfig,
     VerifiedLosslessProof,
@@ -897,6 +898,88 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         cleanup_call.assert_called_once()
         self.assertEqual(len(self.db.advisory_lock_calls), 1,
                          "verified-lossless short-circuit must acquire the WMCL advisory lock")
+
+    def test_replace_during_lossless_lock_cleanup_is_not_reported_success(self) -> None:
+        class NarrowingRaceDB(FakePipelineDB):
+            def __init__(self) -> None:
+                super().__init__()
+                self.raced = False
+
+            def update_request_fields(
+                self,
+                request_id: int,
+                *,
+                expected_status: str | None = None,
+                **fields: object,
+            ) -> bool:
+                if "search_filetype_override" in fields and not self.raced:
+                    self.raced = True
+                    self.supersede_request_mbid(
+                        request_id,
+                        new_mb_release_id="replace-during-cleanup-descendant",
+                        new_mb_release_group_id=None,
+                        new_mb_artist_id=None,
+                        new_artist_name="Correct Artist",
+                        new_album_title="Correct pressing",
+                        new_year=None,
+                        new_country=None,
+                        new_tracks=[],
+                    )
+                return super().update_request_fields(
+                    request_id,
+                    expected_status=expected_status,
+                    **fields,
+                )
+
+        self.db = NarrowingRaceDB()
+        self.db.seed_request(make_request_row(
+            id=1,
+            status="wanted",
+            mb_release_id="mbid-1",
+        ))
+        source = _make_source(self.tmp, "replace-during-cleanup")
+        log_id = _log_wrong_match(self.db, 1, source)
+        self.db.set_download_log_candidate_evidence(
+            log_id,
+            _store_evidence(self.db, _evidence(source)),
+        )
+        current = msgspec.structs.replace(
+            _evidence(source),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=100,
+                avg_bitrate_kbps=119,
+                median_bitrate_kbps=115,
+                format="Opus",
+                is_cbr=False,
+            ),
+            storage_format="Opus",
+            codec="opus",
+            container="ogg",
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=210,
+                avg_bitrate_kbps=240,
+                median_bitrate_kbps=235,
+                source_lineage="lossless_source",
+                source_provenance="lossless_source",
+            ),
+        )
+        self._set_current_evidence_helper(
+            lambda *_a, **_kw: CurrentEvidenceActionResult(
+                evidence=current,
+                provenance=ActionEvidenceProvenance(current_status="loaded"),
+            )
+        )
+
+        result = cleanup_wrong_match(self.db, log_id, cfg=_cfg())
+
+        self.assertEqual(result.outcome, OUTCOME_SKIPPED_OPERATIONAL)
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "request_changed_during_cleanup")
+        self.assertEqual(result.preview_decision, "lossless_source_locked")
+        self.assertFalse(os.path.exists(source))
+        row = self.db.request(1)
+        self.assertEqual(row["status"], "replaced")
+        self.assertIsNone(row.get("search_filetype_override"))
 
     def test_backfilled_verified_lossless_does_not_short_circuit(self) -> None:
         """Backfill can carry an old verified_lossless_proof against changed files; require loaded-from-disk status."""

@@ -184,6 +184,52 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         _assert_required_fields(self, data, self.EXISTS_REQUIRED_FIELDS,
                                 "pipeline add exists response")
 
+    @patch("web.routes.pipeline_mutations.mb_api.get_release_raw")
+    @patch("web.routes.pipeline_mutations.mb_api.get_release")
+    @patch("web.routes.pipeline_mutations.mb_api.get_release_group_year")
+    def test_pipeline_add_replace_during_resolution_returns_409(
+        self, mock_get_group_year, mock_get_release, mock_get_raw,
+    ):
+        import web.server as srv
+
+        release = {
+            "release_group_id": "rg-race",
+            "artist_id": "artist-race",
+            "artist_name": "Race Artist",
+            "title": "Race Album",
+            "year": 2020,
+            "country": "AU",
+            "tracks": [{
+                "title": "Track",
+                "track_number": 1,
+                "disc_number": 1,
+            }],
+        }
+        mock_get_release.return_value = release
+        mock_get_raw.return_value = {
+            **release,
+            "media": [{
+                "tracks": [{
+                    "artist-credit": [{"name": "Late Artist"}],
+                }],
+            }],
+        }
+        mock_get_group_year.return_value = 2020
+
+        racing_db = _RacingRequestFieldsDB()
+        with patch.object(srv, "db", racing_db):
+            status, data = self._post(
+                "/api/pipeline/add", {"mb_release_id": "add-race-source"},
+            )
+
+        self.assertEqual(status, 409)
+        self.assertIn("changed during field resolution", data["error"])
+        source = racing_db.get_request_by_release_id("add-race-source")
+        assert source is not None
+        self.assertEqual(source["status"], "replaced")
+        self.assertIsNone(racing_db.get_tracks(source["id"])[0]["track_artist"])
+        self.assertIsNone(racing_db.get_active_search_plan(source["id"]))
+
     @patch("web.routes.pipeline_mutations.mb_api.get_release_group_year")
     @patch("web.routes.pipeline_mutations.mb_api.get_release")
     def test_pipeline_add_mb_persists_release_group_year_reissue(

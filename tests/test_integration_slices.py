@@ -1137,6 +1137,34 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
     a phantom existing measurement.
     """
 
+    def test_replaced_request_spectral_noop_is_reported_as_not_persisted(self):
+        from lib.measurement import _persist_spectral_state
+        from lib.quality import SpectralMeasurement
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="replaced",
+            current_spectral_grade=None,
+            current_spectral_bitrate=None,
+        ))
+        before = db.request(42)
+
+        persisted = _persist_spectral_state(
+            db=db,  # type: ignore[arg-type]
+            request_id=42,
+            download_spectral=None,
+            existing_spectral=SpectralMeasurement(
+                grade="genuine",
+                bitrate_kbps=320,
+            ),
+            existing_min_bitrate=320,
+            label="Frozen Artist - Frozen Album",
+        )
+
+        self.assertIsNone(persisted)
+        self.assertEqual(db.request(42), before)
+
     def test_accept_suspect_upgrade_still_persists_spectral(self):
         """Accept (suspect grade but bitrate upgrades existing) → spectral state still propagates."""
         from lib.config import CratediggerConfig
@@ -9609,6 +9637,16 @@ class TestFieldResolverSlice(unittest.TestCase):
         pass
 
     @staticmethod
+    def _recorder_db(request_id: int) -> FakePipelineDB:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=request_id,
+            status="wanted",
+            mb_release_id=f"field-resolver-slice-{request_id}",
+        ))
+        return db
+
+    @staticmethod
     def _patch_urlopen(monkey_patches: dict[str, bytes]):
         """Return a context manager patching urlopen with URL→bytes dispatch.
 
@@ -9670,7 +9708,7 @@ class TestFieldResolverSlice(unittest.TestCase):
             b'"primary-type":"Album","first-release-date":"1997-05-21"}'
         )
 
-        db = FakePipelineDB()
+        db = self._recorder_db(4001)
         req = {
             "id": 4001,
             "mb_release_id": "rec-mbid-xyz",
@@ -9712,7 +9750,7 @@ class TestFieldResolverSlice(unittest.TestCase):
             b'"primary_artist_id":3840,"releases":[]}'
         )
 
-        db = FakePipelineDB()
+        db = self._recorder_db(4002)
         req = {
             "id": 4002,
             "mb_release_id": None,
@@ -9744,7 +9782,7 @@ class TestFieldResolverSlice(unittest.TestCase):
         from unittest.mock import patch as _patch
         import urllib.error
 
-        db = FakePipelineDB()
+        db = self._recorder_db(4003)
         req = {
             "id": 4003,
             "mb_release_id": "rec-mbid-xyz",
@@ -9783,7 +9821,7 @@ class TestFieldResolverSlice(unittest.TestCase):
         )
         from tests.fakes import FakePipelineDB
 
-        db = FakePipelineDB()
+        db = self._recorder_db(4011)
         req = {
             "id": 4011,
             "mb_release_id": "rec-mbid-zzz",
@@ -9838,7 +9876,7 @@ class TestFieldResolverSlice(unittest.TestCase):
             b']}]}'
         )
 
-        db = FakePipelineDB()
+        db = self._recorder_db(4004)
         req = {
             "id": 4004,
             "mb_release_id": "rec-mbid-xyz",

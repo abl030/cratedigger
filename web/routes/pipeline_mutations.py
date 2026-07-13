@@ -146,10 +146,17 @@ def _resolve_and_update_after_add(
         return ResolveAllResult()
 
     try:
-        apply_resolve_all_result(
+        applied = apply_resolve_all_result(
             db, req_id, result,
             existing_mb_release_group_id=mb_release_group_id,
         )
+        if not applied:
+            logger.warning(
+                "post_pipeline_add: request %s changed while resolved fields "
+                "were being persisted",
+                req_id,
+            )
+            return None
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "post_pipeline_add: update_request_fields failed for "
@@ -287,6 +294,9 @@ def post_pipeline_add(h, body: dict) -> None:
             mb_artist_id=str(release.get("artist_id") or "") or None,
             discogs_release_payload=release,
         )
+        if resolved is None:
+            h._error("Request changed during field resolution", 409)
+            return
 
         # Re-read tracks from the DB so the per-track ``track_artist``
         # column the resolver just wrote (PR2 Apply #1) flows into the
@@ -378,6 +388,9 @@ def post_pipeline_add(h, body: dict) -> None:
         mb_artist_id=release.get("artist_id"),
         mb_release_payload=release_raw,
     )
+    if resolved is None:
+        h._error("Request changed during field resolution", 409)
+        return
 
     # Re-read tracks from the DB so the per-track ``track_artist``
     # column the resolver just wrote (PR2 Apply #1) flows into the

@@ -402,6 +402,7 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
 
     Status-code mapping:
       * 200 — ``status='resolved'`` (RG found or already set)
+      * 409 — request changed while the mirror lookup was in flight
       * 404 — request not found
       * 422 — non-UUID release id (Discogs) or MB returned no RG
       * 503 — transient MB-mirror failure
@@ -473,6 +474,32 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
         self.assertEqual(
             self.db.request(42)["mb_release_group_id"], "rrrr-rrrr-rrrr",
         )
+
+    def test_resolve_rg_replace_during_lookup_returns_409(self):
+        """A late mirror result cannot mutate or report success on ancestor."""
+        self._seed(None)
+
+        def replace_then_resolve(*_args, **_kwargs):
+            self.assertTrue(self.db.update_request_fields(
+                42,
+                status="replaced",
+                expected_status="wanted",
+            ))
+            return {"release_group_id": "rrrr-rrrr-rrrr"}
+
+        with patch("web.mb.get_release", side_effect=replace_then_resolve):
+            status, data = self._post("/api/pipeline/42/resolve-rg", {})
+
+        self.assertEqual(status, 409)
+        _assert_required_fields(
+            self, data, self.RESOLVE_RG_REQUIRED_FIELDS,
+            "resolve-rg conflict response",
+        )
+        self.assertEqual(data["status"], "conflict")
+        self.assertIsNone(data["mb_release_group_id"])
+        row = self.db.request(42)
+        self.assertEqual(row["status"], "replaced")
+        self.assertIsNone(row["mb_release_group_id"])
 
     def test_resolve_rg_not_found_returns_404(self):
         with patch("web.mb.get_release") as mock_mb:

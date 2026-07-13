@@ -125,7 +125,7 @@ class _PdbRecorder(Protocol):
         field_name: str,
         status: str,
         reason_code: str | None,
-    ) -> None: ...
+    ) -> bool: ...
 
 
 MBReleaseGroupYearFn = Callable[[str], int | None]
@@ -291,12 +291,18 @@ def _record(
     we never accidentally skip a record on a code branch.
     """
     try:
-        pdb.record_field_resolution(
+        applied = pdb.record_field_resolution(
             request_id=request_id,
             field_name=field_name,
             status=result.status,
             reason_code=result.reason_code,
         )
+        if not applied:
+            logger.info(
+                "record_field_resolution skipped frozen/missing request=%d "
+                "field=%s status=%s",
+                request_id, field_name, result.status,
+            )
     except Exception:  # noqa: BLE001
         # Recording is best-effort observability; an upsert failure must
         # not block the caller from using the resolved value. The
@@ -1306,11 +1312,12 @@ class _DeferredRecorder:
         field_name: str,
         status: str,
         reason_code: str | None,
-    ) -> None:
+    ) -> bool:
         with self._lock:
             self._records.append(
                 (int(request_id), field_name, status, reason_code),
             )
+        return True
 
     def already_recorded(self, field_name: str) -> bool:
         """Has a row been queued for ``field_name`` already?
@@ -1334,12 +1341,18 @@ class _DeferredRecorder:
             self._records.clear()
         for request_id, field_name, status, reason_code in pending:
             try:
-                pdb.record_field_resolution(
+                applied = pdb.record_field_resolution(
                     request_id=request_id,
                     field_name=field_name,
                     status=status,
                     reason_code=reason_code,
                 )
+                if not applied:
+                    logger.info(
+                        "deferred record_field_resolution skipped frozen/"
+                        "missing request=%d field=%s status=%s",
+                        request_id, field_name, status,
+                    )
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "deferred record_field_resolution failed for "
@@ -1608,7 +1621,7 @@ class _ApplyResolveAllRecipient(Protocol):
 
     def update_track_artists(
         self, request_id: int, track_artists: list[str | None],
-    ) -> None: ...
+    ) -> bool: ...
 
 
 def apply_resolve_all_result(
@@ -1617,7 +1630,7 @@ def apply_resolve_all_result(
     result: ResolveAllResult,
     *,
     existing_mb_release_group_id: str | None = None,
-) -> None:
+) -> bool:
     """Persist a ``ResolveAllResult`` into ``album_requests``.
 
     Writes ``is_va_compilation`` unconditionally (the immutability
@@ -1632,6 +1645,9 @@ def apply_resolve_all_result(
     known" decision lives outside the helper — the row may have come
     from a fresh add (None until the resolver fills it) or from a
     re-resolution where the column is already populated.
+
+    Returns ``False`` when scalar or per-track persistence loses to a
+    concurrent lifecycle change.
     """
     update_fields: dict[str, Any] = {
         "is_va_compilation": result.is_va_compilation,
@@ -1645,7 +1661,8 @@ def apply_resolve_all_result(
         update_fields["mb_release_group_id"] = result.release_group_id
     if result.catalog_number is not None:
         update_fields["catalog_number"] = result.catalog_number
-    db.update_request_fields(req_id, **update_fields)
+    if not db.update_request_fields(req_id, **update_fields):
+        return False
     # Per-track artists land in album_tracks (one column per track),
     # not album_requests. Done after the request-row update so a
     # failure here doesn't roll back the resolved scalar fields —
@@ -1653,10 +1670,14 @@ def apply_resolve_all_result(
     # log + continue).
     if result.track_artists:
         try:
-            db.update_track_artists(req_id, list(result.track_artists))
+            if not db.update_track_artists(
+                req_id, list(result.track_artists),
+            ):
+                return False
         except Exception:  # noqa: BLE001
             logger.exception(
                 "apply_resolve_all_result: update_track_artists failed "
                 "for request %s; per-track artists not persisted",
                 req_id,
             )
+    return True

@@ -812,8 +812,16 @@ class TestFakePipelineDBFieldResolutions(unittest.TestCase):
     PipelineDB integration is exercised in ``tests/test_pipeline_db.py``.
     """
 
+    def setUp(self) -> None:
+        self.db = FakePipelineDB()
+        self.db.seed_request(make_request_row(
+            id=42,
+            status="wanted",
+            mb_release_id="field-resolution-parent",
+        ))
+
     def test_first_call_creates_row_with_attempts_one(self):
-        db = FakePipelineDB()
+        db = self.db
         db.record_field_resolution(
             request_id=42,
             field_name="release_group_year",
@@ -829,7 +837,7 @@ class TestFakePipelineDBFieldResolutions(unittest.TestCase):
         self.assertEqual(row["field_name"], "release_group_year")
 
     def test_re_upsert_increments_attempts_and_updates_status(self):
-        db = FakePipelineDB()
+        db = self.db
         db.record_field_resolution(
             request_id=42, field_name="release_group_year",
             status="unresolved_mirror_unavailable", reason_code="URLError",
@@ -847,7 +855,7 @@ class TestFakePipelineDBFieldResolutions(unittest.TestCase):
         self.assertEqual(len(db.field_resolutions), 1)
 
     def test_different_fields_get_distinct_rows(self):
-        db = FakePipelineDB()
+        db = self.db
         db.record_field_resolution(
             request_id=42, field_name="release_group_year",
             status="resolved", reason_code=None,
@@ -867,8 +875,30 @@ class TestFakePipelineDBFieldResolutions(unittest.TestCase):
         )
 
     def test_get_field_resolution_returns_none_when_absent(self):
-        db = FakePipelineDB()
-        self.assertIsNone(db.get_field_resolution(42, "release_group_year"))
+        self.assertIsNone(
+            self.db.get_field_resolution(42, "release_group_year"),
+        )
+
+    def test_missing_or_replaced_parent_rejects_write(self):
+        self.db.seed_request(make_request_row(
+            id=43,
+            status="replaced",
+            mb_release_id="field-resolution-frozen-parent",
+        ))
+
+        self.assertFalse(self.db.record_field_resolution(
+            request_id=999,
+            field_name="release_group_year",
+            status="resolved",
+            reason_code=None,
+        ))
+        self.assertFalse(self.db.record_field_resolution(
+            request_id=43,
+            field_name="release_group_year",
+            status="resolved",
+            reason_code=None,
+        ))
+        self.assertEqual(self.db.field_resolutions, {})
 
 
 # ---------------------------------------------------------------------------

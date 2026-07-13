@@ -112,8 +112,8 @@ class _MiscMixin(_PipelineDBBase):
 
 
     def update_track_artists(
-        self, request_id, track_artists,
-    ):
+        self, request_id: int, track_artists: list[str | None],
+    ) -> bool:
         """Update ``album_tracks.track_artist`` for ``request_id`` row-by-row.
 
         ``track_artists`` aligns with ``get_tracks`` ordering
@@ -132,20 +132,35 @@ class _MiscMixin(_PipelineDBBase):
         results). The ORDER BY here MUST match ``get_tracks`` so the
         resolver's per-track output — sorted by ``(disc_number,
         track_number)`` via ``_tracks_titles_and_artists`` — lines up.
+
+        Returns ``False`` when the parent is missing or frozen as
+        ``replaced``. The parent lock linearizes this child write with
+        Replace.
         """
         if not track_artists:
-            return
-        cur = self._execute(
-            "SELECT id FROM album_tracks WHERE request_id = %s "
-            "ORDER BY disc_number, track_number",
-            (request_id,),
-        )
-        row_ids = [r["id"] for r in cur.fetchall()]
-        for row_id, artist in zip(row_ids, track_artists):
-            self._execute(
-                "UPDATE album_tracks SET track_artist = %s WHERE id = %s",
-                (artist, row_id),
+            return True
+        with self._atomic():
+            parent = self._execute(
+                "SELECT status FROM album_requests WHERE id = %s FOR UPDATE",
+                (request_id,),
+            ).fetchone()
+            if parent is None or parent["status"] == "replaced":
+                self.conn.commit()
+                return False
+
+            cur = self._execute(
+                "SELECT id FROM album_tracks WHERE request_id = %s "
+                "ORDER BY disc_number, track_number",
+                (request_id,),
             )
+            row_ids = [r["id"] for r in cur.fetchall()]
+            for row_id, artist in zip(row_ids, track_artists):
+                self._execute(
+                    "UPDATE album_tracks SET track_artist = %s WHERE id = %s",
+                    (artist, row_id),
+                )
+            self.conn.commit()
+            return True
 
 
     # -- Track counts --------------------------------------------------------
@@ -256,7 +271,7 @@ class _MiscMixin(_PipelineDBBase):
         field_name: str,
         status: str,
         reason_code: str | None,
-    ) -> None:
+    ) -> bool:
         """Persist one field-resolution attempt for ``request_id``.
 
         UPSERT: a fresh row carries ``attempts=1``; re-resolving the
@@ -270,20 +285,33 @@ class _MiscMixin(_PipelineDBBase):
         enforced at the service layer, not via DB CHECK (the migration
         comments are the canonical source -- new statuses will appear as
         the system grows and shipped migrations are frozen).
+
+        Returns ``False`` when the parent request is missing or replaced;
+        those child audit rows freeze with their parent.
         """
-        self._execute(
-            """
-            INSERT INTO album_request_field_resolutions
-                (request_id, field_name, status, reason_code)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (request_id, field_name) DO UPDATE
-            SET status = EXCLUDED.status,
-                reason_code = EXCLUDED.reason_code,
-                attempts = album_request_field_resolutions.attempts + 1,
-                resolved_at = NOW()
-            """,
-            (request_id, field_name, status, reason_code),
-        )
+        with self._atomic():
+            parent = self._execute(
+                "SELECT status FROM album_requests WHERE id = %s FOR UPDATE",
+                (request_id,),
+            ).fetchone()
+            if parent is None or parent["status"] == "replaced":
+                self.conn.commit()
+                return False
+            self._execute(
+                """
+                INSERT INTO album_request_field_resolutions
+                    (request_id, field_name, status, reason_code)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (request_id, field_name) DO UPDATE
+                SET status = EXCLUDED.status,
+                    reason_code = EXCLUDED.reason_code,
+                    attempts = album_request_field_resolutions.attempts + 1,
+                    resolved_at = NOW()
+                """,
+                (request_id, field_name, status, reason_code),
+            )
+            self.conn.commit()
+            return True
 
 
     def get_field_resolution(

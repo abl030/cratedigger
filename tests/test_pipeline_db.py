@@ -1691,6 +1691,18 @@ class TestTrackManagement(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["title"], "New")
 
+    def test_child_metadata_writers_reject_missing_parent(self):
+        self.assertFalse(self.db.update_track_artists(
+            999_999,
+            ["Orphan Artist"],
+        ))
+        self.assertFalse(self.db.record_field_resolution(
+            999_999,
+            "track_artist",
+            "resolved",
+            None,
+        ))
+
     def test_resolver_tracks_racing_replace_leave_ancestor_frozen(self):
         """Real PG barrier: Replace wins while resolver is in flight."""
         from lib.config import CratediggerConfig
@@ -1762,6 +1774,82 @@ class TestTrackManagement(unittest.TestCase):
         self.assertEqual(results[0].outcome, RESULT_REQUEST_REPLACED)
         self.assertEqual(self.db.get_request(self.req_id), frozen_row)
         self.assertEqual(self.db.get_tracks(self.req_id), frozen_tracks)
+
+    def test_field_resolver_racing_replace_cannot_rewrite_child_rows(self):
+        """Real PG barrier: late scalar/artist resolution loses to Replace."""
+        from lib.field_resolver_service import (
+            ResolveAllResult,
+            apply_resolve_all_result,
+        )
+        from lib.pipeline_db import PipelineDB
+
+        self.db.set_tracks(self.req_id, [{
+            "disc_number": 1,
+            "track_number": 1,
+            "title": "Track",
+            "track_artist": None,
+        }])
+        entered = threading.Event()
+        release = threading.Event()
+        applied: list[bool] = []
+        errors: list[BaseException] = []
+
+        def resolve_and_apply() -> None:
+            try:
+                entered.set()
+                if not release.wait(timeout=10):
+                    raise TimeoutError("field resolver barrier was not released")
+                applied.append(apply_resolve_all_result(
+                    self.db,
+                    self.req_id,
+                    ResolveAllResult(
+                        release_group_year=1999,
+                        track_artists=["Late Artist"],
+                        is_va_compilation=False,
+                    ),
+                ))
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        worker = threading.Thread(target=resolve_and_apply)
+        worker.start()
+        self.assertTrue(entered.wait(timeout=10))
+
+        replacing_db = PipelineDB(TEST_DSN)
+        try:
+            replacing_db.supersede_request_mbid(
+                self.req_id,
+                new_mb_release_id="field-resolver-race-new",
+                new_mb_release_group_id=None,
+                new_mb_artist_id=None,
+                new_artist_name="A",
+                new_album_title="B (correct pressing)",
+                new_year=None,
+                new_country=None,
+                new_tracks=[],
+            )
+            frozen_row = replacing_db.get_request(self.req_id)
+            frozen_tracks = replacing_db.get_tracks(self.req_id)
+        finally:
+            release.set()
+            worker.join(timeout=10)
+            replacing_db.close()
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(applied, [False])
+        self.assertEqual(self.db.get_request(self.req_id), frozen_row)
+        self.assertEqual(self.db.get_tracks(self.req_id), frozen_tracks)
+        self.assertIsNone(self.db.get_tracks(self.req_id)[0]["track_artist"])
+        self.assertFalse(self.db.record_field_resolution(
+            self.req_id,
+            "track_artist",
+            "resolved",
+            None,
+        ))
+        self.assertIsNone(
+            self.db.get_field_resolution(self.req_id, "track_artist"),
+        )
 
     def test_metadata_compare_and_set_loses_to_replace(self):
         """Real PG barrier: a stale set-intent snapshot reports no apply."""

@@ -1882,12 +1882,15 @@ class FakePipelineDB:
         field_name: str,
         status: str,
         reason_code: str | None,
-    ) -> None:
+    ) -> bool:
         """UPSERT a row into ``field_resolutions`` mirroring migration 030.
 
         On conflict: increment ``attempts``, replace status / reason,
         bump ``resolved_at``. Tests assert directly against the dict.
         """
+        request = self._requests.get(int(request_id))
+        if request is None or request.get("status") == "replaced":
+            return False
         key = (int(request_id), field_name)
         now = _utcnow()
         existing = self.field_resolutions.get(key)
@@ -1902,11 +1905,12 @@ class FakePipelineDB:
                 resolved_at=now,
                 id=self._next_field_resolution_id,
             )
-            return
+            return True
         existing.status = status
         existing.reason_code = reason_code
         existing.attempts += 1
         existing.resolved_at = now
+        return True
 
     def get_field_resolution(
         self,
@@ -2160,12 +2164,10 @@ class FakePipelineDB:
         }
 
     def update_spectral_state(self, request_id: int,
-                              update: RequestSpectralStateUpdate) -> None:
-        row = self._requests.get(request_id)
-        if row:
-            fields = update.as_update_fields()
-            row.update(fields)
-            row["updated_at"] = _utcnow()
+                              update: RequestSpectralStateUpdate) -> bool:
+        return self.update_request_fields(
+            request_id, **update.as_update_fields(),
+        )
 
     def upsert_album_quality_evidence(
         self,
@@ -3171,19 +3173,23 @@ class FakePipelineDB:
     def update_track_artists(
         self, request_id: int,
         track_artists: list[str | None],
-    ) -> None:
+    ) -> bool:
         """Mirror of ``PipelineDB.update_track_artists`` — apply per-track
         artists in (disc, track) order. Length mismatches are tolerated
         (fewer keeps existing, more drops extras) — same shape as real.
         """
         if not track_artists:
-            return
+            return True
+        request = self._requests.get(request_id)
+        if request is None or request.get("status") == "replaced":
+            return False
         rows = self._tracks.get(request_id, [])
         if not rows:
-            return
+            return True
         rows.sort(key=lambda t: (t["disc_number"], t["track_number"]))
         for row, artist in zip(rows, track_artists):
             row["track_artist"] = artist
+        return True
 
     def get_track_counts(self,
                          request_ids: list[int]) -> dict[int, int]:

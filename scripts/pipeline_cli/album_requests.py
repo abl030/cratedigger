@@ -280,10 +280,17 @@ def _resolve_and_update_after_add(
         return ResolveAllResult()
 
     try:
-        apply_resolve_all_result(
+        applied = apply_resolve_all_result(
             db, req_id, result,
             existing_mb_release_group_id=mb_release_group_id,
         )
+        if not applied:
+            print(
+                f"  Request {req_id} changed during field resolution; "
+                "skipping plan generation",
+                file=sys.stderr,
+            )
+            return None
     except Exception as exc:  # noqa: BLE001
         print(
             f"  Failed to persist resolved fields: {exc}",
@@ -353,6 +360,8 @@ def _cmd_add_mb(db, mbid, source):
         mb_artist_id=artist_id,
         mb_release_payload=release,
     )
+    if resolved is None:
+        return
     # Re-read tracks from the DB so the per-track ``track_artist``
     # column the resolver just wrote (PR2 Apply #1) flows into the
     # snapshot. The upstream ``tracks`` extracted from the MB payload
@@ -414,6 +423,8 @@ def _cmd_add_discogs(db, discogs_id, source):
         mb_artist_id=str(release.get("artist_id") or "") or None,
         discogs_release_payload=release,
     )
+    if resolved is None:
+        return
     # Re-read tracks from the DB so the per-track ``track_artist``
     # column the resolver just wrote (PR2 Apply #1) flows into the
     # snapshot.

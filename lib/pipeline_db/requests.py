@@ -808,9 +808,11 @@ class _RequestsMixin(_PipelineDBBase):
         self,
         request_id: int,
         update: RequestSpectralStateUpdate,
-    ) -> None:
+    ) -> bool:
         """Write spectral state pairs together, including explicit NULLs."""
-        self.update_request_fields(request_id, **update.as_update_fields())
+        return self.update_request_fields(
+            request_id, **update.as_update_fields(),
+        )
 
 
 

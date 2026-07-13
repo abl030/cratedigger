@@ -346,6 +346,63 @@ class TestCmdAddPlanGenerationFakeDB(unittest.TestCase):
         # No new plan rows for the duplicate path.
         self.assertEqual(len(db.search_plans), before_plan_count)
 
+    @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
+    def test_cli_add_replace_during_resolution_skips_plan(self, mock_fetch):
+        class RacingDB(FakePipelineDB):
+            def __init__(self) -> None:
+                super().__init__()
+                self.raced = False
+
+            def update_request_fields(
+                self,
+                request_id: int,
+                *,
+                expected_status: str | None = None,
+                **fields: object,
+            ) -> bool:
+                if not self.raced:
+                    self.raced = True
+                    self.supersede_request_mbid(
+                        request_id,
+                        new_mb_release_id="cli-add-race-descendant",
+                        new_mb_release_group_id=None,
+                        new_mb_artist_id=None,
+                        new_artist_name="Buke and Gase",
+                        new_album_title="Riposte (correct pressing)",
+                        new_year=None,
+                        new_country=None,
+                        new_tracks=[],
+                    )
+                return super().update_request_fields(
+                    request_id,
+                    expected_status=expected_status,
+                    **fields,
+                )
+
+        release = json.loads(json.dumps(SAMPLE_MB_RELEASE))
+        for track in release["media"][0]["tracks"]:
+            track["artist-credit"] = [{"name": "Late Artist"}]
+        mock_fetch.return_value = release
+        db = RacingDB()
+        stderr = io.StringIO()
+        with patch(
+            "web.mb.get_release_group_year",
+            return_value=2014,
+        ), redirect_stderr(stderr):
+            pipeline_cli.cmd_add(db, MagicMock(
+                mbid="44438bf9-26d9-4460-9b4f-1a1b015e37a1",
+                source="request",
+            ))
+
+        source = db.get_request_by_release_id(
+            "44438bf9-26d9-4460-9b4f-1a1b015e37a1",
+        )
+        assert source is not None
+        self.assertEqual(source["status"], "replaced")
+        self.assertIsNone(db.get_tracks(source["id"])[0]["track_artist"])
+        self.assertIsNone(db.get_active_search_plan(source["id"]))
+        self.assertIn("skipping plan generation", stderr.getvalue())
+
 
 class TestCmdList(unittest.TestCase):
     def setUp(self):
