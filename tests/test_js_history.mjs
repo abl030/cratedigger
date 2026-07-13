@@ -741,6 +741,51 @@ console.log('Gas: contract, V0 proof, and materialized Opus output stay distinct
   assertExcludes(detail, '>Min bitrate<', 'ambiguous unqualified row is gone');
 }
 
+console.log('Iron & Wine: the temporary V0 minimum never wears the FLAC label');
+{
+  const strip = renderEvidenceFixture({
+    outcome: 'rejected',
+    downloaded_label: 'FLAC',
+    filetype: 'flac',
+    slskd_filetype: 'flac',
+    actual_filetype: 'flac',
+    actual_min_bitrate: 165,
+    spectral_grade: 'likely_transcode',
+    spectral_bitrate: 96,
+    v0_probe_kind: 'lossless_source_v0',
+    v0_probe_min_bitrate: 165,
+    v0_probe_avg_bitrate: 171,
+    existing_format: 'Opus',
+    existing_min_bitrate: 114,
+    existing_spectral_grade: 'likely_transcode',
+    existing_v0_probe_kind: 'lossless_source_v0',
+    existing_v0_probe_min_bitrate: 223,
+    existing_v0_probe_avg_bitrate: 232,
+  });
+  assertContains(strip, 'IN</span> FLAC ·', 'source remains labelled FLAC');
+  assertExcludes(strip, 'FLAC · min 165k', 'V0 minimum is not a FLAC measurement');
+  assertContains(strip, 'V0 171k avg (min 165k)', 'candidate V0 owns its minimum');
+  assertContains(strip, 'Opus min 114k', 'materialized existing Opus keeps its real floor');
+  assertContains(strip, 'V0 232k avg (min 223k)', 'existing source V0 owns its minimum');
+
+  const detail = renderDownloadHistoryFixture({
+    outcome: 'rejected',
+    soulseek_username: 'donfulci',
+    created_at: '2026-07-13T01:01:00+00:00',
+    v0_probe_kind: 'lossless_source_v0',
+    v0_probe_min_bitrate: 165,
+    v0_probe_avg_bitrate: 171,
+    existing_v0_probe_kind: 'lossless_source_v0',
+    existing_v0_probe_min_bitrate: 223,
+    existing_v0_probe_avg_bitrate: 232,
+    verdict: 'Suspect lossless source not better than on-disk copy; searching continues',
+  });
+  assertContains(detail, '171kbps avg · min 165kbps',
+    'detail candidate V0 owns its minimum');
+  assertContains(detail, '232kbps avg · min 223kbps',
+    'detail existing V0 owns its minimum');
+}
+
 console.log('renderEvidenceStrip() marks spectral-clamped rank values with ~');
 {
   const strip = renderEvidenceFixture({
