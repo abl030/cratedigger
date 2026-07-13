@@ -29,10 +29,21 @@ _WORLDS = st.builds(
     call_style=st.sampled_from(
         ("from_import", "module_alias", "conflicting_import", "shadowed_import"),
     ),
-    patch_style=st.sampled_from(("string", "object", "alias_object", "dict")),
-    patch_api=st.sampled_from(("direct", "qualified")),
+    patch_style=st.sampled_from(
+        (
+            "string",
+            "object",
+            "alias_object",
+            "dict",
+            "dict_values",
+            "multiple",
+            "dynamic_object",
+        ),
+    ),
+    patch_api=st.sampled_from(("direct", "qualified", "unittest")),
     activation=st.sampled_from(("with", "decorator", "later_context")),
     production_conflict=st.booleans(),
+    call_capture=st.booleans(),
 )
 
 

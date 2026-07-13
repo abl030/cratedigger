@@ -1,9 +1,8 @@
-"""Fail-closed audit for the repository's canonical default-patch grammar."""
+"""Fail-closed audit for the repository's small default-patch grammar."""
 
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -11,7 +10,7 @@ from typing import Mapping
 
 @dataclass(frozen=True, order=True)
 class DefaultPatchFinding:
-    """One canonical call made without its captured dependency injected."""
+    """One direct call made without its captured dependency injected."""
 
     test_path: str
     line: int
@@ -23,22 +22,44 @@ class DefaultPatchFinding:
 @dataclass(frozen=True)
 class _Capture:
     callable_path: str
-    injectable_keyword: str
+    keyword: str
     targets: frozenset[str]
-    positional_only: bool
-    positional_index: int | None
+    position: int | None
     production_path: str
-    default_line: int
-    unsupported_expression: bool
-    ambiguous_bindings: frozenset[str]
+    line: int
+    unsupported: bool
+    ambiguous: str | None
 
 
 @dataclass(frozen=True)
-class _PatchRegion:
+class _Imports:
+    candidates: Mapping[str, frozenset[str]]
+    direct: frozenset[str]
+    rebounds: Mapping[str, int]
+
+
+@dataclass(frozen=True)
+class _Use:
+    capture: _Capture
     call: ast.Call
-    target: str
-    body: tuple[ast.AST, ...]
-    function_scope: ast.FunctionDef | ast.AsyncFunctionDef | None
+    error_line: int | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class _Patch:
+    call: ast.Call
+    region: tuple[ast.AST, ...]
+    manual: bool = False
+
+
+@dataclass(frozen=True)
+class _Evidence:
+    targets: frozenset[str] | None
+    owners: frozenset[str] | None
+    attributes: frozenset[str]
+    supported: bool
+    error: str
 
 
 _PRODUCTION_ROOTS = (
@@ -49,930 +70,561 @@ _PRODUCTION_ROOTS = (
     "cratedigger.py",
     "album_source.py",
 )
+_PATCH_PREFIX = "unittest.mock.patch"
 
 
-def _module_path(relative_path: str) -> str:
-    parts = list(Path(relative_path).with_suffix("").parts)
+def _module_path(path: str) -> str:
+    parts = list(Path(path).with_suffix("").parts)
     if parts[-1] == "__init__":
         parts.pop()
     return ".".join(parts)
 
 
-def _dotted_name(node: ast.expr) -> str | None:
+def _dotted(node: ast.AST) -> str | None:
     if isinstance(node, ast.Name):
         return node.id
     if isinstance(node, ast.Attribute):
-        owner = _dotted_name(node.value)
-        if owner is not None:
+        owner = _dotted(node.value)
+        if owner:
             return f"{owner}.{node.attr}"
     return None
 
 
-def _bind_imports(
-    statements: Iterable[ast.stmt],
-) -> tuple[dict[str, str], set[str]]:
-    """Collect direct canonical imports; conflicting bindings are ambiguous."""
-    bindings: dict[str, str] = {}
-    ambiguous: set[str] = set()
-    for statement in statements:
-        names: list[tuple[str, str]] = []
-        if isinstance(statement, ast.Import):
-            names.extend(
-                (
-                    alias.asname or alias.name.split(".")[0],
-                    alias.name if alias.asname else alias.name.split(".")[0],
-                )
-                for alias in statement.names
-            )
-        elif isinstance(statement, ast.ImportFrom):
-            if statement.level != 0 or any(
-                alias.name == "*" for alias in statement.names
-            ):
-                ambiguous.update(
-                    alias.asname or alias.name for alias in statement.names
-                )
-                continue
-            module = statement.module or ""
-            names.extend(
-                (alias.asname or alias.name, f"{module}.{alias.name}")
-                for alias in statement.names
-            )
-        for bound, resolved in names:
-            prior = bindings.get(bound)
-            if prior is not None and prior != resolved:
-                ambiguous.add(bound)
-            bindings[bound] = resolved
-    return bindings, ambiguous
-
-
-def _import_candidates(statements: Iterable[ast.stmt]) -> dict[str, set[str]]:
-    """Retain every absolute import target for production-default ambiguity."""
+def _imports(tree: ast.AST) -> _Imports:
     candidates: dict[str, set[str]] = {}
-    for statement in statements:
-        names: list[tuple[str, str]] = []
-        if isinstance(statement, ast.Import):
-            names.extend(
+    direct: set[str] = set()
+    imported_lines: dict[str, list[int]] = {}
+    rebound_lines: dict[str, list[int]] = {}
+    for node in ast.walk(tree):
+        pairs: list[tuple[str, str]] = []
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                target = alias.name if alias.asname else bound
+                pairs.append((bound, target))
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            pairs.extend(
                 (
-                    alias.asname or alias.name.split(".")[0],
-                    alias.name if alias.asname else alias.name.split(".")[0],
+                    alias.asname or alias.name,
+                    f"{node.module or ''}.{alias.name}".strip("."),
                 )
-                for alias in statement.names
-            )
-        elif isinstance(statement, ast.ImportFrom) and statement.level == 0:
-            names.extend(
-                (alias.asname or alias.name, f"{statement.module or ''}.{alias.name}")
-                for alias in statement.names
+                for alias in node.names
                 if alias.name != "*"
             )
-        for bound, resolved in names:
-            candidates.setdefault(bound, set()).add(resolved)
-    return candidates
+        for bound, target in pairs:
+            candidates.setdefault(bound, set()).add(target)
+            direct.add(bound)
+            imported_lines.setdefault(bound, []).append(getattr(node, "lineno", 0))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            rebound_lines.setdefault(node.name, []).append(node.lineno)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            targets: list[ast.expr]
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            else:
+                targets = [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    rebound_lines.setdefault(target.id, []).append(
+                        getattr(node, "lineno", 0),
+                    )
+    rebounds = {
+        name: min(line for line in lines if line not in imported_lines.get(name, ()))
+        for name, lines in rebound_lines.items()
+        if name in imported_lines
+        and any(line not in imported_lines[name] for line in lines)
+    }
+    return _Imports(
+        candidates={key: frozenset(value) for key, value in candidates.items()},
+        direct=frozenset(direct),
+        rebounds=rebounds,
+    )
 
 
-def _resolve_dotted(name: str, bindings: Mapping[str, str]) -> str:
-    root, separator, remainder = name.partition(".")
-    resolved_root = bindings.get(root, root)
-    return resolved_root + (separator + remainder if separator else "")
+def _resolve(name: str, imports: _Imports) -> frozenset[str]:
+    root, dot, tail = name.partition(".")
+    roots = imports.candidates.get(root)
+    if not roots:
+        return frozenset((name,))
+    return frozenset(
+        target + (dot + tail if dot else "") for target in roots
+    )
 
 
-def _default_references(default: ast.expr) -> tuple[str, ...]:
-    """Return maximal dotted references without interpreting the expression."""
-    dotted = {
-        name
-        for node in ast.walk(default)
-        if isinstance(node, (ast.Name, ast.Attribute))
-        and (name := _dotted_name(node)) is not None
+def _references(node: ast.expr) -> tuple[str, ...]:
+    names = {
+        dotted
+        for child in ast.walk(node)
+        if isinstance(child, (ast.Name, ast.Attribute))
+        and (dotted := _dotted(child))
     }
     return tuple(
         sorted(
             name
-            for name in dotted
-            if not any(other.startswith(f"{name}.") for other in dotted)
-        ),
+            for name in names
+            if not any(other.startswith(f"{name}.") for other in names)
+        )
     )
 
 
-def _default_targets(
-    default: ast.expr,
-    *,
-    module: str,
-    import_candidates: Mapping[str, set[str]],
-) -> tuple[frozenset[str], frozenset[str]]:
-    targets: set[str] = set()
-    ambiguous: set[str] = set()
-    for dotted in _default_references(default):
-        targets.add(f"{module}.{dotted}")
-        root, separator, remainder = dotted.partition(".")
-        imported = import_candidates.get(root, set())
-        if len(imported) > 1:
-            ambiguous.add(root)
-        targets.update(
-            resolved + (separator + remainder if separator else "")
-            for resolved in imported
-        )
-    return frozenset(targets), frozenset(ambiguous)
-
-
-def _definition_captures(
+def _captures_for_definition(
     definition: ast.FunctionDef | ast.AsyncFunctionDef,
     *,
     callable_path: str,
     module: str,
-    production_path: str,
-    import_candidates: Mapping[str, set[str]],
-) -> tuple[_Capture, ...]:
+    path: str,
+    imports: _Imports,
+    bound_method: bool,
+) -> list[_Capture]:
     captures: list[_Capture] = []
     positional = [*definition.args.posonlyargs, *definition.args.args]
     offset = len(positional) - len(definition.args.defaults)
-    for index, default in enumerate(definition.args.defaults, start=offset):
-        targets, ambiguous = _default_targets(
-            default,
-            module=module,
-            import_candidates=import_candidates,
+    defaults: list[tuple[ast.arg, ast.expr, int | None]] = [
+        (argument, default, index - int(bound_method))
+        for index, (argument, default) in enumerate(
+            zip(positional[offset:], definition.args.defaults),
+            start=offset,
         )
-        if targets:
-            captures.append(
-                _Capture(
-                    callable_path=callable_path,
-                    injectable_keyword=positional[index].arg,
-                    targets=targets,
-                    positional_only=index < len(definition.args.posonlyargs),
-                    positional_index=index,
-                    production_path=production_path,
-                    default_line=default.lineno,
-                    unsupported_expression=_dotted_name(default) is None,
-                    ambiguous_bindings=ambiguous,
-                ),
-            )
-    for argument, default in zip(
-        definition.args.kwonlyargs,
-        definition.args.kw_defaults,
-    ):
-        if default is None:
+    ]
+    defaults.extend(
+        (argument, default, None)
+        for argument, default in zip(
+            definition.args.kwonlyargs,
+            definition.args.kw_defaults,
+        )
+        if default is not None
+    )
+    for argument, default, position in defaults:
+        references = _references(default)
+        if not references:
             continue
-        targets, ambiguous = _default_targets(
-            default,
-            module=module,
-            import_candidates=import_candidates,
+        targets: set[str] = set()
+        ambiguous: str | None = None
+        for reference in references:
+            root = reference.partition(".")[0]
+            resolved = _resolve(reference, imports)
+            if "." not in reference:
+                targets.add(f"{module}.{reference}")
+            targets.update(resolved)
+            if len(imports.candidates.get(root, ())) > 1:
+                ambiguous = root
+        captures.append(
+            _Capture(
+                callable_path=callable_path,
+                keyword=argument.arg,
+                targets=frozenset(targets),
+                position=position,
+                production_path=path,
+                line=default.lineno,
+                unsupported=_dotted(default) is None,
+                ambiguous=ambiguous,
+            ),
         )
-        if targets:
-            captures.append(
-                _Capture(
-                    callable_path,
-                    argument.arg,
-                    targets,
-                    False,
-                    None,
-                    production_path,
-                    default.lineno,
-                    _dotted_name(default) is None,
-                    ambiguous,
-                ),
-            )
-    return tuple(captures)
+    return captures
 
 
-def _captured_defaults(
-    production_sources: Mapping[str, str],
-) -> tuple[_Capture, ...]:
+def _production_captures(sources: Mapping[str, str]) -> tuple[_Capture, ...]:
     captures: list[_Capture] = []
-    for relative_path, source in production_sources.items():
-        module = _module_path(relative_path)
-        if not module:
-            continue
-        tree = ast.parse(source, filename=relative_path)
-        import_candidates = _import_candidates(tree.body)
+    for path, source in sorted(sources.items()):
+        tree = ast.parse(source, filename=path)
+        module = _module_path(path)
+        imports = _imports(tree)
         for statement in tree.body:
-            definitions: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str]] = []
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                definitions.append((statement, f"{module}.{statement.name}"))
-            elif isinstance(statement, ast.ClassDef):
-                definitions.extend(
-                    (member, f"{module}.{statement.name}.{member.name}")
-                    for member in statement.body
-                    if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
-                )
-            for definition, callable_path in definitions:
                 captures.extend(
-                    _definition_captures(
-                        definition,
-                        callable_path=callable_path,
+                    _captures_for_definition(
+                        statement,
+                        callable_path=f"{module}.{statement.name}",
                         module=module,
-                        production_path=relative_path,
-                        import_candidates=import_candidates,
+                        path=path,
+                        imports=imports,
+                        bound_method=False,
                     ),
                 )
+            elif isinstance(statement, ast.ClassDef):
+                for member in statement.body:
+                    if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        continue
+                    captures.extend(
+                        _captures_for_definition(
+                            member,
+                            callable_path=f"{module}.{statement.name}.{member.name}",
+                            module=module,
+                            path=path,
+                            imports=imports,
+                            bound_method=True,
+                        ),
+                    )
     return tuple(captures)
 
 
-def _parents(tree: ast.AST) -> dict[ast.AST, ast.AST]:
-    return {
-        child: parent
-        for parent in ast.walk(tree)
-        for child in ast.iter_child_nodes(parent)
-    }
-
-
-def _nearest_function(
-    node: ast.AST,
-    parents: Mapping[ast.AST, ast.AST],
-) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
-    current = parents.get(node)
-    while current is not None:
-        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            return current
-        current = parents.get(current)
-    return None
-
-
-def _scope_imports(
-    tree: ast.Module,
-    function: ast.FunctionDef | ast.AsyncFunctionDef | None,
-    parents: Mapping[ast.AST, ast.AST],
-) -> Iterable[ast.stmt]:
-    imports = [
-        node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))
-    ]
-    if function is not None:
-        imports.extend(
-            node
-            for node in ast.walk(function)
-            if isinstance(node, (ast.Import, ast.ImportFrom))
-            and _nearest_function(node, parents) is function
-        )
-    return imports
-
-
-def _scope_rebound_names(
-    tree: ast.Module,
-    function: ast.FunctionDef | ast.AsyncFunctionDef | None,
-    parents: Mapping[ast.AST, ast.AST],
-) -> dict[str, int]:
-    scopes: list[tuple[ast.AST, ast.FunctionDef | ast.AsyncFunctionDef | None]] = [
-        (tree, None)
-    ]
-    if function is not None:
-        scopes.append((function, function))
-    rebound: dict[str, int] = {}
-    for root, expected_scope in scopes:
-        rebound.update(
-            {
-                node.id: node.lineno
-                for node in ast.walk(root)
-                if isinstance(node, ast.Name)
-                and isinstance(node.ctx, ast.Store)
-                and _nearest_function(node, parents) is expected_scope
-            },
-        )
-        rebound.update(
-            {
-                node.name: node.lineno
-                for node in ast.walk(root)
-                if isinstance(
-                    node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-                )
-                and _nearest_function(node, parents) is expected_scope
-            },
-        )
-    if function is not None:
-        arguments = [
-            *function.args.posonlyargs,
-            *function.args.args,
-            *function.args.kwonlyargs,
-        ]
-        if function.args.vararg is not None:
-            arguments.append(function.args.vararg)
-        if function.args.kwarg is not None:
-            arguments.append(function.args.kwarg)
-        rebound.update({argument.arg: argument.lineno for argument in arguments})
-    return rebound
-
-
-def _patch_target(
-    call: ast.Call,
-    *,
-    test_path: str,
-    bindings: Mapping[str, str],
-) -> str | None:
-    dotted = _dotted_name(call.func)
-    if dotted is None:
+def _patch_name(call: ast.Call, imports: _Imports) -> str | None:
+    dotted = _dotted(call.func)
+    if not dotted:
         return None
-    resolved = _resolve_dotted(dotted, bindings)
-    if resolved == "unittest.mock.patch":
-        if not call.args or not (
-            isinstance(call.args[0], ast.Constant)
-            and isinstance(call.args[0].value, str)
-        ):
-            raise ValueError(
-                f"{test_path}:{call.lineno}: unsupported definition-default "
-                "patch syntax: patch target must be a string literal"
-            )
-        return call.args[0].value
-    if resolved != "unittest.mock.patch.object" or len(call.args) < 2:
-        return None
-    owner = _dotted_name(call.args[0])
-    attribute = call.args[1]
-    if owner is None or not (
-        isinstance(attribute, ast.Constant) and isinstance(attribute.value, str)
-    ):
-        return None
-    return f"{_resolve_dotted(owner, bindings)}.{attribute.value}"
+    resolved = _resolve(dotted, imports)
+    matches = [name for name in resolved if name.startswith(_PATCH_PREFIX)]
+    return matches[0] if len(matches) == 1 else None
 
 
-def _canonical_patch_spellings(tree: ast.Module) -> frozenset[str]:
-    """Return the exact direct/qualified patch names imported in this file."""
-    spellings: set[str] = set()
+def _patches(tree: ast.AST, imports: _Imports) -> tuple[_Patch, ...]:
+    found: list[_Patch] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.level == 0:
-            if node.module == "unittest.mock":
-                for alias in node.names:
-                    if alias.name == "patch":
-                        bound = alias.asname or alias.name
-                        spellings.update(
-                            (bound, f"{bound}.object", f"{bound}.dict"),
-                        )
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "unittest.mock" and alias.asname:
-                    spellings.update(
-                        (
-                            f"{alias.asname}.patch",
-                            f"{alias.asname}.patch.object",
-                            f"{alias.asname}.patch.dict",
+        if isinstance(node, (ast.With, ast.AsyncWith)):
+            for index, item in enumerate(node.items):
+                call = item.context_expr
+                if isinstance(call, ast.Call) and _patch_name(call, imports):
+                    found.append(
+                        _Patch(
+                            call,
+                            tuple(
+                                [
+                                    other.context_expr
+                                    for other in node.items[index + 1 :]
+                                ]
+                                + node.body
+                            ),
                         ),
                     )
-    return frozenset(spellings)
-
-
-def _patch_region(
-    call: ast.Call,
-    *,
-    target: str,
-    parents: Mapping[ast.AST, ast.AST],
-) -> _PatchRegion | None:
-    parent = parents.get(call)
-    if isinstance(parent, ast.withitem) and parent.context_expr is call:
-        with_node = parents.get(parent)
-        if isinstance(with_node, (ast.With, ast.AsyncWith)):
-            item_index = with_node.items.index(parent)
-            later_contexts = tuple(
-                item.context_expr for item in with_node.items[item_index + 1 :]
-            )
-            return _PatchRegion(
-                call,
-                target,
-                later_contexts + tuple(with_node.body),
-                _nearest_function(with_node, parents),
-            )
-    if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        if call in parent.decorator_list:
-            return _PatchRegion(
-                call,
-                target,
-                tuple(parent.body),
-                parent
-                if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef))
-                else None,
-            )
-    return None
-
-
-def _walk_region(nodes: tuple[ast.AST, ...]) -> list[ast.AST]:
-    return [descendant for node in nodes for descendant in ast.walk(node)]
-
-
-def _call_reference_path(capture: _Capture) -> str:
-    if capture.callable_path.endswith(".__init__"):
-        return capture.callable_path.removesuffix(".__init__")
-    return capture.callable_path
-
-
-def _instance_bindings(
-    tree: ast.Module,
-    *,
-    function_scope: ast.FunctionDef | ast.AsyncFunctionDef | None,
-    capture: _Capture,
-    bindings: Mapping[str, str],
-    parents: Mapping[ast.AST, ast.AST],
-) -> dict[str, int]:
-    """Recognize only direct ``name = ImportedClass()`` instance bindings."""
-    if capture.callable_path.endswith(".__init__"):
-        return {}
-    owner_path, separator, _ = capture.callable_path.rpartition(".")
-    if not separator:
-        return {}
-    root: ast.AST = function_scope if function_scope is not None else tree
-    instances: dict[str, int] = {}
-    for node in ast.walk(root):
-        if _nearest_function(node, parents) is not function_scope:
-            continue
-        target: ast.Name | None = None
-        value: ast.expr | None = None
-        line: int | None = None
-        if (
-            isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-        ):
-            target = node.targets[0]
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for decorator in node.decorator_list:
+                if isinstance(decorator, ast.Call) and _patch_name(decorator, imports):
+                    found.append(_Patch(decorator, tuple(node.body)))
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
             value = node.value
-            line = node.lineno
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            target = node.target
-            value = node.value
-            line = node.lineno
-        if target is None or line is None or not isinstance(value, ast.Call):
-            continue
-        constructor = _dotted_name(value.func)
-        if (
-            constructor is not None
-            and _resolve_dotted(constructor, bindings) == owner_path
-        ):
-            instances[target.id] = line
-    return instances
+            if isinstance(value, ast.Call) and _patch_name(value, imports):
+                found.append(_Patch(value, (tree,), manual=True))
+    return tuple(found)
 
 
-def _scope_uses_capture(
-    tree: ast.Module,
-    *,
-    function_scope: ast.FunctionDef | ast.AsyncFunctionDef | None,
-    capture: _Capture,
-    bindings: Mapping[str, str],
-    parents: Mapping[ast.AST, ast.AST],
-) -> bool:
-    call_path = _call_reference_path(capture)
-    if any(
-        isinstance(node, (ast.Name, ast.Attribute))
-        and (dotted := _dotted_name(node)) is not None
-        and _resolve_dotted(dotted, bindings) == call_path
-        and _nearest_function(node, parents) is function_scope
-        for node in ast.walk(tree)
-    ):
-        return True
-    instances = _instance_bindings(
-        tree,
-        function_scope=function_scope,
-        capture=capture,
-        bindings=bindings,
-        parents=parents,
-    )
-    member = capture.callable_path.rpartition(".")[2]
-    return any(
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id in instances
-        and node.func.attr == member
-        and _nearest_function(node, parents) is function_scope
-        for node in ast.walk(tree)
-    )
-
-
-def _reference_bindings(
-    node: ast.AST,
-    *,
-    outer_scope: ast.FunctionDef | ast.AsyncFunctionDef | None,
-    outer_bindings: Mapping[str, str],
-    parents: Mapping[ast.AST, ast.AST],
-) -> tuple[dict[str, str], set[str]]:
-    bindings = dict(outer_bindings)
-    scope = _nearest_function(node, parents)
-    if scope is outer_scope or scope is None:
-        return bindings, set()
-    imports = [
-        candidate
-        for candidate in ast.walk(scope)
-        if isinstance(candidate, (ast.Import, ast.ImportFrom))
-        and _nearest_function(candidate, parents) is scope
-    ]
-    nested, ambiguous = _bind_imports(imports)
-    for name, resolved in nested.items():
-        prior = bindings.get(name)
-        if prior is not None and prior != resolved:
-            ambiguous.add(name)
-        bindings[name] = resolved
-    return bindings, ambiguous
-
-
-def _validate_scope_capture_syntax(
-    *,
-    test_path: str,
-    tree: ast.Module,
-    function_scope: ast.FunctionDef | ast.AsyncFunctionDef | None,
-    capture: _Capture,
-    bindings: Mapping[str, str],
-    rebound_names: Mapping[str, int],
-    parents: Mapping[ast.AST, ast.AST],
-) -> None:
-    for name, line in rebound_names.items():
-        resolved = bindings.get(name)
-        if resolved is not None and (
-            capture.callable_path == resolved
-            or capture.callable_path.startswith(f"{resolved}.")
-        ):
-            raise ValueError(
-                f"{test_path}:{line}: unsupported definition-default patch "
-                f"syntax: imported callable binding {name} is rebound"
-            )
-    instances = _instance_bindings(
-        tree,
-        function_scope=function_scope,
-        capture=capture,
-        bindings=bindings,
-        parents=parents,
-    )
-    member = capture.callable_path.rpartition(".")[2]
-    root: ast.AST = function_scope if function_scope is not None else tree
-    for node in ast.walk(root):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id in instances
-            and node.func.attr == member
-            and _nearest_function(node, parents) is function_scope
-        ):
-            raise ValueError(
-                f"{test_path}:{node.lineno}: unsupported definition-default "
-                f"patch syntax: assigned instance call {node.func.value.id}."
-                f"{member} cannot be proven"
-            )
-    call_path = _call_reference_path(capture)
-    for node in ast.walk(root):
-        if not isinstance(node, (ast.Name, ast.Attribute)):
-            continue
-        dotted = _dotted_name(node)
-        reference_bindings, ambiguous = _reference_bindings(
-            node,
-            outer_scope=function_scope,
-            outer_bindings=bindings,
-            parents=parents,
-        )
-        if dotted is None or _resolve_dotted(dotted, reference_bindings) != call_path:
-            continue
-        if ambiguous:
-            names = ", ".join(sorted(ambiguous))
-            raise ValueError(
-                f"{test_path}:{node.lineno}: unsupported definition-default "
-                f"patch syntax: conflicting imports for {names}"
-            )
-        parent = parents.get(node)
-        if not isinstance(parent, ast.Call) or parent.func is not node:
-            raise ValueError(
-                f"{test_path}:{node.lineno}: unsupported definition-default "
-                f"patch syntax: {call_path} must be called directly"
-            )
-        if _nearest_function(parent, parents) is not function_scope:
-            raise ValueError(
-                f"{test_path}:{parent.lineno}: unsupported definition-default "
-                "patch syntax: captured call cannot cross a nested function boundary"
-            )
-
-
-def _check_direct_usage(
-    *,
-    test_path: str,
-    region: _PatchRegion,
-    capture: _Capture,
-    bindings: Mapping[str, str],
-    parents: Mapping[ast.AST, ast.AST],
-) -> list[DefaultPatchFinding]:
-    findings: list[DefaultPatchFinding] = []
-    call_path = _call_reference_path(capture)
-    for node in _walk_region(region.body):
-        if not isinstance(node, (ast.Name, ast.Attribute)):
-            continue
-        dotted = _dotted_name(node)
-        reference_bindings, ambiguous = _reference_bindings(
-            node,
-            outer_scope=region.function_scope,
-            outer_bindings=bindings,
-            parents=parents,
-        )
-        if dotted is None or (_resolve_dotted(dotted, reference_bindings) != call_path):
-            continue
-        if ambiguous:
-            names = ", ".join(sorted(ambiguous))
-            raise ValueError(
-                f"{test_path}:{node.lineno}: unsupported definition-default "
-                f"patch syntax: conflicting imports for {names}"
-            )
-        parent = parents.get(node)
-        if not isinstance(parent, ast.Call) or parent.func is not node:
-            raise ValueError(
-                f"{test_path}:{node.lineno}: unsupported definition-default "
-                f"patch syntax: {call_path} must be called directly"
-            )
-        if _nearest_function(parent, parents) is not region.function_scope:
-            raise ValueError(
-                f"{test_path}:{parent.lineno}: unsupported definition-default "
-                "patch syntax: captured call cannot cross a nested function boundary"
-            )
-        if any(keyword.arg is None for keyword in parent.keywords):
-            raise ValueError(
-                f"{test_path}:{parent.lineno}: unsupported definition-default "
-                f"patch syntax: inject {capture.injectable_keyword} as an explicit keyword"
-            )
-        if any(isinstance(argument, ast.Starred) for argument in parent.args):
-            raise ValueError(
-                f"{test_path}:{parent.lineno}: unsupported definition-default "
-                f"patch syntax: inject {capture.injectable_keyword} as an explicit keyword"
-            )
-        injected = any(
-            keyword.arg == capture.injectable_keyword for keyword in parent.keywords
-        )
-        if capture.positional_only:
-            raise ValueError(
-                f"{test_path}:{parent.lineno}: unsupported definition-default "
-                "patch syntax: positional-only captured defaults are outside the "
-                "canonical injection grammar"
-            )
-        positional_index = capture.positional_index
-        if positional_index is not None and capture.callable_path.endswith(".__init__"):
-            positional_index -= 1
-        if positional_index is not None and len(parent.args) > positional_index:
-            raise ValueError(
-                f"{test_path}:{parent.lineno}: unsupported definition-default "
-                f"patch syntax: inject {capture.injectable_keyword} as an explicit keyword"
-            )
-        if not injected:
-            findings.append(
-                DefaultPatchFinding(
-                    test_path=test_path,
-                    line=parent.lineno,
-                    callable_path=capture.callable_path,
-                    patched_target=region.target,
-                    injectable_keyword=capture.injectable_keyword,
-                ),
-            )
-    return findings
-
-
-def _captures_with_target_suffix(
-    by_target: Mapping[str, list[_Capture]],
-    suffixes: Iterable[str],
+def _direct_capture(
+    expression: ast.expr,
+    captures: tuple[_Capture, ...],
+    imports: _Imports,
 ) -> tuple[_Capture, ...]:
-    wanted = set(suffixes)
+    name = _dotted(expression)
+    if not name:
+        return ()
+    resolved = _resolve(name, imports)
     return tuple(
-        {
-            capture
-            for target, captures in by_target.items()
-            if target.rpartition(".")[2] in wanted
-            for capture in captures
-        },
+        capture
+        for capture in captures
+        if capture.callable_path in resolved
+        or (
+            capture.callable_path.endswith(".__init__")
+            and capture.callable_path.removesuffix(".__init__") in resolved
+        )
     )
 
 
-def _conservative_patch_overlap(
-    call: ast.Call,
-    *,
-    bindings: Mapping[str, str],
-    by_target: Mapping[str, list[_Capture]],
-) -> tuple[str, tuple[_Capture, ...]] | None:
-    """Recognize relevant patch forms that are deliberately outside the grammar."""
-    raw = _dotted_name(call.func)
-    if raw is None:
-        return None
-    resolved = _resolve_dotted(raw, bindings)
-    if resolved == "unittest.mock.patch.object" and len(call.args) >= 2:
-        attribute = call.args[1]
-        if not (
-            isinstance(attribute, ast.Constant) and isinstance(attribute.value, str)
+def _assigned_uses(
+    tree: ast.AST,
+    captures: tuple[_Capture, ...],
+    imports: _Imports,
+) -> tuple[dict[str, tuple[_Capture, int]], dict[str, tuple[str, int]]]:
+    aliases: dict[str, tuple[_Capture, int]] = {}
+    instances: dict[str, tuple[str, int]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        value = node.value
+        if value is None:
+            continue
+        for target in targets:
+            if not isinstance(target, ast.Name):
+                continue
+            direct = _direct_capture(value, captures, imports)
+            if len(direct) == 1:
+                aliases[target.id] = (direct[0], node.lineno)
+            if isinstance(value, ast.Call):
+                name = _dotted(value.func)
+                if not name:
+                    continue
+                for resolved in _resolve(name, imports):
+                    instances[target.id] = (resolved, node.lineno)
+    return aliases, instances
+
+
+def _uses(
+    patch: _Patch,
+    captures: tuple[_Capture, ...],
+    imports: _Imports,
+    aliases: Mapping[str, tuple[_Capture, int]],
+    instances: Mapping[str, tuple[str, int]],
+) -> tuple[_Use, ...]:
+    uses: list[_Use] = []
+    seen: set[tuple[int, str]] = set()
+    for root in patch.region:
+        for node in ast.walk(root):
+            if not isinstance(node, ast.Call):
+                continue
+            for capture in _direct_capture(node.func, captures, imports):
+                key = (id(node), capture.callable_path)
+                if key in seen:
+                    continue
+                seen.add(key)
+                syntactic = _dotted(node.func) or capture.callable_path
+                binding = syntactic.partition(".")[0]
+                candidates = imports.candidates.get(binding, ())
+                if len(candidates) > 1:
+                    uses.append(
+                        _Use(
+                            capture,
+                            node,
+                            node.lineno,
+                            f"imported callable binding {binding} has conflicting imports",
+                        ),
+                    )
+                elif binding in imports.rebounds:
+                    uses.append(
+                        _Use(
+                            capture,
+                            node,
+                            imports.rebounds[binding],
+                            f"imported callable binding {binding} is rebound",
+                        ),
+                    )
+                else:
+                    uses.append(_Use(capture, node))
+            name = _dotted(node.func)
+            if not name:
+                continue
+            root_name, dot, member = name.partition(".")
+            if not dot and root_name in aliases:
+                capture, line = aliases[root_name]
+                uses.append(
+                    _Use(
+                        capture,
+                        node,
+                        line,
+                        f"{capture.callable_path} must be called directly",
+                    ),
+                )
+            if dot and root_name in instances:
+                class_path, line = instances[root_name]
+                for capture in captures:
+                    if capture.callable_path == f"{class_path}.{member}":
+                        uses.append(
+                            _Use(
+                                capture,
+                                node,
+                                line,
+                                f"assigned instance call {name} cannot be proven",
+                            ),
+                        )
+    return tuple(uses)
+
+
+def _owner(node: ast.expr, imports: _Imports) -> tuple[frozenset[str] | None, bool]:
+    name = _dotted(node)
+    if not name:
+        return None, False
+    root = name.partition(".")[0]
+    if root not in imports.candidates:
+        return None, False
+    resolved = _resolve(name.removesuffix(".__dict__"), imports)
+    direct = root in imports.direct and root not in imports.rebounds
+    return resolved, direct and len(imports.candidates.get(root, ())) == 1
+
+
+def _evidence(call: ast.Call, imports: _Imports) -> _Evidence:
+    patch_name = _patch_name(call, imports) or ""
+    kind = patch_name.removeprefix(_PATCH_PREFIX).lstrip(".")
+    if not kind:
+        if call.args and isinstance(call.args[0], ast.Constant) and isinstance(
+            call.args[0].value,
+            str,
         ):
-            return None
-        owner = _dotted_name(call.args[0])
-        owner_root = owner.partition(".")[0] if owner is not None else ""
-        if owner is not None and owner_root in bindings:
-            return None
-        captures = _captures_with_target_suffix(by_target, (attribute.value,))
-        if captures:
-            return "patch.object owner must be a direct import", captures
-    if resolved == "unittest.mock.patch.dict":
-        keys = {
-            keyword.arg
-            for keyword in call.keywords
-            if keyword.arg is not None and keyword.arg not in {"clear", "values"}
-        }
-        if len(call.args) >= 2 and isinstance(call.args[1], ast.Dict):
-            keys.update(
+            return _Evidence(
+                frozenset((call.args[0].value,)),
+                None,
+                frozenset(),
+                True,
+                "",
+            )
+        return _Evidence(
+            None,
+            None,
+            frozenset(),
+            False,
+            "patch target must be a string literal",
+        )
+    if kind == "object":
+        owners, direct = _owner(call.args[0], imports) if call.args else (None, False)
+        attribute = (
+            call.args[1].value
+            if len(call.args) > 1
+            and isinstance(call.args[1], ast.Constant)
+            and isinstance(call.args[1].value, str)
+            else None
+        )
+        targets = (
+            frozenset(f"{owner}.{attribute}" for owner in owners)
+            if owners and attribute
+            else None
+        )
+        if not attribute:
+            return _Evidence(
+                targets,
+                owners,
+                frozenset(),
+                False,
+                "patch.object attribute must be a string literal",
+            )
+        return _Evidence(
+            targets,
+            owners,
+            frozenset((attribute,)),
+            direct,
+            "patch.object owner must be a direct import",
+        )
+    if kind in {"dict", "multiple"}:
+        owner_node = call.args[0] if call.args else None
+        owners, _ = _owner(owner_node, imports) if owner_node else (None, False)
+        attributes: set[str] = set()
+        for keyword in call.keywords:
+            if keyword.arg is not None and keyword.arg not in {"clear", "values"}:
+                attributes.add(keyword.arg)
+        values = next(
+            (keyword.value for keyword in call.keywords if keyword.arg == "values"),
+            None,
+        )
+        if isinstance(values, ast.Dict):
+            attributes.update(
                 key.value
-                for key in call.args[1].keys
+                for key in values.keys
                 if isinstance(key, ast.Constant) and isinstance(key.value, str)
             )
-        captures = _captures_with_target_suffix(by_target, keys)
-        if captures:
-            names = ", ".join(sorted(keys))
-            return f"patch.dict overlaps captured target {names}", captures
-    return None
+        targets = (
+            frozenset(f"{owner}.{attribute}" for owner in owners for attribute in attributes)
+            if owners and attributes
+            else None
+        )
+        suffix = next(iter(sorted(attributes)), "unknown")
+        return _Evidence(
+            targets,
+            owners,
+            frozenset(attributes),
+            False,
+            f"patch.{kind} overlaps captured target {suffix}",
+        )
+    return _Evidence(
+        None,
+        None,
+        frozenset(),
+        False,
+        f"unsupported patch helper patch.{kind}",
+    )
 
 
-def _validate_production_capture(
-    capture: _Capture,
-    *,
-    patched_target: str,
-) -> None:
-    location = f"{capture.production_path}:{capture.default_line}"
-    subject = f"{capture.callable_path}.{capture.injectable_keyword}"
-    if capture.ambiguous_bindings:
-        names = ", ".join(sorted(capture.ambiguous_bindings))
-        raise ValueError(
-            f"{location}: unsupported definition-default expression for {subject}: "
-            f"binding {names} has conflicting imports"
+def _relevant(evidence: _Evidence, capture: _Capture) -> bool:
+    if evidence.targets is not None:
+        return bool(evidence.targets & capture.targets)
+    if evidence.owners is not None:
+        return any(
+            any(target.startswith(f"{owner}.") for owner in evidence.owners)
+            for target in capture.targets
         )
-    if capture.unsupported_expression:
-        raise ValueError(
-            f"{location}: unsupported definition-default expression for {subject} "
-            f"overlaps patched target {patched_target}"
+    if evidence.attributes:
+        return any(
+            target.rpartition(".")[2] in evidence.attributes
+            for target in capture.targets
         )
+    return True
+
+
+def _error(path: str, line: int, message: str) -> ValueError:
+    return ValueError(
+        f"{path}:{line}: unsupported definition-default patch syntax: {message}",
+    )
 
 
 def find_ineffective_default_patches(
     production_sources: Mapping[str, str],
     test_sources: Mapping[str, str],
 ) -> tuple[DefaultPatchFinding, ...]:
-    """Audit direct literal patches, direct imports, and explicit keyword DI.
-
-    This is intentionally a grammar, not an evaluator. Relevant manual
-    patchers, callable aliases, nested execution, dynamic targets, ``**kwargs``,
-    and positional-only injection fail with a source-local diagnostic.
-    """
-    captures = _captured_defaults(production_sources)
-    by_target: dict[str, list[_Capture]] = {}
-    for capture in captures:
-        for target in capture.targets:
-            by_target.setdefault(target, []).append(capture)
-
-    findings: list[DefaultPatchFinding] = []
-    for test_path, source in test_sources.items():
-        tree = ast.parse(source, filename=test_path)
-        parents = _parents(tree)
-        patch_spellings = _canonical_patch_spellings(tree)
-        scope_data: dict[
-            ast.FunctionDef | ast.AsyncFunctionDef | None,
-            tuple[dict[str, str], set[str], dict[str, int]],
-        ] = {}
-
-        def data_for_scope(
-            scope: ast.FunctionDef | ast.AsyncFunctionDef | None,
-        ) -> tuple[dict[str, str], set[str], dict[str, int]]:
-            if scope not in scope_data:
-                imports = _scope_imports(tree, scope, parents)
-                bindings, ambiguous = _bind_imports(imports)
-                scope_data[scope] = (
-                    bindings,
-                    ambiguous,
-                    _scope_rebound_names(tree, scope, parents),
+    """Check direct captured-default calls inside canonical patch regions."""
+    captures = _production_captures(production_sources)
+    findings: set[DefaultPatchFinding] = set()
+    for path, source in sorted(test_sources.items()):
+        tree = ast.parse(source, filename=path)
+        imports = _imports(tree)
+        aliases, instances = _assigned_uses(tree, captures, imports)
+        for patch in _patches(tree, imports):
+            evidence = _evidence(patch.call, imports)
+            for use in _uses(patch, captures, imports, aliases, instances):
+                capture = use.capture
+                if not _relevant(evidence, capture):
+                    continue
+                if use.error:
+                    raise _error(path, use.error_line or use.call.lineno, use.error)
+                injected = any(
+                    keyword.arg == capture.keyword for keyword in use.call.keywords
                 )
-            return scope_data[scope]
-
-        for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
-            if _dotted_name(call.func) not in patch_spellings:
-                continue
-            parent = parents.get(call)
-            binding_scope = (
-                _nearest_function(parent, parents)
-                if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and call in parent.decorator_list
-                else _nearest_function(call, parents)
-            )
-            patch_bindings, patch_ambiguous, patch_rebound = data_for_scope(
-                binding_scope,
-            )
-            raw_patch = _dotted_name(call.func)
-            assert raw_patch is not None
-            patch_root = raw_patch.partition(".")[0]
-
-            def validate_patch_bindings() -> None:
-                if patch_root in patch_rebound:
+                if injected:
+                    continue
+                if capture.position is not None and len(use.call.args) > capture.position:
+                    raise _error(
+                        path,
+                        use.call.lineno,
+                        f"inject {capture.keyword} as an explicit keyword",
+                    )
+                if patch.manual:
+                    raise _error(
+                        path,
+                        patch.call.lineno,
+                        "captured-default patches must be direct with-items or test decorators",
+                    )
+                if not evidence.supported:
+                    raise _error(path, patch.call.lineno, evidence.error)
+                if capture.ambiguous:
                     raise ValueError(
-                        f"{test_path}:{patch_rebound[patch_root]}: unsupported "
-                        f"definition-default patch syntax: patch binding {patch_root} "
-                        "is rebound"
+                        f"{capture.production_path}:{capture.line}: unsupported "
+                        f"definition-default expression for {capture.callable_path}."
+                        f"{capture.keyword}: binding {capture.ambiguous} has "
+                        "conflicting imports",
                     )
-                if patch_ambiguous:
-                    names = ", ".join(sorted(patch_ambiguous))
+                if capture.unsupported:
                     raise ValueError(
-                        f"{test_path}:{call.lineno}: unsupported definition-default "
-                        f"patch syntax: conflicting imports for {names}"
+                        f"{capture.production_path}:{capture.line}: unsupported "
+                        f"definition-default expression for {capture.callable_path}."
+                        f"{capture.keyword}",
                     )
-
-            target = _patch_target(
-                call,
-                test_path=test_path,
-                bindings=patch_bindings,
-            )
-            overlap = _conservative_patch_overlap(
-                call,
-                bindings=patch_bindings,
-                by_target=by_target,
-            )
-            if overlap is not None:
-                reason, possible_captures = overlap
-                tentative_region = _patch_region(
-                    call,
-                    target="<unsupported>",
-                    parents=parents,
-                )
-                usage_scope = (
-                    tentative_region.function_scope
-                    if tentative_region is not None
-                    else binding_scope
-                )
-                bindings, _, _ = data_for_scope(usage_scope)
-                if any(
-                    _scope_uses_capture(
-                        tree,
-                        function_scope=usage_scope,
-                        capture=capture,
-                        bindings=bindings,
-                        parents=parents,
-                    )
-                    for capture in possible_captures
-                ):
-                    validate_patch_bindings()
-                    raise ValueError(
-                        f"{test_path}:{call.lineno}: unsupported definition-default "
-                        f"patch syntax: {reason}"
-                    )
-            if target is None:
-                continue
-            target_captures = by_target.get(target, ())
-            if not target_captures:
-                continue
-            validate_patch_bindings()
-            for capture in target_captures:
-                _validate_production_capture(capture, patched_target=target)
-            region = _patch_region(call, target=target, parents=parents)
-            usage_scope = region.function_scope if region is not None else binding_scope
-            bindings, ambiguous, rebound_names = data_for_scope(usage_scope)
-            if ambiguous:
-                names = ", ".join(sorted(ambiguous))
-                raise ValueError(
-                    f"{test_path}:{call.lineno}: unsupported definition-default "
-                    f"patch syntax: conflicting imports for {names}"
-                )
-            for capture in target_captures:
-                _validate_scope_capture_syntax(
-                    test_path=test_path,
-                    tree=tree,
-                    function_scope=usage_scope,
-                    capture=capture,
-                    bindings=bindings,
-                    rebound_names=rebound_names,
-                    parents=parents,
-                )
-            if region is None:
-                if any(
-                    _scope_uses_capture(
-                        tree,
-                        function_scope=usage_scope,
-                        capture=capture,
-                        bindings=bindings,
-                        parents=parents,
-                    )
-                    for capture in target_captures
-                ):
-                    raise ValueError(
-                        f"{test_path}:{call.lineno}: unsupported definition-default "
-                        "patch syntax: captured-default patches must be direct "
-                        "with-items or test decorators"
-                    )
-                continue
-            for capture in target_captures:
-                findings.extend(
-                    _check_direct_usage(
-                        test_path=test_path,
-                        region=region,
-                        capture=capture,
-                        bindings=bindings,
-                        parents=parents,
+                patched_target = next(iter(sorted(evidence.targets or capture.targets)))
+                findings.add(
+                    DefaultPatchFinding(
+                        test_path=path,
+                        line=use.call.lineno,
+                        callable_path=capture.callable_path,
+                        patched_target=patched_target,
+                        injectable_keyword=capture.keyword,
                     ),
                 )
-    return tuple(sorted(set(findings)))
+    return tuple(sorted(findings))
 
 
-def _read_repository_sources(
-    repo_root: Path,
-) -> tuple[dict[str, str], dict[str, str]]:
-    production_sources: dict[str, str] = {}
-    for root_name in _PRODUCTION_ROOTS:
-        root = repo_root / root_name
-        paths = root.rglob("*.py") if root.is_dir() else (root,)
-        for path in paths:
-            if path.is_file():
-                relative = path.relative_to(repo_root).as_posix()
-                production_sources[relative] = path.read_text(encoding="utf-8")
-    test_sources = {
-        path.relative_to(repo_root).as_posix(): path.read_text(encoding="utf-8")
-        for path in (repo_root / "tests").rglob("*.py")
-        if path.is_file()
-    }
-    return production_sources, test_sources
+def _repository_sources(repo_root: Path) -> tuple[dict[str, str], dict[str, str]]:
+    production: dict[str, str] = {}
+    tests: dict[str, str] = {}
+    for path in repo_root.rglob("*.py"):
+        relative = path.relative_to(repo_root).as_posix()
+        if any(part.startswith(".") for part in path.relative_to(repo_root).parts):
+            continue
+        if relative.startswith("tests/"):
+            if not Path(relative).name.startswith("_"):
+                tests[relative] = path.read_text()
+        elif any(
+            relative == root or relative.startswith(f"{root}/")
+            for root in _PRODUCTION_ROOTS
+        ):
+            production[relative] = path.read_text()
+    return production, tests
 
 
 def repository_default_patch_findings(
     repo_root: Path,
 ) -> tuple[DefaultPatchFinding, ...]:
-    """Run the grammar across every production and test Python source."""
-    production_sources, test_sources = _read_repository_sources(repo_root)
-    return find_ineffective_default_patches(production_sources, test_sources)
+    """Run the audit against the checked-out repository."""
+    production, tests = _repository_sources(repo_root)
+    return find_ineffective_default_patches(production, tests)

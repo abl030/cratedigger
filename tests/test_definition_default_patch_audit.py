@@ -37,24 +37,49 @@ class AuditWorld:
         "conflicting_import",
         "shadowed_import",
     ] = "from_import"
-    patch_style: Literal["string", "object", "alias_object", "dict"] = "string"
-    patch_api: Literal["direct", "qualified"] = "direct"
+    patch_style: Literal[
+        "string",
+        "object",
+        "alias_object",
+        "dict",
+        "dict_values",
+        "multiple",
+        "dynamic_object",
+    ] = "string"
+    patch_api: Literal["direct", "qualified", "unittest"] = "direct"
     activation: Literal["with", "decorator", "later_context"] = "with"
     production_conflict: bool = False
+    call_capture: bool = True
 
     @property
     def expected_error(self) -> bool:
-        return self.captured_patch and (
-            self.default_style in {"wrapper", "tuple"}
-            or self.callable_shape == "instance"
-            or self.patch_style in {"alias_object", "dict"}
+        if not self.captured_patch or not self.call_capture:
+            return False
+        return (
+            self.callable_shape == "instance"
             or self.call_style in {"conflicting_import", "shadowed_import"}
-            or self.production_conflict
+            or (
+                not self.injected
+                and (
+                    self.default_style in {"wrapper", "tuple"}
+                    or self.patch_style
+                    in {
+                        "alias_object",
+                        "dict",
+                        "dict_values",
+                        "multiple",
+                        "dynamic_object",
+                    }
+                    or self.production_conflict
+                )
+            )
         )
 
     @property
     def expected_valid(self) -> bool:
-        return not self.expected_error and (not self.captured_patch or self.injected)
+        return not self.expected_error and (
+            not self.captured_patch or not self.call_capture or self.injected
+        )
 
 
 @dataclass(frozen=True)
@@ -147,9 +172,12 @@ def render_world(world: AuditWorld) -> RenderedWorld:
     if world.patch_api == "direct":
         patch_import = "from unittest.mock import patch"
         patch_expression = "patch"
-    else:
+    elif world.patch_api == "qualified":
         patch_import = "import unittest.mock as mock"
         patch_expression = "mock.patch"
+    else:
+        patch_import = "import unittest"
+        patch_expression = "unittest.mock.patch"
     if world.patch_style == "string":
         patch_call = f'{patch_expression}("{patch_target}")'
         owner_import = ""
@@ -163,14 +191,31 @@ def render_world(world: AuditWorld) -> RenderedWorld:
         owner_import = (
             f"import {owner_path} as dependency_owner\nowner = dependency_owner\n"
         )
-    else:
+    elif world.patch_style == "dict":
         owner_path, attribute = patch_target.rsplit(".", 1)
         patch_call = f"{patch_expression}.dict(owner.__dict__, {attribute}=object())"
+        owner_import = f"import {owner_path} as owner\n"
+    elif world.patch_style == "dict_values":
+        owner_path, attribute = patch_target.rsplit(".", 1)
+        patch_call = (
+            f"{patch_expression}.dict(owner.__dict__, "
+            f'values={{"{attribute}": object()}})'
+        )
+        owner_import = f"import {owner_path} as owner\n"
+    elif world.patch_style == "multiple":
+        owner_path, attribute = patch_target.rsplit(".", 1)
+        patch_call = f"{patch_expression}.multiple(owner, {attribute}=object())"
+        owner_import = f"import {owner_path} as owner\n"
+    else:
+        owner_path, _ = patch_target.rsplit(".", 1)
+        patch_call = f"{patch_expression}.object(owner, dynamic_attribute)"
         owner_import = f"import {owner_path} as owner\n"
 
     injection = ", match_fn=object()" if world.injected else ""
     setup = ""
-    if world.callable_shape == "instance":
+    if not world.call_capture:
+        callable_expression = "unrelated"
+    elif world.callable_shape == "instance":
         setup = f"    worker = {callable_expression}()\n"
         callable_expression = f"worker{member}"
     call = f"{callable_expression}([]{injection})"
@@ -303,15 +348,16 @@ class TestDefinitionDefaultPatchAudit(unittest.TestCase):
         tests = {
             "tests/test_subject.py": (
                 "from unittest.mock import patch\n"
+                "from lib.enqueue import try_enqueue\n"
                 "target = choose_target()\n"
                 "with patch(target):\n"
-                "    pass\n"
+                "    try_enqueue([])\n"
             ),
         }
 
         with self.assertRaisesRegex(
             ValueError,
-            r"tests/test_subject\.py:3: unsupported definition-default patch "
+            r"tests/test_subject\.py:4: unsupported definition-default patch "
             r"syntax: patch target must be a string literal",
         ):
             find_ineffective_default_patches(production, tests)
@@ -360,27 +406,78 @@ class TestDefinitionDefaultPatchAudit(unittest.TestCase):
         ):
             find_ineffective_default_patches(production, tests)
 
-    def test_wrapper_and_tuple_defaults_fail_closed_at_production_source(self) -> None:
+    def test_wrapper_and_tuple_defaults_only_fail_when_omitted(self) -> None:
         for default_style in ("wrapper", "tuple"):
-            world = AuditWorld(
-                captured_patch=True,
-                injected=True,
-                default_style=default_style,
+            injected = render_world(
+                AuditWorld(
+                    captured_patch=True,
+                    injected=True,
+                    default_style=default_style,
+                ),
             )
-            rendered = render_world(world)
-            with (
-                self.subTest(default_style=default_style),
-                self.assertRaisesRegex(
+            unrelated = render_world(
+                AuditWorld(
+                    captured_patch=True,
+                    injected=False,
+                    default_style=default_style,
+                    call_capture=False,
+                ),
+            )
+            omitted = render_world(
+                AuditWorld(
+                    captured_patch=True,
+                    injected=False,
+                    default_style=default_style,
+                ),
+            )
+            with self.subTest(default_style=default_style):
+                self.assertEqual(
+                    find_ineffective_default_patches(
+                        injected.production,
+                        injected.tests,
+                    ),
+                    (),
+                )
+                self.assertEqual(
+                    find_ineffective_default_patches(
+                        unrelated.production,
+                        unrelated.tests,
+                    ),
+                    (),
+                )
+                with self.assertRaisesRegex(
                     ValueError,
                     r"lib/enqueue\.py:\d+: unsupported definition-default "
-                    r"expression for lib\.enqueue\.try_enqueue\.match_fn "
-                    r"overlaps patched target lib\.enqueue\.check_for_match",
-                ),
-            ):
+                    r"expression for lib\.enqueue\.try_enqueue\.match_fn",
+                ):
+                    find_ineffective_default_patches(
+                        omitted.production,
+                        omitted.tests,
+                    )
+
+    def test_standard_unsupported_patch_forms_fail_closed_when_relevant(self) -> None:
+        worlds = (
+            AuditWorld(True, False, patch_style="dict_values"),
+            AuditWorld(True, False, patch_style="multiple"),
+            AuditWorld(True, False, patch_style="dynamic_object"),
+        )
+        for world in worlds:
+            rendered = render_world(world)
+            with self.subTest(world=world), self.assertRaises(ValueError):
                 find_ineffective_default_patches(
                     rendered.production,
                     rendered.tests,
                 )
+        qualified = render_world(AuditWorld(True, False, patch_api="unittest"))
+        self.assertEqual(
+            len(
+                find_ineffective_default_patches(
+                    qualified.production,
+                    qualified.tests,
+                ),
+            ),
+            1,
+        )
 
     def test_direct_constructor_call_is_checked_as_init(self) -> None:
         world = AuditWorld(
