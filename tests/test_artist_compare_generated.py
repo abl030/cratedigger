@@ -104,14 +104,21 @@ def assert_single_pairing(
         assert len(result.discogs_only) == 1
 
 
-def assert_partition_is_one_to_one(result: CompareBuckets) -> None:
-    """Every source identity appears once and no Discogs row pairs twice."""
+def assert_partition_is_one_to_one(
+    result: CompareBuckets,
+    *,
+    expected_mb_ids: set[str],
+    expected_discogs_ids: set[str],
+) -> None:
+    """Every expected post-dedupe identity appears exactly once."""
     mb_ids = [pair["mb"]["id"] for pair in result.both]
     mb_ids.extend(row["id"] for row in result.mb_only)
     discogs_ids = [pair["discogs"]["id"] for pair in result.both]
     discogs_ids.extend(row["id"] for row in result.discogs_only)
     assert len(mb_ids) == len(set(mb_ids))
     assert len(discogs_ids) == len(set(discogs_ids))
+    assert set(mb_ids) == expected_mb_ids
+    assert set(discogs_ids) == expected_discogs_ids
 
 
 def assert_wire_payload_rejected(payload: dict) -> None:
@@ -152,7 +159,24 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             discogs_only=[],
         )
         with self.assertRaises(AssertionError):
-            assert_partition_is_one_to_one(bad)
+            assert_partition_is_one_to_one(
+                bad,
+                expected_mb_ids={"m1", "m2"},
+                expected_discogs_ids={"d"},
+            )
+
+    def test_partition_checker_rejects_silently_dropped_identities(self) -> None:
+        bad = CompareBuckets(
+            both=[{"mb": {"id": "m1"}, "discogs": {"id": "d1"}}],
+            mb_only=[],
+            discogs_only=[],
+        )
+        with self.assertRaises(AssertionError):
+            assert_partition_is_one_to_one(
+                bad,
+                expected_mb_ids={"m1", "m2"},
+                expected_discogs_ids={"d1", "d2"},
+            )
 
     def test_wire_checker_rejects_known_bad_checker_input(self) -> None:
         valid = {
@@ -220,7 +244,11 @@ class TestArtistCompareGenerated(unittest.TestCase):
             discogs_appearance=discogs_appearance,
         )
         assert_single_pairing(result, expected_pair=expected)
-        assert_partition_is_one_to_one(result)
+        assert_partition_is_one_to_one(
+            result,
+            expected_mb_ids={"mb"},
+            expected_discogs_ids={"discogs"},
+        )
 
     @given(
         year=st.integers(min_value=1901, max_value=2099),
@@ -240,7 +268,11 @@ class TestArtistCompareGenerated(unittest.TestCase):
         rows = [adjacent, exact] if reverse else [exact, adjacent]
         result = merge_discographies([mb], rows)
         assert result.both[0]["discogs"]["id"] == "exact"
-        assert_partition_is_one_to_one(result)
+        assert_partition_is_one_to_one(
+            result,
+            expected_mb_ids={"mb"},
+            expected_discogs_ids={"exact", "adjacent"},
+        )
 
     @given(
         year=st.integers(min_value=1901, max_value=2099),
@@ -268,6 +300,11 @@ class TestArtistCompareGenerated(unittest.TestCase):
         )
         assert result.both[0]["mb"]["id"] == "exact-mb"
         assert result.mb_only[0]["id"] == "adjacent-mb"
+        assert_partition_is_one_to_one(
+            result,
+            expected_mb_ids={"adjacent-mb", "exact-mb"},
+            expected_discogs_ids={"discogs"},
+        )
 
     @given(
         year=st.integers(min_value=1900, max_value=2100),
@@ -288,6 +325,11 @@ class TestArtistCompareGenerated(unittest.TestCase):
         rows = [unknown, overlapping] if reverse else [overlapping, unknown]
         result = merge_discographies([mb], rows)
         assert result.both[0]["discogs"]["id"] == "overlap"
+        assert_partition_is_one_to_one(
+            result,
+            expected_mb_ids={"mb"},
+            expected_discogs_ids={"overlap", "unknown"},
+        )
 
     @given(
         year=st.integers(min_value=1900, max_value=2100),
@@ -312,6 +354,11 @@ class TestArtistCompareGenerated(unittest.TestCase):
         rows = [second, first] if reverse else [first, second]
         result = merge_discographies([mb], rows)
         assert result.both[0]["discogs"]["id"] == rows[0]["id"]
+        assert_partition_is_one_to_one(
+            result,
+            expected_mb_ids={"mb"},
+            expected_discogs_ids={"first", "second"},
+        )
 
     @given(
         first_types=_STRUCTURAL_SET,
@@ -365,6 +412,14 @@ class TestArtistCompareGenerated(unittest.TestCase):
             else 2
         )
         assert len(result.discogs_only) == expected_count
+        expected_discogs_ids = (
+            {"first"} if expected_count == 1 else {"first", "second"}
+        )
+        assert_partition_is_one_to_one(
+            result,
+            expected_mb_ids=set(),
+            expected_discogs_ids=expected_discogs_ids,
+        )
 
     @given(
         first_type=_DISPLAY_TYPE,
@@ -412,6 +467,14 @@ class TestArtistCompareGenerated(unittest.TestCase):
             else 2
         )
         assert len(result.mb_only) == expected_count
+        expected_mb_ids = (
+            {"first"} if expected_count == 1 else {"first", "second"}
+        )
+        assert_partition_is_one_to_one(
+            result,
+            expected_mb_ids=expected_mb_ids,
+            expected_discogs_ids=set(),
+        )
 
     @given(
         invalid_element=st.one_of(
