@@ -33,7 +33,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
     }
     ARTIST_RG_REQUIRED_FIELDS = {
         "id", "title", "type", "secondary_types", "first_release_date",
-        "artist_credit", "primary_artist_id", "has_official",
+        "artist_credit", "primary_artist_id", "has_official", "is_appearance",
     }
     LIBRARY_ALBUM_REQUIRED_FIELDS = set(LibraryAlbumRow.__struct_fields__)
     RELEASE_GROUP_REQUIRED_FIELDS = {
@@ -355,6 +355,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "first_release_date": "1997-05-21",
             "artist_credit": "Radiohead",
             "primary_artist_id": self.ARTIST_ID,
+            "is_appearance": False,
         }
         discogs_rg = {
             "id": "21491",
@@ -364,6 +365,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "first_release_date": "1997",
             "artist_credit": "Radiohead",
             "primary_artist_id": "3840",
+            "is_appearance": False,
         }
         with patch("web.server.mb_api") as mock_mb, \
                 patch("web.routes.browse.discogs_api") as mock_dg:
@@ -388,6 +390,8 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["discogs_only"], [])
         self.assertEqual(data["both"][0]["mb"]["id"], self.RG_ID)
         self.assertEqual(data["both"][0]["discogs"]["id"], "21491")
+        self.assertIs(data["both"][0]["mb"]["is_appearance"], False)
+        self.assertIs(data["both"][0]["discogs"]["is_appearance"], False)
         # Bootleg classification flows through to frontend.
         self.assertTrue(data["both"][0]["mb"]["has_official"])
 
@@ -434,6 +438,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "first_release_date": "2024-01-01",
             "artist_credit": "Test Artist",
             "primary_artist_id": self.ARTIST_ID,
+            "is_appearance": False,
         }
         with patch("web.server.mb_api") as mock_mb:
             mock_mb.get_artist_release_groups.return_value = [release_group]
@@ -444,6 +449,27 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         _assert_required_fields(self, data, {"release_groups"}, "artist response")
         _assert_required_fields(self, data["release_groups"][0], self.ARTIST_RG_REQUIRED_FIELDS,
                                 "artist release group")
+
+    def test_artist_track_appearance_remains_distinct_from_bootlegs(self):
+        appearance = {
+            "id": "2e3dd447-ac5e-3b60-b44c-f9e6000ba6e7",
+            "title": "The Big Noise",
+            "type": "Album",
+            "secondary_types": ["Compilation"],
+            "first_release_date": "2003-09-06",
+            "artist_credit": "Various Artists",
+            "primary_artist_id": "89ad4ac3-39f7-470e-963a-56509c546377",
+            "is_appearance": True,
+        }
+        with patch("web.server.mb_api") as mock_mb:
+            mock_mb.get_artist_release_groups.return_value = [appearance]
+            mock_mb.get_official_release_group_ids.return_value = set()
+            status, data = self._get(f"/api/artist/{self.ARTIST_ID}")
+
+        self.assertEqual(status, 200)
+        row = data["release_groups"][0]
+        self.assertIs(row["is_appearance"], True)
+        self.assertIs(row["has_official"], False)
 
     def test_artist_release_groups_transport_failure_is_clean_retryable_503(self):
         raw_reason = "[SSL: UNEXPECTED_EOF_WHILE_READING] private adapter detail"
@@ -970,6 +996,7 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
                     "first_release_date": "1997",
                     "artist_credit": "Radiohead",
                     "primary_artist_id": "3840",
+                    "is_appearance": False,
                 },
             ]
             status, data = self._get("/api/discogs/artist/3840")
@@ -977,6 +1004,7 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.DISCOGS_ARTIST_REQUIRED_FIELDS,
                                 "discogs artist response")
+        self.assertIs(data["release_groups"][0]["is_appearance"], False)
 
     def test_discogs_artist_masterless_pipeline_overlay(self):
         """Masterless rows (id IS the release id) carry the request badge

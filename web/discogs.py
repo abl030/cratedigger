@@ -282,7 +282,11 @@ def search_artists(query: str) -> list[dict]:
     )
 
 
-def _normalize_artist_master_entry(r: dict) -> dict:
+def _normalize_artist_master_entry(
+    r: dict,
+    *,
+    is_appearance: bool,
+) -> dict:
     """Shape one row from /api/artists/{id}/{masters,appearances} into our schema.
 
     Masterless releases come back with id ``release-<n>``; we strip the prefix
@@ -302,6 +306,7 @@ def _normalize_artist_master_entry(r: dict) -> dict:
             "first_release_date": r.get("first_release_date", ""),
             "artist_credit": r.get("artist_credit", ""),
             "primary_artist_id": str(r.get("primary_artist_id") or ""),
+            "is_appearance": is_appearance,
             "is_masterless": True,
             "discogs_release_id": bare_id,
         }
@@ -313,6 +318,7 @@ def _normalize_artist_master_entry(r: dict) -> dict:
         "first_release_date": r.get("first_release_date", ""),
         "artist_credit": r.get("artist_credit", ""),
         "primary_artist_id": str(r.get("primary_artist_id") or ""),
+        "is_appearance": is_appearance,
     }
 
 
@@ -346,7 +352,9 @@ def get_artist_releases(artist_id: int) -> list[dict]:
             if not results:
                 break
             for r in results:
-                entry = _normalize_artist_master_entry(r)
+                entry = _normalize_artist_master_entry(
+                    r, is_appearance=False,
+                )
                 entries.setdefault(entry["id"], entry)
             total = data.get("total", 0)
             if page * data.get("per_page", 100) >= total:
@@ -357,7 +365,9 @@ def get_artist_releases(artist_id: int) -> list[dict]:
             f"{_api_base()}/api/artists/{artist_id}/appearances"
         )
         for r in appearances.get("results", []):
-            entry = _normalize_artist_master_entry(r)
+            entry = _normalize_artist_master_entry(
+                r, is_appearance=True,
+            )
             entries.setdefault(entry["id"], entry)
 
         return sorted(
@@ -365,7 +375,7 @@ def get_artist_releases(artist_id: int) -> list[dict]:
             key=lambda e: (e.get("first_release_date") or "", e.get("id", "")),
         )
 
-    return _cache.memoize_meta(f"discogs:artist:{artist_id}:releases:v2", _fetch)
+    return _cache.memoize_meta(f"discogs:artist:{artist_id}:releases:v3", _fetch)
 
 
 def get_master_releases(master_id: int) -> dict:

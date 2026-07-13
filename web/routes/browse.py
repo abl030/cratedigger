@@ -572,7 +572,7 @@ def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
 
     # Skeleton key is the resolved (mbid, discogs_id) pair — display
     # names are stamped on outside the cache from the canonical APIs.
-    cache_key = f"artist:compare:{mbid or 'none'}:{discogs_id or 'none'}"
+    cache_key = f"artist:compare:v2:{mbid or 'none'}:{discogs_id or 'none'}"
     skeleton = _cache.memoize_meta(
         cache_key,
         lambda: _build_compare_skeleton(mbid, discogs_id),
@@ -745,8 +745,8 @@ ROUTES: list[RouteRegistration] = [
     ),
     route(
         "GET", "/api/artist/compare", get_artist_compare,
-        "Side-by-side MB + Discogs discographies for one artist, "
-        "fuzzy-merged with in-library overlay.",
+        "Side-by-side MB + Discogs discographies and track appearances for "
+        "one artist, fuzzy-merged with in-library overlay.",
         classified=True,
     ),
     route(
@@ -756,7 +756,8 @@ ROUTES: list[RouteRegistration] = [
     ),
     pattern_route(
         "GET", r"^/api/artist/([a-f0-9-]+)$", get_artist,
-        "MB artist detail — release groups with library/pipeline overlay.",
+        "MB artist detail — direct release groups plus track appearances "
+        "with library/pipeline overlay.",
         classified=True,
     ),
     pattern_route(

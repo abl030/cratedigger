@@ -20,7 +20,8 @@
  *
  * Sectioning invariants (see tests/test_js_artist_page.mjs):
  *   I1 every release-group lands in exactly one of {inLibrary, missing,
- *      appearances, bootlegs}; I2 bootleg precedence; I3 ownership via
+ *      appearances, bootlegs}; I2 explicit appearance provenance precedes
+ *      bootleg/ownership classification; I3 ownership via
  *      the credit rules; I4 in_library === true is the only inLibrary
  *      ticket; I5 inFlight is a lens over the library feed
  *      (downloading/manual only — "wanted" is ambient after the
@@ -47,7 +48,9 @@ export function classifyArtistRows({ artistId, artistName, releaseGroups, librar
     const credit = (rg.artist_credit || '').toLowerCase();
     const isOwn = rg.primary_artist_id === artistId
       || credit === nameLC || credit.startsWith(nameLC + ' /') || credit.startsWith(nameLC + ',') || !credit;
-    if (!rg.has_official) {
+    if (rg.is_appearance === true) {
+      appearances.push(rg);
+    } else if (!rg.has_official) {
       bootlegs.push(rg);
     } else if (!isOwn) {
       appearances.push(rg);
@@ -122,6 +125,22 @@ export function ownedTypeSections(rows) {
 }
 
 /**
+ * Partition source-complement rows without guessing from titles or VA names.
+ * Metadata adapters author ``is_appearance`` from their native provenance.
+ *
+ * @param {Object[]} rows
+ * @returns {{mainline: Object[], appearances: Object[]}}
+ */
+export function splitAppearanceRows(rows) {
+  const mainline = [];
+  const appearances = [];
+  for (const row of rows || []) {
+    (row.is_appearance === true ? appearances : mainline).push(row);
+  }
+  return { mainline, appearances };
+}
+
+/**
  * Render the unified artist page body. Empty sections are omitted.
  * @param {{inLibrary: Object[], inFlight: Object[], missing: Object[],
  *          appearances: Object[], bootlegs: Object[]}} sections
@@ -163,8 +182,12 @@ export function renderArtistSections(sections, ctx) {
       typed(sections.missing, true), { open: true });
   }
   if (sections.appearances.length > 0) {
+    const ownedTypes = ownedTypeSections(sections.appearances);
     html += sectionWrap('Appearances', sections.appearances.length,
-      typed(sections.appearances, false), { color: '#777' });
+      typed(sections.appearances, false, ownedTypes), {
+        color: '#777',
+        open: ownedTypes.length > 0,
+      });
   }
   if (sections.bootlegs.length > 0) {
     const ownedTypes = ownedTypeSections(sections.bootlegs);
@@ -192,15 +215,36 @@ export function renderOtherSourceSection(rows, ctx) {
   const rgRow = (rg) => renderRgRow(rg, {
     artistName: ctx.artistName, nameLC, source: ctx.source,
   });
-  const ownedTypes = ownedTypeSections(rows);
-  return sectionWrap(`Only on ${label}`, rows.length,
-    renderTypedSections(rows, rgRow, {
+  const { mainline, appearances } = splitAppearanceRows(rows);
+  const mainlineOwnedTypes = ownedTypeSections(mainline);
+  const appearanceOwnedTypes = ownedTypeSections(appearances);
+  let body = '';
+  if (mainline.length > 0) {
+    body += renderTypedSections(mainline, rgRow, {
       defaultOpen: null,
-      openSections: ownedTypes,
-    }),
+      openSections: mainlineOwnedTypes,
+    });
+  }
+  if (appearances.length > 0) {
+    body += sectionWrap(
+      'Appears on',
+      appearances.length,
+      renderTypedSections(appearances, rgRow, {
+        defaultOpen: null,
+        openSections: appearanceOwnedTypes,
+        headerStyle: 'color:#777;',
+      }),
+      {
+        color: '#777',
+        open: appearanceOwnedTypes.length > 0,
+      },
+    );
+  }
+  return sectionWrap(`Only on ${label}`, rows.length,
+    body,
     {
       color: '#a96',
       id: 'only-other-source',
-      open: ownedTypes.length > 0,
+      open: mainlineOwnedTypes.length > 0 || appearanceOwnedTypes.length > 0,
     });
 }

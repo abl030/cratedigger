@@ -13,7 +13,11 @@ import urllib.parse
 from unittest.mock import MagicMock, patch
 
 from lib.va_identity import MB_VA_ARTIST_MBID
-from web.mb import search_artists, search_release_groups
+from web.mb import (
+    get_artist_release_groups,
+    search_artists,
+    search_release_groups,
+)
 
 
 def _mock_urlopen(response_data):
@@ -23,6 +27,21 @@ def _mock_urlopen(response_data):
     mock_resp.__enter__ = lambda s: s
     mock_resp.__exit__ = MagicMock(return_value=False)
     return patch("web.mb.urllib.request.urlopen", return_value=mock_resp)
+
+
+def _mock_urlopen_by_fragment(responses):
+    """Return the payload whose URL fragment matches the request."""
+    def _side_effect(request, **_kwargs):
+        for fragment, payload in responses.items():
+            if fragment in request.full_url:
+                mock_resp = MagicMock()
+                mock_resp.read.return_value = json.dumps(payload).encode()
+                mock_resp.__enter__ = lambda s: s
+                mock_resp.__exit__ = MagicMock(return_value=False)
+                return mock_resp
+        raise AssertionError(f"no response for {request.full_url}")
+
+    return patch("web.mb.urllib.request.urlopen", side_effect=_side_effect)
 
 
 _EMPTY = {"releases": []}
@@ -168,6 +187,79 @@ class TestSearchArtistsRelatedIdentities(unittest.TestCase):
         )
         self.assertEqual(results[2]["name"], symbol_name)
         self.assertEqual(results[2]["disambiguation"], "Kieran Hebden")
+
+
+class TestArtistReleaseGroupsWithAppearances(unittest.TestCase):
+    ARTIST_ID = "4fa9413b-7c10-4342-8ddb-b1cd8e82f9e1"
+    OWN_RG = "fdb22921-b4c5-3c49-b2d0-85cb69eec1f1"
+    APPEARANCE_RG = "2e3dd447-ac5e-3b60-b44c-f9e6000ba6e7"
+
+    DIRECT = {
+        "release-group-count": 1,
+        "release-groups": [{
+            "id": OWN_RG,
+            "title": "The Pointless Gift",
+            "primary-type": "Album",
+            "secondary-types": [],
+            "first-release-date": "2000-12-05",
+            "artist-credit": [{
+                "name": "Deloris",
+                "artist": {"id": ARTIST_ID, "name": "Deloris"},
+            }],
+        }],
+    }
+    TRACK_APPEARANCES = {
+        "release-count": 2,
+        "releases": [
+            {
+                "id": "appearance-release",
+                "release-group": {
+                    "id": APPEARANCE_RG,
+                    "title": "The Big Noise",
+                    "primary-type": "Album",
+                    "secondary-types": ["Compilation"],
+                    "first-release-date": "2003-09-06",
+                    "artist-credit": [{
+                        "name": "Artists in Support of Make Trade Fair",
+                        "artist": {
+                            "id": MB_VA_ARTIST_MBID,
+                            "name": "Various Artists",
+                        },
+                    }],
+                },
+            },
+            {
+                "id": "duplicate-own-release",
+                "release-group": DIRECT["release-groups"][0],
+            },
+        ],
+    }
+
+    def test_track_artist_release_groups_are_preserved_as_appearances(self):
+        with _mock_urlopen_by_fragment({
+            "/release-group?artist=": self.DIRECT,
+            "/release?track_artist=": self.TRACK_APPEARANCES,
+        }) as mock:
+            rows = get_artist_release_groups(self.ARTIST_ID)
+
+        called = [call.args[0].full_url for call in mock.call_args_list]
+        self.assertTrue(any("/release?track_artist=" in url for url in called))
+        self.assertEqual(len(rows), 2)
+        by_id = {row["id"]: row for row in rows}
+        self.assertIs(by_id[self.OWN_RG]["is_appearance"], False)
+        self.assertIs(by_id[self.APPEARANCE_RG]["is_appearance"], True)
+        self.assertEqual(
+            by_id[self.APPEARANCE_RG]["artist_credit"],
+            "Artists in Support of Make Trade Fair",
+        )
+        self.assertEqual(
+            by_id[self.APPEARANCE_RG]["primary_artist_id"],
+            MB_VA_ARTIST_MBID,
+        )
+        self.assertEqual(
+            by_id[self.APPEARANCE_RG]["secondary_types"],
+            ["Compilation"],
+        )
 
 
 if __name__ == "__main__":
