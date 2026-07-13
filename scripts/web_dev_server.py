@@ -65,6 +65,8 @@ class DevConfig:
     prod_base_url: str
     dsn: str | None
     beets_db: str | None
+    mb_api: str | None
+    discogs_api: str | None
     redis_host: str | None
     redis_port: int
 
@@ -358,12 +360,26 @@ def _api_fixture_slug(path: str) -> str:
     return path.strip("/").replace("/", "__")
 
 
+def configure_live_db_metadata(config: DevConfig) -> None:
+    """Replace process-global mirror origins for one live-db dev session."""
+    from web import discogs, mb
+    from web.api_bases import PUBLIC_MB_WS2_BASE
+
+    mb.MB_API_BASE = config.mb_api or PUBLIC_MB_WS2_BASE
+    discogs.DISCOGS_API_BASE = config.discogs_api
+
+
 def configure_live_db(config: DevConfig) -> None:
     if not config.dsn:
         raise SystemExit("--dsn or PIPELINE_DB_DSN is required for --data live-db")
 
     import web.server as web_server
     from lib.pipeline_db import PipelineDB
+
+    # These adapters use module globals in production too. Assign BOTH for
+    # every live-db configuration, including missing values, so a second dev
+    # server in the same process cannot inherit a stale mirror from the first.
+    configure_live_db_metadata(config)
 
     def connect_readonly() -> None:
         if web_server.db is not None:
@@ -403,6 +419,8 @@ def build_config(args: argparse.Namespace) -> DevConfig:
         prod_base_url=args.prod_base_url,
         dsn=args.dsn,
         beets_db=args.beets_db,
+        mb_api=args.mb_api,
+        discogs_api=args.discogs_api,
         redis_host=args.redis_host,
         redis_port=args.redis_port,
     )
@@ -432,6 +450,22 @@ def main() -> None:
     parser.add_argument("--prod-base-url", default=PROD_BASE_URL)
     parser.add_argument("--dsn", default=os.environ.get("PIPELINE_DB_DSN"))
     parser.add_argument("--beets-db", default=os.environ.get("BEETS_DB_PATH"))
+    parser.add_argument(
+        "--mb-api",
+        default=None,
+        help=(
+            "live-db MusicBrainz API base including /ws/2 "
+            "(default: public MusicBrainz)"
+        ),
+    )
+    parser.add_argument(
+        "--discogs-api",
+        default=None,
+        help=(
+            "live-db Discogs mirror base; required for Discogs browse and "
+            "artist comparison"
+        ),
+    )
     parser.add_argument("--redis-host", default=None)
     parser.add_argument("--redis-port", type=int, default=6379)
     args = parser.parse_args()
@@ -447,6 +481,14 @@ def main() -> None:
         print(f"  proxy: {config.prod_base_url}")
     if config.data == "live-db":
         print("  live DB: read-only session")
+        if config.mb_api:
+            print(f"  MusicBrainz metadata: {config.mb_api}")
+        else:
+            print("  MusicBrainz metadata: public API fallback")
+        if config.discogs_api:
+            print(f"  Discogs metadata: {config.discogs_api}")
+        else:
+            print("  Discogs metadata: NOT CONFIGURED (compare returns HTTP 503)")
     print("  mutating API requests: blocked")
     print("  live reload: web/index.html, web/js/*.js, active fixtures")
     try:

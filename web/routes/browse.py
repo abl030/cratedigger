@@ -568,6 +568,7 @@ def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     if not name:
         h._error("Missing parameter 'name'")  # type: ignore[attr-defined]
         return
+    discogs_api.require_mirror_configured()
     mbid = params.get("mbid", [""])[0].strip()
     discogs_id = params.get("discogs_id", [""])[0].strip()
 
@@ -701,6 +702,8 @@ def get_browse_resolve(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     if source == "discogs" and not raw_id.isdigit():
         h._error("Invalid Discogs ID (must be numeric)")  # type: ignore[attr-defined]
         return
+    if source == "discogs":
+        discogs_api.require_mirror_configured()
 
     cache_key = f"browse-resolve:{source}:{kind}:{raw_id}"
 

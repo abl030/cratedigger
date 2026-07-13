@@ -20,6 +20,9 @@ def mb_ws2_base(origin: str) -> str:
     return (origin or PUBLIC_MB_ORIGIN).rstrip("/") + "/ws/2"
 
 
+PUBLIC_MB_WS2_BASE = mb_ws2_base(PUBLIC_MB_ORIGIN)
+
+
 def configure_api_bases_from_runtime_config() -> None:
     """Point web.mb / web.discogs at the runtime config's mirror origins.
 
