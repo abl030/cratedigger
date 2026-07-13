@@ -17,8 +17,8 @@ A self-hosted mirror of the Discogs music database, serving a JSON API at `https
 | Host | doc2 (192.168.1.35, Proxmox VM) |
 | API port | 8086 |
 | External URL | https://discogs.ablz.au |
-| PostgreSQL | nspawn container `discogs-db`, hostNum=6, IP 192.168.100.13:5432 |
-| DSN | `postgresql://discogs@192.168.100.13:5432/discogs` |
+| PostgreSQL | nspawn container `discogs-db`, reachable from doc2 at `10.20.0.13:5432` |
+| DSN | `postgresql://discogs@10.20.0.13:5432/discogs` |
 | Data dir | `/mnt/mirrors/discogs` (re-downloadable, NOT backed up) |
 | Postgres data | `/mnt/mirrors/discogs/postgres` |
 | Dump files | `/mnt/mirrors/discogs/dumps` (cleaned up after each import) |
@@ -38,6 +38,40 @@ A self-hosted mirror of the Discogs music database, serving a JSON API at `https
 | GET | `/api/labels?name=X&page=1&per_page=25` | Label search with release counts and parent-label context |
 | GET | `/api/labels/{id}` | Label profile, direct release count, parent, and direct sub-labels |
 | GET | `/api/labels/{id}/releases?page=1&per_page=100&include_sublabels=true` | Paginated releases for a label, optionally including recursive sub-label releases |
+
+### Artist catalogue wire contract
+
+The three artist catalogue endpoints share one strict cross-repository row
+contract. It is owned jointly by `discogs-api` and Cratedigger; do not change
+one side independently.
+
+| Field | Mirror wire value | Cratedigger normalization |
+|-------|-------------------|---------------------------|
+| `id` | Integer master ID, or `release-<id>` for a masterless release | String master ID, or the bare release ID plus `is_masterless=true` and `discogs_release_id` |
+| `title` | Master title or exact masterless-release title | Preserved |
+| `type` | Legacy representative-release scalar | Preserved for compatibility |
+| `primary_types` | Required sorted/deduplicated subset of `Album`, `EP`, `Single` | Preserved as the structural type set |
+| `first_release_date` | Earliest non-blank represented date, or `""` | Preserved |
+| `artist_credit` | Master/release credit, or `""` | Preserved |
+| `primary_artist_id` | Integer or JSON `null` | String ID, with `null` deliberately normalized to `""` |
+| `is_masterless` | `true` only for `release-<id>` rows | Selects release rather than master expansion |
+
+Both SQL `master_id IS NULL` and the Discogs dump's `master_id = 0` sentinel
+mean masterless. The `release-` namespace is mandatory because a numeric master
+ID and release ID may collide. For masters, `primary_types` aggregates every
+child pressing; for masterless rows it covers the exact release. Qualifiers
+such as `Compilation`, `Promo`, and `Unofficial Release` do not themselves add a
+structural type, while `Album`, `EP`, or `Single` beside a qualifier still
+counts. An empty list means no recognized structural evidence.
+
+`primary_artist_id: null` is valid for an appearance master that has track-level
+evidence but no master-level credit. Cratedigger's strict `msgspec.Struct`
+requires every field above and rejects a missing field, wrong scalar type, or
+wrong nested shape before normalization. The exact cross-repo nullable fixture
+is `Mixed appearance master`: the real-PostgreSQL producer pin is
+`discogs-api/tests/artist_masters_sql.rs`, and the consumer/blank-normalization
+pin is `tests/test_discogs_api.py`. Issue #681, discogs-api PR #11, and
+Cratedigger PR #686 established this contract.
 
 Label release pagination is capped at `per_page=100` in both cratedigger and
 discogs-api. Release rows currently include both `label_id` and the legacy
@@ -188,8 +222,8 @@ cd ~/discogs-api
 # Check it compiles
 nix-shell -p cargo rustc pkg-config openssl --run "cargo check"
 
-# Run tests (XML parser tests)
-nix-shell -p cargo rustc pkg-config openssl --run "cargo test"
+# Run every test, including generated real-PostgreSQL SQL contracts
+nix-shell -p cargo rustc pkg-config openssl postgresql --run "cargo test"
 
 # Commit and push
 git add -A && git commit -m "description" && git push
@@ -198,16 +232,23 @@ git add -A && git commit -m "description" && git push
 ### Deploying changes
 
 ```bash
-# Update nixosconfig flake lock to pick up the new commit
+# Update the Forgejo-backed nixosconfig flake lock on doc1
 cd ~/nixosconfig
 nix flake update discogs-src
-git add flake.lock && git commit -m "discogs: description" && git push
+git add flake.lock
+git commit -m "discogs: description"  # SSH-signed
+TOKEN=$(cat /run/secrets/forgejo/nixbot-token)
+git -c "http.extraHeader=Authorization: token ${TOKEN}" push origin master
+unset TOKEN
 
-# Deploy to doc2
-ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
+# Trigger doc2's locked sibling deployment path
+fleet-deploy doc2
 ```
 
-The API service restarts automatically on deploy. The import service does NOT restart (it's a timer-triggered oneshot).
+The API service restarts automatically on deploy. The import service does NOT
+restart (it's a timer-triggered oneshot). Do not use a direct GitHub
+`nixos-rebuild` or SSH to doc2 to invoke `fleet-update`; Forgejo plus
+`fleet-deploy doc2` is the normal verified path.
 
 ### Debugging
 
@@ -226,7 +267,7 @@ ssh doc2 'journalctl -u discogs-import.service -f'
 ssh doc2 'curl -s http://127.0.0.1:8086/health'
 
 # Query Postgres directly
-ssh doc2 'psql -h 192.168.100.13 -U discogs -d discogs -c "SELECT count(*) FROM release"'
+ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/discogs-pgpass | grep -oP "POSTGRES_PASSWORD=\K.*"); psql -h 10.20.0.13 -U discogs -d discogs -c "SELECT count(*) FROM release"'
 
 # Restart the API
 ssh doc2 'sudo systemctl restart discogs-api.service'

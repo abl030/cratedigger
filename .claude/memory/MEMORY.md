@@ -20,7 +20,7 @@
 - [No skipped tests](feedback_no_skipped_tests.md) — Skipped/gated tests are forbidden; `test_skip_audit.py` enforces it; nix-shell must provide every resource a test needs
 - [Deploy via master worktree](feedback_deploy_via_master_worktree.md) — doc2 deploys from nixosconfig master; if ~/nixosconfig is dirty/on a feature branch, do flake bumps in a throwaway worktree off origin/master
 - [Tag from cratedigger checkout](feedback_tag_from_cratedigger_checkout.md) — never chain the nixosconfig cleanup cd with the cratedigger deploy tag; separate Bash calls (bit 3× on 2026-07-10)
-- [Forgejo cutover deploy flow](project_forgejo_cutover_deploy_flow.md) — 2026-06-10: nixosconfig deploys via Forgejo + fleet-update, GitHub frozen; nixbot token header push; signed commits required
+- [Forgejo cutover deploy flow](project_forgejo_cutover_deploy_flow.md) — nixosconfig writes go to Forgejo; from doc1 deploy siblings with `fleet-deploy <host>`; signed commits and nixbot token-header pushes are required
 - [CI only runs GitGuardian](project_ci_only_gitguardian.md) — cratedigger CI runs ONLY GitGuardian; tests/dead-code/pyright are NOT gated in CI; a green PR check ≠ green suite, so verify locally
 - [.bak file bug](project_bak_bug.md) — RESOLVED: mp3val -f caused it, fixed with -nb; rename repair deliberately removed (detect-and-warn only)
 - [slskd concurrency limits](project_slskd_concurrency.md) — SemaphoreSlim(1,1) on API, maximumConcurrentSearches=2 in Soulseek.NET, batch searches in pairs
@@ -35,7 +35,8 @@
 - [Issue #430 FakePipelineDB migration done](project_430_fakedb_migration_done.md) — 2026-06-12, PRs #440-#444; reuse the ratchet-first + real-PG parity-gate patterns
 - [Issue #445 beets-mock migration done](project_445_beets_mock_migration_done.md) — 2026-06-12, PRs #446-#450; items 1/2/4/5 done (ratchet empty, named DB methods deployed, fakes package); only item 3 (dual-module-load, own session) remains
 - [Issue #445 COMPLETE — dual-load killed](project_445_complete_dual_load_killed.md) — 2026-06-12 PR #451 deployed; gdb live-probe technique, AST audit > regex ratchet, script-mode sys.path[0] hazard
-- [discogs-api deploy + DB access](project_discogs_api_deploy_and_db_access.md) — Mirror deploys via Forgejo/fleet-update (its own CLAUDE.md is stale on GitHub); nspawn DB is at 10.20.0.13 (not .192.168.100.13), pw in /run/secrets/discogs-pgpass
+- [discogs-api deploy + DB access](project_discogs_api_deploy_and_db_access.md) — Mirror pins go through signed Forgejo nixosconfig commits + `fleet-deploy doc2`; nspawn DB is at 10.20.0.13; SQL changes have mandatory ephemeral-PG tests
+- [#681 Discogs artist wire contract](project_681_discogs_artist_wire_contract.md) — `/masters` + `/appearances` share strict namespaced rows; real-PG producer and msgspec consumer pins protect nullable credits, `master_id=0`, structural types, and empty-array paths
 - [Pipeline DB direct psql writes](project_pipeline_db_direct_psql_writes.md) — For write SQL (pipeline-cli query is read-only) use psql on doc2 with DSN postgresql://cratedigger@10.20.0.11:5432/cratedigger; CLAUDE.md's 192.168.100.11 is stale
 - [#184 sidecar producer](project_184_sidecar_producer.md) — 2026-06-18: cratedigger.json verified-lossless sidecar producer+backfill shipped (3910 written); consumer half deferred; reusable doc2 one-shot recipe
 - [#146 slskd events rollout](project_146_slskd_events_rollout.md) — 2026-07-02: COMPLETE, deployed, issue closed; event stamp is the only file-location source; fake now mirrors download_log outcome CHECK (Rule A win x2); msgspec DecodeError-vs-ValidationError trap

@@ -7,7 +7,7 @@ metadata:
   originSessionId: 92afd350-c68a-4438-a444-759e7ed54714
 ---
 
-doc2 deploys from the **`master`** branch of nixosconfig, fetched from **Forgejo** (`git.ablz.au`) by `ssh doc2 'sudo fleet-update'` — see [[forgejo-cutover-deploy-flow]] for the push/auth mechanics. The operator's `~/nixosconfig` working tree on doc1 is sometimes checked out on a **dirty feature branch** — if so, do NOT `git checkout master` or commit in place.
+doc2 deploys from the **`master`** branch of nixosconfig fetched from **Forgejo** (`git.ablz.au`). From doc1 the normal trigger is `fleet-deploy doc2`; do not SSH to the sibling to invoke its internal `fleet-update` directly. See [[forgejo-cutover-deploy-flow]] for the push/auth mechanics. The operator's `~/nixosconfig` working tree on doc1 is sometimes checked out on a **dirty feature branch** — if so, do NOT `git checkout master` or commit in place.
 
 **Why:** on 2026-05-28 the checkout was on `feat/handsfree-agent-voice-input` with uncommitted voice-input edits. The user confirmed "yeah just deploy us on main."
 

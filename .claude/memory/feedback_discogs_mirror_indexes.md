@@ -7,7 +7,7 @@ metadata:
   originSessionId: 006fd00b-7a40-43b0-b09c-d48f70500b4a
 ---
 
-When adding a new index to the live discogs mirror PostgreSQL (on doc2, nspawn container at 192.168.100.13), plain `CREATE INDEX` is acceptable — no need to use `CREATE INDEX CONCURRENTLY` and no need to babysit the build. Fire it off and move on.
+When adding a new index to the live discogs mirror PostgreSQL (on doc2, nspawn container reachable at `10.20.0.13`), plain `CREATE INDEX` is acceptable — no need to use `CREATE INDEX CONCURRENTLY` and no need to babysit the build. Fire it off and move on.
 
 **Why:** The discogs UI (`discogs.ablz.au` + the cratedigger Browse-Discogs path) tolerates a few minutes of table lock during a one-off index add. The DB is read-only at runtime (the importer is a monthly oneshot); a `CREATE INDEX` that blocks readers for ~20 minutes is preferable to the ceremony around `CONCURRENTLY` (and `CONCURRENTLY` is slower and can fail partway through).
 

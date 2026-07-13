@@ -1,6 +1,6 @@
 ---
 name: forgejo-cutover-deploy-flow
-description: "Since 2026-06-10, nixosconfig deploys come from Forgejo via fleet-update; GitHub is frozen. Push with the nixbot token header; commits must be SSH-signed."
+description: "Nixosconfig writes come from Forgejo; doc1 triggers verified sibling deploys with fleet-deploy. Push with the nixbot token header; commits must be SSH-signed."
 metadata: 
   node_type: memory
   type: project
@@ -14,7 +14,7 @@ Deploy flow for cratedigger changes:
 2. On doc1 in `~/nixosconfig`: `nix flake update cratedigger-src`, commit — must be **SSH-signed** (`commit.gpgsign=true` already set; fleet-update verifies signatures against hosts.nix allowed signers).
 3. Push to Forgejo with the token header (gh credential helper is github.com-only; never echo the token):
    `TOKEN=$(cat /run/secrets/forgejo/nixbot-token) && git -c "http.extraHeader=Authorization: token ${TOKEN}" push origin master`
-4. `ssh doc2 'sudo fleet-update'` — verifies + builds from its root-owned clone at `/var/lib/fleet-update/repo`.
+4. From doc1, run `fleet-deploy doc2`. The locked sibling trigger starts doc2's `nixos-upgrade` service; its internal `fleet-update` verifies and builds from the root-owned clone at `/var/lib/fleet-update/repo`.
 
 Break-glass (e.g. when the deployed fleet-update itself is broken): `sudo fleet-update --dry-run` (fetches + verifies + checks out the clone) then `sudo nixos-rebuild switch --flake /var/lib/fleet-update/repo#doc2 --no-write-lock-file --option accept-flake-config true`.
 
