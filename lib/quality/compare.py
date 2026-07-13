@@ -10,6 +10,8 @@ from lib.quality.evidence_types import (
     AudioQualityMeasurement,
     QualityComparisonBasis,
     SPECTRAL_TRANSCODE_GRADES,
+    TargetQualityContract,
+    V0ProbeEvidence,
 )
 from lib.quality.ranks import (
     QualityRank,
@@ -19,6 +21,7 @@ from lib.quality.ranks import (
     _parse_vbr_level,
     _selected_bitrate,
     _selected_bitrate_with_source,
+    _selected_quality_bitrate_with_source,
     measurement_rank,
     quality_rank,
 )
@@ -119,6 +122,8 @@ def _shared_spectral_bitrates(
     new: AudioQualityMeasurement,
     existing: AudioQualityMeasurement,
     cfg: QualityRankConfig,
+    *,
+    new_v0_probe: V0ProbeEvidence | None = None,
 ) -> "tuple[Optional[int], Optional[int]] | None":
     """Return rank-bucket bitrates when BOTH sides carry spectral estimates.
 
@@ -147,7 +152,7 @@ def _shared_spectral_bitrates(
     if (new.spectral_bitrate_kbps is None
             or existing.spectral_bitrate_kbps is None):
         return None
-    new_br = _selected_bitrate(new, cfg)
+    new_br = _selected_quality_bitrate_with_source(new, cfg, new_v0_probe)[0]
     existing_br = _selected_bitrate(existing, cfg)
     new_br = (min(new_br, new.spectral_bitrate_kbps)
               if new_br is not None else new.spectral_bitrate_kbps)
@@ -161,6 +166,9 @@ def _transcode_candidate_real_rank_regresses(
     new: AudioQualityMeasurement,
     existing: AudioQualityMeasurement,
     cfg: QualityRankConfig,
+    *,
+    new_target_contract: TargetQualityContract | None = None,
+    new_v0_probe: V0ProbeEvidence | None = None,
 ) -> bool:
     """Whether a transcode-grade candidate is lower real rank than existing.
 
@@ -175,13 +183,21 @@ def _transcode_candidate_real_rank_regresses(
         return False
     if existing.spectral_grade in SPECTRAL_TRANSCODE_GRADES:
         return False
-    return measurement_rank(new, cfg) < measurement_rank(existing, cfg)
+    return measurement_rank(
+        new,
+        cfg,
+        target_contract=new_target_contract,
+        v0_probe=new_v0_probe,
+    ) < measurement_rank(existing, cfg)
 
 
 def compare_quality(
     new: AudioQualityMeasurement,
     existing: AudioQualityMeasurement,
     cfg: QualityRankConfig,
+    *,
+    new_target_contract: TargetQualityContract | None = None,
+    new_v0_probe: V0ProbeEvidence | None = None,
 ) -> QualityComparisonBasis:
     """Codec-aware quality comparison.
 
@@ -217,8 +233,15 @@ def compare_quality(
 
     Pure function. No I/O, no hardcoded numbers — every threshold comes from cfg.
     """
-    new_br, new_metric = _selected_bitrate_with_source(new, cfg)
+    new_br, new_metric = _selected_quality_bitrate_with_source(
+        new, cfg, new_v0_probe
+    )
     existing_br, existing_metric = _selected_bitrate_with_source(existing, cfg)
+    new_format = (
+        new_target_contract.format
+        if new_target_contract is not None
+        else new.format
+    )
 
     def _truthful_display_value(
         measurement: AudioQualityMeasurement,
@@ -233,10 +256,13 @@ def compare_quality(
         declared value for machine-readable audit; V-level contracts need no
         synthetic kbps value because the format label is the complete fact.
         """
-        if _is_explicit_label(measurement.format):
+        format_hint = (
+            new_format if measurement is new else measurement.format
+        )
+        if _is_explicit_label(format_hint):
             declared = (
-                _parse_bitrate_label(measurement.format)
-                if measurement.format is not None else None
+                _parse_bitrate_label(format_hint)
+                if format_hint is not None else None
             )
             return "contract", declared
         return metric, value
@@ -271,29 +297,54 @@ def compare_quality(
             # Lowercase-normalized: the hint's casing differs between the
             # simulator and evidence twins ("flac" vs "FLAC") while meaning
             # the same thing — display upper-cases, parity compares.
-            new_format=new.format.lower() if new.format else None,
+            new_format=new_format.lower() if new_format else None,
             existing_format=existing.format.lower() if existing.format else None,
             spectral_clamped=spectral_clamped,
             tolerance_kbps=tolerance_kbps,
         )
 
-    if _transcode_candidate_real_rank_regresses(new, existing, cfg):
+    if _transcode_candidate_real_rank_regresses(
+        new,
+        existing,
+        cfg,
+        new_target_contract=new_target_contract,
+        new_v0_probe=new_v0_probe,
+    ):
         return _basis(
             "worse", "transcode_rank_regression",
-            measurement_rank(new, cfg), measurement_rank(existing, cfg),
+            measurement_rank(
+                new,
+                cfg,
+                target_contract=new_target_contract,
+                v0_probe=new_v0_probe,
+            ), measurement_rank(existing, cfg),
             new_value=new_br, existing_value=existing_br,
         )
 
-    shared = _shared_spectral_bitrates(new, existing, cfg)
+    shared = _shared_spectral_bitrates(
+        new, existing, cfg, new_v0_probe=new_v0_probe
+    )
     if shared is not None:
         clamped_new_br, clamped_existing_br = shared
-        new_rank = quality_rank(new.format, clamped_new_br, new.is_cbr, cfg)
+        projected_is_cbr = (
+            new_target_contract.is_cbr
+            if new_target_contract is not None
+            else new.is_cbr
+        )
+        new_rank = quality_rank(
+            new_format, clamped_new_br, projected_is_cbr, cfg
+        )
         existing_rank = quality_rank(
             existing.format, clamped_existing_br, existing.is_cbr, cfg)
         rank_new_value, rank_existing_value = clamped_new_br, clamped_existing_br
         spectral_clamped = True
     else:
-        new_rank = measurement_rank(new, cfg)
+        new_rank = measurement_rank(
+            new,
+            cfg,
+            target_contract=new_target_contract,
+            v0_probe=new_v0_probe,
+        )
         existing_rank = measurement_rank(existing, cfg)
         rank_new_value, rank_existing_value = new_br, existing_br
         spectral_clamped = False
@@ -319,7 +370,7 @@ def compare_quality(
             spectral_clamped=spectral_clamped,
         )
 
-    new_family = _codec_family_of(new.format)
+    new_family = _codec_family_of(new_format)
     existing_family = _codec_family_of(existing.format)
 
     # Different codec families at the same rank: perceptually equivalent.
@@ -332,7 +383,7 @@ def compare_quality(
 
     # Same codec family. If either side has an explicit label, the label is
     # authoritative — within the same rank tier they are equivalent.
-    if _is_explicit_label(new.format) or _is_explicit_label(existing.format):
+    if _is_explicit_label(new_format) or _is_explicit_label(existing.format):
         return _basis(
             "equivalent", "label_contract_same_rank", new_rank, existing_rank,
             new_value=new_br, existing_value=existing_br,

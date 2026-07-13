@@ -326,12 +326,12 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     min_bitrate_kbps=245,
                     avg_bitrate_kbps=256,
                     median_bitrate_kbps=252,
-                    format="MP3 V0",
+                    format="MP3",
                     spectral_grade="genuine",
                 ),
                 codec="mp3",
                 container="mp3",
-                storage_format="mp3 v0",
+                storage_format="MP3",
             )
             _seed_current_for_request(
                 db, 42,
@@ -346,7 +346,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 ),
                 codec="mp3",
                 container="mp3",
-                storage_format="mp3 128",
+                storage_format="MP3",
             )
             cfg = CratediggerConfig(
                 beets_harness_path=_HARNESS,
@@ -441,11 +441,11 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     source_candidate=None,
                     import_result=ImportResult(
                         decision="import",
-                        new_measurement=AudioQualityMeasurement(
+                        source_measurement=AudioQualityMeasurement(
                             min_bitrate_kbps=245,
                             avg_bitrate_kbps=256,
                             median_bitrate_kbps=252,
-                            format="MP3 V0",
+                            format="MP3",
                             verified_lossless=False,
                         ),
                     ),
@@ -482,12 +482,12 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     min_bitrate_kbps=245,
                     avg_bitrate_kbps=256,
                     median_bitrate_kbps=252,
-                    format="MP3 V0",
+                    format="MP3",
                     spectral_grade="genuine",
                 ),
                 codec="mp3",
                 container="mp3",
-                storage_format="mp3 v0",
+                storage_format="MP3",
             )
             cfg = CratediggerConfig(
                 beets_harness_path=_HARNESS,
@@ -561,12 +561,12 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     min_bitrate_kbps=245,
                     avg_bitrate_kbps=256,
                     median_bitrate_kbps=252,
-                    format="MP3 V0",
+                    format="MP3",
                     spectral_grade="genuine",
                 ),
                 codec="mp3",
                 container="mp3",
-                storage_format="mp3 v0",
+                storage_format="MP3",
             )
             _seed_current_for_request(
                 db, 42,
@@ -581,7 +581,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 ),
                 codec="mp3",
                 container="mp3",
-                storage_format="mp3 128",
+                storage_format="MP3",
             )
             cfg = CratediggerConfig(
                 beets_harness_path=_HARNESS,
@@ -645,12 +645,12 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     min_bitrate_kbps=245,
                     avg_bitrate_kbps=256,
                     median_bitrate_kbps=252,
-                    format="MP3 V0",
+                    format="MP3",
                     spectral_grade="genuine",
                 ),
                 codec="mp3",
                 container="mp3",
-                storage_format="mp3 v0",
+                storage_format="MP3",
             )
             cfg = CratediggerConfig(
                 beets_harness_path=_HARNESS,
@@ -705,12 +705,12 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     min_bitrate_kbps=245,
                     avg_bitrate_kbps=256,
                     median_bitrate_kbps=252,
-                    format="MP3 V0",
+                    format="MP3",
                     spectral_grade="genuine",
                 ),
                 codec="mp3",
                 container="mp3",
-                storage_format="mp3 v0",
+                storage_format="MP3",
             )
             cfg = CratediggerConfig(
                 beets_harness_path=_HARNESS,

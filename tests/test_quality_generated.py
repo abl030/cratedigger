@@ -496,6 +496,7 @@ class ParityWorld:
     candidate_format: str
     converted_count: int
     post_conversion_min_bitrate: int | None
+    post_conversion_is_cbr: bool | None
     v0_avg: int | None
     v0_min: int | None
     # Action facts.
@@ -535,6 +536,7 @@ def parity_worlds(draw) -> ParityWorld:
         candidate_format = draw(st.sampled_from(_LOSSY_FORMATS))
         converted_count = 0
         post_conversion = None
+        post_conversion_is_cbr = None
         v0_avg = v0_min = None
         target_format = draw(st.sampled_from(_TARGET_FORMATS))
     elif kind == "flac_raw":
@@ -544,6 +546,7 @@ def parity_worlds(draw) -> ParityWorld:
         candidate_format = "FLAC"
         converted_count = 0
         post_conversion = None
+        post_conversion_is_cbr = None
         v0_avg = draw(_optional_bitrates(max_value=400))
         v0_min = draw(_optional_bitrates(max_value=400))
         target_format = draw(st.sampled_from(("flac", "lossless")))
@@ -553,7 +556,11 @@ def parity_worlds(draw) -> ParityWorld:
         avg_bitrate = None
         candidate_format = "FLAC"
         converted_count = draw(st.integers(min_value=1, max_value=30))
-        post_conversion = draw(_bitrates(max_value=400))
+        projected_bitrates = draw(st.lists(
+            _bitrates(max_value=400), min_size=1, max_size=8
+        ))
+        post_conversion = min(projected_bitrates)
+        post_conversion_is_cbr = len(set(projected_bitrates)) == 1
         v0_avg = draw(_optional_bitrates(max_value=400))
         v0_min = draw(_optional_bitrates(max_value=400))
         target_format = draw(st.sampled_from((None, "mp3 v0", "opus 128")))
@@ -575,6 +582,7 @@ def parity_worlds(draw) -> ParityWorld:
         candidate_format=candidate_format,
         converted_count=converted_count,
         post_conversion_min_bitrate=post_conversion,
+        post_conversion_is_cbr=post_conversion_is_cbr,
         v0_avg=v0_avg,
         v0_min=v0_min,
         target_format=target_format,
@@ -610,6 +618,7 @@ def _parity_simulator_result(world: ParityWorld) -> SimResult:
         spectral_bitrate=world.spectral_bitrate,
         converted_count=world.converted_count,
         post_conversion_min_bitrate=world.post_conversion_min_bitrate,
+        post_conversion_is_cbr=world.post_conversion_is_cbr,
         new_format=(None if is_flac else world.candidate_format),
         is_vbr=None,  # both twins derive is_vbr = not is_cbr
         avg_bitrate=(None if is_flac else world.avg_bitrate),
@@ -665,6 +674,7 @@ def _parity_evidence_result(world: ParityWorld) -> dict:
         target_format=world.target_format,
         converted_count=world.converted_count,
         post_conversion_min_bitrate=world.post_conversion_min_bitrate,
+        post_conversion_is_cbr=world.post_conversion_is_cbr,
     )
     return full_pipeline_decision_from_evidence(candidate, current, facts=facts)
 
@@ -680,6 +690,7 @@ _MOUNTAIN_GOATS_FLUX_WORLD = ParityWorld(
     avg_bitrate=None, grade="suspect", spectral_bitrate=160,
     candidate_format="FLAC", converted_count=13,
     post_conversion_min_bitrate=198, v0_avg=211, v0_min=198,
+    post_conversion_is_cbr=False,
     target_format=None, verified_lossless_target=None,
 )
 # Fault-injection pin (2026-07-08 mutation run): dropping the evidence
@@ -696,6 +707,7 @@ _SPECTRAL_OVERRIDE_DECISIVE_WORLD = ParityWorld(
     candidate_kind="lossy", min_bitrate=192, is_cbr=True, avg_bitrate=192,
     grade=None, spectral_bitrate=None, candidate_format="MP3",
     converted_count=0, post_conversion_min_bitrate=None, v0_avg=None,
+    post_conversion_is_cbr=None,
     v0_min=None, target_format=None, verified_lossless_target=None,
 )
 _HERETIC_PRIDE_WORLD = ParityWorld(
@@ -705,6 +717,7 @@ _HERETIC_PRIDE_WORLD = ParityWorld(
     candidate_kind="lossy", min_bitrate=192, is_cbr=False, avg_bitrate=192,
     grade="genuine", spectral_bitrate=None, candidate_format="MP3",
     converted_count=0, post_conversion_min_bitrate=None, v0_avg=None,
+    post_conversion_is_cbr=None,
     v0_min=None, target_format=None, verified_lossless_target=None,
 )
 
@@ -765,16 +778,16 @@ def wild_ready_candidate_evidence(draw) -> AlbumQualityEvidence:
             classifier="generated")
         if verified_lossless else None
     )
+    measured_format = draw(st.sampled_from(("MP3", "FLAC", "Opus", "AAC")))
     measurement = AudioQualityMeasurement(
         min_bitrate_kbps=draw(_bitrates(max_value=4000)),
         avg_bitrate_kbps=draw(_optional_bitrates(max_value=4000)),
         median_bitrate_kbps=draw(_optional_bitrates(max_value=4000)),
-        format=draw(st.sampled_from(("MP3", "FLAC", "Opus", "AAC", "mp3 v0"))),
+        format=measured_format,
         is_cbr=draw(st.booleans()),
         spectral_grade=draw(st.sampled_from(_GRADES)),
         spectral_bitrate_kbps=draw(_optional_bitrates(max_value=400)),
         verified_lossless=verified_lossless,
-        was_converted_from=draw(st.sampled_from((None, "flac", "alac", "wav"))),
     )
     has_bad_hash = draw(st.booleans())
     return AlbumQualityEvidence(
@@ -786,8 +799,7 @@ def wild_ready_candidate_evidence(draw) -> AlbumQualityEvidence:
         files=files,
         codec=draw(st.sampled_from(_EVIDENCE_EXTS)),
         container=draw(st.sampled_from(_EVIDENCE_EXTS)),
-        storage_format=draw(st.sampled_from(
-            ("mp3 320", "mp3 v0", "flac", "opus", "aac", "lossless"))),
+        storage_format=measured_format,
         v0_metric=v0_metric,
         verified_lossless_proof=proof,
         audio_corrupt=draw(st.booleans()),

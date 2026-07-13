@@ -47,6 +47,7 @@ from lib.quality import (
     QualityRankConfig,
     SpectralAnalysisDetail,
     SpectralDetail,
+    TargetQualityContract,
     classify_full_pipeline_decision,
     classify_quality_import_stages,
     compute_effective_override_bitrate,
@@ -214,6 +215,7 @@ class ImportPreviewValues(msgspec.Struct, frozen=True):
     existing_format: str | None = None
     existing_is_cbr: bool = False
     post_conversion_min_bitrate: int | None = None
+    post_conversion_is_cbr: bool | None = None
     converted_count: int = 0
     verified_lossless: bool = False
     verified_lossless_target: str | None = None
@@ -491,6 +493,7 @@ def preview_import_from_values(
         existing_format=values.existing_format,
         existing_is_cbr=values.existing_is_cbr,
         post_conversion_min_bitrate=values.post_conversion_min_bitrate,
+        post_conversion_is_cbr=values.post_conversion_is_cbr,
         converted_count=values.converted_count,
         verified_lossless=values.verified_lossless,
         verified_lossless_target=values.verified_lossless_target,
@@ -520,11 +523,18 @@ def preview_import_from_values(
     )
 
 
-def _quality_gate_stage(measurement: AudioQualityMeasurement | None,
-                        cfg: QualityRankConfig) -> str | None:
+def _quality_gate_stage(
+    measurement: AudioQualityMeasurement | None,
+    cfg: QualityRankConfig,
+    target_contract: TargetQualityContract | None = None,
+) -> str | None:
     if measurement is None:
         return None
-    return quality_gate_decision(measurement, cfg=cfg)
+    return quality_gate_decision(
+        measurement,
+        cfg=cfg,
+        target_contract=target_contract,
+    )
 
 
 def _classify_import_result(
@@ -538,7 +548,11 @@ def _classify_import_result(
     chain = [f"stage2_import:{decision}"]
     gate: str | None = None
     if decision in ("import", "preflight_existing"):
-        gate = _quality_gate_stage(ir.new_measurement, cfg)
+        gate = _quality_gate_stage(
+            ir.source_measurement,
+            cfg,
+            ir.target_quality_contract,
+        )
         if gate is not None:
             chain.append(f"stage3_quality_gate:{gate}")
     if decision in ("conversion_failed", "target_conversion_failed"):
@@ -605,7 +619,7 @@ def measure_and_persist_candidate_evidence(
          the persisted evidence row and rejects via the four-fact early-exit
          branches upstream of the quality gate.
       7. Otherwise, run ``run_import_one`` in dry-run mode to produce an
-         ``ImportResult`` with ``new_measurement``. Persist evidence built
+         ``ImportResult`` with ``source_measurement``. Persist evidence built
          from both the measurement (U1 facts) and the import result (audio
          measurement, spectral, V0 probe).
       8. Return ``evidence_ready`` when persistence succeeded; otherwise
@@ -913,12 +927,12 @@ def measure_and_persist_candidate_evidence(
                 import_result=run.import_result,
                 subprocess_stderr=run.stderr,
             )
-        if run.import_result.new_measurement is None:
+        if run.import_result.source_measurement is None:
             return _measurement_failed_result(
                 mode="path",
                 reason="measurement_crashed",
-                decision=run.import_result.decision or "missing_new_measurement",
-                detail="ImportResult missing new_measurement",
+                decision=run.import_result.decision or "missing_source_measurement",
+                detail="ImportResult missing source_measurement",
                 request_id=request_id,
                 download_log_id=download_log_id,
                 source_path=path,
@@ -948,7 +962,6 @@ def measure_and_persist_candidate_evidence(
                 import_result=run.import_result,
                 download_log_id=download_log_id,
                 import_job_id=import_job_id,
-                target_format=req.get("target_format"),
                 files=source_snapshot,
                 measurement=measurement,
             )
@@ -1307,7 +1320,6 @@ def preview_import_from_path(
                     import_result=run.import_result,
                     download_log_id=download_log_id,
                     import_job_id=import_job_id,
-                    target_format=req.get("target_format") if req else None,
                     files=source_snapshot,
                 )
                 evidence_status = evidence.status

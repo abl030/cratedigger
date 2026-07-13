@@ -85,6 +85,7 @@ class DownloadScenario:
     spectral_bitrate: int | None = None
     converted_count: int = 0
     post_conversion_min_bitrate: int | None = None
+    post_conversion_is_cbr: bool | None = None
     new_format: str | None = None  # explicit format hint for the rank model
     # VBR + avg bitrate drive the preimport spectral gate (issue #93).
     # is_vbr defaults to None (simulator derives it from is_cbr); pass
@@ -106,6 +107,7 @@ class DownloadScenario:
             "spectral_bitrate": self.spectral_bitrate,
             "converted_count": self.converted_count,
             "post_conversion_min_bitrate": self.post_conversion_min_bitrate,
+            "post_conversion_is_cbr": self.post_conversion_is_cbr,
             "new_format": self.new_format,
             "candidate_v0_probe_avg": self.candidate_v0_probe_avg,
             "candidate_v0_probe_min": self.candidate_v0_probe_min,

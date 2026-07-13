@@ -83,6 +83,7 @@ class _SidecarServiceCase(unittest.TestCase):
             mb_release_id=MBID,
             files=snapshot_audio_files(self.album_path),
             measurement=_verified_lossless_measurement(),
+            storage_format="FLAC",
             verified_lossless_proof=_proof(),
         )
 
@@ -259,6 +260,7 @@ class TestWriteSidecarSkips(_SidecarServiceCase):
                 )
             ],
             measurement=_verified_lossless_measurement(),
+            storage_format="FLAC",
             verified_lossless_proof=_proof(),
         )
         self._seed_current_evidence(stale)

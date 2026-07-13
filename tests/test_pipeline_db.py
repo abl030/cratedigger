@@ -3515,7 +3515,6 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
                 format="flac",
                 spectral_grade="genuine",
                 verified_lossless=True,
-                was_converted_from="flac",
             ),
             files=[
                 AlbumQualityEvidenceFile(
@@ -3564,6 +3563,9 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         assert loaded is not None
         self.assertEqual(loaded.measurement.format, "flac")
         self.assertTrue(loaded.measurement.verified_lossless)
+        self.assertEqual(loaded.target_format, "lossless")
+        self.assertFalse(loaded.target_is_cbr)
+        self.assertEqual(loaded.lineage_version, 3)
         self.assertIsNotNone(loaded.verified_lossless_proof)
         # Files round-trip sorted-for-storage.
         self.assertEqual(
@@ -3596,7 +3598,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         # Same content address, but mutate a non-keyed field (storage_format)
         # — the upsert should replace.
         import msgspec
-        replaced = msgspec.structs.replace(first, storage_format="mp3 V0")
+        replaced = msgspec.structs.replace(first, storage_format="mp3")
         self.db.upsert_album_quality_evidence(replaced)
 
         loaded = self.db.find_album_quality_evidence(
@@ -3604,7 +3606,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
             snapshot_fingerprint=first.snapshot_fingerprint,
         )
         assert loaded is not None
-        self.assertEqual(loaded.storage_format, "mp3 V0")
+        self.assertEqual(loaded.storage_format, "mp3")
 
         # Only one row exists for this content address.
         cur = self.db._execute(
@@ -5131,6 +5133,7 @@ class TestGetWrongMatches(unittest.TestCase):
         self.assertEqual(row["evidence_source_container"], "flac")
         self.assertEqual(row["evidence_storage_format"], "FLAC")
         self.assertEqual(row["evidence_target_format"], "opus 128")
+        self.assertFalse(row["evidence_target_is_cbr"])
         self.assertEqual(row["evidence_min_bitrate"], 0)
         self.assertTrue(row["evidence_verified_lossless"])
 
@@ -8618,6 +8621,7 @@ class TestLatestDownloadSummaries(unittest.TestCase):
                 spectral_grade="genuine",
                 spectral_bitrate_kbps=998,
             ),
+            storage_format="FLAC",
         )
         self.db.upsert_album_quality_evidence(evidence)
         stored = self.db.find_album_quality_evidence(

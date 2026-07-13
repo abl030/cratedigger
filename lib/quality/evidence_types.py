@@ -29,7 +29,7 @@ class AudioQualityMeasurement(msgspec.Struct, frozen=True):
     Ground truth from ffprobe and spectral analysis. Used by decision functions
     to compare new downloads against existing files and determine quality gate
     outcomes. Wire-boundary type per ``.claude/rules/code-quality.md`` —
-    appears in ``ImportResult.{new_measurement,existing_measurement}`` and
+    appears in ``ImportResult.{source_measurement,current_measurement}`` and
     crosses both the harness stdout and ``download_log.import_result`` JSONB
     boundaries.
 
@@ -48,17 +48,18 @@ class AudioQualityMeasurement(msgspec.Struct, frozen=True):
                                that can pull MIN or AVG away from the typical
                                track quality. measurement_rank() falls back
                                to min when this is None.
-        format:                codec label or bare codec name that drives the
-                               quality_rank() classifier. Accepts either an
-                               explicit label from ImportResult.final_format
-                               ("opus 128", "mp3 v0", "mp3 320", "flac") or a
-                               bare codec string from beets items.format ("MP3",
-                               "Opus", "FLAC", "AAC"). None → UNKNOWN rank.
+        format:                measured source/output codec or container label,
+                               such as a bare codec string from ffprobe or Beets
+                               ("MP3", "Opus", "FLAC", "AAC"). Projected target
+                               labels belong in ``TargetQualityContract``.
+                               None means the measured codec is unknown.
         is_cbr:                True if all tracks have the same bitrate
         spectral_grade:        spectral analysis result (genuine/marginal/suspect)
         spectral_bitrate_kbps: estimated original bitrate from spectral cliff
         verified_lossless:     True if imported from spectral-verified genuine lossless
-        was_converted_from:    source format before conversion (flac/m4a/wav), None if MP3
+        was_converted_from:    output-only lineage: source format before
+                               conversion (flac/m4a/wav). New source
+                               measurements leave this None.
     """
     min_bitrate_kbps: Optional[int] = None
     avg_bitrate_kbps: Optional[int] = None
@@ -69,6 +70,63 @@ class AudioQualityMeasurement(msgspec.Struct, frozen=True):
     spectral_bitrate_kbps: Optional[int] = None
     verified_lossless: bool = False
     was_converted_from: Optional[str] = None
+
+    def new_row_validation_errors(self, *, source: bool = False) -> list[str]:
+        """Validate the unambiguous measurement shape emitted by v3 writers."""
+
+        errors: list[str] = []
+        if self.format is not None:
+            label = self.format.strip()
+            if not label or len(label.split()) != 1:
+                errors.append(
+                    "measurement.format must be a bare measured codec label"
+                )
+        if source and self.was_converted_from is not None:
+            errors.append(
+                "source measurement must not carry was_converted_from"
+            )
+        return errors
+
+
+class TargetQualityContract(msgspec.Struct, frozen=True):
+    """Configured quality of a projected/materialized target.
+
+    A contract is policy, not a measurement.  Its explicit label drives rank
+    classification without borrowing bitrate statistics from the source or a
+    temporary V0 probe.
+    """
+
+    format: str
+    is_cbr: bool
+
+    @classmethod
+    def from_format(
+        cls,
+        format_hint: str,
+        *,
+        projected_is_cbr: bool | None = None,
+    ) -> "TargetQualityContract":
+        """Build target policy with an optional independently measured mode.
+
+        Explicit target labels remain self-describing.  Bare codec labels such
+        as ``MP3`` are not: the harness must pass the album-wide bitrate mode
+        measured from the projected/probe files.  The fallback preserves the
+        policy-only constructor for callers that do not have those files.
+        """
+
+        parts = format_hint.strip().lower().split()
+        return cls(
+            format=format_hint,
+            is_cbr=(
+                projected_is_cbr
+                if projected_is_cbr is not None
+                else (
+                    len(parts) == 2
+                    and parts[0] == "mp3"
+                    and parts[1].isdigit()
+                )
+            ),
+        )
 
 
 _LEGACY_POLICY_V0_PROBE_KINDS: tuple[str, ...] = (
@@ -188,6 +246,12 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
     container: str | None = None
     storage_format: str | None = None
     target_format: str | None = None
+    # Album-wide bitrate mode of the projected target/probe.  This is a
+    # contract fact, not the downloaded source or materialized-output mode.
+    target_is_cbr: bool | None = None
+    # Migration 050 marks the interpretation of storage/target fields.
+    # Existing rows are v1; every new separated-lineage writer emits v3.
+    lineage_version: int = 3
     v0_metric: AlbumQualityV0Metric | None = None
     verified_lossless_proof: VerifiedLosslessProof | None = None
     # U1 (migration 019) preview-evidence facts. The unified decider
@@ -216,6 +280,8 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
             container=self.container,
             storage_format=self.storage_format,
             target_format=self.target_format,
+            target_is_cbr=self.target_is_cbr,
+            lineage_version=self.lineage_version,
             v0_metric=self.v0_metric,
             verified_lossless_proof=self.verified_lossless_proof,
             audio_corrupt=self.audio_corrupt,
@@ -234,6 +300,32 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
             errors.append("snapshot_fingerprint must be a non-empty string")
         if self.measured_at is None:
             errors.append("measured_at is required")
+        if self.lineage_version not in (1, 3):
+            errors.append("lineage_version must be 1 or 3")
+        if self.lineage_version == 3:
+            errors.extend(self.measurement.new_row_validation_errors())
+            if (self.target_format is None) != (self.target_is_cbr is None):
+                errors.append(
+                    "target_format and target_is_cbr must be set together"
+                )
+            if self.storage_format is not None:
+                storage_label = self.storage_format.strip()
+                if not storage_label or len(storage_label.split()) != 1:
+                    errors.append(
+                        "storage_format must be a bare measured codec label"
+                    )
+                measurement_label = (
+                    self.measurement.format.strip().lower()
+                    if self.measurement.format is not None
+                    else None
+                )
+                if (
+                    measurement_label is not None
+                    and storage_label.lower() != measurement_label
+                ):
+                    errors.append(
+                        "storage_format must match measurement.format"
+                    )
         # Empty snapshot is a storable fact ONLY when audio_file_count=0
         # (the explicit empty-inventory signal). When a fileset is present
         # but ``files`` is empty, the evidence row is incomplete.

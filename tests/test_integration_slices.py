@@ -1408,8 +1408,8 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         self.assertEqual(logged, result)
         self.assertEqual(logged.spectral, audit)
         self.assertEqual(logged.decision, "import")
-        self.assertIsNotNone(logged.new_measurement)
-        self.assertIsNotNone(logged.existing_measurement)
+        self.assertIsNotNone(logged.source_measurement)
+        self.assertIsNotNone(logged.current_measurement)
         self.assertTrue(logged.conversion.was_converted)
         self.assertEqual(logged.postflight.beets_id, 77)
         self.assertIsNotNone(logged.comparison_basis)
@@ -1616,8 +1616,8 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         self.assertEqual(logged, result)
         self.assertEqual(logged.spectral, audit)
         self.assertEqual(logged.decision, "import")
-        self.assertIsNotNone(logged.new_measurement)
-        self.assertIsNotNone(logged.existing_measurement)
+        self.assertIsNotNone(logged.source_measurement)
+        self.assertIsNotNone(logged.current_measurement)
         self.assertTrue(logged.conversion.was_converted)
         self.assertEqual(logged.postflight.beets_id, 77)
         self.assertEqual(
@@ -1676,7 +1676,7 @@ class TestForceImportSlice(unittest.TestCase):
                     median_bitrate_kbps=320, format="MP3",
                     spectral_grade="genuine",
                 ),
-                codec="mp3", container="mp3", storage_format="mp3 320",
+                codec="mp3", container="mp3", storage_format="MP3",
             )
             _seed_current_for_request(
                 db, 42,
@@ -1781,7 +1781,7 @@ class TestForceImportSlice(unittest.TestCase):
                     median_bitrate_kbps=320, format="MP3",
                     spectral_grade="genuine",
                 ),
-                codec="mp3", container="mp3", storage_format="mp3 320",
+                codec="mp3", container="mp3", storage_format="MP3",
             )
             _seed_current_for_request(
                 db, 833,
@@ -2103,8 +2103,8 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
         """
         return ImportResult(
             decision="import",
-            new_measurement=new,
-            existing_measurement=existing,
+            source_measurement=new,
+            current_measurement=existing,
             conversion=ConversionInfo(),
             postflight=PostflightInfo(),
         )
@@ -5539,12 +5539,12 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 min_bitrate_kbps=245,
                 avg_bitrate_kbps=256,
                 median_bitrate_kbps=252,
-                format="MP3 V0",
+                format="MP3",
                 spectral_grade="genuine",
             ),
             codec="mp3",
             container="mp3",
-            storage_format="mp3 v0",
+            storage_format="MP3",
         )
 
     def _seed_evidence_for_import_job(self, db, job_id: int, source_path: str):
@@ -5557,12 +5557,12 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 min_bitrate_kbps=245,
                 avg_bitrate_kbps=256,
                 median_bitrate_kbps=252,
-                format="MP3 V0",
+                format="MP3",
                 spectral_grade="genuine",
             ),
             codec="mp3",
             container="mp3",
-            storage_format="mp3 v0",
+            storage_format="MP3",
         )
 
     def test_force_job_with_valid_evidence_short_circuits_no_measurement(self):
@@ -5883,12 +5883,12 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
                     min_bitrate_kbps=245,
                     avg_bitrate_kbps=256,
                     median_bitrate_kbps=252,
-                    format="MP3 V0",
+                    format="MP3",
                     spectral_grade="genuine",
                 ),
                 codec="mp3",
                 container="mp3",
-                storage_format="mp3 v0",
+                storage_format="MP3",
             )
             db.mark_import_job_preview_importable(
                 job.id,
@@ -6353,12 +6353,12 @@ class TestU5PreviewEvidenceReadySlice(unittest.TestCase):
                         min_bitrate_kbps=245,
                         avg_bitrate_kbps=256,
                         median_bitrate_kbps=252,
-                        format="MP3 V0",
+                        format="MP3",
                         spectral_grade="genuine",
                     ),
                     codec="mp3",
                     container="mp3",
-                    storage_format="mp3 v0",
+                    storage_format="MP3",
                 )
                 return preview_result
 
@@ -6461,7 +6461,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
                 min_bitrate_kbps=min_bitrate_kbps,
                 avg_bitrate_kbps=min_bitrate_kbps,
                 median_bitrate_kbps=min_bitrate_kbps,
-                format="MP3 V0",
+                format="MP3",
                 spectral_grade=spectral_grade,
                 spectral_bitrate_kbps=spectral_bitrate_kbps,
             ),
@@ -6469,7 +6469,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             files=files,
             codec="mp3",
             container="mp3",
-            storage_format="mp3 v0",
+            storage_format="MP3",
             audio_corrupt=audio_corrupt,
             folder_layout=folder_layout,
             audio_file_count=(
@@ -7194,7 +7194,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             # both the measurement facts and the harness see suspect@96.
             harness_ir = ImportResult(
                 decision="import",
-                new_measurement=AudioQualityMeasurement(
+                source_measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=96,
                     avg_bitrate_kbps=96,
                     median_bitrate_kbps=96,
@@ -7315,11 +7315,11 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             )
             harness_ir = ImportResult(
                 decision="import",
-                new_measurement=AudioQualityMeasurement(
+                source_measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=256,
                     avg_bitrate_kbps=256,
                     median_bitrate_kbps=256,
-                    format="mp3 v0",
+                    format="MP3",
                     is_cbr=False,
                     spectral_grade="suspect",
                     spectral_bitrate_kbps=256,
@@ -7508,14 +7508,14 @@ class TestWrongMatchCleanupFKChainAvoidsRemeasurement(unittest.TestCase):
                 min_bitrate_kbps=245,
                 avg_bitrate_kbps=256,
                 median_bitrate_kbps=252,
-                format="mp3 v0",
+                format="MP3",
                 spectral_grade="genuine",
             ),
             measured_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
             files=files,
             codec="mp3",
             container="mp3",
-            storage_format="mp3 v0",
+            storage_format="MP3",
             audio_file_count=1,
             filetype_band="mp3",
             folder_layout="flat",
@@ -7630,14 +7630,14 @@ class TestWrongMatchStaleEvidenceRefreshSlice(unittest.TestCase):
                     min_bitrate_kbps=245,
                     avg_bitrate_kbps=256,
                     median_bitrate_kbps=252,
-                    format="mp3 v0",
+                    format="MP3",
                     spectral_grade="genuine",
                 ),
                 measured_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
                 files=stale_files,
                 codec="mp3",
                 container="mp3",
-                storage_format="mp3 v0",
+                storage_format="MP3",
                 audio_file_count=1,
                 filetype_band="mp3",
                 folder_layout="flat",
@@ -7765,6 +7765,7 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
             container="flac",
             storage_format="flac",
             target_format="mp3",
+            target_is_cbr=True,
             v0_metric=v0_metric,
             verified_lossless_proof=None,
             audio_corrupt=False,
@@ -8157,8 +8158,9 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
                 files=dup_files,
                 codec="mp3",
                 container="mp3",
-                storage_format="mp3 v0",
+                storage_format="MP3",
                 target_format="opus",
+                target_is_cbr=False,
                 v0_metric=None,
                 verified_lossless_proof=None,
                 audio_corrupt=False,
@@ -8313,6 +8315,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 container="flac",
                 storage_format="flac",
                 target_format="flac",
+                target_is_cbr=False,
                 v0_metric=v0_metric,
                 verified_lossless_proof=proof,
                 audio_corrupt=False,
@@ -8462,6 +8465,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 container="flac",
                 storage_format="flac",
                 target_format="mp3",
+                target_is_cbr=True,
                 v0_metric=v0_metric,
                 verified_lossless_proof=proof,
                 audio_corrupt=False,
@@ -8592,7 +8596,6 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 spectral_grade="likely_transcode",
                 spectral_bitrate_kbps=96,
                 verified_lossless=False,
-                was_converted_from="m4a",
             )
             from lib.quality import AlbumQualityEvidence
             from datetime import datetime, timezone
@@ -8606,8 +8609,9 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 files=candidate_files,
                 codec="m4a",
                 container="m4a",
-                storage_format="m4a",
+                storage_format="ALAC",
                 target_format="opus",
+                target_is_cbr=False,
                 v0_metric=v0_metric,
                 verified_lossless_proof=None,
                 audio_corrupt=False,
@@ -8728,8 +8732,9 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 files=candidate_files,
                 codec="m4a",
                 container="m4a",
-                storage_format="m4a",
+                storage_format="AAC",
                 target_format="opus",
+                target_is_cbr=False,
                 v0_metric=v0_metric,
                 verified_lossless_proof=None,
                 audio_corrupt=False,
@@ -8846,8 +8851,9 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 files=candidate_files,
                 codec="mp3",
                 container="mp3",
-                storage_format="mp3 320",
+                storage_format="MP3",
                 target_format="opus",
+                target_is_cbr=False,
                 v0_metric=v0_metric,
                 verified_lossless_proof=None,
                 audio_corrupt=False,
@@ -8974,6 +8980,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 container="flac",
                 storage_format="flac",
                 target_format="mp3",
+                target_is_cbr=True,
                 v0_metric=AlbumQualityV0Metric(
                     min_bitrate_kbps=184,
                     avg_bitrate_kbps=215,
@@ -9063,6 +9070,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 container="flac",
                 storage_format="flac",
                 target_format="mp3",
+                target_is_cbr=True,
                 v0_metric=AlbumQualityV0Metric(
                     min_bitrate_kbps=880,
                     avg_bitrate_kbps=900,

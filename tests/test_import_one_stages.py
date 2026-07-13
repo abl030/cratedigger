@@ -674,6 +674,20 @@ class TestConversionTarget(unittest.TestCase):
     def test_target_format_lossless_keeps_lossless(self):
         self.assertEqual(self._target(target_format="lossless"), "lossless")
 
+    def test_native_flac_keep_lossless_emits_typed_target_contract(self):
+        from harness.import_one import projected_target_quality_contract
+
+        contract = projected_target_quality_contract(
+            "flac",
+            converted_count=0,
+            keep_lossless=True,
+            projected_is_cbr=False,
+        )
+        self.assertIsNotNone(contract)
+        assert contract is not None
+        self.assertEqual(contract.format, "flac")
+        self.assertFalse(contract.is_cbr)
+
     def test_verified_with_target_returns_target(self):
         self.assertEqual(self._target(verified=True, vl_target="opus 128"),
                          "opus 128")
@@ -1040,6 +1054,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
             AudioQualityMeasurement,
             QualityEvidenceActionPayload,
             QualityEvidenceActionProvenance,
+            TargetQualityContract,
         )
         from lib.quality_evidence import snapshot_fingerprint
 
@@ -1067,15 +1082,20 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                 min_bitrate_kbps=245,
                 avg_bitrate_kbps=252,
                 median_bitrate_kbps=250,
-                format="mp3 v0",
+                format="MP3",
                 spectral_grade="genuine",
             ),
             measured_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             files=files,
             codec=files[0].codec if files else "mp3",
             container=files[0].container if files else "mp3",
-            storage_format="mp3 v0",
+            storage_format="MP3",
             target_format=target_format,
+            target_is_cbr=(
+                TargetQualityContract.from_format(target_format).is_cbr
+                if target_format is not None
+                else None
+            ),
         )
         decision_payload: dict[str, object] = {"stage2_import": decision}
         if imported is not None:
@@ -1181,7 +1201,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
             self.assertTrue(sentinel.startswith("__IMPORT_RESULT__"))
             result = json.loads(sentinel.removeprefix("__IMPORT_RESULT__"))
             self.assertEqual(result["decision"], "import")
-            self.assertEqual(result["new_measurement"]["format"], "mp3 v0")
+            self.assertEqual(result["source_measurement"]["format"], "MP3")
             self.assertEqual(
                 result["quality_evidence_provenance"]["candidate_status"],
                 "reused",
@@ -1378,21 +1398,38 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
         self.assertEqual(result.final_format, "opus 128")
 
     def test_postflight_materialized_measurement_uses_real_opus_output(self):
-        """Gas / November 89: preserve the 191/224k V0 proxy as decision
-        evidence, but record the 102/132k Opus files as materialized output.
+        """Gas / November 89: preserve source and V0 facts separately, then
+        record the 102/132k Opus files as materialized output.
         """
         from harness import import_one
         from lib.beets_db import AlbumInfo
-        from lib.quality import AudioQualityMeasurement, ImportResult
+        from lib.quality import (
+            AudioQualityMeasurement,
+            ConversionInfo,
+            ImportResult,
+            TargetQualityContract,
+            V0ProbeEvidence,
+        )
 
         result = ImportResult(
-            new_measurement=AudioQualityMeasurement(
+            source_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=742,
+                avg_bitrate_kbps=811,
+                median_bitrate_kbps=803,
+                format="FLAC",
+                verified_lossless=True,
+            ),
+            v0_probe=V0ProbeEvidence(
+                kind="lossless_source_v0",
                 min_bitrate_kbps=191,
                 avg_bitrate_kbps=224,
                 median_bitrate_kbps=237,
-                format="opus 128",
-                verified_lossless=True,
-                was_converted_from="flac",
+            ),
+            target_quality_contract=TargetQualityContract.from_format("opus 128"),
+            conversion=ConversionInfo(
+                was_converted=True,
+                original_filetype="flac",
+                target_filetype="opus",
             ),
         )
         info = AlbumInfo(

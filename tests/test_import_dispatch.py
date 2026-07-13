@@ -205,11 +205,11 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
         dl = DownloadInfo(filetype="flac")
         ir = ImportResult(
             decision="import",
-            new_measurement=AudioQualityMeasurement(
+            source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=191,
                 avg_bitrate_kbps=224,
                 median_bitrate_kbps=237,
-                format="opus 128",
+                format="Opus",
             ),
             materialized_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=102,
@@ -235,7 +235,7 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
         fabricate a value — NULL is the honest signal for consumers."""
         from lib.dispatch import _populate_dl_info_from_import_result
         dl = DownloadInfo(filetype="mp3")
-        ir = ImportResult(decision="import_failed", new_measurement=None)
+        ir = ImportResult(decision="import_failed", source_measurement=None)
         _populate_dl_info_from_import_result(dl, ir)
         self.assertIsNone(dl.actual_min_bitrate)
 
@@ -390,7 +390,7 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
         dl_info = DownloadInfo(filetype="mp3", username="user1")
         ir = ImportResult(
             decision="downgrade",
-            new_measurement=AudioQualityMeasurement(
+            source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=127,
                 avg_bitrate_kbps=127,
                 median_bitrate_kbps=128,
@@ -398,7 +398,7 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
                 spectral_grade="likely_transcode",
                 spectral_bitrate_kbps=128,
             ),
-            existing_measurement=AudioQualityMeasurement(
+            current_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=192,
                 avg_bitrate_kbps=192,
                 median_bitrate_kbps=192,
@@ -480,7 +480,7 @@ class TestRejectImportFromEvidenceDecisionForcedRequeue(unittest.TestCase):
         dl_info = DownloadInfo(filetype="mp3", username="user1")
         ir = ImportResult(
             decision=decision,
-            new_measurement=AudioQualityMeasurement(
+            source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=320,
                 avg_bitrate_kbps=320,
                 median_bitrate_kbps=320,
@@ -948,8 +948,8 @@ class TestDispatchImport(unittest.TestCase):
         persisted = ImportResult.from_json(db.download_logs[0].import_result)
         self.assertEqual(persisted.spectral, audit)
         self.assertEqual(persisted.decision, "duplicate_remove_guard_failed")
-        self.assertIsNotNone(persisted.new_measurement)
-        self.assertIsNotNone(persisted.existing_measurement)
+        self.assertIsNotNone(persisted.source_measurement)
+        self.assertIsNotNone(persisted.current_measurement)
         self.assertTrue(persisted.conversion.was_converted)
         persisted_guard = persisted.postflight.duplicate_remove_guard
         assert persisted_guard is not None
@@ -1306,7 +1306,10 @@ class TestLoadQualityGateState(unittest.TestCase):
         self.assertIsNotNone(state)
         assert state is not None
         self.assertEqual(state.min_bitrate_kbps, 207)
-        self.assertEqual(state.measurement.format, "mp3 v0")
+        self.assertEqual(state.measurement.format, "MP3")
+        self.assertIsNotNone(state.target_contract)
+        assert state.target_contract is not None
+        self.assertEqual(state.target_contract.format, "mp3 v0")
         self.assertEqual(state.measurement.avg_bitrate_kbps, 207)
         self.assertFalse(state.measurement.is_cbr)
         self.assertTrue(state.measurement.verified_lossless)
@@ -1777,7 +1780,7 @@ class TestOpusConversionDispatch(unittest.TestCase):
             decision="import",
             final_format="opus 128",
             v0_verification_bitrate=247,
-            new_measurement=AudioQualityMeasurement(
+            source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=128, verified_lossless=True,
                 was_converted_from="flac"),
             conversion=ConversionInfo(

@@ -73,7 +73,7 @@ class TestGeneratedMaterializedQualityAudit(unittest.TestCase):
             format=output_codec,
         )
         result = ImportResult(
-            new_measurement=AudioQualityMeasurement(
+            source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=proxy_min,
                 avg_bitrate_kbps=proxy_min,
                 median_bitrate_kbps=proxy_min,

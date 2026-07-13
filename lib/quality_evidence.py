@@ -22,6 +22,7 @@ from lib.quality import (
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     ImportResult,
+    TargetQualityContract,
     V0ProbeEvidence,
     VerifiedLosslessProof,
 )
@@ -323,39 +324,6 @@ def neutral_v0_metric_from_probe(
     )
 
 
-def neutral_v0_metric_from_measurement(
-    measurement: AudioQualityMeasurement | None,
-) -> AlbumQualityV0Metric | None:
-    """Fallback v0_metric for candidates without a lossless-source probe.
-
-    Lossy sources (MP3 V0, CBR 320, Opus 128, ...) never produce a
-    comparable lossless-source V0 probe, but every download_log row should
-    still carry the candidate's bitrate signature so audit and UI surfaces
-    can render a "what did we download" row without special-casing source
-    lineage. The fallback uses ``new_measurement.{min,avg,median}_bitrate_kbps``
-    and tags ``source_lineage=native_lossy_research`` to make the
-    provenance unambiguous — policy code that needs a *comparable* probe
-    still gates on ``is_comparable_lossless_source_probe`` (which filters
-    by ``kind == lossless_source_v0``), so this never widens decision input.
-    """
-
-    if measurement is None:
-        return None
-    min_kbps = measurement.min_bitrate_kbps
-    avg_kbps = measurement.avg_bitrate_kbps
-    median_kbps = measurement.median_bitrate_kbps
-    if min_kbps is None and avg_kbps is None and median_kbps is None:
-        return None
-    return AlbumQualityV0Metric(
-        min_bitrate_kbps=min_kbps,
-        avg_bitrate_kbps=avg_kbps,
-        median_bitrate_kbps=median_kbps,
-        source_lineage=V0_SOURCE_LINEAGE_NATIVE_LOSSY_RESEARCH,
-        source_provenance="new_measurement_fallback",
-        proof_provenance=None,
-    )
-
-
 def audit_v0_probe_from_metric(
     metric: AlbumQualityV0Metric | None,
 ) -> V0ProbeEvidence | None:
@@ -366,8 +334,7 @@ def audit_v0_probe_from_metric(
     ``neutral_v0_research`` otherwise). Policy code that needs a comparable
     probe must keep filtering via :func:`is_comparable_lossless_source_probe`
     — this helper exists so audit/UI surfaces can read a probe from *every*
-    download, including non-lossless candidates whose v0_metric was derived
-    from :func:`neutral_v0_metric_from_measurement`.
+    download, including native-lossy research probes.
     """
 
     if metric is None:
@@ -392,7 +359,7 @@ def audit_v0_probe_from_metric(
 def verified_lossless_proof_from_import_result(
     import_result: ImportResult,
 ) -> VerifiedLosslessProof | None:
-    measurement = import_result.new_measurement
+    measurement = import_result.source_measurement
     if measurement is None or not measurement.verified_lossless:
         return None
     return VerifiedLosslessProof(
@@ -548,7 +515,6 @@ def evidence_from_import_result(
     source_path: str,
     import_result: ImportResult | None,
     measured_at: datetime | None = None,
-    target_format: str | None = None,
     files: list[AlbumQualityEvidenceFile] | None = None,
     measurement: "PreimportMeasurement | None" = None,
 ) -> EvidenceBuildResult:
@@ -562,8 +528,12 @@ def evidence_from_import_result(
     bad-hash lookup) — the snapshot helper only knows file sizes and paths.
     """
 
-    if import_result is None or import_result.new_measurement is None:
-        return EvidenceBuildResult(None, "incomplete", "missing new measurement")
+    if import_result is None or import_result.source_measurement is None:
+        return EvidenceBuildResult(None, "incomplete", "missing source measurement")
+    try:
+        import_result.validate_new_row()
+    except ValueError as exc:
+        return EvidenceBuildResult(None, "incomplete", str(exc))
     if files is None:
         try:
             files = snapshot_audio_files(source_path)
@@ -573,7 +543,17 @@ def evidence_from_import_result(
         return EvidenceBuildResult(None, "empty_fileset", "no audio files found")
     if measurement is not None and measurement.audio_corrupt:
         files = _apply_measurement_facts_to_files(files, measurement)
-    audio_measurement = import_result.new_measurement
+    audio_measurement = import_result.source_measurement
+    target_contract = import_result.target_quality_contract
+    # V3 target policy is owned by the harness result. The request row often
+    # has no explicit target because the configured verified-lossless target
+    # supplies it; trusting the request here loses the contract end-to-end.
+    target_format = (
+        target_contract.format if target_contract is not None else None
+    )
+    target_is_cbr = (
+        target_contract.is_cbr if target_contract is not None else None
+    )
     proof = verified_lossless_proof_from_import_result(import_result)
     audio_corrupt = any(not file.decode_ok for file in files)
     if measurement is not None:
@@ -605,9 +585,10 @@ def evidence_from_import_result(
         container=files[0].container,
         storage_format=audio_measurement.format,
         target_format=target_format,
+        target_is_cbr=target_is_cbr,
+        lineage_version=3,
         v0_metric=(
             neutral_v0_metric_from_probe(import_result.v0_probe)
-            or neutral_v0_metric_from_measurement(audio_measurement)
         ),
         verified_lossless_proof=proof,
         audio_corrupt=audio_corrupt,
@@ -701,6 +682,12 @@ def evidence_from_measurement(
         container=container,
         storage_format=audio_measurement.format,
         target_format=target_format,
+        target_is_cbr=(
+            TargetQualityContract.from_format(target_format).is_cbr
+            if target_format is not None
+            else None
+        ),
+        lineage_version=3,
         v0_metric=None,
         verified_lossless_proof=None,
         audio_corrupt=measurement.audio_corrupt,
@@ -764,6 +751,7 @@ def evidence_from_album_info(
         codec=files[0].codec,
         container=files[0].container,
         storage_format=measurement.format,
+        lineage_version=3,
         v0_metric=legacy_current_v0_metric_from_request(request_row),
         verified_lossless_proof=proof,
         audio_corrupt=any(not file.decode_ok for file in files),
@@ -785,7 +773,6 @@ def persist_candidate_evidence_from_import_result(
     import_result: ImportResult | None,
     download_log_id: int | None = None,
     import_job_id: int | None = None,
-    target_format: str | None = None,
     files: list[AlbumQualityEvidenceFile] | None = None,
     measurement: "PreimportMeasurement | None" = None,
 ) -> EvidenceBuildResult:
@@ -807,7 +794,6 @@ def persist_candidate_evidence_from_import_result(
         mb_release_id=mb_release_id,
         source_path=source_path,
         import_result=import_result,
-        target_format=target_format,
         files=files,
         measurement=measurement,
     )
@@ -918,10 +904,12 @@ def propagate_candidate_evidence_to_current(
       describe lossy audio that has no comparable role in subsequent
       candidate comparisons; storing them on the library row provides
       no decision value and would mislead future triage.
-    * Propagated in ALL cases (unchanged): ``verified_lossless``,
-      ``verified_lossless_proof``, ``was_converted_from``. Verified
-      lineage survives transcode by definition; a V0 transcoded from a
-      verified-lossless FLAC is still verified-lossless by lineage.
+    * Propagated in ALL cases: ``verified_lossless`` and
+      ``verified_lossless_proof``. Output ``was_converted_from`` is derived
+      from the candidate source codec for v3 evidence, with the historical
+      measurement field retained only as a legacy fallback. Verified lineage
+      survives transcode by definition; a V0 transcoded from a verified-
+      lossless FLAC is still verified-lossless by lineage.
     """
 
     album_path = getattr(album_info, "album_path", "")
@@ -965,6 +953,17 @@ def propagate_candidate_evidence_to_current(
     strip_source_fields = is_transcode and not source_is_lossless
 
     candidate_measurement = candidate_evidence.measurement
+    measured_source_format = (
+        candidate_measurement.format or source_codec or ""
+    ).strip().lower()
+    output_source_format = (
+        (measured_source_format if is_transcode else None)
+        if candidate_evidence.lineage_version == 3
+        else (
+            candidate_measurement.was_converted_from
+            or (measured_source_format if is_transcode else None)
+        )
+    )
     measurement = AudioQualityMeasurement(
         min_bitrate_kbps=getattr(album_info, "min_bitrate_kbps", None),
         avg_bitrate_kbps=getattr(album_info, "avg_bitrate_kbps", None),
@@ -979,7 +978,7 @@ def propagate_candidate_evidence_to_current(
             else candidate_measurement.spectral_bitrate_kbps
         ),
         verified_lossless=candidate_measurement.verified_lossless,
-        was_converted_from=candidate_measurement.was_converted_from,
+        was_converted_from=output_source_format,
     )
 
     library_filetype_band = derive_filetype_band(files)
@@ -996,6 +995,7 @@ def propagate_candidate_evidence_to_current(
         container=library_container_from_files,
         storage_format=measurement.format,
         target_format=None,
+        lineage_version=3,
         v0_metric=None if strip_source_fields else candidate_evidence.v0_metric,
         verified_lossless_proof=candidate_evidence.verified_lossless_proof,
         audio_corrupt=any(not file.decode_ok for file in files),

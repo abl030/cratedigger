@@ -164,10 +164,18 @@ Browser → https://music.ablz.au
   qualified "(from lossy)" — matching the Wrong Matches convention. Probe
   averages and minima stay under that V0 label (`V0 171k avg (min 165k)`);
   a temporary probe minimum must never render as a FLAC/source minimum.
+  New version-3 rows provide `source_measurement`, `target_quality_contract`,
+  `v0_probe`, and `materialized_measurement` directly. Historical v1/v2 rows
+  are marked by `legacy_projection_version`; equality-based lineage inference
+  is confined to that legacy display path.
 - **Wrong Matches evidence provenance** — candidate rows keep the downloaded
   source codec, configured target contract, and temporary V0 probe separate.
   A lossless candidate destined for Opus therefore reads `FLAC → OPUS 128
   contract` beside `V0 ≈ 224 kbps`, never `OPUS 128 avg 224k · min 191k`.
+  New evidence rows (`quality_lineage_version=3`) use only the explicit
+  `target_format`; the old explicit-label fallback is restricted to rows
+  marked `quality_lineage_version=1`. The UI never guesses legacy lineage from
+  a version-3 storage label.
 - **Comparison basis rendering (request 6039)** — rows whose
   `import_result` JSONB carries the persisted `comparison_basis` render the
   decision's own comparison: the verdict line names the deciding metric or

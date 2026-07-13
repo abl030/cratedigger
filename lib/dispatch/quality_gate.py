@@ -44,7 +44,11 @@ def load_quality_gate_state(
     - grade-aware spectral override logic
     """
     from lib.beets_db import BeetsDB
-    from lib.quality import AudioQualityMeasurement, QualityRankConfig
+    from lib.quality import (
+        AudioQualityMeasurement,
+        QualityRankConfig,
+        TargetQualityContract,
+    )
 
     if quality_ranks is None:
         quality_ranks = QualityRankConfig.defaults()
@@ -75,9 +79,17 @@ def load_quality_gate_state(
         spectral_br = raw_br_int
 
     album_format = info.format
+    target_contract = None
     verified_lossless = bool(req.get("verified_lossless")) if req else False
     if req and req.get("final_format"):
-        album_format = str(req["final_format"])
+        target_contract = TargetQualityContract.from_format(
+            str(req["final_format"]),
+            # Bare MP3 is not self-describing. At the post-import gate the
+            # materialized album is the available confirmation of the
+            # projection mode; keep it on the contract instead of borrowing
+            # it implicitly inside rank classification.
+            projected_is_cbr=info.is_cbr,
+        )
 
     current = AudioQualityMeasurement(
         min_bitrate_kbps=min_br_kbps,
@@ -93,6 +105,7 @@ def load_quality_gate_state(
         min_bitrate_kbps=min_br_kbps,
         spectral_bitrate_kbps=spectral_br,
         spectral_grade=spectral_grade,
+        target_contract=target_contract,
     )
 
 
@@ -139,7 +152,11 @@ def _check_quality_gate_core(
             logger.info(f"QUALITY GATE: using current_spectral={spectral_br}kbps "
                         f"(lower than beets min_bitrate={min_br_kbps}kbps, "
                         f"grade={spectral_grade})")
-        decision = quality_gate_decision(current, cfg=quality_ranks)
+        decision = quality_gate_decision(
+            current,
+            cfg=quality_ranks,
+            target_contract=state.target_contract,
+        )
 
         spectral_note = f" (spectral={spectral_br}kbps)" if spectral_br else ""
 
@@ -157,7 +174,11 @@ def _check_quality_gate_core(
             usernames = extract_usernames(files)
             gate_br = compute_effective_override_bitrate(
                 min_br_kbps, spectral_br, spectral_grade) or min_br_kbps
-            actual_rank = gate_rank(current, quality_ranks)
+            actual_rank = gate_rank(
+                current,
+                quality_ranks,
+                target_contract=state.target_contract,
+            )
             gate_min = quality_ranks.gate_min_rank
             br_note = (f"spectral {spectral_br}kbps (beets {min_br_kbps}kbps)"
                        if spectral_br and spectral_br < min_br_kbps

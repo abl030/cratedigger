@@ -133,12 +133,20 @@ class ClassifiedEntry(msgspec.Struct):
     wrong_match_triage_stage_chain: list[str] = msgspec.field(default_factory=list)
     wrong_match_triage_detail: Optional[str] = None
     # The on-disk codec at download time, from import_result JSONB
-    # (existing_measurement.format). Rank-driven upgrades at equal
+    # (current_measurement.format). Rank-driven upgrades at equal
     # bitrate are unreadable without it (issue #575: AAC 256 replacing
     # unverified MP3 256 rendered as "256kbps (was 256kbps)").
     existing_format: Optional[str] = None
+    # v3 lineage facts. Historical v1/v2 rows leave source_* unset because
+    # their projected source measurement can be a target-labelled V0 proxy.
+    source_format: Optional[str] = None
+    source_min_bitrate: Optional[int] = None
+    source_avg_bitrate: Optional[int] = None
+    source_median_bitrate: Optional[int] = None
+    target_contract_format: Optional[str] = None
+    legacy_projection_version: Optional[int] = None
     # Post-conversion files measured from Beets postflight. These are distinct
-    # from new_measurement (decision input / possible V0 proxy).
+    # from source_measurement (downloaded-source decision input).
     materialized_format: Optional[str] = None
     materialized_min_bitrate: Optional[int] = None
     materialized_avg_bitrate: Optional[int] = None
@@ -289,6 +297,7 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
     downloaded_label = _build_downloaded_label(entry)
     existing_format = _extract_existing_format(entry)
     materialized = _extract_materialized_measurement(entry)
+    lineage = _extract_quality_lineage(entry)
     disambig_reason, disambig_detail = _extract_disambiguation_failure(entry)
     bad_extensions = _extract_bad_extensions(entry)
     triage = _extract_wrong_match_triage(entry)
@@ -312,6 +321,12 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         wrong_match_triage_stage_chain=triage["stage_chain"],
         wrong_match_triage_detail=triage["detail"],
         existing_format=existing_format,
+        source_format=lineage[0],
+        source_min_bitrate=lineage[1],
+        source_avg_bitrate=lineage[2],
+        source_median_bitrate=lineage[3],
+        target_contract_format=lineage[4],
+        legacy_projection_version=lineage[5],
         materialized_format=materialized[0],
         materialized_min_bitrate=materialized[1],
         materialized_avg_bitrate=materialized[2],
@@ -324,6 +339,39 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         spectral_error=spectral[5],
         existing_spectral_attempted=spectral[6],
         existing_spectral_error=spectral[7],
+    )
+
+
+def _extract_quality_lineage(
+    entry: LogEntry,
+) -> tuple[
+    str | None,
+    int | None,
+    int | None,
+    int | None,
+    str | None,
+    int | None,
+]:
+    """Expose v3 source/contract facts without projecting historical proxies."""
+
+    ir = _parse_import_result(entry)
+    if ir is None:
+        return None, None, None, None, None, None
+    target = (
+        ir.target_quality_contract.format
+        if ir.target_quality_contract is not None
+        else None
+    )
+    if ir.legacy_projection_version is not None:
+        return None, None, None, None, target, ir.legacy_projection_version
+    source = ir.source_measurement
+    return (
+        source.format if source is not None else None,
+        source.min_bitrate_kbps if source is not None else None,
+        source.avg_bitrate_kbps if source is not None else None,
+        source.median_bitrate_kbps if source is not None else None,
+        target,
+        None,
     )
 
 
@@ -364,12 +412,12 @@ def _extract_attempt_spectral(
 
 def _extract_existing_format(entry: LogEntry) -> Optional[str]:
     """The on-disk codec at download time, from
-    ``import_result.existing_measurement.format``. None when the blob is
+    ``import_result.current_measurement.format``. None when the blob is
     missing/legacy — renderers fall back to the bare bitrate suffix."""
     ir = _parse_import_result(entry)
-    if ir is None or ir.existing_measurement is None:
+    if ir is None or ir.current_measurement is None:
         return None
-    return ir.existing_measurement.format
+    return ir.current_measurement.format
 
 
 def _extract_materialized_measurement(
@@ -703,7 +751,7 @@ def _parse_import_result(entry: LogEntry) -> ImportResult | None:
         elif isinstance(raw, str):
             return ImportResult.from_json(raw)
         return None
-    except (json.JSONDecodeError, TypeError, KeyError,
+    except (json.JSONDecodeError, TypeError, KeyError, ValueError,
             msgspec.ValidationError):
         return None
 
@@ -825,7 +873,7 @@ def _downloaded_min_bitrate_kbps(entry: LogEntry) -> int | None:
         1. ``entry.actual_min_bitrate`` — denormalized column, populated by
            ``_populate_dl_info_from_import_result`` on the auto-import path
            since the ``actual_min_bitrate`` fix.
-        2. ``ir.new_measurement.min_bitrate_kbps`` — authoritative JSONB,
+        2. ``ir.source_measurement.min_bitrate_kbps`` — authoritative JSONB,
            present on every row. Fixes historical rows (pre-column-fix)
            retroactively without a backfill migration.
         3. ``entry.bitrate`` (bps) — legacy container bitrate, last resort.
@@ -838,9 +886,9 @@ def _downloaded_min_bitrate_kbps(entry: LogEntry) -> int | None:
     if entry.actual_min_bitrate:
         return entry.actual_min_bitrate
     ir = _parse_import_result(entry)
-    if ir is not None and ir.new_measurement is not None:
-        if ir.new_measurement.min_bitrate_kbps is not None:
-            return ir.new_measurement.min_bitrate_kbps
+    if ir is not None and ir.source_measurement is not None:
+        if ir.source_measurement.min_bitrate_kbps is not None:
+            return ir.source_measurement.min_bitrate_kbps
     if entry.bitrate:
         return entry.bitrate // 1000
     return None
@@ -906,8 +954,14 @@ def _probe_values(entry: LogEntry) -> tuple[int | None, int | None, str | None]:
             existing_avg = ir.existing_v0_probe.avg_bitrate_kbps
         if not final_format:
             final_format = ir.final_format
-        if not final_format and ir.new_measurement is not None:
-            final_format = ir.new_measurement.format
+        if not final_format and ir.target_quality_contract is not None:
+            final_format = ir.target_quality_contract.format
+        if (
+            not final_format
+            and ir.legacy_projection_version is not None
+            and ir.source_measurement is not None
+        ):
+            final_format = ir.source_measurement.format
     return candidate_avg, existing_avg, final_format
 
 

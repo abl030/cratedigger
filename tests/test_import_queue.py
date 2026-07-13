@@ -123,12 +123,12 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
                     min_bitrate_kbps=245,
                     avg_bitrate_kbps=256,
                     median_bitrate_kbps=252,
-                    format="MP3 V0",
+                    format="MP3",
                     spectral_grade="genuine",
                 ),
                 codec="mp3",
                 container="mp3",
-                storage_format="mp3 v0",
+                storage_format="MP3",
             )
             cfg = CratediggerConfig(
                 beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
@@ -198,12 +198,12 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
                     min_bitrate_kbps=245,
                     avg_bitrate_kbps=256,
                     median_bitrate_kbps=252,
-                    format="MP3 V0",
+                    format="MP3",
                     spectral_grade="genuine",
                 ),
                 codec="mp3",
                 container="mp3",
-                storage_format="mp3 v0",
+                storage_format="MP3",
             )
             with open(track, "ab") as handle:
                 handle.write(b" changed")
@@ -492,7 +492,7 @@ class TestImporterWorker(unittest.TestCase):
 
         preview_ir = ImportResult(
             decision="import",
-            new_measurement=AudioQualityMeasurement(min_bitrate_kbps=245),
+            source_measurement=AudioQualityMeasurement(min_bitrate_kbps=245),
         )
         db = FakePipelineDB()
         job = db.enqueue_import_job(
@@ -530,7 +530,7 @@ class TestImporterWorker(unittest.TestCase):
         preview_ir = ImportResult(
             decision="import",
             already_in_beets=False,
-            new_measurement=AudioQualityMeasurement(min_bitrate_kbps=141),
+            source_measurement=AudioQualityMeasurement(min_bitrate_kbps=141),
         )
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1477,12 +1477,12 @@ class TestImportPreviewWorker(unittest.TestCase):
                 min_bitrate_kbps=245,
                 avg_bitrate_kbps=256,
                 median_bitrate_kbps=252,
-                format="MP3 V0",
+                format="MP3",
                 spectral_grade="genuine",
             ),
             codec="mp3",
             container="mp3",
-            storage_format="mp3 v0",
+            storage_format="MP3",
         )
 
     def test_force_job_preview_would_import_marks_importable(self):
@@ -2105,12 +2105,12 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 min_bitrate_kbps=245,
                 avg_bitrate_kbps=256,
                 median_bitrate_kbps=252,
-                format="MP3 V0",
+                format="MP3",
                 spectral_grade="genuine",
             ),
             codec="mp3",
             container="mp3",
-            storage_format="mp3 v0",
+            storage_format="MP3",
         )
 
     def _seed_evidence_for_download_log(
@@ -2127,12 +2127,12 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 min_bitrate_kbps=245,
                 avg_bitrate_kbps=256,
                 median_bitrate_kbps=252,
-                format="MP3 V0",
+                format="MP3",
                 spectral_grade="genuine",
             ),
             codec="mp3",
             container="mp3",
-            storage_format="mp3 v0",
+            storage_format="MP3",
         )
 
     def test_force_job_valid_evidence_skips_measurement(self):
