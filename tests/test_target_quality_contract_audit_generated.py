@@ -64,6 +64,28 @@ class TestTargetQualityContractProductionAudit(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertEqual(violations[0].relative_path, "lib/planted.py")
 
+    def test_checker_trips_on_function_local_direct_import_omission(self):
+        source = (
+            "def build():\n"
+            "    from lib.quality import TargetQualityContract\n"
+            "    return TargetQualityContract.from_format('MP3')\n"
+        )
+
+        violations = target_contract_call_violations("web/local_direct.py", source)
+
+        self.assertEqual(len(violations), 1)
+
+    def test_checker_trips_on_function_local_alias_import_omission(self):
+        source = (
+            "def build():\n"
+            "    from lib.quality import TargetQualityContract as Contract\n"
+            "    return Contract.from_format('MP3')\n"
+        )
+
+        violations = target_contract_call_violations("scripts/local_alias.py", source)
+
+        self.assertEqual(len(violations), 1)
+
     def test_unrelated_same_named_class_is_not_a_target_contract(self):
         source = (
             "class TargetQualityContract:\n"
@@ -100,12 +122,44 @@ class TestTargetQualityContractProductionAudit(unittest.TestCase):
 
         self.assertEqual(len(violations), 1)
 
+    def test_local_target_alias_does_not_leak_into_a_sibling_scope(self):
+        source = (
+            "def target_scope():\n"
+            "    from lib.quality import TargetQualityContract as Contract\n"
+            "    return Contract.from_format('mp3 v0')\n"
+            "def unrelated_scope():\n"
+            "    class Contract:\n"
+            "        from_format = staticmethod(lambda label: label)\n"
+            "    return Contract.from_format('MP3')\n"
+        )
+
+        self.assertEqual(
+            target_contract_call_violations("web/sibling_scopes.py", source),
+            (),
+        )
+
+    def test_local_unrelated_import_shadows_real_module_binding(self):
+        source = (
+            "from lib.quality import TargetQualityContract\n"
+            "def unrelated_scope():\n"
+            "    from other.quality import TargetQualityContract\n"
+            "    return TargetQualityContract.from_format('MP3')\n"
+        )
+
+        self.assertEqual(
+            target_contract_call_violations("web/shadowed_scope.py", source),
+            (),
+        )
+
 
 class TestTargetQualityContractAuditGenerated(unittest.TestCase):
     @given(
         label=st.sampled_from(("MP3", " mp3 ", "Mp3", "flac", "mp3 v0", "opus 128")),
         mode=st.one_of(st.none(), st.booleans()),
         supplies_mode=st.booleans(),
+        scope=st.sampled_from(
+            ("module", "function", "nested_function", "class")
+        ),
         binding=st.sampled_from(
             (
                 "direct",
@@ -118,13 +172,26 @@ class TestTargetQualityContractAuditGenerated(unittest.TestCase):
             )
         ),
     )
-    @example(label="MP3", mode=None, supplies_mode=False, binding="direct")
-    @example(label=" mp3 ", mode=True, supplies_mode=True, binding="alias")
+    @example(
+        label="MP3",
+        mode=None,
+        supplies_mode=False,
+        scope="function",
+        binding="direct",
+    )
+    @example(
+        label=" mp3 ",
+        mode=True,
+        supplies_mode=True,
+        scope="function",
+        binding="alias",
+    )
     def test_audit_rejects_exactly_possible_bare_mp3_omissions(
         self,
         label: str,
         mode: bool | None,
         supplies_mode: bool,
+        scope: str,
         binding: str,
     ) -> None:
         if binding == "direct":
@@ -162,10 +229,21 @@ class TestTargetQualityContractAuditGenerated(unittest.TestCase):
         mode_argument = (
             f", projected_is_cbr={mode!r}" if supplies_mode else ""
         )
-        source = (
-            imports
-            + f"contract = {owner}.from_format({label!r}{mode_argument})\n"
-        )
+        call = f"contract = {owner}.from_format({label!r}{mode_argument})\n"
+        if scope == "function":
+            source = "def build():\n" + "".join(
+                f"    {line}\n" for line in (imports + call).splitlines()
+            )
+        elif scope == "nested_function":
+            source = "def outer():\n    def build():\n" + "".join(
+                f"        {line}\n" for line in (imports + call).splitlines()
+            )
+        elif scope == "class":
+            source = "class Builder:\n" + "".join(
+                f"    {line}\n" for line in (imports + call).splitlines()
+            )
+        else:
+            source = imports + call
 
         violations = target_contract_call_violations(relative_path, source)
 
