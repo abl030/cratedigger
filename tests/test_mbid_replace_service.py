@@ -245,8 +245,8 @@ class _ServiceCase(unittest.TestCase):
         )
 
     def _patch_externals(self):
-        """Patch the five external edges (beets removal, wrong-match
-        cleanup, and the three rescan notifiers) and register cleanup via
+        """Patch the four external edges (beets removal, wrong-match
+        cleanup, and the two rescan notifiers) and register cleanup via
         ``self.addCleanup``. Returns the patched mocks as a list so tests
         can assert on them. Scoped per-test — unlike ``patch.stopall``
         which would stop EVERY active patch in the process."""
@@ -263,7 +263,6 @@ class _ServiceCase(unittest.TestCase):
                 "lib.mbid_replace_service.delete_wrong_match_group",
                 MagicMock(side_effect=_empty_wrong_match_summary),
             ),
-            patch("lib.mbid_replace_service.trigger_meelo_scan", MagicMock()),
             patch("lib.mbid_replace_service.trigger_plex_scan", MagicMock()),
             patch(
                 "lib.mbid_replace_service.trigger_jellyfin_scan",
@@ -739,8 +738,6 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         ) as mock_remove, patch(
             "lib.mbid_replace_service.delete_wrong_match_group",
             side_effect=_empty_wrong_match_summary,
-        ), patch(
-            "lib.mbid_replace_service.trigger_meelo_scan"
         ), patch(
             "lib.mbid_replace_service.trigger_plex_scan"
         ) as mock_plex, patch(
@@ -1249,8 +1246,6 @@ class TestReplaceWarnings(_ServiceCase):
             "lib.mbid_replace_service.delete_wrong_match_group",
             side_effect=_empty_wrong_match_summary,
         ), patch(
-            "lib.mbid_replace_service.trigger_meelo_scan"
-        ), patch(
             "lib.mbid_replace_service.trigger_plex_scan"
         ), patch(
             "lib.mbid_replace_service.trigger_jellyfin_scan"
@@ -1272,8 +1267,6 @@ class TestReplaceWarnings(_ServiceCase):
             "lib.mbid_replace_service.delete_wrong_match_group",
             side_effect=RuntimeError("wm crashed"),
         ), patch(
-            "lib.mbid_replace_service.trigger_meelo_scan"
-        ), patch(
             "lib.mbid_replace_service.trigger_plex_scan"
         ), patch(
             "lib.mbid_replace_service.trigger_jellyfin_scan"
@@ -1294,8 +1287,6 @@ class TestReplaceWarnings(_ServiceCase):
         with patch(
             "lib.mbid_replace_service.delete_wrong_match_group",
             side_effect=_empty_wrong_match_summary,
-        ), patch(
-            "lib.mbid_replace_service.trigger_meelo_scan"
         ), patch(
             "lib.mbid_replace_service.trigger_plex_scan"
         ), patch(
@@ -1341,8 +1332,6 @@ class TestReplaceWarnings(_ServiceCase):
         ), patch(
             "lib.mbid_replace_service.delete_wrong_match_group",
             side_effect=_empty_wrong_match_summary,
-        ), patch(
-            "lib.mbid_replace_service.trigger_meelo_scan"
         ), patch(
             "lib.mbid_replace_service.trigger_plex_scan"
         ), patch(
@@ -1396,8 +1385,6 @@ class TestReplaceWarnings(_ServiceCase):
             "lib.mbid_replace_service.delete_wrong_match_group",
             side_effect=_empty_wrong_match_summary,
         ), patch(
-            "lib.mbid_replace_service.trigger_meelo_scan"
-        ), patch(
             "lib.mbid_replace_service.trigger_plex_scan"
         ), patch(
             "lib.mbid_replace_service.trigger_jellyfin_scan"
@@ -1424,14 +1411,14 @@ class TestReplaceCallOrder(_ServiceCase):
 
     - supersede MUST land before any fs helper (otherwise we'd be
       cleaning up filesystem state for a still-live request).
-    - Rescan helpers MUST run AFTER fs cleanup (so Meelo / Plex see
+    - Rescan helpers MUST run AFTER fs cleanup (so Plex sees
       the deleted folder, not the pre-cleanup view).
     - slskd.transfers.cancel_download MUST never be called (R23 —
       Replace intentionally never touches in-flight transfers).
     """
 
     def test_rescans_run_after_advisory_lock_release(self):
-        """Phase 5 (search plan + Meelo/Plex/Jellyfin rescans) must run
+        """Phase 5 (search plan + Plex/Jellyfin rescans) must run
         AFTER the IMPORT advisory lock is released. Holding the lock
         across ~10s rescan timeouts is wasted contention — the new
         request's ``active_plan_id`` is NULL until SearchPlanService
@@ -1474,13 +1461,6 @@ class TestReplaceCallOrder(_ServiceCase):
             assert_released_search_plan
         )
 
-        def assert_released_meelo(*args, **kwargs):
-            manager.trigger_meelo_scan(*args, **kwargs)
-            assert lock_released["flag"], (
-                "Meelo rescan ran while the IMPORT advisory lock was "
-                "still held"
-            )
-
         def assert_released_plex(*args, **kwargs):
             manager.trigger_plex_scan(*args, **kwargs)
             assert lock_released["flag"], (
@@ -1500,9 +1480,6 @@ class TestReplaceCallOrder(_ServiceCase):
         ), patch(
             "lib.mbid_replace_service.delete_wrong_match_group",
             side_effect=_empty_wrong_match_summary,
-        ), patch(
-            "lib.mbid_replace_service.trigger_meelo_scan",
-            side_effect=assert_released_meelo,
         ), patch(
             "lib.mbid_replace_service.trigger_plex_scan",
             side_effect=assert_released_plex,
@@ -1524,7 +1501,6 @@ class TestReplaceCallOrder(_ServiceCase):
         lock_exit_idx = call_names.index("advisory_lock_exit")
         for helper_name in (
             "search_plan",
-            "trigger_meelo_scan",
             "trigger_plex_scan",
             "trigger_jellyfin_scan",
         ):
@@ -1560,15 +1536,12 @@ class TestReplaceCallOrder(_ServiceCase):
             "lib.mbid_replace_service.delete_wrong_match_group",
             side_effect=_empty_wrong_match_summary,
         ) as mock_wm_delete, patch(
-            "lib.mbid_replace_service.trigger_meelo_scan",
-        ) as mock_meelo, patch(
             "lib.mbid_replace_service.trigger_plex_scan",
         ) as mock_plex, patch(
             "lib.mbid_replace_service.trigger_jellyfin_scan",
         ) as mock_jelly:
             manager.attach_mock(mock_remove, "remove_and_reset_release")
             manager.attach_mock(mock_wm_delete, "delete_wrong_match_group")
-            manager.attach_mock(mock_meelo, "trigger_meelo_scan")
             manager.attach_mock(mock_plex, "trigger_plex_scan")
             manager.attach_mock(mock_jelly, "trigger_jellyfin_scan")
 
@@ -1585,7 +1558,6 @@ class TestReplaceCallOrder(_ServiceCase):
         # Filesystem cleanup helpers must precede every rescan helper.
         first_rescan_idx = min(
             call_names.index(name) for name in (
-                "trigger_meelo_scan",
                 "trigger_plex_scan",
                 "trigger_jellyfin_scan",
             )

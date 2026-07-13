@@ -734,13 +734,13 @@ class RecordingQualityGate:
 def patch_dispatch_externals():
     """Patch external edges shared by all dispatch_import_core tests.
 
-    Patches: sp.run, _cleanup_staged_dir, trigger_meelo_scan,
-    trigger_plex_scan, trigger_jellyfin_scan, cleanup_disambiguation_orphans.
+    Patches: sp.run, _cleanup_staged_dir, trigger_plex_scan,
+    trigger_jellyfin_scan, cleanup_disambiguation_orphans.
 
     Does NOT patch parse_import_result, _check_quality_gate_core,
     BeetsDB, or read_runtime_config — callers nest those as needed.
 
-    Yields a SimpleNamespace with attributes: run, cleanup, meelo, plex, jellyfin, orphans.
+    Yields a SimpleNamespace with attributes: run, cleanup, plex, jellyfin, orphans.
     run is pre-configured with returncode=0, stdout="", stderr="".
 
     ``_cleanup_staged_dir`` has two call sites after the #139 split
@@ -753,12 +753,11 @@ def patch_dispatch_externals():
     with patch("lib.dispatch.subprocess_runner.sp.run") as run, \
          patch("lib.dispatch.core._cleanup_staged_dir", cleanup), \
          patch("lib.dispatch.outcome_actions._cleanup_staged_dir", cleanup), \
-         patch("lib.util.trigger_meelo_scan") as meelo, \
          patch("lib.util.trigger_plex_scan") as plex, \
          patch("lib.util.trigger_jellyfin_scan") as jellyfin, \
          patch("lib.dispatch.core.cleanup_disambiguation_orphans",
                return_value=[]) as orphans:
         run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         yield types.SimpleNamespace(
-            run=run, cleanup=cleanup, meelo=meelo, plex=plex,
+            run=run, cleanup=cleanup, plex=plex,
             jellyfin=jellyfin, orphans=orphans)

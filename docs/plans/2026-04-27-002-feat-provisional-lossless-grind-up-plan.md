@@ -510,7 +510,7 @@ AE2, and AE3.
   denylists the source, and does not update current source-probe state.
 - Error path: missing source username on a provisional rejection/import logs
   the missing denylist source without failing the history write.
-- Integration: a provisional import triggers Meelo/Plex/Jellyfin notifier paths
+- Integration: a provisional import triggers Plex/Jellyfin notifier paths
   like normal imports, but does not run a verified-lossless completion path.
 - Regression: `genuine` or `marginal` lossless candidates still mark verified
   and complete through the existing path.

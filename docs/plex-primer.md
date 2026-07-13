@@ -2,15 +2,14 @@
 
 ## What Plex Is
 
-Plex Media Server is a self-hosted media catalogue used here as **one of
-several** music browsers — alongside Meelo. Cratedigger triggers a Plex
+Plex Media Server is a self-hosted media catalogue used here alongside
+Jellyfin. Cratedigger triggers a Plex
 library scan after every successful import so newly-imported albums show
 up without waiting for Plex's scheduled scan.
 
 Upstream: https://www.plex.tv/
 
-In this homelab Plex is **less integrated than Meelo** — we don't drive
-its DB or settings from Nix; the container is configured manually on
+In this homelab we don't drive Plex's DB or settings from Nix; the container is configured manually on
 Unraid and we only talk to its HTTP API.
 
 ## Where Plex Runs
@@ -341,4 +340,3 @@ Walk this checklist top to bottom:
 | Plex API (unofficial) | https://www.plexopedia.com/plex-media-server/api/ |
 | Library refresh endpoint | https://www.plexopedia.com/plex-media-server/api/library/refresh/ |
 | Path-map silent-failure lesson | docs/solutions/runtime-errors/plex-partial-scan-silent-200.md |
-| Meelo primer (sister doc) | docs/meelo-primer.md |

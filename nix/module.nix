@@ -397,11 +397,6 @@
     redis_connect_timeout_ms = ${toString cfg.peerCache.redisConnectTimeoutMs}
     redis_operation_timeout_ms = ${toString cfg.peerCache.redisOperationTimeoutMs}
 
-    [Meelo]
-    url = ${cfg.notifiers.meelo.url}
-    username_file = ${toString cfg.notifiers.meelo.usernameFile}
-    password_file = ${toString cfg.notifiers.meelo.passwordFile}
-
     [Plex]
     url = ${cfg.notifiers.plex.url}
     token_file = ${toString cfg.notifiers.plex.tokenFile}
@@ -879,8 +874,8 @@ in {
             type = types.int;
             default = 300;
             description = ''
-              fetchart minwidth. Load-bearing: art under ~2KB renders as
-              black boxes in Meelo — 300px is the observed floor.
+              fetchart minwidth. Reject unusably small embedded artwork;
+              300px is the collection's established quality floor.
             '';
           };
         };
@@ -1033,22 +1028,6 @@ in {
     # by that user too, otherwise notifier scans silently no-op after
     # CLI-triggered imports (the import itself still succeeds).
     notifiers = {
-      meelo = {
-        enable = mkEnableOption "Meelo post-import scanner notifier";
-        url = mkOption {
-          type = types.str;
-          default = "";
-          example = "https://meelo.example.com";
-        };
-        usernameFile = mkOption {
-          type = types.nullOr types.path;
-          default = null;
-        };
-        passwordFile = mkOption {
-          type = types.nullOr types.path;
-          default = null;
-        };
-      };
       plex = {
         enable = mkEnableOption "Plex post-import scanner notifier";
         url = mkOption {
@@ -1329,10 +1308,6 @@ in {
       {
         assertion = cfg.discogs.apiBase == null || lib.hasPrefix "http://" cfg.discogs.apiBase || lib.hasPrefix "https://" cfg.discogs.apiBase;
         message = "services.cratedigger.discogs.apiBase must be an origin URL (scheme://host[:port]) when set, e.g. https://discogs.ablz.au.";
-      }
-      {
-        assertion = !cfg.notifiers.meelo.enable || (cfg.notifiers.meelo.usernameFile != null && cfg.notifiers.meelo.passwordFile != null && cfg.notifiers.meelo.url != "");
-        message = "services.cratedigger.notifiers.meelo: enable requires url, usernameFile, and passwordFile";
       }
       {
         assertion = !cfg.notifiers.plex.enable || (cfg.notifiers.plex.tokenFile != null && cfg.notifiers.plex.url != "");

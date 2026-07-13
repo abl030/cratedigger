@@ -2,7 +2,7 @@
 
 ## What It Is
 
-A single-page web app for browsing MusicBrainz and adding album releases to the Cratedigger pipeline. Replaces Lidarr as the album picker. Served at `https://music.ablz.au`.
+A single-page web app for browsing MusicBrainz and adding album releases to the Cratedigger pipeline. It is the operator's album picker and is served at `https://music.ablz.au`.
 
 ## Architecture
 

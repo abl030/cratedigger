@@ -60,7 +60,6 @@ def _make_ctx(cfg=None, slskd=None, pipeline_db_source=None):
         cfg.slskd_host_url = "http://localhost:5030"
         cfg.slskd_url_base = "/"
         cfg.pipeline_db_enabled = True
-        cfg.meelo_url = None
     if slskd is None:
         slskd = FakeSlskdAPI()
     if pipeline_db_source is None:

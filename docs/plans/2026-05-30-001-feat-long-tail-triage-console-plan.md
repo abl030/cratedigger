@@ -558,7 +558,7 @@ Carried from origin (`docs/brainstorms/2026-05-30-long-tail-triage-console-requi
   on explicit Refresh or after a Replace removes a row.
 - **Route-contract audit gate.** The new read must be added to `TestRouteContractAudit.CLASSIFIED_ROUTES`
   with a description or the suite fails (U1).
-- **No pipeline/importer/beets changes.** The view consumes existing read + action endpoints; Meelo / Plex /
+- **No pipeline/importer/beets changes.** The view consumes existing read + action endpoints; Plex /
   the importer are unaffected. `album_requests.status` is never written by this work.
 - **CLI ⇄ API symmetry.** Only the new worklist read adds a surface; it ships with a `pipeline-cli`
   counterpart (R16). The three mutating actions keep their single existing service path.

@@ -458,64 +458,9 @@ def beets_validate(harness_path: str, album_path: str, mb_release_id: str,
     return _bv(harness_path, album_path, mb_release_id, distance_threshold)
 
 
-# === Meelo integration ===
+# === Media server integrations ===
 
 import urllib.request
-
-
-def _meelo_jwt_login(url: str, username: str, password: str) -> str:
-    """Authenticate with Meelo and return a JWT token."""
-    login_data = json.dumps({"username": username, "password": password}).encode()
-    login_req = urllib.request.Request(
-        f"{url}/api/auth/login",
-        data=login_data,
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(login_req, timeout=10) as resp:
-        return json.loads(resp.read())["access_token"]
-
-
-def _meelo_scanner_post(url: str, jwt: str, path: str) -> None:
-    """POST to a Meelo scanner endpoint with JWT auth."""
-    req = urllib.request.Request(
-        f"{url}{path}",
-        method="POST",
-        headers={"Authorization": f"Bearer {jwt}"},
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        resp.read()
-
-
-def trigger_meelo_scan(cfg: CratediggerConfig) -> None:
-    """Trigger a Meelo library scan after import. Best-effort — failures don't block."""
-    if not cfg.meelo_url:
-        return
-    try:
-        username = cfg.resolved_meelo_username()
-        password = cfg.resolved_meelo_password()
-        if not username or not password:
-            return
-        jwt = _meelo_jwt_login(cfg.meelo_url, username, password)
-        _meelo_scanner_post(cfg.meelo_url, jwt, "/scanner/scan?library=beets")
-        logger.info("MEELO: triggered beets library scan")
-    except Exception as e:
-        logger.warning(f"MEELO: scan trigger failed: {e}")
-
-
-def trigger_meelo_clean(cfg: CratediggerConfig) -> None:
-    """Trigger a Meelo library clean to remove orphaned entries. Best-effort."""
-    if not cfg.meelo_url:
-        return
-    try:
-        username = cfg.resolved_meelo_username()
-        password = cfg.resolved_meelo_password()
-        if not username or not password:
-            return
-        jwt = _meelo_jwt_login(cfg.meelo_url, username, password)
-        _meelo_scanner_post(cfg.meelo_url, jwt, "/scanner/clean?library=beets")
-        logger.info("MEELO: triggered beets library clean")
-    except Exception as e:
-        logger.warning(f"MEELO: clean trigger failed: {e}")
 
 
 # === Plex integration ===
@@ -1053,5 +998,4 @@ def setup_logging(config: Any) -> None:
     }
     log_config = config["Logging"] if "Logging" in config else _DEFAULT
     logging.basicConfig(**log_config)  # type: ignore
-
 

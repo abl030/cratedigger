@@ -1313,9 +1313,6 @@ def main():
         pipeline_db_source = DatabaseSource(cfg.pipeline_db_dsn)
         logger.info(f"Pipeline DB: {cfg.pipeline_db_dsn}")
 
-        if cfg.meelo_url:
-            logger.info(f"Meelo post-import scan ENABLED: {cfg.meelo_url}")
-
         slskd = _create_slskd_client(cfg)
 
         # Build context with fresh caches for this cycle
