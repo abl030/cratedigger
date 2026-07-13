@@ -6,13 +6,10 @@ GET/read routes (log, status, recent, all, search, downloading, detail,
 requests-by-rg, active-rgs, import-jobs) stay in ``web/routes/pipeline.py``.
 """
 
-import json
 import logging
 import urllib.error
-from pathlib import Path
 from typing import Literal
 
-import msgspec
 from pydantic import BaseModel, Field, model_validator
 
 from web.routes._pydantic import parse_body
@@ -30,18 +27,15 @@ from lib import transitions
 # new=...)`` at the same module-level scope as ``web.server.db``. See the
 # leaf-seam allowlist in ``tests/_mock_audit_scanner.py``.
 finalize_request = transitions.finalize_request
-from lib.audio_hash import AudioHashError, hash_audio_content
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
     force_import_dedupe_key,
     force_import_payload,
 )
-from lib.pipeline_db import BadAudioHashInput
 from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,
                          resolve_user_requeue_override,
                          should_clear_lossless_search_override)
 from lib.release_identity import detect_release_source, normalize_release_id
-from lib.release_cleanup import remove_and_reset_release
 from lib.util import resolve_failed_path
 from lib.validation_envelope import decode_validation_envelope
 from web import mb as mb_api
@@ -721,203 +715,80 @@ def post_pipeline_set_intent(h, body: dict) -> None:
 
 class PipelineBanSourceRequest(BaseModel):
     request_id: int = Field(gt=0)
-    mb_release_id: str = Field(min_length=1)
-    username: str | None = None
+    confirm: Literal["BAN"]
+    mb_release_id: str | None = None
 
 
 def post_pipeline_ban_source(h, body: dict) -> None:
+    from lib.destructive_release_service import (
+        BanSourceImporterBusy,
+        BanSourceLockContended,
+        BanSourceReleaseMismatch,
+        BanSourceRequest,
+        BanSourceRequestNotFound,
+        BanSourceSuccess,
+        ban_source,
+    )
+
     req_body = parse_body(h, body, PipelineBanSourceRequest)
     if req_body is None:
         return
     s = _server()
-    req_id = req_body.request_id
-    username_in = req_body.username.strip() if req_body.username else ""
-    mb_release_id = normalize_release_id(req_body.mb_release_id)
-
-    if not mb_release_id:
-        # ``normalize_release_id`` can strip whitespace down to None
-        # even when the min_length=1 raw input passed Pydantic.
-        h._error("Missing mb_release_id")
-        return
-
-    db = s._db()
-    request_id_int = int(req_id)
-
-    # E1.3: race-check — never run the bad-rip flow against a release
-    # the importer is actively touching. The importer's beets-mutating
-    # window can overlap with the file paths we're about to hash and
-    # ``beet remove`` here; bail with 409 so the curator retries.
-    active_job = db.get_active_import_job_for_request(request_id_int)
-    if active_job is not None:
-        h._json(
-            {"error": "importer_busy", "retry_after_seconds": 30},
-            status=409,
-        )
-        return
-
-    # Resolve `reported_username` server-side (R3). Body still accepts
-    # an explicit `username` for back-compat with non-UI callers; the
-    # web UI no longer sends it. If neither side resolves a user, the
-    # ban still proceeds (E1.1) — hashes are recorded with NULL and
-    # no denylist row is written.
-    reported_username: str | None = (
-        username_in if username_in
-        else db.get_recent_successful_uploader(request_id_int)
-    )
-
-    reason = "manually banned via web UI"
-
-    # Hash capture MUST happen before ``remove_and_reset_release``
-    # because that call deletes the underlying audio files. R6: a
-    # per-track hash failure must not block the ban — accumulate
-    # those failures and surface them in ``partial_failures``.
-    hash_capture_errors: list[dict[str, object]] = []
-    hashes: list[BadAudioHashInput] = []
     b = s._beets_db()
-    if b:
-        item_paths = b.get_item_paths(mb_release_id)
-    else:
-        item_paths = []
+    if b is None:
+        h._error("Beets DB not available", 503)
+        return
+    result = ban_source(
+        pipeline_db=s._db(),
+        beets_db=b,
+        request=BanSourceRequest(
+            request_id=req_body.request_id,
+            expected_release_id=req_body.mb_release_id,
+        ),
+        finalize_request_fn=finalize_request,
+    )
+    if isinstance(result, BanSourceRequestNotFound):
+        h._error("Request not found", 404)
+        return
+    if isinstance(result, BanSourceReleaseMismatch):
+        h._json({
+            "error": "release_mismatch",
+            "authoritative_release_id": result.authoritative_release_id,
+        }, status=422)
+        return
+    if isinstance(result, BanSourceLockContended):
+        h._json({
+            "error": "destructive_operation_busy",
+            "scope": result.scope,
+        }, status=409)
+        return
+    if isinstance(result, BanSourceImporterBusy):
+        h._json({"error": "importer_busy", "retry_after_seconds": 30}, status=409)
+        return
+    assert isinstance(result, BanSourceSuccess)
 
-    if not item_paths:
-        # E1.2: album not in beets (or release id mismatch). Don't
-        # 404 — the user clicked "bad rip", they want the album gone
-        # regardless. Surface as a hash_capture_error so the toast
-        # explains why no hashes were recorded.
-        hash_capture_errors.append({
-            "track_path": None,
-            "reason": "no_tracks_in_beets",
-        })
-    else:
-        for _item_id, raw_path in item_paths:
-            track_path = Path(raw_path)
-            fmt = track_path.suffix.lstrip(".").lower()
-            try:
-                digest = hash_audio_content(track_path, fmt)
-            except AudioHashError as exc:
-                hash_capture_errors.append({
-                    "track_path": str(track_path),
-                    "reason": str(exc),
-                })
-                continue
-            except Exception as exc:  # pragma: no cover — defensive
-                hash_capture_errors.append({
-                    "track_path": str(track_path),
-                    "reason": f"unexpected error: {exc}",
-                })
-                continue
-            hashes.append(BadAudioHashInput(
-                hash_value=digest,
-                audio_format=fmt,
-            ))
-
-    # Insert hashes BEFORE the denylist + remove so a downstream
-    # failure (e.g. denylist DB error) still leaves the bad-byte
-    # ripple-stop in place. ``add_bad_audio_hashes`` handles
-    # ON CONFLICT (hash, format) DO NOTHING — re-clicks are no-ops.
-    hashes_recorded = 0
-    if hashes:
-        hashes_recorded = db.add_bad_audio_hashes(
-            request_id_int,
-            reported_username,
-            reason,
-            hashes,
-        )
-
-    # Denylist only when we resolved a user (E1.1). When the route
-    # was driven without a uploader-on-record, the bytes are still
-    # protected via ``bad_audio_hashes``; nothing useful to denylist.
-    if reported_username:
-        db.add_denylist(request_id_int, reported_username, reason)
-
-    # Atomic pair (issue #121): if the album is in beets, run
-    # ``beet remove -d`` across every selector the release ID could
-    # live under (UUID → ``mb_albumid`` only; Discogs numeric →
-    # ``discogs_albumid`` AND ``mb_albumid`` so both new-layout and
-    # legacy imports are covered). Once beets no longer holds it
-    # (whether this handler just removed it or a prior ``beet rm``
-    # did), clear the pipeline DB's on-disk quality fields in the
-    # same call so nothing downstream reasons about ghost state.
-    #
-    # Issue #123 PR B: ``remove_and_reset_release`` now returns a
-    # typed result. ``selector_failures`` surfaces per-selector
-    # problems (timeout, non-zero rc, exception) so the ban-source
-    # handler can tell a user the ban succeeded but the remove was
-    # incomplete, rather than silently reporting success after a
-    # denylist-committed / album-still-on-disk split brain.
-    beets_removed = False
-    cleanup_errors: list[dict[str, object]] = []
-    if mb_release_id and b:
-        cleanup = remove_and_reset_release(
-            beets_db=b,
-            pipeline_db=db,
-            release_id=mb_release_id,
-            request_id=request_id_int,
-        )
-        beets_removed = cleanup.beets_removed
-        # ``msgspec.to_builtins`` so future fields on ``SelectorFailure``
-        # (e.g. a timestamp) propagate to the route response without
-        # anyone having to remember to update the literal here (issue
-        # #123 PR B review feedback; ``SelectorFailure`` is a
-        # ``msgspec.Struct`` post-issue #141).
-        cleanup_errors = [msgspec.to_builtins(f)
-                          for f in cleanup.selector_failures]
-
-    req = db.get_request(request_id_int)
-    if req:
-        quality = resolve_user_requeue_override(
-            req.get("search_filetype_override"))
-        min_br = req.get("min_bitrate")
-        ban_fields: dict[str, object] = {
-            "search_filetype_override": quality,
+    cleanup_errors: list[dict[str, object]] = [
+        {
+            "selector": failure.selector,
+            "reason": failure.reason,
+            "detail": failure.detail,
         }
-        if min_br is not None:
-            ban_fields["min_bitrate"] = min_br
-        finalize_request(
-            db,
-            request_id_int,
-            transitions.RequestTransition.to_wanted_fields(
-                from_status=req["status"],
-                fields=ban_fields,
-            ),
-        )
-
+        for failure in result.cleanup_errors
+    ]
+    hash_capture_errors: list[dict[str, object]] = [
+        {"track_path": failure.track_path, "reason": failure.reason}
+        for failure in result.hash_capture_errors
+    ]
     partial_failures: dict[str, list[dict[str, object]]] = {}
     if cleanup_errors:
         partial_failures["cleanup_errors"] = cleanup_errors
     if hash_capture_errors:
         partial_failures["hash_capture_errors"] = hash_capture_errors
-
-    # Record the ban as a download_log event (#188 follow-up). It's just
-    # another event — surfacing it through the same audit channel makes
-    # it appear uniformly on recents, the pipeline tab's "last:" verdict
-    # line, and per-row download history without per-surface plumbing.
-    ban_detail = (
-        f"Marked bad rip; {hashes_recorded} hashes captured"
-        if hashes_recorded > 0
-        else "Marked bad rip (no tracks hashed)"
-    )
-    ban_validation = json.dumps({
-        "scenario": "curator_ban",
-        "hashes_recorded": hashes_recorded,
-        "denylisted_username": reported_username,
-        "reason": reason,
-        "cleanup_errors": cleanup_errors,
-        "hash_capture_errors": hash_capture_errors,
-    })
-    db.log_download(
-        request_id=request_id_int,
-        soulseek_username=reported_username,
-        outcome="curator_ban",
-        beets_detail=ban_detail,
-        validation_result=ban_validation,
-    )
-
     payload: dict[str, object] = {
         "status": "ok",
-        "username": reported_username,
-        "beets_removed": beets_removed,
-        "hashes_recorded": hashes_recorded,
+        "username": result.username,
+        "beets_removed": result.beets_removed,
+        "hashes_recorded": result.hashes_recorded,
     }
     if partial_failures:
         payload["partial_failures"] = partial_failures
@@ -1077,8 +948,8 @@ ROUTES: list[RouteRegistration] = [
     ),
     route(
         "POST", "/api/pipeline/ban-source", post_pipeline_ban_source,
-        "Mark a rip as bad: denylist the uploader, hash + bad-byte "
-        "ripple-stop, and remove from beets.",
+        "Mark a server-resolved rip as bad: denylist, hash + bad-byte "
+        "ripple-stop, and remove from beets. Requires confirm='BAN'.",
         classified=True,
     ),
     route(

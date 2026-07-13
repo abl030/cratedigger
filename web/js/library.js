@@ -253,7 +253,7 @@ export async function banSource(requestId, mbid) {
     const r = await fetch(`${API}/api/pipeline/ban-source`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({request_id: requestId, mb_release_id: mbid}),
+      body: JSON.stringify({request_id: requestId, mb_release_id: mbid, confirm: 'BAN'}),
     });
     if (r.status === 409) {
       toast('Importer is busy with this album — try again in a moment.', true);

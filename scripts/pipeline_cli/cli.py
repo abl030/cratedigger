@@ -12,6 +12,7 @@ import sys
 from lib.pipeline_db import PipelineDB
 
 from scripts.pipeline_cli.beets_distance import cmd_beets_distance
+from scripts.pipeline_cli.destructive import cmd_ban_source, cmd_library_delete
 from scripts.pipeline_cli.imports import (
     cmd_force_import,
     cmd_import_jobs,
@@ -127,6 +128,8 @@ def main():
         "repair-spectral": cmd_repair_spectral,
         "replace": cmd_replace,
         "beets-distance": cmd_beets_distance,
+        "ban-source": cmd_ban_source,
+        "library-delete": cmd_library_delete,
         "youtube-album": cmd_youtube_album,
         "youtube-rescue": cmd_youtube_rescue,
         "long-tail": cmd_long_tail,

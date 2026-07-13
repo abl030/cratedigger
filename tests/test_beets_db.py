@@ -1352,7 +1352,7 @@ class TestGetAlbumIdsByMbids(unittest.TestCase):
 
 
 class TestDeleteAlbum(unittest.TestCase):
-    """Test delete_album — static method for writable deletion."""
+    """Test delete_album on an explicitly opened writable database."""
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -1363,7 +1363,8 @@ class TestDeleteAlbum(unittest.TestCase):
         ], album="Test Album", albumartist="Test Artist")
 
     def test_deletes_and_returns_metadata(self) -> None:
-        album, artist, paths = BeetsDB.delete_album(self.db_path, 1)
+        with BeetsDB(self.db_path) as db:
+            album, artist, paths = db.delete_album(1)
         self.assertEqual(album, "Test Album")
         self.assertEqual(artist, "Test Artist")
         self.assertEqual(len(paths), 2)
@@ -1373,7 +1374,8 @@ class TestDeleteAlbum(unittest.TestCase):
 
     def test_not_found_raises(self) -> None:
         with self.assertRaises(ValueError):
-            BeetsDB.delete_album(self.db_path, 999)
+            with BeetsDB(self.db_path) as db:
+                db.delete_album(999)
 
 
 class TestAlbumRowSource(unittest.TestCase):

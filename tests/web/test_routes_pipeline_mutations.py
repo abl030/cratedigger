@@ -656,14 +656,37 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
 
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_pipeline_ban_source_contract(self, _mock_transition):
-        status, data = self._post(
-            "/api/pipeline/ban-source",
-            {"request_id": 100, "username": "baduser", "mb_release_id": "abc-123"},
-        )
+        import web.server as srv
+        release_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        self.db.seed_request(make_request_row(
+            id=101, status="imported", mb_release_id=release_id,
+        ))
+        old_beets = srv._beets
+        srv._beets = FakeBeetsDB()
+        try:
+            status, data = self._post(
+                "/api/pipeline/ban-source",
+                {"request_id": 101, "confirm": "BAN", "mb_release_id": release_id},
+            )
+        finally:
+            srv._beets = old_beets
 
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.BAN_SOURCE_REQUIRED_FIELDS,
                                 "pipeline ban-source response")
+
+    def test_pipeline_ban_source_requires_confirmation(self):
+        status, data = self._post(
+            "/api/pipeline/ban-source",
+            {
+                "request_id": 100,
+                "confirm": "DELETE",
+                "mb_release_id": "abc-123",
+            },
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("confirm", data["error"])
 
     @patch("web.routes.pipeline_mutations.resolve_failed_path", return_value="/tmp/Test Album")
     def test_pipeline_force_import_contract(self, _mock_resolve):
@@ -1024,7 +1047,7 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         ))
 
         status, _data = self._post("/api/pipeline/ban-source", {
-            "request_id": 1704, "username": "baduser",
+            "request_id": 1704, "confirm": "BAN", "username": "baduser",
             "mb_release_id": self.RELEASE_ID,
         })
 
@@ -1061,7 +1084,7 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         ])
 
         status, _data = self._post("/api/pipeline/ban-source", {
-            "request_id": 1704, "username": "baduser",
+            "request_id": 1704, "confirm": "BAN", "username": "baduser",
             "mb_release_id": self.RELEASE_ID,
         })
 
@@ -1104,7 +1127,7 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         ])
 
         status, data = self._post("/api/pipeline/ban-source", {
-            "request_id": 1704, "username": "baduser",
+            "request_id": 1704, "confirm": "BAN", "username": "baduser",
             "mb_release_id": self.RELEASE_ID,
         })
 
@@ -1149,7 +1172,7 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         ])
 
         status, _data = self._post("/api/pipeline/ban-source", {
-            "request_id": 1704, "username": "baduser",
+            "request_id": 1704, "confirm": "BAN", "username": "baduser",
             "mb_release_id": " 0012856590 ",
         })
 
@@ -1191,7 +1214,7 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         ])
 
         status, _data = self._post("/api/pipeline/ban-source", {
-            "request_id": 1704, "username": "baduser",
+            "request_id": 1704, "confirm": "BAN", "username": "baduser",
             "mb_release_id": self.RELEASE_ID,
         })
 
@@ -1207,12 +1230,10 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         mock_subprocess.assert_not_called()
 
     @patch("web.routes.pipeline_mutations.finalize_request")
-    def test_ban_source_rejects_missing_mb_release_id(self, _mock_transition):
-        """Plan 2026-04-29-005 U4: ``mb_release_id`` is now required so
-        the bad-rip flow can locate the audio files to hash before
-        ``remove_and_reset_release`` deletes them. Without it, there is
-        no album to ban — return 400 rather than silently skip.
-        """
+    def test_ban_source_rejects_request_without_server_release_identity(
+        self, _mock_transition,
+    ):
+        """A request without an exact server identity cannot be destroyed."""
         self.db.seed_request(make_request_row(
             id=1704, status="imported",
             min_bitrate=320,
@@ -1221,12 +1242,12 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         ))
 
         status, data = self._post("/api/pipeline/ban-source", {
-            "request_id": 1704, "username": "baduser",
+            "request_id": 1704, "confirm": "BAN", "username": "baduser",
             # No mb_release_id.
         })
 
-        self.assertEqual(status, 400)
-        self.assertIn("mb_release_id", data.get("error", ""))
+        self.assertEqual(status, 422)
+        self.assertEqual(data.get("error"), "release_mismatch")
         self.assertEqual(self.db.clear_on_disk_quality_fields_calls, [])
         row = self.db.request(1704)
         self.assertEqual(row["current_spectral_grade"], "genuine")
@@ -1265,7 +1286,7 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         self._srv._beets = self._orig_beets
 
     # AE1, AE2 — body-without-username, server resolves uploader, hashes recorded.
-    @patch("web.routes.pipeline_mutations.hash_audio_content")
+    @patch("lib.destructive_release_service.hash_audio_content")
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_resolves_username_and_records_hashes(
             self, _mock_transition, mock_hash):
@@ -1287,7 +1308,7 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
 
         status, data = self._post(
             "/api/pipeline/ban-source",
-            {"request_id": 1704, "mb_release_id": self.RELEASE_ID},
+            {"request_id": 1704, "confirm": "BAN", "mb_release_id": self.RELEASE_ID},
         )
 
         self.assertEqual(status, 200)
@@ -1300,7 +1321,7 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0].request_id, 1704)
         self.assertEqual(rows[0].reported_username, "Hxrco")
-        self.assertEqual(rows[0].reason, "manually banned via web UI")
+        self.assertEqual(rows[0].reason, "manually banned via operator action")
         self.assertEqual(rows[0].hash_value, self.HASH_A)
         self.assertEqual(rows[0].audio_format, "flac")
         self.assertEqual(rows[1].hash_value, self.HASH_B)
@@ -1308,7 +1329,7 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         self.assertEqual(len(self.db.denylist), 1)
         self.assertEqual(self.db.denylist[0].username, "Hxrco")
         self.assertEqual(
-            self.db.denylist[0].reason, "manually banned via web UI")
+            self.db.denylist[0].reason, "manually banned via operator action")
         # #188 follow-up: EXACTLY ONE download_log row records the ban.
         ban_rows = [r for r in self.db.download_logs
                     if r.outcome == "curator_ban"]
@@ -1325,7 +1346,7 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         self.assertEqual(ban_meta["denylisted_username"], "Hxrco")
 
     # AE4 — partial hash failure does not block the ban.
-    @patch("web.routes.pipeline_mutations.hash_audio_content")
+    @patch("lib.destructive_release_service.hash_audio_content")
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_hash_failure_partial_does_not_block_ban(
             self, _mock_transition, mock_hash):
@@ -1350,7 +1371,7 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
 
         status, data = self._post(
             "/api/pipeline/ban-source",
-            {"request_id": 1704, "mb_release_id": self.RELEASE_ID},
+            {"request_id": 1704, "confirm": "BAN", "mb_release_id": self.RELEASE_ID},
         )
 
         self.assertEqual(status, 200)
@@ -1367,7 +1388,7 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         self.assertEqual(len(self.db.bad_audio_hashes), 2)
 
     # E1.1 — no successful uploader on record.
-    @patch("web.routes.pipeline_mutations.hash_audio_content")
+    @patch("lib.destructive_release_service.hash_audio_content")
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_no_uploader_records_hashes_with_null_username(
             self, _mock_transition, mock_hash):
@@ -1383,7 +1404,7 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
 
         status, data = self._post(
             "/api/pipeline/ban-source",
-            {"request_id": 1704, "mb_release_id": self.RELEASE_ID},
+            {"request_id": 1704, "confirm": "BAN", "mb_release_id": self.RELEASE_ID},
         )
 
         self.assertEqual(status, 200)
@@ -1418,7 +1439,7 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
 
         status, data = self._post(
             "/api/pipeline/ban-source",
-            {"request_id": 1704, "mb_release_id": self.RELEASE_ID},
+            {"request_id": 1704, "confirm": "BAN", "mb_release_id": self.RELEASE_ID},
         )
 
         self.assertEqual(status, 200)
@@ -1451,7 +1472,7 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
 
         status, data = self._post(
             "/api/pipeline/ban-source",
-            {"request_id": 1704, "mb_release_id": self.RELEASE_ID,
+            {"request_id": 1704, "confirm": "BAN", "mb_release_id": self.RELEASE_ID,
              "username": "anyone"},
         )
 
@@ -1469,14 +1490,14 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         self.db._import_jobs[0]["status"] = "running"
         status, data = self._post(
             "/api/pipeline/ban-source",
-            {"request_id": 1704, "mb_release_id": self.RELEASE_ID,
+            {"request_id": 1704, "confirm": "BAN", "mb_release_id": self.RELEASE_ID,
              "username": "anyone"},
         )
         self.assertEqual(status, 409)
         self.assertEqual(data["error"], "importer_busy")
 
     # E1.6 — idempotency: second click is a no-op insert.
-    @patch("web.routes.pipeline_mutations.hash_audio_content")
+    @patch("lib.destructive_release_service.hash_audio_content")
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_idempotent_second_click_records_zero_new_hashes(
             self, _mock_transition, mock_hash):
@@ -1502,7 +1523,7 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         # First click inserts the hash for real...
         status, data = self._post(
             "/api/pipeline/ban-source",
-            {"request_id": 1704, "mb_release_id": self.RELEASE_ID},
+            {"request_id": 1704, "confirm": "BAN", "mb_release_id": self.RELEASE_ID},
         )
         self.assertEqual(status, 200)
         self.assertEqual(data["hashes_recorded"], 1)
@@ -1510,7 +1531,7 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         # ...the second click dedupes on (hash, format) and inserts 0.
         status, data = self._post(
             "/api/pipeline/ban-source",
-            {"request_id": 1704, "mb_release_id": self.RELEASE_ID},
+            {"request_id": 1704, "confirm": "BAN", "mb_release_id": self.RELEASE_ID},
         )
 
         self.assertEqual(status, 200)

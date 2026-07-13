@@ -6,6 +6,8 @@ pipeline-cli quality <request_id>            # simulate gate for genuine FLAC / 
 pipeline-cli debug-download <download_log_id>  # raw JSONB audit for one attempt
 pipeline-cli search-plan show <request_id>   # active plan + cursor + per-slot usefulness stats (--json for machine output)
 pipeline-cli triage quarantine --json       # unreferenced immediate failed_imports album folders (read-only)
+pipeline-cli ban-source <request_id> --confirm BAN  # bad-rip removal; optional --release-id is confirmation-only
+pipeline-cli library-delete <album_id> --confirm DELETE --purge-pipeline  # exact beets album delete
 pipeline-cli search-plan regenerate <request_id>  # operator repair path; resets cursor on success, preserves old plan on failure
 pipeline-cli query "SELECT ..."              # ad-hoc read-only SQL (add --json for machine output)
 pipeline-cli query - <<'SQL'                 # multi-line SQL without shell quoting
@@ -44,6 +46,7 @@ Every top-level `pipeline-cli` subcommand, one line each. Run `pipeline-cli rout
 |---|---|
 | `add` | Add a new request by MBID or Discogs ID |
 | `beets-distance` | Real beets-distance between a download_log's audio and an MBID (refuses if MBID is outside the request's release group) |
+| `ban-source` | Mark a request's server-resolved exact release as a bad rip, remove it from beets, and requeue it (requires `--confirm BAN`) |
 | `cancel` | Cancel a request (set to skipped) |
 | `disk-coverage` | Show which active pipeline rows are actually present in beets |
 | `force-import` | Force-import a rejected download by download_log ID |
@@ -51,6 +54,7 @@ Every top-level `pipeline-cli` subcommand, one line each. Run `pipeline-cli rout
 | `import-preview` | Preview whether an import would pass |
 | `list` | List album requests |
 | `long-tail` | Long-tail worklist — wanted cohort pre-banded by on-disk quality (missing / QualityRank / unknown) + in_flight_rescue |
+| `library-delete` | Delete one server-resolved exact beets album; optional pipeline purge (requires `--confirm DELETE`) |
 | `manual-import` | Import a local folder as a pipeline request |
 | `quality` | Show quality state and simulate decisions |
 | `query` | Run a read-only SQL query for debugging |

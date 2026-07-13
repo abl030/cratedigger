@@ -175,6 +175,15 @@ taken by the same session further down the call graph and no other
 call site acquires both locks, in practice there is only one ordering
 to follow and it's the one in the code:
 
+Destructive operator actions follow the same order. Ban-source always has a
+pipeline request and therefore takes IMPORT(request_id) then RELEASE(release
+id). Library-delete derives the exact release from the beets album id; when a
+pipeline row exists it takes IMPORT then RELEASE, and when no pipeline row
+exists it takes RELEASE only. Both services re-read their server-owned
+identity and recheck active import jobs after the locks are acquired, then hold
+the locks across hashing, beets/filesystem deletion, pipeline cleanup and
+audit writes. Contention is a 409 / CLI exit 4 with zero mutation.
+
 ```
 FORCE/MANUAL (dispatch_import_from_db)
   └─ acquire IMPORT(request_id)                                ← outer
@@ -339,6 +348,8 @@ session and returns False — revisit the ordering rules.
 | Auto-import outer | `lib/download_validation.py` | `_handle_valid_result` | RELEASE | `release_id_to_lock_key(album_data.mb_release_id)` |
 | Auto + force/manual inner | `lib/dispatch/core.py` | `dispatch_import_core` | RELEASE | `release_id_to_lock_key(mb_release_id)` |
 | Force/manual outer | `lib/dispatch/entry_points.py` | `dispatch_import_from_db` | IMPORT | `request_id` |
+| Ban-source destructive action | `lib/destructive_release_service.py` | `ban_source` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(server release id)` |
+| Library-delete destructive action | `lib/destructive_release_service.py` | `delete_release_from_library` | IMPORT then RELEASE, or RELEASE only without a pipeline row | server-derived pipeline request id; `release_id_to_lock_key(server release id)` |
 | Replace operator action | `lib/mbid_replace_service.py` | `MbidReplaceService.replace_request_mbid` | IMPORT | `request_id` |
 | Importer worker singleton | `scripts/importer.py` | `main` | IMPORTER | `1` |
 | Import queue dedupe | `lib/pipeline_db/` | `enqueue_import_job` | unique index | `dedupe_key` |

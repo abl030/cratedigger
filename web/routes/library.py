@@ -44,12 +44,14 @@ class BeetsDeleteRequest(BaseModel):
 
 
 def post_beets_delete(h, body: dict) -> None:
-    from lib.library_delete_service import (
+    from lib.destructive_release_service import (
         DeleteBeetsFailure,
-        DeleteBeetsDbUnavailable,
         DeleteAlbumNotFound,
+        DeleteImporterBusy,
+        DeleteLockContended,
         DeletePipelinePurgeFailure,
         DeletePostPurgeBeetsFailure,
+        DeleteReleaseMismatch,
         DeleteRequest,
         DeleteSuccess,
         delete_release_from_library,
@@ -61,13 +63,17 @@ def post_beets_delete(h, body: dict) -> None:
     request = DeleteRequest(
         album_id=req_body.id,
         purge_pipeline=req_body.purge_pipeline,
-        pipeline_id=req_body.pipeline_id,
-        release_id=req_body.release_id,
+        expected_pipeline_id=req_body.pipeline_id,
+        expected_release_id=req_body.release_id or None,
     )
     srv = _server()
+    beets = srv._beets_db()
+    if beets is None:
+        h._error("Beets DB not available", 503)
+        return
     result = delete_release_from_library(
-        beets_db_path=srv.beets_db_path,
         pipeline_db=srv._db(),
+        beets_db=beets,
         request=request,
     )
 
@@ -87,12 +93,33 @@ def post_beets_delete(h, body: dict) -> None:
         h._error("Album not found", 404)
         return
 
-    if isinstance(result, DeleteBeetsDbUnavailable):
-        h._error("Beets DB not available")
+    if isinstance(result, DeleteReleaseMismatch):
+        h._json({
+            "error": "release_mismatch",
+            "authoritative_release_id": result.authoritative_release_id,
+            "authoritative_pipeline_id": result.authoritative_pipeline_id,
+        }, status=422)
+        return
+
+    if isinstance(result, DeleteLockContended):
+        h._json({
+            "error": "destructive_operation_busy",
+            "scope": result.scope,
+        }, status=409)
+        return
+
+    if isinstance(result, DeleteImporterBusy):
+        h._json({
+            "error": "destructive_operation_busy",
+            "pipeline_id": result.pipeline_request_id,
+        }, status=409)
         return
 
     if isinstance(result, DeletePipelinePurgeFailure):
-        h._error("Failed to purge pipeline request", 500)
+        h._json({
+            "error": "pipeline_purge_failed",
+            "pipeline_id": result.pipeline_request_id,
+        }, status=500)
         return
 
     if isinstance(result, DeletePostPurgeBeetsFailure):
@@ -118,8 +145,8 @@ ROUTES: list[RouteRegistration] = [
     ),
     route(
         "POST", "/api/beets/delete", post_beets_delete,
-        "Delete a beets album (DESTRUCTIVE — files removed); optional "
-        "pipeline purge. Requires confirm='DELETE'.",
+        "Delete a server-resolved exact beets album (DESTRUCTIVE — files "
+        "removed); optional pipeline purge. Requires confirm='DELETE'.",
         classified=True,
     ),
 ]
