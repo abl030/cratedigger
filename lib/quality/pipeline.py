@@ -409,14 +409,6 @@ def full_pipeline_decision(
             verified_lossless=will_be_verified,
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate)
-        target_contract = (
-            TargetQualityContract.from_format(
-                stage2_new_format,
-                projected_is_cbr=post_conversion_is_cbr,
-            )
-            if stage2_new_format is not None
-            else None
-        )
         # The audit target names only an output policy that would actually be
         # materialized. The temporary V0 comparison proxy and a rejected
         # transcode are not final targets.
@@ -463,6 +455,14 @@ def full_pipeline_decision(
             if verified_lossless_target:
                 result["target_final_format"] = verified_lossless_target
             return result
+        target_contract = (
+            TargetQualityContract.from_format(
+                stage2_new_format,
+                projected_is_cbr=post_conversion_is_cbr,
+            )
+            if stage2_new_format is not None
+            else None
+        )
         measured = measured_import_decision(
             MeasuredImportDecisionInput(
                 new_m,
@@ -917,7 +917,12 @@ def _evidence_target_is_cbr(
         return candidate.target_is_cbr
     if target_format is None:
         return None
-    return TargetQualityContract.from_format(target_format).is_cbr
+    # No projection exists at this boundary. Explicit labels can resolve
+    # themselves; bare MP3 raises rather than borrowing a source/output mode.
+    return TargetQualityContract.from_format(
+        target_format,
+        projected_is_cbr=None,
+    ).is_cbr
 
 
 def _new_format_hint_from_evidence(

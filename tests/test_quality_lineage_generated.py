@@ -7,6 +7,7 @@ import unittest
 from hypothesis import example, given, strategies as st
 
 from harness.import_one import projected_is_cbr_from_bitrates
+from lib.measurement import PreimportMeasurement
 from lib.quality import (
     AlbumQualityEvidenceFile,
     AudioQualityMeasurement,
@@ -19,7 +20,7 @@ from lib.quality import (
     measured_import_decision,
     quality_gate_decision,
 )
-from lib.quality_evidence import evidence_from_import_result
+from lib.quality_evidence import evidence_from_import_result, evidence_from_measurement
 
 
 def assert_source_target_lineage(result: ImportResult) -> None:
@@ -231,19 +232,10 @@ class TestQualityLineagePins(unittest.TestCase):
         legacy = measured_import_decision(
             MeasuredImportDecisionInput(proxy, current, True), cfg=cfg
         )
-        wrong_bare_mp3 = measured_import_decision(
-            MeasuredImportDecisionInput(
-                source,
-                current,
-                True,
-                TargetQualityContract.from_format("MP3"),
-                None,
-            ),
-            cfg=cfg,
-        )
         self.assertEqual(projected, legacy)
         self.assertEqual(projected.decision, "transcode_upgrade")
-        self.assertEqual(wrong_bare_mp3.decision, "transcode_downgrade")
+        with self.assertRaisesRegex(ValueError, "bare MP3"):
+            TargetQualityContract.from_format("MP3")
 
         pipeline = full_pipeline_decision(
             is_flac=True,
@@ -274,6 +266,13 @@ class TestQualityLineagePins(unittest.TestCase):
                 self.assertEqual(mode, expected)
                 self.assertEqual(contract.is_cbr, expected)
 
+    def test_bare_mp3_requires_mode_after_case_and_whitespace_normalization(self):
+        for label in ("MP3", " mp3 ", "\tMp3\n"):
+            with self.subTest(label=label), self.assertRaisesRegex(
+                ValueError, "bare MP3"
+            ):
+                TargetQualityContract.from_format(label)
+
     def test_numeric_mp3_target_is_explicitly_cbr(self):
         self.assertTrue(TargetQualityContract.from_format("mp3 192").is_cbr)
         self.assertFalse(TargetQualityContract.from_format("mp3 v2").is_cbr)
@@ -301,6 +300,69 @@ class TestQualityLineagePins(unittest.TestCase):
 
 class TestQualityLineageGenerated(unittest.TestCase):
     @given(
+        reject_fact=st.sampled_from(("audio_corrupt", "bad_hash", "nested", "empty")),
+        bitrate=st.integers(min_value=1, max_value=320),
+    )
+    @example(reject_fact="audio_corrupt", bitrate=128)
+    def test_measurement_only_rejects_never_invent_target_policy(
+        self,
+        reject_fact: str,
+        bitrate: int,
+    ) -> None:
+        files = [] if reject_fact == "empty" else [
+            AlbumQualityEvidenceFile(
+                relative_path="01.mp3",
+                size_bytes=1,
+                mtime_ns=1,
+                extension="mp3",
+                container="mp3",
+                codec="mp3",
+            )
+        ]
+        measurement = PreimportMeasurement(
+            audio_corrupt=reject_fact == "audio_corrupt",
+            corrupt_files=(
+                ["01.mp3"] if reject_fact == "audio_corrupt" else []
+            ),
+            matched_bad_hash_id=(1 if reject_fact == "bad_hash" else None),
+            matched_bad_track_path=(
+                "01.mp3" if reject_fact == "bad_hash" else None
+            ),
+            folder_layout="nested" if reject_fact == "nested" else "flat",
+            audio_file_count=0 if reject_fact == "empty" else 1,
+            filetype_band="mp3",
+            min_bitrate_kbps=bitrate,
+            is_vbr=False,
+        )
+
+        built = evidence_from_measurement(
+            mb_release_id="generated-early-reject",
+            source_path="/generated/source",
+            measurement=measurement,
+            files=files,
+        )
+
+        self.assertEqual(built.status, "ready")
+        assert built.evidence is not None
+        self.assertIsNone(built.evidence.target_format)
+        self.assertIsNone(built.evidence.target_is_cbr)
+
+    @given(
+        prefix=st.sampled_from(("", " ", "\t", "\n ")),
+        spelling=st.sampled_from(("mp3", "MP3", "Mp3", "mP3")),
+        suffix=st.sampled_from(("", " ", "\t", " \n")),
+    )
+    @example(prefix=" ", spelling="MP3", suffix=" ")
+    def test_bare_mp3_always_requires_an_explicit_mode(
+        self,
+        prefix: str,
+        spelling: str,
+        suffix: str,
+    ) -> None:
+        with self.assertRaisesRegex(ValueError, "bare MP3"):
+            TargetQualityContract.from_format(prefix + spelling + suffix)
+
+    @given(
         projected_bitrates=st.lists(
             st.integers(min_value=32, max_value=200),
             min_size=1,
@@ -311,6 +373,16 @@ class TestQualityLineageGenerated(unittest.TestCase):
     )
     @example(
         projected_bitrates=[128],
+        existing=123,
+        existing_is_cbr=False,
+    )
+    @example(
+        projected_bitrates=[128, 128],
+        existing=123,
+        existing_is_cbr=False,
+    )
+    @example(
+        projected_bitrates=[128, 129],
         existing=123,
         existing_is_cbr=False,
     )

@@ -35,7 +35,10 @@ Key fields:
   independent of the measured source. It may be NULL.
 - `target_is_cbr` — album-wide bitrate mode measured from the projected
   target/probe files. It belongs to the target contract, independently of
-  both the downloaded source and materialized output measurements.
+  both the downloaded source and materialized output measurements. A bare
+  `MP3` target is incomplete without this explicit mode. Measurement-only
+  rows for facts rejected before target policy is consulted leave both
+  `target_format` and `target_is_cbr` NULL rather than guessing a mode.
 - `lineage_version SMALLINT` — `1` marks historical rows whose storage/target
   projection is ambiguous; `3` marks separated source and target facts.
   Migration 050 marks all pre-existing rows as version 1, then changes the

@@ -110,11 +110,15 @@ class TargetQualityContract(msgspec.Struct, frozen=True):
 
         Explicit target labels remain self-describing.  Bare codec labels such
         as ``MP3`` are not: the harness must pass the album-wide bitrate mode
-        measured from the projected/probe files.  The fallback preserves the
-        policy-only constructor for callers that do not have those files.
+        measured from the projected/probe files.  Refusing an omitted mode is
+        what keeps source measurements from being borrowed as target policy.
         """
 
         parts = format_hint.strip().lower().split()
+        if parts == ["mp3"] and projected_is_cbr is None:
+            raise ValueError(
+                "bare MP3 target contract requires explicit projected_is_cbr"
+            )
         return cls(
             format=format_hint,
             is_cbr=(

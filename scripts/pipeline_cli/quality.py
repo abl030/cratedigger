@@ -111,13 +111,15 @@ def cmd_quality(db, args):
     avg_br = None
     median_br = None
     existing_format_hint = None
-    target_contract = (
-        TargetQualityContract.from_format(str(final_format))
-        if final_format else None
-    )
+    mbid = req.get("mb_release_id")
+    info = _load_beets_album_info(mbid, rank_cfg)
+    target_contract = None
     if min_br is not None:
-        mbid = req.get("mb_release_id")
-        info = _load_beets_album_info(mbid, rank_cfg)
+        if final_format:
+            target_contract = TargetQualityContract.from_format(
+                str(final_format),
+                projected_is_cbr=(info.is_cbr if info is not None else None),
+            )
         if info:
             is_cbr = info.is_cbr
             avg_br = info.avg_bitrate_kbps
@@ -195,23 +197,28 @@ def cmd_quality(db, args):
         (f"Genuine FLAC → {lossless_target_label} (high bitrate)", dict(
             is_flac=True, min_bitrate=245, is_cbr=False,
             spectral_grade="genuine", converted_count=12,
-            post_conversion_min_bitrate=245)),
+            post_conversion_min_bitrate=245,
+            post_conversion_is_cbr=False)),
         (f"Genuine FLAC → {lossless_target_label} (lo-fi, 207kbps)", dict(
             is_flac=True, min_bitrate=207, is_cbr=False,
             spectral_grade="genuine", converted_count=12,
-            post_conversion_min_bitrate=207)),
+            post_conversion_min_bitrate=207,
+            post_conversion_is_cbr=False)),
         (f"Marginal FLAC → {lossless_target_label}", dict(
             is_flac=True, min_bitrate=240, is_cbr=False,
             spectral_grade="marginal", converted_count=12,
-            post_conversion_min_bitrate=240)),
+            post_conversion_min_bitrate=240,
+            post_conversion_is_cbr=False)),
         ("Suspect FLAC (transcode, 190kbps)", dict(
             is_flac=True, min_bitrate=190, is_cbr=False,
             spectral_grade="suspect", converted_count=12,
-            post_conversion_min_bitrate=190)),
+            post_conversion_min_bitrate=190,
+            post_conversion_is_cbr=False)),
         ("Suspect FLAC (transcode, 245kbps)", dict(
             is_flac=True, min_bitrate=245, is_cbr=False,
             spectral_grade="suspect", converted_count=12,
-            post_conversion_min_bitrate=245)),
+            post_conversion_min_bitrate=245,
+            post_conversion_is_cbr=False)),
         # Bill Hicks 1990 "Dangerous" shape: spoken-word lossless that
         # spectral_check false-positives as suspect (high HF deficit
         # against music-tuned thresholds), but the lossless_source_v0
@@ -221,6 +228,7 @@ def cmd_quality(db, args):
             is_flac=True, min_bitrate=219, is_cbr=False,
             spectral_grade="suspect", converted_count=10,
             post_conversion_min_bitrate=219,
+            post_conversion_is_cbr=False,
             candidate_v0_probe_avg=241,
             candidate_v0_probe_min=219,
             candidate_v0_probe_kind="lossless_source_v0")),

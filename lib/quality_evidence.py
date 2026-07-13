@@ -22,7 +22,6 @@ from lib.quality import (
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     ImportResult,
-    TargetQualityContract,
     V0ProbeEvidence,
     VerifiedLosslessProof,
 )
@@ -610,7 +609,6 @@ def evidence_from_measurement(
     source_path: str,
     measurement: "PreimportMeasurement",
     measured_at: datetime | None = None,
-    target_format: str | None = None,
     files: list[AlbumQualityEvidenceFile] | None = None,
 ) -> EvidenceBuildResult:
     """Build candidate evidence purely from a ``PreimportMeasurement``.
@@ -681,12 +679,11 @@ def evidence_from_measurement(
         codec=codec,
         container=container,
         storage_format=audio_measurement.format,
-        target_format=target_format,
-        target_is_cbr=(
-            TargetQualityContract.from_format(target_format).is_cbr
-            if target_format is not None
-            else None
-        ),
+        # This path exists only for facts rejected before target policy is
+        # consulted. It has no projected files, so both target fields stay
+        # absent instead of fabricating a bitrate mode.
+        target_format=None,
+        target_is_cbr=None,
         lineage_version=3,
         v0_metric=None,
         verified_lossless_proof=None,
@@ -821,7 +818,6 @@ def persist_candidate_evidence_from_measurement(
     measurement: "PreimportMeasurement",
     download_log_id: int | None = None,
     import_job_id: int | None = None,
-    target_format: str | None = None,
     files: list[AlbumQualityEvidenceFile] | None = None,
 ) -> EvidenceBuildResult:
     """Persist measurement-only candidate evidence (no ImportResult required).
@@ -844,7 +840,6 @@ def persist_candidate_evidence_from_measurement(
         mb_release_id=mb_release_id,
         source_path=source_path,
         measurement=measurement,
-        target_format=target_format,
         files=files,
     )
     if result.evidence is not None:

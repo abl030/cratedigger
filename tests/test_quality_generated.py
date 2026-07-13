@@ -288,6 +288,9 @@ def album_states(draw) -> AlbumState:
 def download_scenarios(draw) -> DownloadScenario:
     is_flac = draw(st.booleans())
     converted_count = draw(st.integers(min_value=0, max_value=30)) if is_flac else 0
+    post_conversion_min_bitrate = (
+        draw(_optional_bitrates(max_value=400)) if is_flac else None
+    )
     return DownloadScenario(
         name="generated_download",
         is_flac=is_flac,
@@ -296,8 +299,13 @@ def download_scenarios(draw) -> DownloadScenario:
         spectral_grade=draw(st.sampled_from(_GRADES)),
         spectral_bitrate=draw(_optional_bitrates(max_value=4000)),
         converted_count=converted_count,
-        post_conversion_min_bitrate=(
-            draw(_optional_bitrates(max_value=400)) if is_flac else None),
+        post_conversion_min_bitrate=post_conversion_min_bitrate,
+        post_conversion_is_cbr=(
+            draw(st.booleans())
+            if is_flac
+            and (converted_count > 0 or post_conversion_min_bitrate is not None)
+            else None
+        ),
         new_format=(None if is_flac else draw(st.sampled_from(("MP3", "opus", "aac")))),
         is_vbr=draw(st.sampled_from((None, True, False))),
         avg_bitrate=draw(_optional_bitrates(max_value=4000)),
@@ -779,6 +787,28 @@ def wild_ready_candidate_evidence(draw) -> AlbumQualityEvidence:
         if verified_lossless else None
     )
     measured_format = draw(st.sampled_from(("MP3", "FLAC", "Opus", "AAC")))
+    codec = draw(st.sampled_from(_EVIDENCE_EXTS))
+    container = draw(st.sampled_from(_EVIDENCE_EXTS))
+    target_format = None
+    target_is_cbr = None
+    lossless_source = (
+        measured_format == "FLAC"
+        or codec in {"flac", "wav", "alac"}
+        or container in {"flac", "wav", "alac"}
+        or verified_lossless
+        or (
+            v0_metric is not None
+            and v0_metric.source_lineage == V0_SOURCE_LINEAGE_LOSSLESS_SOURCE
+        )
+    )
+    if lossless_source:
+        # Actionable v3 evidence from a lossless source has already projected
+        # its target. Measurement-only rows are the separate early-reject
+        # writer and never enter this ready-candidate strategy.
+        target_format = draw(
+            st.sampled_from(("MP3", "mp3 v0", "opus 128", "flac"))
+        )
+        target_is_cbr = draw(st.booleans())
     measurement = AudioQualityMeasurement(
         min_bitrate_kbps=draw(_bitrates(max_value=4000)),
         avg_bitrate_kbps=draw(_optional_bitrates(max_value=4000)),
@@ -797,9 +827,11 @@ def wild_ready_candidate_evidence(draw) -> AlbumQualityEvidence:
         measurement=measurement,
         measured_at=datetime(2026, 7, 8, tzinfo=timezone.utc),
         files=files,
-        codec=draw(st.sampled_from(_EVIDENCE_EXTS)),
-        container=draw(st.sampled_from(_EVIDENCE_EXTS)),
+        codec=codec,
+        container=container,
         storage_format=measured_format,
+        target_format=target_format,
+        target_is_cbr=target_is_cbr,
         v0_metric=v0_metric,
         verified_lossless_proof=proof,
         audio_corrupt=draw(st.booleans()),

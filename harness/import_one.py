@@ -1519,20 +1519,11 @@ def _run_quality_evidence_authorized_import(
             _emit_and_exit(r)
 
         _validate_quality_evidence_action_snapshot(args.path, payload)
-        source_was_lossless = bool(_lossless_filenames(args.path))
         quality_is_transcode = _materialize_quality_evidence_action(
             work_path=args.path,
             payload=payload,
             r=r,
         )
-        if (
-            source_was_lossless
-            and r.target_quality_contract is None
-            and r.final_format
-        ):
-            r.target_quality_contract = TargetQualityContract.from_format(
-                r.final_format
-            )
     except Exception as exc:
         r.exit_code = 5
         r.decision = "quality_evidence_action_failed"
