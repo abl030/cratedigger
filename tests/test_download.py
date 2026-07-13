@@ -6410,6 +6410,43 @@ class TestPurgeCompletedTransfers(unittest.TestCase):
         # first failure.
         self.assertEqual(len(slskd.transfers.cancel_download_calls), 2)
 
+    def test_removal_false_return_is_failed_and_record_remains(self):
+        """A rejected slskd removal is retained and counted for retry."""
+        from lib.slskd_transfers import purge_completed_transfers
+        filename = "Music\\A\\01.flac"
+        slskd = FakeSlskdAPI()
+        slskd.add_transfer(
+            username="peer1", directory="Music\\A",
+            filename=filename, id="t-1",
+            state="Completed, Succeeded")
+        slskd.transfers.cancel_download_results_by_id["t-1"] = False
+        ctx = self._make_ctx(slskd, ledger_rows=[
+            ("peer1", filename, "t-1", True),
+        ])
+
+        with patch("lib.slskd_transfers.logger"):
+            summary = purge_completed_transfers(ctx)
+
+        self.assertEqual(summary.removed, 0)
+        self.assertEqual(summary.removal_failed, 1)
+        self.assertEqual(
+            summary.removed + summary.removal_failed
+            + summary.success_waiting + summary.failure_unconfirmed
+            + summary.foreign_count,
+            1,
+        )
+        remaining_ids = {
+            transfer.id
+            for user in slskd.transfers.get_all_downloads()
+            for directory in user.directories
+            for transfer in directory.files
+        }
+        self.assertEqual(remaining_ids, {"t-1"})
+        self.assertEqual(
+            [call.id for call in slskd.transfers.cancel_download_calls],
+            ["t-1"],
+        )
+
     def test_clean_state_is_a_noop(self):
         from lib.slskd_transfers import purge_completed_transfers
         slskd = FakeSlskdAPI()

@@ -51,6 +51,7 @@ _ALL_STATES = _LIVE_STATES + _TERMINAL_STATES
 
 _OWNERSHIPS = (
     "stamped", "failure_stamped", "unstamped", "unbound", "foreign")
+_REMOVAL_OUTCOMES = ("success", "false", "exception")
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,7 @@ class CompletedTransferWorld:
     key: int
     state: str
     ownership: str
+    removal_outcome: str = "success"
 
 
 @st.composite
@@ -69,6 +71,7 @@ def completed_transfer_worlds(draw) -> tuple[CompletedTransferWorld, ...]:
             key=i,
             state=draw(st.sampled_from(_ALL_STATES)),
             ownership=draw(st.sampled_from(_OWNERSHIPS)),
+            removal_outcome=draw(st.sampled_from(_REMOVAL_OUTCOMES)),
         ))
     return tuple(worlds)
 
@@ -87,6 +90,8 @@ def _cfg() -> CratediggerConfig:
 
 def _build_world_fakes(
     worlds: tuple[CompletedTransferWorld, ...],
+    *,
+    apply_removal_outcomes: bool = False,
 ) -> tuple[FakePipelineDB, FakeSlskdAPI]:
     db = FakePipelineDB()
     slskd = FakeSlskdAPI()
@@ -97,6 +102,12 @@ def _build_world_fakes(
             username=username, directory=f"Music\\Album{w.key}",
             filename=filename, id=transfer_id, state=w.state,
             requestedAt=(datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat())
+        if apply_removal_outcomes:
+            if w.removal_outcome == "false":
+                slskd.transfers.cancel_download_results_by_id[transfer_id] = False
+            elif w.removal_outcome == "exception":
+                slskd.transfers.cancel_download_errors_by_id[transfer_id] = (
+                    RuntimeError("remove failed"))
         if w.ownership in (
             "stamped", "failure_stamped", "unstamped", "unbound",
         ):
@@ -333,22 +344,37 @@ class TestGeneratedPurgeCompletedTransfers(unittest.TestCase):
             foreign=summary.foreign_count,
         )
 
-    @given(
-        worlds=completed_transfer_worlds(),
-        removal_fails=st.booleans(),
-    )
-    def test_terminal_summary_conserves_rows_when_removal_raises(
-        self, worlds, removal_fails,
+    @given(worlds=completed_transfer_worlds())
+    def test_terminal_summary_conserves_rows_across_removal_outcomes(
+        self, worlds,
     ):
-        db, slskd = _build_world_fakes(worlds)
-        if removal_fails:
-            slskd.transfers.cancel_download_error = RuntimeError("remove failed")
-
-        if removal_fails:
-            with patch("lib.slskd_transfers.logger"):
-                summary = purge_completed_transfers(_ctx(db, slskd))
-        else:
+        db, slskd = _build_world_fakes(
+            worlds, apply_removal_outcomes=True)
+        with patch("lib.slskd_transfers.logger"):
             summary = purge_completed_transfers(_ctx(db, slskd))
+
+        attempted_ids = {
+            call.id for call in slskd.transfers.cancel_download_calls
+            if call.remove
+        }
+        outcomes_by_id = {
+            f"t-{world.key}": world.removal_outcome for world in worlds
+        }
+        expected_failed_ids = {
+            transfer_id for transfer_id in attempted_ids
+            if outcomes_by_id[transfer_id] != "success"
+        }
+        expected_removed_ids = attempted_ids - expected_failed_ids
+        remaining_ids = {
+            transfer.id
+            for user in slskd.transfers.get_all_downloads()
+            for directory in user.directories
+            for transfer in directory.files
+        }
+        self.assertEqual(summary.removed, len(expected_removed_ids))
+        self.assertEqual(summary.removal_failed, len(expected_failed_ids))
+        self.assertTrue(expected_removed_ids.isdisjoint(remaining_ids))
+        self.assertLessEqual(expected_failed_ids, remaining_ids)
 
         assert_terminal_summary_is_disjoint(
             worlds,

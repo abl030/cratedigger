@@ -1811,6 +1811,30 @@ class TestFakeSlskdAPI(unittest.TestCase):
         self.assertEqual(slskd.transfers.enqueue_calls[0].files, files)
         self.assertEqual(slskd.transfers.cancel_download_calls[0].id, "tid-1")
 
+    def test_cancel_false_return_keeps_only_rejected_transfer_resident(self):
+        """Per-ID cancellation outcomes preserve the fake's live state."""
+        slskd = FakeSlskdAPI()
+        for transfer_id in ("tid-false", "tid-success"):
+            slskd.add_transfer(
+                username="user1", directory="Music\\Album",
+                filename=f"Music\\Album\\{transfer_id}.flac",
+                id=transfer_id, state="Completed, Succeeded",
+            )
+        slskd.transfers.cancel_download_results_by_id["tid-false"] = False
+
+        self.assertFalse(slskd.transfers.cancel_download(
+            "user1", "tid-false", remove=True))
+        self.assertTrue(slskd.transfers.cancel_download(
+            "user1", "tid-success", remove=True))
+
+        remaining_ids = {
+            transfer.id
+            for user in slskd.transfers.get_all_downloads()
+            for directory in user.directories
+            for transfer in directory.files
+        }
+        self.assertEqual(remaining_ids, {"tid-false"})
+
     def test_user_directories_record_results_and_errors(self):
         slskd = FakeSlskdAPI()
         directory = [{"directory": "Music\\Album", "files": []}]
