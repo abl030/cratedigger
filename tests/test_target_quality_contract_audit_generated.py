@@ -151,6 +151,55 @@ class TestTargetQualityContractProductionAudit(unittest.TestCase):
             (),
         )
 
+    def test_from_lib_module_binding_is_audited(self):
+        source = (
+            "from lib import quality\n"
+            "contract = quality.TargetQualityContract.from_format('MP3')\n"
+        )
+
+        self.assertEqual(
+            len(target_contract_call_violations("web/from_lib.py", source)),
+            1,
+        )
+
+    def test_peer_lib_import_does_not_hide_qualified_binding(self):
+        source = (
+            "import lib.quality\n"
+            "import lib.config\n"
+            "contract = lib.quality.TargetQualityContract.from_format('MP3')\n"
+        )
+
+        self.assertEqual(
+            len(target_contract_call_violations("scripts/peer_import.py", source)),
+            1,
+        )
+
+    def test_factory_alias_escape_fails_closed(self):
+        source = (
+            "from lib.quality import TargetQualityContract\n"
+            "factory = TargetQualityContract.from_format\n"
+            "contract = factory('MP3')\n"
+        )
+
+        self.assertEqual(
+            len(target_contract_call_violations("lib/factory_escape.py", source)),
+            1,
+        )
+
+    def test_later_rebind_of_proven_target_fails_closed(self):
+        source = (
+            "from lib.quality import TargetQualityContract\n"
+            "contract = TargetQualityContract.from_format(\n"
+            "    'MP3', projected_is_cbr=False\n"
+            ")\n"
+            "TargetQualityContract = object()\n"
+        )
+
+        self.assertEqual(
+            len(target_contract_call_violations("lib/later_rebind.py", source)),
+            1,
+        )
+
 
 class TestTargetQualityContractAuditGenerated(unittest.TestCase):
     @given(
@@ -169,6 +218,8 @@ class TestTargetQualityContractAuditGenerated(unittest.TestCase):
                 "module",
                 "module_full",
                 "module_impl",
+                "from_lib",
+                "module_with_peer",
             )
         ),
     )
@@ -222,6 +273,14 @@ class TestTargetQualityContractAuditGenerated(unittest.TestCase):
             imports = "import lib.quality\n"
             owner = "lib.quality.TargetQualityContract"
             relative_path = "lib/generated.py"
+        elif binding == "from_lib":
+            imports = "from lib import quality\n"
+            owner = "quality.TargetQualityContract"
+            relative_path = "lib/generated.py"
+        elif binding == "module_with_peer":
+            imports = "import lib.quality\nimport lib.config\n"
+            owner = "lib.quality.TargetQualityContract"
+            relative_path = "lib/generated.py"
         else:
             imports = "import lib.quality.evidence_types as evidence_types\n"
             owner = "evidence_types.TargetQualityContract"
@@ -249,6 +308,35 @@ class TestTargetQualityContractAuditGenerated(unittest.TestCase):
 
         expected_violation = label.strip().lower() == "mp3" and not supplies_mode
         self.assertEqual(bool(violations), expected_violation)
+
+    @given(
+        escape=st.sampled_from(("factory", "class")),
+        scope=st.sampled_from(("module", "function")),
+    )
+    def test_dynamic_target_factory_escapes_fail_closed(
+        self,
+        escape: str,
+        scope: str,
+    ) -> None:
+        value = (
+            "TargetQualityContract.from_format"
+            if escape == "factory"
+            else "TargetQualityContract"
+        )
+        lines = (
+            "from lib.quality import TargetQualityContract\n"
+            f"factory = {value}\n"
+        )
+        source = (
+            "def build():\n"
+            + "".join(f"    {line}\n" for line in lines.splitlines())
+            if scope == "function"
+            else lines
+        )
+
+        self.assertTrue(
+            target_contract_call_violations("lib/generated_escape.py", source)
+        )
 
     @given(supplies_mode=st.booleans())
     def test_dynamic_labels_always_name_the_mode(

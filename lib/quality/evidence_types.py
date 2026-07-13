@@ -115,21 +115,25 @@ class TargetQualityContract(msgspec.Struct, frozen=True):
         """
 
         parts = format_hint.strip().lower().split()
-        if parts == ["mp3"] and projected_is_cbr is None:
-            raise ValueError(
-                "bare MP3 target contract requires explicit projected_is_cbr"
+        if parts == ["mp3"]:
+            if projected_is_cbr is None:
+                raise ValueError(
+                    "bare MP3 target contract requires explicit projected_is_cbr"
+                )
+            is_cbr = projected_is_cbr
+        else:
+            # Explicit MP3 labels own their mode.  A caller may have an
+            # independently measured mode for a materialized album, but that
+            # observation cannot silently turn ``mp3 v0`` into CBR policy or
+            # ``mp3 320`` into VBR policy.
+            is_cbr = (
+                len(parts) == 2
+                and parts[0] == "mp3"
+                and parts[1].isdigit()
             )
         return cls(
             format=format_hint,
-            is_cbr=(
-                projected_is_cbr
-                if projected_is_cbr is not None
-                else (
-                    len(parts) == 2
-                    and parts[0] == "mp3"
-                    and parts[1].isdigit()
-                )
-            ),
+            is_cbr=is_cbr,
         )
 
 

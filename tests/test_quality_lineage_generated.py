@@ -17,6 +17,7 @@ from lib.quality import (
     TargetQualityContract,
     V0ProbeEvidence,
     full_pipeline_decision,
+    gate_rank,
     measured_import_decision,
     quality_gate_decision,
 )
@@ -277,6 +278,52 @@ class TestQualityLineagePins(unittest.TestCase):
         self.assertTrue(TargetQualityContract.from_format("mp3 192").is_cbr)
         self.assertFalse(TargetQualityContract.from_format("mp3 v2").is_cbr)
 
+    def test_explicit_mp3_labels_ignore_contradictory_projected_modes(self):
+        cfg = QualityRankConfig.defaults()
+        v0_output = AudioQualityMeasurement(
+            min_bitrate_kbps=245,
+            avg_bitrate_kbps=245,
+            format="MP3",
+            is_cbr=True,
+        )
+        cbr_output = AudioQualityMeasurement(
+            min_bitrate_kbps=320,
+            avg_bitrate_kbps=320,
+            format="MP3",
+            is_cbr=False,
+        )
+        for supplied_mode in (False, True):
+            with self.subTest(label="mp3 v0", supplied_mode=supplied_mode):
+                contract = TargetQualityContract.from_format(
+                    "mp3 v0", projected_is_cbr=supplied_mode
+                )
+                self.assertFalse(contract.is_cbr)
+                self.assertEqual(
+                    gate_rank(v0_output, cfg, target_contract=contract).name,
+                    "TRANSPARENT",
+                )
+                self.assertEqual(
+                    quality_gate_decision(
+                        v0_output, cfg=cfg, target_contract=contract
+                    ),
+                    "accept",
+                )
+            with self.subTest(label="mp3 320", supplied_mode=supplied_mode):
+                contract = TargetQualityContract.from_format(
+                    "mp3 320", projected_is_cbr=supplied_mode
+                )
+                self.assertTrue(contract.is_cbr)
+                self.assertEqual(
+                    gate_rank(cbr_output, cfg, target_contract=contract).name,
+                    "TRANSPARENT",
+                )
+                self.assertEqual(
+                    quality_gate_decision(
+                        cbr_output, cfg=cfg, target_contract=contract
+                    ),
+                    "requeue_lossless",
+                )
+
     def test_early_downgrade_keeps_projected_target_for_dispatch_audit(self):
         decision = full_pipeline_decision(
             is_flac=True,
@@ -299,6 +346,41 @@ class TestQualityLineagePins(unittest.TestCase):
 
 
 class TestQualityLineageGenerated(unittest.TestCase):
+    @given(
+        label=st.sampled_from(("mp3 v0", "MP3 V0", "mp3 320", " MP3 320 ")),
+        supplied_mode=st.booleans(),
+    )
+    @example(label="mp3 v0", supplied_mode=True)
+    @example(label="mp3 320", supplied_mode=False)
+    def test_explicit_mp3_label_owns_mode_and_gate_policy(
+        self,
+        label: str,
+        supplied_mode: bool,
+    ) -> None:
+        cfg = QualityRankConfig.defaults()
+        expected_cbr = label.strip().lower() == "mp3 320"
+        bitrate = 320 if expected_cbr else 245
+        contract = TargetQualityContract.from_format(
+            label,
+            projected_is_cbr=supplied_mode,
+        )
+        output = AudioQualityMeasurement(
+            min_bitrate_kbps=bitrate,
+            avg_bitrate_kbps=bitrate,
+            format="MP3",
+            is_cbr=not expected_cbr,
+        )
+
+        self.assertEqual(contract.is_cbr, expected_cbr)
+        self.assertEqual(
+            gate_rank(output, cfg, target_contract=contract).name,
+            "TRANSPARENT",
+        )
+        self.assertEqual(
+            quality_gate_decision(output, cfg=cfg, target_contract=contract),
+            "requeue_lossless" if expected_cbr else "accept",
+        )
+
     @given(
         reject_fact=st.sampled_from(("audio_corrupt", "bad_hash", "nested", "empty")),
         bitrate=st.integers(min_value=1, max_value=320),
