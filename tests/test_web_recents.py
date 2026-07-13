@@ -18,10 +18,12 @@ from web.classify import (average_quality_label, classify_log_entry,
                           legacy_floor_quality_label, LogEntry,
                           ClassifiedEntry, _parse_import_result)
 from lib.quality import (
+    AudioQualityMeasurement,
     DuplicateRemoveCandidate,
     DuplicateRemoveGuardInfo,
     ImportResult,
     PostflightInfo,
+    QualityComparisonBasis,
     SpectralAnalysisDetail,
     SpectralDetail,
 )
@@ -1159,6 +1161,53 @@ class TestExceptionVerdicts(unittest.TestCase):
 # ============================================================================
 
 class TestDownloadedLabel(unittest.TestCase):
+
+    def test_gas_materialized_output_stays_separate_from_v0_proxy(self):
+        """The source, target contract, and output codec/bitrates are three
+        separate facts; no Opus label may sit beside the MP3 V0 proxy 191k.
+        """
+        basis = {
+            "verdict": "better", "branch": "rank",
+            "new_rank": "transparent", "existing_rank": "acceptable",
+            "new_metric": "contract", "existing_metric": "avg",
+            "new_value_kbps": 128, "existing_value_kbps": 128,
+            "new_format": "opus 128", "existing_format": "mp3",
+            "spectral_clamped": False, "tolerance_kbps": None,
+            "verified_lossless_bypass": False,
+        }
+        result = classify_log_entry(_entry(
+            outcome="force_import",
+            filetype="opus",
+            slskd_filetype="flac",
+            was_converted=True,
+            original_filetype="flac",
+            actual_filetype="opus",
+            actual_min_bitrate=102,
+            final_format="opus 128",
+            import_result=ImportResult(
+                decision="import",
+                new_measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=191,
+                    avg_bitrate_kbps=224,
+                    median_bitrate_kbps=237,
+                    format="opus 128",
+                ),
+                materialized_measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=102,
+                    avg_bitrate_kbps=132,
+                    median_bitrate_kbps=144,
+                    format="Opus",
+                ),
+                comparison_basis=msgspec.convert(
+                    basis, type=QualityComparisonBasis),
+            ).to_json(),
+        ))
+
+        self.assertEqual(result.downloaded_label, "FLAC → OPUS 128")
+        self.assertEqual(result.materialized_format, "Opus")
+        self.assertEqual(result.materialized_min_bitrate, 102)
+        self.assertEqual(result.materialized_avg_bitrate, 132)
+        self.assertEqual(result.materialized_median_bitrate, 144)
 
     def test_mixed_source_preserves_every_downloaded_codec(self):
         """The Slow Club live row carried ``flac, ogg`` but rendered FLAC."""

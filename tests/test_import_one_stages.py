@@ -1377,6 +1377,46 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
         self.assertEqual(convert.call_args.args[1].label, "opus 128")
         self.assertEqual(result.final_format, "opus 128")
 
+    def test_postflight_materialized_measurement_uses_real_opus_output(self):
+        """Gas / November 89: preserve the 191/224k V0 proxy as decision
+        evidence, but record the 102/132k Opus files as materialized output.
+        """
+        from harness import import_one
+        from lib.beets_db import AlbumInfo
+        from lib.quality import AudioQualityMeasurement, ImportResult
+
+        result = ImportResult(
+            new_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=191,
+                avg_bitrate_kbps=224,
+                median_bitrate_kbps=237,
+                format="opus 128",
+                verified_lossless=True,
+                was_converted_from="flac",
+            ),
+        )
+        info = AlbumInfo(
+            album_id=89,
+            track_count=5,
+            min_bitrate_kbps=102,
+            avg_bitrate_kbps=132,
+            median_bitrate_kbps=144,
+            is_cbr=False,
+            format="Opus",
+            album_path="Gas/2026 - November 89",
+        )
+
+        measurement = import_one._materialized_measurement_from_album_info(
+            info, result,
+        )
+
+        self.assertEqual(measurement.min_bitrate_kbps, 102)
+        self.assertEqual(measurement.avg_bitrate_kbps, 132)
+        self.assertEqual(measurement.median_bitrate_kbps, 144)
+        self.assertEqual(measurement.format, "Opus")
+        self.assertTrue(measurement.verified_lossless)
+        self.assertEqual(measurement.was_converted_from, "flac")
+
     def test_evidence_materialization_removes_lossless_left_by_retry_skip(self):
         from harness import import_one
         from lib.quality import ImportResult

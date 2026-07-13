@@ -597,6 +597,25 @@ console.log('formatEntryEvidence() formats spectral and lossless-source V0 cells
     'current candidate summary labels average and retains the floor',
   );
 
+  const gas = __test__.formatEntryEvidence({
+    source_codec: 'flac',
+    source_container: 'flac',
+    target_format: 'opus 128',
+    format: 'opus 128',
+    min_bitrate: 191,
+    avg_bitrate: 224,
+    v0_probe_kind: 'lossless_source_v0',
+    v0_probe_avg_bitrate: 224,
+  });
+  assertEqual(
+    gas.format,
+    'FLAC → OPUS 128 contract',
+    'Gas source and target render separately without relabelling the V0 proxy',
+  );
+  assertEqual(gas.v0, 'V0 ≈ 224 kbps', 'Gas V0 probe remains its own fact');
+  assert(!gas.format.includes('191'), 'target contract does not claim the V0 min');
+  assert(!gas.format.includes('224'), 'target contract does not claim the V0 average');
+
   // Happy path: AE1 — both pieces of evidence present.
   let cells = __test__.formatEntryEvidence({
     spectral_grade: 'genuine',

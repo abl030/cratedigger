@@ -222,6 +222,9 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         spectral_bitrate: int | None = None,
         v0_probe_kind: str | None = None,
         v0_probe_avg_bitrate: int | None = None,
+        source_codec: str | None = "mp3",
+        source_container: str | None = "mp3",
+        target_format: str | None = None,
     ) -> None:
         """Attach a real album_quality_evidence row to a download_log row
         — the route reads it through the fake's LEFT-JOIN mirror."""
@@ -234,6 +237,9 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         evidence = make_album_quality_evidence(
             mb_release_id=f"ev-{log_id}",
             storage_format=storage_format,
+            codec=source_codec,
+            container=source_container,
+            target_format=target_format,
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=min_bitrate,
                 avg_bitrate_kbps=(
@@ -687,6 +693,30 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertEqual(entry["avg_bitrate"], 0)
         self.assertTrue(entry["verified_lossless"])
         self.assertEqual(entry["quality_rank"], "lossless")
+
+    def test_entry_keeps_gas_source_target_and_v0_probe_separate(self):
+        """A FLAC V0 probe must not wear the configured Opus label."""
+        self._seed_entry_evidence(
+            self.default_log_id,
+            storage_format="opus 128",
+            min_bitrate=191,
+            avg_bitrate=224,
+            source_codec="flac",
+            source_container="flac",
+            target_format=None,
+            v0_probe_kind="lossless_source",
+            v0_probe_avg_bitrate=224,
+        )
+
+        _, data = self._get("/api/wrong-matches")
+        entry = data["groups"][0]["entries"][0]
+        self.assertEqual(entry["source_codec"], "flac")
+        self.assertEqual(entry["source_container"], "flac")
+        self.assertEqual(
+            entry["target_format"], "opus 128",
+            "explicit storage_format is the effective target contract",
+        )
+        self.assertEqual(entry["v0_probe_avg_bitrate"], 224)
 
     def test_entries_sort_best_quality_first(self):
         """Entries within a group sort lossless → transparent → ... → unknown.

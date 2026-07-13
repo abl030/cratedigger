@@ -131,9 +131,15 @@ Browser → https://music.ablz.au
   imports show `overridden` in the
   Distance row instead of beets' misleading 0.000. Debug internals (Detail /
   Preview / Reason / Stages) sit behind a collapsed `forensics` toggle per
-  attempt. Every bitrate says which statistic it is: the min-vs-min row is
-  labelled "Min bitrate" and strip mins render as `min 216k` (request 8781:
-  an unlabelled 216 beside an avg-labelled 255 read as a contradiction).
+  attempt. Decision inputs and stored output are separate: the "Compared" row
+  renders the persisted decision basis, while the "Output" row renders only
+  `materialized_measurement` captured from Beets after import. Explicit targets
+  are codec contracts (`OPUS 128 contract`), never measured labels attached to
+  a temporary V0 probe. The compact strip likewise distinguishes source,
+  target, probe, and output: `IN FLAC → OPUS 128 contract ... actual OPUS avg
+  132k (min 102k) ... V0 224k avg`. Historical rows without materialized
+  evidence show no inferred output measurement rather than recycling a
+  decision-time bitrate.
   Spectral evidence is attempt-local and two-sided: `IN` is measured from the
   candidate before conversion, while `HAVE` normally measures the exact
   requested release's current Beets files. The sole exception is a current
@@ -146,9 +152,14 @@ Browser → https://music.ablz.au
   row whose analysis was never attempted.
   V0 probes render for every candidate — research probes of lossy sources
   qualified "(from lossy)" — matching the Wrong Matches convention.
+- **Wrong Matches evidence provenance** — candidate rows keep the downloaded
+  source codec, configured target contract, and temporary V0 probe separate.
+  A lossless candidate destined for Opus therefore reads `FLAC → OPUS 128
+  contract` beside `V0 ≈ 224 kbps`, never `OPUS 128 avg 224k · min 191k`.
 - **Comparison basis rendering (request 6039)** — rows whose
   `import_result` JSONB carries the persisted `comparison_basis` render the
-  decision's own comparison: the verdict line names the deciding metric,
+  decision's own comparison: the verdict line names the deciding metric or
+  explicit codec contract,
   values, and ranks ("Upgrade: MP3 avg 196k (good) → avg 288k
   (transparent)"), the strip's IN/HAVE sides show `fmt metric value · rank`,
   and the detail grid gains a "Compared" row (with a verified-lossless-bypass

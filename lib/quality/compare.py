@@ -220,6 +220,27 @@ def compare_quality(
     new_br, new_metric = _selected_bitrate_with_source(new, cfg)
     existing_br, existing_metric = _selected_bitrate_with_source(existing, cfg)
 
+    def _truthful_display_value(
+        measurement: AudioQualityMeasurement,
+        metric: str,
+        value: Optional[int],
+    ) -> tuple[str, Optional[int]]:
+        """Name the evidence that actually classified one side.
+
+        Explicit labels are encoder/storage contracts. Their rank ignores the
+        measured bitrate, so persisting ``min 191k`` beside ``opus 128`` lies:
+        191k may be a temporary V0 proxy. Numeric contracts retain their
+        declared value for machine-readable audit; V-level contracts need no
+        synthetic kbps value because the format label is the complete fact.
+        """
+        if _is_explicit_label(measurement.format):
+            declared = (
+                _parse_bitrate_label(measurement.format)
+                if measurement.format is not None else None
+            )
+            return "contract", declared
+        return metric, value
+
     def _basis(
         verdict: str,
         branch: str,
@@ -230,15 +251,23 @@ def compare_quality(
         spectral_clamped: bool = False,
         tolerance_kbps: Optional[int] = None,
     ) -> QualityComparisonBasis:
+        display_new_metric, display_new_value = _truthful_display_value(
+            new, new_metric, new_value,
+        )
+        display_existing_metric, display_existing_value = (
+            _truthful_display_value(
+                existing, existing_metric, existing_value,
+            )
+        )
         return QualityComparisonBasis(
             verdict=verdict,
             branch=branch,
             new_rank=new_rank.name.lower(),
             existing_rank=existing_rank.name.lower(),
-            new_metric=new_metric,
-            existing_metric=existing_metric,
-            new_value_kbps=new_value,
-            existing_value_kbps=existing_value,
+            new_metric=display_new_metric,
+            existing_metric=display_existing_metric,
+            new_value_kbps=display_new_value,
+            existing_value_kbps=display_existing_value,
             # Lowercase-normalized: the hint's casing differs between the
             # simulator and evidence twins ("flac" vs "FLAC") while meaning
             # the same thing — display upper-cases, parity compares.

@@ -137,6 +137,12 @@ class ClassifiedEntry(msgspec.Struct):
     # bitrate are unreadable without it (issue #575: AAC 256 replacing
     # unverified MP3 256 rendered as "256kbps (was 256kbps)").
     existing_format: Optional[str] = None
+    # Post-conversion files measured from Beets postflight. These are distinct
+    # from new_measurement (decision input / possible V0 proxy).
+    materialized_format: Optional[str] = None
+    materialized_min_bitrate: Optional[int] = None
+    materialized_avg_bitrate: Optional[int] = None
+    materialized_median_bitrate: Optional[int] = None
     # The persisted QualityComparisonBasis as JSON-plain builtins, for the
     # frontend evidence strip / detail grid. None on rows predating the
     # field (request 6039 lesson: labels re-derived from min bitrate lie).
@@ -282,6 +288,7 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
     summary = _build_summary(entry, core.badge, core.verdict)
     downloaded_label = _build_downloaded_label(entry)
     existing_format = _extract_existing_format(entry)
+    materialized = _extract_materialized_measurement(entry)
     disambig_reason, disambig_detail = _extract_disambiguation_failure(entry)
     bad_extensions = _extract_bad_extensions(entry)
     triage = _extract_wrong_match_triage(entry)
@@ -305,6 +312,10 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         wrong_match_triage_stage_chain=triage["stage_chain"],
         wrong_match_triage_detail=triage["detail"],
         existing_format=existing_format,
+        materialized_format=materialized[0],
+        materialized_min_bitrate=materialized[1],
+        materialized_avg_bitrate=materialized[2],
+        materialized_median_bitrate=materialized[3],
         spectral_grade=spectral[0],
         spectral_bitrate=spectral[1],
         existing_spectral_grade=spectral[2],
@@ -359,6 +370,22 @@ def _extract_existing_format(entry: LogEntry) -> Optional[str]:
     if ir is None or ir.existing_measurement is None:
         return None
     return ir.existing_measurement.format
+
+
+def _extract_materialized_measurement(
+    entry: LogEntry,
+) -> tuple[str | None, int | None, int | None, int | None]:
+    """Project the measured output without relabelling decision evidence."""
+    ir = _parse_import_result(entry)
+    if ir is None or ir.materialized_measurement is None:
+        return (None, None, None, None)
+    measurement = ir.materialized_measurement
+    return (
+        measurement.format,
+        measurement.min_bitrate_kbps,
+        measurement.avg_bitrate_kbps,
+        measurement.median_bitrate_kbps,
+    )
 
 
 def _extract_disambiguation_failure(
@@ -708,6 +735,8 @@ def _entry_comparison_basis(entry: LogEntry) -> QualityComparisonBasis | None:
 
 
 def _basis_value_phrase(metric: str, value: int | None, clamped: bool) -> str:
+    if metric == "contract":
+        return "contract"
     if value is None:
         return "unmeasured"
     if clamped:
@@ -792,7 +821,7 @@ def _downloaded_min_bitrate_kbps(entry: LogEntry) -> int | None:
     reproducer request 1055: brandlos's 119k import was painted as 162k
     because that's Ceezles's later upgrade).
 
-    Priority chain:
+    Priority chain for legacy decision-time displays:
         1. ``entry.actual_min_bitrate`` — denormalized column, populated by
            ``_populate_dl_info_from_import_result`` on the auto-import path
            since the ``actual_min_bitrate`` fix.
@@ -801,7 +830,9 @@ def _downloaded_min_bitrate_kbps(entry: LogEntry) -> int | None:
            retroactively without a backfill migration.
         3. ``entry.bitrate`` (bps) — legacy container bitrate, last resort.
 
-    ``spectral_bitrate`` is a cliff estimate ("what was the original source?"),
+    New successful imports expose ``materialized_measurement`` separately;
+    callers describing output bytes must use that instead. ``spectral_bitrate``
+    is a cliff estimate ("what was the original source?"),
     not the file's actual bitrate. It must never appear here.
     """
     if entry.actual_min_bitrate:
@@ -1116,7 +1147,9 @@ def _build_downloaded_label(entry: LogEntry) -> str:
     br_kbps = _downloaded_min_bitrate_kbps(entry) or 0
 
     if entry.was_converted and entry.original_filetype:
-        conv_label = legacy_floor_quality_label(fmt, br_kbps)
-        return f"{entry.original_filetype.upper()} (converted to {conv_label})"
+        ir = _parse_import_result(entry)
+        target = entry.final_format or (ir.final_format if ir is not None else None)
+        target_label = target or legacy_floor_quality_label(fmt, br_kbps)
+        return f"{entry.original_filetype.upper()} → {target_label.upper()}"
 
     return legacy_floor_quality_label(fmt, br_kbps) if br_kbps else fmt.upper()

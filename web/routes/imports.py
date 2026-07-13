@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from web.routes._pydantic import parse_body
 
+from lib.quality import _is_explicit_label
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
     IMPORT_JOB_MANUAL,
@@ -381,6 +382,19 @@ def _build_wrong_match_groups(
         evidence_format = row.get("evidence_storage_format")
         evidence_min_bitrate = row.get("evidence_min_bitrate")
         evidence_avg_bitrate = row.get("evidence_avg_bitrate")
+        configured_target = row.get("evidence_target_format")
+        # verified_lossless_target is projected into measurement.format and
+        # therefore storage_format; album_requests.target_format is commonly
+        # NULL. Preserve the explicit label as a contract instead of letting
+        # its V0 proxy numbers wear that codec label in the UI.
+        evidence_contract = (
+            configured_target
+            if isinstance(configured_target, str) and configured_target
+            else evidence_format
+            if isinstance(evidence_format, str)
+            and _is_explicit_label(evidence_format)
+            else None
+        )
         # Current candidate ranking uses the evidence mean; min remains an
         # explicit floor in the payload for review/audit.
         entry_quality_rank = srv.compute_library_rank(
@@ -404,6 +418,9 @@ def _build_wrong_match_groups(
             "spectral_bitrate": row.get("spectral_bitrate"),
             "v0_probe_kind": row.get("v0_probe_kind"),
             "v0_probe_avg_bitrate": row.get("v0_probe_avg_bitrate"),
+            "source_codec": row.get("evidence_source_codec"),
+            "source_container": row.get("evidence_source_container"),
+            "target_format": evidence_contract,
             "format": evidence_format
                 if isinstance(evidence_format, str) else None,
             "min_bitrate": evidence_min_bitrate

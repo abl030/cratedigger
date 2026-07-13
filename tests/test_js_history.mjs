@@ -91,7 +91,7 @@ console.log('renderDownloadHistoryItem() escapes wrong-match triage audit values
   assertExcludes(html, 'confident<script>', 'raw preview not rendered');
 }
 
-console.log('renderDownloadHistoryItem() shows Bitrate row with inline (was X) comparison');
+console.log('renderDownloadHistoryItem() refuses to infer output from legacy bitrate columns');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
@@ -108,14 +108,12 @@ console.log('renderDownloadHistoryItem() shows Bitrate row with inline (was X) c
   // Single grid, every metric on its own row. Existing data inline as "(was X)".
   assertContains(html, 'class="p-hist-grid"',
     'one consistent grid renders for every entry');
-  assertContains(html, 'class="p-hist-label">Min bitrate</span>',
-    'Min bitrate row label present');
+  assertContains(html, 'class="p-hist-label">Output</span>',
+    'Output row label present');
   assertContains(html, 'class="p-hist-label">Spectral</span>',
     'Spectral row label present');
-  assertContains(html, '192kbps', 'candidate bitrate rendered');
-  // "(was Xkbps)" suffix puts the existing comparison on the same row.
-  assertContains(html, 'class="p-hist-was">(was 192kbps)',
-    'existing bitrate appears inline as (was X) on the candidate row');
+  assertExcludes(html, 'class="p-hist-value">192kbps',
+    'legacy candidate minimum is not relabelled as materialized output');
   assertContains(html, '~160kbps', 'candidate spectral floor rendered');
   assertContains(html, 'suspect (~96kbps)',
     'existing spectral grade and floor appear on the spectral row');
@@ -132,7 +130,8 @@ console.log('renderDownloadHistoryItem() omits the (was X) suffix when no existi
     spectral_bitrate: 160,
   });
 
-  assertContains(html, '192kbps', 'candidate bitrate rendered');
+  assertExcludes(html, 'class="p-hist-value">192kbps',
+    'candidate bitrate is not relabelled as output');
   assertExcludes(html, '(was', 'no (was) suffix when existing data absent');
 }
 
@@ -188,7 +187,7 @@ console.log('renderDownloadHistoryItem() renders lossless V0 probe with inline (
   assertContains(html, 'class="p-hist-was">(was 171kbps avg)',
     'existing V0 probe appears inline as (was X) on the V0 probe row');
   assertContains(html, 'Stored as', 'final format label rendered');
-  assertContains(html, 'opus 128', 'final format rendered');
+  assertContains(html, 'OPUS 128 contract', 'final format rendered as contract');
   assertExcludes(html, '(lossless_source_v0)',
     'lossless probe omits the noisy kind suffix');
 }
@@ -221,9 +220,8 @@ console.log('renderDownloadHistoryItem() omits the V0 probe (was X) suffix when 
   // Bitrate row's legitimate "(was 192kbps)" cannot leak into this assertion.
   assertContains(html, '<span class="p-hist-value">260kbps avg</span>',
     'V0 probe value has no (was X) suffix when existing has no V0 probe');
-  // The legitimate min-vs-min comparison still renders on the Bitrate row.
-  assertContains(html, 'class="p-hist-was">(was 192kbps)',
-    'Bitrate row keeps the apples-to-apples min comparison');
+  assertExcludes(html, 'class="p-hist-was">(was 192kbps)',
+    'legacy minimums are not projected as materialized output');
 }
 
 console.log('renderDownloadHistoryItem() renders the V0 probe row for research probes too');
@@ -250,8 +248,8 @@ console.log('renderDownloadHistoryItem() renders the V0 probe row for research p
     'V0 probe row renders for research probes');
   assertContains(html, '247kbps avg (from lossy)',
     'research probe carries the from-lossy qualifier');
-  assertContains(html, '232kbps',
-    'candidate bitrate still rendered from actual_min_bitrate');
+  assertExcludes(html, 'class="p-hist-value">232kbps',
+    'research candidate minimum is not relabelled as output');
 }
 
 console.log('renderDownloadHistoryItem() V0 was-suffix is kind-aware');
@@ -309,8 +307,8 @@ console.log('renderDownloadHistoryItem() keeps a consistent row vocabulary acros
       'Source row in every entry');
     assertContains(html, 'class="p-hist-label">Spectral</span>',
       'Spectral row in every entry');
-    assertContains(html, 'class="p-hist-label">Min bitrate</span>',
-      'Min bitrate row in every entry');
+    assertContains(html, 'class="p-hist-label">Output</span>',
+      'Output row in every entry');
   }
 }
 
@@ -420,7 +418,7 @@ console.log('renderDownloadHistoryItem() always renders the core row vocabulary 
     verdict: 'Download failed: file exceeded retry limit',
   });
 
-  for (const label of ['Source', 'Spectral', 'Min bitrate', 'Distance']) {
+  for (const label of ['Source', 'Spectral', 'Output', 'Distance']) {
     assertContains(html, `class="p-hist-label">${label}</span>`,
       `${label} row present even without data`);
   }
@@ -549,7 +547,7 @@ console.log('renderEvidenceStrip() shows the on-disk format on the HAVE side');
   assertContains(strip, 'MP3 min 256k', 'HAVE side leads with the on-disk format, min-labelled');
 }
 
-console.log('renderDownloadHistoryItem() includes the on-disk format in the Bitrate (was X) suffix');
+console.log('renderDownloadHistoryItem() does not infer output from legacy min fields');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'success',
@@ -560,11 +558,13 @@ console.log('renderDownloadHistoryItem() includes the on-disk format in the Bitr
     existing_format: 'MP3',
     existing_min_bitrate: 256,
   });
-  assertContains(html, '(was MP3 256kbps)',
-    'Bitrate was-suffix names the on-disk codec');
+  assertContains(html, 'class="p-hist-label">Output</span>',
+    'fixed output row remains present');
+  assertContains(html, '<span class="p-hist-value">—</span>',
+    'legacy row without materialized evidence stays honest');
 }
 
-console.log('renderDownloadHistoryItem() keeps the bare (was X) when existing format unknown');
+console.log('renderDownloadHistoryItem() does not fabricate output when format is unknown');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'success',
@@ -573,7 +573,8 @@ console.log('renderDownloadHistoryItem() keeps the bare (was X) when existing fo
     actual_min_bitrate: 320,
     existing_min_bitrate: 256,
   });
-  assertContains(html, '(was 256kbps)', 'legacy rows keep the bare suffix');
+  assertContains(html, 'class="p-hist-label">Output</span>',
+    'fixed output row remains present');
 }
 
 console.log('renderEvidenceStrip() shows research V0 probes with the from-lossy qualifier');
@@ -635,6 +636,92 @@ console.log('renderEvidenceStrip() renders the persisted comparison basis when p
   assertExcludes(strip, 'MP3 V2', 'min-derived label replaced by the basis');
 }
 
+console.log('Gas: contract, V0 proof, and materialized Opus output stay distinct');
+{
+  const strip = renderEvidenceFixture({
+    downloaded_label: 'FLAC → OPUS 128',
+    slskd_filetype: 'flac',
+    actual_filetype: 'opus',
+    was_converted: true,
+    original_filetype: 'flac',
+    actual_min_bitrate: 102,
+    materialized_format: 'Opus',
+    materialized_min_bitrate: 102,
+    materialized_avg_bitrate: 132,
+    materialized_median_bitrate: 144,
+    spectral_grade: 'genuine',
+    v0_probe_kind: 'lossless_source_v0',
+    v0_probe_min_bitrate: 191,
+    v0_probe_avg_bitrate: 224,
+    existing_format: 'MP3',
+    existing_min_bitrate: 128,
+    existing_spectral_grade: 'suspect',
+    existing_spectral_bitrate: 128,
+    existing_v0_probe_kind: 'native_lossy_research_v0',
+    existing_v0_probe_avg_bitrate: 211,
+    comparison_basis: {
+      verdict: 'better', branch: 'rank',
+      new_rank: 'transparent', existing_rank: 'acceptable',
+      new_metric: 'contract', existing_metric: 'avg',
+      new_value_kbps: 128, existing_value_kbps: 128,
+      new_format: 'opus 128', existing_format: 'mp3',
+      spectral_clamped: false, tolerance_kbps: null,
+      verified_lossless_bypass: false,
+    },
+  });
+  assertContains(strip, 'OPUS 128 contract', 'declared target is labelled contract');
+  assertContains(strip, 'FLAC → OPUS 128 contract',
+    'source codec remains distinct from the target contract');
+  assertContains(strip, 'actual OPUS avg 132k (min 102k)',
+    'materialized output carries its own codec and measurements');
+  assertContains(strip, 'V0 224k avg', 'source V0 proof remains explicit');
+  assertExcludes(strip, 'OPUS 128 min 191k', 'V0 minimum never wears an Opus label');
+
+  const detail = renderDownloadHistoryFixture({
+    outcome: 'force_import',
+    soulseek_username: 'Gas-peer',
+    created_at: '2026-07-13T01:06:27+00:00',
+    downloaded_label: 'FLAC → OPUS 128',
+    slskd_filetype: 'flac',
+    actual_filetype: 'opus',
+    was_converted: true,
+    original_filetype: 'flac',
+    actual_min_bitrate: 102,
+    materialized_format: 'Opus',
+    materialized_min_bitrate: 102,
+    materialized_avg_bitrate: 132,
+    materialized_median_bitrate: 144,
+    spectral_grade: 'genuine',
+    v0_probe_kind: 'lossless_source_v0',
+    v0_probe_min_bitrate: 191,
+    v0_probe_avg_bitrate: 224,
+    existing_format: 'MP3',
+    existing_min_bitrate: 128,
+    existing_spectral_grade: 'suspect',
+    existing_spectral_bitrate: 128,
+    existing_v0_probe_kind: 'native_lossy_research_v0',
+    existing_v0_probe_avg_bitrate: 211,
+    comparison_basis: {
+      verdict: 'better', branch: 'rank',
+      new_rank: 'transparent', existing_rank: 'acceptable',
+      new_metric: 'contract', existing_metric: 'avg',
+      new_value_kbps: 128, existing_value_kbps: 128,
+      new_format: 'opus 128', existing_format: 'mp3',
+      spectral_clamped: false, tolerance_kbps: null,
+      verified_lossless_bypass: false,
+    },
+    final_format: 'opus 128',
+    badge: 'Force imported',
+    badge_class: 'badge-force',
+    verdict: 'Force imported after manual review',
+  });
+  assertContains(detail, 'Output', 'detail grid names the materialized side');
+  assertContains(detail, 'OPUS avg 132kbps · min 102kbps',
+    'detail output is codec-aware');
+  assertContains(detail, 'OPUS 128 contract', 'detail comparison is contract-aware');
+  assertExcludes(detail, '>Min bitrate<', 'ambiguous unqualified row is gone');
+}
+
 console.log('renderEvidenceStrip() marks spectral-clamped rank values with ~');
 {
   const strip = renderEvidenceFixture({
@@ -691,8 +778,8 @@ console.log('renderDownloadHistoryItem() renders a Compared row from the basis')
     },
   });
   assertContains(html, 'Compared', 'Compared label rendered');
-  assertContains(html, 'avg 288k (transparent)', 'new side with rank');
-  assertContains(html, 'avg 196k (good)', 'existing side with rank');
+  assertContains(html, 'MP3 avg 288k · transparent', 'new side with rank');
+  assertContains(html, 'MP3 avg 196k · good', 'existing side with rank');
 }
 
 console.log('renderDownloadHistoryItem() Compared row notes the verified-lossless bypass');
@@ -739,14 +826,14 @@ console.log('renderDownloadHistoryItem() leads with the verdict, red on rejectio
     badge_class: 'badge-rejected',
     soulseek_username: 'tunnik',
     created_at: '2026-07-10T23:19:10+00:00',
-    downloaded_label: 'WAV (converted to OPUS V2)',
+    downloaded_label: 'WAV → OPUS 128',
     spectral_grade: 'genuine',
     verdict: 'mbid_missing',
     comparison_basis: {
       verdict: 'equivalent', branch: 'cross_family_same_rank',
       new_rank: 'transparent', existing_rank: 'transparent',
-      new_metric: 'avg', existing_metric: 'avg',
-      new_value_kbps: 216, existing_value_kbps: 256,
+      new_metric: 'contract', existing_metric: 'avg',
+      new_value_kbps: 128, existing_value_kbps: 256,
       new_format: 'opus 128', existing_format: 'aac',
       spectral_clamped: false, tolerance_kbps: null,
       verified_lossless_bypass: true,
