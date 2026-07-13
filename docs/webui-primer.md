@@ -151,7 +151,9 @@ Browser → https://music.ablz.au
   not be decoded renders `analysis failed`; this is distinct from a legacy
   row whose analysis was never attempted.
   V0 probes render for every candidate — research probes of lossy sources
-  qualified "(from lossy)" — matching the Wrong Matches convention.
+  qualified "(from lossy)" — matching the Wrong Matches convention. Probe
+  averages and minima stay under that V0 label (`V0 171k avg (min 165k)`);
+  a temporary probe minimum must never render as a FLAC/source minimum.
 - **Wrong Matches evidence provenance** — candidate rows keep the downloaded
   source codec, configured target contract, and temporary V0 probe separate.
   A lossless candidate destined for Opus therefore reads `FLAC → OPUS 128
