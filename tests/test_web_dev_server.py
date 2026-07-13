@@ -267,6 +267,18 @@ class _MetadataMirrorHandler(BaseHTTPRequestHandler):
             }
         elif parsed.path == "/api/artists/60":
             payload = {"id": 60, "name": "Synthetic Artist"}
+        elif parsed.path == "/api/releases/60":
+            payload = {
+                "id": 60,
+                "title": "Synthetic Release",
+                "country": "",
+                "released": "",
+                "master_id": None,
+                "artists": [{"id": 60, "name": "Synthetic Artist"}],
+                "labels": [],
+                "formats": [],
+                "tracks": [],
+            }
         else:
             self.send_error(404)
             return
@@ -405,6 +417,16 @@ class WebDevServerLiveDbMetadataIntegrationTest(unittest.TestCase):
             "meta:discogs:artist:60:name",
         }.issubset(self.metadata_cache._store))
 
+        resolve_path = "/api/browse/resolve?id=60&source=discogs&kind=release"
+        with urlopen(f"{base}{resolve_path}") as resolve_response:
+            resolve_payload = json.loads(resolve_response.read())
+        self.assertEqual(resolve_response.status, 200)
+        self.assertEqual(resolve_payload["source"], "discogs")
+        self.assertTrue({
+            "meta:discogs:release:60",
+            "meta:browse-resolve:discogs:release:60",
+        }.issubset(self.metadata_cache._store))
+
         # A second live-db configuration in the same process must clear the
         # first session's Discogs origin and reject BEFORE reading the fully
         # warm compare/name cache. Otherwise screenshot QA can false-green
@@ -416,6 +438,9 @@ class WebDevServerLiveDbMetadataIntegrationTest(unittest.TestCase):
         with self.assertRaises(HTTPError) as raised:
             urlopen(f"{missing_base}{path}")
         self.assertEqual(raised.exception.code, 503)
+        with self.assertRaises(HTTPError) as resolve_raised:
+            urlopen(f"{missing_base}{resolve_path}")
+        self.assertEqual(resolve_raised.exception.code, 503)
 
 
 class ConfigureLiveDbReadOnlyTest(unittest.TestCase):

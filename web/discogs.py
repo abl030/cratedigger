@@ -193,13 +193,14 @@ def search_releases(query: str) -> list[dict]:
     keeps the raw passthrough — an artist_id pin with no title would make
     the mirror scan every one of artist 194's releases.
     """
+    api_base = require_mirror_configured()
     remainder, is_va = split_va_query(query)
     va_pin = is_va and bool(remainder)
     effective_query = remainder if va_pin else query
 
     def _fetch() -> list[dict]:
         q = urllib.parse.quote(effective_query)
-        url = f"{require_mirror_configured()}/api/search?title={q}&per_page=25"
+        url = f"{api_base}/api/search?title={q}&per_page=25"
         if va_pin:
             url += f"&artist_id={VA_ARTIST_ID}"
         data = _get(url)
@@ -243,9 +244,11 @@ def search_artists(query: str) -> list[dict]:
     Uses /api/artists?name=, which is a real ts_rank artist-name search —
     parity with MB's /ws/2/artist?query=.
     """
+    api_base = require_mirror_configured()
+
     def _fetch() -> list[dict]:
         q = urllib.parse.quote(query)
-        data = _get(f"{require_mirror_configured()}/api/artists?name={q}&per_page=20")
+        data = _get(f"{api_base}/api/artists?name={q}&per_page=20")
         results = [
             {
                 "id": str(r["id"]),
@@ -262,7 +265,7 @@ def search_artists(query: str) -> list[dict]:
         if exact is None:
             return results
         try:
-            detail = _get(f"{require_mirror_configured()}/api/artists/{exact['id']}")
+            detail = _get(f"{api_base}/api/artists/{exact['id']}")
         except (urllib.error.HTTPError, urllib.error.URLError):
             return results
         related = [
@@ -385,11 +388,13 @@ def get_artist_releases(artist_id: int) -> list[dict]:
     we don't downgrade own work when it also has track-only credits. A master
     and a masterless release with the same numeric id remain distinct.
     """
+    api_base = require_mirror_configured()
+
     def _fetch() -> list[dict]:
         entries: dict[tuple[str, str], dict] = {}
 
         masters = msgspec.convert(
-            _get(f"{require_mirror_configured()}/api/artists/{artist_id}/masters/all"),
+            _get(f"{api_base}/api/artists/{artist_id}/masters/all"),
             type=_DiscogsArtistMastersResponse,
         )
         _require_complete_artist_catalogue(masters, endpoint="masters/all")
@@ -401,7 +406,7 @@ def get_artist_releases(artist_id: int) -> list[dict]:
             entries.setdefault((namespace, entry["id"]), entry)
 
         appearances = msgspec.convert(
-            _get(f"{require_mirror_configured()}/api/artists/{artist_id}/appearances"),
+            _get(f"{api_base}/api/artists/{artist_id}/appearances"),
             type=_DiscogsArtistMastersResponse,
         )
         _require_complete_artist_catalogue(appearances, endpoint="appearances")
@@ -422,8 +427,10 @@ def get_artist_releases(artist_id: int) -> list[dict]:
 
 def get_master_releases(master_id: int) -> dict:
     """Get all releases (pressings) for a master. Mirrors mb.get_release_group_releases()."""
+    api_base = require_mirror_configured()
+
     def _fetch() -> dict:
-        data = _get(f"{require_mirror_configured()}/api/masters/{master_id}")
+        data = _get(f"{api_base}/api/masters/{master_id}")
         releases = []
         for r in data.get("releases", []):
             formats = r.get("formats", [])
@@ -459,8 +466,10 @@ def get_release(release_id: int, *, fresh: bool = False) -> dict:
     pipeline DB — a 24h cache hit would silently write stale
     artist/title/track data into `album_requests` / `request_tracks`.
     """
+    api_base = require_mirror_configured()
+
     def _fetch() -> dict:
-        data = _get(f"{require_mirror_configured()}/api/releases/{release_id}")
+        data = _get(f"{api_base}/api/releases/{release_id}")
         artists = data.get("artists", [])
         artist_name = _primary_artist_name(artists)
         artist_id = _primary_artist_id(artists)
@@ -498,8 +507,10 @@ def get_release(release_id: int, *, fresh: bool = False) -> dict:
 
 def get_artist_name(artist_id: int) -> str:
     """Look up an artist's name by Discogs ID."""
+    api_base = require_mirror_configured()
+
     def _fetch() -> str:
-        data = _get(f"{require_mirror_configured()}/api/artists/{artist_id}")
+        data = _get(f"{api_base}/api/artists/{artist_id}")
         return data.get("name", "")
 
     return _cache.memoize_meta(f"discogs:artist:{artist_id}:name", _fetch)
@@ -697,10 +708,12 @@ def search_labels(query: str, *, page: int = 1, per_page: int = 25) -> list[Labe
     stays lossless; on read we rehydrate via `msgspec.convert`. Per
     `.claude/rules/code-quality.md` § "Wire-boundary types".
     """
+    api_base = require_mirror_configured()
+
     def _fetch() -> list[dict]:
         q = urllib.parse.quote(query)
         raw = _get(
-            f"{require_mirror_configured()}/api/labels"
+            f"{api_base}/api/labels"
             f"?name={q}&page={page}&per_page={per_page}"
         )
         decoded = msgspec.convert(raw, type=_DiscogsLabelSearchResponse)
@@ -720,10 +733,11 @@ def get_label(label_id: int | str) -> LabelEntity:
     HTTPError on 404 (the caller surfaces the 404 as needed). Returns
     a typed `LabelEntity` on success.
     """
+    api_base = require_mirror_configured()
     label_id_str = _assert_discogs_label_id(label_id)
 
     def _fetch() -> dict:
-        raw = _get(f"{require_mirror_configured()}/api/labels/{label_id_str}")
+        raw = _get(f"{api_base}/api/labels/{label_id_str}")
         decoded = msgspec.convert(raw, type=_DiscogsLabelDetail)
         return msgspec.to_builtins(_label_entity_from_detail(decoded))
 
@@ -746,12 +760,13 @@ def get_label_releases(label_id: int | str, *, include_sublabels: bool = True,
     (str | None), `master_title`, `master_first_released`, `labels`,
     `formats`.
     """
+    api_base = require_mirror_configured()
     label_id_str = _assert_discogs_label_id(label_id)
 
     def _fetch() -> dict:
         sub_flag = "true" if include_sublabels else "false"
         raw = _get(
-            f"{require_mirror_configured()}/api/labels/{label_id_str}/releases"
+            f"{api_base}/api/labels/{label_id_str}/releases"
             f"?include_sublabels={sub_flag}&page={page}&per_page={per_page}",
             timeout=(
                 LABEL_RELEASES_INCLUDE_TIMEOUT_SECONDS

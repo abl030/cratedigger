@@ -702,6 +702,8 @@ def get_browse_resolve(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     if source == "discogs" and not raw_id.isdigit():
         h._error("Invalid Discogs ID (must be numeric)")  # type: ignore[attr-defined]
         return
+    if source == "discogs":
+        discogs_api.require_mirror_configured()
 
     cache_key = f"browse-resolve:{source}:{kind}:{raw_id}"
 
