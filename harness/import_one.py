@@ -326,6 +326,37 @@ def build_existing_measurement(
     )
 
 
+def _materialized_measurement_from_album_info(
+    album_info: AlbumInfo,
+    result: ImportResult,
+) -> AudioQualityMeasurement:
+    """Describe the files Beets actually retained after materialization.
+
+    Decision evidence intentionally stays in ``result.new_measurement``.
+    Postflight Beets metadata is authoritative for the output codec and its
+    per-track bitrate statistics; source spectral/V0 evidence must not be
+    relabelled as an analysis of this derivative.
+    """
+    candidate = result.new_measurement
+    return AudioQualityMeasurement(
+        min_bitrate_kbps=album_info.min_bitrate_kbps,
+        avg_bitrate_kbps=album_info.avg_bitrate_kbps,
+        median_bitrate_kbps=album_info.median_bitrate_kbps,
+        format=album_info.format or None,
+        is_cbr=album_info.is_cbr,
+        verified_lossless=(
+            candidate.verified_lossless if candidate is not None else False
+        ),
+        was_converted_from=(
+            result.conversion.original_filetype
+            if result.conversion.was_converted
+            else (
+                candidate.was_converted_from if candidate is not None else None
+            )
+        ),
+    )
+
+
 def conversion_target(target_format: str | None,
                       will_be_verified_lossless: bool,
                       verified_lossless_target: str | None) -> str | None:
@@ -1510,6 +1541,9 @@ def _run_quality_evidence_authorized_import(
         beets.close()
         _emit_and_exit(r)
 
+    r.materialized_measurement = _materialized_measurement_from_album_info(
+        pf_info, r,
+    )
     r.postflight = PostflightInfo(beets_id=pf_info.album_id,
                                   track_count=pf_info.track_count,
                                   imported_path=pf_info.album_path)
@@ -2210,6 +2244,9 @@ def main():
         beets.close()
         _emit_and_exit(r)
 
+    r.materialized_measurement = _materialized_measurement_from_album_info(
+        pf_info, r,
+    )
     r.postflight = PostflightInfo(beets_id=pf_info.album_id,
                                    track_count=pf_info.track_count,
                                    imported_path=pf_info.album_path)

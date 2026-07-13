@@ -3939,8 +3939,17 @@ class FakePipelineDB:
                 "spectral_bitrate": spectral_bitrate,
                 "v0_probe_kind": v0_probe_kind,
                 "v0_probe_avg_bitrate": v0_probe_avg_bitrate,
+                "evidence_source_codec": (
+                    ev.codec if ev is not None else None
+                ),
+                "evidence_source_container": (
+                    ev.container if ev is not None else None
+                ),
                 "evidence_storage_format": (
                     ev.storage_format if ev is not None else None
+                ),
+                "evidence_target_format": (
+                    ev.target_format if ev is not None else None
                 ),
                 "evidence_min_bitrate": (
                     ev_measurement.min_bitrate_kbps

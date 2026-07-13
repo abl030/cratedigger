@@ -328,6 +328,8 @@ class QualityComparisonBasis(msgspec.Struct, frozen=True):
     the same class of display lie this type exists to kill (request 6039:
     a genuine avg-196→288 rank upgrade rendered as "MP3 V2 to MP3 V2"
     because every UI label re-derived from min bitrate).
+    An explicit codec label uses ``contract`` instead: its declared bitrate is
+    policy, not a measured statistic and especially not a temporary V0 probe.
 
     ``verified_lossless_bypass`` is set by ``import_quality_decision()``, not
     ``compare_quality()`` — True only when the bypass CHANGED the outcome
@@ -344,7 +346,7 @@ class QualityComparisonBasis(msgspec.Struct, frozen=True):
     branch: str   # see COMPARISON_BASIS_BRANCHES
     new_rank: str
     existing_rank: str
-    new_metric: str = "min"        # "min" | "avg" | "median"
+    new_metric: str = "min"        # "min" | "avg" | "median" | "contract"
     existing_metric: str = "min"
     new_value_kbps: Optional[int] = None
     existing_value_kbps: Optional[int] = None

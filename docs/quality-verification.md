@@ -254,7 +254,10 @@ Every `compare_quality()` call returns a `QualityComparisonBasis`
 that branch (spectral-clamped values on a clamped rank comparison, raw
 configured-metric values on a tiebreak), and the per-side statistic actually
 classified (`min`/`avg`/`median` — the configured metric falls back to min
-when unmeasured). `import_quality_decision()` stamps
+when unmeasured). An explicit codec label such as `opus 128` is instead
+persisted as `contract`: the label's declared bitrate is policy, not a measured
+statistic. A temporary V0 probe may still inform source quality, but it never
+becomes an `OPUS` measurement. `import_quality_decision()` stamps
 `verified_lossless_bypass=True` only when the bypass changed the outcome
 (an "equivalent" verdict imported).
 
@@ -265,6 +268,15 @@ plain dict — the dict crosses json.dumps'd API responses), the evidence
 action file, and the dispatch-synthesized reject `ImportResult`. Re-typing
 back from the dict goes through `comparison_basis_from_decision()` — the one
 converter.
+
+Successful imports also persist `ImportResult.materialized_measurement`, built
+from the postflight Beets album info after conversion and import. It records the
+actual stored codec plus min/avg/median bitrate. This is deliberately separate
+from `new_measurement` (the decision-time candidate projection),
+`comparison_basis` (the policy explanation), and `v0_probe` (a temporary
+research encode). Audit UIs must use the materialized measurement for claims
+about output bytes and must leave historical output unknown when that field is
+absent.
 
 **Motivation (request 6039 / download_log 36608):** a genuine avg 196→288
 rank upgrade (GOOD → TRANSPARENT) rendered as "Upgrade: MP3 V2 to MP3 V2"
@@ -280,9 +292,10 @@ same lie can be injected one seam earlier — the decision layer used to
 synthesize comparison measurements with `avg` fabricated `= min` (the
 lossless-conversion path carries only the post-conversion min across the
 flat decision interface), so a persisted basis read "avg 216k" while the
-files' real avg was 255. Synthesized measurements now leave unmeasured
-stats `None`; `_selected_bitrate_with_source` falls back to the min AND
-labels it `min`. Guarded by the `assert_basis_metrics_truthful` generated
+files' real avg was 255. Explicit targets now persist the codec contract
+(`OPUS 128 contract`); without a contract, synthesized measurements leave
+unmeasured stats `None` so `_selected_bitrate_with_source` falls back to the
+min and labels it `min`. Guarded by the `assert_basis_metrics_truthful` generated
 property (`tests/test_quality_generated.py`) and the request-8781 pins in
 `tests/test_quality_classification.py`.
 

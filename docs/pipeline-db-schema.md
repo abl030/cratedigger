@@ -181,12 +181,14 @@ as live queue work.
 
 ## `download_log.import_result` JSONB
 
-`import_one.py` emits an `ImportResult` JSON blob (`__IMPORT_RESULT__` sentinel on stdout). Contains: decision, conversion details, V0 probe evidence, quality comparison (new vs prev bitrate), postflight verification (beets_id, path), and an attempt-local `spectral` audit. Preview analyzes the incoming candidate before conversion, preserving its album grade, spectral floor, suspect percentage, per-track grade/HF deficit/cliff detail, or error. `HAVE` analyzes the exact requested release's current Beets files on every attempt unless `album_requests.current_evidence_id` proves those files are a derivative converted from a lossless source; only that lossless-conversion case uses the persisted pre-conversion source evidence because scanning the derivative would rewrite source provenance. These audit fields are display-only and deliberately separate from `new_measurement` / `existing_measurement`. Every import path (success, downgrade, transcode, provisional, suspect-lossless rejection, error, timeout, crash) logs to download_log.
+`import_one.py` emits an `ImportResult` JSON blob (`__IMPORT_RESULT__` sentinel on stdout). Contains: decision, conversion details, V0 probe evidence, quality comparison (new vs prev bitrate), postflight verification (beets_id, path), the post-import `materialized_measurement`, and an attempt-local `spectral` audit. Preview analyzes the incoming candidate before conversion, preserving its album grade, spectral floor, suspect percentage, per-track grade/HF deficit/cliff detail, or error. `HAVE` analyzes the exact requested release's current Beets files on every attempt unless `album_requests.current_evidence_id` proves those files are a derivative converted from a lossless source; only that lossless-conversion case uses the persisted pre-conversion source evidence because scanning the derivative would rewrite source provenance. These audit fields are display-only and deliberately separate from `new_measurement` / `existing_measurement` (decision inputs) and `materialized_measurement` (the bytes actually stored after conversion). An explicit target such as `opus 128` is persisted in `comparison_basis` as a `contract` metric; a temporary V0 probe must never be presented as the target codec's measured bitrate. Every import path (success, downgrade, transcode, provisional, suspect-lossless rejection, error, timeout, crash) logs to download_log.
 
 ```sql
 SELECT import_result->>'decision',
-       import_result->'quality'->>'new_min_bitrate',
+       import_result->'comparison_basis'->>'new_metric',
        import_result->'v0_probe'->>'avg_bitrate_kbps',
+       import_result->'materialized_measurement'->>'avg_bitrate_kbps',
+       import_result->'materialized_measurement'->>'min_bitrate_kbps',
        import_result->'spectral'->>'grade',
        import_result->'spectral'->'per_track'->0->>'hf_deficit_db'
 FROM download_log ORDER BY id DESC LIMIT 10;

@@ -195,9 +195,12 @@ class ImportResult(msgspec.Struct):
     from import_one.py back to cratedigger.py. Stored in download_log.import_result
     for complete auditability.
 
-    new_measurement / existing_measurement carry the coherent quality state
-    for the download and what was on disk. The same AudioQualityMeasurement
-    type flows through decision functions and the audit trail.
+    ``new_measurement`` / ``existing_measurement`` carry the decision-time
+    candidate/current state. ``materialized_measurement`` is deliberately
+    separate: it describes the bytes that actually landed in Beets after any
+    target conversion. A lossless candidate may be decided through a
+    temporary MP3 V0 probe, then stored as Opus; collapsing those measurements
+    makes a V0 bitrate wear an Opus label.
 
     Wire-boundary type per ``.claude/rules/code-quality.md``: encode via
     ``msgspec.json.encode``, decode via ``msgspec.convert`` — symmetric.
@@ -212,6 +215,7 @@ class ImportResult(msgspec.Struct):
     already_in_beets: bool = False
     new_measurement: Optional[AudioQualityMeasurement] = None
     existing_measurement: Optional[AudioQualityMeasurement] = None
+    materialized_measurement: Optional[AudioQualityMeasurement] = None
     conversion: ConversionInfo = msgspec.field(default_factory=ConversionInfo)
     spectral: SpectralDetail = msgspec.field(default_factory=SpectralDetail)
     postflight: PostflightInfo = msgspec.field(default_factory=PostflightInfo)

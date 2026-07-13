@@ -340,8 +340,8 @@ class TestLiveBugReproductions(unittest.TestCase):
         self.assertNotEqual(r["stage2_import"], "import")
         self.assertFalse(r["imported"])
 
-    def test_olivia_rodrigo_wav_basis_metric_is_honest_min(self):
-        """BUG: the persisted basis labeled a min value "avg" (dl 36660).
+    def test_olivia_rodrigo_wav_basis_uses_target_contract(self):
+        """BUG: the persisted basis labeled a proxy value "avg" (dl 36660).
 
         Request 8781, 2026-07-11. WAV source converted to Opus (real files:
         min 216 / avg 255) vs on-disk AAC avg 256. The decision pipeline
@@ -349,8 +349,9 @@ class TestLiveBugReproductions(unittest.TestCase):
         post-conversion MIN, so the persisted basis read "avg 216k" while
         the V0-probe row on the same card honestly said "255kbps avg" —
         the display-lie class #608 exists to kill, injected one seam
-        earlier at measurement synthesis. The basis must label the value
-        it classified as what it really is: the min.
+        earlier at measurement synthesis. Because the rank is actually
+        classified by the explicit Opus target, the basis must identify the
+        128k contract rather than attach any measured label to the proxy.
         """
         r = full_pipeline_decision(
             is_flac=True,
@@ -377,12 +378,10 @@ class TestLiveBugReproductions(unittest.TestCase):
         self.assertEqual(basis["branch"], "cross_family_same_rank")
         self.assertEqual(basis["verdict"], "equivalent")
         self.assertTrue(basis["verified_lossless_bypass"])
-        # The honest labels: the candidate side classified the
-        # post-conversion MIN (no real avg crosses the decision interface);
-        # the existing side classified its real avg.
-        self.assertEqual(basis["new_metric"], "min",
-                         "a fabricated avg must not label a min value")
-        self.assertEqual(basis["new_value_kbps"], 216)
+        # The honest labels: the candidate side was classified by the target
+        # contract; the existing side was classified by its real average.
+        self.assertEqual(basis["new_metric"], "contract")
+        self.assertEqual(basis["new_value_kbps"], 128)
         self.assertEqual(basis["existing_metric"], "avg")
         self.assertEqual(basis["existing_value_kbps"], 256)
 
@@ -689,11 +688,9 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         self.assertNotEqual(r["stage2_import"], "import")
         self.assertFalse(r["imported"])
 
-    def test_olivia_rodrigo_wav_basis_metric_via_evidence(self):
-        """dl 36660 through the production decider: the basis labels the
-        classified candidate value "min" — the evidence carries a real avg
-        (255) but the decision interface classifies the post-conversion
-        min, and the label must say so."""
+    def test_olivia_rodrigo_wav_basis_contract_via_evidence(self):
+        """dl 36660 through the production decider: the basis records the
+        explicit Opus contract, never the V0 proxy's min or average."""
         from lib.quality import (
             AlbumQualityEvidenceDecisionFacts,
             AlbumQualityV0Metric,
@@ -736,9 +733,8 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         assert basis is not None
         self.assertEqual(basis["branch"], "cross_family_same_rank")
         self.assertTrue(basis["verified_lossless_bypass"])
-        self.assertEqual(basis["new_metric"], "min",
-                         "a fabricated avg must not label a min value")
-        self.assertEqual(basis["new_value_kbps"], 216)
+        self.assertEqual(basis["new_metric"], "contract")
+        self.assertEqual(basis["new_value_kbps"], 128)
         self.assertEqual(basis["existing_metric"], "avg")
         self.assertEqual(basis["existing_value_kbps"], 256)
 

@@ -5087,6 +5087,7 @@ class TestGetWrongMatches(unittest.TestCase):
             codec="flac",
             container="flac",
             storage_format="FLAC",
+            target_format="opus 128",
             v0_metric=AlbumQualityV0Metric(
                 min_bitrate_kbps=220,
                 avg_bitrate_kbps=265,
@@ -5122,7 +5123,10 @@ class TestGetWrongMatches(unittest.TestCase):
         self.assertEqual(row["v0_probe_avg_bitrate"], 265)
 
         # New evidence-only fields surfaced for the entry quality badge.
+        self.assertEqual(row["evidence_source_codec"], "flac")
+        self.assertEqual(row["evidence_source_container"], "flac")
         self.assertEqual(row["evidence_storage_format"], "FLAC")
+        self.assertEqual(row["evidence_target_format"], "opus 128")
         self.assertEqual(row["evidence_min_bitrate"], 0)
         self.assertTrue(row["evidence_verified_lossless"])
 

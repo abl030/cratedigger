@@ -95,6 +95,7 @@ def _populate_dl_info_from_import_result(dl_info: DownloadInfo,
     """Populate a DownloadInfo from an ImportResult (pure, no I/O)."""
     conv = ir.conversion
     new_m = ir.new_measurement
+    materialized_m = ir.materialized_measurement
     existing_m = ir.existing_measurement
     if conv.was_converted:
         dl_info.was_converted = True
@@ -106,10 +107,14 @@ def _populate_dl_info_from_import_result(dl_info: DownloadInfo,
     else:
         dl_info.slskd_filetype = dl_info.filetype
         dl_info.actual_filetype = dl_info.filetype
+    # ``actual_*`` means the materialized output, not the candidate/proxy
+    # measurement used to authorize it. Legacy/non-mutating results without a
+    # separate output retain the historical new_measurement fallback.
+    actual_m = materialized_m or new_m
+    if actual_m and actual_m.min_bitrate_kbps is not None:
+        dl_info.bitrate = actual_m.min_bitrate_kbps * 1000
+        dl_info.actual_min_bitrate = actual_m.min_bitrate_kbps
     if new_m:
-        if new_m.min_bitrate_kbps is not None:
-            dl_info.bitrate = new_m.min_bitrate_kbps * 1000
-            dl_info.actual_min_bitrate = new_m.min_bitrate_kbps
         dl_info.download_spectral = SpectralMeasurement.from_parts(
             new_m.spectral_grade, new_m.spectral_bitrate_kbps)
         dl_info.verified_lossless_override = new_m.verified_lossless

@@ -146,7 +146,7 @@ _BASIS_SAME_RANK_BRANCHES = frozenset({
     "lossless_same_rank", "cross_family_same_rank",
     "label_contract_same_rank", "metric_tiebreak", "metric_missing",
 })
-_BASIS_METRICS = frozenset({"min", "avg", "median"})
+_BASIS_METRICS = frozenset({"min", "avg", "median", "contract"})
 
 
 def assert_basis_consistent(result: SimResult) -> None:
@@ -203,9 +203,10 @@ def assert_basis_metrics_truthful(
     Download_log 36660: the decision layer synthesized the compared
     candidate measurement with avg fabricated = the post-conversion MIN,
     so the persisted basis read "avg 216k" beside an honest "255kbps avg"
-    V0-probe row on the same card. The rule: the flat decision interface
-    carries a real candidate avg only on the native-lossy path — both FLAC
-    paths classify the (post-conversion) min and must say "min". The
+    V0-probe row on the same card. The rule: an explicit target is a
+    ``contract``; otherwise the flat decision interface carries a real
+    candidate avg only on the native-lossy path, and FLAC paths classify the
+    post-conversion min and must say "min". The
     existing side has a real avg only when the album measured one, except
     the deliberate CBR spectral-override clamp (its own pinned policy,
     where a CBR album's avg IS its min). "median" never crosses the flat

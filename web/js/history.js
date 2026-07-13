@@ -94,9 +94,35 @@ function withWas(value, wasValue) {
 function basisValuePhrase(basis, side) {
   const value = side === 'new' ? basis.new_value_kbps : basis.existing_value_kbps;
   const metric = side === 'new' ? basis.new_metric : basis.existing_metric;
+  if (metric === 'contract') return 'contract';
   if (value === null || value === undefined) return 'unmeasured';
   if (basis.spectral_clamped && basis.branch === 'rank') return `~${esc(value)}k`;
   return `${esc(metric)} ${esc(value)}k`;
+}
+
+/**
+ * Measured post-import bytes, kept disjoint from decision-time candidate/V0
+ * evidence. Prefer the configured AVG statistic for VBR output and retain the
+ * minimum as an explicitly-labelled floor.
+ * @param {Object} h
+ * @param {boolean} detail
+ * @returns {string}
+ */
+function materializedOutputPhrase(h, detail = false) {
+  const fmt = h.materialized_format || h.actual_filetype;
+  const avg = h.materialized_avg_bitrate;
+  const median = h.materialized_median_bitrate;
+  const min = h.materialized_min_bitrate;
+  if (!fmt || (avg == null && median == null && min == null)) return '';
+  const primaryMetric = avg != null ? 'avg' : median != null ? 'median' : 'min';
+  const primaryValue = avg != null ? avg : median != null ? median : min;
+  const prefix = detail ? '' : 'actual ';
+  let phrase = `${prefix}${esc(String(fmt).toUpperCase())} ${primaryMetric} ${esc(primaryValue)}`;
+  phrase += detail ? 'kbps' : 'k';
+  if (min != null && primaryMetric !== 'min') {
+    phrase += detail ? ` · min ${esc(min)}kbps` : ` (min ${esc(min)}k)`;
+  }
+  return phrase;
 }
 
 /**
@@ -143,7 +169,10 @@ export function renderEvidenceStrip(h) {
     // render it instead of re-deriving labels from min bitrate (request
     // 6039: min-derived labels turned a real avg 196→288 rank upgrade
     // into "IN MP3 V2 · 194k HAVE MP3 194k").
-    inParts.push(basisSidePhrase(basis, 'new'));
+    const sourceFormat = h.slskd_filetype || h.original_filetype;
+    const sourcePrefix = h.was_converted && sourceFormat
+      ? `${esc(String(sourceFormat).toUpperCase())} → ` : '';
+    inParts.push(`${sourcePrefix}${basisSidePhrase(basis, 'new')}`);
   } else {
     if (h.downloaded_label) inParts.push(esc(h.downloaded_label));
     // Labelled "min": bare numbers on a card that also shows avg-labelled
@@ -151,6 +180,8 @@ export function renderEvidenceStrip(h) {
     // basis exists to kill (request 8781 operator report).
     if (h.actual_min_bitrate) inParts.push(`min ${esc(h.actual_min_bitrate)}k`);
   }
+  const materialized = materializedOutputPhrase(h);
+  if (materialized) inParts.push(materialized);
   if (h.spectral_grade) {
     // With a basis, the clamped rank value already carries the floor —
     // repeating "~250k" in the grade chip would double it up.
@@ -218,7 +249,7 @@ export function renderEvidenceStrip(h) {
  * reads positive must not bury its reason below the grid.
  *
  * Fixed schema (issue #575): the core vocabulary — Source / Spectral /
- * Min bitrate / Distance — renders on EVERY entry, with an em-dash when a
+ * Output / Distance — renders on EVERY entry, with an em-dash when a
  * side has no data, so adjacent entries never jump shape. Existing-side
  * data appears inline as "(was Xkbps)" inside the value cell, so each
  * metric is apples-to-apples on the same row. Semantic extras (V0 probe
@@ -321,33 +352,22 @@ export function renderDownloadHistoryItem(h) {
   // row below stays as the raw min-vs-min detail.
   if (h.comparison_basis) {
     const b = h.comparison_basis;
-    let compared = `${basisValuePhrase(b, 'new')} (${esc(b.new_rank)})`
-      + ` vs ${basisValuePhrase(b, 'existing')} (${esc(b.existing_rank)})`;
+    let compared = `${basisSidePhrase(b, 'new')}`
+      + ` vs ${basisSidePhrase(b, 'existing')}`;
     if (b.verified_lossless_bypass) {
       compared += ' <span style="color:#6af;">· verified lossless bypass</span>';
     }
     rows.push(['Compared', compared]);
   }
 
-  // Min bitrate row — apples-to-apples between candidate and existing on
-  // min bitrate (kbps), and the label SAYS min: an unlabelled "Bitrate:
-  // 216kbps" beside avg-labelled Compared/V0 rows is exactly the
-  // min-vs-avg confusion the operator hit on request 8781. The was-side
-  // names the on-disk codec when known: "256kbps (was MP3 256kbps)"
-  // explains a rank upgrade that the bare numbers would contradict.
-  const candidateMin = h.actual_min_bitrate;
-  const existingMin = h.existing_min_bitrate;
-  if (candidateMin || existingMin) {
-    const candidate = candidateMin ? `${esc(candidateMin)}kbps` : '—';
-    const wasFmt = h.existing_format ? `${esc(h.existing_format)} ` : '';
-    const was = existingMin ? `${wasFmt}${esc(existingMin)}kbps` : null;
-    rows.push(['Min bitrate', withWas(candidate, was)]);
-  } else {
-    rows.push(['Min bitrate', '—']);
-  }
+  // Output is measured only after target conversion/import. Do not fall back
+  // to decision-time ``actual_min_bitrate`` here: historical evidence-action
+  // rows used that column for a temporary V0 proxy (Gas / November 89), which
+  // made 191k of MP3 proof appear as an Opus minimum.
+  rows.push(['Output', materializedOutputPhrase(h, true) || '—']);
 
   if (h.final_format) {
-    rows.push(['Stored as', esc(h.final_format)]);
+    rows.push(['Stored as', `${esc(String(h.final_format).toUpperCase())} contract`]);
   }
 
   if (outcome === 'force_import') {

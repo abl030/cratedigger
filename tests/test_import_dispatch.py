@@ -196,6 +196,40 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
         _populate_dl_info_from_import_result(dl, ir)
         self.assertEqual(dl.actual_min_bitrate, 245)
 
+    def test_materialized_output_owns_actual_bitrate_not_preview_v0_proxy(self):
+        """Gas / November 89: the candidate measurement was the temporary
+        MP3 V0 proof (191k min), while the stored Opus output measured 102k.
+        ``actual_min_bitrate`` must describe the bytes that landed on disk.
+        """
+        from lib.dispatch import _populate_dl_info_from_import_result
+        dl = DownloadInfo(filetype="flac")
+        ir = ImportResult(
+            decision="import",
+            new_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=191,
+                avg_bitrate_kbps=224,
+                median_bitrate_kbps=237,
+                format="opus 128",
+            ),
+            materialized_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=102,
+                avg_bitrate_kbps=132,
+                median_bitrate_kbps=144,
+                format="Opus",
+            ),
+            conversion=ConversionInfo(
+                was_converted=True,
+                original_filetype="flac",
+                target_filetype="opus",
+            ),
+        )
+
+        _populate_dl_info_from_import_result(dl, ir)
+
+        self.assertEqual(dl.actual_filetype, "opus")
+        self.assertEqual(dl.actual_min_bitrate, 102)
+        self.assertEqual(dl.bitrate, 102000)
+
     def test_leaves_actual_min_bitrate_none_when_measurement_missing(self):
         """If there's no new_measurement in the ImportResult, we don't
         fabricate a value — NULL is the honest signal for consumers."""
