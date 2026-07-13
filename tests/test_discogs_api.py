@@ -465,6 +465,7 @@ class TestGetArtistReleases(unittest.TestCase):
                 "id": 21481,
                 "title": "Creep",
                 "type": "EP",
+                "primary_types": ["EP", "Single"],
                 "first_release_date": "1992",
                 "artist_credit": "Radiohead",
                 "primary_artist_id": 3840,
@@ -474,6 +475,7 @@ class TestGetArtistReleases(unittest.TestCase):
                 "id": 13344,
                 "title": "Pablo Honey",
                 "type": "Album",
+                "primary_types": ["Album"],
                 "first_release_date": "1993",
                 "artist_credit": "Radiohead",
                 "primary_artist_id": 3840,
@@ -483,6 +485,7 @@ class TestGetArtistReleases(unittest.TestCase):
                 "id": "release-83182",
                 "title": "Stupid Car (demo)",
                 "type": "Other",
+                "primary_types": [],
                 "first_release_date": "1993",
                 "artist_credit": "Radiohead",
                 "primary_artist_id": 3840,
@@ -512,6 +515,7 @@ class TestGetArtistReleases(unittest.TestCase):
         album = next(r for r in results if r["title"] == "Pablo Honey")
         self.assertEqual(album["id"], "13344")
         self.assertEqual(album["type"], "Album")
+        self.assertEqual(album["primary_types"], ["Album"])
         self.assertEqual(album["first_release_date"], "1993")
         self.assertEqual(album["artist_credit"], "Radiohead")
         self.assertEqual(album["primary_artist_id"], "3840")
@@ -522,6 +526,7 @@ class TestGetArtistReleases(unittest.TestCase):
         masterless = next(r for r in results if r["title"] == "Stupid Car (demo)")
         self.assertEqual(masterless["id"], "83182")  # "release-" prefix stripped
         self.assertEqual(masterless["discogs_release_id"], "83182")
+        self.assertEqual(masterless["primary_types"], [])
         self.assertTrue(masterless["is_masterless"])
 
     def test_appearances_merged_and_classified_as_non_primary(self):
@@ -531,6 +536,7 @@ class TestGetArtistReleases(unittest.TestCase):
                     "id": 555,
                     "title": "Indie 1996",
                     "type": "Album",
+                    "primary_types": ["Album"],
                     "first_release_date": "1996",
                     "artist_credit": "Various",
                     "primary_artist_id": 194,
@@ -566,6 +572,7 @@ class TestGetArtistReleases(unittest.TestCase):
                     "id": 13344,  # same master id as Pablo Honey in /masters
                     "title": "Pablo Honey (Various comp version)",
                     "type": "Album",
+                    "primary_types": ["Album"],
                     "first_release_date": "1993",
                     "artist_credit": "Various",
                     "primary_artist_id": 194,
@@ -586,6 +593,82 @@ class TestGetArtistReleases(unittest.TestCase):
         self.assertEqual(pablo["artist_credit"], "Radiohead")
         self.assertEqual(pablo["primary_artist_id"], "3840")
         self.assertIs(pablo["is_appearance"], False)
+
+    def test_missing_primary_types_is_rejected_at_boundary(self):
+        invalid = {
+            **self.MASTERS_DATA,
+            "results": [
+                {
+                    key: value
+                    for key, value in self.MASTERS_DATA["results"][0].items()
+                    if key != "primary_types"
+                },
+            ],
+            "total": 1,
+        }
+        with _mock_urlopen_by_url({
+            "/masters": invalid,
+            "/appearances": self.EMPTY_APPEARANCES,
+        }):
+            with self.assertRaises(msgspec.ValidationError):
+                get_artist_releases(3840)
+
+    def test_wrong_primary_types_element_is_rejected_at_boundary(self):
+        invalid = {
+            **self.MASTERS_DATA,
+            "results": [
+                {
+                    **self.MASTERS_DATA["results"][0],
+                    "primary_types": [7],
+                },
+            ],
+            "total": 1,
+        }
+        with _mock_urlopen_by_url({
+            "/masters": invalid,
+            "/appearances": self.EMPTY_APPEARANCES,
+        }):
+            with self.assertRaises(msgspec.ValidationError):
+                get_artist_releases(3840)
+
+    def test_invalid_appearance_row_is_rejected_at_boundary(self):
+        invalid_appearances = {
+            "results": [{
+                "id": 555,
+                "title": "Sampler",
+                "type": "Album",
+                "primary_types": ["Compilation"],
+                "first_release_date": "2001",
+                "artist_credit": "Various",
+                "primary_artist_id": 194,
+                "is_masterless": False,
+            }],
+            "total": 1,
+            "page": 1,
+            "per_page": 1,
+        }
+        with _mock_urlopen_by_url({
+            "/masters": self.MASTERS_DATA,
+            "/appearances": invalid_appearances,
+        }):
+            with self.assertRaises(msgspec.ValidationError):
+                get_artist_releases(3840)
+
+    def test_null_primary_artist_id_normalizes_to_empty_string(self):
+        null_artist = {
+            **self.MASTERS_DATA,
+            "results": [{
+                **self.MASTERS_DATA["results"][0],
+                "primary_artist_id": None,
+            }],
+            "total": 1,
+        }
+        with _mock_urlopen_by_url({
+            "/masters": null_artist,
+            "/appearances": self.EMPTY_APPEARANCES,
+        }):
+            results = get_artist_releases(3840)
+        self.assertEqual(results[0]["primary_artist_id"], "")
 
 
 class TestGetArtistName(unittest.TestCase):

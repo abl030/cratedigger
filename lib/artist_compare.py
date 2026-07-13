@@ -4,7 +4,8 @@ Pure functions — no I/O. The web layer fetches both source's discographies
 and hands them to merge_discographies(), which buckets them into:
 
   - 'both'        : (mb_rg, discogs_master) pairs that appear to be the same
-                    logical album (matched on normalized title + year ±tol)
+                    logical work (matched on title, provenance, structural
+                    type evidence, and a conservative date rule)
   - 'mb_only'     : MB release groups with no Discogs counterpart
   - 'discogs_only': Discogs masters with no MB counterpart
 
@@ -164,18 +165,62 @@ def annotate_in_library(
             master["in_library"] = False
 
 
-def _dedupe_within_source(rows: list[dict]) -> list[dict]:
-    """Collapse same-normalized-title + same-year + same-type duplicates.
+_STRUCTURAL_TYPES = frozenset({"Album", "EP", "Single"})
+
+
+def _mb_structural_types(row: dict) -> frozenset[str]:
+    """Return recognized MB structural evidence; Other/blank is unknown."""
+    type_ = row.get("type")
+    return frozenset({type_}) if type_ in _STRUCTURAL_TYPES else frozenset()
+
+
+def _discogs_structural_types(row: dict) -> frozenset[str]:
+    """Return Discogs master-wide type evidence from the mirror contract.
+
+    The legacy scalar ``type`` describes one representative pressing and can
+    be misleading. It is display metadata only and must never authorize a
+    merge across years or a structural boundary.
+    """
+    return frozenset(
+        type_ for type_ in row.get("primary_types", [])
+        if type_ in _STRUCTURAL_TYPES
+    )
+
+
+def _dedupe_type_identity(
+    row: dict, *, source: str
+) -> tuple[str, frozenset[str] | str]:
+    """Use structural evidence, falling back to scalar within one source.
+
+    The scalar fallback only prevents distinct unknown-type rows from being
+    collapsed by the within-source pre-pass. It is never cross-source match
+    evidence and cannot authorize an adjacent-year pairing.
+    """
+    structural_types = (
+        _mb_structural_types(row)
+        if source == "mb"
+        else _discogs_structural_types(row)
+    )
+    if structural_types:
+        return ("structural", structural_types)
+    return ("scalar-fallback", str(row.get("type") or "").lower())
+
+
+def _dedupe_within_source(rows: list[dict], *, source: str) -> list[dict]:
+    """Collapse duplicates only within one provenance/type identity.
 
     Only case-only or punctuation-only title variants of the SAME
-    release (same year, same type) collapse — "Twist And Shout" Album
+    release (same year, same structural set and appearance provenance)
+    collapse — "Twist And Shout" Album
     1964 and "Twist and Shout" Album 1964 become one. Legitimately
     different release groups (EP 1963 vs Album 1964 of the same name,
     or re-releases in different years) stay separate.
 
     Keep first (input order) as canonical. Missing title: passthrough.
     """
-    seen: set[tuple[str, int | None, str]] = set()
+    seen: set[
+        tuple[str, int | None, tuple[str, frozenset[str] | str], bool]
+    ] = set()
     result: list[dict] = []
     for r in rows:
         norm = normalize_title(r.get("title", ""))
@@ -183,8 +228,8 @@ def _dedupe_within_source(rows: list[dict]) -> list[dict]:
             result.append(r)
             continue
         year = extract_year(r.get("first_release_date", ""))
-        type_ = (r.get("type") or "").lower()
-        key = (norm, year, type_)
+        type_identity = _dedupe_type_identity(r, source=source)
+        key = (norm, year, type_identity, bool(r.get("is_appearance")))
         if key in seen:
             continue
         seen.add(key)
@@ -196,27 +241,40 @@ def merge_discographies(
     mb_groups: list[dict],
     discogs_groups: list[dict],
 ) -> CompareBuckets:
-    """Bucket MB + Discogs release groups by exact title+year match.
+    """Bucket MB release groups and Discogs masters conservatively.
 
-    Pre-pass: collapse within-source same-title+year+type duplicates
+    Pre-pass: collapse within-source same-title+year+structural-type duplicates
     via _dedupe_within_source so the cross-source merge sees one row
     per logical album per source.
 
     Match rule:
       1. Normalized title equality is required.
-      2. Years must match exactly (or both be unknown for a weak
-         title-only fallback). Any year mismatch, even by 1 year, splits
-         into two rows — the alternative (tolerance) produced false
-         positives like MB "Twist and Shout" Album 1964 matching
-         Discogs "Twist And Shout" EP 1963.
-      3. Among exact-year candidates, prefer the one with matching type
-         (Album↔Album beats Album↔EP) so MB Album 1964 picks Discogs
-         Album 1964 over Discogs EP 1964 when both exist.
+      2. Appearance provenance must agree. A VA compilation appearance never
+         pairs with the artist's mainline work.
+      3. Recognized, nonempty structural sets must overlap. MB contributes
+         its scalar Album/EP/Single type; Discogs contributes only the
+         mirror's master-wide ``primary_types`` set. The legacy Discogs
+         scalar is one representative pressing and is not evidence.
+      4. Exact known years may pair when types are not known-disjoint. Both
+         unknown years retain the weak title fallback. Adjacent known years
+         may pair only with positive overlapping structural evidence;
+         partial-unknown and larger deltas stay separate.
+      5. Candidate rank is exact year, then adjacent year, then both-unknown;
+         overlapping evidence breaks ties. Equal ranks keep Discogs input
+         order for one MB row; across the whole cohort the stable tie policy
+         is MB input order, then Discogs input order.
+
+    The historical Beatles bug came from a blind year tolerance: MB "Twist
+    and Shout" Album 1964 paired with a Discogs EP from 1963. Structural
+    boundaries now prevent that while allowing "The Pointless Gift" Album
+    2000/2001 to pair. This does not split remasters or reissues: MusicBrainz
+    release groups and Discogs masters have already grouped their child
+    pressings before this display-only cross-source merge runs.
 
     Each Discogs entry can match at most one MB entry.
     """
-    mb_groups = _dedupe_within_source(mb_groups)
-    discogs_groups = _dedupe_within_source(discogs_groups)
+    mb_groups = _dedupe_within_source(mb_groups, source="mb")
+    discogs_groups = _dedupe_within_source(discogs_groups, source="discogs")
 
     by_norm: dict[str, list[int]] = defaultdict(list)
     for i, d in enumerate(discogs_groups):
@@ -224,48 +282,69 @@ def merge_discographies(
         if norm:
             by_norm[norm].append(i)
 
-    matched: set[int] = set()
-    both: list[dict] = []
-    mb_only: list[dict] = []
-
-    for m in mb_groups:
+    candidate_edges: list[tuple[tuple[int, int], int, int]] = []
+    for mi, m in enumerate(mb_groups):
         norm = normalize_title(m.get("title", ""))
         m_year = extract_year(m.get("first_release_date", ""))
-        m_type = (m.get("type") or "").lower()
+        m_types = _mb_structural_types(m)
+        m_appearance = bool(m.get("is_appearance"))
 
-        # Score each available candidate; highest wins. A negative score
-        # disqualifies. Exact year required (or both unknown).
-        best_idx: int | None = None
-        best_score = -1
         for di in by_norm.get(norm, []):
-            if di in matched:
-                continue
             d = discogs_groups[di]
             d_year = extract_year(d.get("first_release_date", ""))
-            d_type = (d.get("type") or "").lower()
-
-            if m_year is None and d_year is None:
-                score = 1  # weakest — title-only match, years unknown
-            elif m_year is not None and d_year is not None and m_year == d_year:
-                score = 10  # exact year match
-            else:
-                # Year mismatch (including partial-unknown). Reject.
+            d_types = _discogs_structural_types(d)
+            if m_appearance != bool(d.get("is_appearance")):
                 continue
 
-            # Type match bonus — only affects tie-breaking among
-            # otherwise-equal candidates.
-            if m_type and d_type and m_type == d_type:
-                score += 5
+            type_overlap = bool(m_types & d_types)
+            if m_types and d_types and not type_overlap:
+                continue
 
-            if score > best_score:
-                best_score = score
-                best_idx = di
+            if m_year is None and d_year is None:
+                year_score = 1  # weakest — title-only match, years unknown
+            elif m_year is not None and d_year is not None and m_year == d_year:
+                year_score = 3
+            elif (
+                m_year is not None
+                and d_year is not None
+                and abs(m_year - d_year) == 1
+                and m_types
+                and d_types
+                and type_overlap
+            ):
+                year_score = 2
+            else:
+                continue
 
-        if best_idx is not None:
-            matched.add(best_idx)
-            both.append({"mb": m, "discogs": discogs_groups[best_idx]})
+            score = (year_score, int(type_overlap))
+            candidate_edges.append((score, mi, di))
+
+    # Highest-confidence edges claim their rows first across the whole title
+    # cohort. This keeps a later MB exact-year edge from losing its Discogs
+    # row to an earlier MB adjacent-year edge. Equal confidence is stable by
+    # MB input order, then Discogs input order.
+    candidate_edges.sort(
+        key=lambda edge: (-edge[0][0], -edge[0][1], edge[1], edge[2])
+    )
+    matched_mb: set[int] = set()
+    matched_discogs: set[int] = set()
+    mb_to_discogs: dict[int, int] = {}
+    for _score, mi, di in candidate_edges:
+        if mi in matched_mb or di in matched_discogs:
+            continue
+        matched_mb.add(mi)
+        matched_discogs.add(di)
+        mb_to_discogs[mi] = di
+
+    both: list[dict] = []
+    mb_only: list[dict] = []
+    for mi, m in enumerate(mb_groups):
+        if mi in mb_to_discogs:
+            both.append({"mb": m, "discogs": discogs_groups[mb_to_discogs[mi]]})
         else:
             mb_only.append(m)
 
-    discogs_only = [d for i, d in enumerate(discogs_groups) if i not in matched]
+    discogs_only = [
+        d for i, d in enumerate(discogs_groups) if i not in matched_discogs
+    ]
     return CompareBuckets(both=both, mb_only=mb_only, discogs_only=discogs_only)
