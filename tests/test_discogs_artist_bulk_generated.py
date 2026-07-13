@@ -23,7 +23,7 @@ import tests._hypothesis_profiles  # noqa: F401
 from hypothesis import given
 from hypothesis import strategies as st
 
-from web.discogs import get_artist_releases
+from web.discogs import DiscogsArtistCatalogueIncomplete, get_artist_releases
 
 
 _PRIMARY_TYPES = ("Album", "EP", "Single")
@@ -119,6 +119,12 @@ def assert_catalogue_projection(
         raise AssertionError(f"catalogue projection drifted: {actual!r} != {expected!r}")
 
 
+def assert_complete_semantic_envelope(payload: dict[str, Any]) -> None:
+    """Independent oracle for the mirror's one-page completeness contract."""
+    if payload["page"] != 1 or len(payload["results"]) != payload["total"]:
+        raise AssertionError(f"incomplete bulk envelope: {payload!r}")
+
+
 def _response(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "results": rows,
@@ -131,12 +137,17 @@ def _response(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def _run_consumer(
     primary: list[dict[str, Any]], appearances: list[dict[str, Any]],
     *, primary_response: dict[str, Any] | None = None,
+    appearance_response: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     def get(url: str) -> dict[str, Any]:
         if url.endswith("/masters/all"):
             return primary_response if primary_response is not None else _response(primary)
         if url.endswith("/appearances"):
-            return _response(appearances)
+            return (
+                appearance_response
+                if appearance_response is not None
+                else _response(appearances)
+            )
         raise AssertionError(f"unexpected legacy or fallback URL: {url}")
 
     with patch("web.discogs.DISCOGS_API_BASE", "https://mirror.test"), patch(
@@ -212,8 +223,48 @@ class TestGeneratedBulkCatalogue(unittest.TestCase):
         with self.assertRaises(msgspec.ValidationError):
             _run_consumer([], [], primary_response=invalid)
 
+    @given(
+        rows=st.lists(_artist_rows(), max_size=4),
+        endpoint=st.sampled_from(("masters", "appearances")),
+        violation=st.sampled_from(("later_page", "wrong_total")),
+    )
+    def test_semantically_incomplete_envelope_fails_loudly(
+        self,
+        rows: list[dict[str, Any]],
+        endpoint: str,
+        violation: str,
+    ) -> None:
+        invalid = _response(rows)
+        if violation == "later_page":
+            invalid["page"] = 2
+        else:
+            invalid["total"] = len(rows) + 1
+
+        with self.assertRaises(AssertionError):
+            assert_complete_semantic_envelope(invalid)
+
+        kwargs = (
+            {"primary_response": invalid}
+            if endpoint == "masters"
+            else {"appearance_response": invalid}
+        )
+        with self.assertRaises(DiscogsArtistCatalogueIncomplete):
+            _run_consumer(rows, rows, **kwargs)
+
 
 class TestBulkCatalogueCheckerKnownBad(unittest.TestCase):
+    def test_envelope_checker_rejects_a_later_page(self) -> None:
+        invalid = _response([])
+        invalid["page"] = 2
+        with self.assertRaises(AssertionError):
+            assert_complete_semantic_envelope(invalid)
+
+    def test_envelope_checker_rejects_a_false_total(self) -> None:
+        invalid = _response([])
+        invalid["total"] = 1
+        with self.assertRaises(AssertionError):
+            assert_complete_semantic_envelope(invalid)
+
     def test_checker_rejects_a_dropped_identity(self) -> None:
         expected = _expected_catalogue(
             [{

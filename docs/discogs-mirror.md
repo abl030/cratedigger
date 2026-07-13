@@ -55,11 +55,14 @@ the label page.
 Cratedigger artist pages use the explicit `/masters/all` route plus
 `/appearances`. They never turn a bulk read into a query option on the legacy
 paginated route and never fall back to page walking: an older mirror therefore
-fails loudly instead of silently returning the first page. The normalized
-catalogue and the outer cross-source compare skeleton have independent 24-hour
-Redis keys. Concurrent cold misses for either key are process-local
-single-flight fills, with deep-copied results per request so live overlays
-cannot mutate another caller's metadata.
+fails loudly instead of silently returning the first page. Both bulk envelopes
+are accepted only when `page == 1` and the result count equals `total`;
+`per_page` remains informational. The normalized catalogue and the outer
+cross-source compare skeleton have independent 24-hour Redis keys. Concurrent
+cold misses for either key are process-local single-flight fills, with
+deep-copied results per request so live overlays cannot mutate another caller's
+metadata. A client disconnect during the fill does not cancel it, so the next
+request can consume the completed cache entry without refetching.
 
 ### API Examples
 

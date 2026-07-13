@@ -305,6 +305,22 @@ class _DiscogsArtistMastersResponse(msgspec.Struct):
     per_page: int
 
 
+class DiscogsArtistCatalogueIncomplete(RuntimeError):
+    """A bulk artist endpoint returned only part of its claimed catalogue."""
+
+
+def _require_complete_artist_catalogue(
+    response: _DiscogsArtistMastersResponse, *, endpoint: str,
+) -> None:
+    """Reject semantic pagination/truncation that still passes wire typing."""
+    row_count = len(response.results)
+    if response.page != 1 or row_count != response.total:
+        raise DiscogsArtistCatalogueIncomplete(
+            f"incomplete Discogs artist {endpoint} response: "
+            f"page={response.page}, rows={row_count}, total={response.total}"
+        )
+
+
 def _normalize_artist_master_entry(
     r: _DiscogsArtistMasterEntry,
     *,
@@ -374,6 +390,7 @@ def get_artist_releases(artist_id: int) -> list[dict]:
             _get(f"{_api_base()}/api/artists/{artist_id}/masters/all"),
             type=_DiscogsArtistMastersResponse,
         )
+        _require_complete_artist_catalogue(masters, endpoint="masters/all")
         for r in masters.results:
             entry = _normalize_artist_master_entry(
                 r, is_appearance=False,
@@ -385,6 +402,7 @@ def get_artist_releases(artist_id: int) -> list[dict]:
             _get(f"{_api_base()}/api/artists/{artist_id}/appearances"),
             type=_DiscogsArtistMastersResponse,
         )
+        _require_complete_artist_catalogue(appearances, endpoint="appearances")
         for r in appearances.results:
             entry = _normalize_artist_master_entry(
                 r, is_appearance=True,

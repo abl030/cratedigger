@@ -2,7 +2,7 @@
 
 The production server is a ``ThreadingHTTPServer`` speaking HTTP/1.1
 keep-alive, with per-thread pipeline/beets DB handles. These tests pin
-the three load-bearing properties:
+the four load-bearing properties:
 
 1. A slow request must not block other requests (the head-of-line
    blocking that made one wedged route a 9-hour outage in #233).
@@ -11,10 +11,14 @@ the three load-bearing properties:
 3. ``_db()`` hands each thread its own ``PipelineDB`` when a DSN is
    configured, while the injected-handle path (this very harness)
    keeps returning the shared object.
+4. A client abort after becoming a metadata-flight leader cannot cancel
+   the fill; the next HTTP request reads the completed cache entry.
 """
 import configparser
 import http.client
 import os
+import socket
+import struct
 import sys
 import threading
 import time
@@ -131,6 +135,100 @@ class TestConcurrentRequests(_WebServerCase):
                 self.assertEqual(mock_discogs.get_artist_releases.call_count, 1)
         finally:
             release.set()
+            cache._redis = saved_redis
+
+    def test_aborted_compare_leader_finishes_fill_for_next_http_request(self):
+        """A real client RST cannot cancel its route's metadata fill."""
+        from tests.test_web_cache import FakeRedis
+        from web import cache
+        from web import server as srv
+
+        artist_id = "664c3e0e-42d8-48c1-b209-1efca19c0325"
+        path = (
+            "/api/artist/compare?name=Test%20Artist&"
+            f"mbid={artist_id}&discogs_id=3840"
+        )
+        compare_key = f"meta:artist:compare:v4:{artist_id}:3840"
+        entered = threading.Event()
+        release = threading.Event()
+        cache_written = threading.Event()
+        disconnect_logged = threading.Event()
+        saved_redis = cache._redis
+        client: socket.socket | None = None
+
+        class SignallingRedis(FakeRedis):
+            def setex(self, key: str, ttl: int, value: str) -> None:
+                super().setex(key, ttl, value)
+                if key == compare_key:
+                    cache_written.set()
+
+        def mb_releases(_artist_id: str) -> list[dict]:
+            entered.set()
+            if not release.wait(timeout=5):
+                raise AssertionError("aborted leader fill was not released")
+            return []
+
+        def record_warning(message: str, *args: object, **_kwargs: object) -> None:
+            if message.startswith("Client disconnect on GET"):
+                disconnect_logged.set()
+
+        cache._redis = SignallingRedis()
+        try:
+            with patch("web.server.mb_api") as mock_mb, patch(
+                "web.routes.browse.discogs_api",
+            ) as mock_discogs, patch(
+                "web.server.get_library_artist", return_value=[],
+            ), patch.object(
+                srv.log, "warning", side_effect=record_warning,
+            ):
+                mock_mb.get_artist_release_groups.side_effect = mb_releases
+                mock_mb.get_official_release_group_ids.return_value = set()
+                mock_mb.get_artist_name.return_value = "Test Artist"
+                mock_discogs.get_artist_releases.return_value = []
+                mock_discogs.get_artist_name.return_value = "Test Artist"
+
+                client = socket.create_connection(
+                    ("127.0.0.1", self.port), timeout=5,
+                )
+                client.sendall(
+                    (
+                        f"GET {path} HTTP/1.1\r\n"
+                        f"Host: 127.0.0.1:{self.port}\r\n"
+                        "Connection: close\r\n\r\n"
+                    ).encode()
+                )
+                self.assertTrue(entered.wait(timeout=5))
+
+                # Abort while the production route is the elected cache-fill
+                # leader. SO_LINGER(0) emits a TCP RST, making the later body
+                # write fail instead of allowing a buffered graceful close.
+                client.setsockopt(
+                    socket.SOL_SOCKET,
+                    socket.SO_LINGER,
+                    struct.pack("ii", 1, 0),
+                )
+                client.close()
+                client = None
+                release.set()
+
+                self.assertTrue(
+                    cache_written.wait(timeout=5),
+                    "leader did not populate the compare cache after abort",
+                )
+                self.assertTrue(
+                    disconnect_logged.wait(timeout=5),
+                    "server did not observe the aborted response write",
+                )
+
+                status, body = self._get(path)
+                self.assertEqual(status, 200)
+                self.assertEqual(body["mb_artist"]["name"], "Test Artist")
+                self.assertEqual(mock_mb.get_artist_release_groups.call_count, 1)
+                self.assertEqual(mock_discogs.get_artist_releases.call_count, 1)
+        finally:
+            release.set()
+            if client is not None:
+                client.close()
             cache._redis = saved_redis
 
 

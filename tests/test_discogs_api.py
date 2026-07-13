@@ -499,6 +499,43 @@ class TestGetArtistReleases(unittest.TestCase):
 
     EMPTY_APPEARANCES = {"results": [], "total": 0, "page": 1, "per_page": 1}
 
+    def _assert_incomplete_envelope_rejected(
+        self, *, endpoint: str, payload: dict,
+    ) -> None:
+        responses = {
+            "/masters": self.MASTERS_DATA,
+            "/appearances": self.EMPTY_APPEARANCES,
+        }
+        responses[endpoint] = payload
+        with _mock_urlopen_by_url(responses), self.assertRaises(
+            web.discogs.DiscogsArtistCatalogueIncomplete,
+        ):
+            get_artist_releases(3840)
+
+    def test_rejects_truncated_masters_envelope(self):
+        self._assert_incomplete_envelope_rejected(
+            endpoint="/masters",
+            payload={**self.MASTERS_DATA, "total": 4},
+        )
+
+    def test_rejects_nonfirst_masters_page(self):
+        self._assert_incomplete_envelope_rejected(
+            endpoint="/masters",
+            payload={**self.MASTERS_DATA, "page": 2},
+        )
+
+    def test_rejects_truncated_appearances_envelope(self):
+        self._assert_incomplete_envelope_rejected(
+            endpoint="/appearances",
+            payload={**self.EMPTY_APPEARANCES, "total": 1},
+        )
+
+    def test_rejects_nonfirst_appearances_page(self):
+        self._assert_incomplete_envelope_rejected(
+            endpoint="/appearances",
+            payload={**self.EMPTY_APPEARANCES, "page": 2},
+        )
+
     def test_normalizes_master_discography(self):
         with _mock_urlopen_by_url({
             "/masters": self.MASTERS_DATA,
