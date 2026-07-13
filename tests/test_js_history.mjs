@@ -577,6 +577,25 @@ console.log('renderDownloadHistoryItem() does not fabricate output when format i
     'fixed output row remains present');
 }
 
+console.log('renderDownloadHistoryItem() calls only explicit quality labels contracts');
+{
+  const legacyMp3 = renderDownloadHistoryFixture({
+    outcome: 'success',
+    created_at: '2026-07-13T00:29:00+00:00',
+    final_format: 'MP3',
+  });
+  assertContains(legacyMp3, 'Stored as', 'legacy stored format still renders');
+  assertContains(legacyMp3, '>MP3<', 'bare MP3 remains a codec fact');
+  assertExcludes(legacyMp3, 'MP3 contract', 'bare MP3 is not a quality contract');
+
+  const explicitOpus = renderDownloadHistoryFixture({
+    outcome: 'success',
+    created_at: '2026-07-13T01:06:00+00:00',
+    final_format: 'opus 128',
+  });
+  assertContains(explicitOpus, 'OPUS 128 contract', 'numeric target is a contract');
+}
+
 console.log('renderEvidenceStrip() shows research V0 probes with the from-lossy qualifier');
 {
   // V0 runs on everything; the strip shows whichever probe each side has,

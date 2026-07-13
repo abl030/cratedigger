@@ -367,7 +367,13 @@ export function renderDownloadHistoryItem(h) {
   rows.push(['Output', materializedOutputPhrase(h, true) || '—']);
 
   if (h.final_format) {
-    rows.push(['Stored as', `${esc(String(h.final_format).toUpperCase())} contract`]);
+    const finalFormat = String(h.final_format);
+    const explicitContract = h.comparison_basis?.new_metric === 'contract'
+      || /(?:\bv\d+\b|\b\d+\b)/i.test(finalFormat);
+    rows.push([
+      'Stored as',
+      `${esc(finalFormat.toUpperCase())}${explicitContract ? ' contract' : ''}`,
+    ]);
   }
 
   if (outcome === 'force_import') {
