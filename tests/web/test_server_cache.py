@@ -344,6 +344,7 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
         }
         discogs_rg = {
             "id": "21491", "title": "OK Computer", "type": "Album",
+            "primary_types": ["Album"],
             "secondary_types": [], "first_release_date": "1997",
             "artist_credit": "Radiohead", "primary_artist_id": "3840",
         }
@@ -372,10 +373,12 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
 
         meta_keys = [k for k in fake._store if k.startswith("meta:")
                      and "compare" in k]
-        self.assertTrue(
+        self.assertEqual(
             meta_keys,
-            "expected a compare skeleton under meta:, got: "
-            f"{sorted(fake._store.keys())}")
+            [f"meta:artist:compare:v4:{self.ARTIST_ID}:3840"],
+            "the bulk-consumer deployment must create a naturally cold "
+            "compare key without reusing a pre-bulk skeleton",
+        )
 
     def test_compare_artist_names_are_canonical_not_user_supplied(self) -> None:
         """Codex round 4: previously the compare skeleton cached
@@ -390,6 +393,7 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
         }
         discogs_rg = {
             "id": "21491", "title": "OK Computer", "type": "Album",
+            "primary_types": ["Album"],
             "secondary_types": [], "first_release_date": "1997",
             "artist_credit": "Radiohead", "primary_artist_id": "3840",
         }
@@ -453,6 +457,7 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
         }
         discogs_rg = {
             "id": "21491", "title": "OK Computer", "type": "Album",
+            "primary_types": ["Album"],
             "secondary_types": [], "first_release_date": "1997",
             "artist_credit": "Radiohead", "primary_artist_id": "3840",
         }

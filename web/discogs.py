@@ -356,39 +356,30 @@ def get_artist_releases(artist_id: int) -> list[dict]:
 
     Merges two mirror endpoints:
 
-    * ``/api/artists/{id}/masters`` — releases where the artist is on the
-      master/release-level credit. Paginated; we walk all pages.
+    * ``/api/artists/{id}/masters/all`` — every release where the artist is
+      on the master/release-level credit, in one fail-loud bulk response.
     * ``/api/artists/{id}/appearances`` — releases where the artist appears
       only via a track-level credit (compilations, guest spots, samplers).
       Single response, no pagination.
 
-    Dedupe by ``id``: a master that already came back from ``/masters`` (i.e.
-    the artist is a primary credit on at least one of its releases) wins —
-    we don't downgrade it to an appearance even when it ALSO has releases
-    where the artist is only a track-level credit (cf. the Wilderness
-    "Sentimental Noise / Future Seats" split, which sits in the same master
-    as a Various-credited "Sentimental Noise" compilation).
+    Dedupe inside the separate master/release id namespaces: a primary-credit
+    identity from ``/masters/all`` wins over the same appearance identity, so
+    we don't downgrade own work when it also has track-only credits. A master
+    and a masterless release with the same numeric id remain distinct.
     """
     def _fetch() -> list[dict]:
-        entries: dict[str, dict] = {}
+        entries: dict[tuple[str, str], dict] = {}
 
-        page = 1
-        while True:
-            raw = _get(
-                f"{_api_base()}/api/artists/{artist_id}/masters?per_page=100&page={page}"
+        masters = msgspec.convert(
+            _get(f"{_api_base()}/api/artists/{artist_id}/masters/all"),
+            type=_DiscogsArtistMastersResponse,
+        )
+        for r in masters.results:
+            entry = _normalize_artist_master_entry(
+                r, is_appearance=False,
             )
-            data = msgspec.convert(raw, type=_DiscogsArtistMastersResponse)
-            results = data.results
-            if not results:
-                break
-            for r in results:
-                entry = _normalize_artist_master_entry(
-                    r, is_appearance=False,
-                )
-                entries.setdefault(entry["id"], entry)
-            if page * data.per_page >= data.total:
-                break
-            page += 1
+            namespace = "release" if entry.get("is_masterless") else "master"
+            entries.setdefault((namespace, entry["id"]), entry)
 
         appearances = msgspec.convert(
             _get(f"{_api_base()}/api/artists/{artist_id}/appearances"),
@@ -398,14 +389,15 @@ def get_artist_releases(artist_id: int) -> list[dict]:
             entry = _normalize_artist_master_entry(
                 r, is_appearance=True,
             )
-            entries.setdefault(entry["id"], entry)
+            namespace = "release" if entry.get("is_masterless") else "master"
+            entries.setdefault((namespace, entry["id"]), entry)
 
         return sorted(
             entries.values(),
             key=lambda e: (e.get("first_release_date") or "", e.get("id", "")),
         )
 
-    return _cache.memoize_meta(f"discogs:artist:{artist_id}:releases:v4", _fetch)
+    return _cache.memoize_meta(f"discogs:artist:{artist_id}:releases:v5", _fetch)
 
 
 def get_master_releases(master_id: int) -> dict:

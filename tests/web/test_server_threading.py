@@ -74,6 +74,65 @@ class TestConcurrentRequests(_WebServerCase):
             slow_thread.join(timeout=5)
             self.assertEqual(slow_result["resp"], {"slow": True})
 
+    def test_concurrent_cold_compare_requests_execute_one_metadata_fill(self):
+        """The real threaded HTTP route shares one cold compare skeleton."""
+        from tests.test_web_cache import FakeRedis
+        from web import cache
+
+        artist_id = "664c3e0e-42d8-48c1-b209-1efca19c0325"
+        entered = threading.Event()
+        release = threading.Event()
+        results: list[tuple[int, dict]] = []
+        saved_redis = cache._redis
+        cache._redis = FakeRedis()
+
+        def mb_releases(_artist_id: str) -> list[dict]:
+            entered.set()
+            if not release.wait(timeout=5):
+                raise AssertionError("compare fill was not released")
+            return []
+
+        try:
+            with patch("web.server.mb_api") as mock_mb, patch(
+                "web.routes.browse.discogs_api",
+            ) as mock_discogs, patch(
+                "web.server.get_library_artist", return_value=[],
+            ):
+                mock_mb.get_artist_release_groups.side_effect = mb_releases
+                mock_mb.get_official_release_group_ids.return_value = set()
+                mock_mb.get_artist_name.return_value = "Test Artist"
+                mock_discogs.get_artist_releases.return_value = []
+                mock_discogs.get_artist_name.return_value = "Test Artist"
+
+                path = (
+                    "/api/artist/compare?name=Test%20Artist&"
+                    f"mbid={artist_id}&discogs_id=3840"
+                )
+                first = threading.Thread(
+                    target=lambda: results.append(self._get(path)), daemon=True,
+                )
+                second = threading.Thread(
+                    target=lambda: results.append(self._get(path)), daemon=True,
+                )
+                first.start()
+                self.assertTrue(entered.wait(timeout=5))
+                second.start()
+                # The first route remains parked in the metadata fill while
+                # the second reaches the same cache key and becomes a waiter.
+                time.sleep(0.05)
+                release.set()
+                first.join(timeout=5)
+                second.join(timeout=5)
+
+                self.assertFalse(first.is_alive())
+                self.assertFalse(second.is_alive())
+                self.assertEqual([status for status, _body in results], [200, 200])
+                self.assertEqual(mock_mb.get_artist_release_groups.call_count, 1)
+                self.assertEqual(mock_discogs.get_artist_releases.call_count, 1)
+        finally:
+            release.set()
+            cache._redis = saved_redis
+
 
 class TestKeepAlive(_WebServerCase):
     """HTTP/1.1 keep-alive: one connection, many requests."""

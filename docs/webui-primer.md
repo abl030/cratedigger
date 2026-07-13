@@ -53,7 +53,7 @@ Browser → https://music.ablz.au
 | `/api/import-jobs/<id>` | GET | Poll a single import queue job |
 | `/api/library/artist?name=...` | GET | Albums by artist from beets library (MB vs Discogs source) |
 | `/api/discogs/search?q=...` | GET | Search Discogs mirror (artist or release mode via `type=` param) |
-| `/api/discogs/artist/<id>` | GET | Artist's releases grouped by master (via `/api/artists/{id}/releases`) |
+| `/api/discogs/artist/<id>` | GET | Artist's complete releases grouped by master (via mirror `/masters/all` + `/appearances`) |
 | `/api/discogs/master/<id>` | GET | All pressings within a Discogs master release |
 | `/api/discogs/release/<id>` | GET | Full Discogs release details with tracks |
 
@@ -97,6 +97,10 @@ Browser → https://music.ablz.au
   despite MB (2000) and Discogs (2001) date disagreement. Reissues and
   remasters remain child pressings inside their existing MB release group or
   Discogs master; this display merge does not split them.
+  The pure metadata fill uses the mirror's bulk artist endpoint and is
+  single-flight per cache key inside the threaded web process, so concurrent
+  cold requests share one MB/Discogs/merge pass while every caller still gets
+  an isolated copy for its live library and pipeline overlays.
 - **Release editions** — when you expand a release group, shows all editions sorted by date
   - Official releases first, bootleg/promo collapsed — EXCEPT pressings that
     are in the library or have a pipeline request, which are always hoisted

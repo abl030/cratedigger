@@ -33,6 +33,7 @@ A self-hosted mirror of the Discogs music database, serving a JSON API at `https
 | GET | `/api/masters/{id}` | Master release with all child releases |
 | GET | `/api/artists/{id}` | Artist profile, aliases, name variations |
 | GET | `/api/artists/{id}/masters?page=1&per_page=100` | Paginated primary-credit masters and masterless releases; each row includes required sorted/deduplicated `primary_types` (`Album`, `EP`, `Single`) aggregated across every child pressing, with `[]` meaning unknown |
+| GET | `/api/artists/{id}/masters/all` | All primary-credit masters and masterless releases in the same strict response shape, projected set-wise for cold large-artist reads |
 | GET | `/api/artists/{id}/appearances` | Track-credit appearances in the same strict row shape as `/masters`, including required `primary_types` |
 | GET | `/api/labels?name=X&page=1&per_page=25` | Label search with release counts and parent-label context |
 | GET | `/api/labels/{id}` | Label profile, direct release count, parent, and direct sub-labels |
@@ -50,6 +51,15 @@ the mirror's 15 second recursive CTE statement timeout. Cratedigger's
 on HTTP 503 or timeout-class upstream failures and returns
 `sub_labels_dropped=true` so the UI can show direct releases instead of failing
 the label page.
+
+Cratedigger artist pages use the explicit `/masters/all` route plus
+`/appearances`. They never turn a bulk read into a query option on the legacy
+paginated route and never fall back to page walking: an older mirror therefore
+fails loudly instead of silently returning the first page. The normalized
+catalogue and the outer cross-source compare skeleton have independent 24-hour
+Redis keys. Concurrent cold misses for either key are process-local
+single-flight fills, with deep-copied results per request so live overlays
+cannot mutate another caller's metadata.
 
 ### API Examples
 
