@@ -56,6 +56,9 @@ export function classify(row) {
  *   intra-section sorting. Defaults to row.first_release_date.
  * @param {string|null} [opts.defaultOpen] - Section name to open by
  *   default. Pass null for none. Default 'Albums'.
+ * @param {string[]} [opts.openSections] - Exact sections to open. When
+ *   supplied, this takes precedence over defaultOpen and may name more than
+ *   one section.
  * @param {string} [opts.headerStyle] - Inline style on the type-header
  *   div. Useful for muting a "bootleg" group.
  * @returns {string}
@@ -64,6 +67,9 @@ export function renderTypedSections(rows, renderRow, opts = {}) {
   const classifier = opts.classify || classify;
   const dateOf = opts.dateOf || ((r) => String(r.first_release_date || ''));
   const defaultOpen = opts.defaultOpen === undefined ? 'Albums' : opts.defaultOpen;
+  const openSections = opts.openSections
+    ? new Set(opts.openSections)
+    : null;
   const headerStyle = opts.headerStyle || '';
 
   /** @type {Object<string, Object[]>} */
@@ -80,7 +86,7 @@ export function renderTypedSections(rows, renderRow, opts = {}) {
     .filter((s) => sections[s])
     .map((s) => {
       const items = sections[s];
-      const isOpen = s === defaultOpen;
+      const isOpen = openSections ? openSections.has(s) : s === defaultOpen;
       const hStyle = headerStyle ? ` style="${headerStyle}"` : '';
       return `
         <div class="type-section">
