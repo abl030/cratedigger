@@ -499,16 +499,65 @@ class TestGetArtistReleases(unittest.TestCase):
 
     EMPTY_APPEARANCES = {"results": [], "total": 0, "page": 1, "per_page": 1}
 
+    def _assert_incomplete_envelope_rejected(
+        self, *, endpoint: str, payload: dict,
+    ) -> None:
+        responses = {
+            "/masters": self.MASTERS_DATA,
+            "/appearances": self.EMPTY_APPEARANCES,
+        }
+        responses[endpoint] = payload
+        with _mock_urlopen_by_url(responses), self.assertRaises(
+            web.discogs.DiscogsArtistCatalogueIncomplete,
+        ):
+            get_artist_releases(3840)
+
+    def test_rejects_truncated_masters_envelope(self):
+        self._assert_incomplete_envelope_rejected(
+            endpoint="/masters",
+            payload={**self.MASTERS_DATA, "total": 4},
+        )
+
+    def test_rejects_nonfirst_masters_page(self):
+        self._assert_incomplete_envelope_rejected(
+            endpoint="/masters",
+            payload={**self.MASTERS_DATA, "page": 2},
+        )
+
+    def test_rejects_truncated_appearances_envelope(self):
+        self._assert_incomplete_envelope_rejected(
+            endpoint="/appearances",
+            payload={**self.EMPTY_APPEARANCES, "total": 1},
+        )
+
+    def test_rejects_nonfirst_appearances_page(self):
+        self._assert_incomplete_envelope_rejected(
+            endpoint="/appearances",
+            payload={**self.EMPTY_APPEARANCES, "page": 2},
+        )
+
     def test_normalizes_master_discography(self):
         with _mock_urlopen_by_url({
             "/masters": self.MASTERS_DATA,
             "/appearances": self.EMPTY_APPEARANCES,
-        }) as mock:
+        }) as mock, patch(
+            "web.discogs._cache.memoize_meta",
+            side_effect=lambda _key, fetch: fetch(),
+        ) as memo:
             results = get_artist_releases(3840)
 
         called_urls = [c.args[0].full_url for c in mock.call_args_list]
-        self.assertTrue(any("/api/artists/3840/masters" in u for u in called_urls))
-        self.assertTrue(any("/api/artists/3840/appearances" in u for u in called_urls))
+        self.assertEqual(
+            called_urls,
+            [
+                "https://discogs-mirror.test/api/artists/3840/masters/all",
+                "https://discogs-mirror.test/api/artists/3840/appearances",
+            ],
+            "cold artist metadata must use one explicit fail-loud bulk request",
+        )
+        self.assertEqual(
+            memo.call_args.args[0], "discogs:artist:3840:releases:v5",
+        )
 
         self.assertEqual(len(results), 3)
 
@@ -593,6 +642,54 @@ class TestGetArtistReleases(unittest.TestCase):
         self.assertEqual(pablo["artist_credit"], "Radiohead")
         self.assertEqual(pablo["primary_artist_id"], "3840")
         self.assertIs(pablo["is_appearance"], False)
+
+    def test_duplicate_primary_credit_rows_keep_first_projection(self):
+        """Duplicate release_artist credits are one catalogue identity."""
+        duplicate = {
+            **self.MASTERS_DATA,
+            "results": [
+                self.MASTERS_DATA["results"][0],
+                {
+                    **self.MASTERS_DATA["results"][0],
+                    "title": "duplicate credit must not replace the first",
+                },
+            ],
+            "total": 2,
+        }
+        with _mock_urlopen_by_url({
+            "/masters": duplicate,
+            "/appearances": self.EMPTY_APPEARANCES,
+        }):
+            results = get_artist_releases(3840)
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["title"], "Creep")
+
+    def test_master_and_same_numeric_masterless_release_both_survive(self):
+        """Master and release ids occupy separate Discogs namespaces."""
+        masters = {
+            **self.MASTERS_DATA,
+            "results": [
+                self.MASTERS_DATA["results"][0],
+                {
+                    **self.MASTERS_DATA["results"][2],
+                    "id": "release-21481",
+                },
+            ],
+            "total": 2,
+        }
+        with _mock_urlopen_by_url({
+            "/masters": masters,
+            "/appearances": self.EMPTY_APPEARANCES,
+        }):
+            results = get_artist_releases(3840)
+
+        collisions = [row for row in results if row["id"] == "21481"]
+        self.assertEqual(len(collisions), 2)
+        self.assertEqual(
+            [row.get("is_masterless", False) for row in collisions],
+            [False, True],
+        )
 
     def test_missing_primary_types_is_rejected_at_boundary(self):
         invalid = {

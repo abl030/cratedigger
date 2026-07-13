@@ -575,7 +575,7 @@ def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
 
     # Skeleton key is the resolved (mbid, discogs_id) pair — display
     # names are stamped on outside the cache from the canonical APIs.
-    cache_key = f"artist:compare:v3:{mbid or 'none'}:{discogs_id or 'none'}"
+    cache_key = f"artist:compare:v4:{mbid or 'none'}:{discogs_id or 'none'}"
     skeleton = _cache.memoize_meta(
         cache_key,
         lambda: _build_compare_skeleton(mbid, discogs_id),

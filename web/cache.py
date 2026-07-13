@@ -11,8 +11,10 @@ an error.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
+import threading
 from typing import Any, Callable
 
 log = logging.getLogger(__name__)
@@ -39,6 +41,19 @@ _GROUP_PATTERNS: dict[str, list[str]] = {
 }
 
 _redis: object | None = None
+
+
+class _MetadataFlight:
+    """One in-process fill shared by callers of the same metadata key."""
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.result: Any = None
+        self.error: BaseException | None = None
+
+
+_metadata_flights: dict[str, _MetadataFlight] = {}
+_metadata_flights_lock = threading.Lock()
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -156,8 +171,10 @@ def memoize_meta(key: str, fetch_fn: Callable[[], Any], ttl: int = TTL_MB,
                  *, fresh: bool = False) -> Any:
     """Return cached `meta:<key>` or call `fetch_fn()` and cache the result.
 
-    With Redis absent (CLI context, tests), degrades to pass-through —
-    every call runs `fetch_fn()` and nothing is cached.
+    Concurrent non-fresh misses for the same key share one process-local
+    fill. This still works when Redis is absent: overlapping callers share
+    the in-flight result, while a later call retries because nothing was
+    persisted.
 
     `fresh=True` skips the cache read and re-fetches live, then repopulates
     the cache with the fresh result. Use this on write paths (e.g. POST
@@ -165,13 +182,57 @@ def memoize_meta(key: str, fetch_fn: Callable[[], Any], ttl: int = TTL_MB,
     would silently bake stale artist/title/track data into the pipeline
     DB. Every `fresh=True` call still warms the cache for subsequent GETs.
     """
-    if not fresh:
+    if fresh:
+        result = fetch_fn()
+        meta_set(key, result, ttl)
+        return result
+
+    cached = meta_get(key)
+    if cached is not None:
+        return cached
+
+    with _metadata_flights_lock:
+        flight = _metadata_flights.get(key)
+        if flight is None:
+            flight = _MetadataFlight()
+            _metadata_flights[key] = flight
+            leader = True
+        else:
+            leader = False
+
+    if not leader:
+        flight.done.wait()
+        if flight.error is not None:
+            raise flight.error
+        # The leader publishes a cache-shaped snapshot, never its mutable
+        # working object. Every follower owns a separate nested copy so a
+        # route overlay cannot leak into another caller's response.
+        return copy.deepcopy(flight.result)
+
+    try:
+        # Close the stale-miss race: another process or a just-completed
+        # local flight may have populated Redis between our first miss and
+        # election. Only the elected leader performs this second read.
         cached = meta_get(key)
         if cached is not None:
+            flight.result = copy.deepcopy(cached)
             return cached
-    result = fetch_fn()
-    meta_set(key, result, ttl)
-    return result
+
+        result = fetch_fn()
+        snapshot = copy.deepcopy(result)
+        meta_set(key, snapshot, ttl)
+        flight.result = snapshot
+        return result
+    except BaseException as exc:
+        # BaseException is deliberate: SystemExit/KeyboardInterrupt-style
+        # termination must not strand followers or poison the key forever.
+        flight.error = exc
+        raise
+    finally:
+        with _metadata_flights_lock:
+            if _metadata_flights.get(key) is flight:
+                del _metadata_flights[key]
+            flight.done.set()
 
 
 # ── Invalidation ──────────────────────────────────────────────────────
@@ -209,5 +270,4 @@ def invalidate_groups(*groups: str) -> None:
         patterns = _GROUP_PATTERNS.get(group, [])
         for pattern in patterns:
             invalidate_pattern(pattern)
-
 
