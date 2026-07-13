@@ -55,7 +55,7 @@ def dispatch_import_from_db(
     ``_requeue_import_job_to_preview`` (returning
     ``DISPATCH_CODE_REQUEUED_FOR_PREVIEW``); the actual measurement happens
     on the preview worker's next claim. Quality decisions (downgrade
-    prevention, quality gate, meelo scan, denylist) still run identically
+    prevention, quality gate, media-server scans, denylist) still run identically
     to auto-import — only the beets *distance* check is skipped when
     ``force=True``.
 

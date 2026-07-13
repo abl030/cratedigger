@@ -1,6 +1,5 @@
 """Tests for lib/util.py — pure utility functions extracted from cratedigger.py."""
 
-import json
 import os
 import shutil
 import tempfile
@@ -458,92 +457,6 @@ class TestCleanupDisambiguationOrphans(unittest.TestCase):
         self.assertEqual(removed, [orphan])
 
 
-class TestMeeloJwtLogin(unittest.TestCase):
-    """Tests for _meelo_jwt_login()."""
-
-    @patch("lib.util.urllib.request.urlopen")
-    def test_returns_jwt_on_success(self, mock_urlopen):
-        from lib.util import _meelo_jwt_login
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = b'{"access_token": "tok123"}'
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
-        jwt = _meelo_jwt_login("http://meelo:5001", "user", "pass")
-        self.assertEqual(jwt, "tok123")
-
-    @patch("lib.util.urllib.request.urlopen")
-    def test_posts_correct_credentials(self, mock_urlopen):
-        from lib.util import _meelo_jwt_login
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = b'{"access_token": "x"}'
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
-        _meelo_jwt_login("http://meelo:5001", "myuser", "mypass")
-        req = mock_urlopen.call_args[0][0]
-        body = json.loads(req.data)
-        self.assertEqual(body["username"], "myuser")
-        self.assertEqual(body["password"], "mypass")
-
-
-class TestTriggerMeeloScan(unittest.TestCase):
-    """Tests for trigger_meelo_scan()."""
-
-    def _make_cfg(self, url: str | None = "http://meelo:5001", user: str = "u", pw: str = "p"):
-        cfg = MagicMock()
-        cfg.meelo_url = url
-        cfg.meelo_username = user
-        cfg.meelo_password = pw
-        cfg.resolved_meelo_username.return_value = user
-        cfg.resolved_meelo_password.return_value = pw
-        return cfg
-
-    @patch("lib.util._meelo_jwt_login", return_value="tok")
-    @patch("lib.util._meelo_scanner_post")
-    def test_calls_scan_endpoint(self, mock_post, mock_login):
-        from lib.util import trigger_meelo_scan
-        trigger_meelo_scan(self._make_cfg())
-        mock_post.assert_called_once_with(
-            "http://meelo:5001", "tok", "/scanner/scan?library=beets")
-
-    def test_noop_when_no_url(self):
-        from lib.util import trigger_meelo_scan
-        cfg = self._make_cfg(url=None)
-        trigger_meelo_scan(cfg)  # should not raise
-
-
-class TestTriggerMeeloClean(unittest.TestCase):
-    """Tests for trigger_meelo_clean()."""
-
-    def _make_cfg(self, url: str | None = "http://meelo:5001", user: str = "u", pw: str = "p"):
-        cfg = MagicMock()
-        cfg.meelo_url = url
-        cfg.meelo_username = user
-        cfg.meelo_password = pw
-        cfg.resolved_meelo_username.return_value = user
-        cfg.resolved_meelo_password.return_value = pw
-        return cfg
-
-    @patch("lib.util._meelo_jwt_login", return_value="tok")
-    @patch("lib.util._meelo_scanner_post")
-    def test_calls_clean_endpoint(self, mock_post, mock_login):
-        from lib.util import trigger_meelo_clean
-        trigger_meelo_clean(self._make_cfg())
-        mock_post.assert_called_once_with(
-            "http://meelo:5001", "tok", "/scanner/clean?library=beets")
-
-    def test_noop_when_no_url(self):
-        from lib.util import trigger_meelo_clean
-        cfg = self._make_cfg(url=None)
-        trigger_meelo_clean(cfg)  # should not raise
-
-    @patch("lib.util._meelo_jwt_login", side_effect=Exception("auth failed"))
-    def test_does_not_raise_on_failure(self, mock_login):
-        from lib.util import trigger_meelo_clean
-        trigger_meelo_clean(self._make_cfg())  # best-effort, no raise
-
-
 class TestTriggerPlexScan(unittest.TestCase):
     """Tests for trigger_plex_scan()."""
 
@@ -831,37 +744,6 @@ class TestNotifiersReadSecretsFromFiles(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as f:
             f.write(value)
         return path
-
-    @patch("lib.util._meelo_scanner_post")
-    @patch("lib.util._meelo_jwt_login", return_value="tok")
-    def test_meelo_scan_reads_credentials_from_files(self, mock_login, mock_post):
-        from lib.config import CratediggerConfig
-        from lib.util import trigger_meelo_scan
-        user_path = self._write("meelo-user", "live-user\n")
-        pass_path = self._write("meelo-pass", "live-pass\n")
-        cfg = CratediggerConfig(
-            meelo_url="http://meelo:5001",
-            meelo_username_file=user_path,
-            meelo_password_file=pass_path,
-        )
-        trigger_meelo_scan(cfg)
-        mock_login.assert_called_once_with("http://meelo:5001", "live-user", "live-pass")
-        mock_post.assert_called_once()
-
-    @patch("lib.util._meelo_scanner_post")
-    @patch("lib.util._meelo_jwt_login", return_value="tok")
-    def test_meelo_clean_reads_credentials_from_files(self, mock_login, mock_post):
-        from lib.config import CratediggerConfig
-        from lib.util import trigger_meelo_clean
-        user_path = self._write("meelo-user", "live-user\n")
-        pass_path = self._write("meelo-pass", "live-pass\n")
-        cfg = CratediggerConfig(
-            meelo_url="http://meelo:5001",
-            meelo_username_file=user_path,
-            meelo_password_file=pass_path,
-        )
-        trigger_meelo_clean(cfg)
-        mock_login.assert_called_once_with("http://meelo:5001", "live-user", "live-pass")
 
     @patch("lib.util.urllib.request.urlopen")
     def test_plex_scan_reads_token_from_file(self, mock_urlopen):

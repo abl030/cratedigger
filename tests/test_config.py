@@ -287,16 +287,6 @@ class TestConfigFromIni(unittest.TestCase):
         self.assertEqual(self.cfg.pipeline_db_dsn,
                          "postgresql://cratedigger@10.20.0.11:5432/cratedigger")
 
-    # --- Meelo ---
-    def test_meelo_url(self):
-        self.assertEqual(self.cfg.meelo_url, "http://192.168.1.29:5001")
-
-    def test_meelo_username(self):
-        self.assertEqual(self.cfg.meelo_username, "testuser")
-
-    def test_meelo_password(self):
-        self.assertEqual(self.cfg.meelo_password, "testpass")
-
     # --- Plex ---
     def test_plex_url(self):
         self.assertEqual(self.cfg.plex_url, "http://192.168.1.2:32400")
@@ -333,14 +323,13 @@ class TestConfigDefaults(unittest.TestCase):
         config = configparser.ConfigParser()
         # Add empty required sections so getboolean etc. don't fail on missing section
         for section in ["Slskd", "Search Settings", "Release Settings",
-                        "Download Settings", "Beets Validation", "Pipeline DB", "Meelo", "Plex"]:
+                        "Download Settings", "Beets Validation", "Pipeline DB", "Plex"]:
             config.add_section(section)
         cfg = CratediggerConfig.from_ini(config)
         self.assertEqual(cfg.page_size, 10)
         self.assertEqual(cfg.stalled_timeout, 3600)
         self.assertAlmostEqual(cfg.beets_distance_threshold, 0.15)
         self.assertFalse(cfg.pipeline_db_enabled)
-        self.assertIsNone(cfg.meelo_url)
         self.assertIsNone(cfg.plex_url)
         self.assertIsNone(cfg.plex_token)
         self.assertIsNone(cfg.plex_library_section_id)
@@ -348,7 +337,7 @@ class TestConfigDefaults(unittest.TestCase):
     def test_single_filetype(self):
         config = configparser.ConfigParser()
         for section in ["Slskd", "Search Settings", "Release Settings",
-                        "Download Settings", "Beets Validation", "Pipeline DB", "Meelo", "Plex"]:
+                        "Download Settings", "Beets Validation", "Pipeline DB", "Plex"]:
             config.add_section(section)
         config.set("Search Settings", "allowed_filetypes", "flac")
         cfg = CratediggerConfig.from_ini(config)
@@ -357,7 +346,7 @@ class TestConfigDefaults(unittest.TestCase):
     def test_verified_lossless_target_default_empty(self):
         config = configparser.ConfigParser()
         for section in ["Slskd", "Search Settings", "Release Settings",
-                        "Download Settings", "Beets Validation", "Pipeline DB", "Meelo", "Plex"]:
+                        "Download Settings", "Beets Validation", "Pipeline DB", "Plex"]:
             config.add_section(section)
         cfg = CratediggerConfig.from_ini(config)
         self.assertEqual(cfg.verified_lossless_target, "")
@@ -365,7 +354,7 @@ class TestConfigDefaults(unittest.TestCase):
     def test_verified_lossless_target_set(self):
         config = configparser.ConfigParser()
         for section in ["Slskd", "Search Settings", "Release Settings",
-                        "Download Settings", "Beets Validation", "Pipeline DB", "Meelo", "Plex"]:
+                        "Download Settings", "Beets Validation", "Pipeline DB", "Plex"]:
             config.add_section(section)
         config.set("Beets Validation", "verified_lossless_target", "opus 128")
         cfg = CratediggerConfig.from_ini(config)
@@ -397,8 +386,6 @@ class TestReadRuntimeConfig(unittest.TestCase):
                 "[Beets Validation]\n"
                 "harness_path = /nix/store/test/run_beets_harness.sh\n"
                 "verified_lossless_target = opus 128\n"
-                "[Meelo]\n"
-                "url = http://meelo.test\n"
                 "[Plex]\n"
                 "url = http://plex.test\n"
                 "token = test-token\n"
@@ -411,7 +398,6 @@ class TestReadRuntimeConfig(unittest.TestCase):
 
         self.assertEqual(cfg.beets_harness_path, "/nix/store/test/run_beets_harness.sh")
         self.assertEqual(cfg.verified_lossless_target, "opus 128")
-        self.assertEqual(cfg.meelo_url, "http://meelo.test")
         self.assertEqual(cfg.plex_url, "http://plex.test")
         self.assertEqual(cfg.plex_token, "test-token")
 
@@ -525,9 +511,6 @@ class TestSecretFileFields(unittest.TestCase):
         config.read_string(
             "[Slskd]\n"
             "api_key_file = /run/secrets/slskd-key\n"
-            "[Meelo]\n"
-            "username_file = /run/secrets/meelo-user\n"
-            "password_file = /run/secrets/meelo-pass\n"
             "[Plex]\n"
             "token_file = /run/secrets/plex-token\n"
             "[Jellyfin]\n"
@@ -535,16 +518,12 @@ class TestSecretFileFields(unittest.TestCase):
         )
         cfg = CratediggerConfig.from_ini(config)
         self.assertEqual(cfg.slskd_api_key_file, "/run/secrets/slskd-key")
-        self.assertEqual(cfg.meelo_username_file, "/run/secrets/meelo-user")
-        self.assertEqual(cfg.meelo_password_file, "/run/secrets/meelo-pass")
         self.assertEqual(cfg.plex_token_file, "/run/secrets/plex-token")
         self.assertEqual(cfg.jellyfin_token_file, "/run/secrets/jellyfin-token")
 
     def test_file_paths_default_to_empty(self):
         cfg = CratediggerConfig.from_ini(configparser.RawConfigParser())
         self.assertEqual(cfg.slskd_api_key_file, "")
-        self.assertEqual(cfg.meelo_username_file, "")
-        self.assertEqual(cfg.meelo_password_file, "")
         self.assertEqual(cfg.plex_token_file, "")
         self.assertEqual(cfg.jellyfin_token_file, "")
 
@@ -591,16 +570,6 @@ class TestResolvedSecrets(unittest.TestCase):
         cfg = CratediggerConfig()
         self.assertEqual(cfg.resolved_slskd_api_key(), "")
 
-    def test_meelo_credentials_resolve_from_files(self):
-        user_path = self._write_secret("meelo-user")
-        pass_path = self._write_secret("meelo-pass")
-        cfg = CratediggerConfig(
-            meelo_username_file=user_path,
-            meelo_password_file=pass_path,
-        )
-        self.assertEqual(cfg.resolved_meelo_username(), "meelo-user")
-        self.assertEqual(cfg.resolved_meelo_password(), "meelo-pass")
-
     def test_plex_token_resolves_from_file(self):
         path = self._write_secret("plex-live-token\n")
         cfg = CratediggerConfig(plex_url="http://plex", plex_token_file=path)
@@ -613,8 +582,6 @@ class TestResolvedSecrets(unittest.TestCase):
 
     def test_notifier_resolvers_none_when_unset(self):
         cfg = CratediggerConfig()
-        self.assertIsNone(cfg.resolved_meelo_username())
-        self.assertIsNone(cfg.resolved_meelo_password())
         self.assertIsNone(cfg.resolved_plex_token())
         self.assertIsNone(cfg.resolved_jellyfin_token())
 
@@ -622,14 +589,9 @@ class TestResolvedSecrets(unittest.TestCase):
         """Direct fields on CratediggerConfig keep working so tests and old deployments
         that haven't switched to *_file paths continue to function."""
         cfg = CratediggerConfig(
-            meelo_url="http://meelo",
-            meelo_username="legacy-user",
-            meelo_password="legacy-pass",
             plex_token="legacy-plex",
             jellyfin_token="legacy-jellyfin",
         )
-        self.assertEqual(cfg.resolved_meelo_username(), "legacy-user")
-        self.assertEqual(cfg.resolved_meelo_password(), "legacy-pass")
         self.assertEqual(cfg.resolved_plex_token(), "legacy-plex")
         self.assertEqual(cfg.resolved_jellyfin_token(), "legacy-jellyfin")
 

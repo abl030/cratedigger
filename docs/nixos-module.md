@@ -22,7 +22,7 @@ The flake export is a wrapper that pins the module's package set to **cratedigge
 | `beets.package.lrclibUrl` | `null` | When set, build-time-patches the beets lyrics plugin's LRCLIB base to this URL. |
 | `beets.package.discogsTokenFile` | `null` | `*File` secret (issue #117): materialized into `${stateDir}/beets/secrets.yaml` (0400) + `include:` in the rendered config. Null = placeholder token (plugins load cleanly; public-Discogs lookups are token-required). |
 | `beets.config.{directory,library}` | production values | Rendered into the module-owned `config.yaml`. `beets.directory` (config.ini) follows `beets.config.directory` by default. |
-| `beets.config.fetchart.{maxwidth,minwidth}` | `500` / `300` | Load-bearing: library size (embedded art × every track) and the Meelo black-box floor. |
+| `beets.config.fetchart.{maxwidth,minwidth}` | `500` / `300` | Load-bearing: library size (embedded art × every track) and the collection's artwork-quality floor. |
 | `beets.config.musicbrainz.{host,https,ratelimit}` | derived from `musicbrainz.apiBase` | mkDefault-derived (mirror ⇒ host:port/http/ratelimit 100; public ⇒ musicbrainz.org/https/1); override to pin explicitly. |
 | `musicbrainz.apiBase` | `https://musicbrainz.org` | ONE MB origin for web/mb.py (via config.ini, read at `cratedigger-web` startup), pipeline-cli lookups, and the rendered beets musicbrainz block (KTD6). Public default is functional but ~1 req/s. |
 | `discogs.apiBase` | `null` | Discogs mirror origin. Mirror-REQUIRED: unset ⇒ Discogs browse off with a 503 mirror-required message (public api.discogs.com does not serve this API shape). |
@@ -36,7 +36,6 @@ The flake export is a wrapper that pins the module's package set to **cratedigge
 | `peerCache.{ttlSeconds,speedTtlSeconds,redisConnectTimeoutMs,redisOperationTimeoutMs}` | 7d, 24h, 200ms, 100ms | Redis TTL and timeout settings rendered into `[Peer Cache]`. |
 | `beets.validation.{enable,distanceThreshold,stagingDir,trackingFile,verifiedLosslessTarget}` | sensible defaults | Beets validation config. |
 | `web.{enable,port,beetsDb,redis.host,redis.port}` | port=8085 | Web UI config. `web.redis.*` follows the shared app Redis defaults unless explicitly overridden. |
-| `notifiers.meelo.{enable,url,usernameFile,passwordFile}` | disabled | Meelo notifier. |
 | `notifiers.plex.{enable,url,tokenFile,librarySectionId,pathMap}` | disabled | Plex notifier. |
 | `notifiers.jellyfin.{enable,url,tokenFile,libraryId,pathMap}` | disabled | Jellyfin notifier; nullable `libraryId` targets the music-library refresh instead of refreshing every library, while `pathMap` (local:remote prefix swap) enables the "Recently Added" DateCreated pin (issue #574, `docs/jellyfin-primer.md`). |
 | `healthCheck.{enable,onFailureCommand}` | enabled, no recovery | Pre-cycle slskd healthcheck. `onFailureCommand` runs to recover (e.g. `systemctl restart slskd.service`). |
@@ -169,7 +168,7 @@ systemd.services.cratedigger-secrets-split = {
   serviceConfig.ExecStart = pkgs.writeShellScript "cratedigger-secrets-split" ''
     set -euo pipefail
     install -d -m 0700 /run/cratedigger-secrets
-    for key in SOULARR_SLSKD_API_KEY MEELO_USERNAME MEELO_PASSWORD PLEX_TOKEN JELLYFIN_TOKEN; do
+    for key in SOULARR_SLSKD_API_KEY PLEX_TOKEN JELLYFIN_TOKEN; do
       grep -m1 "^$key=" "${config.sops.secrets."soularr/env".path}" \
         | cut -d= -f2- | tr -d '\n' > "/run/cratedigger-secrets/$key"
       chmod 0400 "/run/cratedigger-secrets/$key"
@@ -177,7 +176,6 @@ systemd.services.cratedigger-secrets-split = {
   '';
 };
 services.cratedigger.slskd.apiKeyFile = "/run/cratedigger-secrets/SOULARR_SLSKD_API_KEY";
-services.cratedigger.notifiers.meelo.usernameFile = "/run/cratedigger-secrets/MEELO_USERNAME";
 # ... etc
 ```
 

@@ -76,7 +76,7 @@ already receives `found_duplicates` immediately before deciding whether to set
   machine.
 
 **Origin actors:** A1 Operator, A2 Cratedigger importer, A3 Beets harness,
-A4 Acquisition pipeline, A5 Plex/Meelo downstream scanners.
+A4 Acquisition pipeline, A5 Plex/Jellyfin downstream scanners.
 
 **Origin flows:** F1 Guarded same-release replacement, F2 Unsafe duplicate set,
 F3 One-release transition.

@@ -15,7 +15,7 @@ from lib.util import _normalize_title, _extract_title_from_filename, _track_titl
 # === Helper to build test data ===
 
 def make_tracks(titles):
-    """Build Lidarr-shaped track dicts from a list of titles."""
+    """Build release-track dicts from a list of titles."""
     return [{"title": t, "trackNumber": str(i + 1), "mediumNumber": 1} for i, t in enumerate(titles)]
 
 

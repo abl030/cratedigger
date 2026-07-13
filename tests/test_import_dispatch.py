@@ -584,7 +584,6 @@ class TestDispatchImport(unittest.TestCase):
         return {
             "db": db,
             "mock_cleanup": ext.cleanup,
-            "mock_meelo": ext.meelo,
             "mock_jellyfin": ext.jellyfin,
             "mock_gate": mock_gate,
         }
@@ -595,7 +594,6 @@ class TestDispatchImport(unittest.TestCase):
         self.assertEqual(r["db"].request(42)["status"], "imported")
         self.assertEqual(len(r["db"].download_logs), 1)
         self.assertEqual(r["db"].download_logs[0].outcome, "success")
-        r["mock_meelo"].assert_called_once()
         r["mock_jellyfin"].assert_called_once()
         r["mock_cleanup"].assert_called_once()
         r["mock_gate"].assert_called_once()
@@ -621,7 +619,6 @@ class TestDispatchImport(unittest.TestCase):
         r = self._dispatch(ir)
         self.assertEqual(r["db"].request(42)["status"], "imported")
         self.assertEqual(r["db"].download_logs[0].outcome, "success")
-        r["mock_meelo"].assert_called_once()
 
     def test_import_with_upgrade_delta(self):
         ir = make_import_result(decision="import", new_min_bitrate=245,
@@ -694,7 +691,6 @@ class TestDispatchImport(unittest.TestCase):
         self.assertEqual(r["db"].download_logs[0].outcome, "success")
         self.assertEqual(r["db"].request(42)["status"], "wanted")
         self.assertTrue(len(r["db"].denylist) > 0)
-        r["mock_meelo"].assert_called_once()
 
     def test_transcode_downgrade(self):
         ir = make_import_result(decision="transcode_downgrade",
@@ -734,7 +730,6 @@ class TestDispatchImport(unittest.TestCase):
         self.assertEqual(r["db"].download_logs[0].extra["v0_probe_avg_bitrate"],
                          228)
         self.assertTrue(len(r["db"].denylist) > 0)
-        r["mock_meelo"].assert_called_once()
 
     def test_suspect_lossless_downgrade_rejects_without_probe_update(self):
         probe = V0ProbeEvidence(

@@ -2,8 +2,7 @@
 
 ## What Jellyfin Is
 
-Jellyfin is a self-hosted media server used here as **one of several** music
-browsers — alongside Meelo and Plex. Cratedigger triggers a Jellyfin library
+Jellyfin is a self-hosted media server used here alongside Plex. Cratedigger triggers a Jellyfin library
 refresh after every successful import, and (since issue #574) pins album
 "added" dates across upgrades so re-acquisitions don't pollute "Recently
 Added".
@@ -182,4 +181,3 @@ Gotchas:
 |----------|-----|
 | Jellyfin API docs | https://api.jellyfin.org/ |
 | Plex primer (sister doc — the migration-040 pin) | docs/plex-primer.md |
-| Meelo primer (sister doc) | docs/meelo-primer.md |

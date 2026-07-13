@@ -136,7 +136,7 @@ fetchart:
 
 **Why maxwidth: 500 matters**: Embedded art is duplicated in EVERY track. At the old average (1138KB/cover), embedding across 83K tracks = ~91GB. At 500px (~71KB), it's ~6GB. An 85GB saving.
 
-**Meelo threshold**: Cover art under ~2KB shows as black boxes in the Meelo media server. The `minwidth: 300` setting prevents this.
+**Artwork floor**: `minwidth: 300` prevents unusably small embedded artwork from entering the curated library.
 
 ## Library Structure
 

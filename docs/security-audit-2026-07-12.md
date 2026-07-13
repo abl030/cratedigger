@@ -51,7 +51,7 @@ against that reality, not against a hypothetical public exposure.
 
 | ID | Severity | Title | Primary location |
 |----|----------|-------|------------------|
-| CD-SEC-01 | High | Historical credentials committed to a public repo | `docs/meelo-primer.md`, git history |
+| CD-SEC-01 | High | Historical credentials committed to a public repo | deleted notifier docs, git history |
 | CD-SEC-02 | High | No auth + wildcard CORS on file-destructive endpoints | `web/server.py` |
 | CD-SEC-03 | Medium | Manual-import / import-preview accept an arbitrary absolute path (+ in-place `mp3val -f`) | `web/routes/imports.py`, `lib/util.py` |
 | CD-SEC-04 | Medium | No systemd sandboxing on services that process attacker-controlled bytes | `nix/module.nix` |
@@ -88,32 +88,30 @@ arbitrary hosts (every outbound base URL is fixed config, not request input).
 
 ### CD-SEC-01 — Historical credentials in a public repo (High)
 
-`docs/meelo-primer.md` contained a real login (`username abl030`, a plaintext
-password) in four places, and it has been present in git **history** since the
-Meelo-scan feature commit. The cratedigger repo remote is public GitHub, so the
-credential is world-readable and is in history — removing the lines from the
-working tree does not un-publish it.
+A now-deleted media-server primer contained a real login (`username abl030`, a
+plaintext password) in four places, and it has been present in git **history**
+since the retired notifier was added. The cratedigger repo remote is public
+GitHub, so the credential is world-readable and is in history — removing the
+lines from the working tree does not un-publish it.
 
 A full-history Gitleaks scan of 2,135 commits found one additional credible
 credential-shaped value: the original imported `soularr.py` history contains
-the same 32-character hexadecimal Lidarr API key in two early commits. The
-associated host is a private-LAN address and the integration is obsolete, so
-the key may already be dead; it is nevertheless public and must be treated as
-compromised. The other 16 raw Gitleaks matches were de-duplicated false
+the same 32-character hexadecimal predecessor API key in two early commits.
+The associated host is a private-LAN address and the integration is obsolete,
+so the key may already be dead; it is nevertheless public and must be treated
+as compromised. The other 16 raw Gitleaks matches were de-duplicated false
 positives: a deliberately synthetic redaction-test token and expiring GitHub
 private-image URL parameters. A tracked-HEAD scan found only the synthetic test
 token, not a current credential.
 
-- **Impact:** anyone reading the public repo obtains the operator's Meelo login;
+- **Impact:** anyone reading the public repo obtains the retired service login;
   the dominant real risk is password reuse across other services.
 - **Why CI missed it:** the only CI gate is GitGuardian, whose detectors key on
   high-entropy tokens; a low-entropy dictionary-style password does not trip it.
-- **Remediation:** treat both credentials as compromised and **rotate/revoke
-  them** (and any reuse). Scrub the Meelo plaintext from the docs (done in the
-  same change that adds this audit). History rewrite is optional for a
-  single-operator repo once the credentials are dead. (Operator note: Meelo and
-  the original Lidarr integration are no longer in active use, which caps the
-  blast radius — invalidating the old credentials is still the correct close.)
+- **Disposition (2026-07-13):** both integrations are retired and absent from
+  production. Their notifier/config/documentation surfaces were deleted from
+  the current tree, leaving no live service or API target for either historical
+  credential. History rewrite is optional for this single-operator repo.
 
 ### CD-SEC-02 — No auth + wildcard CORS on file-destructive endpoints (High)
 
@@ -511,8 +509,8 @@ write preserves every field and failure boundary through real PostgreSQL.
 
 Operator actions (not code):
 
-- [ ] **CD-SEC-01** — rotate/revoke the Meelo password and historical Lidarr API
-      key (and any reuse); confirm the Meelo plaintext is scrubbed from the docs.
+- [x] **CD-SEC-01** — retire the unused credential-bearing integrations and
+      remove their runtime, configuration, test, and documentation surfaces.
 - [ ] **CD-SEC-02** — decide the web-UI auth mechanism (proxy-injected shared
       secret vs session) before wiring it.
 
