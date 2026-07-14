@@ -748,8 +748,9 @@ def plex_set_added_at(
 def trigger_jellyfin_scan(cfg: CratediggerConfig) -> None:
     """Trigger a Jellyfin library scan after import. Best-effort — failures don't block.
 
-    If jellyfin_library_id is set, refreshes just that library item.
-    Otherwise triggers a full library refresh.
+    If jellyfin_library_id is set, refreshes just that library item with
+    Jellyfin's metadata-safe ``Default`` modes. Otherwise triggers the
+    unchanged full-library refresh.
     """
     if not cfg.jellyfin_url:
         logger.debug("JELLYFIN: skipped scan (no url configured)")
@@ -760,7 +761,13 @@ def trigger_jellyfin_scan(cfg: CratediggerConfig) -> None:
             logger.debug("JELLYFIN: skipped scan (no token configured)")
             return
         if cfg.jellyfin_library_id:
-            url = f"{cfg.jellyfin_url}/Items/{cfg.jellyfin_library_id}/Refresh"
+            url = (
+                f"{cfg.jellyfin_url}/Items/{cfg.jellyfin_library_id}/Refresh"
+                "?metadataRefreshMode=Default"
+                "&imageRefreshMode=Default"
+                "&replaceAllMetadata=false"
+                "&replaceAllImages=false"
+            )
         else:
             url = f"{cfg.jellyfin_url}/Library/Refresh"
         req = urllib.request.Request(

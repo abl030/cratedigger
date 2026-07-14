@@ -95,6 +95,14 @@
           cratediggerSrc = runtimeSrc;
         };
 
+        # Boots the flake-pinned Jellyfin and proves the real targeted
+        # post-import notifier populates tagged album/track metadata without
+        # broadening scope or wiping an existing curated item.
+        jellyfinMetadataVm = import ./nix/tests/jellyfin-metadata-vm.nix {
+          inherit pkgs;
+          cratediggerSrc = runtimeSrc;
+        };
+
         # Eval-level guard for the src threading: the exported wrapper must
         # default services.cratedigger.src to the filtered runtimeSrc (the
         # same source the moduleVm boots). A regression to the raw module

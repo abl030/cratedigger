@@ -12,11 +12,11 @@ Upstream: https://jellyfin.org/
 ## Where Jellyfin Runs
 
 - External: https://jelly.ablz.au
-- Version at integration time: 10.11.x
-- Music library: `/mnt/fuse/Media/Music` (library item id
-  `7e64e319657a9516ec78490da03edccb`); the beets tree appears inside it at
-  `/mnt/fuse/Media/Music/Beets/…` — the same files cratedigger sees at
-  `/mnt/virtio/Music/Beets/…`. That prefix swap is `[Jellyfin] path_map`.
+- Version at integration time: 10.11.11
+- Music library: `/mnt/fuse/Media/Music/Beets` — the same files Cratedigger
+  sees at `/mnt/virtio/Music/Beets`. That exact prefix swap is
+  `[Jellyfin] path_map`; `Incoming` and `failed_imports` are outside Jellyfin's
+  scope.
 - The music library sits on a fuse mount, so inotify (Jellyfin's realtime
   monitor) is unreliable — like Plex on its SMB remount. Changes land via
   the triggered refresh or the scheduled scan.
@@ -27,12 +27,25 @@ Scan notifier: `lib/util.py::trigger_jellyfin_scan(cfg)` — called from
 `lib/dispatch/` after every successful import that sets
 `action.trigger_notifiers = True`. Sends `POST /Library/Refresh` (or
 `POST /Items/<library_id>/Refresh` when `library_id` is configured) with the
-`X-Emby-Token` header. Best-effort — failures don't block the import.
-The targeted form refreshes only the configured music library; leaving the ID
-unset deliberately retains the full-library fallback.
+`X-Emby-Token` header. Best-effort — failures don't block the import. The
+configured targeted post-import and Replace form is exactly:
+
+```http
+POST /Items/<library_id>/Refresh?metadataRefreshMode=Default&imageRefreshMode=Default&replaceAllMetadata=false&replaceAllImages=false
+```
+
+Jellyfin 10.11.11 recurses intrinsically for this endpoint, so the request
+deliberately has no `recursive` parameter. `Default` loads tags for genuinely
+new albums and Audio children; both replace-all flags stay false so existing
+curated metadata is not wiped. The response is normally HTTP 204, which means
+the asynchronous refresh was queued — never that it converged. The configured
+item ID keeps the operation scoped to the music library. Leaving the ID unset
+deliberately preserves the unchanged `POST /Library/Refresh` behavior.
 
 For library deletion, Cratedigger locates the exact `MusicAlbum` by the former
 mapped Beets path and refreshes that item after destructive locks are released.
+This is a separate deletion-observation contract and retains its bare targeted
+refresh request (without the post-import metadata-mode query).
 If no exact item is found it uses the configured library item. A 404 from any
 targeted `/Items/{id}/Refresh` immediately falls back to
 `POST /Library/Refresh`. A 2xx response is only submission evidence:
