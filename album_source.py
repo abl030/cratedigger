@@ -227,7 +227,7 @@ class DatabaseSource:
         ]
 
     def mark_done(self, album_record, bv_result, dest_path=None,
-                  download_info=None):
+                  download_info=None, import_job_id=None):
         """Mark album as imported."""
         from lib.dispatch import _do_mark_done
         from lib.quality import DownloadInfo
@@ -237,7 +237,7 @@ class DatabaseSource:
 
         db = self._get_db()
         dl = download_info if isinstance(download_info, DownloadInfo) else DownloadInfo()
-        _do_mark_done(
+        return _do_mark_done(
             db=db,
             request_id=request_id,
             dl_info=dl,
@@ -245,11 +245,13 @@ class DatabaseSource:
             scenario=bv_result.scenario,
             dest_path=dest_path,
             detail=bv_result.detail,
+            import_job_id=import_job_id,
         )
 
     def reject_and_requeue(self, album_record, bv_result, usernames=None,
                            download_info=None, search_filetype_override=None,
-                           cooled_down_users: set[str] | None = None):
+                           cooled_down_users: set[str] | None = None,
+                           import_job_id: int | None = None):
         """Record a rejected validation and keep the album wanted for retry."""
         from lib.quality import DownloadInfo
         request_id = getattr(album_record, "db_request_id", None)
@@ -258,6 +260,33 @@ class DatabaseSource:
 
         db = self._get_db()
         dl = download_info if isinstance(download_info, DownloadInfo) else DownloadInfo()
+        if import_job_id is not None:
+            from lib.dispatch import _record_rejection_and_maybe_requeue
+            from lib.terminal_outcomes import (
+                PendingImportTerminalOutcome,
+                TerminalDenylist,
+            )
+
+            pending = _record_rejection_and_maybe_requeue(
+                db,
+                request_id,
+                dl,
+                detail=bv_result.detail,
+                error=bv_result.error,
+                validation_result=(dl.validation_result or bv_result.to_json()),
+                requeue=True,
+                search_filetype_override=search_filetype_override,
+                import_job_id=import_job_id,
+            )
+            assert isinstance(pending, PendingImportTerminalOutcome)
+            return pending.append_denylists(*(
+                TerminalDenylist(
+                    username,
+                    "beets validation rejected",
+                    apply_cooldown=True,
+                )
+                for username in sorted(usernames or ())
+            ))
         from lib import transitions
         transition_kwargs: dict[str, object] = {}
         if search_filetype_override is not None:

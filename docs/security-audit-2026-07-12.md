@@ -237,7 +237,7 @@ lock for exactly this data-loss boundary.
   barrier-controlled beets mutation. Add a server-validated confirmation to
   ban-source; its current browser `confirm()` is only a UI affordance.
 
-### CD-SEC-17 — Terminal import outcomes are non-atomic (High)
+### CD-SEC-17 — Terminal import outcomes are non-atomic (High) — Remediated
 
 Successful and rejected outcomes persist request state, attempts, download
 audit, denylist state and import-job state as separate autocommit statements.
@@ -251,6 +251,13 @@ download audit.
   outcome. Existing helpers commit internally, so merely wrapping their current
   calls is insufficient. Add failure injection at every write boundary and
   assert all-or-none persisted state.
+
+  Implemented by the DB-owned `persist_import_terminal_outcome` and
+  `persist_preview_terminal_outcome` commands. They use cursor-level request,
+  audit, denylist/cooldown, attempt, and job writes under one explicit
+  transaction; callers only assemble typed intent. Real-PostgreSQL fault
+  injection now raises after every write boundary and proves that a fresh
+  connection observes either the original state or the complete outcome.
 
 ## Priority 2
 

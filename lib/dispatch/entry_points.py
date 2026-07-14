@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from lib.processing_paths import normalize_source_dirs
@@ -22,6 +23,7 @@ from lib.dispatch.evidence_gate import (_download_info_from_candidate_evidence,
                                         _requeue_import_job_to_preview)
 from lib.dispatch.core import dispatch_import_core
 from lib.dispatch.quality_gate import _check_quality_gate_core
+from lib.terminal_outcomes import ImportJobTerminal
 
 if TYPE_CHECKING:
     from lib.pipeline_db import DownloadLogOutcome, PipelineDB
@@ -166,9 +168,14 @@ def _dispatch_import_from_db_locked(
         download_log_id=download_log_id,
         source_username=source_username,
         attempt_result=attempt_result,
+        import_job_id=import_job_id,
     )
     if manifest_reject is not None:
-        return manifest_reject
+        return _persist_terminal_dispatch_outcome(
+            db,
+            manifest_reject,
+            defer=_job_is_running(db, import_job_id),
+        )
 
     from lib.config import read_runtime_config
 
@@ -209,7 +216,7 @@ def _dispatch_import_from_db_locked(
     resolved_quality_gate_fn = (
         quality_gate_fn if quality_gate_fn is not None else _check_quality_gate_core
     )
-    return dispatch_import_core(
+    outcome = dispatch_import_core(
         path=failed_path,
         mb_release_id=mbid,
         request_id=request_id,
@@ -236,3 +243,40 @@ def _dispatch_import_from_db_locked(
         prevalidated_candidate_result=candidate_result,
         quality_gate_fn=resolved_quality_gate_fn,
     )
+    return _persist_terminal_dispatch_outcome(
+        db,
+        outcome,
+        defer=_job_is_running(db, import_job_id),
+    )
+
+
+def _job_is_running(db: "PipelineDB", import_job_id: int | None) -> bool:
+    if import_job_id is None:
+        return False
+    job = db.get_import_job(import_job_id)
+    return job is not None and job.status == "running"
+
+
+def _persist_terminal_dispatch_outcome(
+    db: "PipelineDB",
+    outcome: DispatchOutcome,
+    *,
+    defer: bool,
+) -> DispatchOutcome:
+    """Finalize direct calls while letting the queue owner add job metadata."""
+    pending = outcome.terminal_outcome
+    if pending is None or defer:
+        return outcome
+    result = {
+        "success": outcome.success,
+        "message": outcome.message,
+        "deferred": outcome.deferred,
+        "code": outcome.code,
+    }
+    db.persist_import_terminal_outcome(pending.with_job(ImportJobTerminal(
+        status="completed" if outcome.success else "failed",
+        error=None if outcome.success else outcome.message,
+        result=result,
+        message=outcome.message,
+    )))
+    return replace(outcome, terminal_outcome=None)

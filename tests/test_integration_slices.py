@@ -6354,8 +6354,8 @@ class TestU5PreviewWorkerSelfHealSlice(unittest.TestCase):
         assert updated is not None
         self.assertEqual(updated.preview_status, "measurement_failed")
         self.assertEqual(updated.status, "failed")
-        # The audit row cannot be written without a request_id; the
-        # worker absorbed the helper's raise (PREVIEW_SELF_HEAL_PARTIAL_FAILURE).
+        # The audit row cannot be written without a request_id, so this is a
+        # job-only precondition failure rather than a terminal domain bundle.
         outcomes = [log.outcome for log in db.download_logs]
         self.assertNotIn("measurement_failed", outcomes)
 

@@ -9,7 +9,7 @@ evidence reject helper. ``finalize_request`` is the module-local DI seam
 from __future__ import annotations
 
 import logging
-from typing import Any, Sequence, TYPE_CHECKING
+from typing import Any, Sequence, TYPE_CHECKING, cast
 
 import msgspec
 
@@ -29,6 +29,12 @@ from lib.dispatch.types import (DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
 from lib.dispatch.helpers import (_cleanup_staged_dir,
                                   _populate_dl_info_from_import_result,
                                   _should_cleanup_path, _v0_probe_log_fields)
+from lib.terminal_outcomes import (
+    PendingImportTerminalOutcome,
+    PreviewTerminalOutcome,
+    TerminalDenylist,
+    TerminalDownloadAudit,
+)
 
 if TYPE_CHECKING:
     from lib.pipeline_db import DownloadLogOutcome, PipelineDB
@@ -53,6 +59,7 @@ def _reject_import_from_evidence_decision(
     files: Sequence[object] | None,
     source_path_cleanup_scenario: str,
     cooled_down_users: set[str] | None,
+    import_job_id: int | None = None,
 ) -> DispatchOutcome:
     """Record a persisted-evidence rejection before beets can mutate files.
 
@@ -96,7 +103,7 @@ def _reject_import_from_evidence_decision(
         scenario=decision or scenario,
         detail=detail,
     ).to_json()
-    _record_rejection_and_maybe_requeue(
+    terminal_outcome = _record_rejection_and_maybe_requeue(
         db,
         request_id,
         dl_info,
@@ -107,6 +114,7 @@ def _reject_import_from_evidence_decision(
         validation_result=rejection_validation,
         staged_path=staged_path,
         attempt_result=attempt_result,
+        import_job_id=import_job_id,
     )
     if action.denylist:
         usernames = extract_usernames(files or [])
@@ -132,17 +140,28 @@ def _reject_import_from_evidence_decision(
             if decision == "mixed_source"
             else f"rejected: {decision}"
         )
-        for username in usernames:
-            db.add_denylist(request_id, username, reason)
-            if cooled_down_users is not None:
-                if db.check_and_apply_cooldown(username):
-                    cooled_down_users.add(username)
+        if isinstance(terminal_outcome, PendingImportTerminalOutcome):
+            terminal_outcome = terminal_outcome.append_denylists(*(
+                TerminalDenylist(username, reason, apply_cooldown=True)
+                for username in sorted(usernames)
+            ))
+        else:
+            for username in usernames:
+                db.add_denylist(request_id, username, reason)
+                if cooled_down_users is not None:
+                    if db.check_and_apply_cooldown(username):
+                        cooled_down_users.add(username)
     if action.cleanup and _should_cleanup_path(source_path_cleanup_scenario, action):
         _cleanup_staged_dir(staged_path)
     return DispatchOutcome(
         success=False,
         message=f"Rejected by persisted quality evidence: {decision}",
         code=DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
+        terminal_outcome=(
+            terminal_outcome
+            if isinstance(terminal_outcome, PendingImportTerminalOutcome)
+            else None
+        ),
     )
 
 
@@ -158,7 +177,8 @@ def _do_mark_done(
     imported_path: str | None = None,
     clear_stale_v0_probe: bool = True,
     attempt_result: ImportAttemptResult | None = None,
-) -> int | None:
+    import_job_id: int | None = None,
+) -> int | None | PendingImportTerminalOutcome:
     """Mark album as imported — standalone version of DatabaseSource.mark_done.
 
     Takes PipelineDB directly instead of going through DatabaseSource.
@@ -219,11 +239,9 @@ def _do_mark_done(
             ).as_update_fields()
         )
     update_fields["final_format"] = dl_info.final_format
-    transitions.require_transition_applied(finalize_request(
-        db,
-        request_id,
-        transitions.RequestTransition.to_imported_fields(fields=update_fields),
-    ))
+    transition = transitions.RequestTransition.to_imported_fields(
+        fields=update_fields
+    )
 
     validation_result = dl_info.validation_result or ValidationResult(
         valid=True,
@@ -233,8 +251,7 @@ def _do_mark_done(
     ).to_json()
     if attempt_result is not None:
         attempt_result.finalize_into(dl_info)
-    return db.log_download(
-        request_id=request_id,
+    audit = TerminalDownloadAudit(
         soulseek_username=dl_info.username,
         filetype=dl_info.filetype,
         beets_detail=detail,
@@ -261,6 +278,22 @@ def _do_mark_done(
         validation_result=validation_result,
         final_format=dl_info.final_format,
         **_v0_probe_log_fields(dl_info),
+    )
+    if import_job_id is not None:
+        return PendingImportTerminalOutcome(
+            request_id=request_id,
+            import_job_id=import_job_id,
+            initial_transition=transition,
+            audit=audit,
+        )
+    transitions.require_transition_applied(finalize_request(
+        db,
+        request_id,
+        transition,
+    ))
+    return cast(Any, db.log_download)(
+        request_id=request_id,
+        **audit.as_log_kwargs(),
     )
 
 
@@ -372,7 +405,8 @@ def _record_rejection_and_maybe_requeue(
     search_filetype_override: str | None = None,
     staged_path: str | None = None,
     attempt_result: ImportAttemptResult | None = None,
-) -> int:
+    import_job_id: int | None = None,
+) -> int | PendingImportTerminalOutcome:
     """Importer-side rejection entry point.
 
     Builds the ``log_download`` kwargs from ``DownloadInfo`` (slskd context:
@@ -423,6 +457,14 @@ def _record_rejection_and_maybe_requeue(
         "validation_result": validation_result,
     }
     log_download_kwargs.update(_v0_probe_log_fields(dl_info))
+    if import_job_id is not None:
+        return _pending_rejection_outcome(
+            request_id=request_id,
+            import_job_id=import_job_id,
+            audit=TerminalDownloadAudit(**log_download_kwargs),
+            requeue=requeue,
+            search_filetype_override=search_filetype_override,
+        )
     return _finalize_request_and_log_rejection(
         db,
         request_id,
@@ -445,6 +487,7 @@ def _record_preview_measurement_failed(
     denylist_username: str | None = None,
     denylist_reason: str | None = None,
     import_result: ImportResult | None = None,
+    preview_result: dict[str, object] | None = None,
 ) -> int:
     """Preview-side measurement_failed entry point (U4).
 
@@ -456,8 +499,8 @@ def _record_preview_measurement_failed(
     columns and the typed ``MeasurementFailure`` payload as its
     ``validation_result`` JSONB.
 
-    Delegates to ``_finalize_request_and_log_rejection`` for the four
-    self-healing side effects:
+    Delegates to ``persist_preview_terminal_outcome`` for the four
+    self-healing effects in one explicit transaction:
 
       * ``download_log`` row written with ``outcome='measurement_failed'``,
         ``beets_scenario='measurement_failed'``, and the
@@ -467,39 +510,72 @@ def _record_preview_measurement_failed(
       * ``import_jobs.status='failed'`` via ``mark_import_job_failed`` so
         the poll loop's active-import-job guard releases on the next tick.
 
-    Returns the new ``download_log`` row id. The ``request_not_found``
-    subcase (``request_id is None``) raises instead — see
-    ``_finalize_request_and_log_rejection``; the worker's self-heal
-    try/except absorbs it.
+    Returns the committed ``download_log`` row id. A missing request owner
+    raises before any write because ``download_log.request_id`` is mandatory.
     """
-    requeue = request_id is not None
+    if request_id is None:
+        raise ValueError(
+            "cannot persist terminal preview outcome without request_id"
+        )
     validation_json = msgspec.json.encode(payload).decode("utf-8")
-    log_download_kwargs: dict[str, Any] = {
-        # NULL for all slskd-only fields — preview has no transfer context.
-        "soulseek_username": None,
-        "filetype": None,
-        "beets_distance": None,
-        "beets_scenario": "measurement_failed",
-        "beets_detail": payload.detail,
-        "outcome": "measurement_failed",
-        "staged_path": payload.source_path or None,
-        "error_message": None,
-        "validation_result": validation_json,
-        "import_result": import_result.to_json() if import_result is not None else None,
-    }
     job_result = msgspec.to_builtins(payload)
     assert isinstance(job_result, dict), \
         "msgspec.to_builtins on a Struct returns a dict"
-    return _finalize_request_and_log_rejection(
-        db,
-        request_id,
-        log_download_kwargs,
-        requeue_to_wanted=requeue,
-        record_validation_attempt=False,  # preview failures aren't validation attempts
+    denylists = (
+        (TerminalDenylist(denylist_username, denylist_reason),)
+        if denylist_username
+        else ()
+    )
+    result = db.persist_preview_terminal_outcome(PreviewTerminalOutcome(
+        request_id=request_id,
         import_job_id=import_job_id,
-        import_job_error=payload.reason,
-        import_job_message=payload.detail,
-        import_job_result=job_result,
-        denylist_username=denylist_username,
-        denylist_reason=denylist_reason,
+        request_transition=transitions.RequestTransition.to_wanted(),
+        audit=TerminalDownloadAudit(
+            soulseek_username=None,
+            filetype=None,
+            beets_distance=None,
+            beets_scenario="measurement_failed",
+            beets_detail=payload.detail,
+            outcome="measurement_failed",
+            staged_path=payload.source_path or None,
+            error_message=None,
+            validation_result=validation_json,
+            import_result=(
+                import_result.to_json() if import_result is not None else None
+            ),
+        ),
+        preview_status="measurement_failed",
+        preview_result=preview_result or job_result,
+        message=payload.detail,
+        error=payload.reason,
+        denylists=denylists,
+    ))
+    return result.download_log_id
+
+
+def _pending_rejection_outcome(
+    *,
+    request_id: int,
+    import_job_id: int,
+    audit: TerminalDownloadAudit,
+    requeue: bool,
+    search_filetype_override: str | None = None,
+) -> PendingImportTerminalOutcome:
+    """Build the DB-owned terminal rejection command without writing."""
+    fields: dict[str, object] = {}
+    if search_filetype_override is not None:
+        fields["search_filetype_override"] = search_filetype_override
+    transition = (
+        transitions.RequestTransition.to_wanted_fields(
+            attempt_type="validation",
+            fields=fields,
+        )
+        if requeue
+        else None
+    )
+    return PendingImportTerminalOutcome(
+        request_id=request_id,
+        import_job_id=import_job_id,
+        initial_transition=transition,
+        audit=audit,
     )

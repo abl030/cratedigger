@@ -8,6 +8,7 @@ lossless. ``finalize_request`` is the module-local DI seam.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Sequence, TYPE_CHECKING
 
 from lib import transitions
@@ -20,6 +21,15 @@ from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,
                          quality_gate_decision)
 
 from lib.dispatch.types import QualityGateState
+from lib.terminal_outcomes import TerminalDenylist
+
+
+@dataclass(frozen=True)
+class QualityGatePlan:
+    """Request/denylist writes produced by a post-import gate decision."""
+
+    transition: transitions.RequestTransition
+    denylists: tuple[TerminalDenylist, ...] = ()
 
 if TYPE_CHECKING:
     from lib.pipeline_db import PipelineDB
@@ -34,6 +44,7 @@ def load_quality_gate_state(
     db: "PipelineDB",
     mb_id: str | None = None,
     quality_ranks: "QualityRankConfig | None" = None,
+    request_fields: dict[str, object] | None = None,
 ) -> QualityGateState | None:
     """Load the current on-disk measurement for quality-gate evaluation.
 
@@ -58,6 +69,8 @@ def load_quality_gate_state(
         req = db.get_request(request_id)
     except Exception:
         logger.debug("QUALITY GATE: DB lookup failed for request row")
+    if req is not None and request_fields:
+        req = {**req, **request_fields}
 
     resolved_mb_id = mb_id or (str(req["mb_release_id"]) if req and req.get("mb_release_id") else None)
     if not resolved_mb_id:
@@ -116,7 +129,9 @@ def _check_quality_gate_core(
     files: Sequence[object],
     db: "PipelineDB",
     quality_ranks: "QualityRankConfig | None" = None,
-) -> None:
+    apply: bool = True,
+    request_fields: dict[str, object] | None = None,
+) -> QualityGatePlan | None:
     """Post-import quality gate — standalone version taking plain params + PipelineDB.
 
     Reads beets DB for on-disk quality, runs quality_gate_decision, dispatches
@@ -141,6 +156,7 @@ def _check_quality_gate_core(
             db=db,
             mb_id=mb_id,
             quality_ranks=quality_ranks,
+            request_fields=request_fields,
         )
         if not state:
             return
@@ -162,15 +178,11 @@ def _check_quality_gate_core(
 
         if decision == "requeue_upgrade":
             upgrade_override = QUALITY_UPGRADE_TIERS
-            transitions.require_transition_applied(finalize_request(
-                db,
-                request_id,
-                transitions.RequestTransition.to_wanted(
-                    from_status="imported",
-                    search_filetype_override=upgrade_override,
-                    min_bitrate=min_br_kbps,
-                ),
-            ))
+            transition = transitions.RequestTransition.to_wanted(
+                from_status="imported",
+                search_filetype_override=upgrade_override,
+                min_bitrate=min_br_kbps,
+            )
             usernames = extract_usernames(files)
             gate_br = compute_effective_override_bitrate(
                 min_br_kbps, spectral_br, spectral_grade) or min_br_kbps
@@ -185,8 +197,10 @@ def _check_quality_gate_core(
                        else f"{min_br_kbps}kbps")
             reason = (f"quality gate: rank {actual_rank.name} < {gate_min.name} "
                       f"({br_note})")
-            for username in usernames:
-                db.add_denylist(request_id, username, reason)
+            denylists = tuple(
+                TerminalDenylist(username, reason)
+                for username in sorted(usernames)
+            )
             logger.info(
                 f"QUALITY GATE: {label} "
                 f"rank={actual_rank.name} < {gate_min.name} "
@@ -195,32 +209,37 @@ def _check_quality_gate_core(
                 f"(searching {upgrade_override})")
         elif decision == "requeue_lossless":
             lossless_override = QUALITY_LOSSLESS
-            transitions.require_transition_applied(finalize_request(
-                db,
-                request_id,
-                transitions.RequestTransition.to_wanted(
-                    from_status="imported",
-                    search_filetype_override=lossless_override,
-                    min_bitrate=min_br_kbps,
-                ),
-            ))
+            transition = transitions.RequestTransition.to_wanted(
+                from_status="imported",
+                search_filetype_override=lossless_override,
+                min_bitrate=min_br_kbps,
+            )
+            denylists = ()
             logger.info(
                 f"QUALITY GATE: {label} "
                 f"min_bitrate={min_br_kbps}kbps CBR, not verified lossless — "
                 f"searching for lossless to verify")
         else:  # accept
-            transitions.require_transition_applied(finalize_request(
-                db,
-                request_id,
-                transitions.RequestTransition.to_imported(
-                    from_status="imported",
-                    min_bitrate=min_br_kbps,
-                    search_filetype_override=None,  # done searching
-                ),
-            ))
+            transition = transitions.RequestTransition.to_imported(
+                from_status="imported",
+                min_bitrate=min_br_kbps,
+                search_filetype_override=None,  # done searching
+            )
+            denylists = ()
             if current.verified_lossless:
                 logger.info(f"QUALITY GATE: {label} min_bitrate={min_br_kbps}kbps — quality OK")
             else:
                 logger.info(f"QUALITY GATE: {label} min_bitrate={min_br_kbps}kbps VBR — quality OK")
+        plan = QualityGatePlan(transition=transition, denylists=denylists)
+        if apply:
+            transitions.require_transition_applied(finalize_request(
+                db,
+                request_id,
+                plan.transition,
+            ))
+            for entry in plan.denylists:
+                db.add_denylist(request_id, entry.username, entry.reason)
+        return plan
     except Exception:
         logger.exception("QUALITY GATE: failed to check quality")
+        return None

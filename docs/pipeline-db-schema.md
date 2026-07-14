@@ -193,6 +193,14 @@ immediately. The importer also holds a DB advisory singleton lock while it
 runs, so an accidentally-started second worker exits instead of requeueing a
 live worker's job.
 
+Terminal import and preview-failure outcomes cross one DB transaction boundary.
+The request transition (including retry-attempt accounting), mandatory
+`download_log` audit, source denylist/cooldown writes, and terminal
+`import_jobs` update commit together through the typed terminal-outcome
+commands in `lib/terminal_outcomes.py`. A request-transition conflict or job
+compare-and-set conflict rolls back the entire bundle; callers must not perform
+a second job finalization.
+
 Async preview workers run outside the beets mutation lane. They claim queued
 jobs with `preview_status='waiting'`, call the no-mutation import preview path,
 persist candidate evidence when an owner exists, then either mark the job ready

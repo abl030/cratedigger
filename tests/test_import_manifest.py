@@ -13,6 +13,7 @@ from lib.import_manifest import (
     move_failed_import_curated,
     tracked_audio_paths_for_downloads,
 )
+from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
@@ -102,6 +103,14 @@ class TestImportManifest(unittest.TestCase):
 
 
 class TestForceImportManifestGuard(unittest.TestCase):
+    @staticmethod
+    def _queued_job(db: FakePipelineDB, failed_path: str) -> int:
+        return db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=42,
+            payload=manual_import_payload(failed_path=failed_path),
+        ).id
+
     def test_force_import_rejects_audio_not_in_origin_manifest(self):
         import msgspec
         from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
@@ -205,13 +214,14 @@ class TestForceImportManifestGuard(unittest.TestCase):
                     ],
                 },
             )
+            job_id = self._queued_job(db, root)
 
             outcome = dispatch_import_from_db(
                 cast(Any, db),
                 request_id=42,
                 failed_path=root,
                 force=True,
-                import_job_id=99,
+                import_job_id=job_id,
                 download_log_id=log_id,
             )
 
@@ -239,13 +249,14 @@ class TestForceImportManifestGuard(unittest.TestCase):
             open(os.path.join(root, "01.mp3"), "wb").close()
             open(os.path.join(root, "02.mp3"), "wb").close()
             open(os.path.join(root, "bonus.mp3"), "wb").close()
+            job_id = self._queued_job(db, root)
 
             outcome = dispatch_import_from_db(
                 cast(Any, db),
                 request_id=42,
                 failed_path=root,
                 force=False,
-                import_job_id=99,
+                import_job_id=job_id,
             )
 
         self.assertFalse(outcome.success)
@@ -270,13 +281,14 @@ class TestForceImportManifestGuard(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             open(os.path.join(root, "01.mp3"), "wb").close()
+            job_id = self._queued_job(db, root)
 
             outcome = dispatch_import_from_db(
                 cast(Any, db),
                 request_id=42,
                 failed_path=root,
                 force=False,
-                import_job_id=99,
+                import_job_id=job_id,
             )
 
         self.assertFalse(outcome.success)
@@ -307,13 +319,14 @@ class TestForceImportManifestGuard(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             open(os.path.join(root, "01.mp3"), "wb").close()
+            job_id = self._queued_job(db, root)
 
             outcome = dispatch_import_from_db(
                 cast(Any, db),
                 request_id=42,
                 failed_path=root,
                 force=False,
-                import_job_id=99,
+                import_job_id=job_id,
             )
 
         self.assertFalse(outcome.success)
@@ -355,13 +368,14 @@ class TestForceImportManifestGuard(unittest.TestCase):
                     ],
                 },
             )
+            job_id = self._queued_job(db, root)
 
             outcome = dispatch_import_from_db(
                 cast(Any, db),
                 request_id=42,
                 failed_path=root,
                 force=True,
-                import_job_id=99,
+                import_job_id=job_id,
                 download_log_id=log_id,
             )
 

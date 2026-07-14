@@ -37,7 +37,8 @@ class PipelineDBSource(Protocol):
         bv_result: Any,
         dest_path: Any = None,
         download_info: Any = None,
-    ) -> None: ...
+        import_job_id: int | None = None,
+    ) -> Any: ...
     def reject_and_requeue(
         self,
         album_record: Any,
@@ -46,7 +47,8 @@ class PipelineDBSource(Protocol):
         download_info: Any = None,
         search_filetype_override: Any = None,
         cooled_down_users: set[str] | None = None,
-    ) -> int | None: ...
+        import_job_id: int | None = None,
+    ) -> Any: ...
     def close(self) -> None: ...
 
 
