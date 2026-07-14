@@ -241,13 +241,15 @@ class TestPinnedBeetsDelete(unittest.TestCase):
 
 class TestDeleteManifestOrdering(unittest.TestCase):
     def test_strict_presence_probe_only_treats_not_found_as_absent(self) -> None:
-        with patch("lib.beets_delete.os.lstat", side_effect=FileNotFoundError):
-            self.assertFalse(_path_exists("/library/missing.flac"))
-        with patch(
-            "lib.beets_delete.os.lstat",
-            side_effect=OSError("planted stat I/O fault"),
-        ), self.assertRaisesRegex(OSError, "planted stat I/O fault"):
-            _path_exists("/library/unreadable.flac")
+        def missing(_path: str) -> os.stat_result:
+            raise FileNotFoundError
+
+        def io_fault(_path: str) -> os.stat_result:
+            raise OSError("planted stat I/O fault")
+
+        self.assertFalse(_path_exists("/library/missing.flac", lstat=missing))
+        with self.assertRaisesRegex(OSError, "planted stat I/O fault"):
+            _path_exists("/library/unreadable.flac", lstat=io_fault)
 
     def test_presence_probe_errors_fail_closed_at_every_phase(self) -> None:
         scenarios = (

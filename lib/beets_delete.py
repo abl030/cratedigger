@@ -86,6 +86,7 @@ PruneFn = Callable[[str], None]
 MetadataRemoveFn = Callable[[], None]
 ListDirFn = Callable[[Path], tuple[Path, ...]]
 PathExistsFn = Callable[[str], bool]
+LstatFn = Callable[[str], os.stat_result]
 
 
 def _same_configured_path(expected: str, configured: str) -> bool:
@@ -134,10 +135,10 @@ def _decode_path(raw: object) -> str:
     return str(raw)
 
 
-def _path_exists(path: str) -> bool:
+def _path_exists(path: str, *, lstat: LstatFn = os.lstat) -> bool:
     """Probe one owned path without collapsing I/O errors into absence."""
     try:
-        os.lstat(path)
+        lstat(path)
     except FileNotFoundError:
         return False
     return True
