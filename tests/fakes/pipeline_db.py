@@ -4938,9 +4938,8 @@ class FakePipelineDB:
         return result
 
     def prune_transfer_ledger(self, older_than: datetime) -> int:
-        """Mirrors the real DELETE ... WHERE enqueued_at < older_than AND
-        request not currently active (wanted/downloading); a request_id
-        with no matching row (hard-deleted elsewhere) counts as inactive."""
+        """Mirror strict age pruning: pending intents ignore request status;
+        accepted rows retain active wanted/downloading protection."""
         active_statuses = ("wanted", "downloading")
         to_remove = []
         for fake_id, row in self._transfer_ledger.items():
@@ -4948,7 +4947,7 @@ class FakePipelineDB:
                 continue
             request = self._requests.get(row.request_id)
             status = request.get("status") if request is not None else None
-            if status in active_statuses:
+            if row.accepted_at is not None and status in active_statuses:
                 continue
             to_remove.append(fake_id)
         for fake_id in to_remove:
