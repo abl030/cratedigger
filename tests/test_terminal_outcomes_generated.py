@@ -5,10 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 import unittest
 
-from hypothesis import given, strategies as st
+from hypothesis import example, given, settings, strategies as st
 
 from lib import transitions
 from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+from lib.pipeline_db import PipelineDB
 from lib.terminal_outcomes import (
     ImportJobTerminal,
     ImportTerminalOutcome,
@@ -17,6 +18,12 @@ from lib.terminal_outcomes import (
 )
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
+from tests.test_pipeline_db import TEST_DSN, requires_postgres
+from tests.test_terminal_outcomes import (
+    FaultInjectingPipelineDB,
+    InjectedTerminalWriteFailure,
+    _seed_running_import,
+)
 
 
 @dataclass(frozen=True)
@@ -46,8 +53,84 @@ def assert_terminal_snapshot_all_or_none(
         raise AssertionError(f"partial terminal outcome: {after!r}")
 
 
+def _terminal_command(request_id: int, job_id: int) -> ImportTerminalOutcome:
+    return ImportTerminalOutcome(
+        request_id=request_id,
+        import_job_id=job_id,
+        initial_transition=transitions.RequestTransition.to_wanted(
+            attempt_type="validation"
+        ),
+        audit=TerminalDownloadAudit(
+            outcome="rejected",
+            validation_result='{"scenario":"generated_reject"}',
+        ),
+        denylists=(TerminalDenylist("generated-peer", "generated"),),
+        job=ImportJobTerminal(
+            status="failed",
+            error="generated_reject",
+            result={"success": False},
+            message="generated reject",
+        ),
+    )
+
+
+def _read_terminal_snapshot(
+    db: PipelineDB,
+    request_id: int,
+    job_id: int,
+) -> TerminalSnapshot:
+    request = db.get_request(request_id)
+    job = db.get_import_job(job_id)
+    assert request is not None and job is not None
+    return TerminalSnapshot(
+        request_terminal=request["status"] == "wanted",
+        audit_present=len(db.get_download_history(request_id)) == 1,
+        denylist_present=len(db.get_denylisted_users(request_id)) == 1,
+        attempt_recorded=request["validation_attempts"] == 1,
+        job_terminal=job.status == "failed",
+    )
+
+
+def _persist_known_bad_split_outcome(
+    db: PipelineDB,
+    request_id: int,
+    job_id: int,
+    *,
+    fail_after_write: int,
+) -> None:
+    """Model the old separate-autocommit path with a deterministic fault."""
+    transitions.require_transition_applied(transitions.finalize_request(
+        db,
+        request_id,
+        transitions.RequestTransition.to_wanted(
+            from_status="downloading",
+            attempt_type="validation",
+        ),
+    ))
+    if fail_after_write == 1:
+        raise InjectedTerminalWriteFailure("known_bad.request")
+    db.log_download(
+        request_id,
+        outcome="rejected",
+        validation_result='{"scenario":"known_bad"}',
+    )
+    if fail_after_write == 2:
+        raise InjectedTerminalWriteFailure("known_bad.download_log")
+    db.add_denylist(request_id, "generated-peer", "known bad")
+    if fail_after_write == 3:
+        raise InjectedTerminalWriteFailure("known_bad.denylist")
+    db.mark_import_job_failed(
+        job_id,
+        error="known_bad",
+        result={"success": False},
+        message="known bad",
+    )
+    if fail_after_write == 4:
+        raise InjectedTerminalWriteFailure("known_bad.import_job")
+
+
 class TestTerminalOutcomeGenerated(unittest.TestCase):
-    @given(fail_after=st.one_of(st.none(), st.integers(min_value=1, max_value=4)))
+    @given(fail_after=st.one_of(st.none(), st.integers(min_value=1, max_value=5)))
     def test_fake_transaction_is_unchanged_or_complete(
         self,
         fail_after: int | None,
@@ -78,24 +161,7 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
         assert claimed is not None
 
         before = TerminalSnapshot(False, False, False, False, False)
-        command = ImportTerminalOutcome(
-            request_id=42,
-            import_job_id=claimed.id,
-            initial_transition=transitions.RequestTransition.to_wanted(
-                attempt_type="validation"
-            ),
-            audit=TerminalDownloadAudit(
-                outcome="rejected",
-                validation_result='{"scenario":"generated_reject"}',
-            ),
-            denylists=(TerminalDenylist("generated-peer", "generated"),),
-            job=ImportJobTerminal(
-                status="failed",
-                error="generated_reject",
-                result={"success": False},
-                message="generated reject",
-            ),
-        )
+        command = _terminal_command(42, claimed.id)
         if fail_after is None:
             db.persist_import_terminal_outcome(command)
         else:
@@ -151,12 +217,77 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 assert_terminal_snapshot_all_or_none(before, after)
 
-    def test_known_bad_partial_commit_trips_checker(self):
-        before = TerminalSnapshot(False, False, False, False, False)
-        known_bad = TerminalSnapshot(True, False, False, False, True)
 
+
+@requires_postgres
+class TestProductionTerminalOutcomeGenerated(unittest.TestCase):
+    @settings(max_examples=12, deadline=None)
+    @example(fail_after=None)
+    @example(fail_after=1)
+    @example(fail_after=2)
+    @example(fail_after=3)
+    @example(fail_after=4)
+    @example(fail_after=5)
+    @given(fail_after=st.one_of(st.none(), st.integers(min_value=1, max_value=5)))
+    def test_real_transaction_is_unchanged_or_complete(
+        self,
+        fail_after: int | None,
+    ) -> None:
+        assert TEST_DSN is not None
+        seed_db, request_id, job_id = _seed_running_import()
+        seed_db.close()
+        before_observer = PipelineDB(TEST_DSN)
+        before = _read_terminal_snapshot(before_observer, request_id, job_id)
+        before_observer.close()
+
+        writer: PipelineDB
+        if fail_after is None:
+            writer = PipelineDB(TEST_DSN)
+        else:
+            writer = FaultInjectingPipelineDB(
+                TEST_DSN,
+                fail_after_write=fail_after,
+            )
+        try:
+            if fail_after is None:
+                writer.persist_import_terminal_outcome(
+                    _terminal_command(request_id, job_id)
+                )
+            else:
+                with self.assertRaises(InjectedTerminalWriteFailure):
+                    writer.persist_import_terminal_outcome(
+                        _terminal_command(request_id, job_id)
+                    )
+        finally:
+            writer.close()
+
+        observer = PipelineDB(TEST_DSN)
+        try:
+            after = _read_terminal_snapshot(observer, request_id, job_id)
+        finally:
+            observer.close()
+        assert_terminal_snapshot_all_or_none(before, after)
+
+    def test_faulted_split_writer_trips_same_oracle(self) -> None:
+        assert TEST_DSN is not None
+        db, request_id, job_id = _seed_running_import()
+        before = _read_terminal_snapshot(db, request_id, job_id)
+        with self.assertRaises(InjectedTerminalWriteFailure):
+            _persist_known_bad_split_outcome(
+                db,
+                request_id,
+                job_id,
+                fail_after_write=1,
+            )
+        db.close()
+
+        observer = PipelineDB(TEST_DSN)
+        try:
+            after = _read_terminal_snapshot(observer, request_id, job_id)
+        finally:
+            observer.close()
         with self.assertRaisesRegex(AssertionError, "partial terminal outcome"):
-            assert_terminal_snapshot_all_or_none(before, known_bad)
+            assert_terminal_snapshot_all_or_none(before, after)
 
 
 if __name__ == "__main__":

@@ -64,6 +64,18 @@ class TestRecordingProcessAlbum(unittest.TestCase):
 
 
 class TestFakePipelineDB(unittest.TestCase):
+    def test_add_denylist_ignores_duplicate_like_postgres(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42))
+
+        db.add_denylist(42, "peer", "first")
+        db.add_denylist(42, "peer", "second")
+
+        self.assertEqual(
+            db.get_denylisted_users(42),
+            [{"username": "peer", "reason": "first", "created_at": None}],
+        )
+
     def test_album_quality_evidence_round_trips_by_content_key(self):
         from lib.quality import AlbumQualityEvidenceFile
 

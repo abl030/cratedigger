@@ -31,6 +31,7 @@ from lib.download_processing import (
     CompletionDispatched,
     CompletionFailed,
     CompletionResult,
+    ProcessAlbumFn,
 )
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
@@ -278,9 +279,17 @@ def _dispatch_outcome_from_completion(
     if isinstance(result, CompletionDispatched):
         return result.outcome
     if isinstance(result, Completed):
-        return DispatchOutcome(success=True, message=completed_message)
+        return DispatchOutcome(
+            success=True,
+            message=completed_message,
+            terminal_outcome=result.terminal_outcome,
+        )
     if isinstance(result, CompletionFailed):
-        return DispatchOutcome(success=False, message=failed_message)
+        return DispatchOutcome(
+            success=False,
+            message=failed_message,
+            terminal_outcome=result.terminal_outcome,
+        )
     assert_never(result)
 
 
@@ -289,6 +298,7 @@ def execute_automation_import_job(
     job: ImportJob,
     *,
     ctx: Any = None,
+    process_album_fn: ProcessAlbumFn | None = None,
 ) -> DispatchOutcome:
     """Run completed-download processing from an automation queue job."""
     from lib.download import _run_completed_processing
@@ -320,6 +330,8 @@ def execute_automation_import_job(
             db,
             runtime_ctx,
             import_job_id=job.id,
+            process_album_fn=process_album_fn,
+            bundle_terminal_outcome=True,
         )
     finally:
         if created_ctx:

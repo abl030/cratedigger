@@ -75,6 +75,10 @@ from lib.slskd_transfers import (
     slskd_do_enqueue,
 )
 from lib.staged_album import StagedAlbum
+from lib.terminal_outcomes import (
+    PendingImportTerminalOutcome,
+    TerminalDownloadAudit,
+)
 
 if TYPE_CHECKING:
     from lib.context import CratediggerContext
@@ -480,6 +484,7 @@ def _run_completed_processing(
     *,
     import_job_id: int,
     process_album_fn: ProcessAlbumFn | None = None,
+    bundle_terminal_outcome: bool = False,
 ) -> CompletionResult:
     """Run or resume local post-download processing for a completed album.
 
@@ -487,6 +492,11 @@ def _run_completed_processing(
     outer transition flow without going through the full
     ``process_completed_album`` body. Defaults to the real production
     function so callers in ``scripts/importer.py`` are unchanged.
+
+    ``bundle_terminal_outcome`` is set only by the import-job owner. It
+    returns the local fallback request transition plus mandatory audit as
+    typed intent for ``process_claimed_job`` to commit with the job. The
+    default retains the direct/no-job transition behavior.
 
     The default is resolved via the ``download_processing`` module
     reference (not a from-import binding) so that patching
@@ -542,34 +552,93 @@ def _run_completed_processing(
 
     if isinstance(result, Completed):
         refreshed = db.get_request(request_id)
+        transition = None
         if refreshed and refreshed["status"] == "downloading":
-            logger.info(f"  process_completed_album succeeded without "
-                        f"setting status — setting imported")
-            transitions.require_transition_applied(transitions.finalize_request(
-                db,
-                request_id,
-                transitions.RequestTransition.to_imported(
-                    from_status="downloading",
-                ),
+            transition = transitions.RequestTransition.to_imported(
+                from_status="downloading",
+            )
+        if bundle_terminal_outcome and transition is not None:
+            return Completed(terminal_outcome=_local_completion_terminal_outcome(
+                entry,
+                state,
+                request_id=request_id,
+                import_job_id=import_job_id,
+                transition=transition,
+                outcome="success",
+                detail="Local automation import processing completed",
             ))
+        if transition is not None:
+            logger.info(
+                "  process_completed_album succeeded without setting status "
+                "— setting imported"
+            )
+            transitions.require_transition_applied(
+                transitions.finalize_request(db, request_id, transition)
+            )
         return result
 
     if isinstance(result, CompletionFailed):
         refreshed = db.get_request(request_id)
+        transition = None
         if refreshed and refreshed["status"] == "downloading":
-            logger.warning(f"  process_completed_album failed without "
-                           f"setting status — resetting to wanted")
-            transitions.require_transition_applied(transitions.finalize_request(
-                db,
-                request_id,
-                transitions.RequestTransition.to_wanted(
-                    from_status="downloading",
-                    attempt_type="download",
+            transition = transitions.RequestTransition.to_wanted(
+                from_status="downloading",
+                attempt_type="download",
+            )
+        if bundle_terminal_outcome and transition is not None:
+            return CompletionFailed(
+                reason=result.reason,
+                terminal_outcome=_local_completion_terminal_outcome(
+                    entry,
+                    state,
+                    request_id=request_id,
+                    import_job_id=import_job_id,
+                    transition=transition,
+                    outcome="failed",
+                    detail=result.reason,
+                    error_message=result.reason,
                 ),
-            ))
+            )
+        if transition is not None:
+            logger.warning(
+                "  process_completed_album failed without setting status "
+                "— resetting to wanted"
+            )
+            transitions.require_transition_applied(
+                transitions.finalize_request(db, request_id, transition)
+            )
         return result
 
     assert_never(result)
+
+
+def _local_completion_terminal_outcome(
+    entry: GrabListEntry,
+    state: ActiveDownloadState,
+    *,
+    request_id: int,
+    import_job_id: int,
+    transition: transitions.RequestTransition | None,
+    outcome: DownloadLogOutcome,
+    detail: str,
+    error_message: str | None = None,
+) -> PendingImportTerminalOutcome:
+    """Build the atomic fallback outcome for one automation import job."""
+    dl_info = _build_download_info(entry)
+    source_path = entry.import_folder or state.current_path
+    return PendingImportTerminalOutcome(
+        request_id=request_id,
+        import_job_id=import_job_id,
+        initial_transition=transition,
+        audit=TerminalDownloadAudit(
+            soulseek_username=dl_info.username,
+            filetype=dl_info.filetype or state.filetype,
+            download_path=source_path,
+            beets_detail=detail,
+            outcome=outcome,
+            error_message=error_message,
+        ),
+    )
 
 
 def _active_import_job_for_request(

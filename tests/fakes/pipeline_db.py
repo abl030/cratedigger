@@ -70,6 +70,7 @@ from lib.pipeline_db._shared import (
 )
 from lib.quality import (
     AlbumQualityEvidence,
+    CooldownConfig,
 )
 from lib import transitions
 from lib.terminal_outcomes import (
@@ -83,6 +84,119 @@ from lib.release_identity import (
     detect_release_source,
     normalize_release_id,
 )
+
+
+class _FakeTerminalTransitionsDB:
+    """Emit production-shaped write boundaries while mutating the fake."""
+
+    def __init__(
+        self,
+        db: "FakePipelineDB",
+        boundary: Callable[[str], None],
+    ) -> None:
+        self._db = db
+        self._boundary = boundary
+
+    def get_request(self, request_id: int) -> dict[str, Any] | None:
+        return self._db.get_request(request_id)
+
+    def set_downloading(
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        expected_status: str = "wanted",
+    ) -> bool:
+        del request_id, state_json, expected_status
+        raise ValueError("terminal outcomes cannot transition to downloading")
+
+    def reset_to_wanted(
+        self,
+        request_id: int,
+        *,
+        expected_status: str | None = None,
+        clear_retry_counters: bool = True,
+        **fields: Any,
+    ) -> bool:
+        applied = self._db.reset_to_wanted(
+            request_id,
+            expected_status=expected_status,
+            clear_retry_counters=clear_retry_counters,
+            **fields,
+        )
+        if applied:
+            self._boundary("request.wanted")
+        return applied
+
+    def reset_downloading_to_wanted(
+        self,
+        request_id: int,
+        *,
+        expected_status: str = "downloading",
+        **fields: Any,
+    ) -> bool:
+        applied = self._db.reset_downloading_to_wanted(
+            request_id,
+            expected_status=expected_status,
+            **fields,
+        )
+        if applied:
+            self._boundary("request.wanted")
+        return applied
+
+    def record_attempt(
+        self,
+        request_id: int,
+        attempt_type: str,
+        *,
+        expected_status: str,
+    ) -> bool:
+        applied = self._db.record_attempt(
+            request_id,
+            attempt_type,
+            expected_status=expected_status,
+        )
+        if applied:
+            self._boundary(f"request.attempt.{attempt_type}")
+        return applied
+
+    def mark_imported_with_rescue(
+        self,
+        request_id: int,
+        *,
+        expected_status: str | None = None,
+        **extra: Any,
+    ) -> bool:
+        applied = self._db.mark_imported_with_rescue(
+            request_id,
+            expected_status=expected_status,
+            **extra,
+        )
+        if applied:
+            self._boundary("request.imported")
+            if extra:
+                self._boundary("request.metadata")
+        return applied
+
+    def update_status(
+        self,
+        request_id: int,
+        status: str,
+        *,
+        expected_status: str | None = None,
+        **extra: Any,
+    ) -> bool:
+        applied = self._db.update_status(
+            request_id,
+            status,
+            expected_status=expected_status,
+            **extra,
+        )
+        if applied:
+            self._boundary("request.status")
+            if extra:
+                self._boundary("request.metadata")
+        return applied
 from lib.validation_envelope import (
     VALIDATION_PROJECTION_UNSET,
     ValidationProjectionUnset,
@@ -1131,6 +1245,8 @@ class FakePipelineDB:
             self.denylist,
             self.user_cooldowns,
             self.status_history,
+            self.recorded_attempts,
+            self.cooldowns_applied,
         ))
 
     def _restore_terminal_state(self, snapshot: tuple[object, ...]) -> None:
@@ -1141,6 +1257,8 @@ class FakePipelineDB:
             self.denylist,
             self.user_cooldowns,
             self.status_history,
+            self.recorded_attempts,
+            self.cooldowns_applied,
         ) = cast(Any, snapshot)
 
     def _terminal_outcome_write_boundary(self, index: int, label: str) -> None:
@@ -1159,41 +1277,48 @@ class FakePipelineDB:
             self._terminal_outcome_write_boundary(boundary_index, label)
 
         try:
+            transition_db = _FakeTerminalTransitionsDB(self, boundary)
             applied = []
             if command.initial_transition is not None:
                 applied.append(transitions.require_transition_applied(
                     transitions.finalize_request(
-                        self,
+                        transition_db,
                         command.request_id,
                         command.initial_transition,
                     )
                 ))
-                boundary("request")
             download_log_id = cast(Any, self.log_download)(
                 request_id=command.request_id,
                 **command.audit.as_log_kwargs(),
             )
-            boundary("audit")
+            boundary("download_log")
             for transition in command.post_audit_transitions:
                 applied.append(transitions.require_transition_applied(
                     transitions.finalize_request(
-                        self,
+                        transition_db,
                         command.request_id,
                         transition,
                     )
                 ))
-                boundary("request")
             cooled: set[str] = set()
             for entry in command.denylists:
+                denied_before = len(self.denylist)
                 self.add_denylist(
                     command.request_id,
                     entry.username,
                     entry.reason,
                 )
-                boundary("denylist")
+                if len(self.denylist) > denied_before:
+                    boundary("denylist")
                 if entry.apply_cooldown and self.check_and_apply_cooldown(
                     entry.username
                 ):
+                    cfg = CooldownConfig()
+                    self.add_cooldown(
+                        entry.username,
+                        _utcnow() + timedelta(days=cfg.cooldown_days),
+                        f"{cfg.failure_threshold} consecutive failures",
+                    )
                     cooled.add(entry.username)
                     boundary("cooldown")
             if command.job.status == "completed":
@@ -1212,7 +1337,7 @@ class FakePipelineDB:
                 )
             if job is None or job.request_id != command.request_id:
                 raise RuntimeError("import job terminal compare-and-set failed")
-            boundary("import_job")
+            boundary(f"import_job.{command.job.status}")
         except Exception:
             self._restore_terminal_state(snapshot)
             raise
@@ -1237,30 +1362,38 @@ class FakePipelineDB:
             self._terminal_outcome_write_boundary(boundary_index, label)
 
         try:
+            transition_db = _FakeTerminalTransitionsDB(self, boundary)
             applied = transitions.require_transition_applied(
                 transitions.finalize_request(
-                    self,
+                    transition_db,
                     command.request_id,
                     command.request_transition,
                 )
             )
-            boundary("request")
             download_log_id = cast(Any, self.log_download)(
                 request_id=command.request_id,
                 **command.audit.as_log_kwargs(),
             )
-            boundary("audit")
+            boundary("download_log")
             cooled: set[str] = set()
             for entry in command.denylists:
+                denied_before = len(self.denylist)
                 self.add_denylist(
                     command.request_id,
                     entry.username,
                     entry.reason,
                 )
-                boundary("denylist")
+                if len(self.denylist) > denied_before:
+                    boundary("denylist")
                 if entry.apply_cooldown and self.check_and_apply_cooldown(
                     entry.username
                 ):
+                    cfg = CooldownConfig()
+                    self.add_cooldown(
+                        entry.username,
+                        _utcnow() + timedelta(days=cfg.cooldown_days),
+                        f"{cfg.failure_threshold} consecutive failures",
+                    )
                     cooled.add(entry.username)
                     boundary("cooldown")
             job = self.mark_import_job_preview_failed(
@@ -1272,7 +1405,7 @@ class FakePipelineDB:
             )
             if job is None or job.request_id != command.request_id:
                 raise RuntimeError("preview job terminal compare-and-set failed")
-            boundary("import_job")
+            boundary("import_job.preview_failed")
         except Exception:
             self._restore_terminal_state(snapshot)
             raise
@@ -1968,6 +2101,11 @@ class FakePipelineDB:
 
     def add_denylist(self, request_id: int, username: str,
                      reason: str | None = None) -> None:
+        if any(
+            entry.request_id == request_id and entry.username == username
+            for entry in self.denylist
+        ):
+            return
         self.denylist.append(DenylistEntry(request_id, username, reason))
 
     def get_denylisted_users(self, request_id: int) -> list[dict[str, Any]]:

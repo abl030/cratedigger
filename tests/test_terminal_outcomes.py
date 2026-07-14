@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import unittest
+from typing import Any
 
 from lib import transitions
-from lib.import_queue import IMPORT_JOB_AUTOMATION
+from lib.dispatch import DispatchOutcome
+from lib.download_processing import Completed, CompletionFailed, CompletionResult
+from lib.import_queue import IMPORT_JOB_AUTOMATION, ImportJob
 from lib.pipeline_db import PipelineDB
+from lib.quality import ActiveDownloadState
 from lib.terminal_outcomes import (
     ImportJobTerminal,
     ImportTerminalOutcome,
@@ -16,7 +20,8 @@ from lib.terminal_outcomes import (
 )
 from tests.test_pipeline_db import TEST_DSN, make_db, requires_postgres
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_request_row
+from tests.fakes.download import RecordingProcessAlbum
+from tests.helpers import make_ctx_with_fake_db, make_request_row
 
 
 class InjectedTerminalWriteFailure(RuntimeError):
@@ -40,7 +45,8 @@ class FaultInjectingPipelineDB(PipelineDB):
 def _snapshot(db: PipelineDB, request_id: int, job_id: int) -> dict[str, object]:
     request_cur = db._execute(
         """
-        SELECT status, active_download_state, validation_attempts,
+        SELECT status, active_download_state, download_attempts,
+               validation_attempts,
                search_filetype_override, beets_distance, beets_scenario,
                min_bitrate, prev_min_bitrate, imported_path,
                verified_lossless, rescued_at, prior_unfindable_category,
@@ -78,7 +84,12 @@ def _snapshot(db: PipelineDB, request_id: int, job_id: int) -> dict[str, object]
     }
 
 
-def _seed_running_import(*, unfindable: bool = False) -> tuple[PipelineDB, int, int]:
+def _seed_running_import(
+    *,
+    unfindable: bool = False,
+    automation_state: bool = False,
+    cooldown_username: str | None = None,
+) -> tuple[PipelineDB, int, int]:
     db = make_db()
     request_id = db.add_request(
         mb_release_id="terminal-outcome",
@@ -94,11 +105,30 @@ def _seed_running_import(*, unfindable: bool = False) -> tuple[PipelineDB, int, 
             category="artist_absent",
             categorised_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
         )
+    active_state = (
+        ActiveDownloadState(
+            filetype="flac",
+            enqueued_at="2026-07-14T00:00:00+00:00",
+            files=[],
+            processing_started_at="2026-07-14T00:01:00+00:00",
+            current_path="/tmp/atomic-processing",
+        ).to_json()
+        if automation_state
+        else "{}"
+    )
     db._execute(
         "UPDATE album_requests SET status = 'downloading', "
-        "active_download_state = '{}'::jsonb WHERE id = %s",
-        (request_id,),
+        "active_download_state = %s::jsonb WHERE id = %s",
+        (active_state, request_id),
     )
+    if cooldown_username is not None:
+        for _ in range(5):
+            db.log_download(
+                request_id,
+                soulseek_username=cooldown_username,
+                outcome="failed",
+                error_message="prior source failure",
+            )
     job = db.enqueue_import_job(
         IMPORT_JOB_AUTOMATION,
         request_id=request_id,
@@ -211,7 +241,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
                 ),
                 denylists=(
                     TerminalDenylist(
-                        username="atomic-peer",
+                        username="cooldown-peer",
                         reason="quality gate",
                         apply_cooldown=True,
                     ),
@@ -231,10 +261,14 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             "request.metadata",
             "request.wanted",
             "denylist",
+            "cooldown",
             "import_job.completed",
         )
         self._assert_rolls_back_at_every_boundary(
-            seed=lambda: _seed_running_import(unfindable=True),
+            seed=lambda: _seed_running_import(
+                unfindable=True,
+                cooldown_username="cooldown-peer",
+            ),
             command_factory=command,
             expected_boundaries=expected,
             persist_method="persist_import_terminal_outcome",
@@ -362,6 +396,115 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         self.assertEqual(float(row["beets_distance"]), 0.04)
         self.assertEqual(row["prior_unfindable_category"], "artist_absent")
 
+    def _run_job_backed_automation_result(
+        self,
+        db: PipelineDB,
+        job_id: int,
+        completion: CompletionResult,
+    ) -> ImportJob | None:
+        from scripts import importer
+
+        job = db.get_import_job(job_id)
+        assert job is not None
+        process_album = RecordingProcessAlbum(outcome=completion)
+        ctx = make_ctx_with_fake_db(db)
+
+        def execute(
+            owner: PipelineDB,
+            claimed: ImportJob,
+            *,
+            ctx: Any = None,
+        ) -> DispatchOutcome:
+            return importer.execute_automation_import_job(
+                owner,
+                claimed,
+                ctx=ctx,
+                process_album_fn=process_album,
+            )
+
+        return importer.process_claimed_job(
+            db,
+            job,
+            ctx=ctx,
+            execute_fn=execute,
+        )
+
+    def test_job_backed_completed_commits_request_audit_and_job_once(self):
+        db, request_id, job_id = _seed_running_import(automation_state=True)
+        self.addCleanup(db.close)
+
+        updated = self._run_job_backed_automation_result(
+            db,
+            job_id,
+            Completed(),
+        )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "completed")
+        row = db.get_request(request_id)
+        assert row is not None
+        self.assertEqual(row["status"], "imported")
+        history = db.get_download_history(request_id)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["outcome"], "success")
+
+    def test_job_backed_completion_failed_commits_attempt_audit_and_job_once(self):
+        db, request_id, job_id = _seed_running_import(automation_state=True)
+        self.addCleanup(db.close)
+
+        updated = self._run_job_backed_automation_result(
+            db,
+            job_id,
+            CompletionFailed(reason="staged_path_missing"),
+        )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        row = db.get_request(request_id)
+        assert row is not None
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["download_attempts"], 1)
+        history = db.get_download_history(request_id)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["outcome"], "failed")
+        self.assertEqual(history[0]["error_message"], "staged_path_missing")
+
+    def test_job_backed_local_outcomes_roll_back_when_job_write_faults(self):
+        assert TEST_DSN is not None
+        cases = (
+            (Completed(), 3),
+            (CompletionFailed(reason="staged_path_missing"), 4),
+        )
+        for completion, job_write_boundary in cases:
+            with self.subTest(completion=type(completion).__name__):
+                seed_db, request_id, job_id = _seed_running_import(
+                    automation_state=True,
+                )
+                before = _snapshot(seed_db, request_id, job_id)
+                seed_db.close()
+                failing = FaultInjectingPipelineDB(
+                    TEST_DSN,
+                    fail_after_write=job_write_boundary,
+                )
+                try:
+                    with self.assertRaises(InjectedTerminalWriteFailure):
+                        self._run_job_backed_automation_result(
+                            failing,
+                            job_id,
+                            completion,
+                        )
+                finally:
+                    failing.close()
+
+                observer = PipelineDB(TEST_DSN)
+                try:
+                    self.assertEqual(
+                        _snapshot(observer, request_id, job_id),
+                        before,
+                    )
+                finally:
+                    observer.close()
+
     def test_stale_source_rolls_back_audit_and_job(self):
         db, request_id, job_id = _seed_running_import()
         self.addCleanup(db.close)
@@ -462,6 +605,94 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
                 ],
             ),
         )
+
+    def test_fake_write_boundaries_and_cooldown_match_real(self):
+        assert TEST_DSN is not None
+        seed_db, request_id, job_id = _seed_running_import(
+            cooldown_username="parity-peer",
+        )
+        seed_db.close()
+        real = FaultInjectingPipelineDB(TEST_DSN, fail_after_write=999)
+        self.addCleanup(real.close)
+
+        class RecordingFakePipelineDB(FakePipelineDB):
+            def __init__(self) -> None:
+                super().__init__()
+                self.write_boundaries: list[str] = []
+
+            def _terminal_outcome_write_boundary(
+                self,
+                index: int,
+                label: str,
+            ) -> None:
+                del index
+                self.write_boundaries.append(label)
+
+        fake = RecordingFakePipelineDB()
+        fake.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": []},
+        ))
+        fake_job = fake.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=42,
+            payload={},
+        )
+        fake.mark_import_job_preview_importable(fake_job.id, preview_result={})
+        fake_claimed = fake.claim_next_import_job(worker_id="parity-boundaries")
+        assert fake_claimed is not None
+        for _ in range(5):
+            fake.log_download(
+                42,
+                soulseek_username="parity-peer",
+                outcome="failed",
+                error_message="prior source failure",
+            )
+        fake.set_cooldown_result(True)
+
+        def command(owner: int, owned_job: int) -> ImportTerminalOutcome:
+            return ImportTerminalOutcome(
+                request_id=owner,
+                import_job_id=owned_job,
+                initial_transition=transitions.RequestTransition.to_wanted(
+                    attempt_type="validation",
+                ),
+                audit=TerminalDownloadAudit(
+                    outcome="rejected",
+                    soulseek_username="parity-peer",
+                    validation_result='{"scenario":"parity"}',
+                ),
+                denylists=(
+                    TerminalDenylist(
+                        "parity-peer",
+                        "parity",
+                        apply_cooldown=True,
+                    ),
+                ),
+                job=ImportJobTerminal(
+                    status="failed",
+                    error="parity",
+                    result={"success": False},
+                    message="parity",
+                ),
+            )
+
+        real.persist_import_terminal_outcome(command(request_id, job_id))
+        fake.persist_import_terminal_outcome(command(42, fake_claimed.id))
+
+        expected = [
+            "request.wanted",
+            "request.attempt.validation",
+            "download_log",
+            "denylist",
+            "cooldown",
+            "import_job.failed",
+        ]
+        self.assertEqual(real.write_boundaries, expected)
+        self.assertEqual(fake.write_boundaries, expected)
+        self.assertIn("parity-peer", real.get_cooled_down_users())
+        self.assertIn("parity-peer", fake.user_cooldowns)
 
 
 if __name__ == "__main__":
