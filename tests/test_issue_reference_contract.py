@@ -41,7 +41,10 @@ def assert_skill_reference_contract(skill_text: str) -> None:
         "use canonical `Refs #N` or a plain issue URL",
         "PR body and every branch commit message",
         "python3 scripts/audit_issue_references.py",
-        "CRATEDIGGER_TEST_ARTIFACT",
+        "A reviewer `CLEAN` is final",
+        "one ordinary branch push through the repository pre-push hook",
+        "Fill available agent slots with independent implementation and review work",
+        "Serialize only when a concrete dependency",
         "post-switch successor cycle",
         "Only after the signed tag push succeeds",
     )
@@ -56,9 +59,28 @@ def assert_skill_reference_contract(skill_text: str) -> None:
         )
 
     release_section = normalized_skill.partition(
-        "## 9. Tag, close, and reflect"
+        "## 9. Tag and close"
     )[2]
-    tag_marker = "the signed tag exactly once"
+    forbidden_fragments = (
+        "CRATEDIGGER_TEST_ARTIFACT",
+        "binding `CLEAN`",
+        "full suite",
+        "artifact verification",
+        "exact final merge SHA",
+        "mandatory post-ship reflection",
+        "Search for stale old-owner imports",
+    )
+    present_forbidden = [
+        fragment for fragment in forbidden_fragments
+        if fragment in normalized_skill
+    ]
+    if present_forbidden:
+        raise AssertionError(
+            "orchestrator skill still duplicates release gates: "
+            + ", ".join(present_forbidden)
+        )
+
+    tag_marker = "Push the signed tag with `--no-verify`"
     close_marker = "Only after the signed tag push succeeds"
     if not release_section:
         raise AssertionError("orchestrator skill has no release section")
@@ -136,8 +158,8 @@ class TestIssueReferenceContract(unittest.TestCase):
             / "SKILL.md"
         ).read_text(encoding="utf-8")
         wrapped = skill.replace(
-            "the signed tag exactly once",
-            "the signed tag\nexactly once",
+            "Push the signed tag with `--no-verify`",
+            "Push the signed tag\nwith `--no-verify`",
         )
         assert_skill_reference_contract(wrapped)
 
@@ -154,8 +176,15 @@ class TestIssueReferenceContract(unittest.TestCase):
         ):
             assert_skill_reference_contract(skill + "\nCloses #609\n")
 
+        with self.assertRaisesRegex(
+            AssertionError, "still duplicates release gates"
+        ):
+            assert_skill_reference_contract(
+                skill + "\nRun the full suite again after merge.\n"
+            )
+
         missing_push = skill.replace(
-            "the signed tag exactly once", "the release tag"
+            "Push the signed tag with `--no-verify`", "Push the release tag"
         )
         with self.assertRaisesRegex(
             AssertionError, "missing ordered release markers"

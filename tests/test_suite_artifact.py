@@ -337,7 +337,6 @@ class TestSuiteArtifact(unittest.TestCase):
     def test_authoritative_guidance_uses_emitted_artifact_path(self) -> None:
         authoritative = (
             REPO_ROOT / ".claude/memory/feedback_use_nix_shell.md",
-            REPO_ROOT / ".claude/memory/feedback_full_suite_before_merge.md",
         )
         for path in authoritative:
             with self.subTest(path=path.name):

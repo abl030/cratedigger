@@ -30,7 +30,7 @@
 - [Plex asciify_paths split](project_plex_asciify_split.md) — 2026-05-18: asciify_paths + beet move split 1,178 Plex albums; fix is Plex merge API, not Empty Trash
 - [Pyright third-party gaps](project_pyright_gaps.md) — 21 remaining pyright errors in cratedigger.py — all at third-party stub boundaries, not our code
 - [Converge is operator-authority](project_converge_operator_authority.md) — Wrong Matches converge button must NOT route deletions through the evidence classifier
-- [Full suite before merge](feedback_full_suite_before_merge.md) — Re-run full suite + pyright after review-fixer edits before commit/push/merge; partial run shipped a broken import to main (2026-05-31)
+- [Parallel work, review CLEAN, then one pre-push](feedback_review_clean_pre_push_only.md) — Fill agent slots with independent PR work; keep changes local through review, then make one ordinary branch push as the complete release-grade code gate
 - [SSH signing agent hang](project_ssh_signing_agent_hang.md) — git commit hangs in ssh-keygen when a wedged forwarded agent socket lingers; ssh-keygen -Y sign asks the agent before the key file; fix: SSH_AUTH_SOCK= git commit
 - [Issue #430 FakePipelineDB migration done](project_430_fakedb_migration_done.md) — 2026-06-12, PRs #440-#444; reuse the ratchet-first + real-PG parity-gate patterns
 - [Issue #445 beets-mock migration done](project_445_beets_mock_migration_done.md) — 2026-06-12, PRs #446-#450; items 1/2/4/5 done (ratchet empty, named DB methods deployed, fakes package); only item 3 (dual-module-load, own session) remains

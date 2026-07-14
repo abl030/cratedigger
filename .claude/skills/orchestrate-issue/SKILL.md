@@ -1,6 +1,6 @@
 ---
 name: orchestrate-issue
-description: Orchestrate a substantial Cratedigger GitHub issue from scope audit through multiple isolated implementation PRs, independent review loops, merge commits, deployment, live verification, tagging, closure, and post-ship reflection. Use when the user asks to complete or ship an entire issue, especially when it spans several workstreams or PRs and requires implementation agents to remain separate from review agents. Do not use for a single small patch, diagnosis-only request, or ordinary code review.
+description: Orchestrate a substantial Cratedigger GitHub issue from scope audit through multiple isolated implementation PRs, independent review loops, merge commits, deployment, live verification, tagging, and closure. Use when the user asks to complete or ship an entire issue, especially when it spans several workstreams or PRs and requires implementation agents to remain separate from review agents. Do not use for a single small patch, diagnosis-only request, or ordinary code review.
 ---
 
 # Orchestrate Issue
@@ -22,8 +22,10 @@ Do not use Compound Engineering or `ce-*` skills in this repository.
    - every "small", optional-looking, or batchable item;
    - decisions the operator must make;
    - the planned PR and verification evidence for each item.
-4. Create a native task plan. Keep one PR in progress at a time unless two
-   tasks are genuinely independent and cannot mutate overlapping files.
+4. Create a native task plan with explicit dependencies and ownership surfaces.
+   Fill available agent slots with independent implementation and review work.
+   Serialize only when a concrete dependency, overlapping mutation surface, or
+   required merge order makes concurrency unsafe; never serialize by default.
 5. State any interpretation that changes product behavior. Preserve the
    archivist invariants: strict pressing identity, perpetual searching,
    reversible/operator-owned decisions, and positive ownership before cleanup.
@@ -42,23 +44,27 @@ For each PR:
    branch, unless the issue explicitly requires a stack.
 4. Never edit or clean the shared primary worktree. Treat unrelated dirt as
    another operator's work.
-5. After the preceding PR merges, create the next worktree from the resulting
-   new `main`. This keeps integration feedback inside each PR and prevents a
-   long speculative stack.
+5. Create worktrees for independent PRs concurrently from the same current
+   `origin/main`. Start a dependent PR only after its prerequisite merges.
+   Every concurrent PR must refresh and integrate current `main` locally before
+   its final review.
 
 Record the worktree, branch, base SHA, PR number, and current head SHA in the
 plan or coverage ledger.
 
 ## 3. Delegate implementation with a hard role boundary
 
-Create a fresh implementation agent for each PR. Never carry an implementation
-agent into the next PR. Give it:
+Create a fresh implementation agent for each PR. Dispatch as many independent
+implementation agents concurrently as available slots safely allow; a ready,
+independent workstream must not sit idle behind another PR. Never carry an
+implementation agent into the next PR. Give it:
 
 - the exact worktree and branch it may modify;
 - the issue items assigned to this PR;
 - repository invariants and relevant rules;
 - expected tests, docs, generated properties, and live evidence;
-- permission to commit, push, and open a non-draft PR;
+- permission to create signed local commits, but an explicit ban on pushing or
+  opening the PR until an independent reviewer returns `CLEAN`;
 - the PR-reference contract: whenever the PR body or a branch commit message
   references the issue, use canonical `Refs #N` or a plain issue URL, never a
   GitHub auto-closing keyword;
@@ -74,13 +80,13 @@ the implementation agent to:
    known-bad/fault test.
 3. Avoid compatibility shims, skipped tests, guessed schemas, and duplicated
    decision logic.
-4. Run focused tests, randomized generated tests where relevant, pyright, the
-   full suite, dead-code checks, pre-push shards, and Nix checks in proportion
-   to risk.
+4. Run focused tests that help implementation converge. Do not manually invoke
+   broad release gates or duplicate the randomized and Nix work owned by the
+   repository pre-push hook.
 5. Fetch current `main` before handoff. Integrate it semantically if it
-   advanced, then rerun affected gates.
-6. Push signed commits and report the exact head SHA, base SHA, gates, PR URL,
-   reference audit, and clean worktree status.
+   advanced, then rerun only affected focused tests.
+6. Report the exact signed local head SHA, base SHA, focused evidence, and
+   clean worktree status for independent review. Do not push yet.
 
 The implementation report is evidence, not a review verdict.
 
@@ -89,7 +95,7 @@ The implementation report is evidence, not a review verdict.
 While implementation runs, independently understand the code path and prepare
 the adversarial review brief. After handoff:
 
-1. Fetch the branch and confirm the reported exact SHA.
+1. Inspect the isolated local branch and confirm the reported exact SHA.
 2. Inspect `git status`, signatures, `git diff --check`, the full diff, and
    current-main compatibility.
 3. Trace every remaining caller, import, patch target, wire field, and
@@ -112,15 +118,19 @@ Pay special attention to:
 
 ## 5. Run an independent review loop
 
-Only after a pushed implementation head exists, create a separate review
+Only after a signed local implementation head exists, create a separate review
 agent. Make the review read-only and give it:
 
-- the exact PR head SHA and current base;
+- the exact local head SHA and current base;
 - the assigned coverage-ledger items;
 - the product and ownership invariants at risk;
 - known architectural seams to challenge;
 - required adversarial tests and current-main merge audit;
 - an explicit ban on editing, committing, pushing, merging, or deploying.
+
+Start that review as soon as a slot is available while other independent
+implementations continue. Review different independent PRs concurrently when
+slots allow; do not wait for an arbitrary issue-wide phase boundary.
 
 Require one of two outputs:
 
@@ -139,16 +149,18 @@ When review is not clean:
 1. Send the complete finding batch back to the implementation agent. Do not
    let the implementer declare itself clean.
 2. During correction rounds, run focused tests and the smallest relevant fuzz
-   or real-service qualification. Do not run the full suite, Nix gates,
-   guarded push, or other release-grade gates after each finding.
-3. When the batch is fixed and the worktree is quiescent, let the same reviewer
-   make a read-only preflight pass over the uncommitted correction. The
-   implementation agent must not edit concurrently with this pass.
-4. Repeat the focused correction/preflight loop until the reviewer reports no
-   provisional findings.
-5. Only then create the signed correction commit, run the full required gates,
-   update the PR body, push, and report the exact new SHA.
-6. Send that exact pushed SHA to the reviewer for the binding `CLEAN` verdict.
+   or real-service qualification. Do not invoke release-grade gates or push
+   after each finding.
+3. Commit the complete correction batch locally as a signed commit, stop all
+   edits, and let the same reviewer inspect that exact local SHA.
+4. Repeat the focused correction/review loop until the reviewer returns
+   `CLEAN` on the exact local SHA.
+5. A reviewer `CLEAN` is final. Do not request a second review, post-push
+   review, or another release gate.
+6. Push the reviewed SHA with one ordinary branch push through the repository
+   pre-push hook, open the non-draft PR, and confirm the remote PR head still
+   equals the reviewed SHA. If satisfying a real hook failure changes code,
+   return the new local SHA to the reviewer before pushing again.
 
 If the PR reaches a third substantial correction round, rotate both roles at
 the round boundary instead of extending already-long agent contexts. Do not
@@ -165,9 +177,11 @@ Do not merge on CI, mergeability, or the orchestrator's opinion alone.
 Before merging:
 
 1. Confirm the reviewed SHA still equals the remote PR head.
-2. Confirm current `main` is incorporated or semantically compatible.
-3. Confirm signed commits, clean diff, required gates, and coverage-ledger
-   completion for this PR.
+2. Confirm current `main` is an ancestor of the reviewed SHA. If `main`
+   advanced, merge it locally, run only affected focused tests, and return the
+   new signed local SHA to the reviewer before its one ordinary push.
+3. Confirm signed commits, clean diff, successful pre-push hook, and
+   coverage-ledger completion for this PR. Do not rerun its checks.
 4. Audit the PR body and every branch commit message before merge. Feed each
    surface through
    `nix-shell --run "python3 scripts/audit_issue_references.py"`; both must be
@@ -178,22 +192,22 @@ Before merging:
 After merging:
 
 - record the merge SHA;
+- verify the merge tree equals the reviewed PR-head tree; stop if it differs;
 - verify the issue remains open (PR references must never decide closure);
 - mark only the actually completed ledger items complete;
 - create the next PR's fresh worktree from the new `origin/main`;
 - remove no worktree until it is clean and no agent or operator needs it.
 
-## 7. Prove the complete issue before deployment
+## 7. Record the completed issue before deployment
 
 After the final PR merges:
 
-1. Re-read the original issue and comments line by line against the coverage
-   ledger.
-2. Search for stale old-owner imports, hardcoded parallel taxonomies,
-   compatibility exports, TODOs, and deferred issue items.
-3. Confirm the final combined tree passed a full suite after the latest
-   concurrent `main` changes. A PR head whose tree equals the final merge is
-   acceptable evidence; say why.
+1. Confirm every coverage-ledger item was included in an independently
+   reviewed PR.
+2. Confirm every final merge tree equals its independently reviewed PR-head
+   tree and that each reviewed head passed the repository pre-push hook.
+3. Do not run a post-merge suite, focused-test replay, semantic audit, Nix gate,
+   or post-push review. Review plus pre-push is the complete code gate.
 4. Comment on the issue with the PR-to-workstream map and verification summary.
 
 Do not close the issue yet. Deployment, live evidence, and a signed release tag
@@ -226,39 +240,28 @@ If any documented deployment command conflicts with current downstream
 instructions, stop, reconcile the contract, and record the discrepancy rather
 than silently choosing the more permissive path.
 
-## 9. Tag, close, and reflect
+## 9. Tag and close
 
 The release sequence is strict; do not reorder it:
 
 1. Confirm deployment and post-switch successor cycle evidence from section 8.
-2. On the exact final merge SHA in a clean worktree, run the full suite and
-   retain its collision-free artifact directory. Verify that artifact against
-   the exact final merge with the `verify` subcommand of
-   `scripts/test_artifact.py`.
-3. Create an SSH-signed `vYYYY.MM.DD` tag, using `-N` for another same-day
-   release, at that exact final merge SHA.
-4. Export the verified artifact path as `CRATEDIGGER_TEST_ARTIFACT` and push
-   the signed tag exactly once with that environment variable set, so the
-   pre-push gate verifies the peeled tag commit against the exact-final-HEAD
-   suite evidence.
-5. Confirm the remote tag's peeled commit and signature.
-6. Only after the signed tag push succeeds, add the deploy, live successor,
-   artifact, and tag evidence to the issue and close it as completed.
-7. Perform the mandatory post-ship reflection:
-   - findings reviewers caught manually;
-   - fixes repeated across PRs;
-   - boilerplate or signature duplication introduced by the series;
-   - aggregate audits that masked file-local defects;
-   - workflow or deploy instructions that proved stale.
-8. Search all open issue bodies, not only titles. File one ranked covering issue
-   with suggested PR grouping if new debt clears the bar; otherwise state that
-   nothing does.
+2. Create an SSH-signed `vYYYY.MM.DD` tag, using `-N` for another same-day
+   release, at the recorded final merge commit.
+3. The reviewed commit already passed the hook before merge and the merge tree
+   was proven identical. Push the signed tag with `--no-verify`; a tag adds no
+   code and must not replay the randomized or Nix gates.
+4. Confirm the remote tag's peeled commit and signature.
+5. Only after the signed tag push succeeds, add the review, pre-push, deploy,
+   live successor, and tag evidence to the issue and close it as completed.
 
 ## 10. Communicate without losing the thread
 
 - After dispatch, let implementation and review agents run autonomously. Do
   not send reassurance pings, request interim status, or list agents merely
   because time has passed.
+- Keep useful agent slots occupied with ready independent implementation or
+  review work. Do not wait for one PR to finish before dispatching another
+  unless the dependency map says it must be serial.
 - When no independent orchestrator work remains, wait for an agent blocker or
   completion notification for up to 15 minutes. If the wait times out, check
   status once and begin another 15-minute wait. Never approximate this cadence
@@ -269,7 +272,7 @@ The release sequence is strict; do not reorder it:
 - Correct premature status claims immediately when live process evidence
   contradicts them.
 - Keep the final response self-contained: merged PRs, final merge, deploy pin,
-  live evidence, tag, issue closure, and reflection issue.
+  live evidence, tag, and issue closure.
 - Lead with the outcome. Mention failed attempts only when they affect trust or
   explain the final verification path.
 
