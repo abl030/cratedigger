@@ -37,7 +37,7 @@ The flake export is a wrapper that pins the module's package set to **cratedigge
 | `beets.validation.{enable,distanceThreshold,stagingDir,trackingFile,verifiedLosslessTarget}` | sensible defaults | Beets validation config. |
 | `web.{enable,port,beetsDb,redis.host,redis.port}` | port=8085 | Web UI config. `web.redis.*` follows the shared app Redis defaults unless explicitly overridden. |
 | `notifiers.plex.{enable,url,tokenFile,librarySectionId,pathMap}` | disabled | Plex notifier. |
-| `notifiers.jellyfin.{enable,url,tokenFile,libraryId,pathMap}` | disabled | Jellyfin notifier; nullable `libraryId` targets the music-library refresh instead of refreshing every library, while `pathMap` (local:remote prefix swap) enables the "Recently Added" DateCreated pin (issue #574, `docs/jellyfin-primer.md`). |
+| `notifiers.jellyfin.{enable,url,tokenFile,libraryId,pathMap}` | disabled | Jellyfin notifier; a configured `libraryId` sends the metadata-safe targeted music-library refresh, while null preserves broad `POST /Library/Refresh`; `pathMap` (local:remote prefix swap) enables the "Recently Added" DateCreated pin (issues #574/#697, `docs/jellyfin-primer.md`). |
 | `healthCheck.{enable,onFailureCommand}` | enabled, no recovery | Pre-cycle slskd healthcheck. `onFailureCommand` runs to recover (e.g. `systemctl restart slskd.service`). |
 | `releaseSettings.*` / `searchSettings.*` / `downloadSettings.*` | match config.ini defaults | Pipeline tunables. See "Search loop tunables" below for the trio that caps the slskd search window. |
 | `qualityRanks.*` | mirror of `QualityRankConfig.defaults()` | See docs/quality-ranks.md § "Tuning reference (Nix options)". |
@@ -190,6 +190,7 @@ github:abl030/cratedigger
 ├── nixosModules.default              ← upstream NixOS module (pins packageSet to this flake's lock)
 ├── devShells.<system>.default         ← test/dev environment (same pinned nixpkgs)
 ├── checks.<system>.moduleVm           ← NixOS VM test (boots module against ephemeral postgres)
+├── checks.<system>.jellyfinMetadataVm ← Jellyfin 10.11.11 tagged-metadata + DateCreated pin lifecycle VM
 ├── checks.<system>.packageSetPin      ← eval guard: default packageSet = own lock; override honoured
 ├── checks.<system>.moduleAssertions   ← eval guard: friendly required-option messages; doc2 + stranger shapes clean
 ├── checks.<system>.apiBaseDerivation  ← eval guard: beets musicbrainz block derives from musicbrainz.apiBase
@@ -199,13 +200,21 @@ github:abl030/cratedigger
 
 ## Validating before deploy
 
-The flake exposes a NixOS VM check that boots the upstream module against an ephemeral postgres + stub slskd:
+The flake exposes separate NixOS VM checks for module wiring and the real
+Jellyfin integration contract:
 
 ```bash
 nix build .#checks.x86_64-linux.moduleVm    # ~30s after first build
+nix build .#checks.x86_64-linux.jellyfinMetadataVm
 ```
 
 This catches: option surface breakage, prestart sed-substitution bugs, systemd dep graph cycles, wrapper script PYTHONPATH errors, missing python deps. It does NOT exercise slskd interaction or real downloads (those need fixture data — see the python suite). Run before any `nix/module.nix` change.
+
+`jellyfinMetadataVm` boots the flake-pinned Jellyfin, invokes the production
+targeted notifier against tagged FLAC fixtures, and proves metadata population,
+scoped targeting, curated-field preservation, and the real PostgreSQL-backed
+DateCreated capture/reconcile lifecycle. Run it for Jellyfin notifier, pin, or
+flake-pinned Jellyfin changes.
 
 For Redis peer-cache changes, verify with a paused timer and one manual cycle:
 

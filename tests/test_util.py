@@ -693,7 +693,7 @@ class TestTriggerJellyfinScan(unittest.TestCase):
         mock_urlopen.return_value = mock_resp
         trigger_jellyfin_scan(self._make_cfg())
         req = mock_urlopen.call_args[0][0]
-        self.assertIn("/Library/Refresh", req.full_url)
+        self.assertEqual(req.full_url, "http://jelly:8096/Library/Refresh")
         self.assertEqual(req.get_header("X-emby-token"), "api-key-123")
         self.assertEqual(req.get_method(), "POST")
 
@@ -707,7 +707,15 @@ class TestTriggerJellyfinScan(unittest.TestCase):
         mock_urlopen.return_value = mock_resp
         trigger_jellyfin_scan(self._make_cfg(library_id="abc123"))
         req = mock_urlopen.call_args[0][0]
-        self.assertIn("/Items/abc123/Refresh", req.full_url)
+        self.assertEqual(
+            req.full_url,
+            "http://jelly:8096/Items/abc123/Refresh"
+            "?metadataRefreshMode=Default"
+            "&imageRefreshMode=Default"
+            "&replaceAllMetadata=false"
+            "&replaceAllImages=false",
+        )
+        self.assertNotIn("recursive", req.full_url)
         self.assertEqual(req.get_header("X-emby-token"), "api-key-123")
 
     def test_noop_when_no_url(self):
