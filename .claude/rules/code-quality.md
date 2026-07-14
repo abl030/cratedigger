@@ -163,6 +163,24 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   citation for every peeled target commit.
 - For single modules during dev: `nix-shell --run "python3 -m unittest tests.<module> -v"`
 
+## Prefer canonical contracts over semantic scanners
+
+When an invariant can be enforced by narrowing the production contract, make
+the allowed code shape small and explicit. Prefer one typed owner, one
+canonical call or SQL form, and a fail-closed audit that rejects everything
+outside that grammar.
+
+Do not grow a home-made AST, data-flow, SQL, or control-flow analyzer one
+syntax case at a time in an attempt to reproduce Python or database execution
+semantics. Static audits are appropriate for local structural facts; they are
+not substitutes for a language runtime or SQL parser. If adversarial review
+keeps finding equivalent spellings that bypass an audit, stop extending the
+scanner and simplify the permitted production form instead.
+
+Qualify the narrow contract with known-bad variants and at least one real
+production-path test. Any non-canonical or unresolved construction must fail
+closed unless it is an explicitly reviewed, tightly bounded seam.
+
 ## API Contract Tests
 - Every API endpoint consumed by the frontend must have a contract test in `tests/web/` — one `test_*.py` per `web/routes/*.py` module (e.g. `tests/web/test_routes_pipeline.py` for `web/routes/pipeline.py`)
 - Contract tests use the real `_FakeDbWebServerCase` harness (HTTPServer on a random port + a fresh bare `FakePipelineDB` installed as `web.server.db` per test) — see existing `TestPipelineRouteContracts`, `TestBrowseRouteContracts`, etc. as reference patterns. Seed state (`self.db.seed_request(...)`, `self.db.log_download(...)`) and assert against the fake's real query semantics — never configure mock returns (#430; the `WEB_HARNESS_MOCK_BASELINE` ratchet in `tests/_mock_audit_scanner.py` is permanently empty and bans `mock_db` references in tests/web outright)

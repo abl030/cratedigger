@@ -51,7 +51,8 @@ plan or coverage ledger.
 
 ## 3. Delegate implementation with a hard role boundary
 
-Create one implementation agent for the PR. Give it:
+Create a fresh implementation agent for each PR. Never carry an implementation
+agent into the next PR. Give it:
 
 - the exact worktree and branch it may modify;
 - the issue items assigned to this PR;
@@ -127,13 +128,35 @@ Require one of two outputs:
 - severity-ranked findings with file/line, concrete failure mode, and a
   specific correction.
 
+Require the reviewer to finish one full exploratory pass and return a
+consolidated final report. Treat interim findings as evidence, not as a
+handoff: do not begin corrections while the reviewer is still searching.
+Batching the complete pass prevents one finding from triggering a commit,
+full gate run, and push before an equivalent bypass arrives.
+
 When review is not clean:
 
-1. Send every finding back to the original implementation agent.
-2. Require a signed correction, focused gates, updated PR body, and exact new
-   SHA. Do not let the implementer declare itself clean.
-3. Send the corrected exact SHA to the same reviewer.
-4. Repeat until the reviewer returns `CLEAN`.
+1. Send the complete finding batch back to the implementation agent. Do not
+   let the implementer declare itself clean.
+2. During correction rounds, run focused tests and the smallest relevant fuzz
+   or real-service qualification. Do not run the full suite, Nix gates,
+   guarded push, or other release-grade gates after each finding.
+3. When the batch is fixed and the worktree is quiescent, let the same reviewer
+   make a read-only preflight pass over the uncommitted correction. The
+   implementation agent must not edit concurrently with this pass.
+4. Repeat the focused correction/preflight loop until the reviewer reports no
+   provisional findings.
+5. Only then create the signed correction commit, run the full required gates,
+   update the PR body, push, and report the exact new SHA.
+6. Send that exact pushed SHA to the reviewer for the binding `CLEAN` verdict.
+
+If the PR reaches a third substantial correction round, rotate both roles at
+the round boundary instead of extending already-long agent contexts. Do not
+interrupt active edits. Give the fresh implementation agent and fresh reviewer
+a compact durable handoff containing the worktree, base/head SHAs, coverage
+ledger, consolidated finding history, current diff, and focused evidence.
+They must rebuild understanding from repository and PR artifacts rather than
+from a conversation transcript.
 
 Do not merge on CI, mergeability, or the orchestrator's opinion alone.
 
