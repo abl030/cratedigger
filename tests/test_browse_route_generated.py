@@ -12,7 +12,7 @@ from urllib.error import HTTPError, URLError
 from hypothesis import given, strategies as st
 
 from tests import _hypothesis_profiles  # noqa: F401 — registers active profile
-from web.routes.browse import get_artist
+from web.routes.browse import _resolve_discogs, get_artist
 
 
 _CLEAN_ERROR = "MusicBrainz fallback unavailable, retry"
@@ -87,7 +87,6 @@ class TestArtistMusicBrainzFailureGenerated(unittest.TestCase):
             )
 
     @given(
-        failing_call=st.sampled_from(("release_groups", "official_releases")),
         reason_suffix=st.text(
             alphabet=st.characters(
                 min_codepoint=0x20,
@@ -98,19 +97,14 @@ class TestArtistMusicBrainzFailureGenerated(unittest.TestCase):
             max_size=80,
         ),
     )
-    def test_all_transport_reasons_and_both_calls_keep_stable_contract(
+    def test_all_transport_reasons_keep_stable_contract(
         self,
-        failing_call: str,
         reason_suffix: str,
     ) -> None:
         raw_reason = f"raw-mb-transport-secret::{reason_suffix}"
         handler = _RecordingHandler()
         with patch("web.server.mb_api") as mock_mb:
-            if failing_call == "release_groups":
-                mock_mb.get_artist_release_groups.side_effect = URLError(raw_reason)
-            else:
-                mock_mb.get_artist_release_groups.return_value = []
-                mock_mb.get_official_release_group_ids.side_effect = URLError(raw_reason)
+            mock_mb.get_artist_release_groups.side_effect = URLError(raw_reason)
             get_artist(handler, {}, self.ARTIST_ID)  # type: ignore[arg-type]
 
         assert handler.status is not None
@@ -118,7 +112,6 @@ class TestArtistMusicBrainzFailureGenerated(unittest.TestCase):
         assert_clean_retryable_failure(handler.status, handler.data, raw_reason)
 
     @given(
-        failing_call=st.sampled_from(("release_groups", "official_releases")),
         upstream_status=st.one_of(
             st.integers(min_value=400, max_value=499),
             st.integers(min_value=500, max_value=599),
@@ -133,9 +126,8 @@ class TestArtistMusicBrainzFailureGenerated(unittest.TestCase):
             max_size=80,
         ),
     )
-    def test_http_statuses_and_both_calls_keep_clean_status_aware_contract(
+    def test_http_statuses_keep_clean_status_aware_contract(
         self,
-        failing_call: str,
         upstream_status: int,
         reason_suffix: str,
     ) -> None:
@@ -149,11 +141,7 @@ class TestArtistMusicBrainzFailureGenerated(unittest.TestCase):
         )
         handler = _RecordingHandler()
         with patch("web.server.mb_api") as mock_mb:
-            if failing_call == "release_groups":
-                mock_mb.get_artist_release_groups.side_effect = error
-            else:
-                mock_mb.get_artist_release_groups.return_value = []
-                mock_mb.get_official_release_group_ids.side_effect = error
+            mock_mb.get_artist_release_groups.side_effect = error
             get_artist(handler, {}, self.ARTIST_ID)  # type: ignore[arg-type]
 
         assert handler.status is not None
@@ -164,3 +152,58 @@ class TestArtistMusicBrainzFailureGenerated(unittest.TestCase):
             upstream_status,
             raw_reason,
         )
+
+
+def assert_discogs_target_identity(
+    result: dict, *, expected_kind: str,
+) -> None:
+    if result.get("target_identity_kind") != expected_kind:
+        raise AssertionError(
+            "resolver target identity drifted: "
+            f"{result.get('target_identity_kind')!r} != {expected_kind!r}"
+        )
+
+
+class TestDiscogsResolverIdentityGenerated(unittest.TestCase):
+    @given(discogs_id=st.integers(min_value=1, max_value=2_000_000_000))
+    def test_equal_numeric_grouped_release_still_targets_work(
+        self, discogs_id: int,
+    ) -> None:
+        raw_id = str(discogs_id)
+        with patch("web.routes.browse.discogs_api.get_release", return_value={
+            "id": raw_id,
+            "artist_id": "3840",
+            "artist_name": "Artist",
+            "release_group_id": raw_id,
+        }):
+            result = _resolve_discogs(raw_id, "release")
+
+        self.assertEqual(result["expand_id"], result["leaf_id"])
+        assert_discogs_target_identity(result, expected_kind="work")
+
+    @given(discogs_id=st.integers(min_value=1, max_value=2_000_000_000))
+    def test_equal_numeric_masterless_release_targets_release(
+        self, discogs_id: int,
+    ) -> None:
+        raw_id = str(discogs_id)
+        with patch("web.routes.browse.discogs_api.get_release", return_value={
+            "id": raw_id,
+            "artist_id": "3840",
+            "artist_name": "Artist",
+            "release_group_id": None,
+        }):
+            result = _resolve_discogs(raw_id, "release")
+
+        self.assertEqual(result["expand_id"], result["leaf_id"])
+        assert_discogs_target_identity(result, expected_kind="release")
+
+    def test_checker_rejects_numeric_equality_mutant(self) -> None:
+        grouped_equal_id = {
+            "expand_id": "122",
+            "leaf_id": "122",
+            "target_identity_kind": "release",
+        }
+        with self.assertRaisesRegex(AssertionError, "identity drifted"):
+            assert_discogs_target_identity(
+                grouped_equal_id, expected_kind="work",
+            )

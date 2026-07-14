@@ -31,7 +31,7 @@ def _catalogue_row(
         primary_types=["Album"],
         secondary_types=[],
         format_qualifiers=[],
-        provenance=[] if source == "mb" else ["ordinary"],
+        provenance=["ordinary"],
         first_release_date="1997",
         artist_credit="Radiohead",
         primary_artist_id=primary_artist_id,
@@ -372,7 +372,6 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
             mock_mb.search_artists.return_value = [
                 {"id": self.ARTIST_ID, "name": "Radiohead"}]
             mock_mb.get_artist_release_groups.return_value = [mb_rg]
-            mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
             mock_mb.get_artist_name.return_value = "Radiohead"
             mock_dg.search_artists.return_value = [
                 {"id": "3840", "name": "Radiohead"}]
@@ -392,7 +391,7 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
                      and "compare" in k]
         self.assertEqual(
             meta_keys,
-            [f"meta:artist:compare:v5:{self.ARTIST_ID}:3840"],
+            [f"meta:artist:compare:v6:{self.ARTIST_ID}:3840"],
             "the bulk-consumer deployment must create a naturally cold "
             "compare key without reusing a pre-bulk skeleton",
         )
@@ -418,7 +417,6 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
             mock_mb.search_artists.return_value = [
                 {"id": self.ARTIST_ID, "name": "Radiohead"}]
             mock_mb.get_artist_release_groups.return_value = [mb_rg]
-            mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
             mock_mb.get_artist_name.return_value = "Radiohead"
             mock_dg.search_artists.return_value = [
                 {"id": "3840", "name": "Radiohead"}]
@@ -444,7 +442,6 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
             mock_mb.search_artists.return_value = [
                 {"id": self.ARTIST_ID, "name": "Radiohead"}]
             mock_mb.get_artist_release_groups.return_value = [mb_rg]
-            mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
             mock_mb.get_artist_name.return_value = "Radiohead"
             mock_dg.search_artists.return_value = [
                 {"id": "3840", "name": "Radiohead"}]
@@ -479,7 +476,6 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
                 mock_mb.search_artists.return_value = [
                     {"id": self.ARTIST_ID, "name": "Radiohead"}]
                 mock_mb.get_artist_release_groups.return_value = [mb_rg]
-                mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
                 mock_mb.get_artist_name.return_value = "Radiohead"
                 mock_dg.search_artists.return_value = [
                     {"id": "3840", "name": "Radiohead"}]

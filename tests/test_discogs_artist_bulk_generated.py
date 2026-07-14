@@ -10,6 +10,7 @@ existing stable ``(first_release_date, id)`` ordering.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import unittest
 from copy import deepcopy
@@ -148,13 +149,14 @@ def assert_canonical_evidence(row: Mapping[str, Any]) -> None:
 
 
 def assert_identity_marker_consistent(row: Mapping[str, Any]) -> None:
-    """Independent oracle for the release-unit namespace marker."""
+    """Independent oracle for strict positive Discogs identity grammar."""
     raw_id = row["id"]
-    has_release_prefix = (
-        isinstance(raw_id, str) and raw_id.startswith("release-")
-    )
-    if bool(row["is_masterless"]) != has_release_prefix:
-        raise AssertionError("masterless marker disagrees with identity namespace")
+    if row["is_masterless"]:
+        if not isinstance(raw_id, str) or not re.fullmatch(r"release-[1-9]\d*", raw_id):
+            raise AssertionError("invalid masterless release identity")
+        return
+    if not isinstance(raw_id, int) or isinstance(raw_id, bool) or raw_id <= 0:
+        raise AssertionError("invalid master identity")
 
 
 def _response(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -163,6 +165,21 @@ def _response(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "total": len(rows),
         "page": 1,
         "per_page": max(1, len(rows)),
+    }
+
+
+def _artist_row_example() -> dict[str, Any]:
+    return {
+        "id": 122,
+        "title": "Example",
+        "type": "Album",
+        "primary_types": ["Album"],
+        "format_qualifiers": ["Album"],
+        "provenance": ["ordinary"],
+        "first_release_date": "1964",
+        "artist_credit": "Artist",
+        "primary_artist_id": 1,
+        "is_masterless": False,
     }
 
 
@@ -265,9 +282,35 @@ class TestGeneratedBulkCatalogue(unittest.TestCase):
     ) -> None:
         invalid = deepcopy(row)
         invalid["is_masterless"] = not invalid["is_masterless"]
-        with self.assertRaisesRegex(AssertionError, "identity namespace"):
+        with self.assertRaisesRegex(AssertionError, "invalid .* identity"):
             assert_identity_marker_consistent(invalid)
-        with self.assertRaisesRegex(ValueError, "must agree"):
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            _run_consumer([invalid], [])
+
+    @given(
+        malformed=st.sampled_from((
+            ("foo", True),
+            ("release-", True),
+            ("release-abc", True),
+            ("release-0", True),
+            ("release--1", True),
+            (0, False),
+            (-1, False),
+            ("122", False),
+        )),
+    )
+    def test_malformed_discogs_identities_fail_the_real_consumer(
+        self, malformed: tuple[int | str, bool],
+    ) -> None:
+        raw_id, is_masterless = malformed
+        invalid = {
+            **_artist_row_example(),
+            "id": raw_id,
+            "is_masterless": is_masterless,
+        }
+        with self.assertRaisesRegex(AssertionError, "invalid .* identity"):
+            assert_identity_marker_consistent(invalid)
+        with self.assertRaises(ValueError):
             _run_consumer([invalid], [])
 
     @given(
@@ -323,10 +366,17 @@ class TestGeneratedBulkCatalogue(unittest.TestCase):
 
 class TestBulkCatalogueCheckerKnownBad(unittest.TestCase):
     def test_identity_marker_checker_rejects_prefixed_master(self) -> None:
-        with self.assertRaisesRegex(AssertionError, "identity namespace"):
+        with self.assertRaisesRegex(AssertionError, "invalid master identity"):
             assert_identity_marker_consistent({
                 "id": "release-122", "is_masterless": False,
             })
+
+    def test_identity_checker_rejects_prefix_only_mutant(self) -> None:
+        row = {"id": "release-abc", "is_masterless": True}
+        prefix_only_mutant_accepts = str(row["id"]).startswith("release-")
+        self.assertTrue(prefix_only_mutant_accepts)
+        with self.assertRaisesRegex(AssertionError, "invalid masterless"):
+            assert_identity_marker_consistent(row)
 
     def test_evidence_checker_rejects_unsorted_values(self) -> None:
         row = {

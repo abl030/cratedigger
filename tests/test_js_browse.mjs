@@ -11,7 +11,12 @@
 
 import assert from 'node:assert/strict';
 
-import { loadArtistPage, reloadBrowseArtist, setBrowseSource } from '../web/js/browse.js';
+import {
+  loadArtistPage,
+  reloadBrowseArtist,
+  resolverTargetIdentityKind,
+  setBrowseSource,
+} from '../web/js/browse.js';
 import { state } from '../web/js/state.js';
 
 const artistBody = {
@@ -52,6 +57,7 @@ function resetWorld() {
   state.searchTargetId = null;
   state.searchTargetExpandId = null;
   state.searchTargetSource = null;
+  state.searchTargetIdentityKind = null;
   artistBody.innerHTML = '';
   elements['browse-artist-name'].textContent = '';
   elements['browse-artist'].style.display = 'block';
@@ -74,6 +80,53 @@ function assertSafeRetryFailure(aid, rawSecret) {
     'Retry must call the existing public reload binding',
   );
   assert.doesNotMatch(artistBody.innerHTML, new RegExp(rawSecret), 'raw failure detail must stay hidden');
+}
+
+// Resolver identity is backend-authored. Equal master/release numbers are
+// valid in separate Discogs namespaces and therefore prove nothing.
+{
+  const groupedEqualId = {
+    source: 'discogs', kind: 'release', expand_id: '122', leaf_id: '122',
+    target_identity_kind: 'work',
+  };
+  const masterlessEqualId = {
+    source: 'discogs', kind: 'release', expand_id: '122', leaf_id: '122',
+    target_identity_kind: 'release',
+  };
+  assert.equal(resolverTargetIdentityKind(groupedEqualId), 'work');
+  assert.equal(resolverTargetIdentityKind(masterlessEqualId), 'release');
+
+  const equalityMutant = data => (
+    String(data.expand_id) === String(data.leaf_id) ? 'release' : 'work'
+  );
+  assert.equal(
+    equalityMutant(groupedEqualId),
+    'release',
+    'known-bad equality heuristic misclassifies the grouped release',
+  );
+  assert.notEqual(
+    equalityMutant(groupedEqualId),
+    resolverTargetIdentityKind(groupedEqualId),
+  );
+
+  for (let id = 1; id <= 2000; id += 41) {
+    for (const targetIdentityKind of ['work', 'release']) {
+      const data = {
+        source: 'discogs', kind: 'release',
+        expand_id: String(id), leaf_id: String(id),
+        target_identity_kind: targetIdentityKind,
+      };
+      assert.equal(
+        resolverTargetIdentityKind(data),
+        targetIdentityKind,
+        `explicit target survives equal-ID world ${id}/${targetIdentityKind}`,
+      );
+    }
+  }
+  assert.throws(
+    () => resolverTargetIdentityKind({ expand_id: '122', leaf_id: '122' }),
+    /missing target_identity_kind/,
+  );
 }
 
 // Known-bad qualification: the checker trips on both persistence and leakage.

@@ -36,6 +36,7 @@ Browser → https://music.ablz.au
 | `/` | GET | Serves the HTML UI |
 | `/api/search?q=...` | GET | Search MB for artists |
 | `/api/artist/<mbid>` | GET | Artist's normalized work catalogue plus an empty `ungrouped_releases` bucket; each row carries structural and provenance evidence |
+| `/api/browse/resolve?source=...&id=...&kind=...` | GET | Resolve a pasted release/master/group ID to an artist target, including explicit `target_identity_kind` (`work` or `release`) |
 | `/api/release-group/<mbid>` | GET | All releases for a release group (paginated from MB) |
 | `/api/release/<mbid>` | GET | Full release details with tracks |
 | `/api/pipeline/add` | POST | Add a release to the pipeline DB `{"mb_release_id": "..."}` or `{"discogs_release_id": "..."}` |
@@ -76,7 +77,12 @@ Browser → https://music.ablz.au
   Appearance provenance comes from each source rather than title heuristics:
   MusicBrainz release groups discovered through the `track_artist` release
   browse and Discogs rows from `/artists/<id>/appearances` are kept out of
-  mainline Albums even when they are VA compilations. Ownership matching uses
+  mainline Albums even when they are VA compilations. The MusicBrainz adapter
+  unions status evidence per release group across both direct-artist and
+  `track_artist` release browses: `Official` becomes `ordinary`, `Promotion`
+  becomes `promo`, and `Bootleg` becomes `unofficial`. Null or unsupported
+  statuses remain unknown (`provenance: []`); absence from a direct-official
+  query is never treated as proof that a work is unofficial. Ownership matching uses
   exact ID evidence only: MusicBrainz work rows match `mb_releasegroupid`,
   while an ungrouped Discogs release may match its exact release ID. Titles
   never establish ownership and a Discogs master never inherits ownership
@@ -111,6 +117,15 @@ Browser → https://music.ablz.au
   single-flight per cache key inside the threaded web process, so concurrent
   cold requests share one MB/Discogs/merge pass while every caller still gets
   an isolated copy for its live library and pipeline overlays.
+  Pipeline badges use exact `(source, identity kind, id)` keys. A Discogs
+  request's persisted `mb_release_group_id` is its exact master identity, so
+  that master receives the badge; a numerically equal leaf release does not.
+  Expansion DOM IDs and search-target selectors use the same source/kind
+  namespace, allowing master 122 and release 122 to coexist and dispatch to
+  `/api/discogs/master/122` and `/api/discogs/release/122` respectively.
+  Search-by-ID consumes the resolver's explicit `target_identity_kind`; it
+  never infers masterlessness from `expand_id == leaf_id`, because a grouped
+  Discogs release may legitimately have the same numeric ID as its master.
 - **Release editions** — when you expand a release group, shows all editions sorted by date
   - Official releases first, bootleg/promo collapsed — EXCEPT pressings that
     are in the library or have a pipeline request, which are always hoisted

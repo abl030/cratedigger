@@ -75,6 +75,13 @@ example, ordinary plus unofficial child pressings) keeps every provenance
 value so the UI can display that evidence without misclassifying the whole
 work as an ordinary or unofficial-only album.
 
+Artist-row identity syntax is strict at the Cratedigger boundary: a master is
+a positive integer and a masterless row is exactly
+`release-<positive integer>`. Values such as `foo`, `release-`,
+`release-abc`, `release-0`, zero, negative IDs, and numeric strings in the
+master namespace fail the request instead of being normalized into ambiguous
+catalogue identities.
+
 ### API Examples
 
 ```bash

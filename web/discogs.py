@@ -290,6 +290,7 @@ def search_artists(query: str) -> list[dict]:
 
 _DiscogsStructuralType = Literal["Album", "EP", "Single"]
 _DiscogsProvenance = Literal["ordinary", "promo", "unofficial"]
+_DISCOGS_RELEASE_ROW_ID_RE = re.compile(r"^release-([1-9]\d*)$")
 
 
 class _DiscogsArtistMasterEntry(msgspec.Struct):
@@ -353,16 +354,24 @@ def _normalize_artist_master_entry(
 
     raw_id = r.id
     is_masterless = r.is_masterless
-    has_release_prefix = (
-        isinstance(raw_id, str) and raw_id.startswith("release-")
+    release_match = (
+        _DISCOGS_RELEASE_ROW_ID_RE.fullmatch(raw_id)
+        if isinstance(raw_id, str)
+        else None
     )
-    if is_masterless != has_release_prefix:
+    if is_masterless and release_match is None:
         raise ValueError(
-            "Discogs artist row is_masterless must agree with release- id"
+            "Discogs masterless artist row id must be release-<positive integer>"
+        )
+    if not is_masterless and (
+        not isinstance(raw_id, int) or isinstance(raw_id, bool) or raw_id <= 0
+    ):
+        raise ValueError(
+            "Discogs master artist row id must be a positive integer"
         )
     if is_masterless:
-        assert isinstance(raw_id, str)
-        bare_id = raw_id[len("release-"):]
+        assert release_match is not None
+        bare_id = release_match.group(1)
         return ArtistCatalogueRow(
             id=bare_id,
             title=r.title,
@@ -452,7 +461,7 @@ def get_artist_releases(artist_id: int) -> list[ArtistCatalogueRow]:
         return msgspec.to_builtins(rows)
 
     cached = _cache.memoize_meta(
-        f"discogs:artist:{artist_id}:releases:v6", _fetch,
+        f"discogs:artist:{artist_id}:releases:v7", _fetch,
     )
     return msgspec.convert(cached, type=list[ArtistCatalogueRow])
 

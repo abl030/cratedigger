@@ -166,7 +166,7 @@ console.log('unpaired wording, structural grouping, and release navigation');
     'compilation qualifier groups as Compilation');
   assertContains(html, 'Other <span class="type-count">1</span>',
     'legacy scalar Album cannot authorize Albums');
-  assertContains(html, "{masterless:true,source:'discogs'}",
+  assertContains(html, "{masterless:true,source:'discogs',identityKind:'release'}",
     'release unit keeps exact release expansion');
   assertContains(html, 'data-release-id="999222"',
     'release unit remains ringable by exact id');
@@ -248,6 +248,143 @@ console.log('appearance partition preserves native provenance');
   assertEqual(provenance.mainline[0].id, 'main', 'mainline stays mainline');
   assertEqual(provenance.appearances[0].id, 'app',
     'appearance stays separate');
+}
+
+console.log('ownership credit variants preserve the established artist-page contract');
+{
+  const world = [
+    work('id-match', { primary_artist_id: ARTIST_ID, artist_credit: 'Different' }),
+    work('exact-credit', { primary_artist_id: 'other', artist_credit: 'the lucksmiths' }),
+    work('slash-credit', { primary_artist_id: 'other', artist_credit: 'The Lucksmiths / Someone' }),
+    work('comma-credit', { primary_artist_id: 'other', artist_credit: 'The Lucksmiths, Someone' }),
+    work('empty-credit', { primary_artist_id: 'other', artist_credit: '' }),
+    work('foreign', { primary_artist_id: 'other', artist_credit: 'Someone Else' }),
+  ];
+  const sections = classify(world);
+  const own = new Set(sections.missing.map(row => row.id));
+  for (const id of ['id-match', 'exact-credit', 'slash-credit', 'comma-credit', 'empty-credit']) {
+    assertEqual(own.has(id), true, `${id} remains an own-work credit`);
+  }
+  assertEqual(sections.appearances.map(row => row.id).join(','), 'foreign',
+    'foreign credit remains an appearance');
+
+  const unannotated = work('undefined-library');
+  delete unannotated.in_library;
+  assertEqual(classify([unannotated]).missing[0].id, 'undefined-library',
+    'missing ownership annotation cannot fabricate library ownership');
+}
+
+console.log('non-own and explicit appearance precedence beats exceptional provenance');
+{
+  const sections = classify([
+    work('foreign-unofficial', {
+      primary_artist_id: 'other', artist_credit: 'Someone Else',
+      provenance: ['unofficial'], in_library: true,
+    }),
+    work('explicit-promo-appearance', {
+      is_appearance: true, provenance: ['promo'], in_library: true,
+    }),
+  ]);
+  assertEqual(
+    sections.appearances.map(row => row.id).join(','),
+    'foreign-unofficial,explicit-promo-appearance',
+    'appearance identity wins before promo/unofficial bucketing',
+  );
+  assertEqual(sections.unofficialOnly.length + sections.promoOnly.length, 0,
+    'non-own exceptional rows do not leak into own-work sections');
+  assertEqual(sections.inLibrary.length, 0,
+    'owned annotation cannot promote an appearance into mainline');
+}
+
+console.log('in-flight lens includes downloading/manual and excludes ambient states');
+{
+  const albums = [
+    library({ id: 1, album: 'DL', pipeline_status: 'downloading', pipeline_id: 11 }),
+    library({ id: 2, album: 'Manual', pipeline_status: 'manual', pipeline_id: 12 }),
+    library({ id: 3, album: 'Wanted', pipeline_status: 'wanted', pipeline_id: 13 }),
+    library({ id: 4, album: 'Imported', pipeline_status: 'imported', pipeline_id: 14 }),
+    library({ id: 5, album: 'None', pipeline_status: null }),
+    library({
+      id: 6, album: 'Pipeline-only DL', in_library: false,
+      beets_album_id: null, pipeline_status: 'downloading', pipeline_id: 16,
+    }),
+  ];
+  const sections = classify([], albums);
+  assertEqual(sections.inFlight.map(row => row.album).join(','),
+    'DL,Manual,Pipeline-only DL',
+    'downloading/manual are visible regardless of library ownership');
+}
+
+console.log('empty and orphan-only artist worlds remain renderable');
+{
+  const empty = classify([], []);
+  assertEqual([
+    empty.inLibrary, empty.inLibraryOrphans, empty.inFlight, empty.missing,
+    empty.appearances, empty.promoOnly, empty.unofficialOnly,
+    empty.unknownProvenance, empty.ungroupedReleases,
+  ].flat().length, 0, 'empty world has no synthetic rows');
+
+  const orphanOnly = classify([], [library({
+    id: 7, album: 'Only Orphan', mb_releasegroupid: null,
+  })]);
+  const orphanHtml = renderArtistSections(orphanOnly, {
+    artistId: ARTIST_ID, artistName: ARTIST_NAME,
+  });
+  assertContains(orphanHtml, 'In library <span class="type-count">1</span>',
+    'orphan-only In library section renders');
+  assertContains(orphanHtml, 'Library-only editions <span class="type-count">1</span>',
+    'orphan-only edition has its explicit subheader');
+  assertContains(orphanHtml, 'Only Orphan', 'orphan row remains visible');
+}
+
+console.log('section rendering preserves counts, namespaced expansion targets, and toggles');
+{
+  const sections = classify([
+    work('lib1', { in_library: true, title: 'Owned Album' }),
+    work('miss1', { title: 'Missing Album' }),
+    work('miss2', { title: 'Missing EP', type: 'EP', primary_types: ['EP'] }),
+    work('app1', {
+      primary_artist_id: 'other', artist_credit: 'Someone Else', title: 'Guest Spot',
+    }),
+    work('unofficial1', { provenance: ['unofficial'], title: 'Live Tape' }),
+  ], [library({
+    id: 9, album: 'DL Album', in_library: false, beets_album_id: null,
+    pipeline_status: 'downloading', pipeline_id: 9,
+  })]);
+  const html = renderArtistSections(sections, {
+    artistId: ARTIST_ID, artistName: ARTIST_NAME,
+  });
+  assertContains(html, 'In library <span class="type-count">1</span>', 'library count');
+  assertContains(html, 'In flight <span class="type-count">1</span>', 'in-flight count');
+  assertContains(html, 'Missing <span class="type-count">2</span>', 'missing count');
+  assertContains(html, 'Appearances <span class="type-count">1</span>', 'appearance count');
+  assertContains(html, 'Unofficial-only works <span class="type-count">1</span>', 'unofficial count');
+  for (const title of ['Owned Album', 'Missing Album', 'Missing EP', 'Guest Spot', 'Live Tape', 'DL Album']) {
+    assertContains(html, title, `${title} row renders`);
+  }
+  assertContains(html, 'id="rel-mb-work-lib1"',
+    'in-library work keeps a source/kind-namespaced expansion target');
+  assertContains(html, 'id="rel-mb-work-miss1"',
+    'missing work keeps a source/kind-namespaced expansion target');
+  assertContains(html, 'data-catalogue-source="mb"', 'row selector carries source');
+  assertContains(html, 'data-identity-kind="work"', 'row selector carries identity kind');
+  assertContains(html, 'data-rg-id="miss1"', 'analysis selector remains intact');
+  assertContains(html, 'window.toggleSection(this)', 'section headers keep shared toggle');
+}
+
+console.log('empty artist sections are omitted');
+{
+  const html = renderArtistSections(classify([
+    work('only', { in_library: true }),
+  ]), { artistId: ARTIST_ID, artistName: ARTIST_NAME });
+  assertContains(html, 'In library', 'non-empty section rendered');
+  for (const title of [
+    'In flight', 'Missing', 'Appearances', 'Promo-only works',
+    'Unofficial-only works', 'Unknown-provenance works',
+    'Ungrouped Discogs releases',
+  ]) {
+    assertExcludes(html, title, `${title} omitted when empty`);
+  }
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

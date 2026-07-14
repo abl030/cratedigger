@@ -590,7 +590,7 @@ class TestGetArtistReleases(unittest.TestCase):
             "cold artist metadata must use one explicit fail-loud bulk request",
         )
         self.assertEqual(
-            memo.call_args.args[0], "discogs:artist:3840:releases:v6",
+            memo.call_args.args[0], "discogs:artist:3840:releases:v7",
         )
 
         self.assertEqual(len(results), 3)
@@ -731,6 +731,34 @@ class TestGetArtistReleases(unittest.TestCase):
             [row["identity_kind"] for row in collisions],
             ["work", "release"],
         )
+
+    def test_rejects_malformed_or_nonpositive_artist_identity_ids(self):
+        for raw_id, is_masterless in (
+            ("foo", True),
+            ("release-", True),
+            ("release-abc", True),
+            ("release-0", True),
+            ("release--1", True),
+            (0, False),
+            (-1, False),
+            ("122", False),
+        ):
+            with self.subTest(raw_id=raw_id, is_masterless=is_masterless):
+                invalid_row = {
+                    **self.MASTERS_DATA["results"][0],
+                    "id": raw_id,
+                    "is_masterless": is_masterless,
+                }
+                payload = {
+                    **self.MASTERS_DATA,
+                    "results": [invalid_row],
+                    "total": 1,
+                }
+                with _mock_urlopen_by_url({
+                    "/masters": payload,
+                    "/appearances": self.EMPTY_APPEARANCES,
+                }), self.assertRaises(ValueError):
+                    get_artist_releases(3840)
 
     def test_missing_primary_types_is_rejected_at_boundary(self):
         invalid = {

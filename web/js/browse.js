@@ -1,7 +1,12 @@
 // @ts-check
 import { state, API, toast } from './state.js';
 import { esc, jsArg, parsePastedId } from './util.js';
-import { loadReleaseGroup, renderReleaseDetail, applySearchTargetAfterDiscography } from './discography.js';
+import {
+  applySearchTargetAfterDiscography,
+  catalogueDomId,
+  loadReleaseGroup,
+  renderReleaseDetail,
+} from './discography.js';
 import { applyAnalysisChips, applyAnalysisToOpenExpansions } from './analysis.js';
 import { classifyArtistRows, renderArtistSections, renderUnpairedSourceSections } from './artist_page.js';
 import { searchLabels, renderLabelSearchResults, openLabelDetail, closeLabelDetail } from './labels.js';
@@ -177,6 +182,21 @@ export function clearSearchTarget() {
   state.searchTargetId = null;
   state.searchTargetExpandId = null;
   state.searchTargetSource = null;
+  state.searchTargetIdentityKind = null;
+}
+
+/**
+ * Read the resolver-authored catalogue identity level. Discogs master and
+ * release IDs occupy separate numeric namespaces, so equality between
+ * expand_id and leaf_id is not evidence of a masterless release.
+ * @param {Object} data
+ * @returns {'work'|'release'}
+ */
+export function resolverTargetIdentityKind(data) {
+  if (data.target_identity_kind === 'work' || data.target_identity_kind === 'release') {
+    return data.target_identity_kind;
+  }
+  throw new Error('Resolver response missing target_identity_kind');
 }
 
 /**
@@ -241,6 +261,7 @@ export async function resolveAndNavigate(q, requestToken) {
   state.searchTargetId = data.leaf_id || null;
   state.searchTargetExpandId = data.expand_id || null;
   state.searchTargetSource = data.source;
+  state.searchTargetIdentityKind = resolverTargetIdentityKind(data);
 
   // Force a discography re-render even if the artist is already cached.
   // Without this, two consecutive pastes for different releases on the
@@ -266,7 +287,7 @@ export async function resolveAndNavigate(q, requestToken) {
  *
  * In-flight token guard: each await is gated by `requestToken !==
  * searchArtistsRequestToken`. Unlike the artist-view path where a re-render
- * detaches prior #rel-X nodes (so a stale write goes to detached DOM and is
+ * detaches prior expansion nodes (so a stale write goes to detached DOM and is
  * harmless), va-fallback-body is a stable, never-replaced node — a stale
  * fetch landing here would scribble onto a fresh card. The isStale callback
  * is also threaded into loadReleaseGroup so the nested write is protected.
@@ -628,8 +649,10 @@ export async function searchArtists(q) {
         // Discogs releases without a master: show pressings inline instead of dead-end artist page
         const isMasterless = isDiscogs && rg.is_master === false;
         const releaseId = isMasterless ? rg.discogs_release_id || rg.id : rg.id;
+        const identityKind = isMasterless ? 'release' : 'work';
+        const loadOpts = `{source:'${browseSource}',identityKind:'${identityKind}'${isMasterless ? ',masterless:true' : ''}}`;
         const onclick = (isVA || isMasterless)
-          ? `window.loadReleaseGroup(${jsArg(releaseId)}, this, ${isMasterless ? '{masterless:true}' : '{}'})`
+          ? `window.loadReleaseGroup(${jsArg(releaseId)}, this, ${loadOpts})`
           : `window.openBrowseArtist(${jsArg(rg.artist_id)}, ${jsArg(rg.artist_name)})`;
         return `
         <div class="artist" style="cursor:pointer;padding:6px 0;" onclick="${onclick}">
@@ -637,7 +660,7 @@ export async function searchArtists(q) {
           <span class="artist-dis"> — ${esc(rg.title)}</span>
           ${rg.primary_type ? `<span class="artist-dis" style="color:#888;"> (${esc(rg.primary_type)})</span>` : ''}
         </div>
-        <div id="rel-${esc(String(rg.id))}"></div>`;
+        <div id="${esc(catalogueDomId(browseSource, identityKind, releaseId))}"></div>`;
       }).join('');
     } else {
       const r = await fetch(`${searchBase}?q=${encodeURIComponent(q)}`);

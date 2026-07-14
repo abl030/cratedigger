@@ -103,7 +103,6 @@ class TestConcurrentRequests(_WebServerCase):
                 "web.server.get_library_artist", return_value=[],
             ):
                 mock_mb.get_artist_release_groups.side_effect = mb_releases
-                mock_mb.get_official_release_group_ids.return_value = set()
                 mock_mb.get_artist_name.return_value = "Test Artist"
                 mock_discogs.get_artist_releases.return_value = []
                 mock_discogs.get_artist_name.return_value = "Test Artist"
@@ -148,7 +147,7 @@ class TestConcurrentRequests(_WebServerCase):
             "/api/artist/compare?name=Test%20Artist&"
             f"mbid={artist_id}&discogs_id=3840"
         )
-        compare_key = f"meta:artist:compare:v5:{artist_id}:3840"
+        compare_key = f"meta:artist:compare:v6:{artist_id}:3840"
         entered = threading.Event()
         release = threading.Event()
         cache_written = threading.Event()
@@ -182,7 +181,6 @@ class TestConcurrentRequests(_WebServerCase):
                 srv.log, "warning", side_effect=record_warning,
             ):
                 mock_mb.get_artist_release_groups.side_effect = mb_releases
-                mock_mb.get_official_release_group_ids.return_value = set()
                 mock_mb.get_artist_name.return_value = "Test Artist"
                 mock_discogs.get_artist_releases.return_value = []
                 mock_discogs.get_artist_name.return_value = "Test Artist"

@@ -404,34 +404,52 @@ class TestArtistCompareGenerated(unittest.TestCase):
         self.assertEqual(row.secondary_types, secondary_types or [])
 
     @given(
-        identity=st.sampled_from(("mb_work", "discogs_work", "discogs_release")),
+        target_kind=st.sampled_from(("work", "release")),
         catalogue_id=st.text(min_size=1, max_size=24),
     )
-    @example(identity="discogs_work", catalogue_id="122")
-    def test_pipeline_overlay_uses_exact_identity_namespace(
-        self, identity: str, catalogue_id: str,
+    @example(target_kind="release", catalogue_id="122")
+    @example(target_kind="work", catalogue_id="122")
+    def test_pipeline_overlay_uses_source_and_identity_kind_namespace(
+        self, target_kind: str, catalogue_id: str,
     ) -> None:
-        if identity == "mb_work":
-            row = _mb(
-                year=1964, type_="Album", appearance=False, id_=catalogue_id,
-            )
-            expected = True
-        else:
-            row = _discogs(
-                year=1964, types=["Album"], appearance=False,
-                id_=catalogue_id,
-            )
-            row.identity_kind = (
-                "release" if identity == "discogs_release" else "work"
-            )
-            expected = identity == "discogs_release"
+        work = _discogs(
+            year=1964, types=["Album"], appearance=False, id_=catalogue_id,
+        )
+        release = _discogs(
+            year=1964, types=["Album"], appearance=False, id_=catalogue_id,
+        )
+        release.identity_kind = "release"
 
         hit = {"status": "wanted", "id": 42}
         _apply_rg_pipeline_overlay(
-            [row], {catalogue_id: hit}, {catalogue_id: hit},
+            [work, release],
+            {("discogs", target_kind, catalogue_id): hit},
         )
 
-        assert_pipeline_overlay(row, expected=expected)
+        assert_pipeline_overlay(work, expected=target_kind == "work")
+        assert_pipeline_overlay(release, expected=target_kind == "release")
+
+    @given(
+        target_source=st.sampled_from(("mb", "discogs")),
+        catalogue_id=st.text(min_size=1, max_size=24),
+    )
+    @example(target_source="discogs", catalogue_id="122")
+    def test_pipeline_overlay_also_separates_catalogue_sources(
+        self, target_source: str, catalogue_id: str,
+    ) -> None:
+        mb = _mb(
+            year=1964, type_="Album", appearance=False, id_=catalogue_id,
+        )
+        discogs = _discogs(
+            year=1964, types=["Album"], appearance=False, id_=catalogue_id,
+        )
+        hit = {"status": "wanted", "id": 42}
+        _apply_rg_pipeline_overlay(
+            [mb, discogs],
+            {(target_source, "work", catalogue_id): hit},
+        )
+        assert_pipeline_overlay(mb, expected=target_source == "mb")
+        assert_pipeline_overlay(discogs, expected=target_source == "discogs")
 
     @given(
         releases=st.lists(
