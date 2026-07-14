@@ -14,14 +14,21 @@ import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
+import msgspec
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from lib.artist_catalogue import ArtistCatalogueRow
 from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
 from web.library_album_row import LibraryAlbumRow
+
+
+def _catalogue(rows: list[dict]) -> list[ArtistCatalogueRow]:
+    """Make mocked adapter output obey the real normalized row contract."""
+    return msgspec.convert(rows, type=list[ArtistCatalogueRow])
 
 
 class TestBrowseRouteContracts(_FakeDbWebServerCase):
@@ -32,8 +39,10 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         "id", "title", "artist_id", "artist_name", "primary_type",
     }
     ARTIST_RG_REQUIRED_FIELDS = {
-        "id", "title", "type", "secondary_types", "first_release_date",
-        "artist_credit", "primary_artist_id", "has_official", "is_appearance",
+        "id", "title", "type", "source", "identity_kind", "primary_types",
+        "secondary_types", "format_qualifiers", "provenance",
+        "first_release_date", "artist_credit", "primary_artist_id",
+        "is_appearance",
     }
     LIBRARY_ALBUM_REQUIRED_FIELDS = set(LibraryAlbumRow.__struct_fields__)
     RELEASE_GROUP_REQUIRED_FIELDS = {
@@ -351,6 +360,9 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "id": self.RG_ID,
             "title": "OK Computer",
             "type": "Album",
+            "source": "mb", "identity_kind": "work",
+            "primary_types": ["Album"], "format_qualifiers": [],
+            "provenance": [],
             "secondary_types": [],
             "first_release_date": "1997-05-21",
             "artist_credit": "Radiohead",
@@ -361,8 +373,10 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "id": "21491",
             "title": "OK Computer",
             "type": "Album",
+            "source": "discogs", "identity_kind": "work",
             "primary_types": ["Album"],
             "secondary_types": [],
+            "format_qualifiers": ["Album"], "provenance": ["ordinary"],
             "first_release_date": "1997",
             "artist_credit": "Radiohead",
             "primary_artist_id": "3840",
@@ -371,50 +385,61 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         with patch("web.server.mb_api") as mock_mb, \
                 patch("web.routes.browse.discogs_api") as mock_dg:
             mock_mb.search_artists.return_value = [{"id": self.ARTIST_ID, "name": "Radiohead"}]
-            mock_mb.get_artist_release_groups.return_value = [mb_rg]
+            mock_mb.get_artist_release_groups.return_value = _catalogue([mb_rg])
             mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
             mock_mb.get_artist_name.return_value = "Radiohead"
             mock_dg.search_artists.return_value = [{"id": "3840", "name": "Radiohead"}]
-            mock_dg.get_artist_releases.return_value = [discogs_rg]
+            mock_dg.get_artist_releases.return_value = _catalogue([discogs_rg])
             mock_dg.get_artist_name.return_value = "Radiohead"
             status, data = self._get("/api/artist/compare?name=Radiohead")
 
         self.assertEqual(status, 200)
         _assert_required_fields(
             self, data,
-            {"mb_artist", "discogs_artist", "both", "mb_only", "discogs_only"},
+            {
+                "mb_artist", "discogs_artist", "both", "mb_unpaired",
+                "discogs_unpaired", "discogs_ungrouped_releases",
+            },
             "artist compare response",
         )
         # Same title + same year → matched
         self.assertEqual(len(data["both"]), 1)
-        self.assertEqual(data["mb_only"], [])
-        self.assertEqual(data["discogs_only"], [])
+        self.assertEqual(data["mb_unpaired"], [])
+        self.assertEqual(data["discogs_unpaired"], [])
+        self.assertEqual(data["discogs_ungrouped_releases"], [])
         self.assertEqual(data["both"][0]["mb"]["id"], self.RG_ID)
         self.assertEqual(data["both"][0]["discogs"]["id"], "21491")
         self.assertIs(data["both"][0]["mb"]["is_appearance"], False)
         self.assertIs(data["both"][0]["discogs"]["is_appearance"], False)
-        # Bootleg classification flows through to frontend.
-        self.assertTrue(data["both"][0]["mb"]["has_official"])
+        self.assertEqual(data["both"][0]["mb"]["provenance"], ["ordinary"])
 
     def test_artist_compare_marks_bootleg_only_rgs(self):
         """Release groups absent from get_official_release_group_ids land
-        with has_official=False so the frontend can route them into the
-        Bootleg-only collapsible section."""
+        with explicit unofficial provenance so the frontend can route them
+        into the unofficial-only collapsible section."""
         official_rg = {
             "id": self.RG_ID, "title": "Real Album", "type": "Album",
             "secondary_types": [], "first_release_date": "1997",
             "artist_credit": "Artist", "primary_artist_id": self.ARTIST_ID,
+            "source": "mb", "identity_kind": "work",
+            "primary_types": ["Album"], "format_qualifiers": [],
+            "provenance": [], "is_appearance": False,
         }
         bootleg_rg = {
             "id": "00000000-0000-0000-0000-000000000099",
             "title": "Live Bootleg 99", "type": "Album",
             "secondary_types": [], "first_release_date": "1999",
             "artist_credit": "Artist", "primary_artist_id": self.ARTIST_ID,
+            "source": "mb", "identity_kind": "work",
+            "primary_types": ["Album"], "format_qualifiers": [],
+            "provenance": [], "is_appearance": False,
         }
         with patch("web.server.mb_api") as mock_mb, \
                 patch("web.routes.browse.discogs_api") as mock_dg:
             mock_mb.search_artists.return_value = [{"id": self.ARTIST_ID, "name": "Artist"}]
-            mock_mb.get_artist_release_groups.return_value = [official_rg, bootleg_rg]
+            mock_mb.get_artist_release_groups.return_value = _catalogue(
+                [official_rg, bootleg_rg]
+            )
             mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
             mock_mb.get_artist_name.return_value = "Artist"
             mock_dg.search_artists.return_value = []
@@ -423,18 +448,22 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             status, data = self._get("/api/artist/compare?name=Artist")
 
         self.assertEqual(status, 200)
-        # Both RGs land in mb_only (no Discogs counterpart). Both carry
-        # has_official so the frontend can split them.
-        self.assertEqual(len(data["mb_only"]), 2)
-        by_id = {r["id"]: r for r in data["mb_only"]}
-        self.assertTrue(by_id[self.RG_ID]["has_official"])
-        self.assertFalse(by_id["00000000-0000-0000-0000-000000000099"]["has_official"])
+        self.assertEqual(len(data["mb_unpaired"]), 2)
+        by_id = {r["id"]: r for r in data["mb_unpaired"]}
+        self.assertEqual(by_id[self.RG_ID]["provenance"], ["ordinary"])
+        self.assertEqual(
+            by_id["00000000-0000-0000-0000-000000000099"]["provenance"],
+            ["unofficial"],
+        )
 
     def test_artist_release_groups_contract(self):
         release_group = {
             "id": self.RG_ID,
             "title": "Test Album",
             "type": "Album",
+            "source": "mb", "identity_kind": "work",
+            "primary_types": ["Album"], "format_qualifiers": [],
+            "provenance": [],
             "secondary_types": [],
             "first_release_date": "2024-01-01",
             "artist_credit": "Test Artist",
@@ -442,12 +471,17 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "is_appearance": False,
         }
         with patch("web.server.mb_api") as mock_mb:
-            mock_mb.get_artist_release_groups.return_value = [release_group]
+            mock_mb.get_artist_release_groups.return_value = _catalogue(
+                [release_group]
+            )
             mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
             status, data = self._get(f"/api/artist/{self.ARTIST_ID}")
 
         self.assertEqual(status, 200)
-        _assert_required_fields(self, data, {"release_groups"}, "artist response")
+        _assert_required_fields(
+            self, data, {"release_groups", "ungrouped_releases"},
+            "artist response",
+        )
         _assert_required_fields(self, data["release_groups"][0], self.ARTIST_RG_REQUIRED_FIELDS,
                                 "artist release group")
 
@@ -456,6 +490,9 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "id": "2e3dd447-ac5e-3b60-b44c-f9e6000ba6e7",
             "title": "The Big Noise",
             "type": "Album",
+            "source": "mb", "identity_kind": "work",
+            "primary_types": ["Album"], "format_qualifiers": [],
+            "provenance": [],
             "secondary_types": ["Compilation"],
             "first_release_date": "2003-09-06",
             "artist_credit": "Various Artists",
@@ -463,14 +500,16 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "is_appearance": True,
         }
         with patch("web.server.mb_api") as mock_mb:
-            mock_mb.get_artist_release_groups.return_value = [appearance]
+            mock_mb.get_artist_release_groups.return_value = _catalogue(
+                [appearance]
+            )
             mock_mb.get_official_release_group_ids.return_value = set()
             status, data = self._get(f"/api/artist/{self.ARTIST_ID}")
 
         self.assertEqual(status, 200)
         row = data["release_groups"][0]
         self.assertIs(row["is_appearance"], True)
-        self.assertIs(row["has_official"], False)
+        self.assertEqual(row["provenance"], ["unofficial"])
 
     def test_artist_release_groups_transport_failure_is_clean_retryable_503(self):
         raw_reason = "[SSL: UNEXPECTED_EOF_WHILE_READING] private adapter detail"
@@ -548,6 +587,9 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         (backwards-compatible)."""
         release_group = {
             "id": self.RG_ID, "title": "Owned Album", "type": "Album",
+            "source": "mb", "identity_kind": "work",
+            "primary_types": ["Album"], "format_qualifiers": [],
+            "provenance": [], "is_appearance": False,
             "secondary_types": [], "first_release_date": "2024",
             "artist_credit": "Test Artist", "primary_artist_id": self.ARTIST_ID,
         }
@@ -558,7 +600,9 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         }
         with patch("web.server.mb_api") as mock_mb, \
                 patch("web.server.get_library_artist", return_value=[owned_album]):
-            mock_mb.get_artist_release_groups.return_value = [release_group]
+            mock_mb.get_artist_release_groups.return_value = _catalogue(
+                [release_group]
+            )
             mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
             status, data = self._get(
                 f"/api/artist/{self.ARTIST_ID}?name=Test%20Artist"
@@ -573,6 +617,9 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         pipeline_id on the row, next to the in-library annotation."""
         release_group = {
             "id": self.RG_ID, "title": "Wanted Album", "type": "Album",
+            "source": "mb", "identity_kind": "work",
+            "primary_types": ["Album"], "format_qualifiers": [],
+            "provenance": [], "is_appearance": False,
             "secondary_types": [], "first_release_date": "2024",
             "artist_credit": "Test Artist", "primary_artist_id": self.ARTIST_ID,
         }
@@ -586,7 +633,9 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         ))
         with patch("web.server.mb_api") as mock_mb, \
                 patch("web.server.get_library_artist", return_value=[]):
-            mock_mb.get_artist_release_groups.return_value = [release_group]
+            mock_mb.get_artist_release_groups.return_value = _catalogue(
+                [release_group]
+            )
             mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
             status, data = self._get(
                 f"/api/artist/{self.ARTIST_ID}?name=Test%20Artist"
@@ -601,6 +650,9 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         """Replaced rows are frozen audit — they must not badge the rg."""
         release_group = {
             "id": self.RG_ID, "title": "Old Album", "type": "Album",
+            "source": "mb", "identity_kind": "work",
+            "primary_types": ["Album"], "format_qualifiers": [],
+            "provenance": [], "is_appearance": False,
             "secondary_types": [], "first_release_date": "2024",
             "artist_credit": "Test Artist", "primary_artist_id": self.ARTIST_ID,
         }
@@ -614,7 +666,9 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         ))
         with patch("web.server.mb_api") as mock_mb, \
                 patch("web.server.get_library_artist", return_value=[]):
-            mock_mb.get_artist_release_groups.return_value = [release_group]
+            mock_mb.get_artist_release_groups.return_value = _catalogue(
+                [release_group]
+            )
             mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
             status, data = self._get(
                 f"/api/artist/{self.ARTIST_ID}?name=Test%20Artist"
@@ -623,20 +677,21 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         self.assertIsNone(data["release_groups"][0].get("pipeline_status"))
 
-    def test_artist_compare_discogs_only_pipeline_overlay(self):
-        """A masterless discogs_only row (its id IS the release id) carries
+    def test_artist_compare_ungrouped_release_pipeline_overlay(self):
+        """An ungrouped release row (its id IS the release id) carries
         the request badge fields when a request targets that release id —
         the Deloris 'Feather Figure/Elastic Bones' case (#575)."""
         discogs_rg = {
             "id": "8317023",
             "title": "Feather Figure/Elastic Bones",
             "type": "EP",
+            "source": "discogs", "identity_kind": "release",
             "primary_types": ["EP"],
             "secondary_types": [],
+            "format_qualifiers": ["EP"], "provenance": ["ordinary"],
             "first_release_date": "2005-06-00",
             "artist_credit": "Deloris",
             "primary_artist_id": "361476",
-            "is_masterless": True,
             "discogs_release_id": "8317023",
             "is_appearance": False,
         }
@@ -655,15 +710,65 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             mock_mb.get_official_release_group_ids.return_value = set()
             mock_mb.get_artist_name.return_value = "Deloris"
             mock_dg.search_artists.return_value = [{"id": "361476", "name": "Deloris"}]
-            mock_dg.get_artist_releases.return_value = [discogs_rg]
+            mock_dg.get_artist_releases.return_value = _catalogue([discogs_rg])
             mock_dg.get_artist_name.return_value = "Deloris"
             status, data = self._get("/api/artist/compare?name=Deloris")
 
         self.assertEqual(status, 200)
-        self.assertEqual(len(data["discogs_only"]), 1)
-        row = data["discogs_only"][0]
+        self.assertEqual(len(data["discogs_ungrouped_releases"]), 1)
+        row = data["discogs_ungrouped_releases"][0]
         self.assertEqual(row["pipeline_status"], "wanted")
         self.assertEqual(row["pipeline_id"], 8838)
+
+    def test_artist_compare_discogs_master_does_not_inherit_release_badge(self):
+        """A Discogs master and leaf release share a numeric ID namespace.
+
+        A request for release 122 must not badge master 122; only an explicit
+        release identity may carry that request state.
+        """
+        discogs_master = {
+            "id": "122",
+            "title": "The Rolling Stones",
+            "type": "Album",
+            "source": "discogs", "identity_kind": "work",
+            "primary_types": ["Album"],
+            "secondary_types": [],
+            "format_qualifiers": ["Album"], "provenance": ["ordinary"],
+            "first_release_date": "1964",
+            "artist_credit": "The Rolling Stones",
+            "primary_artist_id": "20991",
+            "is_appearance": False,
+        }
+        self.db.seed_request(make_request_row(
+            id=8838,
+            artist_name="The Rolling Stones",
+            album_title="The Rolling Stones",
+            mb_release_id=None,
+            discogs_release_id="122",
+            mb_release_group_id=None,
+            status="wanted",
+        ))
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("web.routes.browse.discogs_api") as mock_dg:
+            mock_mb.search_artists.return_value = []
+            mock_mb.get_artist_release_groups.return_value = []
+            mock_mb.get_official_release_group_ids.return_value = set()
+            mock_mb.get_artist_name.return_value = ""
+            mock_dg.search_artists.return_value = [{
+                "id": "20991", "name": "The Rolling Stones",
+            }]
+            mock_dg.get_artist_releases.return_value = _catalogue(
+                [discogs_master]
+            )
+            mock_dg.get_artist_name.return_value = "The Rolling Stones"
+            status, data = self._get(
+                "/api/artist/compare?name=The%20Rolling%20Stones"
+            )
+
+        self.assertEqual(status, 200)
+        row = data["discogs_unpaired"][0]
+        self.assertNotIn("pipeline_status", row)
+        self.assertNotIn("pipeline_id", row)
 
     def test_release_group_contract(self):
         release = {
@@ -934,12 +1039,13 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
         "in_library", "beets_album_id", "pipeline_status", "pipeline_id",
     }
     DISCOGS_ARTIST_REQUIRED_FIELDS = {
-        "artist_id", "artist_name", "release_groups",
+        "artist_id", "artist_name", "release_groups", "ungrouped_releases",
     }
     DISCOGS_ARTIST_ROW_REQUIRED_FIELDS = {
-        "id", "title", "type", "primary_types", "secondary_types",
+        "id", "title", "type", "source", "identity_kind", "primary_types",
+        "secondary_types", "format_qualifiers", "provenance",
         "first_release_date", "artist_credit", "primary_artist_id",
-        "is_appearance", "has_official",
+        "is_appearance",
     }
 
     def test_discogs_routes_return_503_mirror_required_when_base_unset(self):
@@ -995,19 +1101,22 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
     def test_discogs_artist_contract(self):
         with patch("web.routes.browse.discogs_api") as mock_dg:
             mock_dg.get_artist_name.return_value = "Radiohead"
-            mock_dg.get_artist_releases.return_value = [
+            mock_dg.get_artist_releases.return_value = _catalogue([
                 {
                     "id": "21491",
                     "title": "OK Computer",
                     "type": "Album",
+                    "source": "discogs", "identity_kind": "work",
                     "primary_types": ["Album"],
                     "secondary_types": [],
+                    "format_qualifiers": ["Album"],
+                    "provenance": ["ordinary"],
                     "first_release_date": "1997",
                     "artist_credit": "Radiohead",
                     "primary_artist_id": "3840",
                     "is_appearance": False,
                 },
-            ]
+            ])
             status, data = self._get("/api/discogs/artist/3840")
 
         self.assertEqual(status, 200)
@@ -1036,25 +1145,27 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
         with patch("web.routes.browse.discogs_api") as mock_dg, \
                 patch("web.server.get_library_artist", return_value=[]):
             mock_dg.get_artist_name.return_value = "Deloris"
-            mock_dg.get_artist_releases.return_value = [
+            mock_dg.get_artist_releases.return_value = _catalogue([
                 {
                     "id": "8317023",
                     "title": "Feather Figure/Elastic Bones",
                     "type": "EP",
+                    "source": "discogs", "identity_kind": "release",
                     "primary_types": ["EP"],
                     "secondary_types": [],
+                    "format_qualifiers": ["EP"],
+                    "provenance": ["ordinary"],
                     "first_release_date": "2005-06-00",
                     "artist_credit": "Deloris",
                     "primary_artist_id": "361476",
-                    "is_masterless": True,
                     "discogs_release_id": "8317023",
                     "is_appearance": False,
                 },
-            ]
+            ])
             status, data = self._get("/api/discogs/artist/361476?name=Deloris")
 
         self.assertEqual(status, 200)
-        row = data["release_groups"][0]
+        row = data["ungrouped_releases"][0]
         self.assertEqual(row["pipeline_status"], "wanted")
         self.assertEqual(row["pipeline_id"], 8838)
 

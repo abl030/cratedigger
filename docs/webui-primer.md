@@ -35,7 +35,7 @@ Browser → https://music.ablz.au
 |----------|--------|-------------|
 | `/` | GET | Serves the HTML UI |
 | `/api/search?q=...` | GET | Search MB for artists |
-| `/api/artist/<mbid>` | GET | Artist's release groups + official/bootleg classification |
+| `/api/artist/<mbid>` | GET | Artist's normalized work catalogue plus an empty `ungrouped_releases` bucket; each row carries structural and provenance evidence |
 | `/api/release-group/<mbid>` | GET | All releases for a release group (paginated from MB) |
 | `/api/release/<mbid>` | GET | Full release details with tracks |
 | `/api/pipeline/add` | POST | Add a release to the pipeline DB `{"mb_release_id": "..."}` or `{"discogs_release_id": "..."}` |
@@ -53,7 +53,7 @@ Browser → https://music.ablz.au
 | `/api/import-jobs/<id>` | GET | Poll a single import queue job |
 | `/api/library/artist?name=...` | GET | Albums by artist from beets library (MB vs Discogs source) |
 | `/api/discogs/search?q=...` | GET | Search Discogs mirror (artist or release mode via `type=` param) |
-| `/api/discogs/artist/<id>` | GET | Artist's complete releases grouped by master (via mirror `/masters/all` + `/appearances`) |
+| `/api/discogs/artist/<id>` | GET | Artist's normalized work catalogue plus separately conserved ungrouped release identities (via mirror `/masters/all` + `/appearances`) |
 | `/api/discogs/master/<id>` | GET | All pressings within a Discogs master release |
 | `/api/discogs/release/<id>` | GET | Full Discogs release details with tracks |
 
@@ -61,42 +61,52 @@ Browser → https://music.ablz.au
 
 - **Source toggle** — a labelled **Source** MB / Discogs switch in the browse tab
   header. The selected source is the *primary* discography for all search, artist,
-  and release views; the other source only *fills in* releases the primary is
-  missing, surfaced as the appended "Only on …" section. A live hint line under the
-  switch spells this out ("MusicBrainz is primary · Discogs fills the rest …") and
-  flips when you toggle, so the primary/complement relationship is never a mystery.
+  and release views. The other source is appended as conservatively
+  **unpaired** works, not claimed to be exclusive to that source: differing
+  work models and incomplete evidence can prevent a legitimate pair. A live
+  hint line under the switch states that relationship and flips with the
+  primary source.
 - **Search** — debounced text search, returns artists (or releases in album mode)
 - **Unified artist page (#575 PR4)** — one scrolling page (the old
   Discography / Analysis / Library / Compare sub-tabs are gone), sectioned by
   availability: **In library / In flight / Missing / Appearances /
-  Bootleg-only releases**, each grouped by type (Albums, EPs, Singles, etc.).
+  Promo-only works / Unofficial-only works / Unknown-provenance works /
+  Ungrouped Discogs releases**, each grouped by positively evidenced type
+  (Albums, EPs, Singles, Compilations, Live, etc.).
   Appearance provenance comes from each source rather than title heuristics:
   MusicBrainz release groups discovered through the `track_artist` release
   browse and Discogs rows from `/artists/<id>/appearances` are kept out of
-  mainline Albums even when they are VA compilations. Ownership matching is a
-  fallback for non-primary release-group credits. Missing = official own-work
+  mainline Albums even when they are VA compilations. Ownership matching uses
+  exact ID evidence only: MusicBrainz work rows match `mb_releasegroupid`,
+  while an ungrouped Discogs release may match its exact release ID. Titles
+  never establish ownership and a Discogs master never inherits ownership
+  from one of its child pressings. Missing = ordinary own-work
   release groups the beets library doesn't hold; In flight =
   requests currently `downloading` or `manual` (`wanted` is ambient after the
   full-library backfill and stays a badge). Two slow feeds decorate the page
   after the fast render, without re-rendering: `/api/artist/compare` appends an
-  "Only on Discogs/MusicBrainz" complement section, with source-only
-  appearances under a distinct **Appears on** bucket (silently skipped on
-  hosts without the Discogs mirror), and `/api/artist/<id>/disambiguate` adds
+  **Unpaired Discogs/MusicBrainz works** section, with appearances and
+  exceptional provenance retained in explicit nested buckets (silently
+  skipped on hosts without the Discogs mirror), and
+  `/api/artist/<id>/disambiguate` adds
   unique-track / covered-by chips to rows plus colour-dot recordings
   breakdowns inside expanded release groups (MB artists only). Expanding an
   in-library pressing's detail offers a lazy **Library detail** panel (path,
   download history, status / min-bitrate / intent controls) fetched from
   `/api/beets/album/<id>`.
   Cross-source pairing is conservative: normalized titles and appearance
-  provenance must agree; known Album/EP/Single sets must overlap; exact years
+  provenance must agree; ordinary and exceptional provenance cannot pair by
+  title alone; known Album/EP/Single sets must overlap; exact years
   may pair when a type is genuinely unknown; and an adjacent-year discrepancy
   pairs only with positive type overlap. Discogs structural evidence comes
   from the mirror's master-wide `primary_types`, never its representative
-  pressing's legacy scalar `type`. This preserves the Beatles' distinct
+  pressing's legacy scalar `type`; `format_qualifiers` supplies compilation,
+  live, remix, DJ-mix, and demo grouping. This preserves the Beatles' distinct
   *Twist and Shout* Album/EP/Single works while pairing *The Pointless Gift*
   despite MB (2000) and Discogs (2001) date disagreement. Reissues and
   remasters remain child pressings inside their existing MB release group or
-  Discogs master; this display merge does not split them.
+  Discogs master. Masterless Discogs rows are release identities, never work
+  candidates; they remain separately visible and expand the exact release.
   The pure metadata fill uses the mirror's bulk artist endpoint and is
   single-flight per cache key inside the threaded web process, so concurrent
   cold requests share one MB/Discogs/merge pass while every caller still gets
@@ -108,7 +118,8 @@ Browser → https://music.ablz.au
     (`splitPressings` in `web/js/discography.js`; an owned pressing is never
     hidden, whatever its status)
   - Exceptional artist-page sections stay quiet unless they contain something
-    owned. An in-library Bootleg-only, appearance, or other-source-only row
+    exactly owned. An in-library unofficial-only, appearance, unpaired, or
+    ungrouped-release row
     opens its exceptional section and only the type buckets containing
     in-library rows; a pipeline request alone never auto-expands them.
   - Releases already in pipeline DB or beets library are badged

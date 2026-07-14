@@ -32,9 +32,9 @@ A self-hosted mirror of the Discogs music database, serving a JSON API at `https
 | GET | `/api/releases/{id}` | Full release: tracks, genres, styles, identifiers |
 | GET | `/api/masters/{id}` | Master release with all child releases |
 | GET | `/api/artists/{id}` | Artist profile, aliases, name variations |
-| GET | `/api/artists/{id}/masters?page=1&per_page=100` | Paginated primary-credit masters and masterless releases; each row includes required sorted/deduplicated `primary_types` (`Album`, `EP`, `Single`) aggregated across every child pressing, with `[]` meaning unknown |
+| GET | `/api/artists/{id}/masters?page=1&per_page=100` | Paginated primary-credit masters and masterless releases; each row includes required sorted/deduplicated `primary_types` (`Album`, `EP`, `Single`), `format_qualifiers`, and `provenance` (`ordinary`, `promo`, `unofficial`), all aggregated across every child pressing |
 | GET | `/api/artists/{id}/masters/all` | All primary-credit masters and masterless releases in the same strict response shape, projected set-wise for cold large-artist reads |
-| GET | `/api/artists/{id}/appearances` | Track-credit appearances in the same strict row shape as `/masters`, including required `primary_types` |
+| GET | `/api/artists/{id}/appearances` | Track-credit appearances in the same strict row shape as `/masters`, including all three required evidence arrays |
 | GET | `/api/labels?name=X&page=1&per_page=25` | Label search with release counts and parent-label context |
 | GET | `/api/labels/{id}` | Label profile, direct release count, parent, and direct sub-labels |
 | GET | `/api/labels/{id}/releases?page=1&per_page=100&include_sublabels=true` | Paginated releases for a label, optionally including recursive sub-label releases |
@@ -63,6 +63,17 @@ cold misses for either key are process-local single-flight fills, with
 deep-copied results per request so live overlays cannot mutate another caller's
 metadata. A client disconnect during the fill does not cancel it, so the next
 request can consume the completed cache entry without refetching.
+
+The three evidence arrays are required, sorted, and duplicate-free; missing,
+wrongly typed, unsorted, or duplicated fields fail the artist request instead
+of silently falling back to the legacy representative-pressing scalar
+`type`. Cratedigger normalizes master rows as work identities and masterless
+rows as release identities. Only work identities enter the cross-source
+matcher. Ungrouped release identities are conserved in their own response
+bucket and navigate to the exact release endpoint. A mixed master (for
+example, ordinary plus unofficial child pressings) keeps every provenance
+value so the UI can display that evidence without misclassifying the whole
+work as an ordinary or unofficial-only album.
 
 ### API Examples
 

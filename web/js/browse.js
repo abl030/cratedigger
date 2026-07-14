@@ -3,7 +3,7 @@ import { state, API, toast } from './state.js';
 import { esc, jsArg, parsePastedId } from './util.js';
 import { loadReleaseGroup, renderReleaseDetail, applySearchTargetAfterDiscography } from './discography.js';
 import { applyAnalysisChips, applyAnalysisToOpenExpansions } from './analysis.js';
-import { classifyArtistRows, renderArtistSections, renderOtherSourceSection } from './artist_page.js';
+import { classifyArtistRows, renderArtistSections, renderUnpairedSourceSections } from './artist_page.js';
 import { searchLabels, renderLabelSearchResults, openLabelDetail, closeLabelDetail } from './labels.js';
 
 /**
@@ -33,8 +33,8 @@ async function findArtistOnSource(name, src) {
 /**
  * Reflect the active metadata source in the toggle buttons + the hint line.
  * The selected source is the PRIMARY discography; the other source only
- * fills in releases the primary is missing (the appended "Only on <other>"
- * section). Called from every place that changes browseSource so the
+ * exposes conservatively unpaired work units from the other source below.
+ * Called from every place that changes browseSource so the
  * primary/complement story never goes stale. Single source of truth for
  * the source-toggle chrome — the two call sites used to duplicate the
  * button-class flip and neither touched the hint.
@@ -48,8 +48,8 @@ function applySourceUI(src) {
   const hint = document.getElementById('source-hint');
   if (hint) {
     hint.innerHTML = src === 'discogs'
-      ? '<b class="src-primary">Discogs</b> is primary · MusicBrainz fills the rest (shown as "Only on MusicBrainz" below)'
-      : '<b class="src-primary">MusicBrainz</b> is primary · Discogs fills the rest (shown as "Only on Discogs" below)';
+      ? '<b class="src-primary">Discogs</b> is primary · unpaired MusicBrainz works are shown below'
+      : '<b class="src-primary">MusicBrainz</b> is primary · unpaired Discogs works and releases are shown below';
   }
 }
 
@@ -499,6 +499,7 @@ function renderUnified(el, aid, name, rgRes, libRes) {
     artistId: aid,
     artistName: name,
     releaseGroups: rgRes.release_groups || [],
+    ungroupedReleases: rgRes.ungrouped_releases || [],
     libraryAlbums: libRes.albums || [],
   });
   el.innerHTML = renderArtistSections(sections, { artistId: aid, artistName: name });
@@ -507,7 +508,7 @@ function renderUnified(el, aid, name, rgRes, libRes) {
 
 /**
  * Background decoration 1: the MB↔Discogs compare complement. Appends
- * an "Only on <other source>" section with the deduped bucket from
+ * honest unpaired-work and ungrouped-release sections from
  * /api/artist/compare. Silent on failure — a mirror-less host 503s and
  * the page simply stays single-source.
  * @param {HTMLElement} el
@@ -539,13 +540,21 @@ async function fireCompareComplement(el, aid, name, token) {
  * @param {Object} data - /api/artist/compare response
  */
 function appendOtherSourceSection(el, name, data) {
-  if (el.querySelector('#only-other-source')) return;
   const isDiscogs = state.browseSource === 'discogs';
-  const rows = isDiscogs ? (data.mb_only || []) : (data.discogs_only || []);
-  const html = renderOtherSourceSection(rows, {
+  const rows = isDiscogs
+    ? (data.mb_unpaired || [])
+    : (data.discogs_unpaired || []);
+  const ungrouped = isDiscogs
+    ? []
+    : (data.discogs_ungrouped_releases || []);
+  const html = renderUnpairedSourceSections(
+    el.querySelector('#unpaired-other-source') ? [] : rows,
+    el.querySelector('#ungrouped-discogs-releases') ? [] : ungrouped,
+    {
     artistName: name,
     source: isDiscogs ? 'mb' : 'discogs',
-  });
+    },
+  );
   if (html) el.insertAdjacentHTML('beforeend', html);
 }
 

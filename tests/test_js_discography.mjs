@@ -200,7 +200,10 @@ console.log('Release-id onclick arguments — adversarial deterministic pin');
   const id = "rg'\"\\</div><script>alert(1)</script>";
   const arg = expectedJsArg(id);
   const rgHtml = renderRgRow(
-    { id, title: 'Adversarial RG', first_release_date: '2003', is_masterless: true },
+    {
+      id, title: 'Adversarial release', first_release_date: '2003',
+      identity_kind: 'release',
+    },
     { artistName: 'The Wrens', nameLC: 'the wrens', source: 'mb' },
   );
   const pressingHtml = renderPressingRow({

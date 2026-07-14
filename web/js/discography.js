@@ -17,7 +17,7 @@ import {
  * One release-group row: year + title + badges + expansion target.
  * Shared by every section of the unified artist page (issue #575 PR4) —
  * In library, Missing, Appearances, Bootlegs, and the late-appended
- * "Only on <other source>" complement.
+ * unpaired work and ungrouped-release sections from the other source.
  *
  * @param {Object} rg - Release-group row from /api/artist or /api/discogs/artist
  *   (or a compare-bucket row for complement sections).
@@ -31,10 +31,11 @@ export function renderRgRow(rg, ctx) {
   const year = rg.first_release_date ? rg.first_release_date.slice(0, 4) : '';
   const creditNote = rg.artist_credit && rg.artist_credit.toLowerCase() !== ctx.nameLC
     ? `<span class="rg-meta"> - ${esc(rg.artist_credit)}</span>` : '';
-  const badges = renderStatusBadges(rg);
-  // Masterless Discogs releases have no child master to expand; the rg row
-  // is the leaf, so it carries data-release-id for search-by-ID ringing.
-  const leafAttr = rg.is_masterless ? ` data-release-id="${esc(rg.id)}"` : '';
+  const badges = renderStatusBadges(rg) + catalogueProvenanceBadges(rg);
+  const isReleaseUnit = rg.identity_kind === 'release';
+  // Ungrouped Discogs releases have no child master to expand; the row is
+  // the leaf, so it carries data-release-id for search-by-ID ringing.
+  const leafAttr = isReleaseUnit ? ` data-release-id="${esc(rg.id)}"` : '';
   // Search-plan inspector button — only when this rg has a pipeline
   // request. RG-level pipeline_id surfaces from the analysis overlay's
   // disambData snapshot via pipelineStore (see release_action_state.js).
@@ -46,7 +47,7 @@ export function renderRgRow(rg, ctx) {
     }).pipelineId,
   });
   const optParts = [];
-  if (rg.is_masterless) optParts.push('masterless:true');
+  if (isReleaseUnit) optParts.push('masterless:true');
   if (ctx.source) optParts.push(`source:'${ctx.source}'`);
   const opts = `{${optParts.join(',')}}`;
   return `
@@ -57,6 +58,20 @@ export function renderRgRow(rg, ctx) {
       <div class="releases" id="rel-${esc(rg.id)}"></div>
     </div>
   `;
+}
+
+/**
+ * Preserve mixed/exceptional master evidence on the collapsed work row.
+ * @param {Object} row
+ * @returns {string}
+ */
+export function catalogueProvenanceBadges(row) {
+  const provenance = new Set(row.provenance || []);
+  const labels = [];
+  if (provenance.has('promo')) labels.push('promo');
+  if (provenance.has('unofficial')) labels.push('unofficial');
+  return labels.map(label =>
+    `<span class="badge badge-nonofficial">${label}</span>`).join('');
 }
 
 /**
@@ -326,8 +341,8 @@ export async function loadReleaseGroup(id, el, opts = {}) {
   try {
     const source = opts.source || state.browseSource;
     const isDiscogs = source === 'discogs';
-    // Masterless Discogs releases (is_masterless from the artist endpoint)
-    // have no upstream master row; their ``id`` is a release ID. Hit the
+    // Ungrouped Discogs release identities have no upstream master row;
+    // their ``id`` is a release ID. Hit the
     // release endpoint directly and synthesise a single-pressing list so
     // the rest of the rendering path is unchanged.
     const masterless = isDiscogs && !!opts.masterless;

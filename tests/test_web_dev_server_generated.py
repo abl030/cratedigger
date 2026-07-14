@@ -225,8 +225,13 @@ class TestLiveDbMetadataWiringGenerated(unittest.TestCase):
         configure_live_db_metadata(config)
         cache._redis = FakeRedis()
         cache.meta_set(
-            f"artist:compare:v4:{mbid}:{discogs_id}",
-            {"both": [], "mb_only": [], "discogs_only": []},
+            f"artist:compare:v5:{mbid}:{discogs_id}",
+            {
+                "both": [],
+                "mb_unpaired": [],
+                "discogs_unpaired": [],
+                "discogs_ungrouped_releases": [],
+            },
         )
         cache.meta_set(f"mb:artist:{mbid}:name", artist_name)
         cache.meta_set(f"discogs:artist:{discogs_id}:name", artist_name)

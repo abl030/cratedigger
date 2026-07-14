@@ -7,7 +7,7 @@
  * sectioning so every view sorts the same way.
  *
  * Tolerates row shapes from different sources:
- *   - Discography RGs    : `type` + `secondary_types[]`
+ *   - Normalized artist rows: `primary_types[]` + source qualifiers
  *   - Analysis RGs       : `primary_type`
  *   - Library albums     : `type` (lowercase strings from beets albumtype)
  *   - Compare pairs      : `{mb, discogs}` — caller passes a custom
@@ -26,13 +26,23 @@ export const SECTION_ORDER = [
  * @returns {string}
  */
 export function classify(row) {
-  const st = row.secondary_types || [];
-  if (st.includes('Compilation')) return 'Compilations';
-  if (st.includes('Live')) return 'Live';
-  if (st.includes('Remix')) return 'Remixes';
-  if (st.includes('DJ-mix')) return 'DJ Mixes';
-  if (st.includes('Demo')) return 'Demos';
-  if (st.length > 0) return 'Other';
+  const qualifiers = [
+    ...(row.secondary_types || []),
+    ...(row.format_qualifiers || []),
+  ];
+  if (qualifiers.includes('Compilation')) return 'Compilations';
+  if (qualifiers.includes('Live')) return 'Live';
+  if (qualifiers.includes('Remix')) return 'Remixes';
+  if (qualifiers.includes('DJ-mix')) return 'DJ Mixes';
+  if (qualifiers.includes('Demo')) return 'Demos';
+  if (row.primary_types !== undefined) {
+    const structural = row.primary_types || [];
+    if (structural.includes('Album')) return 'Albums';
+    if (structural.includes('EP')) return 'EPs';
+    if (structural.includes('Single')) return 'Singles';
+    return 'Other';
+  }
+  if (qualifiers.length > 0) return 'Other';
   const t = String(row.primary_type || row.type || '').toLowerCase();
   if (t === 'album') return 'Albums';
   if (t === 'ep') return 'EPs';

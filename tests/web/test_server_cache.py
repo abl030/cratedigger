@@ -15,7 +15,28 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tests.web._harness import _FakeDbWebServerCase, _WebServerCase
 
+from lib.artist_catalogue import ArtistCatalogueRow
 from tests.helpers import make_request_row
+
+
+def _catalogue_row(
+    *, source: str, row_id: str, primary_artist_id: str,
+) -> ArtistCatalogueRow:
+    return ArtistCatalogueRow(
+        id=row_id,
+        title="OK Computer",
+        type="Album",
+        source="mb" if source == "mb" else "discogs",
+        identity_kind="work",
+        primary_types=["Album"],
+        secondary_types=[],
+        format_qualifiers=[],
+        provenance=[] if source == "mb" else ["ordinary"],
+        first_release_date="1997",
+        artist_credit="Radiohead",
+        primary_artist_id=primary_artist_id,
+        is_appearance=False,
+    )
 
 
 class TestOverlayNotBakedIntoRoutingCache(_WebServerCase):
@@ -337,17 +358,13 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
         fake = self._cache._redis
         assert isinstance(fake, FakeRedis)
 
-        mb_rg = {
-            "id": self.RG_ID, "title": "OK Computer", "type": "Album",
-            "secondary_types": [], "first_release_date": "1997",
-            "artist_credit": "Radiohead", "primary_artist_id": self.ARTIST_ID,
-        }
-        discogs_rg = {
-            "id": "21491", "title": "OK Computer", "type": "Album",
-            "primary_types": ["Album"],
-            "secondary_types": [], "first_release_date": "1997",
-            "artist_credit": "Radiohead", "primary_artist_id": "3840",
-        }
+        mb_rg = _catalogue_row(
+            source="mb", row_id=self.RG_ID,
+            primary_artist_id=self.ARTIST_ID,
+        )
+        discogs_rg = _catalogue_row(
+            source="discogs", row_id="21491", primary_artist_id="3840",
+        )
 
         with patch("web.server.mb_api") as mock_mb, \
                 patch("web.routes.browse.discogs_api") as mock_dg, \
@@ -375,7 +392,7 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
                      and "compare" in k]
         self.assertEqual(
             meta_keys,
-            [f"meta:artist:compare:v4:{self.ARTIST_ID}:3840"],
+            [f"meta:artist:compare:v5:{self.ARTIST_ID}:3840"],
             "the bulk-consumer deployment must create a naturally cold "
             "compare key without reusing a pre-bulk skeleton",
         )
@@ -386,17 +403,13 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
         first request's `name=` query param won for 24h. Canonical
         names from the MB/Discogs API must be used instead.
         """
-        mb_rg = {
-            "id": self.RG_ID, "title": "OK Computer", "type": "Album",
-            "secondary_types": [], "first_release_date": "1997",
-            "artist_credit": "Radiohead", "primary_artist_id": self.ARTIST_ID,
-        }
-        discogs_rg = {
-            "id": "21491", "title": "OK Computer", "type": "Album",
-            "primary_types": ["Album"],
-            "secondary_types": [], "first_release_date": "1997",
-            "artist_credit": "Radiohead", "primary_artist_id": "3840",
-        }
+        mb_rg = _catalogue_row(
+            source="mb", row_id=self.RG_ID,
+            primary_artist_id=self.ARTIST_ID,
+        )
+        discogs_rg = _catalogue_row(
+            source="discogs", row_id="21491", primary_artist_id="3840",
+        )
 
         # First request — misspelled name. Skeleton gets cached.
         with patch("web.server.mb_api") as mock_mb, \
@@ -450,17 +463,13 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
     def test_compare_overlay_reflects_library_flip(self) -> None:
         """Even with the compare skeleton cached, annotate_in_library
         must run on every request so badges flip with beets state."""
-        mb_rg = {
-            "id": self.RG_ID, "title": "OK Computer", "type": "Album",
-            "secondary_types": [], "first_release_date": "1997",
-            "artist_credit": "Radiohead", "primary_artist_id": self.ARTIST_ID,
-        }
-        discogs_rg = {
-            "id": "21491", "title": "OK Computer", "type": "Album",
-            "primary_types": ["Album"],
-            "secondary_types": [], "first_release_date": "1997",
-            "artist_credit": "Radiohead", "primary_artist_id": "3840",
-        }
+        mb_rg = _catalogue_row(
+            source="mb", row_id=self.RG_ID,
+            primary_artist_id=self.ARTIST_ID,
+        )
+        discogs_rg = _catalogue_row(
+            source="discogs", row_id="21491", primary_artist_id="3840",
+        )
 
         def _run(lib_albums: list[dict]) -> dict:
             with patch("web.server.mb_api") as mock_mb, \

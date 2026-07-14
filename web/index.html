@@ -544,12 +544,12 @@
     <div class="browse-source-toggle">
       <span class="source-label">Source</span>
       <div style="display:flex;gap:2px;">
-        <button class="p-btn active-status" id="source-mb" title="Use MusicBrainz as the primary discography. Releases found only on Discogs are added at the bottom as “Only on Discogs”." onclick="setBrowseSource('mb')">MB</button>
-        <button class="p-btn" id="source-discogs" title="Use Discogs as the primary discography. Releases found only on MusicBrainz are added at the bottom as “Only on MusicBrainz”." onclick="setBrowseSource('discogs')">Discogs</button>
+        <button class="p-btn active-status" id="source-mb" title="Use MusicBrainz as the primary discography. Conservatively unpaired Discogs works and ungrouped releases remain visible below." onclick="setBrowseSource('mb')">MB</button>
+        <button class="p-btn" id="source-discogs" title="Use Discogs as the primary discography. Conservatively unpaired MusicBrainz works remain visible below." onclick="setBrowseSource('discogs')">Discogs</button>
       </div>
     </div>
   </div>
-  <div id="source-hint"><b class="src-primary">MusicBrainz</b> is primary · Discogs fills the rest (shown as "Only on Discogs" below)</div>
+  <div id="source-hint"><b class="src-primary">MusicBrainz</b> is primary · unpaired Discogs works and releases are shown below</div>
   <div id="results"></div>
   <div id="browse-artist" style="display:none;">
     <div id="browse-artist-header" style="margin:12px 0 8px;display:flex;align-items:center;gap:12px;">

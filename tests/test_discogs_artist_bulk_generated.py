@@ -13,6 +13,7 @@ import os
 import sys
 import unittest
 from copy import deepcopy
+from collections.abc import Mapping, Sequence
 from typing import Any
 from unittest.mock import patch
 
@@ -27,11 +28,15 @@ from web.discogs import DiscogsArtistCatalogueIncomplete, get_artist_releases
 
 
 _PRIMARY_TYPES = ("Album", "EP", "Single")
+_PROVENANCE = ("ordinary", "promo", "unofficial")
+_QUALIFIERS = ("Compilation", "Promo", "Unofficial Release", "LP")
 _ROW_FIELDS = (
     "id",
     "title",
     "type",
     "primary_types",
+    "format_qualifiers",
+    "provenance",
     "first_release_date",
     "artist_credit",
     "primary_artist_id",
@@ -48,9 +53,15 @@ def _artist_rows(draw: st.DrawFn) -> dict[str, Any]:
         "id": f"release-{release_id}" if masterless else release_id,
         "title": draw(st.text(max_size=20)),
         "type": draw(st.sampled_from((*_PRIMARY_TYPES, "Other"))),
-        "primary_types": draw(st.lists(
+        "primary_types": sorted(draw(st.lists(
             st.sampled_from(_PRIMARY_TYPES), max_size=3, unique=True,
-        )),
+        ))),
+        "format_qualifiers": sorted(draw(st.lists(
+            st.sampled_from(_QUALIFIERS), max_size=4, unique=True,
+        ))),
+        "provenance": sorted(draw(st.lists(
+            st.sampled_from(_PROVENANCE), min_size=1, max_size=3, unique=True,
+        ))),
         "first_release_date": draw(st.sampled_from(("", "1963", "2001-02-03"))),
         "artist_credit": draw(st.text(max_size=20)),
         "primary_artist_id": draw(st.one_of(
@@ -72,8 +83,12 @@ def _expected_row(raw: dict[str, Any], *, appearance: bool) -> dict[str, Any]:
         "id": bare_id,
         "title": raw["title"],
         "type": raw["type"],
+        "source": "discogs",
+        "identity_kind": "release" if masterless else "work",
         "primary_types": list(raw["primary_types"]),
         "secondary_types": [],
+        "format_qualifiers": list(raw["format_qualifiers"]),
+        "provenance": list(raw["provenance"]),
         "first_release_date": raw["first_release_date"],
         "artist_credit": raw["artist_credit"],
         "primary_artist_id": (
@@ -84,14 +99,12 @@ def _expected_row(raw: dict[str, Any], *, appearance: bool) -> dict[str, Any]:
         "is_appearance": appearance,
     }
     if masterless:
-        row["is_masterless"] = True
         row["discogs_release_id"] = bare_id
     return row
 
 
 def _identity(row: dict[str, Any]) -> tuple[str, str]:
-    namespace = "release" if row.get("is_masterless") is True else "master"
-    return namespace, row["id"]
+    return row["identity_kind"], row["id"]
 
 
 def _expected_catalogue(
@@ -112,7 +125,8 @@ def _expected_catalogue(
 
 
 def assert_catalogue_projection(
-    expected: list[dict[str, Any]], actual: list[dict[str, Any]],
+    expected: Sequence[Mapping[str, Any]],
+    actual: Sequence[Mapping[str, Any]],
 ) -> None:
     """Check conservation, provenance, fields, and stable ordering together."""
     if actual != expected:
@@ -123,6 +137,24 @@ def assert_complete_semantic_envelope(payload: dict[str, Any]) -> None:
     """Independent oracle for the mirror's one-page completeness contract."""
     if payload["page"] != 1 or len(payload["results"]) != payload["total"]:
         raise AssertionError(f"incomplete bulk envelope: {payload!r}")
+
+
+def assert_canonical_evidence(row: Mapping[str, Any]) -> None:
+    """Independent oracle for required sorted, duplicate-free evidence."""
+    for field in ("primary_types", "format_qualifiers", "provenance"):
+        values = row[field]
+        if values != sorted(set(values)):
+            raise AssertionError(f"non-canonical {field}: {values!r}")
+
+
+def assert_identity_marker_consistent(row: Mapping[str, Any]) -> None:
+    """Independent oracle for the release-unit namespace marker."""
+    raw_id = row["id"]
+    has_release_prefix = (
+        isinstance(raw_id, str) and raw_id.startswith("release-")
+    )
+    if bool(row["is_masterless"]) != has_release_prefix:
+        raise AssertionError("masterless marker disagrees with identity namespace")
 
 
 def _response(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -156,7 +188,7 @@ def _run_consumer(
         "web.discogs._cache.memoize_meta",
         side_effect=lambda _key, fetch: fetch(),
     ):
-        return get_artist_releases(82730)
+        return msgspec.to_builtins(get_artist_releases(82730))
 
 
 class TestGeneratedBulkCatalogue(unittest.TestCase):
@@ -192,6 +224,8 @@ class TestGeneratedBulkCatalogue(unittest.TestCase):
             "title": 7,
             "type": 7,
             "primary_types": [7],
+            "format_qualifiers": [7],
+            "provenance": [7],
             "first_release_date": 7,
             "artist_credit": 7,
             "primary_artist_id": "7",
@@ -199,6 +233,41 @@ class TestGeneratedBulkCatalogue(unittest.TestCase):
         }
         invalid[corrupt] = wrong[corrupt]
         with self.assertRaises(msgspec.ValidationError):
+            _run_consumer([invalid], [])
+
+    @given(
+        row=_artist_rows(),
+        field=st.sampled_from(
+            ("primary_types", "format_qualifiers", "provenance")
+        ),
+    )
+    def test_duplicate_evidence_fails_the_real_consumer(
+        self, row: dict[str, Any], field: str,
+    ) -> None:
+        invalid = deepcopy(row)
+        values = list(invalid[field])
+        if not values:
+            defaults = {
+                "primary_types": "Album",
+                "format_qualifiers": "Compilation",
+                "provenance": "ordinary",
+            }
+            values = [defaults[field]]
+        invalid[field] = [*values, values[0]]
+        with self.assertRaisesRegex(AssertionError, "non-canonical"):
+            assert_canonical_evidence(invalid)
+        with self.assertRaisesRegex(ValueError, "sorted and deduplicated"):
+            _run_consumer([invalid], [])
+
+    @given(row=_artist_rows())
+    def test_masterless_marker_must_match_release_identity_namespace(
+        self, row: dict[str, Any],
+    ) -> None:
+        invalid = deepcopy(row)
+        invalid["is_masterless"] = not invalid["is_masterless"]
+        with self.assertRaisesRegex(AssertionError, "identity namespace"):
+            assert_identity_marker_consistent(invalid)
+        with self.assertRaisesRegex(ValueError, "must agree"):
             _run_consumer([invalid], [])
 
     @given(
@@ -253,6 +322,21 @@ class TestGeneratedBulkCatalogue(unittest.TestCase):
 
 
 class TestBulkCatalogueCheckerKnownBad(unittest.TestCase):
+    def test_identity_marker_checker_rejects_prefixed_master(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "identity namespace"):
+            assert_identity_marker_consistent({
+                "id": "release-122", "is_masterless": False,
+            })
+
+    def test_evidence_checker_rejects_unsorted_values(self) -> None:
+        row = {
+            "primary_types": ["Album"],
+            "format_qualifiers": [],
+            "provenance": ["unofficial", "ordinary"],
+        }
+        with self.assertRaisesRegex(AssertionError, "non-canonical provenance"):
+            assert_canonical_evidence(row)
+
     def test_envelope_checker_rejects_a_later_page(self) -> None:
         invalid = _response([])
         invalid["page"] = 2
@@ -272,6 +356,8 @@ class TestBulkCatalogueCheckerKnownBad(unittest.TestCase):
                 "title": "Master",
                 "type": "Album",
                 "primary_types": ["Album"],
+                "format_qualifiers": [],
+                "provenance": ["ordinary"],
                 "first_release_date": "1964",
                 "artist_credit": "Artist",
                 "primary_artist_id": 1,
@@ -290,6 +376,8 @@ class TestBulkCatalogueCheckerKnownBad(unittest.TestCase):
                     "title": str(row_id),
                     "type": "Album",
                     "primary_types": ["Album"],
+                    "format_qualifiers": [],
+                    "provenance": ["ordinary"],
                     "first_release_date": date,
                     "artist_credit": "Artist",
                     "primary_artist_id": 1,
