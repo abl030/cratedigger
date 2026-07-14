@@ -85,6 +85,7 @@ RemoveFn = Callable[[str], None]
 PruneFn = Callable[[str], None]
 MetadataRemoveFn = Callable[[], None]
 ListDirFn = Callable[[Path], tuple[Path, ...]]
+PathExistsFn = Callable[[str], bool]
 
 
 def _same_configured_path(expected: str, configured: str) -> bool:
@@ -134,7 +135,21 @@ def _decode_path(raw: object) -> str:
 
 
 def _path_exists(path: str) -> bool:
-    return os.path.lexists(path)
+    """Probe one owned path without collapsing I/O errors into absence."""
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _remaining_owned_paths(
+    owned_paths: tuple[_OwnedPath, ...],
+    path_exists: PathExistsFn,
+) -> tuple[str, ...]:
+    return tuple(
+        item.path for item in owned_paths if path_exists(item.path)
+    )
 
 
 def _confined_path(raw: object, root: Path) -> Path | None:
@@ -185,6 +200,7 @@ def _delete_manifest(
     remove_path: RemoveFn,
     prune_dir: PruneFn,
     list_dir: ListDirFn = _list_directory,
+    path_exists: PathExistsFn = _path_exists,
 ) -> BeetsDeleteOutcome:
     """Apply the monotonic filesystem -> metadata state transition."""
     owned_path_set = {item.path for item in owned_paths}
@@ -201,21 +217,54 @@ def _delete_manifest(
                 f"{type(exc).__name__}: {exc}"
             ),
             album_still_present=album_present(),
-            remaining_owned_paths=tuple(
-                item.path for item in owned_paths if _path_exists(item.path)
-            ),
+            # Enumeration failed before any mutation. Reporting the complete
+            # manifest is conservative and avoids a second fallible probe.
+            remaining_owned_paths=tuple(item.path for item in owned_paths),
         )
 
     deleted_tracks = 0
     deleted_artifacts = 0
     for target in owned_paths:
-        existed = _path_exists(target.path)
+        try:
+            existed = path_exists(target.path)
+        except OSError as exc:
+            return BeetsDeleteFailed(
+                album_id=album_id,
+                reason="filesystem_error",
+                detail=(
+                    "owned-path presence probe failed before deletion: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                album_still_present=album_present(),
+                deleted_tracks=deleted_tracks,
+                deleted_artifacts=deleted_artifacts,
+                remaining_owned_paths=tuple(
+                    item.path for item in owned_paths
+                ),
+                preserved_paths=preserved,
+            )
         try:
             remove_path(target.path)
         except Exception as exc:  # noqa: BLE001 -- typed subprocess outcome
-            remaining = tuple(
-                item.path for item in owned_paths if _path_exists(item.path)
-            )
+            try:
+                remaining = _remaining_owned_paths(owned_paths, path_exists)
+            except OSError as probe_exc:
+                return BeetsDeleteFailed(
+                    album_id=album_id,
+                    reason="filesystem_error",
+                    detail=(
+                        f"{type(exc).__name__}: {exc}; owned-path presence "
+                        "probe also failed after the removal error: "
+                        f"{type(probe_exc).__name__}: {probe_exc}"
+                    ),
+                    album_still_present=album_present(),
+                    deleted_tracks=deleted_tracks,
+                    deleted_artifacts=deleted_artifacts,
+                    remaining_owned_paths=tuple(
+                        item.path for item in owned_paths
+                    ),
+                    preserved_paths=preserved,
+                )
             return BeetsDeleteFailed(
                 album_id=album_id,
                 reason="filesystem_error",
@@ -226,14 +275,45 @@ def _delete_manifest(
                 remaining_owned_paths=remaining,
                 preserved_paths=preserved,
             )
-        if existed and not _path_exists(target.path):
+        try:
+            survived = path_exists(target.path)
+        except OSError as exc:
+            return BeetsDeleteFailed(
+                album_id=album_id,
+                reason="postcondition_failed",
+                detail=(
+                    "owned-path presence probe failed after deletion: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                album_still_present=album_present(),
+                deleted_tracks=deleted_tracks,
+                deleted_artifacts=deleted_artifacts,
+                remaining_owned_paths=tuple(
+                    item.path for item in owned_paths
+                ),
+                preserved_paths=preserved,
+            )
+        if existed and not survived:
             deleted_artifacts += 1
             if target.kind == "track":
                 deleted_tracks += 1
 
-    remaining = tuple(
-        item.path for item in owned_paths if _path_exists(item.path)
-    )
+    try:
+        remaining = _remaining_owned_paths(owned_paths, path_exists)
+    except OSError as exc:
+        return BeetsDeleteFailed(
+            album_id=album_id,
+            reason="postcondition_failed",
+            detail=(
+                "owned-path presence probe failed during final verification: "
+                f"{type(exc).__name__}: {exc}"
+            ),
+            album_still_present=album_present(),
+            deleted_tracks=deleted_tracks,
+            deleted_artifacts=deleted_artifacts,
+            remaining_owned_paths=tuple(item.path for item in owned_paths),
+            preserved_paths=preserved,
+        )
     try:
         preserved = _remaining_unknown(
             album_dirs, owned_path_set, list_dir=list_dir,

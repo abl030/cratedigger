@@ -60,7 +60,8 @@ Every top-level `pipeline-cli` subcommand, one line each. Run `pipeline-cli rout
 exact Beets row and owned artifacts are absent; `preserved_paths` lists unknown
 content left untouched and `notifications` records media submissions/warnings.
 `error=delete_incomplete` always preserves the PostgreSQL request and skips
-media notification. For ordinary filesystem failures the Beets row also stays
+media notification, and exits with code 4 to match the API's HTTP 409 conflict.
+For ordinary filesystem failures the Beets row also stays
 as retry authority. A lost subprocess/protocol acknowledgement is explicitly
 manual: the JSON retains the preflight album, artist, former exact path, and
 pipeline ID/status, but warns that filesystem deletion is unconfirmed and

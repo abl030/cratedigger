@@ -473,7 +473,9 @@ released.
 Unknown content is never recursively guessed away. It remains on disk, appears
 in `preserved_paths`, and blocks directory pruning. An error enumerating an
 album directory fails closed before metadata removal; it is never interpreted
-as an empty directory. Partial I/O leaves both the Beets row and pipeline row
+as an empty directory. Owned-path presence uses strict `lstat`: only
+`FileNotFoundError` means absent, while every other probe error fails closed
+before Beets metadata removal. Partial I/O leaves both the Beets row and pipeline row
 available for retry. Zero newly deleted files is
 successful only when the complete postcondition was already satisfied.
 

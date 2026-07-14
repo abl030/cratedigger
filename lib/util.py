@@ -568,12 +568,11 @@ def _notifier_container_path(
     server sees on its side of a ``local_prefix:container_prefix`` remap —
     the join key for locating an album in Plex/Jellyfin.
 
-    Mirrors the absolutize + path_map transform in ``trigger_plex_scan``. Kept
-    separate from that function deliberately: ``trigger_plex_scan`` has a
-    documented five-week silent-failure history (see
-    ``docs/solutions/runtime-errors/plex-partial-scan-silent-200.md``) and is
-    not refactored here to avoid regressing it. Returns ``None`` when the
-    result is not absolute (a media server can't match a relative path)."""
+    Mirrors the absolutize + path-map transform used by
+    ``request_plex_scan``. It remains a pure helper so lookup callers can
+    derive the media-server path without submitting a scan request. Returns
+    ``None`` when the result is not absolute (a media server cannot match a
+    relative path)."""
     if not imported_path:
         return None
     out = imported_path

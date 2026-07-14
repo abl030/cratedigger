@@ -475,6 +475,63 @@ class TestDeleteReleaseFromLibrary(unittest.TestCase):
         self.assertEqual(result.preserved_paths, (sentinel,))
         self.assertIsNotNone(pipeline.get_request(42))
 
+    def test_presence_probe_error_retains_beets_pg_and_skips_notify(self) -> None:
+        track_path = self._seed_album()
+        album_dir = os.path.dirname(track_path)
+        pipeline = FakePipelineDB()
+        pipeline.seed_request(make_request_row(
+            id=42, status="imported", mb_release_id=RELEASE_UUID,
+        ))
+        probe_calls = 0
+        notifications: list[str] = []
+
+        def probe(path: str) -> bool:
+            nonlocal probe_calls
+            probe_calls += 1
+            if probe_calls == 2:
+                raise OSError("planted post-delete presence fault")
+            try:
+                os.lstat(path)
+            except FileNotFoundError:
+                return False
+            return True
+
+        def presence_failure(
+            request: BeetsDeleteRequest,
+        ) -> BeetsDeleteCompleted | BeetsDeleteFailed:
+            return _delete_manifest(
+                album_id=request.album_id,
+                album_name="Test Album",
+                artist_name="Test Artist",
+                owned_paths=(_OwnedPath(track_path, "track"),),
+                album_dirs=(album_dir,),
+                metadata_remove=lambda: self.fail(
+                    "presence failure must retain Beets metadata",
+                ),
+                album_present=lambda: True,
+                remove_path=os.remove,
+                prune_dir=lambda _path: None,
+                path_exists=probe,
+            )
+
+        with BeetsDB(self.db_path) as beets:
+            result = delete_release_from_library(
+                pipeline_db=pipeline,
+                beets_db=beets,
+                request=DeleteRequest(album_id=7, purge_pipeline=True),
+                beets_delete_fn=presence_failure,
+                notify_fn=lambda path: notifications.append(path) or (),
+            )
+            self.assertIsNotNone(beets.get_album_detail(7))
+
+        self.assertIsInstance(result, DeleteIncomplete)
+        assert isinstance(result, DeleteIncomplete)
+        self.assertEqual(result.reason, "postcondition_failed")
+        self.assertIn("presence probe", result.detail)
+        self.assertFalse(os.path.exists(track_path))
+        self.assertIsNotNone(pipeline.get_request(42))
+        self.assertEqual(notifications, [])
+
     def test_notifier_exception_is_typed_after_locks_release(self) -> None:
         class TrackingPipeline(FakePipelineDB):
             active_locks = 0

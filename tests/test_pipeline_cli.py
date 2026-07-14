@@ -4552,7 +4552,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
             )
 
         payload = json.loads(output.getvalue())
-        self.assertEqual(rc, 1)
+        self.assertEqual(rc, 4)
         self.assertEqual(payload["error"], "delete_incomplete")
         self.assertFalse(payload["album_still_present"])
         self.assertTrue(payload["acknowledgement_lost"])

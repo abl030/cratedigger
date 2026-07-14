@@ -24,6 +24,7 @@ from lib.beets_delete import (
     _OwnedPath,
     _confined_path,
     _delete_manifest,
+    _path_exists,
     _remove_album_metadata_atomically,
     run_beets_delete,
 )
@@ -239,6 +240,70 @@ class TestPinnedBeetsDelete(unittest.TestCase):
 
 
 class TestDeleteManifestOrdering(unittest.TestCase):
+    def test_strict_presence_probe_only_treats_not_found_as_absent(self) -> None:
+        with patch("lib.beets_delete.os.lstat", side_effect=FileNotFoundError):
+            self.assertFalse(_path_exists("/library/missing.flac"))
+        with patch(
+            "lib.beets_delete.os.lstat",
+            side_effect=OSError("planted stat I/O fault"),
+        ), self.assertRaisesRegex(OSError, "planted stat I/O fault"):
+            _path_exists("/library/unreadable.flac")
+
+    def test_presence_probe_errors_fail_closed_at_every_phase(self) -> None:
+        scenarios = (
+            ("pre", 1, False, "filesystem_error", True),
+            ("post", 2, False, "postcondition_failed", False),
+            ("progress", 2, True, "filesystem_error", True),
+            ("final", 3, False, "postcondition_failed", False),
+        )
+        for phase, fault_at, removal_fault, reason, track_survives in scenarios:
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as raw:
+                track = Path(raw) / "01.flac"
+                track.write_bytes(b"audio")
+                metadata_present = True
+                probe_calls = 0
+
+                def probe(path: str) -> bool:
+                    nonlocal probe_calls
+                    probe_calls += 1
+                    if probe_calls == fault_at:
+                        raise OSError(f"planted {phase} presence fault")
+                    try:
+                        os.lstat(path)
+                    except FileNotFoundError:
+                        return False
+                    return True
+
+                def remove(path: str) -> None:
+                    if removal_fault:
+                        raise OSError("planted removal fault")
+                    os.remove(path)
+
+                def remove_metadata() -> None:
+                    nonlocal metadata_present
+                    metadata_present = False
+
+                outcome = _delete_manifest(
+                    album_id=7,
+                    album_name="Album",
+                    artist_name="Artist",
+                    owned_paths=(_OwnedPath(str(track), "track"),),
+                    album_dirs=(raw,),
+                    metadata_remove=remove_metadata,
+                    album_present=lambda: metadata_present,
+                    remove_path=remove,
+                    prune_dir=lambda _path: None,
+                    path_exists=probe,
+                )
+
+                self.assertIsInstance(outcome, BeetsDeleteFailed)
+                assert isinstance(outcome, BeetsDeleteFailed)
+                self.assertEqual(outcome.reason, reason)
+                self.assertIn("presence probe", outcome.detail)
+                self.assertTrue(metadata_present)
+                self.assertEqual(track.exists(), track_survives)
+                self.assertEqual(outcome.remaining_owned_paths, (str(track),))
+
     def test_unknown_enumeration_error_prevents_any_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             track = Path(raw) / "01.flac"

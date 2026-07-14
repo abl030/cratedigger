@@ -162,6 +162,24 @@ def assert_enumeration_failure_fails_closed(
         raise AssertionError("enumeration failure notified media servers")
 
 
+def assert_presence_probe_failure_fails_closed(
+    *,
+    completed: bool,
+    beets_present: bool,
+    pipeline_present: bool,
+    notification_count: int,
+) -> None:
+    """Presence-probe failure retains both deletion authorities."""
+    if completed:
+        raise AssertionError("presence-probe failure was reported as success")
+    if not beets_present:
+        raise AssertionError("presence-probe failure removed Beets authority")
+    if not pipeline_present:
+        raise AssertionError("presence-probe failure purged pipeline authority")
+    if notification_count:
+        raise AssertionError("presence-probe failure notified media servers")
+
+
 def _different_release(release_id: str) -> str:
     identity = ReleaseIdentity.from_id(release_id)
     assert identity is not None
@@ -901,6 +919,109 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
             if unknown_payload is not None:
                 self.assertEqual(unknown.read_bytes(), unknown_payload)
 
+    @example(fault_stage="pre", purge_pipeline=True)
+    @example(fault_stage="post", purge_pipeline=True)
+    @example(fault_stage="progress", purge_pipeline=False)
+    @example(fault_stage="final", purge_pipeline=True)
+    @given(
+        fault_stage=st.sampled_from(("pre", "post", "progress", "final")),
+        purge_pipeline=st.booleans(),
+    )
+    def test_presence_probe_faults_retain_beets_pg_and_notifications(
+        self,
+        fault_stage: str,
+        purge_pipeline: bool,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            track = root / "01.flac"
+            track.write_bytes(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=41,
+                status="imported",
+                mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            ))
+            beets = FakeBeetsDB()
+            beets.set_album_detail(7, {
+                "id": 7,
+                "album": "Album",
+                "artist": "Artist",
+                "mb_albumid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "discogs_albumid": None,
+                "path": str(root),
+                "tracks": [{"id": 1, "path": str(track)}],
+            })
+            notifications: list[str] = []
+            probe_calls = 0
+            fault_call = {
+                "pre": 1,
+                "post": 2,
+                "progress": 2,
+                "final": 3,
+            }[fault_stage]
+
+            def probe(path: str) -> bool:
+                nonlocal probe_calls
+                probe_calls += 1
+                if probe_calls == fault_call:
+                    raise OSError(
+                        f"generated {fault_stage} presence-probe fault",
+                    )
+                try:
+                    os.lstat(path)
+                except FileNotFoundError:
+                    return False
+                return True
+
+            def remove(path: str) -> None:
+                if fault_stage == "progress":
+                    raise OSError("generated removal fault")
+                os.remove(path)
+
+            def remove_metadata() -> None:
+                beets._album_detail.pop(7)
+
+            def failed_probe(
+                request: BeetsDeleteRequest,
+            ) -> BeetsDeleteCompleted | BeetsDeleteFailed:
+                return _delete_manifest(
+                    album_id=request.album_id,
+                    album_name="Album",
+                    artist_name="Artist",
+                    owned_paths=(_OwnedPath(str(track), "track"),),
+                    album_dirs=(str(root),),
+                    metadata_remove=remove_metadata,
+                    album_present=lambda: (
+                        beets.get_album_detail(request.album_id) is not None
+                    ),
+                    remove_path=remove,
+                    prune_dir=lambda _path: None,
+                    path_exists=probe,
+                )
+
+            result = delete_release_from_library(
+                pipeline_db=db,
+                beets_db=beets,
+                request=DeleteRequest(
+                    album_id=7,
+                    purge_pipeline=purge_pipeline,
+                ),
+                beets_delete_fn=failed_probe,
+                notify_fn=lambda path: notifications.append(path) or (),
+            )
+
+            assert_presence_probe_failure_fails_closed(
+                completed=isinstance(result, DeleteSuccess),
+                beets_present=beets.get_album_detail(7) is not None,
+                pipeline_present=db.get_request(41) is not None,
+                notification_count=len(notifications),
+            )
+            self.assertIsInstance(result, DeleteIncomplete)
+            assert isinstance(result, DeleteIncomplete)
+            self.assertIn("presence", result.detail)
+            self.assertEqual(result.remaining_owned_paths, (str(track),))
+
     @given(
         mismatch_db=st.booleans(),
         mismatch_root=st.booleans(),
@@ -1068,6 +1189,34 @@ class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
         for name, world in mutants.items():
             with self.subTest(mutant=name), self.assertRaises(AssertionError):
                 assert_enumeration_failure_fails_closed(
+                    completed=bool(world["completed"]),
+                    beets_present=bool(world["beets_present"]),
+                    pipeline_present=bool(world["pipeline_present"]),
+                    notification_count=int(world["notification_count"]),
+                )
+
+    def test_presence_probe_checker_kills_each_fail_closed_mutant(self) -> None:
+        mutants = {
+            "reported_success": dict(
+                completed=True, beets_present=True,
+                pipeline_present=True, notification_count=0,
+            ),
+            "beets_removed": dict(
+                completed=False, beets_present=False,
+                pipeline_present=True, notification_count=0,
+            ),
+            "pipeline_purged": dict(
+                completed=False, beets_present=True,
+                pipeline_present=False, notification_count=0,
+            ),
+            "media_notified": dict(
+                completed=False, beets_present=True,
+                pipeline_present=True, notification_count=1,
+            ),
+        }
+        for name, world in mutants.items():
+            with self.subTest(mutant=name), self.assertRaises(AssertionError):
+                assert_presence_probe_failure_fails_closed(
                     completed=bool(world["completed"]),
                     beets_present=bool(world["beets_present"]),
                     pipeline_present=bool(world["pipeline_present"]),

@@ -208,7 +208,7 @@ def cmd_library_delete(
             "remaining_owned_paths": list(result.remaining_owned_paths),
             "preserved_paths": list(result.preserved_paths),
         }), file=sys.stderr)
-        return 1
+        return 4
     raise AssertionError(f"Unhandled library-delete result: {result!r}")
 
 
