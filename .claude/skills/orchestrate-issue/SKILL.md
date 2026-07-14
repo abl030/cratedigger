@@ -1,280 +1,85 @@
 ---
 name: orchestrate-issue
-description: Orchestrate a substantial Cratedigger GitHub issue from scope audit through multiple isolated implementation PRs, independent review loops, merge commits, deployment, live verification, tagging, and closure. Use when the user asks to complete or ship an entire issue, especially when it spans several workstreams or PRs and requires implementation agents to remain separate from review agents. Do not use for a single small patch, diagnosis-only request, or ordinary code review.
+description: Orchestrate a substantial Cratedigger issue through scoped PRs, independent review, merge, deployment, live verification, tagging, and closure. Use for whole-issue delivery, especially when several workstreams can run concurrently. Do not use for a small patch, diagnosis-only request, or ordinary review.
 ---
 
 # Orchestrate Issue
 
-Own the issue end to end. Delegate bounded execution and independent review,
-but keep scope coverage, architectural decisions, merge authority, deployment,
-and final verification in the orchestrator.
+Own the outcome, not every keystroke. Keep scope and architecture coherent while
+agents implement and review bounded pieces. Repository instructions remain the
+authority; load the deploy skill when it is time to ship instead of repeating
+its runbook here.
 
-Do not use Compound Engineering or `ce-*` skills in this repository.
+## Shape the work
 
-## 1. Establish the contract
+Read the issue and comments, inspect the relevant code and live state, then make
+a compact coverage ledger: requested outcome, PR, dependency, and evidence.
+Use it to prevent forgotten edge items, not to rewrite the issue as bureaucracy.
 
-1. Read the issue body and every comment. Read current repository instructions
-   and every path-scoped rule that the issue may touch.
-2. Inspect the relevant code and live state before deciding the PR breakdown.
-   Do not merely restate the issue's suggested grouping.
-3. Build a coverage ledger containing:
-   - every named workstream and acceptance criterion;
-   - every "small", optional-looking, or batchable item;
-   - decisions the operator must make;
-   - the planned PR and verification evidence for each item.
-4. Create a native task plan with explicit dependencies and ownership surfaces.
-   Fill available agent slots with independent implementation and review work.
-   Serialize only when a concrete dependency, overlapping mutation surface, or
-   required merge order makes concurrency unsafe; never serialize by default.
-5. State any interpretation that changes product behavior. Preserve the
-   archivist invariants: strict pressing identity, perpetual searching,
-   reversible/operator-owned decisions, and positive ownership before cleanup.
+Prefer small, coherent PRs in isolated worktrees. Use available agent slots for
+independent work when it shortens the critical path; an idle slot is cheaper
+than a duplicate agent. Serialize only for a concrete dependency, overlapping
+ownership, or required merge order. Independent PRs may start from the same
+current `main`; refresh it before final review.
 
-The coverage ledger is the defense against an implementer completing the main
-idea while silently missing the edge items.
+## Implement and review
 
-## 2. Isolate every PR
+Compose agents around bounded jobs, not a fixed per-PR template. Implementation
+may stay local, be delegated, or be split across disjoint surfaces. Review may
+be broad or specialist, but must be independent of the code it assesses. Use
+the fewest agents that give real coverage. Do not spend tokens on duplicate
+generalist reviews or send several agents to answer the same question.
 
-For each PR:
+Treat tokens and context length as budgets. Brief agents with the issue slice,
+worktree, exact SHA, and only the relevant rules; point to durable files instead
+of pasting conversation history. Keep handoffs compact. Replace an agent whose
+context is getting long at a coherent boundary. Never carry a subagent into the
+next PR.
 
-1. Fetch `origin/main`.
-2. Create a fresh branch and worktree under a task-specific path outside the
-   shared primary checkout.
-3. Base the worktree on current `origin/main`, not on another unmerged feature
-   branch, unless the issue explicitly requires a stack.
-4. Never edit or clean the shared primary worktree. Treat unrelated dirt as
-   another operator's work.
-5. Create worktrees for independent PRs concurrently from the same current
-   `origin/main`. Start a dependent PR only after its prerequisite merges.
-   Every concurrent PR must refresh and integrate current `main` locally before
-   its final review.
+Let useful implementations and reviews overlap when safe. Agents should run
+autonomously without reassurance pings or routine polling.
 
-Record the worktree, branch, base SHA, PR number, and current head SHA in the
-plan or coverage ledger.
+Keep work local through review. Implementers use focused tests while converging
+and follow the repository's rules for tests, docs, and generated properties.
+The orchestrator understands the diff and scope before handing the exact signed
+local SHA over for independent review.
 
-## 3. Delegate implementation with a hard role boundary
+Review returns either one consolidated finding batch or `CLEAN`. Fix findings
+locally and repeat on the new SHA. An independent `CLEAN` verdict is final. If
+current `main` changes the reviewed tree, integrate it and review the new SHA.
 
-Create a fresh implementation agent for each PR. Dispatch as many independent
-implementation agents concurrently as available slots safely allow; a ready,
-independent workstream must not sit idle behind another PR. Never carry an
-implementation agent into the next PR. Give it:
+Push the reviewed SHA with one ordinary branch push through the repository
+pre-push hook, then open the PR. The hook is the sole release-grade code gate.
+If a hook failure requires a code change, review that new local SHA before the
+next push. Do not add post-push review, duplicate suites, artifact gates, Nix
+replays, or post-merge code audits.
 
-- the exact worktree and branch it may modify;
-- the issue items assigned to this PR;
-- repository invariants and relevant rules;
-- expected tests, docs, generated properties, and live evidence;
-- permission to create signed local commits, but an explicit ban on pushing or
-  opening the PR until an independent reviewer returns `CLEAN`;
-- the PR-reference contract: whenever the PR body or a branch commit message
-  references the issue, use canonical `Refs #N` or a plain issue URL, never a
-  GitHub auto-closing keyword;
-- an explicit ban on code review, self-issued CLEAN verdicts, merge,
-  deployment, tagging, issue closure, and edits outside its worktree.
+## Merge and advance
 
-Every implementation-agent brief must state that reference contract. Require
-the implementation agent to:
+Confirm the PR head is the reviewed SHA and the coverage ledger is satisfied.
+The PR body and every branch commit message must use canonical `Refs #N` or a
+plain issue URL, never an auto-closing keyword; audit both with
+`python3 scripts/audit_issue_references.py`.
 
-1. Inspect current code rather than trust stale issue line numbers.
-2. Start from invariants and write the deterministic pin plus generated
-   property required by repository rules. Qualify new harnesses with a
-   known-bad/fault test.
-3. Avoid compatibility shims, skipped tests, guessed schemas, and duplicated
-   decision logic.
-4. Run focused tests that help implementation converge. Do not manually invoke
-   broad release gates or duplicate the randomized and Nix work owned by the
-   repository pre-push hook.
-5. Fetch current `main` before handoff. Integrate it semantically if it
-   advanced, then rerun only affected focused tests.
-6. Report the exact signed local head SHA, base SHA, focused evidence, and
-   clean worktree status for independent review. Do not push yet.
+Use the repository's merge method and expected-head guard. Confirm the merge
+tree equals the reviewed PR-head tree, update the ledger, and keep independent
+work moving. Do not rerun code gates after an unchanged reviewed tree merges.
 
-The implementation report is evidence, not a review verdict.
+## Ship
 
-## 4. Audit as the orchestrator
+When the ledger is complete, use the deploy skill. Verify the exact deployed
+source and the real user-facing behavior, including the post-switch successor
+cycle where the service lifecycle requires it. Screenshots or live data should
+prove the reported symptom, not merely that deployment commands succeeded.
 
-While implementation runs, independently understand the code path and prepare
-the adversarial review brief. After handoff:
+Create the signed release tag at the verified merge. Push the signed tag with `--no-verify`;
+it adds no code. Confirm the remote tag, then record the PR, review, deploy, and
+live evidence. Only after the signed tag push succeeds, close the issue
+deliberately.
 
-1. Inspect the isolated local branch and confirm the reported exact SHA.
-2. Inspect `git status`, signatures, `git diff --check`, the full diff, and
-   current-main compatibility.
-3. Trace every remaining caller, import, patch target, wire field, and
-   persistence writer affected by the change.
-4. Run a small set of high-value focused tests yourself.
-5. Compare the diff to the coverage ledger. Do not allow a green suite to
-   substitute for an unimplemented issue item.
+## Keep perspective
 
-Pay special attention to:
-
-- concern boundaries that point backward after an extraction;
-- tests that claim "every writer" but omit one writer;
-- generated tests that patch owned orchestration instead of leaf seams;
-- fakes that pre-filter before the predicate supposedly under test;
-- aggregate static analysis masking file-local unused imports;
-- exact error-type and explicit-null behavior at wire boundaries;
-- broad `Any`, `Callable[..., ...]`, `**kwargs`, or mock seams that let tests
-  express behavior production cannot;
-- documentation or compatibility exports that preserve the old owner.
-
-## 5. Run an independent review loop
-
-Only after a signed local implementation head exists, create a separate review
-agent. Make the review read-only and give it:
-
-- the exact local head SHA and current base;
-- the assigned coverage-ledger items;
-- the product and ownership invariants at risk;
-- known architectural seams to challenge;
-- required adversarial tests and current-main merge audit;
-- an explicit ban on editing, committing, pushing, merging, or deploying.
-
-Start that review as soon as a slot is available while other independent
-implementations continue. Review different independent PRs concurrently when
-slots allow; do not wait for an arbitrary issue-wide phase boundary.
-
-Require one of two outputs:
-
-- `CLEAN`, tied to the exact reviewed SHA; or
-- severity-ranked findings with file/line, concrete failure mode, and a
-  specific correction.
-
-Require the reviewer to finish one full exploratory pass and return a
-consolidated final report. Treat interim findings as evidence, not as a
-handoff: do not begin corrections while the reviewer is still searching.
-Batching the complete pass prevents one finding from triggering a commit,
-full gate run, and push before an equivalent bypass arrives.
-
-When review is not clean:
-
-1. Send the complete finding batch back to the implementation agent. Do not
-   let the implementer declare itself clean.
-2. During correction rounds, run focused tests and the smallest relevant fuzz
-   or real-service qualification. Do not invoke release-grade gates or push
-   after each finding.
-3. Commit the complete correction batch locally as a signed commit, stop all
-   edits, and let the same reviewer inspect that exact local SHA.
-4. Repeat the focused correction/review loop until the reviewer returns
-   `CLEAN` on the exact local SHA.
-5. A reviewer `CLEAN` is final. Do not request a second review, post-push
-   review, or another release gate.
-6. Push the reviewed SHA with one ordinary branch push through the repository
-   pre-push hook, open the non-draft PR, and confirm the remote PR head still
-   equals the reviewed SHA. If satisfying a real hook failure changes code,
-   return the new local SHA to the reviewer before pushing again.
-
-If the PR reaches a third substantial correction round, rotate both roles at
-the round boundary instead of extending already-long agent contexts. Do not
-interrupt active edits. Give the fresh implementation agent and fresh reviewer
-a compact durable handoff containing the worktree, base/head SHAs, coverage
-ledger, consolidated finding history, current diff, and focused evidence.
-They must rebuild understanding from repository and PR artifacts rather than
-from a conversation transcript.
-
-Do not merge on CI, mergeability, or the orchestrator's opinion alone.
-
-## 6. Merge and advance deliberately
-
-Before merging:
-
-1. Confirm the reviewed SHA still equals the remote PR head.
-2. Confirm current `main` is an ancestor of the reviewed SHA. If `main`
-   advanced, merge it locally, run only affected focused tests, and return the
-   new signed local SHA to the reviewer before its one ordinary push.
-3. Confirm signed commits, clean diff, successful pre-push hook, and
-   coverage-ledger completion for this PR. Do not rerun its checks.
-4. Audit the PR body and every branch commit message before merge. Feed each
-   surface through
-   `nix-shell --run "python3 scripts/audit_issue_references.py"`; both must be
-   clean. For example, pipe `gh pr view --json body --jq .body` and the
-   base-to-head `git log --format=%B` output into separate invocations.
-5. Merge with GitHub's merge-commit method and an expected-head guard.
-
-After merging:
-
-- record the merge SHA;
-- verify the merge tree equals the reviewed PR-head tree; stop if it differs;
-- verify the issue remains open (PR references must never decide closure);
-- mark only the actually completed ledger items complete;
-- create the next PR's fresh worktree from the new `origin/main`;
-- remove no worktree until it is clean and no agent or operator needs it.
-
-## 7. Record the completed issue before deployment
-
-After the final PR merges:
-
-1. Confirm every coverage-ledger item was included in an independently
-   reviewed PR.
-2. Confirm every final merge tree equals its independently reviewed PR-head
-   tree and that each reviewed head passed the repository pre-push hook.
-3. Do not run a post-merge suite, focused-test replay, semantic audit, Nix gate,
-   or post-push review. Review plus pre-push is the complete code gate.
-4. Comment on the issue with the PR-to-workstream map and verification summary.
-
-Do not close the issue yet. Deployment, live evidence, and a signed release tag
-are all part of done for a deploy-worthy Cratedigger series.
-
-## 8. Deploy through the current control plane
-
-Load the repository deploy skill, then independently read the current
-downstream `nixosconfig` instructions. The downstream control-plane contract
-wins if the two disagree.
-
-For the current fleet topology:
-
-1. Fast-forward clean `~/nixosconfig` on doc1.
-2. Update only `cratedigger-src`, inspect the lock diff, create an SSH-signed
-   commit, and push it to Forgejo without exposing the token.
-3. Trigger doc2 from doc1 with `fleet-deploy doc2`. Do not bypass the
-   forced-command boundary with direct host-side `fleet-update`.
-4. Poll `nixos-upgrade.service` using `ActiveState`, `SubState`, and `Result`.
-5. Verify dependent workers and the migration unit.
-6. Resolve the exact active source store path from a running service wrapper or
-   process command line. Do not accept a grep hit from an arbitrary old store
-   closure.
-7. Exercise the shipped feature through its real CLI/API/live path.
-8. Because the main cycle has `restartIfChanged=false`, wait for the protected
-   pre-switch cycle to finish and verify a post-switch successor cycle runs the
-   new source before tagging.
-
-If any documented deployment command conflicts with current downstream
-instructions, stop, reconcile the contract, and record the discrepancy rather
-than silently choosing the more permissive path.
-
-## 9. Tag and close
-
-The release sequence is strict; do not reorder it:
-
-1. Confirm deployment and post-switch successor cycle evidence from section 8.
-2. Create an SSH-signed `vYYYY.MM.DD` tag, using `-N` for another same-day
-   release, at the recorded final merge commit.
-3. The reviewed commit already passed the hook before merge and the merge tree
-   was proven identical. Push the signed tag with `--no-verify`; a tag adds no
-   code and must not replay the randomized or Nix gates.
-4. Confirm the remote tag's peeled commit and signature.
-5. Only after the signed tag push succeeds, add the review, pre-push, deploy,
-   live successor, and tag evidence to the issue and close it as completed.
-
-## 10. Communicate without losing the thread
-
-- After dispatch, let implementation and review agents run autonomously. Do
-  not send reassurance pings, request interim status, or list agents merely
-  because time has passed.
-- Keep useful agent slots occupied with ready independent implementation or
-  review work. Do not wait for one PR to finish before dispatching another
-  unless the dependency map says it must be serial.
-- When no independent orchestrator work remains, wait for an agent blocker or
-  completion notification for up to 15 minutes. If the wait times out, check
-  status once and begin another 15-minute wait. Never approximate this cadence
-  with repeated shorter polls.
-- Do not send the operator routine updates that only say an agent or long gate
-  is still running. Report material milestones, blockers that need a decision,
-  corrections to prior claims, and completed handoffs.
-- Correct premature status claims immediately when live process evidence
-  contradicts them.
-- Keep the final response self-contained: merged PRs, final merge, deploy pin,
-  live evidence, tag, and issue closure.
-- Lead with the outcome. Mention failed attempts only when they affect trust or
-  explain the final verification path.
-
-The orchestrator remains accountable throughout. Agents keep execution detail
-bounded; they do not replace the orchestrator's understanding or authority.
+The orchestrator owns scope, architectural judgment, merge authority, and live
+evidence. Agents own bounded execution and independent challenge. Keep useful
+slots busy, communicate only material milestones or blockers, and lead the
+handoff with what shipped and how it was proven.

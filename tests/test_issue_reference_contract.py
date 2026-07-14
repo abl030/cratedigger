@@ -38,13 +38,18 @@ def assert_skill_reference_contract(skill_text: str) -> None:
 
     normalized_skill = " ".join(skill_text.split())
     required_fragments = (
-        "use canonical `Refs #N` or a plain issue URL",
+        "coverage ledger",
+        "isolated worktrees",
+        "canonical `Refs #N` or a plain issue URL",
         "PR body and every branch commit message",
         "python3 scripts/audit_issue_references.py",
-        "A reviewer `CLEAN` is final",
+        "An independent `CLEAN` verdict is final",
         "one ordinary branch push through the repository pre-push hook",
-        "Fill available agent slots with independent implementation and review work",
-        "Serialize only when a concrete dependency",
+        "Compose agents around bounded jobs, not a fixed per-PR template",
+        "Use available agent slots for independent work when it shortens the critical path",
+        "Serialize only for a concrete dependency",
+        "Do not spend tokens on duplicate generalist reviews",
+        "Never carry a subagent into the next PR",
         "post-switch successor cycle",
         "Only after the signed tag push succeeds",
     )
@@ -58,9 +63,10 @@ def assert_skill_reference_contract(skill_text: str) -> None:
             + ", ".join(missing)
         )
 
-    release_section = normalized_skill.partition(
-        "## 9. Tag and close"
-    )[2]
+    if len(skill_text.split()) > 750:
+        raise AssertionError("orchestrator skill has become a runbook again")
+
+    release_section = normalized_skill.partition("## Ship")[2]
     forbidden_fragments = (
         "CRATEDIGGER_TEST_ARTIFACT",
         "binding `CLEAN`",
@@ -69,6 +75,8 @@ def assert_skill_reference_contract(skill_text: str) -> None:
         "exact final merge SHA",
         "mandatory post-ship reflection",
         "Search for stale old-owner imports",
+        "Use a fresh implementation agent for each PR",
+        "a separate read-only reviewer",
     )
     present_forbidden = [
         fragment for fragment in forbidden_fragments
