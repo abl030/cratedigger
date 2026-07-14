@@ -5,6 +5,7 @@ import {
   renderArtistSections,
 } from '../web/js/artist_page.js';
 import { renderRgRow } from '../web/js/discography.js';
+import { classify as classifyType } from '../web/js/grouping.js';
 
 let passed = 0;
 let failed = 0;
@@ -105,17 +106,17 @@ console.log('simple catalogue partition is total and provenance-backed');
   );
 }
 
-console.log('masterless rows enter musical buckets with exact release navigation');
+console.log('unmatched masterless rows stay reachable inside Other releases');
 {
   const ordinary = release('3938744', { title: 'Fraulein' });
   const promo = release('19254925', {
     title: 'Loup Garou', provenance: ['promo'], primary_types: ['Single'],
   });
   const sections = classify([], [], [ordinary, promo]);
-  assertEqual(sections.missing.map(row => row.id).join(','), '3938744',
-    'ordinary masterless album is a normal Missing row');
-  assertEqual(sections.otherReleases.map(row => row.id).join(','), '19254925',
-    'promo masterless release is in Other releases');
+  assertEqual(sections.missing.length, 0,
+    'unassociated masterless releases never leak into Missing');
+  assertEqual(sections.otherReleases.map(row => row.id).join(','), '3938744,19254925',
+    'every unmatched masterless release is in Other releases');
   const html = renderArtistSections(sections, {
     artistId: ARTIST_ID, artistName: ARTIST_NAME,
   });
@@ -124,6 +125,121 @@ console.log('masterless rows enter musical buckets with exact release navigation
     'masterless row keeps exact release expansion');
   assertContains(html, 'data-release-id="3938744"',
     'masterless row remains ringable by exact release id');
+}
+
+console.log('paired display classification follows MB work precedence');
+{
+  const mb = work('mb-live', {
+    title: 'Live Pair', primary_types: ['Album'], secondary_types: ['Live'],
+    format_qualifiers: ['Demo'], in_library: true,
+  });
+  const dg = release('dg-album', {
+    title: 'Live Pair', primary_types: ['Album'], secondary_types: [],
+    format_qualifiers: ['Remix'], in_library: false,
+    pipeline_status: 'wanted', pipeline_id: 991,
+  });
+  const [row] = composeCompareCatalogue({
+    both: [{ mb, discogs: dg }], mb_unpaired: [], discogs_unpaired: [],
+    discogs_ungrouped_releases: [],
+  }, 'discogs');
+  assertEqual(classifyType(row), 'Live',
+    'MB Live evidence keeps the selected Discogs Album out of Albums');
+  assertEqual(row.primary_types.join(','), 'Album',
+    'selected structural evidence remains source-authored');
+  assertEqual(row.secondary_types.length, 0,
+    'selected secondary evidence remains source-authored');
+  assertEqual(row.format_qualifiers.join(','), 'Remix',
+    'selected format qualifiers remain source-authored');
+  assertEqual(row.display_primary_types.join(','), 'Album',
+    'positive MB structural evidence authors display classification');
+  assertEqual(row.display_secondary_types.join(','), 'Live',
+    'positive MB secondary evidence authors display classification');
+  assertEqual(row.display_format_qualifiers.length, 0,
+    'Discogs edition qualifiers cannot override known MB work evidence');
+  assertEqual(`${row.source}:${row.identity_kind}:${row.id}`, 'discogs:release:dg-album',
+    'display evidence never rewrites selected exact identity');
+  assertEqual(`${row.in_library}:${row.pipeline_status}:${row.pipeline_id}`, 'false:wanted:991',
+    'display evidence never rewrites selected ownership or action state');
+}
+
+console.log('paired display precedence is stable in both source modes');
+{
+  const scenarios = [
+    {
+      label: 'known MB Album ignores Discogs Compilation',
+      mb: work('mb-album', {
+        title: 'Canonical Album', primary_types: ['Album'], secondary_types: [],
+      }),
+      dg: release('dg-compilation', {
+        title: 'Canonical Album', primary_types: ['Album'],
+        secondary_types: [], format_qualifiers: ['Compilation'],
+      }),
+      expected: 'Albums',
+    },
+    {
+      label: 'positive MB Live overrides Discogs Album',
+      mb: work('mb-live-authority', {
+        title: 'Canonical Live', primary_types: ['Album'], secondary_types: ['Live'],
+      }),
+      dg: release('dg-plain-album', {
+        title: 'Canonical Live', primary_types: ['Album'], secondary_types: [],
+        format_qualifiers: [],
+      }),
+      expected: 'Live',
+    },
+    {
+      label: 'unknown MB classification falls back to Discogs',
+      mb: work('mb-unknown', {
+        title: 'Fallback Compilation', type: 'Other',
+        primary_types: [], secondary_types: [], format_qualifiers: ['Demo'],
+      }),
+      dg: release('dg-fallback', {
+        title: 'Fallback Compilation', primary_types: [], secondary_types: [],
+        format_qualifiers: ['Compilation'],
+      }),
+      expected: 'Compilations',
+    },
+  ];
+  for (const scenario of scenarios) {
+    const compare = {
+      both: [{ mb: scenario.mb, discogs: scenario.dg }],
+      mb_unpaired: [], discogs_unpaired: [], discogs_ungrouped_releases: [],
+    };
+    for (const source of ['mb', 'discogs']) {
+      const [row] = composeCompareCatalogue(compare, source);
+      assertEqual(classifyType(row), scenario.expected,
+        `${scenario.label} in ${source} mode`);
+      assertEqual(`${row.source}:${row.id}`,
+        source === 'mb' ? `mb:${scenario.mb.id}` : `discogs:${scenario.dg.id}`,
+        `${scenario.label} retains selected identity in ${source} mode`);
+    }
+  }
+}
+
+console.log('source toggle keeps unmatched counterpart works visible but exceptional');
+{
+  const compare = {
+    both: [],
+    mb_unpaired: [work('mb-only', { title: 'MB Only' })],
+    discogs_unpaired: [work('dg-only', {
+      title: 'Discogs Only', source: 'discogs', primary_artist_id: '361476',
+    })],
+    discogs_ungrouped_releases: [],
+  };
+  const mbSections = classify(composeCompareCatalogue(compare, 'mb'));
+  assertEqual(mbSections.missing.map(row => row.id).join(','), 'mb-only',
+    'MB view keeps only its unmatched work in work-level Missing');
+  assertEqual(mbSections.otherReleases.map(row => row.id).join(','), 'dg-only',
+    'unmatched Discogs master remains visible in Other on MB view');
+  const dgSections = classifyArtistRows({
+    artistId: '361476', artistName: ARTIST_NAME,
+    releaseGroups: composeCompareCatalogue(compare, 'discogs'),
+    ungroupedReleases: [], libraryAlbums: [],
+  });
+  assertEqual(dgSections.missing.map(row => row.id).join(','), 'dg-only',
+    'Discogs view keeps only its unmatched master in work-level Missing');
+  assertEqual(dgSections.otherReleases.map(row => row.id).join(','), 'mb-only',
+    'unmatched MB work remains visible in Other on Discogs view');
 }
 
 console.log('library-only suppression uses exact source/kind identity, including pairs');

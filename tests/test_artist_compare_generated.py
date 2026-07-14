@@ -14,6 +14,7 @@ from lib.artist_compare import (
     CompareBuckets,
     annotate_in_library,
     merge_discographies,
+    normalize_title,
 )
 from web.discogs import (
     _DiscogsArtistMasterEntry,
@@ -100,11 +101,7 @@ def _pair_is_allowed(
 ) -> bool:
     if mb_appearance != discogs_appearance:
         return False
-    if (
-        mb_provenance
-        and discogs_provenance
-        and not (mb_provenance & discogs_provenance)
-    ):
+    if not _provenance_is_allowed(mb_provenance, discogs_provenance):
         return False
     overlap = bool(mb_types & discogs_types)
     if mb_types and discogs_types and not overlap:
@@ -115,6 +112,32 @@ def _pair_is_allowed(
     if delta == 0:
         return True
     return delta == 1 and bool(mb_types) and bool(discogs_types) and overlap
+
+
+def _provenance_is_allowed(
+    mb: frozenset[str], discogs: frozenset[str],
+) -> bool:
+    """Independent policy oracle: unknown is neutral; ordinary is symmetric."""
+    if not mb or not discogs:
+        return True
+    if "ordinary" in mb or "ordinary" in discogs:
+        return "ordinary" in mb and "ordinary" in discogs
+    return bool(mb & discogs)
+
+
+def assert_provenance_decision(
+    mb: frozenset[str], discogs: frozenset[str], actual: bool,
+) -> None:
+    expected = _provenance_is_allowed(mb, discogs)
+    if actual != expected:
+        raise AssertionError(
+            f"provenance decision drifted: {mb=} {discogs=} {actual=} {expected=}"
+        )
+
+
+def assert_master_preferred(result: CompareBuckets) -> None:
+    if not result.both or result.both[0].discogs.identity_kind != "work":
+        raise AssertionError("equal-evidence master was not preferred")
 
 
 def assert_single_pairing(
@@ -248,6 +271,32 @@ _PROVENANCE_SET = st.sets(
 
 
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
+    def test_provenance_checker_rejects_overlap_only_mutant(self) -> None:
+        mb = frozenset({"ordinary", "unofficial"})
+        discogs = frozenset({"unofficial"})
+        overlap_only_mutant = bool(mb & discogs)
+        with self.assertRaisesRegex(AssertionError, "provenance decision"):
+            assert_provenance_decision(mb, discogs, overlap_only_mutant)
+
+    def test_candidate_checker_rejects_release_first_mutant(self) -> None:
+        release = _discogs(
+            year=2000, types=["Album"], appearance=False, id_="release",
+        )
+        release.identity_kind = "release"
+        bad = CompareBuckets(
+            both=[ArtistCataloguePair(
+                mb=_mb(year=2000, type_="Album", appearance=False),
+                discogs=release,
+            )],
+            mb_unpaired=[],
+            discogs_unpaired=[_discogs(
+                year=2000, types=["Album"], appearance=False, id_="master",
+            )],
+            discogs_ungrouped_releases=[],
+        )
+        with self.assertRaisesRegex(AssertionError, "master was not preferred"):
+            assert_master_preferred(bad)
+
     def test_release_identity_checker_rejects_work_bucket_rewrite(self) -> None:
         release = _discogs(
             year=2000, types=["Album"], appearance=False, id_="release-1",
@@ -399,6 +448,51 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
 
 class TestArtistCompareGenerated(unittest.TestCase):
     @given(
+        left=st.text(alphabet="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ", max_size=12),
+        right=st.text(alphabet="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ", max_size=12),
+    )
+    @example(left="12", right="5")
+    def test_multiplication_sign_normalizes_like_ascii_x(
+        self, left: str, right: str,
+    ) -> None:
+        self.assertEqual(
+            normalize_title(f"{left} × {right}"),
+            normalize_title(f"{left} X {right}"),
+        )
+
+    @given(
+        year=st.integers(min_value=1900, max_value=2100),
+        type_=st.sampled_from(_STRUCTURAL_TYPES),
+        release_first=st.booleans(),
+    )
+    def test_equal_evidence_master_rank_precedes_release_fallback(
+        self, year: int, type_: StructuralType, release_first: bool,
+    ) -> None:
+        master = _discogs(
+            year=year, types=[type_], appearance=False, id_="master",
+        )
+        release = _discogs(
+            year=year, types=[type_], appearance=False, id_="release",
+        )
+        release.identity_kind = "release"
+        candidates = [release, master] if release_first else [master, release]
+
+        result = merge_discographies(
+            [_mb(year=year, type_=type_, appearance=False)], candidates,
+        )
+
+        assert_master_preferred(result)
+        assert_partition_is_one_to_one(
+            result,
+            expected_mb_ids={"mb"},
+            expected_discogs_ids={"master", "release"},
+        )
+        self.assertEqual(
+            [row.id for row in result.discogs_ungrouped_releases],
+            ["release"],
+        )
+
+    @given(
         primary_type=st.one_of(st.none(), _DISPLAY_TYPE),
         title=st.one_of(st.none(), st.text(max_size=24)),
         date=st.one_of(st.none(), st.text(max_size=16)),
@@ -544,6 +638,18 @@ class TestArtistCompareGenerated(unittest.TestCase):
         mb_provenance=["ordinary"],
         discogs_provenance=["ordinary"],
         discogs_identity_kind="release",
+    )
+    @example(
+        mb_year=2000,
+        discogs_year=2000,
+        mb_type="Album",
+        discogs_types=["Album"],
+        mb_appearance=False,
+        discogs_appearance=False,
+        misleading_scalar="Album",
+        mb_provenance=["ordinary", "unofficial"],
+        discogs_provenance=["unofficial"],
+        discogs_identity_kind="work",
     )
     @example(
         mb_year=1998,

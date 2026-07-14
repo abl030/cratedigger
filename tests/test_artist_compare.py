@@ -85,6 +85,7 @@ class TestNormalizeTitle(unittest.TestCase):
         ("empty", "", ""),
         ("whitespace only", "   ", ""),
         ("unicode-ish", "Sigur Rós", "sigurrs"),  # non-ascii stripped
+        ("multiplication sign", "12 × 5", "12x5"),
     ]
 
     def test_normalize(self):
@@ -138,6 +139,51 @@ class TestMergeDiscographies(unittest.TestCase):
 
         self.assertEqual(len(result.both), 1)
         self.assertEqual(result.both[0].discogs.id, "discogs-split")
+
+    def test_mixed_ordinary_does_not_pair_with_pure_exceptional_release(self):
+        mb = _mb("Shared Title", "2000", id="mb-mixed")
+        mb.provenance = ["ordinary", "unofficial"]
+        release = _dg("Shared Title", "2000", id="discogs-unofficial")
+        release.identity_kind = "release"
+        release.provenance = ["unofficial"]
+
+        result = merge_discographies([mb], [release])
+
+        self.assertEqual(result.both, [])
+        self.assertEqual([row.id for row in result.mb_unpaired], ["mb-mixed"])
+        self.assertEqual(
+            [row.id for row in result.discogs_ungrouped_releases],
+            ["discogs-unofficial"],
+        )
+
+    def test_multiplication_sign_title_variant_pairs_exactly(self):
+        result = merge_discographies(
+            [_mb("12 X 5", "1964", id="mb-12x5")],
+            [_dg("12 × 5", "1964", id="discogs-12x5")],
+        )
+
+        self.assertEqual(len(result.both), 1)
+        self.assertEqual(result.both[0].discogs.id, "discogs-12x5")
+
+    def test_equal_evidence_prefers_master_over_release_in_both_orders(self):
+        for release_first in (False, True):
+            with self.subTest(release_first=release_first):
+                master = _dg("Shared Title", "2000", id="master")
+                release = _dg("Shared Title", "2000", id="release")
+                release.identity_kind = "release"
+                candidates = (
+                    [release, master] if release_first else [master, release]
+                )
+
+                result = merge_discographies(
+                    [_mb("Shared Title", "2000", id="mb")], candidates,
+                )
+
+                self.assertEqual(result.both[0].discogs.id, "master")
+                self.assertEqual(
+                    [row.id for row in result.discogs_ungrouped_releases],
+                    ["release"],
+                )
 
     def test_masterless_release_respects_every_conservative_guard(self):
         cases = [

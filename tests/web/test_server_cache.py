@@ -391,7 +391,7 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
                      and "compare" in k]
         self.assertEqual(
             meta_keys,
-            [f"meta:artist:compare:v7:{self.ARTIST_ID}:3840"],
+            [f"meta:artist:compare:v8:{self.ARTIST_ID}:3840"],
             "masterless-association semantics must create a naturally cold "
             "compare key without reusing a pre-correction skeleton",
         )

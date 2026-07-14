@@ -23,7 +23,8 @@ _STRUCTURAL_TYPES = frozenset({"Album", "EP", "Single"})
 
 def normalize_title(title: str) -> str:
     """Lowercase + strip non-alphanumeric for conservative comparison."""
-    return _NON_ALNUM_RE.sub("", (title or "").lower())
+    normalized = (title or "").lower().replace("×", "x")
+    return _NON_ALNUM_RE.sub("", normalized)
 
 
 def extract_year(date_str: str) -> int | None:
@@ -108,11 +109,13 @@ def _provenance_compatible(
     mb_row: ArtistCatalogueRow,
     discogs_row: ArtistCatalogueRow,
 ) -> bool:
-    """Reject positive conflicts without treating unknown as a conflict."""
+    """Treat unknown as neutral while requiring symmetric ordinary evidence."""
     mb = frozenset(mb_row.provenance)
     discogs = frozenset(discogs_row.provenance)
     if not mb or not discogs:
         return True
+    if "ordinary" in mb or "ordinary" in discogs:
+        return "ordinary" in mb and "ordinary" in discogs
     return bool(mb & discogs)
 
 
@@ -128,8 +131,10 @@ def merge_discographies(
     pair when one source has unknown structural type; adjacent years require
     positive overlapping structural evidence. Unknown provenance is not
     negative evidence; when both sides are known their evidence sets must
-    overlap. Each source identity remains present exactly once across the
-    returned buckets, and a paired Discogs release remains a release.
+    overlap. When evidence scores tie, a Discogs master is preferred over a
+    masterless release; the release remains a conserved exact fallback. Each
+    source identity remains present exactly once across the returned buckets,
+    and a paired Discogs release remains a release.
     """
     if any(row.identity_kind != "work" for row in mb_groups):
         raise ValueError("MusicBrainz artist rows must be work identities")
@@ -146,7 +151,7 @@ def merge_discographies(
         if norm:
             by_norm[norm].append(index)
 
-    candidate_edges: list[tuple[tuple[int, int], int, int]] = []
+    candidate_edges: list[tuple[tuple[int, int, int], int, int]] = []
     for mb_index, mb_row in enumerate(mb_groups):
         norm = normalize_title(mb_row.title)
         mb_year = extract_year(mb_row.first_release_date)
@@ -189,11 +194,17 @@ def merge_discographies(
                 continue
 
             candidate_edges.append(
-                ((year_score, int(type_overlap)), mb_index, discogs_index)
+                ((
+                    year_score,
+                    int(type_overlap),
+                    int(discogs_row.identity_kind == "work"),
+                ), mb_index, discogs_index)
             )
 
     candidate_edges.sort(
-        key=lambda edge: (-edge[0][0], -edge[0][1], edge[1], edge[2])
+        key=lambda edge: (
+            -edge[0][0], -edge[0][1], -edge[0][2], edge[1], edge[2]
+        )
     )
     matched_mb: set[int] = set()
     matched_discogs: set[int] = set()

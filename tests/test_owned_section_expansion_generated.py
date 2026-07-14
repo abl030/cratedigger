@@ -25,6 +25,7 @@ import {{
   composeCompareCatalogue,
   renderArtistSections,
 }} from './web/js/artist_page.js';
+import {{ classify as classifyType }} from './web/js/grouping.js';
 let input = '';
 for await (const chunk of process.stdin) input += chunk;
 const payload = JSON.parse(input);
@@ -82,19 +83,31 @@ const sections = classifyArtistRows({
 });
 const bucket = sections.inLibrary.length ? 'inLibrary'
   : sections.missing.length ? 'missing' : 'other';
-process.stdout.write(JSON.stringify({ ...rows[0], _bucket: bucket }));
+process.stdout.write(JSON.stringify({
+  ...rows[0], _bucket: bucket, _type_section: classifyType(rows[0]),
+}));
 """, payload)  # type: ignore[return-value]
 
 
-def _real_composition_keys(payload: dict[str, object]) -> list[str]:
+def _real_composition(payload: dict[str, object]) -> list[dict[str, str]]:
     result = _run_artist_page("""
 const rows = composeCompareCatalogue(payload.compare, payload.source);
-process.stdout.write(JSON.stringify(rows.map(
-  row => `${row.source}:${row.identity_kind}:${row.id}`,
-)));
+const sections = classifyArtistRows({
+  artistId: 'artist-id', artistName: 'Artist', releaseGroups: rows,
+  ungroupedReleases: [], libraryAlbums: [],
+});
+const bucket = new Map([
+  ...sections.inLibrary.map(row => [row, 'inLibrary']),
+  ...sections.missing.map(row => [row, 'missing']),
+  ...sections.otherReleases.map(row => [row, 'other']),
+]);
+process.stdout.write(JSON.stringify(rows.map(row => ({
+  key: `${row.source}:${row.identity_kind}:${row.id}`,
+  bucket: bucket.get(row),
+}))));
 """, payload)
     assert isinstance(result, list)
-    return [str(value) for value in result]
+    return [value for value in result if isinstance(value, dict)]  # type: ignore[return-value]
 
 
 def _real_rolling_collision(payload: dict[str, object]) -> str:
@@ -173,6 +186,64 @@ def assert_display_conservation(actual: list[str], expected: set[str]) -> None:
         )
 
 
+def _classify_display_evidence(
+    primary: list[str], secondary: list[str], qualifiers: list[str],
+) -> str:
+    combined = [*secondary, *qualifiers]
+    if "Compilation" in combined:
+        return "Compilations"
+    if "Live" in combined:
+        return "Live"
+    if "Remix" in combined:
+        return "Remixes"
+    if "DJ-mix" in combined:
+        return "DJ Mixes"
+    if "Demo" in combined:
+        return "Demos"
+    if "Album" in primary:
+        return "Albums"
+    if "EP" in primary:
+        return "EPs"
+    if "Single" in primary:
+        return "Singles"
+    return "Other"
+
+
+def assert_mb_work_classification_precedence(
+    row: dict[str, object], *,
+    mb_primary: list[str], mb_secondary: list[str],
+    discogs_primary: list[str], discogs_secondary: list[str],
+    discogs_qualifiers: list[str],
+) -> None:
+    """Independent oracle: positive MB work type wins; otherwise use DG."""
+    if mb_primary or mb_secondary:
+        expected_primary = mb_primary
+        expected_secondary = mb_secondary
+        expected_qualifiers: list[str] = []
+    else:
+        expected_primary = discogs_primary
+        expected_secondary = discogs_secondary
+        expected_qualifiers = discogs_qualifiers
+    expected = (
+        expected_primary,
+        expected_secondary,
+        expected_qualifiers,
+        _classify_display_evidence(
+            expected_primary, expected_secondary, expected_qualifiers,
+        ),
+    )
+    actual = (
+        row.get("display_primary_types"),
+        row.get("display_secondary_types"),
+        row.get("display_format_qualifiers"),
+        row.get("_type_section"),
+    )
+    if actual != expected:
+        raise AssertionError(
+            f"MB classification precedence drifted: {actual=} {expected=}"
+        )
+
+
 row_strategy = st.builds(
     lambda primary_type, provenance, in_library, is_appearance,
            secondary_type: {
@@ -227,6 +298,20 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 ["mb:work:1", "mb:work:1"], {"mb:work:1"},
             )
 
+    def test_precedence_checker_rejects_union_mutant(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "precedence drifted"):
+            assert_mb_work_classification_precedence(
+                {
+                    "display_primary_types": ["Album"],
+                    "display_secondary_types": [],
+                    "display_format_qualifiers": ["Compilation"],
+                    "_type_section": "Compilations",
+                },
+                mb_primary=["Album"], mb_secondary=[],
+                discogs_primary=["Album"], discogs_secondary=[],
+                discogs_qualifiers=["Compilation"],
+            )
+
 
 class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
     @given(rows=st.lists(row_strategy, max_size=16))
@@ -255,10 +340,33 @@ class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
         discogs_provenance=st.lists(
             st.sampled_from(PROVENANCE), max_size=3, unique=True,
         ),
+        mb_primary=st.lists(
+            st.sampled_from(STRUCTURAL_TYPES), max_size=3, unique=True,
+        ),
+        discogs_primary=st.lists(
+            st.sampled_from(STRUCTURAL_TYPES), max_size=3, unique=True,
+        ),
+        mb_secondary=st.lists(
+            st.sampled_from(("Compilation", "Live")), max_size=2, unique=True,
+        ),
+        discogs_secondary=st.lists(
+            st.sampled_from(("Compilation", "Live")), max_size=2, unique=True,
+        ),
+        mb_qualifiers=st.lists(
+            st.sampled_from(("Remix", "DJ-mix", "Demo")), max_size=3,
+            unique=True,
+        ),
+        discogs_qualifiers=st.lists(
+            st.sampled_from(("Remix", "DJ-mix", "Demo")), max_size=3,
+            unique=True,
+        ),
     )
     @example(
         source="discogs", mb_owned=True, discogs_owned=False,
         mb_provenance=["ordinary"], discogs_provenance=["ordinary"],
+        mb_primary=["Album"], discogs_primary=["Album"],
+        mb_secondary=["Live"], discogs_secondary=[],
+        mb_qualifiers=["Demo"], discogs_qualifiers=["Remix"],
     )
     def test_pair_projection_keeps_selected_exact_identity_and_source_evidence(
         self,
@@ -267,16 +375,27 @@ class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
         discogs_owned: bool,
         mb_provenance: list[str],
         discogs_provenance: list[str],
+        mb_primary: list[str],
+        discogs_primary: list[str],
+        mb_secondary: list[str],
+        discogs_secondary: list[str],
+        mb_qualifiers: list[str],
+        discogs_qualifiers: list[str],
     ) -> None:
         mb = {
             "id": "mb-rg", "title": "Shared", "source": "mb",
             "identity_kind": "work", "provenance": mb_provenance,
             "in_library": mb_owned,
+            "primary_types": mb_primary, "secondary_types": mb_secondary,
+            "format_qualifiers": mb_qualifiers,
         }
         discogs = {
             "id": "3938744", "title": "Shared", "source": "discogs",
             "identity_kind": "release", "provenance": discogs_provenance,
             "in_library": discogs_owned,
+            "primary_types": discogs_primary,
+            "secondary_types": discogs_secondary,
+            "format_qualifiers": discogs_qualifiers,
         }
         row = _real_pair_projection({
             "source": source,
@@ -307,6 +426,23 @@ class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
         )
         self.assertEqual(
             projected_counterpart["in_library"], counterpart["in_library"],
+        )
+        selected_primary = mb_primary if source == "mb" else discogs_primary
+        selected_secondary = (
+            mb_secondary if source == "mb" else discogs_secondary
+        )
+        selected_qualifiers = (
+            mb_qualifiers if source == "mb" else discogs_qualifiers
+        )
+        self.assertEqual(row["primary_types"], selected_primary)
+        self.assertEqual(row["secondary_types"], selected_secondary)
+        self.assertEqual(row["format_qualifiers"], selected_qualifiers)
+        assert_mb_work_classification_precedence(
+            row,
+            mb_primary=mb_primary, mb_secondary=mb_secondary,
+            discogs_primary=discogs_primary,
+            discogs_secondary=discogs_secondary,
+            discogs_qualifiers=discogs_qualifiers,
         )
         display_provenance = set(mb_provenance) | set(discogs_provenance)
         expected_bucket = (
@@ -357,7 +493,7 @@ class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
             "id": f"dg-release-{index}", "source": "discogs",
             "identity_kind": "release", "provenance": ["ordinary"],
         } for index in range(discogs_release_count)]
-        actual = _real_composition_keys({
+        actual = _real_composition({
             "source": source,
             "compare": {
                 "both": pairs,
@@ -382,7 +518,39 @@ class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
                 for index in range(discogs_release_count)
             ),
         }
-        assert_display_conservation(actual, expected)
+        actual_keys = [row["key"] for row in actual]
+        assert_display_conservation(actual_keys, expected)
+        unmatched_release_keys = {
+            f"discogs:release:dg-release-{index}"
+            for index in range(discogs_release_count)
+        }
+        self.assertEqual(
+            {
+                row["key"] for row in actual
+                if row["key"] in unmatched_release_keys
+                and row["bucket"] == "other"
+            },
+            unmatched_release_keys,
+        )
+        expected_other_source_works = (
+            {
+                f"discogs:work:dg-work-{index}"
+                for index in range(discogs_work_count)
+            }
+            if source == "mb"
+            else {
+                f"mb:work:mb-only-{index}"
+                for index in range(mb_unpaired_count)
+            }
+        )
+        self.assertEqual(
+            {
+                row["key"] for row in actual
+                if row["key"] in expected_other_source_works
+                and row["bucket"] == "other"
+            },
+            expected_other_source_works,
+        )
 
     @given(
         qualifier=st.sampled_from(("Compilation", "Live")),

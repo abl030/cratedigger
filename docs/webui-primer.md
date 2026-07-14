@@ -92,7 +92,9 @@ Browser → https://music.ablz.au
   taxonomy. Two slow feeds decorate the page after the fast render:
   `/api/artist/compare` completes the one cross-source catalogue (silently
   skipped on hosts without the Discogs mirror) while retaining already-loaded
-  expansions by exact source/kind/id, and
+  expansions by exact source/kind/id. Unmatched works from the non-selected
+  source remain musically visible inside Other releases so the selected
+  source's Missing counts stay work-scale, and
   `/api/artist/<id>/disambiguate` adds
   unique-track / covered-by chips to rows plus colour-dot recordings
   breakdowns inside expanded release groups (MB artists only). Expanding an
@@ -115,7 +117,14 @@ Browser → https://music.ablz.au
   under the same policy, but remains `identity_kind=release` and expands or
   acts only on its exact Discogs release ID. On the opposite-source view an
   exactly owned counterpart is labelled **other edition in library** rather
-  than turning the selected pressing into an in-library match.
+  than turning the selected pressing into an in-library match. Unmatched
+  masterless releases remain exact, reachable action targets inside the one
+  collapsed Other releases area; they never inflate work-level Missing/type
+  counts. Pair display classification treats positive MB release-group primary
+  or secondary type evidence as the authoritative work classification, so a
+  Discogs edition's format qualifier cannot turn a known MB Album into a
+  Compilation. Discogs structural and qualifier evidence is used only when the
+  MB work is genuinely unclassified. Each selected source field remains exact.
   The pure metadata fill uses the mirror's bulk artist endpoint and is
   single-flight per cache key inside the threaded web process, so concurrent
   cold requests share one MB/Discogs/merge pass while every caller still gets

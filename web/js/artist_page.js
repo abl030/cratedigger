@@ -13,20 +13,33 @@ function displayProvenance(row) {
 
 /**
  * Project one diagnostic pair onto the operator-selected source identity.
- * The counterpart contributes display classification and an honest presence
- * hint only; it never overwrites the selected row's exact ownership, request,
- * source, identity kind, or id.
+ * MB work classification is authoritative whenever it has positive primary or
+ * secondary evidence. Discogs edition qualifiers are a fallback only when the
+ * MB work is genuinely unclassified. The counterpart still contributes an
+ * honest presence hint, but never overwrites the selected row's exact
+ * ownership, request, source, identity kind, or id.
  * @param {Object} selected
  * @param {Object} counterpart
  * @returns {Object}
  */
 function projectPair(selected, counterpart) {
+  const union = field => Array.from(new Set([
+    ...(selected[field] || []),
+    ...(counterpart[field] || []),
+  ]));
+  const mb = selected.source === 'mb' ? selected : counterpart;
+  const discogs = selected.source === 'discogs' ? selected : counterpart;
+  const mbHasWorkClassification = Boolean(
+    (mb.primary_types || []).length || (mb.secondary_types || []).length,
+  );
+  const classification = mbHasWorkClassification ? mb : discogs;
   return {
     ...selected,
-    display_provenance: Array.from(new Set([
-      ...(selected.provenance || []),
-      ...(counterpart.provenance || []),
-    ])),
+    display_provenance: union('provenance'),
+    display_primary_types: [...(classification.primary_types || [])],
+    display_secondary_types: [...(classification.secondary_types || [])],
+    display_format_qualifiers: mbHasWorkClassification
+      ? [] : [...(discogs.format_qualifiers || [])],
     counterpart: { ...counterpart },
   };
 }
@@ -35,9 +48,10 @@ function projectPair(selected, counterpart) {
 /**
  * Turn compare diagnostics into one deduped musical catalogue.
  *
- * A paired work renders once using the selected source identity. Unpaired rows
- * from both sources remain visible as ordinary catalogue rows; their pairing
- * or master topology never becomes a page section. Exact source/kind/id is
+ * A paired work renders once using the selected source identity. Unpaired MB
+ * works and Discogs masters remain work-level catalogue rows. Unmatched exact
+ * Discogs releases remain reachable in the same row stream but classification
+ * keeps them inside the collapsed Other releases area. Exact source/kind/id is
  * preserved on every returned row.
  * @param {Object} compare
  * @param {'mb'|'discogs'} source
@@ -54,6 +68,7 @@ export function composeCompareCatalogue(compare, source) {
     seen.add(key);
     result.push(row);
   };
+  const addToOther = row => add({ ...row, catalogue_placement: 'other' });
 
   for (const pair of compare.both || []) {
     const selected = source === 'mb' ? pair.mb : pair.discogs;
@@ -63,12 +78,12 @@ export function composeCompareCatalogue(compare, source) {
 
   if (source === 'mb') {
     for (const row of compare.mb_unpaired || []) add(row);
-    for (const row of compare.discogs_unpaired || []) add(row);
-    for (const row of compare.discogs_ungrouped_releases || []) add(row);
+    for (const row of compare.discogs_unpaired || []) addToOther(row);
+    for (const row of compare.discogs_ungrouped_releases || []) addToOther(row);
   } else {
     for (const row of compare.discogs_unpaired || []) add(row);
-    for (const row of compare.discogs_ungrouped_releases || []) add(row);
-    for (const row of compare.mb_unpaired || []) add(row);
+    for (const row of compare.discogs_ungrouped_releases || []) addToOther(row);
+    for (const row of compare.mb_unpaired || []) addToOther(row);
   }
   return result;
 }
@@ -77,8 +92,9 @@ export function composeCompareCatalogue(compare, source) {
 /**
  * Split one semantic catalogue into the original simple page model.
  * Ordinary own rows go to exact In library or Missing. Everything
- * exceptional, unknown, or appearance-shaped goes to one collapsed Other
- * releases area. Masterless Discogs releases are ordinary catalogue rows.
+ * exceptional, unknown, appearance-shaped, or an unassociated masterless
+ * Discogs release goes to one collapsed Other releases area. A masterless
+ * release associated with an MB work participates normally through its pair.
  * @param {{artistId:string, artistName:string, releaseGroups:Object[],
  *          ungroupedReleases?:Object[], libraryAlbums:Object[]}} input
  * @returns {Object}
@@ -95,7 +111,10 @@ export function classifyArtistRows({
       || credit === nameLC || credit.startsWith(nameLC + ' /')
       || credit.startsWith(nameLC + ',') || !credit;
     const provenance = displayProvenance(row);
-    if (row.is_appearance === true || !isOwn || !provenance.has('ordinary')) {
+    const unmatchedRelease = row.identity_kind === 'release' && !row.counterpart;
+    if (row.catalogue_placement === 'other' || unmatchedRelease
+        || row.is_appearance === true || !isOwn
+        || !provenance.has('ordinary')) {
       otherReleases.push(row);
     } else {
       (row.in_library === true ? inLibrary : missing).push(row);
