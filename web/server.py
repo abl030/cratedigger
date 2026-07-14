@@ -113,6 +113,11 @@ db: PipelineDB | None = None
 beets_db_path: str | None = None
 beets_library_root: str = ""
 _beets: BeetsDB | None = None
+# Explicit test/dev dependency-injection seams for the pinned destructive
+# operation. Production leaves both unset and the service selects its real
+# subprocess/notifier implementations.
+beets_delete_fn = None
+delete_notify_fn = None
 
 # Per-thread DB handles. Threads are mostly long-lived: the Handler
 # speaks HTTP/1.1 keep-alive, so a browser's persistent connections

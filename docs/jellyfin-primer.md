@@ -31,6 +31,16 @@ Scan notifier: `lib/util.py::trigger_jellyfin_scan(cfg)` — called from
 The targeted form refreshes only the configured music library; leaving the ID
 unset deliberately retains the full-library fallback.
 
+For library deletion, Cratedigger locates the exact `MusicAlbum` by the former
+mapped Beets path and refreshes that item after destructive locks are released.
+If no exact item is found it uses the configured library item. A 404 from any
+targeted `/Items/{id}/Refresh` immediately falls back to
+`POST /Library/Refresh`. A 2xx response is only submission evidence:
+Cratedigger checks the former path again, reports observed absence when it can,
+and emits a warning when the item was never observable or remains present.
+Failures are surfaced as warnings on the already completed delete rather than
+rolling library state back.
+
 ### "Recently Added" pin on upgrades (migration 046, issue #574)
 
 An upgrade re-import replaces an album's on-disk files. The Jellyfin rescan

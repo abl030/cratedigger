@@ -3,7 +3,11 @@
  * Run with: node tests/test_js_library.mjs
  */
 
-import { buildDeleteConfirmHtml, renderLibraryDetailBody } from '../web/js/library.js';
+import {
+  buildDeleteConfirmHtml,
+  describeBeetsDeletion,
+  renderLibraryDetailBody,
+} from '../web/js/library.js';
 
 let passed = 0;
 let failed = 0;
@@ -23,6 +27,14 @@ function assertExcludes(haystack, needle, msg) {
   } else {
     failed++;
     console.error(`  FAIL: ${msg} — unexpectedly found '${needle}'`);
+  }
+}
+
+function assertEqual(actual, expected, msg) {
+  if (actual === expected) passed++;
+  else {
+    failed++;
+    console.error(`  FAIL: ${msg} — expected '${expected}', got '${actual}'`);
   }
 }
 
@@ -46,6 +58,65 @@ console.log('buildDeleteConfirmHtml() omits pipeline note without release id');
   const html = buildDeleteConfirmHtml(7, 'Bodyjar', 'Plastic Skies', 12, null, '');
   assertContains(html, 'window.executeBeetsDeletion(7, this, null, &quot;&quot;)', 'empty release id still encoded safely');
   assertExcludes(html, 'matching pipeline request/history', 'no pipeline note without release id');
+}
+
+console.log('delete result UI never presents incomplete cleanup as success');
+{
+  const incomplete = describeBeetsDeletion({
+    error: 'delete_incomplete',
+    detail: 'cover.jpg survived',
+  });
+  assertEqual(incomplete.completed, false, 'incomplete result does not refresh away evidence');
+  assertEqual(incomplete.error, true, 'incomplete result is an error toast');
+  assertContains(incomplete.message, 'cover.jpg survived', 'incomplete detail is visible');
+
+  const lostAck = describeBeetsDeletion({
+    error: 'delete_incomplete',
+    acknowledgement_lost: true,
+    album: 'Album', artist: 'Artist',
+    former_album_path: '/music/Artist/Album',
+    pipeline_id: 42, pipeline_status: 'imported',
+    detail: 'Beets acknowledgement was lost; filesystem deletion is unconfirmed and Beets metadata may be gone. Do not assume files were deleted. Pipeline request #42 (imported) was preserved. Inspect the exact former album path "/music/Artist/Album" before explicit recovery.',
+  });
+  assertEqual(lostAck.completed, false, 'lost acknowledgement requires manual recovery');
+  assertContains(lostAck.message, 'metadata may be gone', 'metadata ambiguity is explicit');
+  assertContains(lostAck.message, 'Do not assume files were deleted', 'file deletion is not claimed');
+  assertContains(lostAck.message, 'Pipeline request #42 (imported) was preserved', 'pipeline preservation is explicit');
+  assertContains(lostAck.message, '/music/Artist/Album', 'exact recovery path is visible');
+
+  const partial = describeBeetsDeletion({
+    status: 'partial', album_deleted: true, pipeline_id: 42,
+    preserved_paths: ['/music/A/B/booklet.pdf'],
+    notifications: [{
+      provider: 'jellyfin',
+      status: 'warning',
+      detail: 'exact album item jf-7 remains observable after refresh submission',
+    }],
+  });
+  assertEqual(partial.completed, true, 'PG partial acknowledges album is already gone');
+  assertEqual(partial.error, true, 'PG partial is not a normal success toast');
+  assertContains(partial.message, 'pipeline request #42 remains', 'PG residual is actionable');
+  assertContains(partial.message, '1 unknown path preserved', 'PG partial keeps preserved-path warning visible');
+  assertContains(partial.message, '1 media notification warning', 'PG partial keeps media warning count visible');
+  assertContains(partial.message, 'jellyfin: exact album item jf-7 remains observable', 'PG partial keeps media warning detail visible');
+}
+
+console.log('delete result UI surfaces unknown content and notifier warnings');
+{
+  const warning = describeBeetsDeletion({
+    status: 'ok', artist: 'A', album: 'B', deleted_files: 2,
+    deleted_artifacts: 4, pipeline_deleted: true,
+    preserved_paths: ['/music/A/B/booklet.pdf'],
+    notifications: [{
+      provider: 'jellyfin', status: 'warning',
+      detail: 'exact album item jf-7 remains observable',
+    }],
+  });
+  assertEqual(warning.completed, true, 'verified delete still completes');
+  assertEqual(warning.error, true, 'warning result gets warning styling');
+  assertContains(warning.message, '1 unknown path preserved', 'unknown content count visible');
+  assertContains(warning.message, '1 media notification warning', 'notifier warning count visible');
+  assertContains(warning.message, 'jellyfin: exact album item jf-7 remains observable', 'notifier warning detail visible');
 }
 
 /** Independent expected encoder: JSON JS literal, then HTML attribute escaping. */

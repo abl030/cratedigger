@@ -439,6 +439,46 @@ prune a directory whose managed audio and sidecar are all gone. Any file that
 does not match the configured clutter patterns prevents pruning and remains
 untouched.
 
+Library delete (`POST /api/beets/delete` / `pipeline-cli library-delete`) is a
+separate exact-album-PK operation owned by the same pinned Beets runtime. It
+does not write Beets SQLite directly and does not use stock `beet remove -d`:
+pinned Beets 2.x removes metadata before its filesystem loop. Instead,
+`harness/delete_album.py` keeps the album row as the retry manifest while Beets
+removes and verifies exact item paths, exact art, `cratedigger.json`, and
+configured clutter. Paths are confined to `directory:` with realpath/symlink
+checks. Before mutation, the harness also proves that its active `library:`
+and `directory:` resolve to the exact SQLite path and root used by the web/CLI
+preflight. Beets metadata is removed with `delete=False` only after every
+owned artifact is absent; album, item, and flexible-field rows share one outer
+transaction with explicit rollback on any exception.
+
+The child commits that final metadata transaction before its JSON result can
+reach the parent, so a process exit or malformed/truncated acknowledgement is
+commit-ambiguous. The synchronous endpoint deliberately does not infer success
+from later metadata absence: it returns `delete_incomplete`, preserves the
+PostgreSQL request, skips Plex/Jellyfin notification, and retains the preflight
+album, artist, exact former path, and pipeline state for explicit operator
+recovery. Its message says that filesystem deletion is unconfirmed and Beets
+metadata may be gone; it never claims files were deleted. Honest automatic
+crash recovery would require a durable queued delete owned by the serialized
+importer worker. That larger architecture is outside this endpoint hardening.
+
+This endpoint is the existing destructive Web/CLI surface being hardened; it
+does not create a second general Beets-mutating entry point. Confirmed success
+still requires the pinned child result plus a fresh exact album-and-item
+metadata postcondition. Optional pipeline purge remains last, and
+Plex/Jellyfin notification still waits until the destructive locks are
+released.
+
+Unknown content is never recursively guessed away. It remains on disk, appears
+in `preserved_paths`, and blocks directory pruning. An error enumerating an
+album directory fails closed before metadata removal; it is never interpreted
+as an empty directory. Owned-path presence uses strict `lstat`: only
+`FileNotFoundError` means absent, while every other probe error fails closed
+before Beets metadata removal. Partial I/O leaves both the Beets row and pipeline row
+available for retry. Zero newly deleted files is
+successful only when the complete postcondition was already satisfied.
+
 ## The Beets SQLite Database
 
 Located at `/mnt/virtio/Music/beets-library.db`. Two main tables:

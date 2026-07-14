@@ -4871,22 +4871,6 @@ class TestPipelineDBFakeContractInternals(unittest.TestCase):
 class TestFakeBeetsDB(unittest.TestCase):
     """Self-tests for FakeBeetsDB — the minimal in-memory BeetsDB stand-in."""
 
-    def test_delete_album_removes_detail_and_returns_track_paths(self) -> None:
-        beets = FakeBeetsDB()
-        beets.set_album_detail(7, {
-            "id": 7,
-            "album": "A",
-            "artist": "B",
-            "tracks": [{"path": "/music/B/A/01.flac"}],
-        })
-
-        self.assertEqual(
-            beets.delete_album(7),
-            ("A", "B", ["/music/B/A/01.flac"]),
-        )
-        self.assertIsNone(beets.get_album_detail(7))
-        self.assertEqual(beets.delete_album_calls, [7])
-
     def test_check_mbids_detail_returns_seeded_rows_only(self) -> None:
         beets = FakeBeetsDB()
         beets.set_mbid_detail(
@@ -5067,6 +5051,16 @@ class TestFakeBeetsDB(unittest.TestCase):
         self.assertEqual(got["album"], "A")
         self.assertIsNone(beets.get_album_detail(8))
         self.assertEqual(beets.get_album_detail_calls, [7, 7, 8])
+
+    def test_album_and_items_absent_requires_both_absence_facts(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_album_detail(7, {"id": 7, "album": "A", "tracks": []})
+        self.assertFalse(beets.album_and_items_absent(7))
+        beets._album_detail.pop(7)
+        beets.set_orphan_items_present(7)
+        self.assertFalse(beets.album_and_items_absent(7))
+        beets.set_orphan_items_present(7, False)
+        self.assertTrue(beets.album_and_items_absent(7))
 
     def test_get_album_ids_by_mbids_derives_from_release_id_seeds(self) -> None:
         # Shares the set_album_ids_for_release seed store so presence
