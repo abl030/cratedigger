@@ -1016,16 +1016,17 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
     untouched, however old (``_prune_stale_empty_dirs``).
 
     Retention/residency ordering (binding, PR #585 review amendment):
-    ``prune_transfer_ledger``'s retention window (90 days,
-    request-inactive-gated — ``lib/slskd_transfer_ledger.py``) MUST
+    ``prune_transfer_ledger``'s retention window (90 days; accepted ownership
+    evidence remains protected for active requests, while pending intent has
+    no disk authority and is age-only — ``lib/slskd_transfer_ledger.py``) MUST
     strictly exceed the maximum legitimate time a file can sit in the
     download dir before either import consumes it or this reaper's own
-    ``ORPHAN_MIN_AGE_DAYS`` (7 days) would reap it. Once a ledger row is
-    pruned, its file becomes UNOWNED here — never reapable again. This
-    is the safe direction (a pruned-but-still-present file just
-    lingers, it is never wrongly deleted), but it means the ledger
-    prune window is load-bearing for eventual cleanup, not just
-    bookkeeping hygiene.
+    ``ORPHAN_MIN_AGE_DAYS`` (7 days) would reap it. Once accepted evidence is
+    pruned, its file becomes UNOWNED here — never reapable again. This is the
+    safe direction (a pruned-but-still-present file just lingers, it is never
+    wrongly deleted), but it means accepted evidence's prune window is
+    load-bearing for eventual cleanup, not just bookkeeping hygiene. Pending
+    intent never owned a file, so pruning it changes no cleanup authority.
 
     Fail-closed: if ANY downloading row's ``active_download_state``
     can't be decoded, the whole sweep is skipped for the cycle (zero

@@ -19,8 +19,8 @@ The methods this mixin adds:
   mine?", joined to each ledgered attempt's request identity so the
   caller can re-derive the folder with
   ``lib.processing_paths.canonical_processing_path``.
-* ``prune_transfer_ledger`` -- T3: keeps the table bounded by
-  hard-deleting rows that are both old AND whose request is no longer
+* ``prune_transfer_ledger`` -- T3: keeps pending intents bounded by age;
+  accepted ownership evidence is also protected while its request remains
   active (``wanted``/``downloading``).
 
 See migrations 045 and 051 for the schema and rationale.
@@ -36,11 +36,12 @@ import psycopg2.extras
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.pipeline_db._shared import TransferLedgerRow
 
-# Requests still active (in-flight) can't be pruned regardless of age --
-# a future reaper/convergence flip may still need the ledger row while
-# the request is being retried. Everything else (imported, manual,
-# replaced, or a request_id whose row no longer exists) is fair game
-# once past the retention window.
+# Accepted rows for active requests cannot be pruned regardless of age: the
+# reaper/convergence paths may still need their ownership evidence while the
+# request is being retried. Pending intents have no ownership value and are
+# bounded solely by the retention window. Accepted rows for everything else
+# (imported, manual, replaced, or a missing request) are also fair game once
+# past that window.
 _ACTIVE_REQUEST_STATUSES = ("wanted", "downloading")
 
 
@@ -217,24 +218,27 @@ class _TransferLedgerMixin(_PipelineDBBase):
         return [dict(r) for r in cur.fetchall()]
 
     def prune_transfer_ledger(self, older_than: datetime) -> int:
-        """Hard-delete rows older than ``older_than`` whose request is
-        NOT currently active (T3).
+        """Hard-delete rows strictly older than ``older_than`` (T3).
 
-        A row is kept regardless of age while its request is
-        ``wanted``/``downloading`` -- the future reaper/convergence flip
-        may still need it for an in-flight retry. A request that no
-        longer exists (hard-deleted elsewhere) is treated as inactive --
-        it can never come back to wanted/downloading. Returns the number
+        Pending ``accepted_at IS NULL`` intent is pruned regardless of request
+        status because it grants no ownership authority. Accepted evidence is
+        kept while its request is ``wanted``/``downloading``; the reaper and
+        convergence paths may still need it for an in-flight retry. Accepted
+        rows for inactive or hard-deleted requests are pruned. The exact
+        boundary survives because the comparison is strict. Returns the number
         of rows removed.
         """
         cur = self._execute(
             """
             DELETE FROM slskd_transfer_ledger t
             WHERE t.enqueued_at < %s
-              AND NOT EXISTS (
-                  SELECT 1 FROM album_requests r
-                  WHERE r.id = t.request_id
-                    AND r.status = ANY(%s)
+              AND (
+                  t.accepted_at IS NULL
+                  OR NOT EXISTS (
+                      SELECT 1 FROM album_requests r
+                      WHERE r.id = t.request_id
+                        AND r.status = ANY(%s)
+                  )
               )
             """,
             (older_than, list(_ACTIVE_REQUEST_STATUSES)),

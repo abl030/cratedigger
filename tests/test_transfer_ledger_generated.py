@@ -14,8 +14,9 @@ Two properties over generated worlds:
    Destructive ownership exists iff that POST succeeds. Worlds without
    ownership context never write a row, but the
    enqueue is never blocked by that absence.
-2. **T3 (bounded, forensic)** — a ledger row is pruned iff it is BOTH
-   past the retention cutoff AND its request is not currently
+2. **T3 (bounded, forensic)** — a pending intent row is pruned once it is
+   strictly past the retention cutoff regardless of request status. An
+   accepted row past the cutoff survives only while its request is currently
    wanted/downloading; a request_id with no matching row (hard-deleted
    elsewhere) counts as inactive.
 The deterministic pins for these same invariants live in
@@ -40,7 +41,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 from lib.download_ownership import DownloadOwnershipWriter
@@ -203,12 +204,16 @@ class TestGeneratedTransferLedgerWriteAhead(unittest.TestCase):
 @dataclass(frozen=True)
 class LedgerPruneRow:
     request_id: int
-    age_days: float
+    age_seconds: int
     request_status: str | None  # None = request row doesn't exist
+    accepted: bool
 
 
 _STATUSES = ("wanted", "downloading", "imported", "manual", "replaced")
 _RETENTION_DAYS = 90
+_RETENTION_SECONDS = _RETENTION_DAYS * 24 * 60 * 60
+_PRUNE_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+_PRUNE_CUTOFF = _PRUNE_NOW - timedelta(seconds=_RETENTION_SECONDS)
 
 
 @st.composite
@@ -216,29 +221,22 @@ def prune_worlds(draw) -> tuple[LedgerPruneRow, ...]:
     count = draw(st.integers(min_value=0, max_value=8))
     rows = []
     for i in range(count):
-        # Deliberately avoid the exact retention boundary (~90 days): the
-        # seed timestamp and the prune call's `older_than` are computed
-        # at two different `datetime.now()` reads a few microseconds
-        # apart, so a value landing exactly on the boundary is a genuine
-        # clock-skew race, not a meaningful invariant edge to pin.
-        age_days = draw(st.one_of(
-            st.floats(min_value=0.0, max_value=_RETENTION_DAYS - 0.1,
-                      allow_nan=False, allow_infinity=False),
-            st.floats(min_value=_RETENTION_DAYS + 0.1, max_value=400.0,
-                      allow_nan=False, allow_infinity=False),
+        age_seconds = draw(st.one_of(
+            st.just(_RETENTION_SECONDS),
+            st.integers(min_value=0, max_value=400 * 24 * 60 * 60),
         ))
         rows.append(LedgerPruneRow(
             request_id=i + 1,
-            age_days=age_days,
+            age_seconds=age_seconds,
             request_status=draw(st.one_of(
                 st.none(), st.sampled_from(_STATUSES))),
+            accepted=draw(st.booleans()),
         ))
     return tuple(rows)
 
 
 def _build_prune_db(rows: tuple[LedgerPruneRow, ...]) -> FakePipelineDB:
     db = FakePipelineDB()
-    now = datetime.now(timezone.utc)
     for row in rows:
         if row.request_status is not None:
             db.seed_request({"id": row.request_id, "status": row.request_status})
@@ -247,22 +245,27 @@ def _build_prune_db(rows: tuple[LedgerPruneRow, ...]) -> FakePipelineDB:
                 request_id=row.request_id, username="p0",
                 filename=f"f-{row.request_id}.flac"),
         ])
+        if row.accepted:
+            db.confirm_transfer_enqueue("p0", f"f-{row.request_id}.flac")
         ledger_id = next(
             fid for fid, r in db._transfer_ledger.items()
             if r.request_id == row.request_id)
         db._transfer_ledger[ledger_id].enqueued_at = (
-            now - timedelta(days=row.age_days))
+            _PRUNE_NOW - timedelta(seconds=row.age_seconds))
     return db
 
 
 def expected_prune_survivors(rows: tuple[LedgerPruneRow, ...]) -> set[int]:
-    """T3 invariant: a row survives iff it's within retention OR its
-    request is currently active (wanted/downloading)."""
+    """T3 invariant: rows within retention survive; after it, only accepted
+    rows for active requests retain ownership evidence."""
     survivors = set()
     for row in rows:
-        within_retention = row.age_days < _RETENTION_DAYS
-        active = row.request_status in ("wanted", "downloading")
-        if within_retention or active:
+        within_retention = row.age_seconds <= _RETENTION_SECONDS
+        accepted_active = (
+            row.accepted
+            and row.request_status in ("wanted", "downloading")
+        )
+        if within_retention or accepted_active:
             survivors.add(row.request_id)
     return survivors
 
@@ -279,15 +282,21 @@ def assert_prune_matches_oracle(
 
 
 class TestGeneratedTransferLedgerPrune(unittest.TestCase):
-    """T3 property: retention + active-request gating over generated
-    ledger-row worlds."""
+    """T3 property: pending-intent bounds plus accepted-row protection."""
 
+    @example(rows=(
+        LedgerPruneRow(1, 200 * 24 * 60 * 60, "wanted", False),
+        LedgerPruneRow(2, 200 * 24 * 60 * 60, "downloading", False),
+        LedgerPruneRow(3, 200 * 24 * 60 * 60, "wanted", True),
+        LedgerPruneRow(4, 200 * 24 * 60 * 60, "downloading", True),
+        LedgerPruneRow(5, _RETENTION_SECONDS, "imported", False),
+        LedgerPruneRow(6, 200 * 24 * 60 * 60, None, True),
+    ))
     @given(rows=prune_worlds())
-    def test_prune_respects_retention_and_active_status(self, rows):
+    def test_prune_respects_intent_acceptance_retention_and_status(self, rows):
         db = _build_prune_db(rows)
 
-        db.prune_transfer_ledger(
-            older_than=datetime.now(timezone.utc) - timedelta(days=_RETENTION_DAYS))
+        db.prune_transfer_ledger(older_than=_PRUNE_CUTOFF)
 
         survivors_after = {r.request_id for r in db._transfer_ledger.values()}
         assert_prune_matches_oracle(rows, survivors_after)
@@ -357,14 +366,34 @@ class TestTransferLedgerCheckersTripOnViolations(unittest.TestCase):
             assert_write_ahead_holds(world, ["ledger:1", "post:1"], db)
 
     def test_prune_checker_trips_when_an_expected_survivor_is_missing(self):
-        rows = (LedgerPruneRow(request_id=1, age_days=5.0, request_status="wanted"),)
+        rows = (LedgerPruneRow(
+            request_id=1,
+            age_seconds=200 * 24 * 60 * 60,
+            request_status="wanted",
+            accepted=True,
+        ),)
         with self.assertRaises(AssertionError):
             assert_prune_matches_oracle(rows, survivors_after=set())
 
-    def test_prune_checker_trips_when_an_unexpected_row_survives(self):
-        rows = (LedgerPruneRow(request_id=1, age_days=200.0, request_status="imported"),)
+    def test_prune_checker_trips_when_old_pending_active_row_survives(self):
+        rows = (LedgerPruneRow(
+            request_id=1,
+            age_seconds=200 * 24 * 60 * 60,
+            request_status="downloading",
+            accepted=False,
+        ),)
         with self.assertRaises(AssertionError):
             assert_prune_matches_oracle(rows, survivors_after={1})
+
+    def test_prune_checker_trips_when_exact_boundary_row_is_missing(self):
+        rows = (LedgerPruneRow(
+            request_id=1,
+            age_seconds=_RETENTION_SECONDS,
+            request_status=None,
+            accepted=False,
+        ),)
+        with self.assertRaises(AssertionError):
+            assert_prune_matches_oracle(rows, survivors_after=set())
 
 
 if __name__ == "__main__":

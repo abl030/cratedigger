@@ -292,6 +292,13 @@ the completion event feed stamps it, and disk deletion still requires that
 event-stamped path or another positive ownership signal. Terminal transfer
 cleanup does not infer a filesystem path from the queue key.
 
+Retention is a strict 90-day cutoff on `enqueued_at`: a row exactly at the
+cutoff survives. Older pending rows (`accepted_at IS NULL`) are deleted even
+when their request remains `wanted` or `downloading`, because enqueue intent
+alone has no ownership value and long-tail requests search forever. Older
+accepted rows keep active-request protection; accepted evidence is deleted
+only when the request is inactive or hard-deleted.
+
 ## Persisted search plans (migration 014)
 
 Search execution is plan-driven. Each wanted request owns a materialised

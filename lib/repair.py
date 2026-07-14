@@ -190,11 +190,13 @@ def find_slskd_orphans(
     string is treated as live so a stray never dodges convergence by
     omitting it.
 
-    A ledger row that has since been pruned (``prune_transfer_ledger``,
-    T3 — old AND its request inactive) is indistinguishable here from a
-    transfer that was never ledgered: it becomes FOREIGN, never reaped by
-    this convergence. Accepted: prune only fires well past any transfer's
-    legitimate lifetime, and the safe direction of that miss is "leave it
+    Accepted evidence that has since been pruned
+    (``prune_transfer_ledger``, T3 — old with an inactive request) is
+    indistinguishable here from a transfer that was never ledgered: it becomes
+    FOREIGN, never reaped by this convergence. Pending intent is also pruned
+    once old, but was already foreign because it never granted authority.
+    Accepted evidence is pruned only well past any inactive transfer's
+    legitimate lifetime. The safe direction of either miss is "leave it
     alone", never "delete a human's transfer".
     """
     backed: set[tuple[str, str]] = set()

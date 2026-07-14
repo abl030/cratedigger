@@ -9971,7 +9971,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             fake.get_owned_attempt_folders(),
         )
 
-    def test_prune_removes_only_old_inactive_rows(self):
+    def test_prune_removes_old_inactive_accepted_rows(self):
         active = self._seed_request("downloading")
         inactive = self._seed_request("imported")
         recent = self._seed_request("imported")
@@ -9998,6 +9998,38 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         self.assertIn((f"p{recent}", f"{recent}.flac"), remaining)
         self.assertNotIn((f"p{inactive}", f"{inactive}.flac"), remaining)
         self.assertNotIn((f"p{missing}", f"{missing}.flac"), remaining)
+
+    def test_prune_old_pending_rows_ignores_active_request_status(self):
+        pending_wanted = self._seed_request("wanted")
+        pending_downloading = self._seed_request("downloading")
+        accepted_wanted = self._seed_request("wanted")
+        accepted_downloading = self._seed_request("downloading")
+        for request_id in (
+            pending_wanted,
+            pending_downloading,
+            accepted_wanted,
+            accepted_downloading,
+        ):
+            self.db.record_transfer_enqueue([
+                TransferLedgerRow(
+                    request_id=request_id,
+                    username=f"p{request_id}",
+                    filename=f"{request_id}.flac",
+                ),
+            ])
+            self._backdate(request_id, days=200)
+        for request_id in (accepted_wanted, accepted_downloading):
+            self.db.confirm_transfer_enqueue(
+                f"p{request_id}", f"{request_id}.flac")
+
+        removed = self.db.prune_transfer_ledger(
+            older_than=datetime.now(timezone.utc) - timedelta(days=90))
+
+        self.assertEqual(removed, 2)
+        self.assertEqual(self._ledger_rows(pending_wanted), [])
+        self.assertEqual(self._ledger_rows(pending_downloading), [])
+        self.assertEqual(len(self._ledger_rows(accepted_wanted)), 1)
+        self.assertEqual(len(self._ledger_rows(accepted_downloading)), 1)
 
     def test_prune_exact_boundary_row_survives(self):
         rid = self._seed_request("imported")

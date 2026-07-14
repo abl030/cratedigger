@@ -6255,12 +6255,13 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
             db.get_owned_transfer_keys(),
             {("p0", "a.flac")})
 
-    def test_prune_transfer_ledger_keeps_active_request_rows(self):
+    def test_prune_transfer_ledger_keeps_accepted_active_request_rows(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1, status="downloading"))
         db.record_transfer_enqueue([
             TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
         ])
+        db.confirm_transfer_enqueue("p0", "a.flac")
         old_id = next(iter(db._transfer_ledger))
         db._transfer_ledger[old_id].enqueued_at = (
             datetime.now(timezone.utc) - timedelta(days=200))
@@ -6270,6 +6271,30 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
 
         self.assertEqual(removed, 0)
         self.assertIn(old_id, db._transfer_ledger)
+
+    def test_prune_transfer_ledger_removes_pending_active_request_rows(self):
+        db = FakePipelineDB()
+        for request_id, status in ((1, "wanted"), (2, "downloading")):
+            db.seed_request(make_request_row(id=request_id, status=status))
+            db.record_transfer_enqueue([
+                TransferLedgerRow(
+                    request_id=request_id,
+                    username=f"p{request_id}",
+                    filename=f"{request_id}.flac",
+                ),
+            ])
+            ledger_id = next(
+                fake_id for fake_id, row in db._transfer_ledger.items()
+                if row.request_id == request_id
+            )
+            db._transfer_ledger[ledger_id].enqueued_at = (
+                datetime.now(timezone.utc) - timedelta(days=200))
+
+        removed = db.prune_transfer_ledger(
+            older_than=datetime.now(timezone.utc) - timedelta(days=90))
+
+        self.assertEqual(removed, 2)
+        self.assertEqual(db._transfer_ledger, {})
 
     def test_prune_transfer_ledger_removes_old_terminal_rows(self):
         db = FakePipelineDB()
