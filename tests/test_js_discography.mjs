@@ -4,6 +4,8 @@
  */
 
 import {
+  catalogueDomId,
+  releaseGroupRequestPath,
   renderPressingRow,
   renderRgRow,
   synthesizeMasterlessRow,
@@ -200,7 +202,10 @@ console.log('Release-id onclick arguments — adversarial deterministic pin');
   const id = "rg'\"\\</div><script>alert(1)</script>";
   const arg = expectedJsArg(id);
   const rgHtml = renderRgRow(
-    { id, title: 'Adversarial RG', first_release_date: '2003', is_masterless: true },
+    {
+      id, title: 'Adversarial release', first_release_date: '2003',
+      identity_kind: 'release',
+    },
     { artistName: 'The Wrens', nameLC: 'the wrens', source: 'mb' },
   );
   const pressingHtml = renderPressingRow({
@@ -258,6 +263,71 @@ console.log('Release-id onclick arguments — generated critical-character prope
   let oldCompiles = true;
   try { new Function('window', oldHandler); } catch (_) { oldCompiles = false; }
   assertEqual(oldCompiles, false, 'known-bad raw interpolation checker rejects apostrophe ID');
+}
+
+console.log('Discogs master/release DOM identities stay distinct at equal numeric IDs');
+{
+  const masterId = catalogueDomId('discogs', 'work', '122');
+  const releaseId = catalogueDomId('discogs', 'release', '122');
+  assertEqual(masterId, 'rel-discogs-work-122', 'master target is namespaced as work');
+  assertEqual(releaseId, 'rel-discogs-release-122', 'leaf target is namespaced as release');
+  assertEqual(masterId === releaseId, false, 'equal numeric IDs cannot collide');
+  assertEqual(
+    catalogueDomId('mb', 'work', '122') === masterId,
+    false,
+    'equal IDs from different catalogues cannot collide',
+  );
+  assertEqual(
+    releaseGroupRequestPath('122', 'discogs', 'work'),
+    '/api/discogs/master/122',
+    'work identity loads the master endpoint',
+  );
+  assertEqual(
+    releaseGroupRequestPath('122', 'discogs', 'release'),
+    '/api/discogs/release/122',
+    'release identity loads the leaf endpoint',
+  );
+
+  const masterHtml = renderRgRow(
+    { id: '122', title: 'Master', identity_kind: 'work' },
+    { artistName: 'The Rolling Stones', nameLC: 'the rolling stones', source: 'discogs' },
+  );
+  const releaseHtml = renderRgRow(
+    { id: '122', title: 'Release', identity_kind: 'release' },
+    { artistName: 'The Rolling Stones', nameLC: 'the rolling stones', source: 'discogs' },
+  );
+  assertContains(masterHtml, `id="${masterId}"`, 'master renders its own expansion target');
+  assertContains(releaseHtml, `id="${releaseId}"`, 'release renders its own expansion target');
+  assertContains(masterHtml, 'data-identity-kind="work"', 'master row carries selector identity');
+  assertContains(releaseHtml, 'data-identity-kind="release"', 'release row carries selector identity');
+  assertContains(masterHtml, "source:'discogs',identityKind:'work'", 'master click preserves endpoint identity');
+  assertContains(releaseHtml, "source:'discogs',identityKind:'release'", 'release click preserves endpoint identity');
+}
+
+console.log('Discogs DOM identity namespace — generated numeric collision sweep');
+{
+  for (let id = 1; id <= 1000; id += 37) {
+    const master = catalogueDomId('discogs', 'work', id);
+    const release = catalogueDomId('discogs', 'release', id);
+    assertEqual(master === release, false, `master/release ${id} targets differ`);
+    assertEqual(
+      releaseGroupRequestPath(id, 'discogs', 'work').includes('/master/'),
+      true,
+      `master ${id} dispatches to master endpoint`,
+    );
+    assertEqual(
+      releaseGroupRequestPath(id, 'discogs', 'release').includes('/release/'),
+      true,
+      `release ${id} dispatches to release endpoint`,
+    );
+  }
+  const oldDomId = id => `rel-${id}`;
+  assertEqual(oldDomId(122), oldDomId(122), 'known-bad scalar target collides');
+  assertEqual(
+    catalogueDomId('discogs', 'work', 122) === catalogueDomId('discogs', 'release', 122),
+    false,
+    'new checker rejects the known-bad collision',
+  );
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

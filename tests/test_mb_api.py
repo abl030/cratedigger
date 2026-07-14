@@ -213,6 +213,7 @@ class TestArtistReleaseGroupsWithAppearances(unittest.TestCase):
         "releases": [
             {
                 "id": "appearance-release",
+                "status": "Official",
                 "release-group": {
                     "id": APPEARANCE_RG,
                     "title": "The Big Noise",
@@ -230,7 +231,28 @@ class TestArtistReleaseGroupsWithAppearances(unittest.TestCase):
             },
             {
                 "id": "duplicate-own-release",
+                "status": "Bootleg",
                 "release-group": DIRECT["release-groups"][0],
+            },
+        ],
+    }
+    DIRECT_RELEASES = {
+        "release-count": 3,
+        "releases": [
+            {
+                "id": "own-official",
+                "status": "Official",
+                "release-group": {"id": OWN_RG},
+            },
+            {
+                "id": "own-promo",
+                "status": "Promotion",
+                "release-group": {"id": OWN_RG},
+            },
+            {
+                "id": "unsupported-status",
+                "status": "Pseudo-Release",
+                "release-group": {"id": APPEARANCE_RG},
             },
         ],
     }
@@ -238,6 +260,7 @@ class TestArtistReleaseGroupsWithAppearances(unittest.TestCase):
     def test_track_artist_release_groups_are_preserved_as_appearances(self):
         with _mock_urlopen_by_fragment({
             "/release-group?artist=": self.DIRECT,
+            "/release?artist=": self.DIRECT_RELEASES,
             "/release?track_artist=": self.TRACK_APPEARANCES,
         }) as mock:
             rows = get_artist_release_groups(self.ARTIST_ID)
@@ -245,21 +268,74 @@ class TestArtistReleaseGroupsWithAppearances(unittest.TestCase):
         called = [call.args[0].full_url for call in mock.call_args_list]
         self.assertTrue(any("/release?track_artist=" in url for url in called))
         self.assertEqual(len(rows), 2)
-        by_id = {row["id"]: row for row in rows}
-        self.assertIs(by_id[self.OWN_RG]["is_appearance"], False)
-        self.assertIs(by_id[self.APPEARANCE_RG]["is_appearance"], True)
+        by_id = {row.id: row for row in rows}
+        self.assertIs(by_id[self.OWN_RG].is_appearance, False)
+        self.assertIs(by_id[self.APPEARANCE_RG].is_appearance, True)
         self.assertEqual(
-            by_id[self.APPEARANCE_RG]["artist_credit"],
+            by_id[self.APPEARANCE_RG].artist_credit,
             "Artists in Support of Make Trade Fair",
         )
         self.assertEqual(
-            by_id[self.APPEARANCE_RG]["primary_artist_id"],
+            by_id[self.APPEARANCE_RG].primary_artist_id,
             MB_VA_ARTIST_MBID,
         )
         self.assertEqual(
-            by_id[self.APPEARANCE_RG]["secondary_types"],
+            by_id[self.APPEARANCE_RG].secondary_types,
             ["Compilation"],
         )
+        self.assertEqual(
+            by_id[self.OWN_RG].provenance,
+            ["ordinary", "promo", "unofficial"],
+        )
+        self.assertEqual(by_id[self.APPEARANCE_RG].provenance, ["ordinary"])
+
+    def test_unknown_or_null_release_status_does_not_become_unofficial(self):
+        direct_releases = {
+            "release-count": 2,
+            "releases": [
+                {"status": None, "release-group": {"id": self.OWN_RG}},
+                {"status": "Pseudo-Release", "release-group": {"id": self.OWN_RG}},
+            ],
+        }
+        with _mock_urlopen_by_fragment({
+            "/release-group?artist=": self.DIRECT,
+            "/release?artist=": direct_releases,
+            "/release?track_artist=": {"release-count": 0, "releases": []},
+        }):
+            rows = get_artist_release_groups(self.ARTIST_ID)
+
+        self.assertEqual(rows[0].provenance, [])
+
+    def test_null_primary_type_normalizes_to_empty_structural_evidence(self):
+        artist_id = "00000000-0000-0000-0000-000000000695"
+        release_group = {
+            "id": "00000000-0000-0000-0000-000000000696",
+            "title": "Unclassified Work",
+            "primary-type": None,
+            "secondary-types": [],
+            "first-release-date": None,
+            "artist-credit": [],
+        }
+        with _mock_urlopen_by_fragment({
+            "/release-group?artist=": {
+                "release-group-count": 1,
+                "release-groups": [release_group],
+            },
+            "/release?artist=": {
+                "release-count": 0,
+                "releases": [],
+            },
+            "/release?track_artist=": {
+                "release-count": 0,
+                "releases": [],
+            },
+        }):
+            rows = get_artist_release_groups(artist_id)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].type, "")
+        self.assertEqual(rows[0].primary_types, [])
+        self.assertEqual(rows[0].first_release_date, "")
 
 
 if __name__ == "__main__":

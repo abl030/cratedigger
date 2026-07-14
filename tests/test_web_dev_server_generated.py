@@ -225,8 +225,13 @@ class TestLiveDbMetadataWiringGenerated(unittest.TestCase):
         configure_live_db_metadata(config)
         cache._redis = FakeRedis()
         cache.meta_set(
-            f"artist:compare:v4:{mbid}:{discogs_id}",
-            {"both": [], "mb_only": [], "discogs_only": []},
+            f"artist:compare:v6:{mbid}:{discogs_id}",
+            {
+                "both": [],
+                "mb_unpaired": [],
+                "discogs_unpaired": [],
+                "discogs_ungrouped_releases": [],
+            },
         )
         cache.meta_set(f"mb:artist:{mbid}:name", artist_name)
         cache.meta_set(f"discogs:artist:{discogs_id}:name", artist_name)
@@ -279,13 +284,14 @@ class TestBrowseResolveWarmCacheGenerated(unittest.TestCase):
         self, discogs_id: int, kind: str, marker: str,
     ) -> None:
         cache._redis = FakeRedis()
-        cache_key = f"browse-resolve:discogs:{kind}:{discogs_id}"
+        cache_key = f"browse-resolve:v2:discogs:{kind}:{discogs_id}"
         cache.meta_set(cache_key, {
             "source": "discogs",
             "kind": "master" if kind == "master" else "release",
             "artist_id": marker,
             "artist_name": marker,
             "is_va": False,
+            "target_identity_kind": "work" if kind == "master" else "release",
             "expand_id": str(discogs_id),
             "leaf_id": None if kind == "master" else str(discogs_id),
         })

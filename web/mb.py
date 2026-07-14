@@ -13,9 +13,18 @@ web UI's POST invalidation paths. See issue #101.
 """
 
 import json
+from typing import cast
+import urllib.error
 import urllib.parse
 import urllib.request
-import urllib.error
+
+import msgspec
+
+from lib.artist_catalogue import (
+    ArtistCatalogueRow,
+    ArtistProvenance,
+    ArtistStructuralType,
+)
 
 # Use the `web.` package-qualified path to keep the web metadata cache
 # separate from the pipeline's peer-cache implementation.
@@ -183,34 +192,70 @@ def _normalize_artist_release_group(
     rg: dict,
     *,
     is_appearance: bool,
-) -> dict:
+) -> ArtistCatalogueRow:
     """Shape direct and track-appearance MB rows into one artist-page contract."""
     ac = rg.get("artist-credit", [])
     credit_name = " / ".join(a.get("name", "?") for a in ac) if ac else ""
     primary_artist_id = ac[0].get("artist", {}).get("id") if ac else None
-    return {
-        "id": rg["id"],
-        "title": rg.get("title", ""),
-        "type": rg.get("primary-type", ""),
-        "secondary_types": rg.get("secondary-types", []),
-        "first_release_date": rg.get("first-release-date", ""),
-        "artist_credit": credit_name,
-        "primary_artist_id": primary_artist_id,
-        "is_appearance": is_appearance,
-    }
+    # MusicBrainz represents an unclassified release group with JSON null,
+    # not only by omitting the field. The shared catalogue contract keeps
+    # display text non-null and carries structural knowledge separately.
+    primary_type = rg.get("primary-type") or ""
+    primary_types: list[ArtistStructuralType] = []
+    if primary_type in {"Album", "EP", "Single"}:
+        primary_types.append(cast(ArtistStructuralType, primary_type))
+    return ArtistCatalogueRow(
+        id=rg["id"],
+        title=rg.get("title") or "",
+        type=primary_type,
+        source="mb",
+        identity_kind="work",
+        primary_types=primary_types,
+        secondary_types=rg.get("secondary-types") or [],
+        format_qualifiers=[],
+        # Release status is unioned set-wise inside get_artist_release_groups
+        # before rows leave this adapter.
+        provenance=[],
+        first_release_date=rg.get("first-release-date") or "",
+        artist_credit=credit_name,
+        primary_artist_id=primary_artist_id or "",
+        is_appearance=is_appearance,
+    )
 
 
-def get_artist_release_groups(artist_mbid):
+def get_artist_release_groups(artist_mbid: str) -> list[ArtistCatalogueRow]:
     """Get directly credited release groups plus track-level appearances.
 
     MusicBrainz has no combined artist-discography endpoint. Direct work comes
     from the release-group artist browse; VA compilations and guest spots come
-    from the release ``track_artist`` browse. Direct rows win deduplication so
-    a release group is never downgraded merely because another pressing also
-    contains an appearance.
+    from the release ``track_artist`` browse. Release status evidence is
+    projected here, not in the route: both direct-artist and track-artist
+    release browses contribute to a per-release-group union. Direct rows win
+    identity deduplication so a release group is never downgraded merely
+    because another pressing also contains an appearance.
     """
-    def _fetch() -> list[dict]:
-        entries: dict[str, dict] = {}
+    def _fetch() -> list[ArtistCatalogueRow]:
+        entries: dict[str, ArtistCatalogueRow] = {}
+        provenance_by_rg: dict[str, set[ArtistProvenance]] = {}
+
+        def collect_release_provenance(release: dict) -> None:
+            rg = release.get("release-group")
+            if not isinstance(rg, dict):
+                return
+            rg_id = rg.get("id")
+            if not isinstance(rg_id, str) or not rg_id:
+                return
+            status = release.get("status")
+            provenance: ArtistProvenance | None = None
+            if status == "Official":
+                provenance = "ordinary"
+            elif status == "Promotion":
+                provenance = "promo"
+            elif status == "Bootleg":
+                provenance = "unofficial"
+            if provenance is not None:
+                provenance_by_rg.setdefault(rg_id, set()).add(provenance)
+
         offset = 0
         while True:
             data = _get(
@@ -221,8 +266,24 @@ def get_artist_release_groups(artist_mbid):
                 entry = _normalize_artist_release_group(
                     rg, is_appearance=False,
                 )
-                entries.setdefault(entry["id"], entry)
+                entries.setdefault(entry.id, entry)
             total = data.get("release-group-count", 0)
+            offset += 100
+            if offset >= total:
+                break
+
+        # A release group browse carries no child release statuses. Fetch the
+        # directly credited releases without a status filter so mixed
+        # Official/Promotion/Bootleg evidence survives as a set.
+        offset = 0
+        while True:
+            data = _get(
+                f"{MB_API_BASE}/release?artist={artist_mbid}"
+                f"&inc=release-groups&fmt=json&limit=100&offset={offset}"
+            )
+            for release in data.get("releases", []):
+                collect_release_provenance(release)
+            total = data.get("release-count", 0)
             offset += 100
             if offset >= total:
                 break
@@ -235,57 +296,35 @@ def get_artist_release_groups(artist_mbid):
                 f"&fmt=json&limit=100&offset={offset}"
             )
             for release in data.get("releases", []):
+                collect_release_provenance(release)
                 rg = release.get("release-group")
                 if not isinstance(rg, dict) or not rg.get("id"):
                     continue
                 entry = _normalize_artist_release_group(
                     rg, is_appearance=True,
                 )
-                entries.setdefault(entry["id"], entry)
+                entries.setdefault(entry.id, entry)
             total = data.get("release-count", 0)
             offset += 100
             if offset >= total:
                 break
 
-        return sorted(
+        for rg_id, entry in entries.items():
+            entry.provenance = sorted(provenance_by_rg.get(rg_id, set()))
+
+        rows = sorted(
             entries.values(),
             key=lambda row: (
-                row.get("first_release_date") or "",
-                row.get("id") or "",
+                row.first_release_date,
+                row.id,
             ),
         )
-
-    return _cache.memoize_meta(
-        f"mb:artist:{artist_mbid}:release_groups:v2", _fetch,
-    )
-
-
-def get_official_release_group_ids(artist_mbid):
-    """Get the set of release group IDs that have at least one official release."""
-    # JSON cannot serialize a set, so we cache the sorted list and
-    # rebuild the set on the caller's side. Callers use `x in` which
-    # works on either, but set semantics are preserved here for clarity.
-    def _fetch() -> list[str]:
-        rg_ids: set[str] = set()
-        offset = 0
-        while True:
-            data = _get(
-                f"{MB_API_BASE}/release?artist={artist_mbid}"
-                f"&status=official&inc=release-groups&fmt=json&limit=100&offset={offset}"
-            )
-            for r in data.get("releases", []):
-                rg_id = r.get("release-group", {}).get("id")
-                if rg_id:
-                    rg_ids.add(rg_id)
-            total = data.get("release-count", 0)
-            offset += 100
-            if offset >= total:
-                break
-        return sorted(rg_ids)
+        return msgspec.to_builtins(rows)
 
     cached = _cache.memoize_meta(
-        f"mb:artist:{artist_mbid}:official_rg_ids", _fetch)
-    return set(cached)
+        f"mb:artist:{artist_mbid}:release_groups:v4", _fetch,
+    )
+    return msgspec.convert(cached, type=list[ArtistCatalogueRow])
 
 
 def get_release_group(rg_mbid):

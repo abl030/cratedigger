@@ -40,7 +40,7 @@ import { invalidateActiveRgs } from './active_rgs.js';
  * @property {string} query             Current search-box substring filter.
  */
 
-/** @type {{ browseSource: string, browseSearchType: string, browseArtist: {id:string, name:string}|null, browseLabel: {id:string, name:string}|null, labelFilters: {yearMin:number|null, yearMax:number|null, format:string, hideHeld:boolean}, labelPage: number, browseCache: Object, pipelineDashboardData: Object|null, pipelineView: string, pipelineMatchGraphOpen: boolean, pipelineHourlyMatchGraphOpen: boolean, pipelineDailyMatchGraphOpen: boolean, longTail: LongTailState, recentsCounts: {all:number, imported:number, rejected:number, matches_24h:number, matches_6h:number, matches_per_hour_24h:number, matches_per_hour_6h:number}, recentsFilter: string, recentsSub: 'history'|'downloading'|'imports', dsConstants: Object|null, disambData: Object|null, searchTimer: number|null, searchTargetId: string|null, searchTargetExpandId: string|null, searchTargetSource: string|null, searchPlanDetailContext: SearchPlanDetailContext|null }} */
+/** @type {{ browseSource: string, browseSearchType: string, browseArtist: {id:string, name:string}|null, browseLabel: {id:string, name:string}|null, labelFilters: {yearMin:number|null, yearMax:number|null, format:string, hideHeld:boolean}, labelPage: number, browseCache: Object, pipelineDashboardData: Object|null, pipelineView: string, pipelineMatchGraphOpen: boolean, pipelineHourlyMatchGraphOpen: boolean, pipelineDailyMatchGraphOpen: boolean, longTail: LongTailState, recentsCounts: {all:number, imported:number, rejected:number, matches_24h:number, matches_6h:number, matches_per_hour_24h:number, matches_per_hour_6h:number}, recentsFilter: string, recentsSub: 'history'|'downloading'|'imports', dsConstants: Object|null, disambData: Object|null, searchTimer: number|null, searchTargetId: string|null, searchTargetExpandId: string|null, searchTargetSource: string|null, searchTargetIdentityKind: 'work'|'release'|null, searchPlanDetailContext: SearchPlanDetailContext|null }} */
 export const state = {
   browseSource: 'mb',
   browseSearchType: 'artist',
@@ -76,10 +76,13 @@ export const state = {
   // Search-by-ID ring state. Cleared on closeBrowseArtist / setSearchType /
   // next paste. searchTargetId is the leaf .release[data-release-id]; null
   // for group-level inputs (master / release-group). searchTargetExpandId
-  // is the parent .rg the discography post-render hook auto-expands.
+  // is the parent .rg the discography post-render hook auto-expands;
+  // searchTargetIdentityKind disambiguates a Discogs work from a
+  // numerically equal ungrouped release.
   searchTargetId: null,
   searchTargetExpandId: null,
   searchTargetSource: null,
+  searchTargetIdentityKind: null,
   // Search-plan detail subview back-button stash. Hydrated by
   // `openSearchPlanDetail` (U4); cleared by `closeSearchPlanDetail`.
   searchPlanDetailContext: null,

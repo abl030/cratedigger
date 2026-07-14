@@ -1,97 +1,105 @@
 // @ts-check
-/**
- * Unified artist page (issue #575 PR4).
- *
- * One scrolling page replaces the old Discography / Analysis / Library /
- * Compare sub-tabs. The fast pair (source discography + library feed)
- * renders immediately, sectioned into:
- *
- *   In library / In flight / Missing / Appearances / Bootleg-only
- *
- * All release-group rows share renderRgRow (badges, expansion target,
- * data-rg-id), so search-by-ID ringing and the sibling-pressing Replace
- * flow work in every section. Two slow feeds decorate the page after it
- * renders, without re-rendering (expansion state survives):
- *
- *   - /api/artist/compare → an appended "Only on <other source>" section
- *     (the deduped complement bucket; MB-preferred merge).
- *   - /api/artist/<id>/disambiguate → unique-track chips on rows and
- *     colour-dot recordings breakdowns inside expansions (analysis.js).
- *
- * Sectioning invariants (see tests/test_js_artist_page.mjs):
- *   I1 every release-group lands in exactly one of {inLibrary, missing,
- *      appearances, bootlegs}; I2 explicit appearance provenance precedes
- *      bootleg/ownership classification; I3 ownership via
- *      the credit rules; I4 in_library === true is the only inLibrary
- *      ticket; I5 inFlight is a lens over the library feed
- *      (downloading/manual only — "wanted" is ambient after the
- *      full-library backfill and stays a badge); I6 no owned album is
- *      invisible — a library-feed row whose release group is absent
- *      from the source discography renders as an orphan album row
- *      inside the In library section.
- */
+/** Unified artist-page semantic partitioning and rendering. */
 import { classify, renderTypedSections, SECTION_ORDER } from './grouping.js';
 import { renderRgRow } from './discography.js';
 import { renderLibraryAlbumRow } from './library.js';
 
-/**
- * Split the fast pair into the page's sections.
- * @param {{artistId: string, artistName: string,
- *          releaseGroups: Array<Object>, libraryAlbums: Array<Object>}} input
- * @returns {{inLibrary: Object[], inFlight: Object[], missing: Object[],
- *            appearances: Object[], bootlegs: Object[]}}
- */
-export function classifyArtistRows({ artistId, artistName, releaseGroups, libraryAlbums }) {
-  const nameLC = (artistName || '').toLowerCase();
-  const inLibrary = [], missing = [], appearances = [], bootlegs = [];
-  for (const rg of releaseGroups || []) {
-    const credit = (rg.artist_credit || '').toLowerCase();
-    const isOwn = rg.primary_artist_id === artistId
-      || credit === nameLC || credit.startsWith(nameLC + ' /') || credit.startsWith(nameLC + ',') || !credit;
-    if (rg.is_appearance === true) {
-      appearances.push(rg);
-    } else if (!rg.has_official) {
-      bootlegs.push(rg);
-    } else if (!isOwn) {
-      appearances.push(rg);
-    } else if (rg.in_library === true) {
-      inLibrary.push(rg);
-    } else {
-      missing.push(rg);
-    }
-  }
-  const inFlight = (libraryAlbums || []).filter(
-    a => a.pipeline_status === 'downloading' || a.pipeline_status === 'manual');
-  // I6 — owned albums whose release group never made it into the source
-  // discography (MB lacks the release, or the backend's title-fallback
-  // match missed). Without this they'd be invisible on the whole page.
-  // The title checks approximate the backend fallback so an album whose
-  // rg row DID render (under a different rg id) isn't shown twice. The
-  // dedupe set spans EVERY bucket that can carry an in-library-annotated
-  // RG — an owned split 7" whose MB twin is unofficial renders (badged)
-  // under Bootleg-only, and a guest-credit one under Appearances; both
-  // previously re-emitted as orphans because only the inLibrary bucket
-  // fed the set.
-  const rgIds = new Set((releaseGroups || []).map(r => String(r.id)));
-  const inLibTitles = new Set((releaseGroups || [])
-    .filter(r => r.in_library === true)
-    .map(r => (r.title || '').toLowerCase()));
-  const inLibraryOrphans = (libraryAlbums || []).filter(a =>
-    a.in_library !== false
-    && !(a.mb_releasegroupid && rgIds.has(String(a.mb_releasegroupid)))
-    && !inLibTitles.has((a.album || '').toLowerCase())
-    && !inLibTitles.has((a.release_group_title || '').toLowerCase()));
-  return { inLibrary, inLibraryOrphans, inFlight, missing, appearances, bootlegs };
-}
 
 /**
- * A collapsible page section: type-header (count) + type-body.
- * @param {string} title
- * @param {number} count
- * @param {string} bodyHtml
- * @param {{open?: boolean, color?: string, id?: string}} [opts]
- * @returns {string}
+ * @param {Object} row
+ * @returns {Set<string>}
  */
+function provenanceSet(row) {
+  return new Set(row.provenance || []);
+}
+
+
+/**
+ * Partition work rows by source-authored provenance without title guesses.
+ * Appearances remain distinct from both mainline and exceptional own works.
+ * Mixed works with positive ordinary evidence remain mainline and carry their
+ * exceptional provenance chips on the row.
+ * @param {Object[]} rows
+ * @returns {{mainline:Object[], appearances:Object[], promoOnly:Object[],
+ *            unofficialOnly:Object[], unknown:Object[]}}
+ */
+export function partitionWorkRows(rows) {
+  const result = {
+    mainline: [], appearances: [], promoOnly: [], unofficialOnly: [], unknown: [],
+  };
+  for (const row of rows || []) {
+    if (row.is_appearance === true) {
+      result.appearances.push(row);
+      continue;
+    }
+    const provenance = provenanceSet(row);
+    if (provenance.has('ordinary')) result.mainline.push(row);
+    else if (provenance.has('unofficial')) result.unofficialOnly.push(row);
+    else if (provenance.has('promo')) result.promoOnly.push(row);
+    else result.unknown.push(row);
+  }
+  return result;
+}
+
+
+/**
+ * Split the fast artist/library pair into mutually exclusive work sections.
+ * Discogs release units are supplied separately and never enter work buckets.
+ * @param {{artistId:string, artistName:string, releaseGroups:Object[],
+ *          ungroupedReleases?:Object[], libraryAlbums:Object[]}} input
+ * @returns {Object}
+ */
+export function classifyArtistRows({
+  artistId, artistName, releaseGroups, ungroupedReleases = [], libraryAlbums,
+}) {
+  const nameLC = (artistName || '').toLowerCase();
+  const inLibrary = [], missing = [], appearances = [];
+  const promoOnly = [], unofficialOnly = [], unknownProvenance = [];
+  for (const row of releaseGroups || []) {
+    const credit = (row.artist_credit || '').toLowerCase();
+    const isOwn = row.primary_artist_id === artistId
+      || credit === nameLC || credit.startsWith(nameLC + ' /')
+      || credit.startsWith(nameLC + ',') || !credit;
+    if (row.is_appearance === true || !isOwn) {
+      appearances.push(row);
+      continue;
+    }
+    const provenance = provenanceSet(row);
+    if (!provenance.has('ordinary')) {
+      if (provenance.has('unofficial')) unofficialOnly.push(row);
+      else if (provenance.has('promo')) promoOnly.push(row);
+      else unknownProvenance.push(row);
+      continue;
+    }
+    (row.in_library === true ? inLibrary : missing).push(row);
+  }
+
+  const inFlight = (libraryAlbums || []).filter(
+    album => album.pipeline_status === 'downloading'
+      || album.pipeline_status === 'manual');
+
+  // Suppress library editions only through exact identity. Title collisions
+  // never hide a curated edition or fabricate cross-source ownership.
+  const workIds = new Set((releaseGroups || []).map(row => String(row.id)));
+  const releaseIds = new Set((ungroupedReleases || [])
+    .filter(row => row.in_library === true)
+    .map(row => String(row.id)));
+  const inLibraryOrphans = (libraryAlbums || []).filter(album =>
+    album.in_library !== false
+    && !(album.mb_releasegroupid
+      && workIds.has(String(album.mb_releasegroupid)))
+    && !(album.mb_albumid && releaseIds.has(String(album.mb_albumid))));
+
+  return {
+    inLibrary, inLibraryOrphans, inFlight, missing, appearances,
+    promoOnly, unofficialOnly, unknownProvenance,
+    ungroupedReleases: ungroupedReleases || [],
+  };
+}
+
+
+/** @param {string} title @param {number} count @param {string} bodyHtml
+ * @param {{open?:boolean,color?:string,id?:string}} [opts] @returns {string} */
 function sectionWrap(title, count, bodyHtml, opts = {}) {
   const style = opts.color ? ` style="color:${opts.color};"` : '';
   const idAttr = opts.id ? ` id="${opts.id}"` : '';
@@ -107,16 +115,8 @@ function sectionWrap(title, count, bodyHtml, opts = {}) {
   `;
 }
 
-/**
- * Return the release-type sections containing at least one owned row.
- *
- * Strict ``in_library === true`` keeps wanted/downloading rows from opening
- * exceptional buckets merely because the pipeline is still searching.
- * SECTION_ORDER makes the result stable for rendering and tests.
- *
- * @param {Object[]} rows
- * @returns {string[]}
- */
+
+/** @param {Object[]} rows @returns {string[]} */
 export function ownedTypeSections(rows) {
   const owned = new Set((rows || [])
     .filter(row => row.in_library === true)
@@ -124,46 +124,64 @@ export function ownedTypeSections(rows) {
   return SECTION_ORDER.filter(section => owned.has(section));
 }
 
-/**
- * Partition source-complement rows without guessing from titles or VA names.
- * Metadata adapters author ``is_appearance`` from their native provenance.
- *
- * @param {Object[]} rows
- * @returns {{mainline: Object[], appearances: Object[]}}
- */
-export function splitAppearanceRows(rows) {
-  const mainline = [];
-  const appearances = [];
-  for (const row of rows || []) {
-    (row.is_appearance === true ? appearances : mainline).push(row);
-  }
-  return { mainline, appearances };
-}
 
 /**
- * Render the unified artist page body. Empty sections are omitted.
- * @param {{inLibrary: Object[], inFlight: Object[], missing: Object[],
- *          appearances: Object[], bootlegs: Object[]}} sections
- * @param {{artistId: string, artistName: string}} ctx
- * @returns {string}
+ * @param {string} title @param {Object[]} rows
+ * @param {(row:Object)=>string} rowRenderer @param {string} color
  */
+function renderCollapsedWorkSection(title, rows, rowRenderer, color) {
+  if (!rows.length) return '';
+  const ownedTypes = ownedTypeSections(rows);
+  return sectionWrap(title, rows.length, renderTypedSections(rows, rowRenderer, {
+    defaultOpen: null,
+    openSections: ownedTypes,
+  }), { color, open: ownedTypes.length > 0 });
+}
+
+
+/**
+ * @param {Object[]} rows @param {(row:Object)=>string} rowRenderer
+ * @param {string} label
+ */
+function renderProvenanceSections(rows, rowRenderer, label) {
+  const split = partitionWorkRows(rows);
+  let html = '';
+  if (split.mainline.length) {
+    const owned = ownedTypeSections(split.mainline);
+    html += renderTypedSections(split.mainline, rowRenderer, {
+      defaultOpen: null, openSections: owned,
+    });
+  }
+  html += renderCollapsedWorkSection(
+    `Appears on${label}`, split.appearances, rowRenderer, '#777');
+  html += renderCollapsedWorkSection(
+    `Promo-only${label}`, split.promoOnly, rowRenderer, '#8a7040');
+  html += renderCollapsedWorkSection(
+    `Unofficial-only${label}`, split.unofficialOnly, rowRenderer, '#777');
+  html += renderCollapsedWorkSection(
+    `Unknown provenance${label}`, split.unknown, rowRenderer, '#777');
+  return html;
+}
+
+
+/** Render the fast primary-source artist page. @param {Object} sections
+ * @param {{artistId:string,artistName:string}} ctx @returns {string} */
 export function renderArtistSections(sections, ctx) {
   const nameLC = (ctx.artistName || '').toLowerCase();
-  const rgRow = (rg) => renderRgRow(rg, { artistName: ctx.artistName, nameLC });
-  const typed = (rgs, defaultOpen, openSections) => renderTypedSections(
-    rgs,
-    rgRow,
-    {
+  const rowRenderer = row => renderRgRow(row, {
+    artistName: ctx.artistName, nameLC,
+  });
+  const typed = (rows, defaultOpen, openSections) => renderTypedSections(
+    rows, rowRenderer, {
       defaultOpen: defaultOpen ? 'Albums' : null,
       ...(openSections ? { openSections } : {}),
-    },
-  );
+    });
 
   let html = '';
   const orphans = sections.inLibraryOrphans || [];
-  if (sections.inLibrary.length > 0 || orphans.length > 0) {
-    let body = sections.inLibrary.length > 0 ? typed(sections.inLibrary, true) : '';
-    if (orphans.length > 0) {
+  if (sections.inLibrary.length || orphans.length) {
+    let body = sections.inLibrary.length ? typed(sections.inLibrary, true) : '';
+    if (orphans.length) {
       body += `
         <div class="type-header" style="color:#777;margin-top:6px;cursor:default;" onclick="event.stopPropagation()">
           Library-only editions <span class="type-count">${orphans.length}</span>
@@ -173,78 +191,74 @@ export function renderArtistSections(sections, ctx) {
     html += sectionWrap('In library', sections.inLibrary.length + orphans.length,
       body, { open: true });
   }
-  if (sections.inFlight.length > 0) {
+  if (sections.inFlight.length) {
     html += sectionWrap('In flight', sections.inFlight.length,
       sections.inFlight.map(renderLibraryAlbumRow).join(''), { open: true });
   }
-  if (sections.missing.length > 0) {
+  if (sections.missing.length) {
     html += sectionWrap('Missing', sections.missing.length,
       typed(sections.missing, true), { open: true });
   }
-  if (sections.appearances.length > 0) {
-    const ownedTypes = ownedTypeSections(sections.appearances);
-    html += sectionWrap('Appearances', sections.appearances.length,
-      typed(sections.appearances, false, ownedTypes), {
+  html += renderCollapsedWorkSection(
+    'Appearances', sections.appearances, rowRenderer, '#777');
+  html += renderCollapsedWorkSection(
+    'Promo-only works', sections.promoOnly, rowRenderer, '#8a7040');
+  html += renderCollapsedWorkSection(
+    'Unofficial-only works', sections.unofficialOnly, rowRenderer, '#555');
+  html += renderCollapsedWorkSection(
+    'Unknown-provenance works', sections.unknownProvenance, rowRenderer, '#777');
+
+  const ungrouped = sections.ungroupedReleases || [];
+  if (ungrouped.length) {
+    const ownedTypes = ownedTypeSections(ungrouped);
+    html += sectionWrap(
+      'Ungrouped Discogs releases',
+      ungrouped.length,
+      renderProvenanceSections(ungrouped, rowRenderer, ' releases'),
+      {
         color: '#777',
+        id: 'ungrouped-discogs-releases',
         open: ownedTypes.length > 0,
-      });
-  }
-  if (sections.bootlegs.length > 0) {
-    const ownedTypes = ownedTypeSections(sections.bootlegs);
-    html += sectionWrap('Bootleg-only releases', sections.bootlegs.length,
-      typed(sections.bootlegs, false, ownedTypes), {
-        color: '#555',
-        open: ownedTypes.length > 0,
-      });
+      },
+    );
   }
   return html;
 }
 
+
 /**
- * The late-appended complement section: release groups that exist only
- * on the OTHER metadata source (compare's deduped mb_only/discogs_only
- * bucket). Rows force loadReleaseGroup onto the complement source.
- * @param {Object[]} rows - rg-shaped rows from the compare bucket
- * @param {{artistName: string, source: 'mb'|'discogs'}} ctx
- * @returns {string} '' when the bucket is empty
+ * Render the other source's unpaired work units and, when Discogs is the
+ * other source, its separately conserved ungrouped release units.
+ * @param {Object[]} rows @param {Object[]} ungroupedRows
+ * @param {{artistName:string,source:'mb'|'discogs'}} ctx @returns {string}
  */
-export function renderOtherSourceSection(rows, ctx) {
-  if (!rows || rows.length === 0) return '';
+export function renderUnpairedSourceSections(rows, ungroupedRows, ctx) {
   const nameLC = (ctx.artistName || '').toLowerCase();
   const label = ctx.source === 'discogs' ? 'Discogs' : 'MusicBrainz';
-  const rgRow = (rg) => renderRgRow(rg, {
+  const rowRenderer = row => renderRgRow(row, {
     artistName: ctx.artistName, nameLC, source: ctx.source,
   });
-  const { mainline, appearances } = splitAppearanceRows(rows);
-  const mainlineOwnedTypes = ownedTypeSections(mainline);
-  const appearanceOwnedTypes = ownedTypeSections(appearances);
-  let body = '';
-  if (mainline.length > 0) {
-    body += renderTypedSections(mainline, rgRow, {
-      defaultOpen: null,
-      openSections: mainlineOwnedTypes,
-    });
-  }
-  if (appearances.length > 0) {
-    body += sectionWrap(
-      'Appears on',
-      appearances.length,
-      renderTypedSections(appearances, rgRow, {
-        defaultOpen: null,
-        openSections: appearanceOwnedTypes,
-        headerStyle: 'color:#777;',
-      }),
+  let html = '';
+  if (rows && rows.length) {
+    const owned = ownedTypeSections(rows);
+    html += sectionWrap(
+      `Unpaired ${label} works`, rows.length,
+      renderProvenanceSections(rows, rowRenderer, ' works'),
       {
-        color: '#777',
-        open: appearanceOwnedTypes.length > 0,
+        color: '#a96', id: 'unpaired-other-source', open: owned.length > 0,
       },
     );
   }
-  return sectionWrap(`Only on ${label}`, rows.length,
-    body,
-    {
-      color: '#a96',
-      id: 'only-other-source',
-      open: mainlineOwnedTypes.length > 0 || appearanceOwnedTypes.length > 0,
-    });
+  if (ungroupedRows && ungroupedRows.length) {
+    const owned = ownedTypeSections(ungroupedRows);
+    html += sectionWrap(
+      'Ungrouped Discogs releases', ungroupedRows.length,
+      renderProvenanceSections(ungroupedRows, rowRenderer, ' releases'),
+      {
+        color: '#777', id: 'ungrouped-discogs-releases',
+        open: owned.length > 0,
+      },
+    );
+  }
+  return html;
 }

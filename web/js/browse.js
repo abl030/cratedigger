@@ -1,9 +1,14 @@
 // @ts-check
 import { state, API, toast } from './state.js';
 import { esc, jsArg, parsePastedId } from './util.js';
-import { loadReleaseGroup, renderReleaseDetail, applySearchTargetAfterDiscography } from './discography.js';
+import {
+  applySearchTargetAfterDiscography,
+  catalogueDomId,
+  loadReleaseGroup,
+  renderReleaseDetail,
+} from './discography.js';
 import { applyAnalysisChips, applyAnalysisToOpenExpansions } from './analysis.js';
-import { classifyArtistRows, renderArtistSections, renderOtherSourceSection } from './artist_page.js';
+import { classifyArtistRows, renderArtistSections, renderUnpairedSourceSections } from './artist_page.js';
 import { searchLabels, renderLabelSearchResults, openLabelDetail, closeLabelDetail } from './labels.js';
 
 /**
@@ -33,8 +38,8 @@ async function findArtistOnSource(name, src) {
 /**
  * Reflect the active metadata source in the toggle buttons + the hint line.
  * The selected source is the PRIMARY discography; the other source only
- * fills in releases the primary is missing (the appended "Only on <other>"
- * section). Called from every place that changes browseSource so the
+ * exposes conservatively unpaired work units from the other source below.
+ * Called from every place that changes browseSource so the
  * primary/complement story never goes stale. Single source of truth for
  * the source-toggle chrome — the two call sites used to duplicate the
  * button-class flip and neither touched the hint.
@@ -48,8 +53,8 @@ function applySourceUI(src) {
   const hint = document.getElementById('source-hint');
   if (hint) {
     hint.innerHTML = src === 'discogs'
-      ? '<b class="src-primary">Discogs</b> is primary · MusicBrainz fills the rest (shown as "Only on MusicBrainz" below)'
-      : '<b class="src-primary">MusicBrainz</b> is primary · Discogs fills the rest (shown as "Only on Discogs" below)';
+      ? '<b class="src-primary">Discogs</b> is primary · unpaired MusicBrainz works are shown below'
+      : '<b class="src-primary">MusicBrainz</b> is primary · unpaired Discogs works and releases are shown below';
   }
 }
 
@@ -177,6 +182,21 @@ export function clearSearchTarget() {
   state.searchTargetId = null;
   state.searchTargetExpandId = null;
   state.searchTargetSource = null;
+  state.searchTargetIdentityKind = null;
+}
+
+/**
+ * Read the resolver-authored catalogue identity level. Discogs master and
+ * release IDs occupy separate numeric namespaces, so equality between
+ * expand_id and leaf_id is not evidence of a masterless release.
+ * @param {Object} data
+ * @returns {'work'|'release'}
+ */
+export function resolverTargetIdentityKind(data) {
+  if (data.target_identity_kind === 'work' || data.target_identity_kind === 'release') {
+    return data.target_identity_kind;
+  }
+  throw new Error('Resolver response missing target_identity_kind');
 }
 
 /**
@@ -241,6 +261,7 @@ export async function resolveAndNavigate(q, requestToken) {
   state.searchTargetId = data.leaf_id || null;
   state.searchTargetExpandId = data.expand_id || null;
   state.searchTargetSource = data.source;
+  state.searchTargetIdentityKind = resolverTargetIdentityKind(data);
 
   // Force a discography re-render even if the artist is already cached.
   // Without this, two consecutive pastes for different releases on the
@@ -266,7 +287,7 @@ export async function resolveAndNavigate(q, requestToken) {
  *
  * In-flight token guard: each await is gated by `requestToken !==
  * searchArtistsRequestToken`. Unlike the artist-view path where a re-render
- * detaches prior #rel-X nodes (so a stale write goes to detached DOM and is
+ * detaches prior expansion nodes (so a stale write goes to detached DOM and is
  * harmless), va-fallback-body is a stable, never-replaced node — a stale
  * fetch landing here would scribble onto a fresh card. The isStale callback
  * is also threaded into loadReleaseGroup so the nested write is protected.
@@ -499,6 +520,7 @@ function renderUnified(el, aid, name, rgRes, libRes) {
     artistId: aid,
     artistName: name,
     releaseGroups: rgRes.release_groups || [],
+    ungroupedReleases: rgRes.ungrouped_releases || [],
     libraryAlbums: libRes.albums || [],
   });
   el.innerHTML = renderArtistSections(sections, { artistId: aid, artistName: name });
@@ -507,7 +529,7 @@ function renderUnified(el, aid, name, rgRes, libRes) {
 
 /**
  * Background decoration 1: the MB↔Discogs compare complement. Appends
- * an "Only on <other source>" section with the deduped bucket from
+ * honest unpaired-work and ungrouped-release sections from
  * /api/artist/compare. Silent on failure — a mirror-less host 503s and
  * the page simply stays single-source.
  * @param {HTMLElement} el
@@ -539,13 +561,21 @@ async function fireCompareComplement(el, aid, name, token) {
  * @param {Object} data - /api/artist/compare response
  */
 function appendOtherSourceSection(el, name, data) {
-  if (el.querySelector('#only-other-source')) return;
   const isDiscogs = state.browseSource === 'discogs';
-  const rows = isDiscogs ? (data.mb_only || []) : (data.discogs_only || []);
-  const html = renderOtherSourceSection(rows, {
+  const rows = isDiscogs
+    ? (data.mb_unpaired || [])
+    : (data.discogs_unpaired || []);
+  const ungrouped = isDiscogs
+    ? []
+    : (data.discogs_ungrouped_releases || []);
+  const html = renderUnpairedSourceSections(
+    el.querySelector('#unpaired-other-source') ? [] : rows,
+    el.querySelector('#ungrouped-discogs-releases') ? [] : ungrouped,
+    {
     artistName: name,
     source: isDiscogs ? 'mb' : 'discogs',
-  });
+    },
+  );
   if (html) el.insertAdjacentHTML('beforeend', html);
 }
 
@@ -619,8 +649,10 @@ export async function searchArtists(q) {
         // Discogs releases without a master: show pressings inline instead of dead-end artist page
         const isMasterless = isDiscogs && rg.is_master === false;
         const releaseId = isMasterless ? rg.discogs_release_id || rg.id : rg.id;
+        const identityKind = isMasterless ? 'release' : 'work';
+        const loadOpts = `{source:'${browseSource}',identityKind:'${identityKind}'${isMasterless ? ',masterless:true' : ''}}`;
         const onclick = (isVA || isMasterless)
-          ? `window.loadReleaseGroup(${jsArg(releaseId)}, this, ${isMasterless ? '{masterless:true}' : '{}'})`
+          ? `window.loadReleaseGroup(${jsArg(releaseId)}, this, ${loadOpts})`
           : `window.openBrowseArtist(${jsArg(rg.artist_id)}, ${jsArg(rg.artist_name)})`;
         return `
         <div class="artist" style="cursor:pointer;padding:6px 0;" onclick="${onclick}">
@@ -628,7 +660,7 @@ export async function searchArtists(q) {
           <span class="artist-dis"> — ${esc(rg.title)}</span>
           ${rg.primary_type ? `<span class="artist-dis" style="color:#888;"> (${esc(rg.primary_type)})</span>` : ''}
         </div>
-        <div id="rel-${esc(String(rg.id))}"></div>`;
+        <div id="${esc(catalogueDomId(browseSource, identityKind, releaseId))}"></div>`;
       }).join('');
     } else {
       const r = await fetch(`${searchBase}?q=${encodeURIComponent(q)}`);

@@ -23,6 +23,7 @@ from typing import Literal
 
 import msgspec
 
+from lib.artist_catalogue import ArtistCatalogueRow
 from web import cache as _cache
 from web.artist_search import merge_exact_artist_identities
 
@@ -288,6 +289,8 @@ def search_artists(query: str) -> list[dict]:
 
 
 _DiscogsStructuralType = Literal["Album", "EP", "Single"]
+_DiscogsProvenance = Literal["ordinary", "promo", "unofficial"]
+_DISCOGS_RELEASE_ROW_ID_RE = re.compile(r"^release-([1-9]\d*)$")
 
 
 class _DiscogsArtistMasterEntry(msgspec.Struct):
@@ -296,6 +299,8 @@ class _DiscogsArtistMasterEntry(msgspec.Struct):
     title: str
     type: str
     primary_types: list[_DiscogsStructuralType]
+    format_qualifiers: list[str]
+    provenance: list[_DiscogsProvenance]
     first_release_date: str
     artist_credit: str
     primary_artist_id: int | None
@@ -330,49 +335,81 @@ def _normalize_artist_master_entry(
     r: _DiscogsArtistMasterEntry,
     *,
     is_appearance: bool,
-) -> dict:
+) -> ArtistCatalogueRow:
     """Shape one row from /api/artists/{id}/{masters,appearances} into our schema.
 
     Masterless releases come back with id ``release-<n>``; we strip the prefix
-    so the bare release id flows through downstream lookups (the row gets
-    ``is_masterless=True`` + a ``discogs_release_id`` so the UI knows to expand
-    via the release endpoint, not the master endpoint).
+    and normalize them as release identities so downstream code cannot confuse
+    a leaf pressing with a master/work row.
     """
+    for field_name, values in (
+        ("primary_types", r.primary_types),
+        ("format_qualifiers", r.format_qualifiers),
+        ("provenance", r.provenance),
+    ):
+        if values != sorted(set(values)):
+            raise ValueError(
+                f"Discogs artist row {field_name} must be sorted and deduplicated"
+            )
+
     raw_id = r.id
     is_masterless = r.is_masterless
-    if is_masterless and isinstance(raw_id, str) and raw_id.startswith("release-"):
-        bare_id = raw_id[len("release-"):]
-        return {
-            "id": bare_id,
-            "title": r.title,
-            "type": r.type,
-            "primary_types": list(r.primary_types),
-            "secondary_types": [],
-            "first_release_date": r.first_release_date,
-            "artist_credit": r.artist_credit,
-            "primary_artist_id": (
+    release_match = (
+        _DISCOGS_RELEASE_ROW_ID_RE.fullmatch(raw_id)
+        if isinstance(raw_id, str)
+        else None
+    )
+    if is_masterless and release_match is None:
+        raise ValueError(
+            "Discogs masterless artist row id must be release-<positive integer>"
+        )
+    if not is_masterless and (
+        not isinstance(raw_id, int) or isinstance(raw_id, bool) or raw_id <= 0
+    ):
+        raise ValueError(
+            "Discogs master artist row id must be a positive integer"
+        )
+    if is_masterless:
+        assert release_match is not None
+        bare_id = release_match.group(1)
+        return ArtistCatalogueRow(
+            id=bare_id,
+            title=r.title,
+            type=r.type,
+            source="discogs",
+            identity_kind="release",
+            primary_types=list(r.primary_types),
+            secondary_types=[],
+            format_qualifiers=list(r.format_qualifiers),
+            provenance=list(r.provenance),
+            first_release_date=r.first_release_date,
+            artist_credit=r.artist_credit,
+            primary_artist_id=(
                 str(r.primary_artist_id) if r.primary_artist_id is not None else ""
             ),
-            "is_appearance": is_appearance,
-            "is_masterless": True,
-            "discogs_release_id": bare_id,
-        }
-    return {
-        "id": str(raw_id),
-        "title": r.title,
-        "type": r.type,
-        "primary_types": list(r.primary_types),
-        "secondary_types": [],
-        "first_release_date": r.first_release_date,
-        "artist_credit": r.artist_credit,
-        "primary_artist_id": (
+            is_appearance=is_appearance,
+            discogs_release_id=bare_id,
+        )
+    return ArtistCatalogueRow(
+        id=str(raw_id),
+        title=r.title,
+        type=r.type,
+        source="discogs",
+        identity_kind="work",
+        primary_types=list(r.primary_types),
+        secondary_types=[],
+        format_qualifiers=list(r.format_qualifiers),
+        provenance=list(r.provenance),
+        first_release_date=r.first_release_date,
+        artist_credit=r.artist_credit,
+        primary_artist_id=(
             str(r.primary_artist_id) if r.primary_artist_id is not None else ""
         ),
-        "is_appearance": is_appearance,
-    }
+        is_appearance=is_appearance,
+    )
 
 
-def get_artist_releases(artist_id: int) -> list[dict]:
+def get_artist_releases(artist_id: int) -> list[ArtistCatalogueRow]:
     """Get an artist's discography grouped by master. Mirrors mb.get_artist_release_groups().
 
     Merges two mirror endpoints:
@@ -390,8 +427,8 @@ def get_artist_releases(artist_id: int) -> list[dict]:
     """
     api_base = require_mirror_configured()
 
-    def _fetch() -> list[dict]:
-        entries: dict[tuple[str, str], dict] = {}
+    def _fetch() -> list[ArtistCatalogueRow]:
+        entries: dict[tuple[str, str], ArtistCatalogueRow] = {}
 
         masters = msgspec.convert(
             _get(f"{api_base}/api/artists/{artist_id}/masters/all"),
@@ -402,8 +439,8 @@ def get_artist_releases(artist_id: int) -> list[dict]:
             entry = _normalize_artist_master_entry(
                 r, is_appearance=False,
             )
-            namespace = "release" if entry.get("is_masterless") else "master"
-            entries.setdefault((namespace, entry["id"]), entry)
+            namespace = entry.identity_kind
+            entries.setdefault((namespace, entry.id), entry)
 
         appearances = msgspec.convert(
             _get(f"{api_base}/api/artists/{artist_id}/appearances"),
@@ -414,15 +451,43 @@ def get_artist_releases(artist_id: int) -> list[dict]:
             entry = _normalize_artist_master_entry(
                 r, is_appearance=True,
             )
-            namespace = "release" if entry.get("is_masterless") else "master"
-            entries.setdefault((namespace, entry["id"]), entry)
+            namespace = entry.identity_kind
+            entries.setdefault((namespace, entry.id), entry)
 
-        return sorted(
+        rows = sorted(
             entries.values(),
-            key=lambda e: (e.get("first_release_date") or "", e.get("id", "")),
+            key=lambda e: (e.first_release_date, e.id),
         )
+        return msgspec.to_builtins(rows)
 
-    return _cache.memoize_meta(f"discogs:artist:{artist_id}:releases:v5", _fetch)
+    cached = _cache.memoize_meta(
+        f"discogs:artist:{artist_id}:releases:v7", _fetch,
+    )
+    return msgspec.convert(cached, type=list[ArtistCatalogueRow])
+
+
+def _status_from_formats(formats: list[dict]) -> str:
+    """Project Discogs format descriptions into truthful display status."""
+    qualifiers: set[str] = set()
+    for format_ in formats:
+        descriptions = format_.get("descriptions", "")
+        if isinstance(descriptions, str):
+            qualifiers.update(
+                value.strip() for value in descriptions.split(",") if value.strip()
+            )
+        elif isinstance(descriptions, list):
+            qualifiers.update(
+                value.strip() for value in descriptions if isinstance(value, str)
+            )
+    unofficial = "Unofficial Release" in qualifiers
+    promo = "Promo" in qualifiers
+    if unofficial and promo:
+        return "Bootleg / Promo"
+    if unofficial:
+        return "Bootleg"
+    if promo:
+        return "Promotion"
+    return "Official"
 
 
 def get_master_releases(master_id: int) -> dict:
@@ -440,7 +505,7 @@ def get_master_releases(master_id: int) -> dict:
                 "title": r.get("title", data.get("title", "")),
                 "date": r.get("released", ""),
                 "country": r.get("country", ""),
-                "status": "Official",
+                "status": _status_from_formats(formats),
                 "track_count": r.get("track_count", 0),
                 "format": ", ".join(format_names) if format_names else "?",
                 "media_count": len(formats),
@@ -455,7 +520,7 @@ def get_master_releases(master_id: int) -> dict:
             "releases": releases,
         }
 
-    return _cache.memoize_meta(f"discogs:master:{master_id}", _fetch)
+    return _cache.memoize_meta(f"discogs:master:v2:{master_id}", _fetch)
 
 
 def get_release(release_id: int, *, fresh: bool = False) -> dict:
@@ -495,14 +560,14 @@ def get_release(release_id: int, *, fresh: bool = False) -> dict:
             "date": data.get("released", ""),
             "year": year,
             "country": data.get("country", ""),
-            "status": "Official",
+            "status": _status_from_formats(data.get("formats", [])),
             "tracks": tracks,
             "labels": data.get("labels", []),
             "formats": data.get("formats", []),
         }
 
     return _cache.memoize_meta(
-        f"discogs:release:{release_id}", _fetch, fresh=fresh)
+        f"discogs:release:v2:{release_id}", _fetch, fresh=fresh)
 
 
 def get_artist_name(artist_id: int) -> str:
