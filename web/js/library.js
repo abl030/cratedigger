@@ -459,6 +459,13 @@ export function describeBeetsDeletion(data) {
       completed: true,
     };
   }
+  if (data.acknowledgement_lost) {
+    return {
+      message: data.detail || 'Beets acknowledgement was lost; filesystem deletion is unconfirmed, metadata may be gone, and the pipeline row was preserved for explicit recovery.',
+      error: true,
+      completed: false,
+    };
+  }
   const detail = data.detail ? `: ${data.detail}` : '';
   return {
     message: `${data.error || 'Delete failed'}${detail}`,

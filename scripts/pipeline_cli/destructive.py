@@ -193,6 +193,13 @@ def cmd_library_delete(
     if isinstance(result, DeleteIncomplete):
         print(json.dumps({
             "error": "delete_incomplete",
+            "id": result.album_id,
+            "album": result.album_name,
+            "artist": result.artist_name,
+            "former_album_path": result.former_album_path,
+            "pipeline_id": result.pipeline_request_id,
+            "pipeline_status": result.pipeline_status,
+            "acknowledgement_lost": result.acknowledgement_lost,
             "reason": result.reason,
             "detail": result.detail,
             "album_still_present": result.album_still_present,

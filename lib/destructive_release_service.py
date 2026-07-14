@@ -19,7 +19,6 @@ from lib import transitions
 from lib.audio_hash import AudioHashError, hash_audio_content
 from lib.beets_album_op import BeetsOpFailure
 from lib.beets_delete import (
-    BeetsDeleteCompleted,
     BeetsDeleteFailed,
     BeetsDeleteOutcome,
     BeetsDeleteRequest,
@@ -455,11 +454,17 @@ class DeletePipelinePurgeFailure:
 @dataclass(frozen=True)
 class DeleteIncomplete:
     album_id: int
+    album_name: str
+    artist_name: str
+    former_album_path: str
+    pipeline_request_id: int | None
+    pipeline_status: str | None
+    acknowledgement_lost: bool
     reason: str
     detail: str
     album_still_present: bool
-    deleted_files: int
-    deleted_artifacts: int
+    deleted_files: int | None
+    deleted_artifacts: int | None
     remaining_owned_paths: tuple[str, ...]
     preserved_paths: tuple[str, ...]
 
@@ -516,7 +521,7 @@ def _delete_confirmations_match(
 
 
 def _preflight_former_album_path(detail: dict[str, object]) -> str:
-    """Retain the exact album directory across a lost child acknowledgement."""
+    """Retain the exact album directory for incomplete operator recovery."""
     direct = detail.get("path")
     if isinstance(direct, str) and direct:
         return direct
@@ -534,44 +539,69 @@ def _preflight_former_album_path(detail: dict[str, object]) -> str:
     return ""
 
 
-def _reconcile_ambiguous_beets_ack(
+def _incomplete_delete_detail(
     *,
-    beets_db: SupportsDestructiveBeetsDB,
     failed: BeetsDeleteFailed,
-    preflight_detail: dict[str, object],
-) -> BeetsDeleteCompleted | None:
-    """Recognize a committed child delete whose final acknowledgement was lost.
-
-    Only transport/protocol failures are commit-ambiguous. The pinned child is
-    permitted to remove metadata only after its complete filesystem
-    postcondition, so authoritative absence of both the exact album PK and all
-    item rows proves the child crossed that commit boundary. Ordinary typed
-    cleanup failures are never promoted.
-    """
+    former_album_path: str,
+    pipeline_row: dict[str, Any] | None,
+) -> str:
+    """Explain the manual boundary when the child acknowledgement is ambiguous."""
     if failed.reason not in _ACK_AMBIGUOUS_DELETE_REASONS:
-        return None
-    if not beets_db.album_and_items_absent(failed.album_id):
-        return None
-    former_album_path = _preflight_former_album_path(preflight_detail)
-    if not former_album_path:
-        log.error(
-            "Pinned Beets delete for album %s committed without a retained path",
-            failed.album_id,
+        return failed.detail
+    if pipeline_row is None:
+        pipeline_context = "No authoritative pipeline request was present to purge."
+    else:
+        pipeline_context = (
+            f"Pipeline request #{int(pipeline_row['id'])} "
+            f"({str(pipeline_row.get('status') or 'unknown')}) was preserved."
         )
-        return None
-    log.warning(
-        "Reconciling committed Beets delete for album %s after %s acknowledgement",
-        failed.album_id,
-        failed.reason,
+    path_context = (
+        f" Inspect the exact former album path {former_album_path!r} before "
+        "explicit recovery."
+        if former_album_path
+        else " Inspect the library manually before explicit recovery."
     )
-    return BeetsDeleteCompleted(
-        album_id=failed.album_id,
+    return (
+        "Beets acknowledgement was lost; filesystem deletion is unconfirmed "
+        "and Beets metadata may be gone. Do not assume files were deleted. "
+        f"{pipeline_context}{path_context} Child detail: {failed.detail}"
+    )
+
+
+def _delete_incomplete(
+    *,
+    album_id: int,
+    preflight_detail: dict[str, object],
+    pipeline_row: dict[str, Any] | None,
+    reason: str,
+    detail: str,
+    album_still_present: bool,
+    deleted_files: int | None,
+    deleted_artifacts: int | None,
+    remaining_owned_paths: tuple[str, ...],
+    preserved_paths: tuple[str, ...],
+) -> DeleteIncomplete:
+    return DeleteIncomplete(
+        album_id=album_id,
         album_name=str(preflight_detail.get("album") or ""),
         artist_name=str(preflight_detail.get("artist") or ""),
-        former_album_path=former_album_path,
-        deleted_tracks=failed.deleted_tracks,
-        deleted_artifacts=failed.deleted_artifacts,
-        preserved_paths=failed.preserved_paths,
+        former_album_path=_preflight_former_album_path(preflight_detail),
+        pipeline_request_id=(
+            int(pipeline_row["id"]) if pipeline_row is not None else None
+        ),
+        pipeline_status=(
+            str(pipeline_row.get("status") or "unknown")
+            if pipeline_row is not None
+            else None
+        ),
+        acknowledgement_lost=reason in _ACK_AMBIGUOUS_DELETE_REASONS,
+        reason=reason,
+        detail=detail,
+        album_still_present=album_still_present,
+        deleted_files=deleted_files,
+        deleted_artifacts=deleted_artifacts,
+        remaining_owned_paths=remaining_owned_paths,
+        preserved_paths=preserved_paths,
     )
 
 
@@ -612,29 +642,38 @@ def _delete_under_release_lock(
         library_root=beets_db.library_root,
     ))
     if isinstance(beets_outcome, BeetsDeleteFailed):
-        reconciled = _reconcile_ambiguous_beets_ack(
-            beets_db=beets_db,
-            failed=beets_outcome,
-            preflight_detail=detail,
+        album_still_present = (
+            beets_db.get_album_detail(request.album_id) is not None
         )
-        if reconciled is None:
-            album_still_present = (
-                beets_db.get_album_detail(request.album_id) is not None
-            )
-            return DeleteIncomplete(
-                album_id=request.album_id,
-                reason=beets_outcome.reason,
-                detail=beets_outcome.detail,
-                album_still_present=album_still_present,
-                deleted_files=beets_outcome.deleted_tracks,
-                deleted_artifacts=beets_outcome.deleted_artifacts,
-                remaining_owned_paths=beets_outcome.remaining_owned_paths,
-                preserved_paths=beets_outcome.preserved_paths,
-            )
-        beets_outcome = reconciled
-    if not beets_db.album_and_items_absent(request.album_id):
-        return DeleteIncomplete(
+        former_album_path = _preflight_former_album_path(detail)
+        acknowledgement_lost = (
+            beets_outcome.reason in _ACK_AMBIGUOUS_DELETE_REASONS
+        )
+        return _delete_incomplete(
             album_id=request.album_id,
+            preflight_detail=detail,
+            pipeline_row=current_pipeline,
+            reason=beets_outcome.reason,
+            detail=_incomplete_delete_detail(
+                failed=beets_outcome,
+                former_album_path=former_album_path,
+                pipeline_row=current_pipeline,
+            ),
+            album_still_present=album_still_present,
+            deleted_files=(
+                None if acknowledgement_lost else beets_outcome.deleted_tracks
+            ),
+            deleted_artifacts=(
+                None if acknowledgement_lost else beets_outcome.deleted_artifacts
+            ),
+            remaining_owned_paths=beets_outcome.remaining_owned_paths,
+            preserved_paths=beets_outcome.preserved_paths,
+        )
+    if not beets_db.album_and_items_absent(request.album_id):
+        return _delete_incomplete(
+            album_id=request.album_id,
+            preflight_detail=detail,
+            pipeline_row=current_pipeline,
             reason="postcondition_failed",
             detail="exact Beets album or item metadata survived the delete operation",
             album_still_present=(

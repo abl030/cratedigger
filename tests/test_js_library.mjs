@@ -70,6 +70,20 @@ console.log('delete result UI never presents incomplete cleanup as success');
   assertEqual(incomplete.error, true, 'incomplete result is an error toast');
   assertContains(incomplete.message, 'cover.jpg survived', 'incomplete detail is visible');
 
+  const lostAck = describeBeetsDeletion({
+    error: 'delete_incomplete',
+    acknowledgement_lost: true,
+    album: 'Album', artist: 'Artist',
+    former_album_path: '/music/Artist/Album',
+    pipeline_id: 42, pipeline_status: 'imported',
+    detail: 'Beets acknowledgement was lost; filesystem deletion is unconfirmed and Beets metadata may be gone. Do not assume files were deleted. Pipeline request #42 (imported) was preserved. Inspect the exact former album path "/music/Artist/Album" before explicit recovery.',
+  });
+  assertEqual(lostAck.completed, false, 'lost acknowledgement requires manual recovery');
+  assertContains(lostAck.message, 'metadata may be gone', 'metadata ambiguity is explicit');
+  assertContains(lostAck.message, 'Do not assume files were deleted', 'file deletion is not claimed');
+  assertContains(lostAck.message, 'Pipeline request #42 (imported) was preserved', 'pipeline preservation is explicit');
+  assertContains(lostAck.message, '/music/Artist/Album', 'exact recovery path is visible');
+
   const partial = describeBeetsDeletion({
     status: 'partial', album_deleted: true, pipeline_id: 42,
     preserved_paths: ['/music/A/B/booklet.pdf'],

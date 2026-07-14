@@ -634,10 +634,10 @@ class BeetsDB:
     def album_and_items_absent(self, album_id: int) -> bool:
         """Prove the exact album PK and every item row for it are absent.
 
-        This is the parent-side commit-ack reconciliation check for pinned
-        Beets deletion. It deliberately addresses items by the original album
-        primary key rather than release identity, so an orphan item row cannot
-        be mistaken for a completed metadata transaction.
+        This is a defense-in-depth postcondition for a confirmed pinned-Beets
+        delete result. It is never used to promote a lost child acknowledgement
+        into success. Items are addressed by the original album primary key so
+        an orphan row cannot be mistaken for a completed metadata transaction.
         """
         row = self._conn.execute(
             "SELECT "

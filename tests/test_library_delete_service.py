@@ -19,6 +19,8 @@ from lib.beets_delete import (
     BeetsDeleteCompleted,
     BeetsDeleteFailed,
     BeetsDeleteRequest,
+    _OwnedPath,
+    _delete_manifest,
     run_beets_delete,
 )
 from lib.destructive_release_service import (
@@ -189,7 +191,7 @@ class TestDeleteReleaseFromLibrary(unittest.TestCase):
         with BeetsDB(self.db_path) as beets:
             self.assertIsNotNone(beets.get_album_detail(7))
 
-    def test_postcommit_subprocess_error_reconciles_and_purges_last(self) -> None:
+    def test_postcommit_subprocess_error_requires_manual_recovery(self) -> None:
         class TrackingPipeline(FakePipelineDB):
             active_locks = 0
 
@@ -230,11 +232,6 @@ class TestDeleteReleaseFromLibrary(unittest.TestCase):
         def commit_then_lose_ack(request: BeetsDeleteRequest):
             return run_beets_delete(request, runner=nonzero_after_commit)
 
-        def notify_after_release(path: str):
-            self.assertEqual(pipeline.active_locks, 0)
-            notified.append(path)
-            return ()
-
         with (
             patch.dict(os.environ, {
                 "BEETSDIR": self.tmpdir,
@@ -254,7 +251,7 @@ class TestDeleteReleaseFromLibrary(unittest.TestCase):
                     expected_release_id=RELEASE_UUID,
                 ),
                 beets_delete_fn=commit_then_lose_ack,
-                notify_fn=notify_after_release,
+                notify_fn=lambda path: notified.append(path) or (),
             )
             retry = delete_release_from_library(
                 pipeline_db=pipeline,
@@ -266,17 +263,27 @@ class TestDeleteReleaseFromLibrary(unittest.TestCase):
                     "retry must not notify a second time"),
             )
 
-        self.assertIsInstance(result, DeleteSuccess)
-        assert isinstance(result, DeleteSuccess)
-        self.assertTrue(result.pipeline_deleted)
+        self.assertIsInstance(result, DeleteIncomplete)
+        assert isinstance(result, DeleteIncomplete)
+        self.assertTrue(result.acknowledgement_lost)
+        self.assertFalse(result.album_still_present)
         self.assertEqual(result.album_name, "Test Album")
         self.assertEqual(result.artist_name, "Test Artist")
-        self.assertEqual(notified, [os.path.dirname(track_path)])
+        self.assertEqual(result.former_album_path, os.path.dirname(track_path))
+        self.assertEqual(result.pipeline_request_id, 42)
+        self.assertEqual(result.pipeline_status, "imported")
+        self.assertIsNone(result.deleted_files)
+        self.assertIsNone(result.deleted_artifacts)
+        self.assertIn("Beets acknowledgement was lost", result.detail)
+        self.assertIn("metadata may be gone", result.detail)
+        self.assertIn("Pipeline request #42 (imported) was preserved", result.detail)
+        self.assertIn("Do not assume files were deleted", result.detail)
+        self.assertEqual(notified, [])
         self.assertEqual(pipeline.active_locks, 0)
-        self.assertIsNone(pipeline.get_request(42))
+        self.assertIsNotNone(pipeline.get_request(42))
         self.assertIsInstance(retry, DeleteAlbumNotFound)
 
-    def test_postcommit_protocol_loss_reconciles_without_requested_purge(
+    def test_protocol_loss_with_metadata_gone_and_audio_present_fails_closed(
         self,
     ) -> None:
         track_path = self._seed_album()
@@ -287,7 +294,6 @@ class TestDeleteReleaseFromLibrary(unittest.TestCase):
         notified: list[str] = []
 
         def invalid_json_after_commit(argv, **_kwargs):
-            os.remove(track_path)
             with closing(sqlite3.connect(self.db_path)) as conn:
                 conn.execute(
                     "DELETE FROM items WHERE album_id = ?", (7,),
@@ -324,11 +330,18 @@ class TestDeleteReleaseFromLibrary(unittest.TestCase):
                 request=DeleteRequest(album_id=7),
             )
 
-        self.assertIsInstance(result, DeleteSuccess)
-        assert isinstance(result, DeleteSuccess)
-        self.assertFalse(result.pipeline_deleted)
+        self.assertIsInstance(result, DeleteIncomplete)
+        assert isinstance(result, DeleteIncomplete)
+        self.assertTrue(result.acknowledgement_lost)
+        self.assertFalse(result.album_still_present)
+        self.assertEqual(result.former_album_path, os.path.dirname(track_path))
+        self.assertEqual(result.pipeline_request_id, 42)
+        self.assertEqual(result.pipeline_status, "imported")
+        self.assertIsNone(result.deleted_files)
+        self.assertIsNone(result.deleted_artifacts)
+        self.assertTrue(os.path.exists(track_path))
         self.assertIsNotNone(pipeline.get_request(42))
-        self.assertEqual(notified, [os.path.dirname(track_path)])
+        self.assertEqual(notified, [])
         self.assertIsInstance(retry, DeleteAlbumNotFound)
 
     def test_ack_loss_with_orphan_items_is_not_reconciled(self) -> None:
@@ -400,6 +413,67 @@ class TestDeleteReleaseFromLibrary(unittest.TestCase):
         self.assertIsInstance(second, DeleteSuccess)
         self.assertFalse(os.path.exists(track_path))
         self.assertIsNone(pipeline.get_request(42))
+
+    def test_final_unknown_enumeration_error_retains_beets_pg_and_skips_notify(
+        self,
+    ) -> None:
+        track_path = self._seed_album()
+        album_dir = os.path.dirname(track_path)
+        sentinel = os.path.join(album_dir, "booklet.pdf")
+        with open(sentinel, "wb") as handle:
+            handle.write(b"preserve")
+        pipeline = FakePipelineDB()
+        pipeline.seed_request(make_request_row(
+            id=42, status="imported", mb_release_id=RELEASE_UUID,
+        ))
+        list_calls = 0
+
+        def list_with_final_fault(directory):
+            nonlocal list_calls
+            list_calls += 1
+            if list_calls == 2:
+                raise OSError("planted final enumeration fault")
+            return tuple(directory.iterdir())
+
+        def enumeration_failure(
+            request: BeetsDeleteRequest,
+        ) -> BeetsDeleteCompleted | BeetsDeleteFailed:
+            return _delete_manifest(
+                album_id=request.album_id,
+                album_name="Test Album",
+                artist_name="Test Artist",
+                owned_paths=(_OwnedPath(track_path, "track"),),
+                album_dirs=(album_dir,),
+                metadata_remove=lambda: self.fail(
+                    "enumeration failure must retain Beets metadata",
+                ),
+                album_present=lambda: True,
+                remove_path=os.remove,
+                prune_dir=lambda _path: None,
+                list_dir=list_with_final_fault,
+            )
+
+        with BeetsDB(self.db_path) as beets:
+            result = delete_release_from_library(
+                pipeline_db=pipeline,
+                beets_db=beets,
+                request=DeleteRequest(album_id=7, purge_pipeline=True),
+                beets_delete_fn=enumeration_failure,
+                notify_fn=lambda _path: self.fail(
+                    "incomplete enumeration must not notify",
+                ),
+            )
+            self.assertIsNotNone(beets.get_album_detail(7))
+
+        self.assertIsInstance(result, DeleteIncomplete)
+        assert isinstance(result, DeleteIncomplete)
+        self.assertEqual(result.reason, "filesystem_error")
+        self.assertIn("before metadata removal", result.detail)
+        self.assertFalse(os.path.exists(track_path))
+        with open(sentinel, "rb") as handle:
+            self.assertEqual(handle.read(), b"preserve")
+        self.assertEqual(result.preserved_paths, (sentinel,))
+        self.assertIsNotNone(pipeline.get_request(42))
 
     def test_notifier_exception_is_typed_after_locks_release(self) -> None:
         class TrackingPipeline(FakePipelineDB):

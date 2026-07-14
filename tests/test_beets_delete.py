@@ -239,6 +239,39 @@ class TestPinnedBeetsDelete(unittest.TestCase):
 
 
 class TestDeleteManifestOrdering(unittest.TestCase):
+    def test_unknown_enumeration_error_prevents_any_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            track = Path(raw) / "01.flac"
+            track.write_bytes(b"audio")
+            metadata_removed = False
+
+            def remove_metadata() -> None:
+                nonlocal metadata_removed
+                metadata_removed = True
+
+            def fail_list(_directory: Path) -> tuple[Path, ...]:
+                raise OSError("planted enumeration fault")
+
+            outcome = _delete_manifest(
+                album_id=7,
+                album_name="Album",
+                artist_name="Artist",
+                owned_paths=(_OwnedPath(str(track), "track"),),
+                album_dirs=(raw,),
+                metadata_remove=remove_metadata,
+                album_present=lambda: not metadata_removed,
+                remove_path=os.remove,
+                prune_dir=lambda _path: None,
+                list_dir=fail_list,
+            )
+
+            self.assertIsInstance(outcome, BeetsDeleteFailed)
+            assert isinstance(outcome, BeetsDeleteFailed)
+            self.assertEqual(outcome.reason, "filesystem_error")
+            self.assertIn("before deletion", outcome.detail)
+            self.assertFalse(metadata_removed)
+            self.assertTrue(track.exists())
+
     def test_second_path_failure_retains_metadata_and_retry_converges(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

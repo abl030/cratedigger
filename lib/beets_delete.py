@@ -84,6 +84,7 @@ class _OwnedPath(msgspec.Struct, frozen=True):
 RemoveFn = Callable[[str], None]
 PruneFn = Callable[[str], None]
 MetadataRemoveFn = Callable[[], None]
+ListDirFn = Callable[[Path], tuple[Path, ...]]
 
 
 def _same_configured_path(expected: str, configured: str) -> bool:
@@ -150,17 +151,23 @@ def _confined_path(raw: object, root: Path) -> Path | None:
     return candidate
 
 
-def _remaining_unknown(album_dirs: tuple[str, ...], owned: set[str]) -> tuple[str, ...]:
+def _list_directory(directory: Path) -> tuple[Path, ...]:
+    return tuple(directory.iterdir())
+
+
+def _remaining_unknown(
+    album_dirs: tuple[str, ...],
+    owned: set[str],
+    *,
+    list_dir: ListDirFn = _list_directory,
+) -> tuple[str, ...]:
+    """Enumerate unknown content, propagating every directory I/O failure."""
     out: set[str] = set()
     for raw_dir in album_dirs:
         directory = Path(raw_dir)
         if not directory.is_dir():
             continue
-        try:
-            entries = tuple(directory.iterdir())
-        except OSError:
-            continue
-        for entry in entries:
+        for entry in list_dir(directory):
             if str(entry) not in owned:
                 out.add(str(entry))
     return tuple(sorted(out))
@@ -177,8 +184,28 @@ def _delete_manifest(
     album_present: Callable[[], bool],
     remove_path: RemoveFn,
     prune_dir: PruneFn,
+    list_dir: ListDirFn = _list_directory,
 ) -> BeetsDeleteOutcome:
     """Apply the monotonic filesystem -> metadata state transition."""
+    owned_path_set = {item.path for item in owned_paths}
+    try:
+        preserved = _remaining_unknown(
+            album_dirs, owned_path_set, list_dir=list_dir,
+        )
+    except OSError as exc:
+        return BeetsDeleteFailed(
+            album_id=album_id,
+            reason="filesystem_error",
+            detail=(
+                "directory enumeration failed before deletion: "
+                f"{type(exc).__name__}: {exc}"
+            ),
+            album_still_present=album_present(),
+            remaining_owned_paths=tuple(
+                item.path for item in owned_paths if _path_exists(item.path)
+            ),
+        )
+
     deleted_tracks = 0
     deleted_artifacts = 0
     for target in owned_paths:
@@ -197,8 +224,7 @@ def _delete_manifest(
                 deleted_tracks=deleted_tracks,
                 deleted_artifacts=deleted_artifacts,
                 remaining_owned_paths=remaining,
-                preserved_paths=_remaining_unknown(
-                    album_dirs, {item.path for item in owned_paths}),
+                preserved_paths=preserved,
             )
         if existed and not _path_exists(target.path):
             deleted_artifacts += 1
@@ -208,8 +234,24 @@ def _delete_manifest(
     remaining = tuple(
         item.path for item in owned_paths if _path_exists(item.path)
     )
-    preserved = _remaining_unknown(
-        album_dirs, {item.path for item in owned_paths})
+    try:
+        preserved = _remaining_unknown(
+            album_dirs, owned_path_set, list_dir=list_dir,
+        )
+    except OSError as exc:
+        return BeetsDeleteFailed(
+            album_id=album_id,
+            reason="filesystem_error",
+            detail=(
+                "directory enumeration failed before metadata removal: "
+                f"{type(exc).__name__}: {exc}"
+            ),
+            album_still_present=album_present(),
+            deleted_tracks=deleted_tracks,
+            deleted_artifacts=deleted_artifacts,
+            remaining_owned_paths=remaining,
+            preserved_paths=preserved,
+        )
     if remaining:
         return BeetsDeleteFailed(
             album_id=album_id,
@@ -360,7 +402,19 @@ def execute_pinned_beets_delete(request: BeetsDeleteRequest) -> BeetsDeleteOutco
             sidecar = directory / "cratedigger.json"
             candidates.append(_OwnedPath(str(sidecar), "sidecar"))
             if directory.is_dir():
-                for entry in directory.iterdir():
+                try:
+                    entries = _list_directory(directory)
+                except OSError as exc:
+                    return BeetsDeleteFailed(
+                        album_id=request.album_id,
+                        reason="filesystem_error",
+                        detail=(
+                            "directory enumeration failed while building the "
+                            f"owned manifest: {type(exc).__name__}: {exc}"
+                        ),
+                        album_still_present=True,
+                    )
+                for entry in entries:
                     if entry.is_dir():
                         continue
                     if any(fnmatch.fnmatch(entry.name, pattern)

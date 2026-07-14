@@ -59,7 +59,13 @@ Every top-level `pipeline-cli` subcommand, one line each. Run `pipeline-cli rout
 `library-delete` JSON has three truthful terminal shapes. `status=ok` means the
 exact Beets row and owned artifacts are absent; `preserved_paths` lists unknown
 content left untouched and `notifications` records media submissions/warnings.
-`error=delete_incomplete` retains Beets/pipeline authority for retry.
+`error=delete_incomplete` always preserves the PostgreSQL request and skips
+media notification. For ordinary filesystem failures the Beets row also stays
+as retry authority. A lost subprocess/protocol acknowledgement is explicitly
+manual: the JSON retains the preflight album, artist, former exact path, and
+pipeline ID/status, but warns that filesystem deletion is unconfirmed and
+Beets metadata may be gone; deletion counts are `null` because no result was
+acknowledged. Do not infer success from metadata absence.
 `status=partial` with `album_deleted=true` means Beets deletion completed but
 the named PostgreSQL row remains after a purge failure.
 | `manual-import` | Import a local folder as a pipeline request |

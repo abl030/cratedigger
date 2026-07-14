@@ -7,7 +7,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
@@ -4392,11 +4392,14 @@ class TestDestructiveCliAdapters(unittest.TestCase):
         self.addCleanup(self.tmpdir.cleanup)
         self.beets_path = os.path.join(self.tmpdir.name, "beets.db")
         _create_test_db(self.beets_path)
+        self.track_path = os.path.join(
+            self.tmpdir.name, "Artist A", "Album A", "01 Track.flac",
+        )
         _insert_album(
             self.beets_path,
             7,
             RELEASE_A,
-            [],
+            [(320000, self.track_path)],
             album="Album A",
             albumartist="Artist A",
         )
@@ -4480,9 +4483,10 @@ class TestDestructiveCliAdapters(unittest.TestCase):
 
         def completed_delete(request):
             delete_requests.append(request)
-            with sqlite3.connect(self.beets_path) as conn:
+            with closing(sqlite3.connect(self.beets_path)) as conn:
                 conn.execute("DELETE FROM items WHERE album_id = 7")
                 conn.execute("DELETE FROM albums WHERE id = 7")
+                conn.commit()
             return outcome
 
         with (
@@ -4511,21 +4515,31 @@ class TestDestructiveCliAdapters(unittest.TestCase):
         from lib.beets_delete import BeetsDeleteFailed
 
         db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41, status="imported", mb_release_id=RELEASE_A,
+        ))
         args = SimpleNamespace(
             album_id=7,
-            purge_pipeline=False,
-            pipeline_id=None,
+            purge_pipeline=True,
+            pipeline_id=41,
             release_id=RELEASE_A,
             beets_db=self.beets_path,
         )
         output = io.StringIO()
         failure = BeetsDeleteFailed(
             album_id=7,
-            reason="postcondition_failed",
-            detail="cover survived",
-            album_still_present=True,
-            remaining_owned_paths=("/music/cover.jpg",),
+            reason="protocol_error",
+            detail="truncated child result",
+            album_still_present=False,
         )
+
+        def lose_ack_after_metadata(_request):
+            with closing(sqlite3.connect(self.beets_path)) as conn:
+                conn.execute("DELETE FROM items WHERE album_id = 7")
+                conn.execute("DELETE FROM albums WHERE id = 7")
+                conn.commit()
+            return failure
+
         with (
             self._env(),
             redirect_stderr(output),
@@ -4533,15 +4547,27 @@ class TestDestructiveCliAdapters(unittest.TestCase):
             rc = pipeline_cli.cmd_library_delete(
                 db,
                 args,
-                beets_delete_fn=lambda _request: failure,
+                beets_delete_fn=lose_ack_after_metadata,
                 notify_fn=lambda _path: (),
             )
 
         payload = json.loads(output.getvalue())
         self.assertEqual(rc, 1)
         self.assertEqual(payload["error"], "delete_incomplete")
-        self.assertTrue(payload["album_still_present"])
-        self.assertEqual(payload["remaining_owned_paths"], ["/music/cover.jpg"])
+        self.assertFalse(payload["album_still_present"])
+        self.assertTrue(payload["acknowledgement_lost"])
+        self.assertEqual(payload["album"], "Album A")
+        self.assertEqual(payload["artist"], "Artist A")
+        self.assertEqual(
+            payload["former_album_path"], os.path.dirname(self.track_path),
+        )
+        self.assertEqual(payload["pipeline_id"], 41)
+        self.assertEqual(payload["pipeline_status"], "imported")
+        self.assertIsNone(payload["deleted_files"])
+        self.assertIsNone(payload["deleted_artifacts"])
+        self.assertIn("Beets acknowledgement was lost", payload["detail"])
+        self.assertIn("metadata may be gone", payload["detail"])
+        self.assertIsNotNone(db.get_request(41))
 
     def test_argparse_requires_server_validated_ban_confirmation(self) -> None:
         from scripts.pipeline_cli.routes_meta import _build_parser

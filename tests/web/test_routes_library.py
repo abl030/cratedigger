@@ -515,6 +515,14 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
 
         self.assertEqual(status, 409)
         self.assertEqual(data["error"], "delete_incomplete")
+        self.assertEqual(data["album"], "Test Album")
+        self.assertEqual(data["artist"], "Test Artist")
+        self.assertEqual(
+            data["former_album_path"], "/music/Test Artist/Test Album",
+        )
+        self.assertEqual(data["pipeline_id"], 42)
+        self.assertEqual(data["pipeline_status"], "imported")
+        self.assertFalse(data["acknowledgement_lost"])
         self.assertTrue(data["album_still_present"])
         self.assertIsNotNone(self.db.get_request(42))
 

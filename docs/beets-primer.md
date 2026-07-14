@@ -454,17 +454,27 @@ transaction with explicit rollback on any exception.
 
 The child commits that final metadata transaction before its JSON result can
 reach the parent, so a process exit or malformed/truncated acknowledgement is
-commit-ambiguous. The parent reconciles only those two boundary failures, and
-only when a fresh SQLite query proves both the exact album primary key and all
-items for that key are absent. The preflight name, artist, and former path are
-retained for the result and media notifications. Filesystem, metadata, and
-postcondition failures are never promoted this way. Optional pipeline purge
-still runs last, and Plex/Jellyfin notification still waits until the
-destructive locks have been released.
+commit-ambiguous. The synchronous endpoint deliberately does not infer success
+from later metadata absence: it returns `delete_incomplete`, preserves the
+PostgreSQL request, skips Plex/Jellyfin notification, and retains the preflight
+album, artist, exact former path, and pipeline state for explicit operator
+recovery. Its message says that filesystem deletion is unconfirmed and Beets
+metadata may be gone; it never claims files were deleted. Honest automatic
+crash recovery would require a durable queued delete owned by the serialized
+importer worker. That larger architecture is outside this endpoint hardening.
+
+This endpoint is the existing destructive Web/CLI surface being hardened; it
+does not create a second general Beets-mutating entry point. Confirmed success
+still requires the pinned child result plus a fresh exact album-and-item
+metadata postcondition. Optional pipeline purge remains last, and
+Plex/Jellyfin notification still waits until the destructive locks are
+released.
 
 Unknown content is never recursively guessed away. It remains on disk, appears
-in `preserved_paths`, and blocks directory pruning. Partial I/O leaves both the
-Beets row and pipeline row available for retry. Zero newly deleted files is
+in `preserved_paths`, and blocks directory pruning. An error enumerating an
+album directory fails closed before metadata removal; it is never interpreted
+as an empty directory. Partial I/O leaves both the Beets row and pipeline row
+available for retry. Zero newly deleted files is
 successful only when the complete postcondition was already satisfied.
 
 ## The Beets SQLite Database
