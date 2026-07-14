@@ -999,6 +999,10 @@ class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
         for row in rows:
             self.assertEqual(row.attempt_fingerprint, "fp-1")
             self.assertEqual(row.request_id, 42)
+        self.assertEqual(
+            db.get_owned_transfer_keys(),
+            {("user1", "01.flac"), ("user1", "02.flac")},
+        )
 
     def test_ledger_row_survives_a_simulated_kill_at_the_post(self):
         """Kill-safety: the POST raising AFTER the ledger write still
@@ -1021,6 +1025,86 @@ class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
         rows = db.record_transfer_enqueue_calls
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].filename, "a.flac")
+        self.assertEqual(db.get_owned_transfer_keys(), set())
+
+    def test_definitive_rejection_never_owns_a_later_manual_transfer(self):
+        """A rejected POST leaves intent evidence, not destructive authority."""
+        from types import SimpleNamespace
+
+        import requests
+
+        from lib.slskd_transfers import (
+            purge_completed_transfers,
+            slskd_enqueue_with_outcome,
+        )
+        from lib.slskd_events import ingest_download_file_events
+        from tests.fakes import FakePipelineDB
+        from tests.helpers import make_file_complete_event_data
+
+        db = FakePipelineDB()
+        slskd = FakeSlskdAPI()
+        error = requests.HTTPError("500 Server Error")
+        error.response = SimpleNamespace(  # type: ignore[attr-defined]
+            text="User peer1 appears to be offline",
+        )
+        slskd.transfers.enqueue_error = error
+        ctx = self._ctx_with_ownership(db, slskd)
+        filename = "Music\\Album\\01.flac"
+
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "peer1",
+                [{"filename": filename, "size": 1}],
+                "Music\\Album",
+                ctx,
+                request_id=7,
+            )
+
+        self.assertEqual(outcome.status, "rejected")
+        self.assertEqual(len(db._transfer_ledger), 1)
+        self.assertEqual(db.get_owned_transfer_keys(), set())
+
+        slskd.transfers.enqueue_error = None
+        slskd.add_transfer(
+            username="peer1",
+            directory="Music\\Album",
+            filename=filename,
+            id="human-later",
+            state="Completed, Succeeded",
+        )
+        db.upsert_slskd_event_cursor(
+            "ev-cursor", "2026-07-01T00:00:00.0000000Z")
+        slskd.events.set_events([
+            slskd.events.make_event(
+                id="ev-human",
+                timestamp="2026-07-01T10:00:00.0000000Z",
+                type="DownloadFileComplete",
+                data=make_file_complete_event_data(
+                    username="peer1",
+                    filename=filename,
+                    local_filename="/downloads/manual/01.flac",
+                ),
+            ),
+            slskd.events.make_event(
+                id="ev-cursor",
+                timestamp="2026-07-01T00:00:00.0000000Z",
+                type="Noise",
+                data="{}",
+            ),
+        ])
+
+        ingest = ingest_download_file_events(db, slskd, [])
+
+        self.assertEqual(ingest.transfers_stamped, 0)
+        pending = next(iter(db._transfer_ledger.values()))
+        self.assertIsNone(pending.accepted_at)
+        self.assertIsNone(pending.local_path)
+
+        summary = purge_completed_transfers(ctx)
+
+        self.assertEqual(summary.removed, 0)
+        self.assertEqual(summary.foreign_count, 1)
+        self.assertEqual(slskd.transfers.cancel_download_calls, [])
 
     def test_no_request_id_skips_ledger_but_still_enqueues(self):
         """Documents the guard: the legacy/test fallback shape (no
@@ -1079,79 +1163,6 @@ class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
             slskd_do_enqueue("user1", [], "dir", ctx, request_id=1)
 
         self.assertEqual(db.record_transfer_enqueue_calls, [])
-
-    # --- T1.5: enqueue-response transfer_id capture (issue #571 PR 5) --
-
-    def test_reconciled_transfer_id_is_stamped_onto_the_ledger_row(self):
-        from lib.slskd_transfers import slskd_enqueue_with_outcome
-        from tests.fakes import FakePipelineDB
-
-        db = FakePipelineDB()
-        slskd = FakeSlskdAPI(downloads=[{
-            "username": "user1",
-            "directories": [{
-                "directory": "user1\\Music",
-                "files": [
-                    {"filename": "01.flac", "id": "tid-1"},
-                    {"filename": "02.flac", "id": "tid-2"},
-                ],
-            }],
-        }])
-        ctx = self._ctx_with_ownership(db, slskd)
-
-        files = [
-            {"filename": "01.flac", "size": 1},
-            {"filename": "02.flac", "size": 2},
-        ]
-        with patch("time.sleep"):
-            outcome = slskd_enqueue_with_outcome(
-                "user1", files, "user1\\Music", ctx, request_id=42)
-
-        self.assertEqual(outcome.status, "accepted")
-        rows = {r.filename: r for r in db._transfer_ledger.values()}
-        self.assertEqual(rows["01.flac"].transfer_id, "tid-1")
-        self.assertEqual(rows["02.flac"].transfer_id, "tid-2")
-
-    def test_unreconciled_file_leaves_transfer_id_null_for_the_t2_fallback(self):
-        """A file whose id never reconciled within the wait window (empty
-        DownloadFile.id) is left for the T2 completion-event fallback --
-        stamp_transfer_id is never called with an empty id."""
-        from lib.slskd_transfers import slskd_enqueue_with_outcome
-        from tests.fakes import FakePipelineDB
-
-        db = FakePipelineDB()
-        slskd = FakeSlskdAPI()  # empty snapshot -- nothing ever reconciles
-        ctx = self._ctx_with_ownership(db, slskd)
-
-        with patch("time.sleep"):
-            outcome = slskd_enqueue_with_outcome(
-                "user1", [{"filename": "a.flac", "size": 1}],
-                "user1\\Music", ctx, request_id=7)
-
-        self.assertEqual(outcome.status, "accepted")
-        row = next(iter(db._transfer_ledger.values()))
-        self.assertIsNone(row.transfer_id)
-        self.assertEqual(db.stamp_transfer_id_calls, [])
-
-    def test_no_download_ownership_skips_id_capture_but_still_enqueues(self):
-        from lib.slskd_transfers import slskd_enqueue_with_outcome
-
-        slskd = FakeSlskdAPI(downloads=[{
-            "username": "user1",
-            "directories": [{
-                "directory": "user1\\Music",
-                "files": [{"filename": "a.flac", "id": "tid-1"}],
-            }],
-        }])
-        ctx = _make_ctx(slskd=slskd)  # download_ownership stays None
-
-        with patch("time.sleep"):
-            outcome = slskd_enqueue_with_outcome(
-                "user1", [{"filename": "a.flac", "size": 1}],
-                "user1\\Music", ctx, request_id=99)
-
-        self.assertEqual(outcome.status, "accepted")  # never blocked
-
 
 class TestGrabMostWanted(unittest.TestCase):
     """grab_most_wanted enqueues and persists state, no blocking monitor."""
@@ -5882,6 +5893,8 @@ class TestConvergeSlskdOrphans(unittest.TestCase):
                     filename=filename)
                 for (username, filename) in ledger
             ])
+            for username, filename in ledger:
+                fake_db.confirm_transfer_enqueue(username, filename)
         return make_ctx_with_fake_db(fake_db, slskd=slskd)
 
     def _seed_slskd(self):
@@ -5990,6 +6003,32 @@ class TestConvergeSlskdOrphans(unittest.TestCase):
         self.assertEqual(cancelled, 0)
         self.assertEqual(slskd.transfers.cancel_download_calls, [])
 
+    def test_pending_write_ahead_intent_never_authorizes_cancellation(self):
+        """A failed/unknown POST leaves intent, not destructive authority."""
+        from lib.slskd_transfers import converge_slskd_orphans
+
+        slskd = FakeSlskdAPI()
+        slskd.add_transfer(
+            username="peer2",
+            directory="Music\\Manual",
+            filename=self.ORPHAN_FILE,
+            id="human-transfer",
+            state="InProgress",
+        )
+        fake_db = FakePipelineDB()
+        fake_db.record_transfer_enqueue([TransferLedgerRow(
+            request_id=7,
+            username="peer2",
+            filename=self.ORPHAN_FILE,
+        )])
+        ctx = make_ctx_with_fake_db(fake_db, slskd=slskd)
+
+        cancelled = converge_slskd_orphans(ctx)
+
+        self.assertEqual(cancelled, 0)
+        self.assertEqual(fake_db.get_owned_transfer_keys(), set())
+        self.assertEqual(slskd.transfers.cancel_download_calls, [])
+
     def test_snapshot_failure_cancels_nothing(self):
         from lib.slskd_transfers import converge_slskd_orphans
         slskd = self._seed_slskd()
@@ -6030,51 +6069,37 @@ class TestConvergeSlskdOrphans(unittest.TestCase):
 
 
 class TestPurgeCompletedTransfers(unittest.TestCase):
-    """Owned terminal rows are durably stamped before per-ID removal."""
+    """Every terminal attempt for a ledgered queue key is removed."""
 
     FILENAME = "Music\\Album\\01 - Track.flac"
 
     def _make_ctx(self, slskd, ledger_rows=()):
-        """``ledger_rows`` is a list of (username, filename, transfer_id,
-        completed) tuples -- built directly via record_transfer_enqueue +
-        stamp_transfer_id/stamp_transfer_completion so the test drives
-        the SAME ledger shape production writes, not a synthetic dict."""
         fake_db = FakePipelineDB()
-        for username, filename, transfer_id, completed in ledger_rows:
+        for username, filename in ledger_rows:
             fake_db.record_transfer_enqueue([
                 TransferLedgerRow(
                     request_id=1, username=username, filename=filename),
             ])
-            if completed:
-                fake_db.stamp_transfer_completion(
-                    username, filename, "/downloads/complete/x",
-                    datetime.now(timezone.utc), transfer_id=transfer_id)
-            elif transfer_id:
-                fake_db.stamp_transfer_id(username, filename, transfer_id)
+            fake_db.confirm_transfer_enqueue(username, filename)
         return make_ctx_with_fake_db(fake_db, slskd=slskd)
 
     def _seed_slskd(self):
         slskd = FakeSlskdAPI()
         slskd.add_transfer(
             username="peer1", directory="Music\\Album",
-            filename=self.FILENAME, id="t-stamped",
+            filename=self.FILENAME, id="t-owned",
             state="Completed, Succeeded")
         slskd.add_transfer(
             username="peer2", directory="Music\\Other",
-            filename="Music\\Other\\02.flac", id="t-unstamped",
-            state="Completed, Succeeded")
-        slskd.add_transfer(
-            username="peer3", directory="Music\\Foreign",
-            filename="Music\\Foreign\\03.flac", id="t-foreign",
+            filename="Music\\Other\\02.flac", id="t-foreign",
             state="Completed, Succeeded")
         return slskd
 
-    def test_stamped_owned_record_is_removed(self):
-        """P2 + P3: a stamped, ledger-owned completed record is removed."""
+    def test_owned_record_is_removed_by_current_slskd_id(self):
         from lib.slskd_transfers import purge_completed_transfers
         slskd = self._seed_slskd()
         ctx = self._make_ctx(slskd, ledger_rows=[
-            ("peer1", self.FILENAME, "t-stamped", True),
+            ("peer1", self.FILENAME),
         ])
 
         summary = purge_completed_transfers(ctx)
@@ -6083,27 +6108,39 @@ class TestPurgeCompletedTransfers(unittest.TestCase):
         calls = slskd.transfers.cancel_download_calls
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0].username, "peer1")
-        self.assertEqual(calls[0].id, "t-stamped")
+        self.assertEqual(calls[0].id, "t-owned")
         self.assertTrue(calls[0].remove)
 
-    def test_unstamped_owned_success_waits_for_completion_event(self):
-        """Success still requires the authoritative event/local-path stamp."""
+    def test_slskd_retry_with_a_new_id_is_removed_by_queue_ownership(self):
+        """One ledgered enqueue owns every slskd attempt for that queue key."""
         from lib.slskd_transfers import purge_completed_transfers
-        slskd = self._seed_slskd()
+
+        slskd = FakeSlskdAPI()
+        slskd.add_transfer(
+            username="peer1",
+            directory="Music\\Album",
+            filename=self.FILENAME,
+            id="t-successor",
+            state="Completed, Errored",
+        )
         ctx = self._make_ctx(slskd, ledger_rows=[
-            ("peer2", "Music\\Other\\02.flac", "t-unstamped", False),
+            ("peer1", self.FILENAME),
         ])
 
         summary = purge_completed_transfers(ctx)
 
-        self.assertEqual(summary.removed, 0)
-        self.assertEqual(summary.success_waiting, 1)
-        self.assertEqual(slskd.transfers.cancel_download_calls, [])
+        self.assertEqual(summary.removed, 1)
+        self.assertEqual(summary.foreign_count, 0)
+        self.assertEqual(
+            [(call.id, call.remove)
+             for call in slskd.transfers.cancel_download_calls],
+            [("t-successor", True)],
+        )
 
-    def test_every_owned_terminal_failure_is_stamped_then_removed(self):
-        """All known failure modes converge without an impossible event."""
+    def test_every_owned_terminal_state_is_removed(self):
         from lib.slskd_transfers import purge_completed_transfers
         for index, state in enumerate((
+            "Completed, Succeeded",
             "Completed, Aborted",
             "Completed, Cancelled",
             "Completed, Errored",
@@ -6118,199 +6155,37 @@ class TestPurgeCompletedTransfers(unittest.TestCase):
                     username="peer1", directory="Music\\Failure",
                     filename=filename, id=transfer_id, state=state)
                 ctx = self._make_ctx(slskd, ledger_rows=[
-                    ("peer1", filename, transfer_id, False),
+                    ("peer1", filename),
                 ])
 
                 summary = purge_completed_transfers(ctx)
 
-                self.assertEqual(summary.failure_stamped, 1)
                 self.assertEqual(summary.removed, 1)
-                db = ctx.pipeline_db_source._get_db()
-                row = next(iter(db._transfer_ledger.values()))
-                self.assertIsNotNone(row.completed_at)
-                self.assertIsNone(row.local_path)
                 self.assertEqual(
                     [(call.id, call.remove)
                      for call in slskd.transfers.cancel_download_calls],
                     [(transfer_id, True)],
                 )
 
-    def test_pathless_failure_stamp_never_authorizes_success_removal(self):
-        """A later success must wait for and accept its exact-ID event path."""
-        from lib.slskd_transfers import purge_completed_transfers
-        filename = "Music\\Retry\\01.flac"
-        initial = FakeSlskdAPI()
-        ctx = self._make_ctx(initial, ledger_rows=[
-            ("peer1", filename, "t-same", False),
-        ])
-        db = ctx.pipeline_db_source._get_db()
-        db.stamp_terminal_failures(
-            {"t-same"}, datetime.now(timezone.utc))
-        success = FakeSlskdAPI()
-        success.add_transfer(
-            username="peer1", directory="Music\\Retry", filename=filename,
-            id="t-same", state="Completed, Succeeded")
-        ctx.slskd = success
-
-        waiting = purge_completed_transfers(ctx)
-
-        self.assertEqual(waiting.success_waiting, 1)
-        self.assertEqual(waiting.removed, 0)
-        self.assertEqual(success.transfers.cancel_download_calls, [])
-        event_at = datetime.now(timezone.utc)
-        self.assertEqual(db.stamp_transfer_completion(
-            "peer1", filename, "/downloads/Retry/01.flac", event_at,
-            transfer_id="t-same"), 1)
-
-        ready = purge_completed_transfers(ctx)
-
-        self.assertEqual(ready.removed, 1)
-        self.assertEqual(
-            [(call.id, call.remove)
-             for call in success.transfers.cancel_download_calls],
-            [("t-same", True)],
-        )
-
-    def test_terminal_failure_stamp_write_error_fails_closed(self):
-        """A failed persistence write never authorizes slskd removal."""
-        from lib.slskd_transfers import purge_completed_transfers
-        slskd = FakeSlskdAPI()
-        slskd.add_transfer(
-            username="peer1", directory="Music\\Failure",
-            filename=self.FILENAME, id="t-failed-write",
-            state="Completed, Errored")
-        ctx = self._make_ctx(slskd, ledger_rows=[
-            ("peer1", self.FILENAME, "t-failed-write", False),
-        ])
-        db = ctx.pipeline_db_source._get_db()
-        db.set_stamp_terminal_failures_error(RuntimeError("postgres down"))
-
-        summary = purge_completed_transfers(ctx)
-
-        self.assertEqual(summary.failure_stamped, 0)
-        self.assertEqual(summary.removed, 0)
-        self.assertEqual(slskd.transfers.cancel_download_calls, [])
-        row = next(iter(db._transfer_ledger.values()))
-        self.assertIsNone(row.completed_at)
-
-    def test_unbound_failure_claims_only_causal_old_retry_row(self):
-        """T1 fallback does not bind an old terminal to a newer retry."""
-        from lib.slskd_transfers import purge_completed_transfers
-        filename = "Music\\Retry\\01.flac"
-        slskd = FakeSlskdAPI()
-        slskd.add_transfer(
-            username="peer1", directory="Music\\Retry", filename=filename,
-            id="t-old", state="Completed, Cancelled",
-            requestedAt="2026-07-13T01:05:00+00:00")
-        slskd.add_transfer(
-            username="peer1", directory="Music\\Retry", filename=filename,
-            id="t-new", state="InProgress",
-            requestedAt="2026-07-13T01:10:00+00:00")
-        ctx = self._make_ctx(slskd, ledger_rows=[
-            ("peer1", filename, "", False),
-            ("peer1", filename, "", False),
-        ])
-        db = ctx.pipeline_db_source._get_db()
-        rows = sorted(db._transfer_ledger.values(), key=lambda row: row.id)
-        rows[0].enqueued_at = datetime(
-            2026, 7, 13, 1, 0, tzinfo=timezone.utc)
-        rows[1].enqueued_at = datetime(
-            2026, 7, 13, 1, 8, tzinfo=timezone.utc)
-
-        summary = purge_completed_transfers(ctx)
-
-        self.assertEqual(summary.failure_stamped, 1)
-        self.assertEqual(summary.removed, 1)
-        self.assertEqual(rows[0].transfer_id, "t-old")
-        self.assertIsNotNone(rows[0].completed_at)
-        self.assertIsNone(rows[1].transfer_id)
-        self.assertIsNone(rows[1].completed_at)
-        self.assertEqual(
-            [call.id for call in slskd.transfers.cancel_download_calls],
-            ["t-old"],
-        )
-
-    def test_unbound_failure_missing_requested_at_cannot_use_enqueued_at(self):
-        """Fallback requires requestedAt even when slskd reports enqueuedAt."""
-        from lib.slskd_transfers import purge_completed_transfers
-        filename = "Music\\Retry\\01.flac"
-        slskd = FakeSlskdAPI()
-        slskd.add_transfer(
-            username="peer1", directory="Music\\Retry", filename=filename,
-            id="t-old", state="Completed, TimedOut",
-            enqueuedAt="2026-07-13T01:05:00+00:00")
-        slskd.add_transfer(
-            username="peer1", directory="Music\\Retry", filename=filename,
-            id="t-new", state="InProgress",
-            requestedAt="2026-07-13T01:10:00+00:00")
-        ctx = self._make_ctx(slskd, ledger_rows=[
-            ("peer1", filename, "", False),
-        ])
-        db = ctx.pipeline_db_source._get_db()
-        row = next(iter(db._transfer_ledger.values()))
-        row.enqueued_at = datetime(
-            2026, 7, 13, 1, 8, tzinfo=timezone.utc)
-
-        summary = purge_completed_transfers(ctx)
-
-        self.assertEqual(summary.failure_unconfirmed, 1)
-        self.assertEqual(summary.foreign_count, 0)
-        self.assertEqual(summary.removed, 0)
-        self.assertIsNone(row.transfer_id)
-        self.assertIsNone(row.completed_at)
-        self.assertEqual(slskd.transfers.cancel_download_calls, [])
-
-    def test_summary_terminal_categories_are_disjoint(self):
-        """Unresolved failures are not also counted as foreign rows."""
-        from lib.slskd_transfers import purge_completed_transfers
-        slskd = FakeSlskdAPI()
-        slskd.add_transfer(
-            username="human1", directory="Music", filename="Music\\a.flac",
-            id="failure", state="Completed, Errored",
-            requestedAt="2026-07-13T01:00:00+00:00")
-        slskd.add_transfer(
-            username="human2", directory="Music", filename="Music\\b.flac",
-            id="success", state="Completed, Succeeded")
-        ctx = self._make_ctx(slskd)
-
-        summary = purge_completed_transfers(ctx)
-
-        self.assertEqual(summary.failure_unconfirmed, 1)
-        self.assertEqual(summary.foreign_count, 1)
-        self.assertEqual(summary.removed, 0)
-        self.assertEqual(
-            summary.removed
-            + summary.removal_failed
-            + summary.success_waiting
-            + summary.failure_unconfirmed
-            + summary.foreign_count,
-            2,
-        )
-
     def test_terminal_accounting_conservation_table(self):
-        """Every terminal record lands in exactly one lifecycle category."""
         from lib.slskd_transfers import purge_completed_transfers
 
         cases = (
-            ("removed", "Completed, Succeeded", "t-removed", True, False),
-            ("removal_failed", "Completed, Succeeded", "t-failed", True, True),
-            ("success_waiting", "Completed, Succeeded", "t-wait", False, False),
-            ("failure_unconfirmed", "Completed, Errored", "", False, False),
-            ("foreign_count", "Completed, Succeeded", None, False, False),
+            ("removed", True, False),
+            ("removal_failed", True, True),
+            ("foreign_count", False, False),
         )
-        for expected_field, state, ledger_id, completed, removal_fails in cases:
+        for expected_field, owned, removal_fails in cases:
             with self.subTest(category=expected_field):
-                transfer_id = ledger_id or f"foreign-{expected_field}"
+                transfer_id = f"t-{expected_field}"
                 filename = f"Music\\{expected_field}\\track.flac"
                 slskd = FakeSlskdAPI()
                 slskd.add_transfer(
                     username="peer", directory=f"Music\\{expected_field}",
-                    filename=filename, id=transfer_id, state=state,
+                    filename=filename, id=transfer_id,
+                    state="Completed, Succeeded",
                 )
-                ledger_rows = []
-                if ledger_id is not None:
-                    ledger_rows.append(
-                        ("peer", filename, ledger_id, completed))
+                ledger_rows = [("peer", filename)] if owned else []
                 if removal_fails:
                     slskd.transfers.cancel_download_errors_by_id[transfer_id] = (
                         RuntimeError("remove failed"))
@@ -6321,31 +6196,11 @@ class TestPurgeCompletedTransfers(unittest.TestCase):
                 self.assertEqual(
                     summary.removed
                     + summary.removal_failed
-                    + summary.success_waiting
-                    + summary.failure_unconfirmed
                     + summary.foreign_count,
                     1,
                 )
 
-    def test_terminal_claim_timestamp_requires_real_datetime_shape(self):
-        from lib.slskd_transfers import _terminal_claim_timestamp
-
-        expected_aware = datetime(2026, 7, 13, 1, 5, tzinfo=timezone.utc)
-        cases = (
-            (None, None),
-            ("", None),
-            ("not-a-time", None),
-            ("2026-07-13", None),
-            ("2026-07-13T01:05:00Z", expected_aware),
-            ("2026-07-13T01:05:00", expected_aware),
-        )
-        for value, expected in cases:
-            with self.subTest(value=value):
-                self.assertEqual(_terminal_claim_timestamp(value), expected)
-
     def test_foreign_record_is_never_removed(self):
-        """P1: zero ledger knowledge of this transfer id -- never
-        cratedigger's, whatever its state or age."""
         from lib.slskd_transfers import purge_completed_transfers
         slskd = self._seed_slskd()
         ctx = self._make_ctx(slskd, ledger_rows=[])
@@ -6353,14 +6208,14 @@ class TestPurgeCompletedTransfers(unittest.TestCase):
         summary = purge_completed_transfers(ctx)
 
         self.assertEqual(summary.removed, 0)
-        self.assertEqual(summary.foreign_count, 3)
+        self.assertEqual(summary.foreign_count, 2)
         self.assertEqual(slskd.transfers.cancel_download_calls, [])
 
     def test_snapshot_fetch_excludes_removed_transfers(self):
         from lib.slskd_transfers import purge_completed_transfers
         slskd = self._seed_slskd()
         ctx = self._make_ctx(slskd, ledger_rows=[
-            ("peer1", self.FILENAME, "t-stamped", True),
+            ("peer1", self.FILENAME),
         ])
 
         purge_completed_transfers(ctx)
@@ -6372,7 +6227,7 @@ class TestPurgeCompletedTransfers(unittest.TestCase):
         slskd = self._seed_slskd()
         slskd.transfers.get_all_downloads_error = RuntimeError("slskd down")
         ctx = self._make_ctx(slskd, ledger_rows=[
-            ("peer1", self.FILENAME, "t-stamped", True),
+            ("peer1", self.FILENAME),
         ])
 
         summary = purge_completed_transfers(ctx)
@@ -6393,8 +6248,8 @@ class TestPurgeCompletedTransfers(unittest.TestCase):
             state="Completed, Succeeded")
         slskd.transfers.cancel_download_error = RuntimeError("remove failed")
         ctx = self._make_ctx(slskd, ledger_rows=[
-            ("peer1", "Music\\A\\01.flac", "t-1", True),
-            ("peer2", "Music\\B\\01.flac", "t-2", True),
+            ("peer1", "Music\\A\\01.flac"),
+            ("peer2", "Music\\B\\01.flac"),
         ])
 
         summary = purge_completed_transfers(ctx)
@@ -6403,12 +6258,9 @@ class TestPurgeCompletedTransfers(unittest.TestCase):
         self.assertEqual(summary.removal_failed, 2)
         self.assertEqual(
             summary.removed + summary.removal_failed
-            + summary.success_waiting + summary.failure_unconfirmed
             + summary.foreign_count,
             2,
         )
-        # Both stamped-owned records were still attempted despite the
-        # first failure.
         self.assertEqual(len(slskd.transfers.cancel_download_calls), 2)
 
     def test_removal_false_return_is_failed_and_record_remains(self):
@@ -6422,7 +6274,7 @@ class TestPurgeCompletedTransfers(unittest.TestCase):
             state="Completed, Succeeded")
         slskd.transfers.cancel_download_results_by_id["t-1"] = False
         ctx = self._make_ctx(slskd, ledger_rows=[
-            ("peer1", filename, "t-1", True),
+            ("peer1", filename),
         ])
 
         with patch("lib.slskd_transfers.logger"):
@@ -6432,7 +6284,6 @@ class TestPurgeCompletedTransfers(unittest.TestCase):
         self.assertEqual(summary.removal_failed, 1)
         self.assertEqual(
             summary.removed + summary.removal_failed
-            + summary.success_waiting + summary.failure_unconfirmed
             + summary.foreign_count,
             1,
         )

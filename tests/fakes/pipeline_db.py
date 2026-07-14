@@ -60,9 +60,6 @@ from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
                              SearchPlanItemProvenance, SearchPlanItemRow,
                              SearchPlanMetadataSnapshot,
                              SearchPlanProvenance, SearchPlanRow,
-                             TERMINAL_FAILURE_CLAIM_MAX_SKEW,
-                             TerminalFailureClaim,
-                             TransferIdOwnership,
                              TransferLedgerRow,
                              WantedReconciliationCandidate)
 from lib.pipeline_db._shared import (
@@ -290,14 +287,6 @@ class FakePipelineDB:
         self._transfer_ledger: dict[int, FakeTransferLedgerRow] = {}
         self._transfer_ledger_next_id: int = 1
         self.record_transfer_enqueue_calls: list[TransferLedgerRow] = []
-        # #571 PR 5, T1.5: (username, filename, transfer_id) per call.
-        self.stamp_transfer_id_calls: list[tuple[str, str, str]] = []
-        self.stamp_terminal_failures_calls: list[
-            tuple[set[str], datetime]] = []
-        self.claim_terminal_failures_calls: list[
-            tuple[list[TerminalFailureClaim], datetime]] = []
-        self._stamp_terminal_failures_error: Exception | None = None
-        self._claim_terminal_failures_error: Exception | None = None
         self.denylist: list[DenylistEntry] = []
         self.persist_import_terminal_outcome_calls: list[ImportTerminalOutcome] = []
         self.persist_preview_terminal_outcome_calls: list[PreviewTerminalOutcome] = []
@@ -4871,159 +4860,51 @@ class FakePipelineDB:
                 attempt_fingerprint=row.attempt_fingerprint,
             )
 
-    def stamp_transfer_id(
-        self, username: str, filename: str, transfer_id: str,
-    ) -> int:
-        """Enqueue-response write (T1.5, issue #571 PR 5) -- mirrors the
-        real UPDATE ... WHERE transfer_id IS NULL ORDER BY enqueued_at
-        DESC LIMIT 1."""
-        self.stamp_transfer_id_calls.append((username, filename, transfer_id))
-        if any(
-            row.transfer_id == transfer_id
-            for row in self._transfer_ledger.values()
-        ):
-            return 0
-        candidates = [
-            r for r in self._transfer_ledger.values()
-            if r.username == username and r.filename == filename
-            and r.transfer_id is None and r.completed_at is None
-        ]
-        if not candidates:
-            return 0
-        newest = max(candidates, key=lambda r: r.enqueued_at)
-        newest.transfer_id = transfer_id
-        return 1
-
     def stamp_transfer_completion(
         self,
         username: str,
         filename: str,
         local_path: str,
-        completed_at: datetime,
-        *,
-        transfer_id: str,
     ) -> int:
-        """Mirror exact-ID success stamping and its guarded key fallback.
-
-        A success event upgrades an exact-ID pathless failure stamp. Only
-        when the event ID is globally absent may it bind the newest open,
-        ID-less exact-key row; replays are no-ops.
-        """
-        exact = [
+        """Mirror newest-open exact-key completion-path stamping."""
+        if any(
+            row.username == username
+            and row.filename == filename
+            and row.local_path == local_path
+            for row in self._transfer_ledger.values()
+        ):
+            return 0
+        candidates = [
             row for row in self._transfer_ledger.values()
-            if row.transfer_id == transfer_id
+            if row.username == username and row.filename == filename
+            and row.accepted_at is not None
+            and row.local_path is None
         ]
-        if exact:
-            newest = exact[0]
-            if newest.local_path is not None:
-                return 0
-        else:
-            candidates = [
-                row for row in self._transfer_ledger.values()
-                if row.username == username and row.filename == filename
-                and row.transfer_id is None and row.completed_at is None
-            ]
-            if not candidates:
-                return 0
-            newest = max(candidates, key=lambda row: row.enqueued_at)
-            newest.transfer_id = transfer_id
+        if not candidates:
+            return 0
+        newest = max(candidates, key=lambda row: (row.enqueued_at, row.id))
         newest.local_path = local_path
-        newest.completed_at = completed_at
+        return 1
+
+    def confirm_transfer_enqueue(self, username: str, filename: str) -> int:
+        candidates = [
+            row for row in self._transfer_ledger.values()
+            if row.username == username and row.filename == filename
+            and row.accepted_at is None
+        ]
+        if not candidates:
+            return 0
+        newest = max(candidates, key=lambda row: (row.enqueued_at, row.id))
+        newest.accepted_at = _utcnow()
         return 1
 
     def get_owned_transfer_keys(self) -> set[tuple[str, str]]:
-        """Mirrors the real SELECT username, filename -- an unordered
-        membership set over ALL ledger rows, stamped or not."""
+        """Mirror confirmed ownership, excluding pending write-ahead intent."""
         return {
             (r.username, r.filename)
             for r in self._transfer_ledger.values()
+            if r.accepted_at is not None
         }
-
-    def get_owned_transfer_id_sets(self) -> TransferIdOwnership:
-        """Mirror the real success-ready/failure-only/open ID partition."""
-        path_stamped: set[str] = set()
-        pathless_stamped: set[str] = set()
-        unstamped: set[str] = set()
-        for r in self._transfer_ledger.values():
-            if r.transfer_id is None:
-                continue
-            if r.local_path is not None:
-                target = path_stamped
-            elif r.completed_at is not None:
-                target = pathless_stamped
-            else:
-                target = unstamped
-            target.add(r.transfer_id)
-        return TransferIdOwnership(
-            path_stamped=path_stamped,
-            pathless_stamped=pathless_stamped,
-            unstamped=unstamped,
-        )
-
-    def set_stamp_terminal_failures_error(self, error: Exception) -> None:
-        """Inject a persistence failure before any fake row mutates."""
-        self._stamp_terminal_failures_error = error
-
-    def set_claim_terminal_failures_error(self, error: Exception) -> None:
-        """Inject a T1-claim failure before any fake row mutates."""
-        self._claim_terminal_failures_error = error
-
-    def stamp_terminal_failures(
-        self, transfer_ids: set[str], observed_at: datetime,
-    ) -> set[str]:
-        """Mirror the real exact-ID, open-row-only terminal stamp."""
-        self.stamp_terminal_failures_calls.append(
-            (set(transfer_ids), observed_at))
-        if self._stamp_terminal_failures_error is not None:
-            raise self._stamp_terminal_failures_error
-        confirmed: set[str] = set()
-        for row in self._transfer_ledger.values():
-            if (
-                row.completed_at is None
-                and row.transfer_id is not None
-                and row.transfer_id in transfer_ids
-            ):
-                row.completed_at = observed_at
-                confirmed.add(row.transfer_id)
-        return confirmed
-
-    def claim_terminal_failures(
-        self,
-        claims: list[TerminalFailureClaim],
-        observed_at: datetime,
-    ) -> set[str]:
-        """Mirror causal, exact-key, one-open-row-per-failure claiming."""
-        self.claim_terminal_failures_calls.append((list(claims), observed_at))
-        if self._claim_terminal_failures_error is not None:
-            raise self._claim_terminal_failures_error
-        confirmed: set[str] = set()
-        for claim in sorted(
-            claims, key=lambda item: (item.requested_at, item.transfer_id),
-        ):
-            if claim.transfer_id in confirmed:
-                continue
-            if any(
-                row.transfer_id == claim.transfer_id
-                for row in self._transfer_ledger.values()
-            ):
-                continue
-            candidates = [
-                row for row in self._transfer_ledger.values()
-                if row.username == claim.username
-                and row.filename == claim.filename
-                and row.transfer_id is None
-                and row.completed_at is None
-                and row.enqueued_at >= (
-                    claim.requested_at - TERMINAL_FAILURE_CLAIM_MAX_SKEW)
-                and row.enqueued_at <= claim.requested_at
-            ]
-            if not candidates:
-                continue
-            newest = max(candidates, key=lambda row: (row.enqueued_at, row.id))
-            newest.transfer_id = claim.transfer_id
-            newest.completed_at = observed_at
-            confirmed.add(claim.transfer_id)
-        return confirmed
 
     def get_owned_local_paths(self) -> set[str]:
         return {
@@ -5038,7 +4919,7 @@ class FakePipelineDB:
         seen: set[tuple[int, str]] = set()
         result: list[dict[str, Any]] = []
         for row in self._transfer_ledger.values():
-            if row.attempt_fingerprint is None:
+            if row.attempt_fingerprint is None or row.accepted_at is None:
                 continue
             key = (row.request_id, row.attempt_fingerprint)
             if key in seen:

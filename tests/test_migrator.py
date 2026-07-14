@@ -3263,7 +3263,7 @@ class TestPinStatusDomainMigration(unittest.TestCase):
         dsn = _create_fresh_database(name)
         try:
             applied = apply_migrations(dsn, DEFAULT_MIGRATIONS_DIR)
-            self.assertEqual(applied[-1].version, 50)
+            self.assertEqual(applied[-1].version, 51)
             self.assertEqual(
                 self._query(
                     dsn,
@@ -3428,7 +3428,7 @@ class TestUniqueSlskdTransferIdsMigration(unittest.TestCase):
         finally:
             _drop_database(name)
 
-    def test_records_049_and_partial_unique_index_exists(self) -> None:
+    def test_records_049_but_051_retires_its_attempt_id_index(self) -> None:
         conn = psycopg2.connect(TEST_DSN)
         try:
             with conn.cursor() as cur:
@@ -3437,16 +3437,12 @@ class TestUniqueSlskdTransferIdsMigration(unittest.TestCase):
                 self.assertEqual(
                     cur.fetchone(), ("unique_slskd_transfer_ids",))
                 cur.execute("""
-                    SELECT indexdef FROM pg_indexes
+                    SELECT indexname FROM pg_indexes
                     WHERE schemaname = 'public'
                       AND indexname =
                           'idx_slskd_transfer_ledger_transfer_id_unique'
                 """)
-                index_row = cur.fetchone()
-                assert index_row is not None
-                indexdef = index_row[0]
-                self.assertIn("UNIQUE", indexdef)
-                self.assertIn("WHERE (transfer_id IS NOT NULL)", indexdef)
+                self.assertIsNone(cur.fetchone())
         finally:
             conn.close()
 
@@ -3537,6 +3533,109 @@ class TestQualityEvidenceLineageVersionMigration(unittest.TestCase):
                             NOW(), 2
                         )
                     """)
+        finally:
+            conn.close()
+
+
+@requires_postgres
+class TestSimplifySlskdTransferOwnershipMigration(unittest.TestCase):
+    """Migration 051 drops attempt-local IDs without losing ownership rows."""
+
+    def _copy_through(self, target: str, version: int) -> None:
+        for migration in discover_migrations(DEFAULT_MIGRATIONS_DIR):
+            if migration.version <= version:
+                shutil.copy2(migration.path, target)
+
+    def test_drops_attempt_state_and_preserves_queue_ownership(self) -> None:
+        name = "cratedigger_test_simplify_transfer_ownership_051"
+        dsn = _create_fresh_database(name)
+        try:
+            with tempfile.TemporaryDirectory() as migrations_dir:
+                self._copy_through(migrations_dir, 50)
+                apply_migrations(dsn, migrations_dir)
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO album_requests
+                                (artist_name, album_title, source, status)
+                            VALUES ('Artist', 'Album', 'request', 'wanted')
+                            RETURNING id
+                        """)
+                        request_row = cur.fetchone()
+                        assert request_row is not None
+                        request_id = request_row[0]
+                        cur.execute("""
+                            INSERT INTO slskd_transfer_ledger
+                                (request_id, username, filename, transfer_id,
+                                 local_path, completed_at)
+                            VALUES
+                                (%s, 'peer', 'id.flac', 'old-id', NULL, NULL),
+                                (%s, 'peer', 'terminal.flac', NULL, NULL, NOW()),
+                                (%s, 'peer', 'event.flac', NULL,
+                                 '/downloads/event.flac', NULL),
+                                (%s, 'peer', 'pending.flac', NULL, NULL, NULL)
+                        """, (request_id, request_id, request_id, request_id))
+                finally:
+                    conn.close()
+
+                self._copy_through(migrations_dir, 51)
+                applied = apply_migrations(dsn, migrations_dir)
+                self.assertEqual([migration.version for migration in applied], [51])
+
+                conn = psycopg2.connect(dsn)
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT filename, accepted_at IS NOT NULL, local_path
+                            FROM slskd_transfer_ledger
+                            ORDER BY filename
+                        """)
+                        self.assertEqual(cur.fetchall(), [
+                            ("event.flac", True, "/downloads/event.flac"),
+                            ("id.flac", True, None),
+                            ("pending.flac", False, None),
+                            ("terminal.flac", True, None),
+                        ])
+                        cur.execute("""
+                            SELECT column_name
+                            FROM information_schema.columns
+                            WHERE table_schema = 'public'
+                              AND table_name = 'slskd_transfer_ledger'
+                              AND column_name IN ('transfer_id', 'completed_at')
+                        """)
+                        self.assertEqual(cur.fetchall(), [])
+                finally:
+                    conn.close()
+        finally:
+            _drop_database(name)
+
+    def test_current_schema_records_051_without_attempt_indexes(self) -> None:
+        conn = psycopg2.connect(TEST_DSN)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT name FROM schema_migrations WHERE version = 51")
+                self.assertEqual(
+                    cur.fetchone(), ("simplify_slskd_transfer_ownership",))
+                cur.execute("""
+                    SELECT indexname FROM pg_indexes
+                    WHERE schemaname = 'public'
+                      AND indexname IN (
+                          'idx_slskd_transfer_ledger_transfer_id_unique',
+                          'idx_slskd_transfer_ledger_open'
+                      )
+                """)
+                self.assertEqual(cur.fetchall(), [])
+                cur.execute("""
+                    SELECT is_nullable
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'slskd_transfer_ledger'
+                      AND column_name = 'accepted_at'
+                """)
+                self.assertEqual(cur.fetchone(), ("YES",))
         finally:
             conn.close()
 

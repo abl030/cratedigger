@@ -297,6 +297,7 @@ def _build_harness(world: EventWorld) -> tuple[FakePipelineDB, FakeSlskdAPI, lis
             TransferLedgerRow(
                 request_id=owner, username=username, filename=filename),
         ])
+        db.confirm_transfer_enqueue(username, filename)
     return db, slskd, downloading
 
 

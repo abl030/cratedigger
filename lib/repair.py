@@ -5,15 +5,14 @@ Originally extracted verbatim from the monolithic ``lib/quality.py`` (issue
 quality-decision logic; refreshed to also carry ``SlskdOrphanTransfer`` /
 ``find_slskd_orphans`` (issue #278, the inverse orphan direction — live
 slskd transfers no downloading row owns); relocated to this top-level
-module (issue #512). ``find_slskd_orphans`` was flipped to ledger-positive
+module (issue #512). ``find_slskd_orphans`` was flipped to positive
 ownership (issue #571 PR 3): a live transfer is only ever reported as an
-orphan when it's IN cratedigger's write-ahead ledger — never merely
+orphan when its queue key has a confirmed accepted enqueue — never merely
 "unowned" by a downloading row, which used to risk cancelling a human's
 transfer on a shared slskd instance. ``find_completed_transfers_to_purge``
-applies the same doctrine to terminal transfers. Exact-ID ledger state is
-authoritative; a failed T1.5 capture remains only a claim candidate until
-the database atomically binds that failure to one causal, exact-key open
-write-ahead row.
+applies the same doctrine to terminal transfers. slskd re-issues transfer
+IDs when it retries a queued file, so the durable ownership identity is the
+accepted ``(username, filename)`` queue key.
 """
 
 from __future__ import annotations
@@ -143,7 +142,7 @@ class SlskdTransferOwnership:
 def find_slskd_orphans(
     downloads: list[DownloadUser],
     db_rows: list[dict[str, Any]],
-    ledgered: set[tuple[str, str]],
+    owned_keys: set[tuple[str, str]],
 ) -> SlskdTransferOwnership:
     """Classify live slskd transfers against ledger ownership (#571
     good-citizen flip). Pure — no I/O.
@@ -161,25 +160,25 @@ def find_slskd_orphans(
             ``lib.slskd_client.parse_downloads_envelope`` (issue #507).
         db_rows: album_requests rows (must include status,
             active_download_state).
-        ledgered: ``(username, filename)`` pairs present in
-            ``slskd_transfer_ledger`` — cratedigger's write-ahead record
-            of every transfer it ever enqueued
+        owned_keys: ``(username, filename)`` pairs with an accepted enqueue
+            in ``slskd_transfer_ledger`` — pending intent is excluded
             (``lib.pipeline_db.transfer_ledger.get_owned_transfer_keys``).
 
     A live, non-terminal transfer classifies as exactly one of:
 
       * **FOREIGN (C1)** — ``(username, filename)`` absent from
-        ``ledgered``. Cratedigger never created it (a human sharing the
+        ``owned_keys``. Cratedigger never proved it created the transfer (a
+        human sharing the
         slskd instance, most likely); it is NEVER reported as an orphan,
         whatever its state or age. Rolled into ``foreign_count`` only.
-      * **owned STRAY (C2, returned in ``orphans``)** — ledgered, but NOT
+      * **owned STRAY (C2, returned in ``orphans``)** — confirmed, but NOT
         backed by any currently-``downloading`` row's
         ``active_download_state``. Cratedigger created it and no longer
         has a claim: the classic Replace-abandons-transfer case, and
-        also a ledgered transfer whose row already self-healed back to
+        also a confirmed transfer whose row already self-healed back to
         ``wanted`` after a failed cancel attempt (still a stray — the
         ledger row, not the request's current status, proves creation).
-      * **still in flight** — ledgered AND backed by a ``downloading``
+      * **still in flight** — confirmed AND backed by a ``downloading``
         row. Reported nowhere; this is the common case every cycle.
 
     Ownership backing is strictly ``status='downloading'`` rows — a
@@ -221,7 +220,7 @@ def find_slskd_orphans(
                 if not filename:
                     continue
                 key = (username, filename)
-                if key not in ledgered:
+                if key not in owned_keys:
                     foreign_count += 1
                     continue
                 if key in backed:
@@ -237,57 +236,33 @@ def find_slskd_orphans(
 
 @dataclass(frozen=True)
 class CompletedTransferToRemove:
-    """One exact-ID terminal transfer action from the pure classifier."""
+    """One terminal transfer action from the pure classifier."""
     username: str
     transfer_id: str
     filename: str
-    requested_at: str | None = None
 
 
 @dataclass(frozen=True)
 class CompletedTransferOwnership:
-    """Exact terminal-transfer classification for safe convergence."""
+    """Terminal-transfer classification by stable queue ownership."""
     to_remove: list[CompletedTransferToRemove]
-    to_stamp_failures: list[CompletedTransferToRemove]
-    to_claim_failures: list[CompletedTransferToRemove]
-    success_waiting_count: int
     foreign_count: int
     nonterminal_count: int
 
 
 def find_completed_transfers_to_purge(
     downloads: list[DownloadUser],
-    path_stamped_owned_ids: set[str],
-    pathless_stamped_owned_ids: set[str],
-    unstamped_owned_ids: set[str],
+    owned_keys: set[tuple[str, str]],
 ) -> CompletedTransferOwnership:
     """Classify the live slskd snapshot for terminal convergence. Pure.
 
-    Args:
-        downloads: slskd ``transfers.get_all_downloads(includeRemoved=
-            False)`` snapshot (username → directories → files groups),
-            already decoded via ``lib.slskd_client.parse_downloads_
-            envelope`` (issue #507).
-        path_stamped_owned_ids: owned IDs carrying the authoritative
-            success-event ``local_path``.
-        pathless_stamped_owned_ids: owned IDs carrying only a terminal
-            failure stamp.
-        unstamped_owned_ids: owned IDs with neither terminal stamp.
-            (``lib.pipeline_db.transfer_ledger.get_owned_transfer_id_
-            sets``).
-    Nonterminal records are counted but never mutated. Stamped terminal
-    failures are removable; successes require a path-backed stamp. A success
-    over a pathless failure stamp waits for its authoritative event upgrade.
-    Unstamped failed IDs require an exact-ID stamp.
-    An unknown failed ID is only a claim candidate: the database must still
-    atomically bind it to one causal exact-key T1 row before removal. An
-    unknown success is foreign and never uses that fallback. A record with
-    no ID cannot be safely addressed and is skipped.
+    Every terminal attempt for a confirmed ``(username, filename)`` queue key
+    is owned, including successor IDs that slskd creates while retrying the
+    original enqueue. Unknown keys remain foreign and untouched. Nonterminal
+    records are counted but never mutated. A terminal record without an ID
+    cannot be addressed and is left alone.
     """
     to_remove: list[CompletedTransferToRemove] = []
-    to_stamp_failures: list[CompletedTransferToRemove] = []
-    to_claim_failures: list[CompletedTransferToRemove] = []
-    success_waiting_count = 0
     foreign_count = 0
     nonterminal_count = 0
     for user_group in downloads:
@@ -301,40 +276,16 @@ def find_completed_transfers_to_purge(
                 transfer_id = transfer.id
                 if not transfer_id:
                     continue
-                item = CompletedTransferToRemove(
+                if (username, transfer.filename) not in owned_keys:
+                    foreign_count += 1
+                    continue
+                to_remove.append(CompletedTransferToRemove(
                     username=username,
                     transfer_id=transfer_id,
                     filename=transfer.filename,
-                )
-                if transfer.state == "Completed, Succeeded":
-                    if transfer_id in path_stamped_owned_ids:
-                        to_remove.append(item)
-                    elif (
-                        transfer_id in pathless_stamped_owned_ids
-                        or transfer_id in unstamped_owned_ids
-                    ):
-                        success_waiting_count += 1
-                    else:
-                        foreign_count += 1
-                elif (
-                    transfer_id in path_stamped_owned_ids
-                    or transfer_id in pathless_stamped_owned_ids
-                ):
-                    to_remove.append(item)
-                elif transfer_id in unstamped_owned_ids:
-                    to_stamp_failures.append(item)
-                else:
-                    to_claim_failures.append(CompletedTransferToRemove(
-                        username=username,
-                        transfer_id=transfer_id,
-                        filename=transfer.filename,
-                        requested_at=transfer.requested_at,
-                    ))
+                ))
     return CompletedTransferOwnership(
         to_remove=to_remove,
-        to_stamp_failures=to_stamp_failures,
-        to_claim_failures=to_claim_failures,
-        success_waiting_count=success_waiting_count,
         foreign_count=foreign_count,
         nonterminal_count=nonterminal_count,
     )

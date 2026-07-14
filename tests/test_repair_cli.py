@@ -312,6 +312,7 @@ class TestCollectIssuesSlskdOrphanReport(unittest.TestCase):
                 request_id=1, username="peer1",
                 filename="Music\\Orphan\\01.flac"),
         ])
+        db.confirm_transfer_enqueue("peer1", "Music\\Orphan\\01.flac")
 
         collected = repair._collect_issues(
             cast(Any, db),
