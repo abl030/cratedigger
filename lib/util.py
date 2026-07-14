@@ -460,10 +460,61 @@ def beets_validate(harness_path: str, album_path: str, mb_release_id: str,
 
 # === Media server integrations ===
 
+import urllib.error
 import urllib.request
 
 
 # === Plex integration ===
+
+
+def request_plex_scan(
+    cfg: CratediggerConfig,
+    imported_path: str | None = None,
+) -> tuple[int, str] | None:
+    """Submit one Plex refresh and return its status and actual sent path.
+
+    This proves only that Plex accepted the request. Plex returns HTTP 200 for
+    invalid paths too, so callers must not treat the status as scan evidence.
+    Missing configuration returns ``None``; transport failures raise.
+    """
+    if not cfg.plex_url:
+        return None
+    token = cfg.resolved_plex_token()
+    if not token:
+        return None
+    section = cfg.plex_library_section_id or "1"
+    url = f"{cfg.plex_url}/library/sections/{section}/refresh?X-Plex-Token={token}"
+    scan_path: str | None = None
+    if imported_path:
+        from urllib.parse import quote
+        scan_path = imported_path
+        if not os.path.isabs(scan_path) and cfg.beets_directory:
+            scan_path = os.path.join(cfg.beets_directory, scan_path)
+        if cfg.plex_path_map:
+            local_prefix, container_prefix = cfg.plex_path_map.split(":", 1)
+            if scan_path.startswith(local_prefix):
+                scan_path = container_prefix + scan_path[len(local_prefix):]
+            elif not os.path.isabs(scan_path):
+                scan_path = container_prefix.rstrip("/") + "/" + scan_path
+            else:
+                logger.warning(
+                    f"PLEX: imported_path {scan_path!r} is absolute but "
+                    f"outside path_map local_prefix {local_prefix!r}; "
+                    "Plex may silently ignore the partial scan")
+        if not os.path.isabs(scan_path):
+            logger.warning(
+                f"PLEX: imported_path {scan_path!r} is relative and no "
+                "beets_directory or plex_path_map is configured to "
+                "absolutize it; Plex may silently ignore the partial scan")
+        url += f"&path={quote(scan_path, safe='')}"
+    safe_url = url.split("X-Plex-Token=")[0] + "X-Plex-Token=<redacted>"
+    if "&path=" in url:
+        safe_url += "&path=" + url.split("&path=")[1]
+    logger.debug(f"PLEX: GET {safe_url}")
+    req = urllib.request.Request(url)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        status = resp.status
+    return status, scan_path or ""
 
 
 def trigger_plex_scan(cfg: CratediggerConfig, imported_path: str | None = None) -> None:
@@ -472,57 +523,13 @@ def trigger_plex_scan(cfg: CratediggerConfig, imported_path: str | None = None) 
     If imported_path is provided, does a targeted partial scan of just that folder.
     Otherwise triggers a full library section refresh.
     """
-    if not cfg.plex_url:
-        logger.debug("PLEX: skipped scan (no url configured)")
-        return
     try:
-        token = cfg.resolved_plex_token()
-        if not token:
-            logger.debug("PLEX: skipped scan (no token configured)")
+        submitted = request_plex_scan(cfg, imported_path)
+        if submitted is None:
+            logger.debug("PLEX: skipped scan (url/token not configured)")
             return
-        section = cfg.plex_library_section_id or "1"
-        url = f"{cfg.plex_url}/library/sections/{section}/refresh?X-Plex-Token={token}"
-        scan_path: str | None = None
-        if imported_path:
-            from urllib.parse import quote
-            scan_path = imported_path
-            # Step 1: absolutize relative paths via beets_directory if set.
-            # Beets stores paths relative to its library root, so this is the
-            # general-purpose mechanism for any deployment to absolutize.
-            if not os.path.isabs(scan_path) and cfg.beets_directory:
-                scan_path = os.path.join(cfg.beets_directory, scan_path)
-            # Step 2: translate host path → container path via path_map
-            # (only needed when Plex runs in a container with a different mount).
-            if cfg.plex_path_map:
-                local_prefix, container_prefix = cfg.plex_path_map.split(":", 1)
-                if scan_path.startswith(local_prefix):
-                    scan_path = container_prefix + scan_path[len(local_prefix):]
-                elif not os.path.isabs(scan_path):
-                    # path_map is set but beets_directory wasn't (or didn't
-                    # apply). Fall back to anchoring relative paths under the
-                    # container_prefix — this is the original PR #236 fix.
-                    scan_path = container_prefix.rstrip("/") + "/" + scan_path
-                else:
-                    logger.warning(
-                        f"PLEX: imported_path {scan_path!r} is absolute but "
-                        f"outside path_map local_prefix {local_prefix!r}; "
-                        "Plex may silently ignore the partial scan")
-            # Step 3: final guard — Plex won't resolve a relative path.
-            if not os.path.isabs(scan_path):
-                logger.warning(
-                    f"PLEX: imported_path {scan_path!r} is relative and no "
-                    "beets_directory or plex_path_map is configured to "
-                    "absolutize it; Plex may silently ignore the partial scan")
-            url += f"&path={quote(scan_path, safe='')}"
-        # Log the URL without the token for debugging
-        safe_url = url.split("X-Plex-Token=")[0] + "X-Plex-Token=<redacted>"
-        if "&path=" in url:
-            safe_url += "&path=" + url.split("&path=")[1]
-        logger.debug(f"PLEX: GET {safe_url}")
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            status = resp.status
-        if scan_path is not None:
+        status, scan_path = submitted
+        if scan_path:
             logger.info(f"PLEX: triggered partial scan for {scan_path} (HTTP {status})")
         else:
             logger.info(f"PLEX: triggered full library scan (HTTP {status})")
@@ -772,6 +779,37 @@ def trigger_jellyfin_scan(cfg: CratediggerConfig) -> None:
         logger.warning(f"JELLYFIN: scan trigger failed: {e}")
 
 
+def request_jellyfin_refresh(
+    cfg: CratediggerConfig,
+    item_id: str | None,
+) -> tuple[int, str] | None:
+    """Submit a targeted Jellyfin refresh, with full refresh on target 404."""
+    if not cfg.jellyfin_url:
+        return None
+    token = cfg.resolved_jellyfin_token()
+    if not token:
+        return None
+
+    def _post(path: str) -> int:
+        req = urllib.request.Request(
+            f"{cfg.jellyfin_url}{path}",
+            method="POST",
+            headers={"X-Emby-Token": token},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
+            return resp.status
+
+    target = f"/Items/{item_id}/Refresh" if item_id else "/Library/Refresh"
+    try:
+        return _post(target), target
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404 or target == "/Library/Refresh":
+            raise
+        fallback = "/Library/Refresh"
+        return _post(fallback), fallback
+
+
 # === Jellyfin DateCreated pin (read + edit) ===
 #
 # Read/edit half of the Jellyfin "Recently Added" pin feature (migration 046,
@@ -998,4 +1036,3 @@ def setup_logging(config: Any) -> None:
     }
     log_config = config["Logging"] if "Logging" in config else _DEFAULT
     logging.basicConfig(**log_config)  # type: ignore
-

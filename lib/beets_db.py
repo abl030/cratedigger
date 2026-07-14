@@ -155,6 +155,16 @@ class BeetsDB:
     def close(self) -> None:
         self._conn.close()
 
+    @property
+    def library_db_path(self) -> str:
+        """Exact SQLite path represented by this preflight handle."""
+        return self._db_path
+
+    @property
+    def library_root(self) -> str:
+        """Exact filesystem root used to resolve paths from this handle."""
+        return self._library_root
+
     def __enter__(self) -> "BeetsDB":
         return self
 
@@ -694,30 +704,6 @@ class BeetsDB:
         or regress to an N+1 query pattern for large artist pages.
         """
         return self._batch_lookup_album_ids(mbids)
-
-    def delete_album(self, album_id: int) -> tuple[str, str, list[str]]:
-        """Delete an album from beets DB (read-write). Returns (album, artist, file_paths).
-
-        Opens a separate writable connection — does not use the read-only instance conn.
-        Raises ValueError if album not found.
-        """
-        conn = sqlite3.connect(self._db_path)
-        try:
-            album_row = conn.execute(
-                "SELECT album, albumartist FROM albums WHERE id = ?", (album_id,)
-            ).fetchone()
-            if not album_row:
-                raise ValueError(f"Album {album_id} not found")
-            items = conn.execute(
-                "SELECT path FROM items WHERE album_id = ?", (album_id,)
-            ).fetchall()
-            file_paths = [self._resolve_path(r[0]) for r in items]
-            conn.execute("DELETE FROM items WHERE album_id = ?", (album_id,))
-            conn.execute("DELETE FROM albums WHERE id = ?", (album_id,))
-            conn.commit()
-            return album_row[0], album_row[1], file_paths
-        finally:
-            conn.close()
 
     def get_avg_bitrate_kbps(self, mb_release_id: str) -> Optional[int]:
         """Get average track bitrate (kbps) for a release. None if not found.

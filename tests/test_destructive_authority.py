@@ -5,7 +5,14 @@ from __future__ import annotations
 
 import unittest
 import threading
+import os
+import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from unittest.mock import patch
+
+from beets import library
 
 from lib.destructive_release_service import (
     BanSourceImporterBusy,
@@ -20,6 +27,12 @@ from lib.destructive_release_service import (
     DeleteSuccess,
     ban_source,
     delete_release_from_library,
+)
+from lib.beets_db import BeetsDB
+from lib.beets_delete import (
+    BeetsDeleteCompleted,
+    BeetsDeleteRequest,
+    run_beets_delete,
 )
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
@@ -214,7 +227,6 @@ class TestLibraryDeleteAuthority(unittest.TestCase):
         self.assertIsNotNone(self.beets.get_album_detail(7))
         self.assertIsNotNone(self.db.get_request(41))
         self.assertIsNotNone(self.db.get_request(42))
-        self.assertEqual(self.beets.delete_album_calls, [])
 
     def test_ab_pipeline_identifier_mismatch_is_zero_mutation(self) -> None:
         result = delete_release_from_library(
@@ -317,7 +329,6 @@ class TestLibraryDeleteAuthority(unittest.TestCase):
 
                 self.assertIsInstance(result, DeleteReleaseMismatch)
                 self.assertIsNotNone(beets.get_album_detail(7))
-                self.assertEqual(beets.delete_album_calls, [])
                 if pipeline_world in ("mb", "both"):
                     self.assertIsNotNone(db.get_request(41))
                 if pipeline_world in ("discogs", "both"):
@@ -353,7 +364,6 @@ class TestLibraryDeleteAuthority(unittest.TestCase):
 
                 self.assertIsInstance(result, DeleteReleaseMismatch)
                 self.assertEqual(self.db.advisory_lock_calls, [])
-                self.assertEqual(self.beets.delete_album_calls, [])
                 self.assertIsNotNone(self.beets.get_album_detail(7))
                 self.assertIsNotNone(self.db.get_request(41))
 
@@ -439,7 +449,6 @@ class TestDestructiveAuthorityRealPostgres(unittest.TestCase):
 
             self.assertIsInstance(result, DeleteLockContended)
             self.assertIsNotNone(beets.get_album_detail(7))
-            self.assertEqual(beets.delete_album_calls, [])
         finally:
             db1.close()
 
@@ -505,7 +514,6 @@ class TestDestructiveAuthorityRealPostgres(unittest.TestCase):
             self.assertIsInstance(busy, DeleteImporterBusy)
             self.assertIsNotNone(db1.get_request(request_id))
             self.assertIsNotNone(beets.get_album_detail(7))
-            self.assertEqual(beets.delete_album_calls, [])
         finally:
             db1.close()
 
@@ -523,15 +531,41 @@ class TestDestructiveAuthorityRealPostgres(unittest.TestCase):
         entered_delete = threading.Event()
         allow_delete = threading.Event()
 
-        class BlockingBeetsDB(FakeBeetsDB):
-            def delete_album(self, album_id: int) -> tuple[str, str, list[str]]:
-                entered_delete.set()
-                if not allow_delete.wait(timeout=5):
-                    raise TimeoutError("test did not release Beets mutation")
-                return super().delete_album(album_id)
-
-        beets = BlockingBeetsDB()
+        beets = FakeBeetsDB()
         beets.set_album_detail(7, _album())
+        notifier_saw_released_locks = False
+
+        def blocking_delete(request: BeetsDeleteRequest) -> BeetsDeleteCompleted:
+            entered_delete.set()
+            if not allow_delete.wait(timeout=5):
+                raise TimeoutError("test did not release Beets mutation")
+            beets._album_detail.pop(request.album_id)
+            return BeetsDeleteCompleted(
+                album_id=request.album_id,
+                album_name="Album",
+                artist_name="Artist",
+                former_album_path="/music/Artist/Album",
+                deleted_tracks=0,
+                deleted_artifacts=0,
+                preserved_paths=(),
+            )
+
+        def notify_after_release(_path: str):
+            nonlocal notifier_saw_released_locks
+            assert TEST_DSN is not None
+            observer = PipelineDB(TEST_DSN)
+            try:
+                with observer.advisory_lock(
+                    ADVISORY_LOCK_NAMESPACE_IMPORT, request_id,
+                ) as import_free:
+                    with observer.advisory_lock(
+                        ADVISORY_LOCK_NAMESPACE_RELEASE,
+                        release_id_to_lock_key(RELEASE_A),
+                    ) as release_free:
+                        notifier_saw_released_locks = import_free and release_free
+            finally:
+                observer.close()
+            return ()
         try:
             def destroy() -> object:
                 assert TEST_DSN is not None
@@ -541,6 +575,8 @@ class TestDestructiveAuthorityRealPostgres(unittest.TestCase):
                         pipeline_db=db2,
                         beets_db=beets,
                         request=DeleteRequest(album_id=7),
+                        beets_delete_fn=blocking_delete,
+                        notify_fn=notify_after_release,
                     )
                 finally:
                     db2.close()
@@ -562,11 +598,82 @@ class TestDestructiveAuthorityRealPostgres(unittest.TestCase):
                 result = future.result(timeout=5)
 
             self.assertIsInstance(result, DeleteSuccess)
+            self.assertTrue(notifier_saw_released_locks)
             self.assertIsNone(beets.get_album_detail(7))
             self.assertIsNotNone(db1.get_request(request_id))
         finally:
             allow_delete.set()
             db1.close()
+
+    def test_real_pg_and_pinned_beets_delete_slice(self) -> None:
+        db = make_db()
+        try:
+            request_id = db.add_request(
+                "Artist A", "Album A", "request",
+                mb_release_id=RELEASE_A, status="imported",
+            )
+            with tempfile.TemporaryDirectory() as raw:
+                root = Path(raw) / "library"
+                album_dir = root / "Artist A" / "Album A"
+                album_dir.mkdir(parents=True)
+                track = album_dir / "01 Track.flac"
+                track.write_bytes(b"audio")
+                sidecar = album_dir / "cratedigger.json"
+                sidecar.write_bytes(b"sidecar")
+                db_path = Path(raw) / "beets.db"
+                config_dir = Path(raw) / "config"
+                config_dir.mkdir()
+                (config_dir / "config.yaml").write_text(
+                    f"directory: {root}\n"
+                    f"library: {db_path}\n"
+                    "plugins: []\n"
+                    "clutter: ['cratedigger.json']\n",
+                    encoding="utf-8",
+                )
+                runtime_config = Path(raw) / "config.ini"
+                runtime_config.write_text(
+                    "[Beets]\n"
+                    f"directory = {root}\n"
+                    f"config_dir = {config_dir}\n"
+                    f"python = {sys.executable}\n",
+                    encoding="utf-8",
+                )
+                beets_lib = library.Library(str(db_path), str(root))
+                item = library.Item(
+                    path=str(track.relative_to(root)),
+                    album="Album A", albumartist="Artist A",
+                    artist="Artist A", title="Track", mb_albumid=RELEASE_A,
+                )
+                album = beets_lib.add_album([item])
+                album_id = int(album.id)
+                beets_lib._close()
+                with (
+                    patch.dict(os.environ, {
+                        "CRATEDIGGER_RUNTIME_CONFIG": str(runtime_config),
+                    }),
+                    BeetsDB(str(db_path), library_root=str(root)) as beets,
+                ):
+                    result = delete_release_from_library(
+                        pipeline_db=db,
+                        beets_db=beets,
+                        request=DeleteRequest(
+                            album_id=album_id,
+                            purge_pipeline=True,
+                            expected_pipeline_id=request_id,
+                            expected_release_id=RELEASE_A,
+                        ),
+                        beets_delete_fn=run_beets_delete,
+                        notify_fn=lambda _path: (),
+                    )
+
+                self.assertIsInstance(result, DeleteSuccess)
+                self.assertFalse(track.exists())
+                self.assertFalse(sidecar.exists())
+                self.assertIsNone(db.get_request(request_id))
+                with BeetsDB(str(db_path), library_root=str(root)) as beets:
+                    self.assertIsNone(beets.get_album_detail(album_id))
+        finally:
+            db.close()
 
 
 if __name__ == "__main__":

@@ -16,14 +16,15 @@ from lib.destructive_release_service import (
     BanSourceSuccess,
     BanSourceTransitionConflict,
     DeleteAlbumNotFound,
-    DeleteBeetsFailure,
+    DeleteIncomplete,
     DeleteImporterBusy,
     DeleteLockContended,
     DeletePipelinePurgeFailure,
-    DeletePostPurgeBeetsFailure,
     DeleteReleaseMismatch,
     DeleteRequest,
     DeleteSuccess,
+    BeetsDeleteFn,
+    DeleteNotifyFn,
     ban_source,
     delete_release_from_library,
 )
@@ -96,7 +97,13 @@ def cmd_ban_source(db, args) -> int:
     raise AssertionError(f"Unhandled ban-source result: {result!r}")
 
 
-def cmd_library_delete(db, args) -> int:
+def cmd_library_delete(
+    db,
+    args,
+    *,
+    beets_delete_fn: BeetsDeleteFn | None = None,
+    notify_fn: DeleteNotifyFn | None = None,
+) -> int:
     """Delete one exact beets album with optional pipeline purge."""
     try:
         beets = _open_beets(args.beets_db)
@@ -113,6 +120,8 @@ def cmd_library_delete(db, args) -> int:
                 expected_pipeline_id=args.pipeline_id,
                 expected_release_id=args.release_id,
             ),
+            beets_delete_fn=beets_delete_fn,
+            notify_fn=notify_fn,
         )
     if isinstance(result, DeleteSuccess):
         print(json.dumps({
@@ -121,8 +130,19 @@ def cmd_library_delete(db, args) -> int:
             "album": result.album_name,
             "artist": result.artist_name,
             "deleted_files": result.deleted_files,
+            "deleted_artifacts": result.deleted_artifacts,
             "pipeline_deleted": result.pipeline_deleted,
             "pipeline_id": result.deleted_pipeline_id,
+            "preserved_paths": list(result.preserved_paths),
+            "notifications": [
+                {
+                    "provider": item.provider,
+                    "status": item.status,
+                    "detail": item.detail,
+                    "target": item.target,
+                }
+                for item in result.notifications
+            ],
         }))
         return 0
     if isinstance(result, DeleteAlbumNotFound):
@@ -150,11 +170,37 @@ def cmd_library_delete(db, args) -> int:
     if isinstance(result, DeletePipelinePurgeFailure):
         print(json.dumps({
             "error": "pipeline_purge_failed",
+            "status": "partial",
+            "album_deleted": True,
+            "id": result.album_id,
+            "album": result.album_name,
+            "artist": result.artist_name,
+            "deleted_files": result.deleted_files,
+            "deleted_artifacts": result.deleted_artifacts,
+            "preserved_paths": list(result.preserved_paths),
             "pipeline_id": result.pipeline_request_id,
+            "notifications": [
+                {
+                    "provider": item.provider,
+                    "status": item.status,
+                    "detail": item.detail,
+                    "target": item.target,
+                }
+                for item in result.notifications
+            ],
         }), file=sys.stderr)
         return 1
-    if isinstance(result, (DeletePostPurgeBeetsFailure, DeleteBeetsFailure)):
-        print(json.dumps({"error": "destructive_operation_failed"}), file=sys.stderr)
+    if isinstance(result, DeleteIncomplete):
+        print(json.dumps({
+            "error": "delete_incomplete",
+            "reason": result.reason,
+            "detail": result.detail,
+            "album_still_present": result.album_still_present,
+            "deleted_files": result.deleted_files,
+            "deleted_artifacts": result.deleted_artifacts,
+            "remaining_owned_paths": list(result.remaining_owned_paths),
+            "preserved_paths": list(result.preserved_paths),
+        }), file=sys.stderr)
         return 1
     raise AssertionError(f"Unhandled library-delete result: {result!r}")
 

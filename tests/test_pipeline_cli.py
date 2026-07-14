@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -4451,6 +4452,96 @@ class TestDestructiveCliAdapters(unittest.TestCase):
             "destructive_operation_busy",
         )
         self.assertIsNotNone(db.get_request(41))
+
+    def test_library_delete_success_exposes_artifacts_and_notifier_warnings(self) -> None:
+        from lib.beets_delete import BeetsDeleteCompleted
+        from lib.library_delete_notifiers import DeleteNotification
+
+        db = FakePipelineDB()
+        args = SimpleNamespace(
+            album_id=7,
+            purge_pipeline=False,
+            pipeline_id=None,
+            release_id=RELEASE_A,
+            beets_db=self.beets_path,
+        )
+        outcome = BeetsDeleteCompleted(
+            album_id=7,
+            album_name="Album A",
+            artist_name="Artist A",
+            former_album_path=self.tmpdir.name,
+            deleted_tracks=1,
+            deleted_artifacts=3,
+            preserved_paths=(os.path.join(self.tmpdir.name, "booklet.pdf"),),
+        )
+        output = io.StringIO()
+
+        delete_requests = []
+
+        def completed_delete(request):
+            delete_requests.append(request)
+            with sqlite3.connect(self.beets_path) as conn:
+                conn.execute("DELETE FROM items WHERE album_id = 7")
+                conn.execute("DELETE FROM albums WHERE id = 7")
+            return outcome
+
+        with (
+            self._env(),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_library_delete(
+                db,
+                args,
+                beets_delete_fn=completed_delete,
+                notify_fn=lambda _path: (DeleteNotification(
+                    "jellyfin", "warning", "connection refused"),),
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["deleted_artifacts"], 3)
+        self.assertEqual(payload["preserved_paths"], [
+            os.path.join(self.tmpdir.name, "booklet.pdf")])
+        self.assertEqual(payload["notifications"][0]["status"], "warning")
+        self.assertEqual(len(delete_requests), 1)
+        self.assertEqual(delete_requests[0].library_db_path, self.beets_path)
+        self.assertEqual(delete_requests[0].library_root, self.tmpdir.name)
+
+    def test_library_delete_incomplete_matches_http_semantics(self) -> None:
+        from lib.beets_delete import BeetsDeleteFailed
+
+        db = FakePipelineDB()
+        args = SimpleNamespace(
+            album_id=7,
+            purge_pipeline=False,
+            pipeline_id=None,
+            release_id=RELEASE_A,
+            beets_db=self.beets_path,
+        )
+        output = io.StringIO()
+        failure = BeetsDeleteFailed(
+            album_id=7,
+            reason="postcondition_failed",
+            detail="cover survived",
+            album_still_present=True,
+            remaining_owned_paths=("/music/cover.jpg",),
+        )
+        with (
+            self._env(),
+            redirect_stderr(output),
+        ):
+            rc = pipeline_cli.cmd_library_delete(
+                db,
+                args,
+                beets_delete_fn=lambda _request: failure,
+                notify_fn=lambda _path: (),
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertEqual(payload["error"], "delete_incomplete")
+        self.assertTrue(payload["album_still_present"])
+        self.assertEqual(payload["remaining_owned_paths"], ["/music/cover.jpg"])
 
     def test_argparse_requires_server_validated_ban_confirmation(self) -> None:
         from scripts.pipeline_cli.routes_meta import _build_parser

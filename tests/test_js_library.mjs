@@ -3,7 +3,11 @@
  * Run with: node tests/test_js_library.mjs
  */
 
-import { buildDeleteConfirmHtml, renderLibraryDetailBody } from '../web/js/library.js';
+import {
+  buildDeleteConfirmHtml,
+  describeBeetsDeletion,
+  renderLibraryDetailBody,
+} from '../web/js/library.js';
 
 let passed = 0;
 let failed = 0;
@@ -23,6 +27,14 @@ function assertExcludes(haystack, needle, msg) {
   } else {
     failed++;
     console.error(`  FAIL: ${msg} — unexpectedly found '${needle}'`);
+  }
+}
+
+function assertEqual(actual, expected, msg) {
+  if (actual === expected) passed++;
+  else {
+    failed++;
+    console.error(`  FAIL: ${msg} — expected '${expected}', got '${actual}'`);
   }
 }
 
@@ -46,6 +58,38 @@ console.log('buildDeleteConfirmHtml() omits pipeline note without release id');
   const html = buildDeleteConfirmHtml(7, 'Bodyjar', 'Plastic Skies', 12, null, '');
   assertContains(html, 'window.executeBeetsDeletion(7, this, null, &quot;&quot;)', 'empty release id still encoded safely');
   assertExcludes(html, 'matching pipeline request/history', 'no pipeline note without release id');
+}
+
+console.log('delete result UI never presents incomplete cleanup as success');
+{
+  const incomplete = describeBeetsDeletion({
+    error: 'delete_incomplete',
+    detail: 'cover.jpg survived',
+  });
+  assertEqual(incomplete.completed, false, 'incomplete result does not refresh away evidence');
+  assertEqual(incomplete.error, true, 'incomplete result is an error toast');
+  assertContains(incomplete.message, 'cover.jpg survived', 'incomplete detail is visible');
+
+  const partial = describeBeetsDeletion({
+    status: 'partial', album_deleted: true, pipeline_id: 42,
+  });
+  assertEqual(partial.completed, true, 'PG partial acknowledges album is already gone');
+  assertEqual(partial.error, true, 'PG partial is not a normal success toast');
+  assertContains(partial.message, 'pipeline request #42 remains', 'PG residual is actionable');
+}
+
+console.log('delete result UI surfaces unknown content and notifier warnings');
+{
+  const warning = describeBeetsDeletion({
+    status: 'ok', artist: 'A', album: 'B', deleted_files: 2,
+    deleted_artifacts: 4, pipeline_deleted: true,
+    preserved_paths: ['/music/A/B/booklet.pdf'],
+    notifications: [{provider: 'jellyfin', status: 'warning'}],
+  });
+  assertEqual(warning.completed, true, 'verified delete still completes');
+  assertEqual(warning.error, true, 'warning result gets warning styling');
+  assertContains(warning.message, '1 unknown path preserved', 'unknown content count visible');
+  assertContains(warning.message, '1 media notification warning', 'notifier warning count visible');
 }
 
 /** Independent expected encoder: JSON JS literal, then HTML attribute escaping. */

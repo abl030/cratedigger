@@ -29,7 +29,14 @@ class FakeBeetsDB:
         assert beets.close_calls == 1
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        library_db_path: str = "/tmp/fake-beets-library.db",
+        library_root: str = "/tmp/fake-beets-library",
+    ) -> None:
+        self.library_db_path = library_db_path
+        self.library_root = library_root
         self._album_exists: dict[str, bool] = {}
         self._album_ids_for_release: dict[str, list[int]] = {}
         self._album_info: dict[str, Any] = {}
@@ -58,8 +65,6 @@ class FakeBeetsDB:
         self.list_release_identities_calls: int = 0
         self._album_detail: dict[int, dict[str, Any]] = {}
         self.get_album_detail_calls: list[int] = []
-        self.delete_album_calls: list[int] = []
-        self._delete_album_error: Exception | None = None
         self._locate_queue: list[ReleaseLocation] = []
         self.locate_calls: list[str] = []
         self._min_bitrate: dict[str, int | None] = {}
@@ -103,9 +108,6 @@ class FakeBeetsDB:
 
     def set_album_detail(self, album_id: int, detail: dict[str, Any]) -> None:
         self._album_detail[album_id] = copy.deepcopy(detail)
-
-    def set_delete_album_error(self, error: Exception | None) -> None:
-        self._delete_album_error = error
 
     def set_min_bitrate(self, release_id: str, kbps: int | None) -> None:
         """Seed a per-release min bitrate. Keys are normalized like
@@ -260,26 +262,6 @@ class FakeBeetsDB:
         self.get_album_detail_calls.append(album_id)
         detail = self._album_detail.get(album_id)
         return copy.deepcopy(detail) if detail is not None else None
-
-    def delete_album(self, album_id: int) -> tuple[str, str, list[str]]:
-        """Stateful mirror of ``BeetsDB.delete_album``."""
-        self.delete_album_calls.append(album_id)
-        if self._delete_album_error is not None:
-            raise self._delete_album_error
-        detail = self._album_detail.pop(album_id, None)
-        if detail is None:
-            raise ValueError(f"Album {album_id} not found")
-        tracks = detail.get("tracks") or []
-        paths = [
-            str(track["path"])
-            for track in tracks
-            if isinstance(track, dict) and track.get("path") is not None
-        ]
-        return (
-            str(detail.get("album") or ""),
-            str(detail.get("artist") or detail.get("albumartist") or ""),
-            paths,
-        )
 
     @staticmethod
     def _selectors_for(release_id: str) -> tuple[str, ...]:

@@ -439,6 +439,24 @@ prune a directory whose managed audio and sidecar are all gone. Any file that
 does not match the configured clutter patterns prevents pruning and remains
 untouched.
 
+Library delete (`POST /api/beets/delete` / `pipeline-cli library-delete`) is a
+separate exact-album-PK operation owned by the same pinned Beets runtime. It
+does not write Beets SQLite directly and does not use stock `beet remove -d`:
+pinned Beets 2.x removes metadata before its filesystem loop. Instead,
+`harness/delete_album.py` keeps the album row as the retry manifest while Beets
+removes and verifies exact item paths, exact art, `cratedigger.json`, and
+configured clutter. Paths are confined to `directory:` with realpath/symlink
+checks. Before mutation, the harness also proves that its active `library:`
+and `directory:` resolve to the exact SQLite path and root used by the web/CLI
+preflight. Beets metadata is removed with `delete=False` only after every
+owned artifact is absent; album, item, and flexible-field rows share one outer
+transaction with explicit rollback on any exception.
+
+Unknown content is never recursively guessed away. It remains on disk, appears
+in `preserved_paths`, and blocks directory pruning. Partial I/O leaves both the
+Beets row and pipeline row available for retry. Zero newly deleted files is
+successful only when the complete postcondition was already satisfied.
+
 ## The Beets SQLite Database
 
 Located at `/mnt/virtio/Music/beets-library.db`. Two main tables:

@@ -1407,33 +1407,6 @@ class TestGetAlbumIdsByMbids(unittest.TestCase):
         self.assertEqual(result, {"5555555": 88})
 
 
-class TestDeleteAlbum(unittest.TestCase):
-    """Test delete_album on an explicitly opened writable database."""
-
-    def setUp(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.db_path = os.path.join(self.tmpdir, "test.db")
-        _create_test_db(self.db_path)
-        _insert_album(self.db_path, 1, "aaa-111", [
-            (320000, "/m/a/01.mp3"), (320000, "/m/a/02.mp3"),
-        ], album="Test Album", albumartist="Test Artist")
-
-    def test_deletes_and_returns_metadata(self) -> None:
-        with BeetsDB(self.db_path) as db:
-            album, artist, paths = db.delete_album(1)
-        self.assertEqual(album, "Test Album")
-        self.assertEqual(artist, "Test Artist")
-        self.assertEqual(len(paths), 2)
-        # Verify rows are gone
-        with BeetsDB(self.db_path) as db:
-            self.assertFalse(db.album_exists("aaa-111"))
-
-    def test_not_found_raises(self) -> None:
-        with self.assertRaises(ValueError):
-            with BeetsDB(self.db_path) as db:
-                db.delete_album(999)
-
-
 class TestAlbumRowSource(unittest.TestCase):
     """Test that _album_row_to_dict computes source correctly."""
 

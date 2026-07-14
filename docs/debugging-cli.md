@@ -54,7 +54,14 @@ Every top-level `pipeline-cli` subcommand, one line each. Run `pipeline-cli rout
 | `import-preview` | Preview whether an import would pass |
 | `list` | List album requests |
 | `long-tail` | Long-tail worklist — wanted cohort pre-banded by on-disk quality (missing / QualityRank / unknown) + in_flight_rescue |
-| `library-delete` | Delete one server-resolved exact beets album; optional pipeline purge (requires `--confirm DELETE`) |
+| `library-delete` | Delete one exact Beets album through the pinned runtime, verify owned artifacts absent, optionally purge pipeline last, then notify Plex/Jellyfin (requires `--confirm DELETE`) |
+
+`library-delete` JSON has three truthful terminal shapes. `status=ok` means the
+exact Beets row and owned artifacts are absent; `preserved_paths` lists unknown
+content left untouched and `notifications` records media submissions/warnings.
+`error=delete_incomplete` retains Beets/pipeline authority for retry.
+`status=partial` with `album_deleted=true` means Beets deletion completed but
+the named PostgreSQL row remains after a purge failure.
 | `manual-import` | Import a local folder as a pipeline request |
 | `quality` | Show quality state and simulate decisions |
 | `query` | Run a read-only SQL query for debugging |
