@@ -270,34 +270,27 @@ FROM download_log, jsonb_array_elements(validation_result->'candidates'->0->'map
 WHERE id = <id>;
 ```
 
-## `slskd_transfer_ledger` — transfer ownership and terminal evidence
+## `slskd_transfer_ledger` — transfer ownership and file evidence
 
-Migration 045 creates one write-ahead row for every transfer Cratedigger
-attempts to enqueue. Migration 049 enforces a partial unique index on non-NULL
-`transfer_id`: one live slskd ID identifies exactly one ledger attempt. Its
-dedupe step preserves every historical row, retaining the ID on the row with
-authoritative `local_path` evidence, then a terminal stamp, then the earliest
-enqueue; later duplicate rows keep their fingerprints and other forensic data
-with `transfer_id=NULL`.
+Migration 045 creates one write-ahead row for every file Cratedigger attempts
+to enqueue. The row is intent evidence until slskd accepts the POST; migration
+051 adds nullable `accepted_at`, which is stamped immediately after acceptance.
+Completion events add file paths only to already-confirmed rows; they never
+promote pending intent. A definitively rejected POST therefore cannot gain
+destructive authority from a later same-key human completion.
 
-The terminal columns deliberately encode two different evidence strengths:
+The durable ownership key is `(username, filename)`: slskd assigns a fresh
+transfer ID when it retries the same queued file, so an attempt-local ID cannot
+prove or disprove ownership of a later terminal record. Every terminal
+`Completed,*` record with a confirmed queue key is removed individually using
+its current slskd ID; a pending or unledgered key is never touched.
 
-- `local_path IS NOT NULL` is an authoritative successful-completion event and
-  permits removal of a matching `Completed,Succeeded` record.
-- `completed_at IS NOT NULL AND local_path IS NULL` records a terminal failure
-  observation only. It permits removal of that failure state, but never a later
-  success snapshot; the exact-ID completion event may upgrade the same row with
-  its path.
-- both NULL means the attempt is still unstamped.
-
-If enqueue-response reconciliation missed `transfer_id`, a terminal failure may
-claim one exact peer/file row only from slskd's own `requestedAt` timestamp and
-only within the five-minute causal window before it. Local `enqueued_at` is not
-a substitute for missing slskd evidence, and a date-only ISO value is not a
-lifecycle timestamp. T1.5, event fallback, and causal-claim writers reassert
-their expected row state in the outer UPDATE after lock waits; this prevents a
-different-ID winner from being overwritten while both writers claim success.
-The unique index remains the equal-ID backstop.
+Migration 051 derives historical acceptance from the old positive evidence,
+then removes the obsolete `transfer_id` and `completed_at` columns and their
+indexes. `local_path` remains separate, authoritative file evidence: only
+the completion event feed stamps it, and disk deletion still requires that
+event-stamped path or another positive ownership signal. Terminal transfer
+cleanup does not infer a filesystem path from the queue key.
 
 ## Persisted search plans (migration 014)
 

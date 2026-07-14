@@ -142,18 +142,16 @@ def _collect_new_events(
 class _EventCompletionInfo:
     """One decoded DownloadFileComplete event's payload, keyed by
     (username, remote filename) — what one ingestion pass needs to stamp
-    both ``active_download_state`` (``local_path``) and the transfer
-    ledger (``local_path`` + ``transfer_id``, issue #571 T2)."""
+    both ``active_download_state`` and the transfer ledger."""
 
     local_path: str
-    transfer_id: str
 
 
 def _completion_info_from_events(
     events: list[SlskdRawEvent],
 ) -> dict[tuple[str, str], _EventCompletionInfo]:
     """Map ``(username, remote filename)`` → the newest decodable
-    DownloadFileComplete event's local path + transfer id.
+    DownloadFileComplete event's local path.
 
     ``events`` is newest-first; the first occurrence of a key wins.
     """
@@ -175,7 +173,6 @@ def _completion_info_from_events(
         key = (payload.transfer.username, payload.transfer.filename)
         info.setdefault(key, _EventCompletionInfo(
             local_path=payload.local_filename,
-            transfer_id=payload.transfer.id,
         ))
     return info
 
@@ -221,31 +218,22 @@ def _stamp_local_paths(
 def _stamp_transfer_ledger(
     db: Any,
     completion_info: dict[tuple[str, str], _EventCompletionInfo],
-    completed_at: datetime,
 ) -> int:
     """Write-ahead ledger completion stamp (issue #571, T2).
 
     Matches by the SAME ``(username, remote filename)`` keys
     ``_stamp_local_paths`` already uses for ``active_download_state``, in
     the SAME ingestion pass (one new call, no second cursor, no separate
-    scan). An unledgered pair — a foreign transfer, or one this pipeline
-    never enqueued — stamps nothing and never invents a ledger row;
-    ``stamp_transfer_completion`` returns 0 for those, which this simply
-    sums. ``completed_at`` is the ingestion pass's own clock reading
-    (matching ``enqueued_at``'s ``DEFAULT now()`` semantics — a
-    pipeline-observed timestamp, not slskd's own event clock), passed by
-    the caller so a single pass stamps every matched row with one
-    consistent value.
-
-    ``transfer_id`` is forwarded from the SAME decoded event. It selects an
-    existing exact-ID row first (including a prior pathless failure stamp),
-    or binds the newest open exact-key row only when the ID is globally absent.
+    scan). Only an already POST-confirmed ledger row may receive the path.
+    Pending intent and unledgered pairs stamp nothing and never invent or
+    promote a row; a later human same-key event cannot claim a rejected
+    enqueue. Transfer IDs are deliberately ignored because slskd re-issues
+    them while retrying one durable queue key.
     """
     stamped = 0
     for (username, filename), info in completion_info.items():
         stamped += db.stamp_transfer_completion(
-            username, filename, info.local_path, completed_at,
-            transfer_id=info.transfer_id)
+            username, filename, info.local_path)
     return stamped
 
 
@@ -339,10 +327,9 @@ def ingest_download_file_events(
         else (0, 0)
     )
     # T2 (issue #571): same pass, same completion_info map — no second
-    # cursor, no separate scan. One consistent "now" for every row this
-    # pass stamps.
+    # cursor and no separate scan.
     transfers_stamped = (
-        _stamp_transfer_ledger(db, completion_info, datetime.now(timezone.utc))
+        _stamp_transfer_ledger(db, completion_info)
         if completion_info
         else 0
     )

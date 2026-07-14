@@ -135,20 +135,17 @@ class FakeTransferLedgerRow:
     colliding with the real write-payload ``msgspec.Struct`` of the same
     short name in ``lib.pipeline_db`` — that Struct carries only the
     write-ahead fields (``request_id``/``username``/``filename``/
-    ``attempt_fingerprint``); this fake row carries the FULL table shape
-    (``id``/``transfer_id``/``enqueued_at``/``local_path``/
-    ``completed_at``) so the purpose-shaped ownership reads and fake
-    write-method self-tests observe production-shaped state.
+    ``attempt_fingerprint``); this fake row also carries the generated ID,
+    enqueue time, and authoritative completion-event path from the table.
     """
     id: int
     request_id: int
     username: str
     filename: str
     attempt_fingerprint: str | None = None
-    transfer_id: str | None = None
     enqueued_at: datetime = field(default_factory=_utcnow)
+    accepted_at: datetime | None = None
     local_path: str | None = None
-    completed_at: datetime | None = None
 
 
 @dataclass

@@ -3,18 +3,20 @@
 ``lib.slskd_transfers.converge_slskd_orphans`` (issue #571 PR 3).
 
 Two properties over generated worlds of live slskd transfers, each
-independently {ledgered/unledgered} x {backed/unbacked by a
+independently {foreign/pending/confirmed} x {backed/unbacked by a
 ``downloading`` row} x transfer state:
 
-1. **C1 (good-citizen)** — a live transfer absent from cratedigger's
-   write-ahead ``slskd_transfer_ledger`` is NEVER cancelled by
-   convergence, whatever its state or backed status. This is the flip:
+1. **C1 (good-citizen)** — a live transfer without a confirmed accepted
+   enqueue in ``slskd_transfer_ledger`` is NEVER cancelled by convergence,
+   whatever its state or backed status. This includes both foreign keys and
+   pending write-ahead intents whose POST failed or had an unknown outcome.
+   This is the flip:
    the OLD doctrine cancelled any transfer no ``downloading`` row backed,
    which risked cancelling a human's transfer on a shared slskd instance.
-2. **C2 (housekeeping still works)** — a live (non-terminal), LEDGERED
+2. **C2 (housekeeping still works)** — a live (non-terminal), CONFIRMED
    transfer that is NOT backed by a currently-``downloading`` row IS
    cancelled — cratedigger's own stray (the classic Replace-abandons-
-   transfer case, and a ledgered transfer whose row already self-healed
+   transfer case, and a confirmed transfer whose row already self-healed
    back to ``wanted``).
 
 Both properties drive the REAL ``converge_slskd_orphans`` entry point
@@ -37,6 +39,7 @@ import os
 import sys
 import unittest
 from dataclasses import dataclass
+from typing import Literal
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -68,7 +71,7 @@ _ALL_STATES = _LIVE_STATES + _TERMINAL_STATES
 class TransferWorld:
     key: int
     state: str
-    ledgered: bool
+    ownership: Literal["foreign", "pending", "confirmed"]
     backed: bool
 
 
@@ -80,7 +83,8 @@ def transfer_worlds(draw) -> tuple[TransferWorld, ...]:
         worlds.append(TransferWorld(
             key=i,
             state=draw(st.sampled_from(_ALL_STATES)),
-            ledgered=draw(st.booleans()),
+            ownership=draw(st.sampled_from(
+                ("foreign", "pending", "confirmed"))),
             backed=draw(st.booleans()),
         ))
     return tuple(worlds)
@@ -109,7 +113,7 @@ def _build_world_fakes(
         slskd.add_transfer(
             username=username, directory=f"Music\\Album{w.key}",
             filename=filename, id=f"t-{w.key}", state=w.state)
-        if w.ledgered:
+        if w.ownership != "foreign":
             ledger_rows.append(TransferLedgerRow(
                 request_id=w.key + 1, username=username, filename=filename))
         if w.backed:
@@ -121,6 +125,9 @@ def _build_world_fakes(
                 }))
     if ledger_rows:
         db.record_transfer_enqueue(ledger_rows)
+    for w in worlds:
+        if w.ownership == "confirmed":
+            db.confirm_transfer_enqueue(_username(w.key), _filename(w.key))
     return db, slskd
 
 
@@ -133,35 +140,34 @@ def _ctx(db: FakePipelineDB, slskd: FakeSlskdAPI) -> CratediggerContext:
 # call them directly) --------------------------------------------------
 
 
-def assert_foreign_never_cancelled(
+def assert_unconfirmed_never_cancelled(
     worlds: tuple[TransferWorld, ...], cancelled_ids: set[str],
 ) -> None:
-    """C1: an unledgered live transfer is never cancelled, whatever its
-    state or backed status."""
+    """C1: a foreign or merely pending transfer is never cancelled."""
     for w in worlds:
-        if w.ledgered:
+        if w.ownership == "confirmed":
             continue
         transfer_id = f"t-{w.key}"
         if transfer_id in cancelled_ids:
             raise AssertionError(
-                f"foreign transfer {transfer_id!r} (world={w!r}) "
+                f"unconfirmed transfer {transfer_id!r} (world={w!r}) "
                 "was cancelled by convergence")
 
 
-def assert_ledgered_unbacked_live_is_cancelled(
+def assert_confirmed_unbacked_live_is_cancelled(
     worlds: tuple[TransferWorld, ...], cancelled_ids: set[str],
 ) -> None:
-    """C2: a ledgered, unbacked, LIVE (non-terminal) transfer is always
+    """C2: a confirmed, unbacked, LIVE (non-terminal) transfer is always
     cancelled — cratedigger's own stray."""
     for w in worlds:
-        if not w.ledgered or w.backed:
+        if w.ownership != "confirmed" or w.backed:
             continue
         if w.state.startswith("Completed"):
             continue
         transfer_id = f"t-{w.key}"
         if transfer_id not in cancelled_ids:
             raise AssertionError(
-                f"ledgered, unbacked, live transfer {transfer_id!r} "
+                f"confirmed, unbacked, live transfer {transfer_id!r} "
                 f"(world={w!r}) was NOT cancelled by convergence")
 
 
@@ -176,8 +182,8 @@ class TestGeneratedConvergeSlskdOrphans(unittest.TestCase):
         converge_slskd_orphans(_ctx(db, slskd))
 
         cancelled_ids = {c.id for c in slskd.transfers.cancel_download_calls}
-        assert_foreign_never_cancelled(worlds, cancelled_ids)
-        assert_ledgered_unbacked_live_is_cancelled(worlds, cancelled_ids)
+        assert_unconfirmed_never_cancelled(worlds, cancelled_ids)
+        assert_confirmed_unbacked_live_is_cancelled(worlds, cancelled_ids)
 
     @given(worlds=transfer_worlds())
     def test_convergence_is_idempotent_second_pass_cancels_nothing_new(
@@ -202,23 +208,31 @@ class TestConvergeCheckersTripOnViolations(unittest.TestCase):
 
     def test_c1_checker_trips_when_a_foreign_transfer_is_cancelled(self):
         worlds = (TransferWorld(
-            key=0, state="InProgress", ledgered=False, backed=False),)
+            key=0, state="InProgress", ownership="foreign", backed=False),)
         with self.assertRaises(AssertionError):
-            assert_foreign_never_cancelled(worlds, cancelled_ids={"t-0"})
+            assert_unconfirmed_never_cancelled(worlds, cancelled_ids={"t-0"})
+
+    def test_c1_checker_trips_when_a_pending_transfer_is_cancelled(self):
+        worlds = (TransferWorld(
+            key=0, state="InProgress", ownership="pending", backed=False),)
+        with self.assertRaises(AssertionError):
+            assert_unconfirmed_never_cancelled(worlds, cancelled_ids={"t-0"})
 
     def test_c2_checker_trips_when_a_stray_survives_uncancelled(self):
         worlds = (TransferWorld(
-            key=0, state="InProgress", ledgered=True, backed=False),)
+            key=0, state="InProgress", ownership="confirmed", backed=False),)
         with self.assertRaises(AssertionError):
-            assert_ledgered_unbacked_live_is_cancelled(
+            assert_confirmed_unbacked_live_is_cancelled(
                 worlds, cancelled_ids=set())
 
     def test_c2_checker_passes_terminal_stray_left_alone(self):
-        # A terminal-state ledgered/unbacked transfer is NOT a C2 target
+        # A terminal-state confirmed/unbacked transfer is NOT a C2 target
         # (nothing to cancel) — the checker must not raise here.
         worlds = (TransferWorld(
-            key=0, state="Completed, Succeeded", ledgered=True, backed=False),)
-        assert_ledgered_unbacked_live_is_cancelled(worlds, cancelled_ids=set())
+            key=0, state="Completed, Succeeded",
+            ownership="confirmed", backed=False),)
+        assert_confirmed_unbacked_live_is_cancelled(
+            worlds, cancelled_ids=set())
 
 
 if __name__ == "__main__":

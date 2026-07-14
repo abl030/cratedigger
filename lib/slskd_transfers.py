@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -20,7 +19,6 @@ from typing import Any, Literal, TYPE_CHECKING
 
 from lib.download_reconstruction import reconstruct_grab_list_entry
 from lib.grab_list import DownloadFile, GrabListEntry
-from lib.pipeline_db import TerminalFailureClaim
 from lib.processing_paths import (
     canonical_folder_for_row,
     canonical_processing_path,
@@ -262,36 +260,6 @@ def _write_ahead_transfer_ledger(
     writer.record_transfer_enqueue(rows)
 
 
-def _stamp_transfer_ids_after_enqueue(
-    username: str,
-    downloads: list[DownloadFile],
-    ctx: CratediggerContext,
-) -> None:
-    """Enqueue-response ownership capture (issue #571 PR 5, T1.5) -- MUST
-    run AFTER the reconciliation poll above resolves each file's transfer
-    id, so the row T1 write-ahead-inserted before the POST gets its
-    ``transfer_id`` filled in as soon as it's knowable.
-
-    This is the PRIMARY capture path; ``lib.slskd_events``'s completion
-    stamping (T2) is the fallback that closes the gap when reconciliation
-    times out before a transfer id is ever seen here (the ``reconciled !=
-    len(downloads)`` case logged above) -- a completion event always
-    carries slskd's own transfer id, so a stamped row's transfer_id ends
-    up durably known one way or the other.
-
-    Same guard as ``_write_ahead_transfer_ledger``: silently skips when
-    no ``ctx.download_ownership`` writer is wired (the legacy/test
-    fallback shape). Files with no reconciled id (``download.id`` falsy)
-    are left for the T2 fallback -- nothing to stamp yet.
-    """
-    writer = getattr(ctx, "download_ownership", None)
-    if writer is None:
-        return
-    pairs = [(d.filename, d.id) for d in downloads if d.id]
-    if pairs:
-        writer.stamp_transfer_ids(username, pairs)
-
-
 def slskd_enqueue_with_outcome(
     username: str,
     files: list[dict[str, Any]],
@@ -322,6 +290,13 @@ def slskd_enqueue_with_outcome(
         return SlskdEnqueueOutcome(status="unknown", reason=reason)
     if not enqueue:
         return SlskdEnqueueOutcome(status="rejected")
+
+    writer = getattr(ctx, "download_ownership", None)
+    if writer is not None:
+        writer.confirm_transfer_enqueues(
+            username,
+            [str(file["filename"]) for file in files],
+        )
 
     # Poll for transfer IDs — slskd needs time to register the enqueue.
     # Typically resolves in 1-2s; max 10s before giving up.
@@ -374,7 +349,6 @@ def slskd_enqueue_with_outcome(
             reconciled,
             len(downloads),
         )
-    _stamp_transfer_ids_after_enqueue(username, downloads, ctx)
     return SlskdEnqueueOutcome(status="accepted", downloads=downloads)
 
 
@@ -546,18 +520,17 @@ def converge_slskd_orphans(ctx: CratediggerContext) -> int:
     row is genuinely stranded, not mid-write. The slskd snapshot is taken
     BEFORE the DB read: a transfer enqueued after the snapshot can't
     appear in it, so ordering alone still rules out false strays on the
-    "backed" side of the check. (It buys nothing on the ledger side — a
-    fresh write-ahead row from a mid-flight enqueue makes that transfer
-    MORE ledgered, never less, so it can only turn a would-be stray into
-    correctly-still-in-flight, never the other way.)
+    "backed" side of the check. A fresh write-ahead intent is not ownership;
+    only the accepted-POST confirmation enters the ownership set.
 
     Good-citizen doctrine (#571): a live transfer is cancelled ONLY when
-    it is BOTH (a) present in cratedigger's write-ahead
+    it is BOTH (a) backed by an accepted enqueue in
     ``slskd_transfer_ledger`` (proof cratedigger created it — see
     ``lib.repair.find_slskd_orphans`` for the full classification) AND
     (b) not currently backed by a ``downloading`` row. A transfer absent
-    from the ledger is foreign — on a shared slskd instance that may be a
-    human's — and is NEVER cancelled, whatever its state or age.
+    from the confirmed ownership set is foreign — on a shared slskd instance
+    that may be a human's — and is NEVER cancelled, whatever its state or
+    age. Pending write-ahead intents are deliberately absent from that set.
 
     Best-effort: a snapshot failure skips the pass, a cancel failure is
     logged and the remaining strays are still attempted. Returns the
@@ -644,17 +617,11 @@ def rederive_transfer_ids(
 class CompletedPurgeSummary:
     """Aggregate result of one completed-transfer purge pass.
 
-    ``reportable`` gates the cycle's INFO summary line. Newly stamped or
-    unconfirmed failures, successes still waiting on their authoritative
-    event, failed removals, and foreign terminal rows are operator-relevant
-    even when no slskd row was removed. ``failure_stamped`` is an overlapping
-    action metric; it is deliberately excluded from terminal-row conservation.
+    ``reportable`` gates the cycle's INFO summary line. Failed removals and
+    foreign terminal rows are operator-relevant even when no row was removed.
     """
     removed: int = 0
     removal_failed: int = 0
-    failure_stamped: int = 0
-    failure_unconfirmed: int = 0
-    success_waiting: int = 0
     foreign_count: int = 0
     nonterminal_count: int = 0
 
@@ -663,63 +630,25 @@ class CompletedPurgeSummary:
         return bool(
             self.removed
             or self.removal_failed
-            or self.failure_stamped
-            or self.failure_unconfirmed
-            or self.success_waiting
             or self.foreign_count
         )
 
 
-_SLSKD_LIFECYCLE_TIMESTAMP = re.compile(
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}"
-    r"(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?$"
-)
-
-
-def _terminal_claim_timestamp(value: str | None) -> datetime | None:
-    """Parse a real slskd lifecycle datetime, failing closed.
-
-    A date alone is valid to ``datetime.fromisoformat`` but is not lifecycle
-    evidence. The explicit shape check retains slskd's aware and naive forms
-    while requiring an actual time component.
-    """
-    if not value or _SLSKD_LIFECYCLE_TIMESTAMP.fullmatch(value) is None:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
 def purge_completed_transfers(ctx: CratediggerContext) -> CompletedPurgeSummary:
-    """End-of-cycle sweep (issue #571 PR 5): per-id removal of ledger-
-    owned, terminal-stamped slskd transfer records.
+    """Remove every terminal attempt for a ledger-owned slskd queue key.
 
     Replaces the old bulk ``remove_completed_downloads()`` call (``DELETE
     /transfers/downloads/all/completed``), which purged EVERY completed
     transfer record slskd reported — including a human's, on a shared
-    instance. Good-citizen doctrine (#571): a completed record is removed
-    ONLY when it is BOTH (a) present in cratedigger's write-ahead
-    ``slskd_transfer_ledger`` by ``transfer_id`` (proof cratedigger
-    created it) AND (b) its ledger row carries a durable terminal stamp.
-    Successful transfers receive that stamp only with the authoritative
-    DownloadFileComplete local-path event. Non-success ``Completed,*``
-    snapshots receive it by exact transfer ID after the pre-purge evidence
-    harvest. If T1.5 never captured an ID, a failure may atomically claim
-    one causal ID-less T1 row for the exact peer/file key; the ledger row
-    must predate slskd's request timestamp, so an old terminal snapshot
-    cannot consume a newer retry. Removal remains per confirmed ID.
+    instance. An accepted write-ahead row proves ownership by the stable
+    ``(username, filename)`` queue identity. slskd may issue several attempt
+    IDs while retrying that one enqueue; all of them belong to the same queue
+    entry and are removed individually. Pending and unknown keys remain
+    untouched.
 
-    Interplay with issue #550's disk reaper: the old bulk purge destroyed
-    every completed transfer's slskd handle every cycle, which is part of
-    why the disk reaper (filesystem + DB reasoning, no slskd handle
-    needed) had to exist. With per-id stamped-gated removal, a completed
-    transfer keeps its slskd handle until cratedigger's own ledger proves
-    it stamped — strictly better: less state for the reaper to have to
-    reconstruct from disk alone.
+    Completion paths remain owned by the independent event feed. The cycle
+    harvests terminal state before this pass, and removing a transfer-history
+    row does not remove its retained completion event.
 
     Best-effort: a snapshot failure skips the pass, a per-id removal
     failure is logged and the remaining removals are still attempted.
@@ -732,65 +661,13 @@ def purge_completed_transfers(ctx: CratediggerContext) -> CompletedPurgeSummary:
     if downloads is None:
         return CompletedPurgeSummary()
     db = ctx.pipeline_db_source._get_db()
-    id_sets = db.get_owned_transfer_id_sets()
     classification = find_completed_transfers_to_purge(
         downloads,
-        id_sets.path_stamped,
-        id_sets.pathless_stamped,
-        id_sets.unstamped,
-    )
-
-    observed_at = datetime.now(timezone.utc)
-    exact_failure_ids = {
-        item.transfer_id for item in classification.to_stamp_failures
-    }
-    confirmed_exact: set[str] = set()
-    if exact_failure_ids:
-        try:
-            confirmed_exact = db.stamp_terminal_failures(
-                exact_failure_ids, observed_at)
-        except Exception:
-            logger.exception(
-                "COMPLETED-PURGE: exact-ID terminal-failure stamp failed; "
-                "those transfers will not be removed this cycle")
-
-    claim_by_id = {
-        item.transfer_id: item for item in classification.to_claim_failures
-    }
-    claims: list[TerminalFailureClaim] = []
-    for item in classification.to_claim_failures:
-        requested_at = _terminal_claim_timestamp(item.requested_at)
-        if requested_at is None:
-            continue
-        claims.append(TerminalFailureClaim(
-            transfer_id=item.transfer_id,
-            username=item.username,
-            filename=item.filename,
-            requested_at=requested_at,
-        ))
-    confirmed_claims: set[str] = set()
-    if claims:
-        try:
-            confirmed_claims = db.claim_terminal_failures(
-                claims, observed_at)
-        except Exception:
-            logger.exception(
-                "COMPLETED-PURGE: causal T1 terminal-failure claim failed; "
-                "those transfers will not be removed this cycle")
-
-    newly_confirmed = confirmed_exact | confirmed_claims
-    removable = list(classification.to_remove)
-    removable.extend(
-        item for item in classification.to_stamp_failures
-        if item.transfer_id in confirmed_exact
-    )
-    removable.extend(
-        claim_by_id[transfer_id]
-        for transfer_id in confirmed_claims
+        db.get_owned_transfer_keys(),
     )
     removed = 0
     removal_failed = 0
-    for item in removable:
+    for item in classification.to_remove:
         try:
             removed_ok = ctx.slskd.transfers.cancel_download(
                 item.username, item.transfer_id, remove=True)
@@ -811,25 +688,15 @@ def purge_completed_transfers(ctx: CratediggerContext) -> CompletedPurgeSummary:
     summary = CompletedPurgeSummary(
         removed=removed,
         removal_failed=removal_failed,
-        failure_stamped=len(newly_confirmed),
-        failure_unconfirmed=(
-            len(exact_failure_ids) - len(confirmed_exact)
-            + len(classification.to_claim_failures) - len(confirmed_claims)
-        ),
-        success_waiting=classification.success_waiting_count,
-        foreign_count=(
-            classification.foreign_count
-        ),
+        foreign_count=classification.foreign_count,
         nonterminal_count=classification.nonterminal_count,
     )
     if summary.reportable:
         logger.info(
-            "COMPLETED-PURGE: removed=%d removal_failed=%d failure_stamped=%d "
-            "failure_unconfirmed=%d success_waiting=%d foreign=%d "
+            "COMPLETED-PURGE: removed=%d removal_failed=%d foreign=%d "
             "nonterminal=%d",
-            summary.removed, summary.removal_failed, summary.failure_stamped,
-            summary.failure_unconfirmed, summary.success_waiting,
-            summary.foreign_count, summary.nonterminal_count)
+            summary.removed, summary.removal_failed, summary.foreign_count,
+            summary.nonterminal_count)
     return summary
 
 

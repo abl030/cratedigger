@@ -2,37 +2,26 @@
 """Generated tests for the slskd transfer write-ahead ownership ledger
 (issue #571, migration 045).
 
-Three properties over generated worlds:
+Two properties over generated worlds:
 
-1. **T1 (write-ahead ownership)** — for worlds with an ownership context
+1. **T1/T1.5 (write-ahead intent and accepted ownership)** — for worlds with
+   an ownership context
    (a real ``request_id`` AND a wired ``download_ownership`` writer), the
    ledger insert for ``lib.slskd_transfers.slskd_enqueue_with_outcome``
    (the ONE production call site of ``ctx.slskd.transfers.enqueue``)
    ALWAYS precedes the POST, and EVERY file in the enqueue call ends up
-   with a matching ledger row — including when the POST itself raises
-   (a simulated kill mid-enqueue). Worlds without ownership context never
-   write a row, but the enqueue is never blocked by that absence.
+   with a matching intent row — including rejected and unknown POST outcomes.
+   Destructive ownership exists iff that POST succeeds. Worlds without
+   ownership context never write a row, but the
+   enqueue is never blocked by that absence.
 2. **T3 (bounded, forensic)** — a ledger row is pruned iff it is BOTH
    past the retention cutoff AND its request is not currently
    wanted/downloading; a request_id with no matching row (hard-deleted
    elsewhere) counts as inactive.
-3. **TS1 (transfer_id capture, issue #571 PR 5)** — over any sequence of
-   T1.5 (``stamp_transfer_id``) and T2 (``stamp_transfer_completion``
-   with ``transfer_id=``) capture calls for one ledger row, the row's
-   final ``transfer_id`` is whichever value the FIRST call in the
-   sequence carried — every later call either finds ``transfer_id``
-   already non-NULL (a no-op) or, for a later completion call, finds
-   ``completed_at`` already non-NULL (a full no-op). This is what makes
-   the per-id completed-transfer purge's ownership proof durable
-   regardless of which capture path (enqueue-response or the completion
-   event) wins the race.
-
 The deterministic pins for these same invariants live in
-``tests/test_download.py::TestTransferLedgerWriteAheadOrdering`` (T1 +
-T1.5), ``tests/test_slskd_events.py::TestTransferLedgerStamping`` (T2 +
-TS1's event-fallback wiring), and
+``tests/test_download.py::TestTransferLedgerWriteAheadOrdering`` (T1), and
 ``tests/test_pipeline_db.py::TestTransferLedgerRoundTrip`` /
-``tests/test_fakes.py::TestFakePipelineDBTransferLedger`` (T3, TS1).
+``tests/test_fakes.py::TestFakePipelineDBTransferLedger`` (T3).
 
 Profiles and promotion policy: tests/_hypothesis_profiles.py and
 docs/generated-testing.md.
@@ -44,6 +33,7 @@ import sys
 import unittest
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -77,7 +67,7 @@ class EnqueueWorld:
     request_id: int | None
     attempt_fp: str | None
     has_download_ownership: bool
-    enqueue_raises: bool
+    enqueue_outcome: Literal["accepted", "rejected", "unknown"]
 
 
 @st.composite
@@ -92,7 +82,8 @@ def enqueue_worlds(draw) -> EnqueueWorld:
         attempt_fp=draw(st.one_of(
             st.none(), st.text(min_size=1, max_size=8))),
         has_download_ownership=draw(st.booleans()),
-        enqueue_raises=draw(st.booleans()),
+        enqueue_outcome=draw(st.sampled_from(
+            ("accepted", "rejected", "unknown"))),
     )
 
 
@@ -110,8 +101,10 @@ def _run_enqueue(world: EnqueueWorld) -> tuple[list[str], FakePipelineDB]:
     order: list[str] = []
     db = FakePipelineDB()
     slskd = FakeSlskdAPI()
-    if world.enqueue_raises:
+    if world.enqueue_outcome == "unknown":
         slskd.transfers.enqueue_error = RuntimeError("simulated kill mid-POST")
+    elif world.enqueue_outcome == "rejected":
+        slskd.transfers.enqueue_result = False
 
     real_record = db.record_transfer_enqueue
 
@@ -151,7 +144,7 @@ def assert_write_ahead_holds(world: EnqueueWorld, order: list[str], db: FakePipe
     Owned worlds (real request_id + wired ownership writer): the ledger
     write must precede the POST, and EVERY file must have a matching
     ledger row — regardless of whether the POST itself succeeded or
-    raised (the simulated-kill worlds).  Un-owned worlds must write
+    failed or returned false. Un-owned worlds must write
     nothing, but the enqueue call itself must still have been attempted
     (`order` contains a "post:" entry) — absence of ownership context
     never blocks the enqueue.
@@ -182,11 +175,21 @@ def assert_write_ahead_holds(world: EnqueueWorld, order: list[str], db: FakePipe
         if row.attempt_fingerprint != world.attempt_fp:
             raise AssertionError(
                 f"attempt_fingerprint drifted: {row!r} vs {world.attempt_fp!r}")
+    expected_owned = (
+        {(world.username, filename) for filename in world.filenames}
+        if world.enqueue_outcome == "accepted"
+        else set()
+    )
+    actual_owned = db.get_owned_transfer_keys()
+    if actual_owned != expected_owned:
+        raise AssertionError(
+            f"destructive ownership {actual_owned!r} != {expected_owned!r}"
+        )
 
 
 class TestGeneratedTransferLedgerWriteAhead(unittest.TestCase):
     """T1 property: write-ahead ownership over generated enqueue worlds,
-    including simulated-kill (POST raises) worlds."""
+    including rejected and unknown POST outcomes."""
 
     @given(world=enqueue_worlds())
     def test_write_ahead_holds_across_worlds(self, world):
@@ -290,101 +293,15 @@ class TestGeneratedTransferLedgerPrune(unittest.TestCase):
         assert_prune_matches_oracle(rows, survivors_after)
 
 
-# --- TS1: transfer_id capture, first-known-wins (issue #571 PR 5) ------
-
-
-@dataclass(frozen=True)
-class CaptureOp:
-    kind: str  # "stamp_id" | "stamp_completion"
-    transfer_id: str
-
-
-@st.composite
-def capture_op_sequences(draw) -> tuple[CaptureOp, ...]:
-    op_count = draw(st.integers(min_value=0, max_value=5))
-    ops = []
-    for i in range(op_count):
-        kind = draw(st.sampled_from(("stamp_id", "stamp_completion")))
-        # Distinct-looking ids per position so a wrong final value is
-        # never accidentally right.
-        ops.append(CaptureOp(kind=kind, transfer_id=f"tid-{i}"))
-    return tuple(ops)
-
-
-def _run_capture_sequence(ops: tuple[CaptureOp, ...]) -> FakePipelineDB:
-    """Drive the REAL production write methods (via FakePipelineDB,
-    proven at parity with real PG by the round-trip pins in
-    tests/test_pipeline_db.py) over one generated capture-op sequence for
-    a single ledgered (username, filename) row -- no retries, so ledger
-    row identity never ambiguous."""
-    db = FakePipelineDB()
-    db.record_transfer_enqueue([
-        TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
-    ])
-    for op in ops:
-        if op.kind == "stamp_id":
-            db.stamp_transfer_id("p0", "a.flac", op.transfer_id)
-        else:
-            db.stamp_transfer_completion(
-                "p0", "a.flac", "/downloads/a.flac",
-                datetime.now(timezone.utc), transfer_id=op.transfer_id)
-    return db
-
-
-def expected_final_transfer_id(ops: tuple[CaptureOp, ...]) -> str | None:
-    """TS1 invariant: the final transfer_id is whichever value the FIRST
-    op in the sequence carried (write-ahead leaves it NULL; the first
-    capture call -- either path -- always finds the row still open and
-    writes; every later call finds no matching row left to touch)."""
-    return ops[0].transfer_id if ops else None
-
-
-def assert_transfer_id_capture_matches_oracle(
-    ops: tuple[CaptureOp, ...], actual: str | None,
-) -> None:
-    """TS1 checker (module-level for the known-bad self-test)."""
-    expected = expected_final_transfer_id(ops)
-    if expected != actual:
-        raise AssertionError(
-            f"final transfer_id diverged: expected={expected!r} "
-            f"actual={actual!r} ops={ops!r}")
-
-
-class TestGeneratedTransferIdCapture(unittest.TestCase):
-    """TS1 property: first-known-wins over generated capture-op
-    sequences, through the REAL stamp_transfer_id / stamp_transfer_
-    completion write methods."""
-
-    @given(ops=capture_op_sequences())
-    def test_first_known_transfer_id_wins(self, ops):
-        db = _run_capture_sequence(ops)
-
-        rows = list(db._transfer_ledger.values())
-        self.assertEqual(len(rows), 1)
-        assert_transfer_id_capture_matches_oracle(ops, rows[0].transfer_id)
-
-
 class TestTransferLedgerCheckersTripOnViolations(unittest.TestCase):
     """Known-bad self-tests: each checker must trip on a planted
     violating world/state."""
-
-    def test_transfer_id_capture_checker_trips_when_a_later_id_clobbers(self):
-        ops = (
-            CaptureOp(kind="stamp_id", transfer_id="tid-0"),
-            CaptureOp(kind="stamp_completion", transfer_id="tid-1"),
-        )
-        with self.assertRaises(AssertionError):
-            assert_transfer_id_capture_matches_oracle(ops, "tid-1")
-
-    def test_transfer_id_capture_checker_trips_on_empty_ops_with_a_value(self):
-        with self.assertRaises(AssertionError):
-            assert_transfer_id_capture_matches_oracle((), "tid-invented")
 
     def test_write_ahead_checker_trips_when_post_precedes_ledger(self):
         world = EnqueueWorld(
             filenames=("a.flac",), username="p0", request_id=1,
             attempt_fp=None, has_download_ownership=True,
-            enqueue_raises=False)
+            enqueue_outcome="accepted")
         db = FakePipelineDB()
         with self.assertRaises(AssertionError):
             assert_write_ahead_holds(world, ["post:1", "ledger:1"], db)
@@ -393,7 +310,7 @@ class TestTransferLedgerCheckersTripOnViolations(unittest.TestCase):
         world = EnqueueWorld(
             filenames=("a.flac", "b.flac"), username="p0", request_id=1,
             attempt_fp=None, has_download_ownership=True,
-            enqueue_raises=False)
+            enqueue_outcome="accepted")
         db = FakePipelineDB()
         db.record_transfer_enqueue([
             TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
@@ -405,13 +322,39 @@ class TestTransferLedgerCheckersTripOnViolations(unittest.TestCase):
         world = EnqueueWorld(
             filenames=("a.flac",), username="p0", request_id=None,
             attempt_fp=None, has_download_ownership=False,
-            enqueue_raises=False)
+            enqueue_outcome="accepted")
         db = FakePipelineDB()
         db.record_transfer_enqueue([
             TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
         ])
         with self.assertRaises(AssertionError):
             assert_write_ahead_holds(world, ["post:1"], db)
+
+    def test_write_ahead_checker_trips_when_failed_post_is_confirmed(self):
+        world = EnqueueWorld(
+            filenames=("a.flac",), username="p0", request_id=1,
+            attempt_fp=None, has_download_ownership=True,
+            enqueue_outcome="unknown")
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+        db.confirm_transfer_enqueue("p0", "a.flac")
+        with self.assertRaisesRegex(AssertionError, "destructive ownership"):
+            assert_write_ahead_holds(world, ["ledger:1", "post:1"], db)
+
+    def test_write_ahead_checker_trips_when_rejected_post_is_confirmed(self):
+        world = EnqueueWorld(
+            filenames=("a.flac",), username="p0", request_id=1,
+            attempt_fp=None, has_download_ownership=True,
+            enqueue_outcome="rejected")
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+        db.confirm_transfer_enqueue("p0", "a.flac")
+        with self.assertRaisesRegex(AssertionError, "destructive ownership"):
+            assert_write_ahead_holds(world, ["ledger:1", "post:1"], db)
 
     def test_prune_checker_trips_when_an_expected_survivor_is_missing(self):
         rows = (LedgerPruneRow(request_id=1, age_days=5.0, request_status="wanted"),)

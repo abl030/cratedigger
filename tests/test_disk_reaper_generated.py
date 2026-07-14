@@ -195,10 +195,11 @@ def _ledger_seed(
             attempt_fingerprint=fp)
         for username, filename in file_pairs
     ])
+    for username, filename in file_pairs:
+        fake_db.confirm_transfer_enqueue(username, filename)
     for (username, filename), local_path in (local_paths or {}).items():
         fake_db.stamp_transfer_completion(
-            username, filename, local_path, datetime.now(timezone.utc),
-            transfer_id=f"owned-{username}-{filename}")
+            username, filename, local_path)
 
 
 def _seed_active_downloading(

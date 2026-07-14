@@ -382,52 +382,37 @@ class TestFindSlskdOrphans(unittest.TestCase):
 
 
 class TestFindCompletedTransfersToPurge(unittest.TestCase):
-    """Completed-transfer purge classification (#571 PR 5): a live
-    COMPLETED transfer is only ever removable when its ``transfer_id`` is
-    BOTH ledger-owned AND completion-stamped (P1 good-citizen, P2 stamp-
-    before-remove). Matching is by transfer_id, never (username,
-    filename) — a retried file's completed and in-flight attempts can
-    share that pair."""
+    """Terminal cleanup follows the write-ahead-ledgered queue key.
+
+    slskd assigns a fresh transfer ID when it retries the same queued file,
+    so attempt-local IDs cannot be the durable ownership boundary.
+    """
 
     FILENAME = "Music\\Album\\01 - Track.flac"
 
     @staticmethod
     def _snapshot(username="peer1", directory="Music\\Album",
                   filename="Music\\Album\\01 - Track.flac",
-                  transfer_id="t-1", state="Completed, Succeeded",
-                  requested_at="2026-07-13T01:00:00+00:00"):
+                  transfer_id="t-1", state="Completed, Succeeded"):
         return [make_download_user(username=username, directories=[
             make_download_directory(directory=directory, files=[
                 make_transfer_snapshot(
-                    filename=filename, id=transfer_id, state=state,
-                    requested_at=requested_at),
+                    filename=filename, id=transfer_id, state=state),
             ]),
         ])]
 
-    def test_stamped_owned_transfer_is_removable(self):
+    def test_owned_terminal_transfer_is_removable(self):
         ownership = find_completed_transfers_to_purge(
-            self._snapshot(), {"t-1"}, set(), set())
+            self._snapshot(), {("peer1", self.FILENAME)})
         self.assertEqual(len(ownership.to_remove), 1)
         self.assertEqual(ownership.to_remove[0].username, "peer1")
         self.assertEqual(ownership.to_remove[0].transfer_id, "t-1")
         self.assertEqual(ownership.to_remove[0].filename, self.FILENAME)
-        self.assertEqual(ownership.to_stamp_failures, [])
-        self.assertEqual(ownership.to_claim_failures, [])
-        self.assertEqual(ownership.success_waiting_count, 0)
         self.assertEqual(ownership.foreign_count, 0)
 
-    def test_unstamped_owned_success_waits_for_authoritative_event(self):
-        """An unstamped success still needs the event/local-path stamp."""
-        ownership = find_completed_transfers_to_purge(
-            self._snapshot(), set(), set(), {"t-1"})
-        self.assertEqual(ownership.to_remove, [])
-        self.assertEqual(ownership.to_stamp_failures, [])
-        self.assertEqual(ownership.success_waiting_count, 1)
-        self.assertEqual(ownership.foreign_count, 0)
-
-    def test_every_unstamped_owned_failure_is_selected_for_terminal_stamp(self):
-        """Every known non-success terminal mode gets exact-id stamping."""
+    def test_every_owned_terminal_state_is_removable(self):
         for state in (
+            "Completed, Succeeded",
             "Completed, Aborted",
             "Completed, Cancelled",
             "Completed, Errored",
@@ -436,122 +421,103 @@ class TestFindCompletedTransfersToPurge(unittest.TestCase):
         ):
             with self.subTest(state=state):
                 ownership = find_completed_transfers_to_purge(
-                    self._snapshot(state=state), set(), set(), {"t-1"})
-                self.assertEqual(ownership.to_remove, [])
+                    self._snapshot(state=state),
+                    {("peer1", self.FILENAME)},
+                )
                 self.assertEqual(
-                    [item.transfer_id for item in ownership.to_stamp_failures],
+                    [item.transfer_id for item in ownership.to_remove],
                     ["t-1"],
                 )
-                self.assertEqual(ownership.success_waiting_count, 0)
                 self.assertEqual(ownership.foreign_count, 0)
 
-    def test_unbound_terminal_failure_is_an_atomic_claim_candidate(self):
-        """A failed T1.5 can claim an exact-key causal open T1 row in DB."""
-        ownership = find_completed_transfers_to_purge(
-            self._snapshot(state="Completed, Errored"), set(), set(), set())
-        self.assertEqual(ownership.to_remove, [])
-        self.assertEqual(ownership.to_stamp_failures, [])
-        self.assertEqual(
-            [item.transfer_id for item in ownership.to_claim_failures],
-            ["t-1"],
-        )
-        self.assertEqual(ownership.foreign_count, 0)
-
     def test_foreign_completed_transfer_is_never_removed(self):
-        """P1: absent from both sets entirely -- a human's completed
-        download on a shared instance."""
         ownership = find_completed_transfers_to_purge(
-            self._snapshot(), set(), set(), set())
+            self._snapshot(), set())
         self.assertEqual(ownership.to_remove, [])
-        self.assertEqual(ownership.to_stamp_failures, [])
-        self.assertEqual(ownership.to_claim_failures, [])
-        self.assertEqual(ownership.success_waiting_count, 0)
         self.assertEqual(ownership.foreign_count, 1)
 
     def test_live_non_terminal_transfer_is_skipped_entirely(self):
-        """This classifier only ever reasons about completed records --
-        the disjoint half of find_slskd_orphans' live-transfer scope.
-        Even a stamped-owned id doesn't count if the transfer hasn't
-        reached a terminal state (shouldn't happen in practice, but the
-        classifier must not misreport it either way)."""
         ownership = find_completed_transfers_to_purge(
-            self._snapshot(state="InProgress"), {"t-1"}, set(), set())
+            self._snapshot(state="InProgress"),
+            {("peer1", self.FILENAME)},
+        )
         self.assertEqual(ownership.to_remove, [])
-        self.assertEqual(ownership.to_stamp_failures, [])
-        self.assertEqual(ownership.success_waiting_count, 0)
         self.assertEqual(ownership.foreign_count, 0)
         self.assertEqual(ownership.nonterminal_count, 1)
 
-    def test_transfer_id_disambiguates_retried_attempts(self):
-        """The brief's exact scenario: two completed records share the
-        SAME (username, filename) -- a retried file -- but only one
-        transfer_id is stamped-owned. (username, filename) matching alone
-        would be ambiguous; transfer_id matching is not."""
+    def test_all_retry_ids_keep_the_ledgered_queue_ownership(self):
         snapshot = (
             self._snapshot(transfer_id="t-old", state="Completed, Cancelled")
             + self._snapshot(transfer_id="t-new", state="Completed, Succeeded")
         )
         ownership = find_completed_transfers_to_purge(
-            snapshot, {"t-new"}, set(), set())
-        self.assertEqual(len(ownership.to_remove), 1)
-        self.assertEqual(ownership.to_remove[0].transfer_id, "t-new")
+            snapshot, {("peer1", self.FILENAME)})
         self.assertEqual(
-            [item.transfer_id for item in ownership.to_claim_failures],
-            ["t-old"],
+            [item.transfer_id for item in ownership.to_remove],
+            ["t-old", "t-new"],
         )
+
+    def test_slskd_successor_ids_keep_the_ledgered_queue_ownership(self):
+        """A retry ID is still owned by the original peer/file enqueue."""
+        owned_key = ("peer1", self.FILENAME)
+        for state in (
+            "Completed, Succeeded",
+            "Completed, Errored",
+            "Completed, Cancelled",
+        ):
+            with self.subTest(state=state):
+                ownership = find_completed_transfers_to_purge(
+                    self._snapshot(
+                        transfer_id="t-successor",
+                        state=state,
+                    ),
+                    {owned_key},
+                )
+                self.assertEqual(
+                    [item.transfer_id for item in ownership.to_remove],
+                    ["t-successor"],
+                )
+                self.assertEqual(ownership.foreign_count, 0)
 
     def test_completed_transfer_with_no_id_is_skipped(self):
         snapshot = self._snapshot(transfer_id="")
-        ownership = find_completed_transfers_to_purge(
-            snapshot, set(), set(), set())
+        ownership = find_completed_transfers_to_purge(snapshot, {
+            ("peer1", self.FILENAME),
+        })
         self.assertEqual(ownership.to_remove, [])
-        self.assertEqual(ownership.to_claim_failures, [])
         self.assertEqual(ownership.foreign_count, 0)
         self.assertEqual(ownership.nonterminal_count, 0)
 
-    def test_mixed_snapshot_classifies_all_three_tiers_independently(self):
+    def test_mixed_snapshot_classifies_owned_foreign_and_live(self):
         snapshot = (
-            self._snapshot()  # stamped-owned -> removable
+            self._snapshot()
             + self._snapshot(username="peer2", transfer_id="t-2",
-                             filename="Music\\Other\\02.flac")  # unstamped-owned
+                             filename="Music\\Other\\02.flac")
             + self._snapshot(username="peer3", transfer_id="t-3",
-                             filename="Music\\Foreign\\03.flac")  # foreign
+                             filename="Music\\Foreign\\03.flac")
             + self._snapshot(username="peer4", transfer_id="t-4",
-                             state="InProgress")  # live, not our concern
+                             state="InProgress")
         )
         ownership = find_completed_transfers_to_purge(
-            snapshot, {"t-1"}, set(), {"t-2"})
-        self.assertEqual(len(ownership.to_remove), 1)
-        self.assertEqual(ownership.to_remove[0].transfer_id, "t-1")
-        self.assertEqual(ownership.to_stamp_failures, [])
-        self.assertEqual(ownership.to_claim_failures, [])
-        self.assertEqual(ownership.success_waiting_count, 1)
+            snapshot,
+            {
+                ("peer1", self.FILENAME),
+                ("peer2", "Music\\Other\\02.flac"),
+                ("peer4", self.FILENAME),
+            },
+        )
+        self.assertEqual(
+            [item.transfer_id for item in ownership.to_remove],
+            ["t-1", "t-2"],
+        )
         self.assertEqual(ownership.foreign_count, 1)
         self.assertEqual(ownership.nonterminal_count, 1)
 
     def test_empty_snapshot(self):
-        ownership = find_completed_transfers_to_purge(
-            [], {"t-1"}, set(), {"t-2"})
+        ownership = find_completed_transfers_to_purge([], set())
         self.assertEqual(ownership.to_remove, [])
-        self.assertEqual(ownership.to_stamp_failures, [])
-        self.assertEqual(ownership.to_claim_failures, [])
-        self.assertEqual(ownership.success_waiting_count, 0)
         self.assertEqual(ownership.foreign_count, 0)
         self.assertEqual(ownership.nonterminal_count, 0)
-
-    def test_pathless_failure_stamp_waits_when_live_state_is_success(self):
-        ownership = find_completed_transfers_to_purge(
-            self._snapshot(state="Completed, Succeeded"),
-            set(), {"t-1"}, set())
-        self.assertEqual(ownership.to_remove, [])
-        self.assertEqual(ownership.success_waiting_count, 1)
-
-    def test_pathless_failure_stamp_removes_when_live_state_is_failure(self):
-        ownership = find_completed_transfers_to_purge(
-            self._snapshot(state="Completed, TimedOut"),
-            set(), {"t-1"}, set())
-        self.assertEqual(
-            [item.transfer_id for item in ownership.to_remove], ["t-1"])
 
 
 class TestSuggestRepair(unittest.TestCase):
