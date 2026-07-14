@@ -63,16 +63,22 @@ class _AlbumRequestUpdate:
 # The ratchet does not infer parameter dataflow: transition SQL must use the
 # canonical direct call grammar below.
 _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/beets_db.py", 329, "8f86dc625b889913"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 79, "741f55b2f7eee516"): (
+        "terminal metadata keys use the existing validated request-field vocabulary"
+    ),
+    ("lib/pipeline_db/terminal_outcomes.py", 218, "6cfaff9c6507c211"): (
+        "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
+    ),
+    ("lib/beets_db.py", 339, "8f86dc625b889913"): (
         "SQLite IN list is generated only from '?' value placeholders"
     ),
-    ("lib/beets_db.py", 340, "ee7a80c1900ded7e"): (
+    ("lib/beets_db.py", 350, "ee7a80c1900ded7e"): (
         "SQLite IN list is generated only from '?' value placeholders"
     ),
-    ("lib/beets_db.py", 569, "25f232934b82ec93"): (
+    ("lib/beets_db.py", 579, "25f232934b82ec93"): (
         "SQLite IN list is generated only from '?' value placeholders"
     ),
-    ("lib/beets_db.py", 577, "b065a06e6e2e0d72"): (
+    ("lib/beets_db.py", 587, "b065a06e6e2e0d72"): (
         "SQLite IN list is generated only from '?' value placeholders"
     ),
     ("lib/pipeline_db/dashboard.py", 481, "5e3b8177198ccbed"): (
@@ -149,6 +155,18 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
 # beside the implementation they review; movement or SQL-shape drift fails the
 # ratchet just like the dynamic-SQL exceptions above.
 _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
+    ("lib/pipeline_db/terminal_outcomes.py", 121, "72791581d0b54266"): (
+        "atomic terminal transition mirrors typed wanted CAS inside one transaction"
+    ),
+    ("lib/pipeline_db/terminal_outcomes.py", 180, "9ab1fc9fb20fb77b"): (
+        "atomic preview recovery accepts only downloading as its exact source"
+    ),
+    ("lib/pipeline_db/terminal_outcomes.py", 259, "786d2b82f14ac409"): (
+        "atomic terminal import CASes status with rescue audit in the same transaction"
+    ),
+    ("lib/pipeline_db/terminal_outcomes.py", 299, "0a9c4396d1185b94"): (
+        "atomic terminal typed transition CASes the source status selected by the DAG"
+    ),
     ("lib/pipeline_db/download_log.py", 253, "b04c5ae9eb3423c1"): (
         "atomic abandoned-import recovery performs downloading-to-wanted CAS"
     ),

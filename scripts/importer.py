@@ -10,6 +10,7 @@ import shutil
 import socket
 import sys
 import time
+from collections.abc import Callable
 from typing import Any, assert_never
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -30,6 +31,7 @@ from lib.download_processing import (
     CompletionDispatched,
     CompletionFailed,
     CompletionResult,
+    ProcessAlbumFn,
 )
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
@@ -38,6 +40,7 @@ from lib.import_queue import (
     IMPORT_JOB_YOUTUBE,
     ImportJob,
 )
+from lib.terminal_outcomes import ImportJobTerminal
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORTER,
     DEFAULT_DSN,
@@ -276,9 +279,17 @@ def _dispatch_outcome_from_completion(
     if isinstance(result, CompletionDispatched):
         return result.outcome
     if isinstance(result, Completed):
-        return DispatchOutcome(success=True, message=completed_message)
+        return DispatchOutcome(
+            success=True,
+            message=completed_message,
+            terminal_outcome=result.terminal_outcome,
+        )
     if isinstance(result, CompletionFailed):
-        return DispatchOutcome(success=False, message=failed_message)
+        return DispatchOutcome(
+            success=False,
+            message=failed_message,
+            terminal_outcome=result.terminal_outcome,
+        )
     assert_never(result)
 
 
@@ -287,6 +298,7 @@ def execute_automation_import_job(
     job: ImportJob,
     *,
     ctx: Any = None,
+    process_album_fn: ProcessAlbumFn | None = None,
 ) -> DispatchOutcome:
     """Run completed-download processing from an automation queue job."""
     from lib.download import _run_completed_processing
@@ -318,6 +330,8 @@ def execute_automation_import_job(
             db,
             runtime_ctx,
             import_job_id=job.id,
+            process_album_fn=process_album_fn,
+            bundle_terminal_outcome=True,
         )
     finally:
         if created_ctx:
@@ -461,11 +475,41 @@ def _youtube_active_download_files(staged_path: str) -> list[ActiveDownloadFileS
     return out
 
 
+def _cleanup_committed_wrong_match_rejection(
+    db: PipelineDB,
+    job: ImportJob,
+    download_log_id: int,
+    scenario: str | None,
+) -> None:
+    """Run Wrong Matches convergence only after the terminal bundle commits."""
+    from lib.wrong_match_policy import rejection_scenario_is_wrong_match_candidate
+
+    if not rejection_scenario_is_wrong_match_candidate(scenario):
+        return
+    try:
+        from lib.wrong_match_cleanup_service import cleanup_wrong_match
+
+        evidence_id = db.get_import_job_candidate_evidence_id(job.id)
+        if evidence_id is not None:
+            db.set_download_log_candidate_evidence(download_log_id, evidence_id)
+        cleanup_wrong_match(
+            db,
+            download_log_id,
+            ignore_import_job_id=job.id,
+        )
+    except Exception:
+        logger.exception(
+            "WRONG-MATCH CLEANUP FAILED after terminal commit: download_log_id=%s",
+            download_log_id,
+        )
+
+
 def process_claimed_job(
     db: PipelineDB,
     job: ImportJob,
     *,
     ctx: Any = None,
+    execute_fn: Callable[..., DispatchOutcome] = execute_import_job,
 ) -> ImportJob | None:
     """Execute a claimed job and persist its terminal queue status.
 
@@ -478,7 +522,7 @@ def process_claimed_job(
     just automation + youtube, issue #510).
     """
     try:
-        outcome = execute_import_job(db, job, ctx=ctx)
+        outcome = execute_fn(db, job, ctx=ctx)
     except Exception as exc:
         logger.exception("Import job %s crashed", job.id)
         return db.mark_import_job_failed(
@@ -493,6 +537,21 @@ def process_claimed_job(
         dismissal = _dismiss_successful_force_import(db, job)
         if dismissal is not None:
             result["wrong_match_dismissal"] = dismissal
+        if outcome.terminal_outcome is not None:
+            terminal = db.persist_import_terminal_outcome(
+                outcome.terminal_outcome.with_job(ImportJobTerminal(
+                    status="completed",
+                    result=result,
+                    message=outcome.message,
+                ))
+            )
+            _cleanup_committed_wrong_match_rejection(
+                db,
+                job,
+                terminal.download_log_id,
+                outcome.post_commit_wrong_match_scenario,
+            )
+            return terminal.job
         return db.mark_import_job_completed(
             job.id,
             result=result,
@@ -532,6 +591,22 @@ def process_claimed_job(
     cleanup = _cleanup_failed_force_import(db, job, outcome)
     if cleanup is not None:
         result["cleanup"] = cleanup
+    if outcome.terminal_outcome is not None:
+        terminal = db.persist_import_terminal_outcome(
+            outcome.terminal_outcome.with_job(ImportJobTerminal(
+                status="failed",
+                error=outcome.message,
+                result=result,
+                message=outcome.message,
+            ))
+        )
+        _cleanup_committed_wrong_match_rejection(
+            db,
+            job,
+            terminal.download_log_id,
+            outcome.post_commit_wrong_match_scenario,
+        )
+        return terminal.job
     return db.mark_import_job_failed(
         job.id,
         error=outcome.message,

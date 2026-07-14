@@ -55,7 +55,8 @@ from lib.dispatch.evidence_gate import (_current_evidence_allows_action,
 from lib.dispatch.outcome_actions import (_do_mark_done,
                                           _record_rejection_and_maybe_requeue,
                                           _reject_import_from_evidence_decision)
-from lib.dispatch.quality_gate import _check_quality_gate_core
+from lib.dispatch.quality_gate import QualityGatePlan, _check_quality_gate_core
+from lib.terminal_outcomes import PendingImportTerminalOutcome, TerminalDenylist
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
@@ -64,6 +65,61 @@ if TYPE_CHECKING:
     from lib.quality import SpectralDetail
 
 logger = logging.getLogger("cratedigger")
+
+
+def _apply_or_stage_transition(
+    db: "PipelineDB",
+    request_id: int,
+    pending: PendingImportTerminalOutcome | None,
+    transition: transitions.RequestTransition,
+) -> PendingImportTerminalOutcome | None:
+    if pending is not None:
+        return pending.append_transitions(transition)
+    transitions.require_transition_applied(
+        finalize_request(db, request_id, transition)
+    )
+    return None
+
+
+def _apply_or_stage_denylists(
+    db: "PipelineDB",
+    request_id: int,
+    pending: PendingImportTerminalOutcome | None,
+    usernames: set[str],
+    reason: str,
+    cooled_down_users: set[str] | None,
+) -> PendingImportTerminalOutcome | None:
+    if pending is not None:
+        return pending.append_denylists(*(
+            TerminalDenylist(username, reason, apply_cooldown=True)
+            for username in sorted(usernames)
+        ))
+    for username in usernames:
+        db.add_denylist(request_id, username, reason)
+        if cooled_down_users is not None and db.check_and_apply_cooldown(username):
+            cooled_down_users.add(username)
+    return None
+
+
+def _run_or_stage_quality_gate(
+    quality_gate_fn: QualityGateFn,
+    pending: PendingImportTerminalOutcome | None,
+    **kwargs: object,
+) -> PendingImportTerminalOutcome | None:
+    if pending is None:
+        quality_gate_fn(**kwargs)
+        return None
+    initial = pending.initial_transition
+    plan = quality_gate_fn(
+        **kwargs,
+        apply=False,
+        request_fields=dict(initial.fields) if initial is not None else None,
+    )
+    if not isinstance(plan, QualityGatePlan):
+        return pending
+    return pending.append_transitions(plan.transition).append_denylists(
+        *plan.denylists
+    )
 
 
 def dispatch_import_core(
@@ -126,6 +182,7 @@ def dispatch_import_core(
 
     outcome_success = False
     outcome_message = ""
+    terminal_outcome: PendingImportTerminalOutcome | None = None
 
     # Acquire the RELEASE (per-MBID) advisory lock for the duration of
     # the ``import_one.py`` subprocess. This is the funnel every path
@@ -358,6 +415,7 @@ def dispatch_import_core(
                         files=files,
                         source_path_cleanup_scenario=scenario,
                         cooled_down_users=cooled_down_users,
+                        import_job_id=candidate_import_job_id,
                     )
                 quality_evidence_action_file = _write_quality_evidence_action_file(
                     candidate=evidence_gate.candidate,
@@ -435,7 +493,7 @@ def dispatch_import_core(
                     f"{mode} FAILED (no JSON, rc={run.returncode}): {label}")
                 for line in run.stdout.strip().split("\n"):
                     logger.error(f"  {line}")
-                _record_rejection_and_maybe_requeue(
+                pending = _record_rejection_and_maybe_requeue(
                     db, request_id, dl_info,
                     detail=f"import_one.py rc={run.returncode}, no JSON",
                     error=f"rc={run.returncode}",
@@ -449,7 +507,10 @@ def dispatch_import_core(
                         source_dirs=source_dirs,
                     ).to_json(),
                     staged_path=path,
-                    attempt_result=attempt_result)
+                    attempt_result=attempt_result,
+                    import_job_id=candidate_import_job_id)
+                if isinstance(pending, PendingImportTerminalOutcome):
+                    terminal_outcome = pending
                 outcome_message = f"No JSON result (rc={run.returncode})"
             else:
                 _populate_dl_info_from_import_result(dl_info, ir)
@@ -479,7 +540,7 @@ def dispatch_import_core(
                         if decision == "provisional_lossless_upgrade"
                         else scenario
                     )
-                    _do_mark_done(
+                    pending = _do_mark_done(
                         db, request_id, dl_info,
                         distance=distance, scenario=mark_scenario,
                         dest_path=path, outcome_label=outcome_label,
@@ -487,7 +548,10 @@ def dispatch_import_core(
                         clear_stale_v0_probe=(
                             decision != "preflight_existing"
                         ),
-                        attempt_result=attempt_result)
+                        attempt_result=attempt_result,
+                        import_job_id=candidate_import_job_id)
+                    if isinstance(pending, PendingImportTerminalOutcome):
+                        terminal_outcome = pending
                     try:
                         _refresh_current_evidence_after_import(
                             db,
@@ -524,15 +588,17 @@ def dispatch_import_core(
                     if decision in ("import", "preflight_existing"):
                         if prev_br is not None or new_br is not None:
                             try:
-                                transitions.require_transition_applied(finalize_request(
+                                delta_transition = transitions.RequestTransition.to_imported(
+                                    from_status="imported",
+                                    prev_min_bitrate=prev_br,
+                                    min_bitrate=new_br,
+                                )
+                                terminal_outcome = _apply_or_stage_transition(
                                     db,
                                     request_id,
-                                    transitions.RequestTransition.to_imported(
-                                        from_status="imported",
-                                        prev_min_bitrate=prev_br,
-                                        min_bitrate=new_br,
-                                    ),
-                                ))
+                                    terminal_outcome,
+                                    delta_transition,
+                                )
                             except Exception:
                                 logger.exception("Failed to update upgrade delta")
                     outcome_success = True
@@ -692,7 +758,7 @@ def dispatch_import_core(
                                 "Failed to inspect search_filetype_override"
                                 " before lossless_source_locked narrow")
 
-                    _record_rejection_and_maybe_requeue(
+                    pending = _record_rejection_and_maybe_requeue(
                         db, request_id, dl_info,
                         detail=fail_detail,
                         error=fail_error,
@@ -708,7 +774,10 @@ def dispatch_import_core(
                                                source_dirs=source_dirs,
                                            ).to_json()),
                         staged_path=path,
-                        attempt_result=attempt_result)
+                        attempt_result=attempt_result,
+                        import_job_id=candidate_import_job_id)
+                    if isinstance(pending, PendingImportTerminalOutcome):
+                        terminal_outcome = pending
                     if narrowed_override is not None:
                         logger.info(
                             f"  Narrowed search_filetype_override '{current_override}'"
@@ -736,11 +805,14 @@ def dispatch_import_core(
                             "available to denylist for request %s",
                             request_id,
                         )
-                    for username in usernames:
-                        db.add_denylist(request_id, username, reason)
-                        if cooled_down_users is not None:
-                            if db.check_and_apply_cooldown(username):
-                                cooled_down_users.add(username)
+                    terminal_outcome = _apply_or_stage_denylists(
+                        db,
+                        request_id,
+                        terminal_outcome,
+                        usernames,
+                        reason,
+                        cooled_down_users,
+                    )
                     logger.info(f"  Denylisted {usernames} for request {request_id}")
 
                 # Rejected auto-imports are already requeued by
@@ -754,17 +826,21 @@ def dispatch_import_core(
                     }
                     if action.mark_done and new_br is not None:
                         requeue_fields["min_bitrate"] = new_br
-                    transitions.require_transition_applied(finalize_request(
+                    requeue_transition = transitions.RequestTransition.to_wanted_fields(
+                        from_status="imported",
+                        fields=requeue_fields,
+                    )
+                    terminal_outcome = _apply_or_stage_transition(
                         db,
                         request_id,
-                        transitions.RequestTransition.to_wanted_fields(
-                            from_status="imported",
-                            fields=requeue_fields,
-                        ),
-                    ))
+                        terminal_outcome,
+                        requeue_transition,
+                    )
 
                 if action.run_quality_gate:
-                    quality_gate_fn(
+                    terminal_outcome = _run_or_stage_quality_gate(
+                        quality_gate_fn,
+                        terminal_outcome,
                         mb_id=mb_release_id,
                         label=label,
                         request_id=request_id,
@@ -824,7 +900,7 @@ def dispatch_import_core(
                     )
         except sp.TimeoutExpired:
             logger.error(f"{mode} TIMEOUT: {label}")
-            _record_rejection_and_maybe_requeue(
+            pending = _record_rejection_and_maybe_requeue(
                 db, request_id, dl_info,
                 detail="import_one.py timed out", error="timeout",
                 requeue=requeue_on_failure, outcome_label="failed",
@@ -836,11 +912,14 @@ def dispatch_import_core(
                     source_dirs=source_dirs,
                 ).to_json(),
                 staged_path=path,
-                attempt_result=attempt_result)
+                attempt_result=attempt_result,
+                import_job_id=candidate_import_job_id)
+            if isinstance(pending, PendingImportTerminalOutcome):
+                terminal_outcome = pending
             outcome_message = "Import timed out"
         except Exception:
             logger.exception(f"{mode} ERROR: {label}")
-            _record_rejection_and_maybe_requeue(
+            pending = _record_rejection_and_maybe_requeue(
                 db, request_id, dl_info,
                 detail="unhandled exception in auto-import", error="exception",
                 requeue=requeue_on_failure, outcome_label="failed",
@@ -852,9 +931,16 @@ def dispatch_import_core(
                     source_dirs=source_dirs,
                 ).to_json(),
                 staged_path=path,
-                attempt_result=attempt_result)
+                attempt_result=attempt_result,
+                import_job_id=candidate_import_job_id)
+            if isinstance(pending, PendingImportTerminalOutcome):
+                terminal_outcome = pending
             outcome_message = "Unhandled exception"
         finally:
             _remove_quality_evidence_action_file(quality_evidence_action_file)
 
-    return DispatchOutcome(success=outcome_success, message=outcome_message)
+    return DispatchOutcome(
+        success=outcome_success,
+        message=outcome_message,
+        terminal_outcome=terminal_outcome,
+    )

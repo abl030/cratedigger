@@ -147,6 +147,15 @@ Plex's API quirks (read these before debugging):
 >
 > See `docs/solutions/runtime-errors/plex-partial-scan-silent-200.md`.
 
+### Library deletion refresh
+
+After a verified library delete, Cratedigger walks upward only within the
+configured Beets root and asks Plex to refresh the nearest existing ancestor
+(normally the artist folder), never the now-missing album path. Existing path
+mapping still translates host to Plex paths. Results say `submitted` and expose
+the exact target; even HTTP 200 remains submission evidence, not proof a scan
+ran. Failures are visible warnings and do not roll back the completed delete.
+
 ### Useful endpoints
 
 ```bash

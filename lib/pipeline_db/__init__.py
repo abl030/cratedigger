@@ -10,6 +10,7 @@ from lib.pipeline_db.download_log import (
     DownloadLogCounts,
     DownloadLogOutcome,
 )
+from lib.pipeline_db.terminal_outcomes import ImportJobTerminalConflict
 from lib.pipeline_db.pin_status import (
     JELLYFIN_PIN_STATUSES,
     JELLYFIN_TERMINAL_PIN_STATUSES,
@@ -132,6 +133,7 @@ __all__ = [
     "JELLYFIN_TERMINAL_PIN_STATUSES",
     "DownloadLogCounts",
     "DownloadLogOutcome",
+    "ImportJobTerminalConflict",
     "JellyfinPinStatus",
     "JellyfinTerminalPinStatus",
     "DryRunPlanClassification",

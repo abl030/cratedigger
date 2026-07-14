@@ -424,6 +424,57 @@ export function confirmDeleteBeets(id, artist, album, trackCount, pipelineId = n
 }
 
 /**
+ * Convert the typed delete wire result into UI semantics.
+ * @param {any} data
+ * @returns {{message: string, error: boolean, completed: boolean}}
+ */
+export function describeBeetsDeletion(data) {
+  const warnings = (data.notifications || []).filter(n => n.status === 'warning');
+  const preserved = data.preserved_paths || [];
+  const warningParts = [];
+  if (preserved.length) {
+    warningParts.push(`${preserved.length} unknown path${preserved.length === 1 ? '' : 's'} preserved`);
+  }
+  if (warnings.length) {
+    const details = warnings
+      .map(n => `${n.provider}: ${n.detail || 'unspecified warning'}`)
+      .join('; ');
+    warningParts.push(
+      `${warnings.length} media notification warning${warnings.length === 1 ? '' : 's'} (${details})`,
+    );
+  }
+  const warningSuffix = warningParts.length ? `; ${warningParts.join(', ')}` : '';
+  if (data.status === 'ok') {
+    const pipelineMsg = data.pipeline_deleted ? ', request removed' : '';
+    return {
+      message: `Deleted: ${data.artist} - ${data.album} (${data.deleted_files} tracks, ${data.deleted_artifacts} owned artifacts${pipelineMsg})${warningSuffix}`,
+      error: warningParts.length > 0,
+      completed: true,
+    };
+  }
+  if (data.status === 'partial' && data.album_deleted) {
+    return {
+      message: `Album deleted, but pipeline request #${data.pipeline_id} remains. Retry pipeline cleanup after checking logs${warningSuffix}.`,
+      error: true,
+      completed: true,
+    };
+  }
+  if (data.acknowledgement_lost) {
+    return {
+      message: data.detail || 'Beets acknowledgement was lost; filesystem deletion is unconfirmed, metadata may be gone, and the pipeline row was preserved for explicit recovery.',
+      error: true,
+      completed: false,
+    };
+  }
+  const detail = data.detail ? `: ${data.detail}` : '';
+  return {
+    message: `${data.error || 'Delete failed'}${detail}`,
+    error: true,
+    completed: false,
+  };
+}
+
+/**
  * Execute the beets deletion after confirmation.
  * @param {number} id
  * @param {HTMLButtonElement} btn
@@ -447,15 +498,18 @@ export async function executeBeetsDeletion(id, btn, pipelineId = null, releaseId
     });
     const data = await r.json();
     document.querySelector('.confirm-overlay')?.remove();
+    const display = describeBeetsDeletion(data);
     if (data.status === 'ok') {
       if (data.pipeline_deleted && releaseId) {
         updatePipelineStatus(releaseId, null, null);
       }
-      const pipelineMsg = data.pipeline_deleted ? ', request removed' : '';
-      toast(`Deleted: ${data.artist} - ${data.album} (${data.deleted_files} files${pipelineMsg})`);
+      toast(display.message, display.error);
+      refreshAfterBeetsDeletion(id);
+    } else if (data.status === 'partial' && data.album_deleted) {
+      toast(display.message, display.error);
       refreshAfterBeetsDeletion(id);
     } else {
-      toast(data.error || 'Delete failed', true);
+      toast(display.message, display.error);
     }
   } catch (e) {
     document.querySelector('.confirm-overlay')?.remove();

@@ -45,12 +45,11 @@ class BeetsDeleteRequest(BaseModel):
 
 def post_beets_delete(h, body: dict) -> None:
     from lib.destructive_release_service import (
-        DeleteBeetsFailure,
         DeleteAlbumNotFound,
+        DeleteIncomplete,
         DeleteImporterBusy,
         DeleteLockContended,
         DeletePipelinePurgeFailure,
-        DeletePostPurgeBeetsFailure,
         DeleteReleaseMismatch,
         DeleteRequest,
         DeleteSuccess,
@@ -75,6 +74,8 @@ def post_beets_delete(h, body: dict) -> None:
         pipeline_db=srv._db(),
         beets_db=beets,
         request=request,
+        beets_delete_fn=srv.beets_delete_fn,
+        notify_fn=srv.delete_notify_fn,
     )
 
     if isinstance(result, DeleteSuccess):
@@ -84,8 +85,19 @@ def post_beets_delete(h, body: dict) -> None:
             "album": result.album_name,
             "artist": result.artist_name,
             "deleted_files": result.deleted_files,
+            "deleted_artifacts": result.deleted_artifacts,
             "pipeline_deleted": result.pipeline_deleted,
             "pipeline_id": result.deleted_pipeline_id,
+            "preserved_paths": list(result.preserved_paths),
+            "notifications": [
+                {
+                    "provider": item.provider,
+                    "status": item.status,
+                    "detail": item.detail,
+                    "target": item.target,
+                }
+                for item in result.notifications
+            ],
         })
         return
 
@@ -118,20 +130,45 @@ def post_beets_delete(h, body: dict) -> None:
     if isinstance(result, DeletePipelinePurgeFailure):
         h._json({
             "error": "pipeline_purge_failed",
+            "status": "partial",
+            "album_deleted": True,
+            "id": result.album_id,
+            "album": result.album_name,
+            "artist": result.artist_name,
+            "deleted_files": result.deleted_files,
+            "deleted_artifacts": result.deleted_artifacts,
+            "preserved_paths": list(result.preserved_paths),
             "pipeline_id": result.pipeline_request_id,
+            "notifications": [
+                {
+                    "provider": item.provider,
+                    "status": item.status,
+                    "detail": item.detail,
+                    "target": item.target,
+                }
+                for item in result.notifications
+            ],
         }, status=500)
         return
 
-    if isinstance(result, DeletePostPurgeBeetsFailure):
-        h._error(
-            "Pipeline request was removed, but delete from beets failed; "
-            "check logs and disk state",
-            500,
-        )
-        return
-
-    if isinstance(result, DeleteBeetsFailure):
-        h._error("Delete from beets failed", 500)
+    if isinstance(result, DeleteIncomplete):
+        h._json({
+            "error": "delete_incomplete",
+            "id": result.album_id,
+            "album": result.album_name,
+            "artist": result.artist_name,
+            "former_album_path": result.former_album_path,
+            "pipeline_id": result.pipeline_request_id,
+            "pipeline_status": result.pipeline_status,
+            "acknowledgement_lost": result.acknowledgement_lost,
+            "reason": result.reason,
+            "detail": result.detail,
+            "album_still_present": result.album_still_present,
+            "deleted_files": result.deleted_files,
+            "deleted_artifacts": result.deleted_artifacts,
+            "remaining_owned_paths": list(result.remaining_owned_paths),
+            "preserved_paths": list(result.preserved_paths),
+        }, status=409)
         return
 
     assert_never(result)
@@ -145,8 +182,9 @@ ROUTES: list[RouteRegistration] = [
     ),
     route(
         "POST", "/api/beets/delete", post_beets_delete,
-        "Delete a server-resolved exact beets album (DESTRUCTIVE — files "
-        "removed); optional pipeline purge. Requires confirm='DELETE'.",
+        "Delete a server-resolved exact Beets album through the pinned Beets "
+        "runtime, verify owned-artifact absence, optionally purge pipeline "
+        "last, then notify Plex/Jellyfin. Requires confirm='DELETE'.",
         classified=True,
     ),
 ]

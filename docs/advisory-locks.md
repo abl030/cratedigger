@@ -356,6 +356,10 @@ session and returns False — revisit the ordering rules.
 | Plan generation | `lib/search_plan_service.py` | `SearchPlanService.generate_for_new_request` / `generate_for_request` | PLAN | `request_id` |
 | Wrong-match cleanup | `lib/wrong_match_cleanup_service.py` | `cleanup_wrong_match` | WMCL | `wrong_match_cleanup_lock_key(request_id, download_log_id, resolved_path)` |
 
+Library delete holds its locks through the pinned-Beets filesystem/metadata
+postcondition and optional PostgreSQL purge. Plex/Jellyfin discovery and refresh
+are slow best-effort network work and run only after both locks are released.
+
 Plan generation acquires the PLAN lock before reading the request,
 building the snapshot, invoking the generator, and persisting the
 replacement plan/cursor state.

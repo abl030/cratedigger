@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import copy
+import logging
+import os
 import tempfile
 import unittest
 import uuid
@@ -16,10 +18,22 @@ import tests._hypothesis_profiles  # noqa: F401
 from lib.destructive_release_service import (
     BanSourceSuccess,
     BanSourceRequest,
+    DeleteIncomplete,
     DeleteRequest,
     DeleteSuccess,
     ban_source,
     delete_release_from_library,
+)
+from lib.beets_delete import (
+    BeetsDeleteCompleted,
+    BeetsDeleteFailureReason,
+    BeetsDeleteRequest,
+)
+from lib.beets_delete import (
+    BeetsDeleteFailed,
+    _OwnedPath,
+    _configuration_matches,
+    _delete_manifest,
 )
 from lib.import_queue import IMPORT_JOB_AUTOMATION
 from lib.pipeline_db import (
@@ -38,7 +52,6 @@ class DestructiveState:
     hashes: tuple[object, ...]
     logs: tuple[object, ...]
     album: dict[str, object] | None
-    delete_calls: tuple[int, ...]
     files: tuple[tuple[str, bytes], ...]
     directories: tuple[str, ...]
 
@@ -73,7 +86,6 @@ def snapshot_state(
         hashes=tuple(copy.deepcopy(db.bad_audio_hashes)),
         logs=tuple(copy.deepcopy(db.download_logs)),
         album=copy.deepcopy(beets.get_album_detail(album_id)),
-        delete_calls=tuple(beets.delete_album_calls),
         files=files,
         directories=directories,
     )
@@ -88,6 +100,84 @@ def assert_rejection_preserved_state(
     """Rejecting a destructive request must preserve all owned state."""
     if rejected and before != after:
         raise AssertionError("destructive rejection mutated owned state")
+
+
+def assert_delete_postcondition(
+    *,
+    outcome: str,
+    owned_paths_present: bool,
+    unknown_bytes_preserved: bool,
+    beets_album_present: bool,
+    pipeline_present: bool,
+) -> None:
+    """Executable law for cleanup success, retryable failure, and PG partial."""
+    if not unknown_bytes_preserved:
+        raise AssertionError("unknown content was deleted or changed")
+    if outcome == "success":
+        if owned_paths_present or beets_album_present or pipeline_present:
+            raise AssertionError("success postcondition is incomplete")
+    elif outcome == "cleanup_failure":
+        if not beets_album_present or not pipeline_present:
+            raise AssertionError("cleanup failure lost retry authority")
+    elif outcome == "pg_partial":
+        if owned_paths_present or beets_album_present or not pipeline_present:
+            raise AssertionError("PG partial state is not explicit")
+    else:
+        raise AssertionError(f"unknown outcome {outcome}")
+
+
+def assert_ambiguous_delete_fails_closed(
+    *,
+    completed: bool,
+    pipeline_present: bool,
+    notification_count: int,
+    context_retained: bool,
+) -> None:
+    """A synchronous lost acknowledgement always requires manual recovery."""
+    if completed:
+        raise AssertionError("ambiguous delete acknowledgement was promoted")
+    if not pipeline_present:
+        raise AssertionError("ambiguous delete purged pipeline authority")
+    if notification_count:
+        raise AssertionError("ambiguous delete notified media servers")
+    if not context_retained:
+        raise AssertionError("ambiguous delete lost operator recovery context")
+
+
+def assert_enumeration_failure_fails_closed(
+    *,
+    completed: bool,
+    beets_present: bool,
+    pipeline_present: bool,
+    notification_count: int,
+) -> None:
+    """Unknown-content enumeration failure retains both authorities."""
+    if completed:
+        raise AssertionError("enumeration failure was reported as success")
+    if not beets_present:
+        raise AssertionError("enumeration failure removed Beets authority")
+    if not pipeline_present:
+        raise AssertionError("enumeration failure purged pipeline authority")
+    if notification_count:
+        raise AssertionError("enumeration failure notified media servers")
+
+
+def assert_presence_probe_failure_fails_closed(
+    *,
+    completed: bool,
+    beets_present: bool,
+    pipeline_present: bool,
+    notification_count: int,
+) -> None:
+    """Presence-probe failure retains both deletion authorities."""
+    if completed:
+        raise AssertionError("presence-probe failure was reported as success")
+    if not beets_present:
+        raise AssertionError("presence-probe failure removed Beets authority")
+    if not pipeline_present:
+        raise AssertionError("presence-probe failure purged pipeline authority")
+    if notification_count:
+        raise AssertionError("presence-probe failure notified media servers")
 
 
 def _different_release(release_id: str) -> str:
@@ -456,6 +546,28 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                 "discogs_albumid": discogs_albumid,
                 "tracks": tracks,
             })
+
+            def beets_delete(
+                request: BeetsDeleteRequest,
+            ) -> BeetsDeleteCompleted:
+                deleted = 0
+                for path in track_paths:
+                    if path.exists():
+                        path.unlink()
+                        deleted += 1
+                if sidecar_path.exists():
+                    sidecar_path.unlink()
+                    deleted += 1
+                beets._album_detail.pop(request.album_id)
+                return BeetsDeleteCompleted(
+                    album_id=request.album_id,
+                    album_name="A",
+                    artist_name="B",
+                    former_album_path=str(album_dir),
+                    deleted_tracks=len(track_paths),
+                    deleted_artifacts=deleted,
+                    preserved_paths=(),
+                )
             before = snapshot_state(
                 db,
                 beets,
@@ -473,6 +585,8 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                     expected_pipeline_id=expected_pipeline,
                     expected_release_id=expected_release,
                 ),
+                beets_delete_fn=beets_delete,
+                notify_fn=lambda _path: (),
             )
 
             after = snapshot_state(
@@ -516,7 +630,7 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
             if succeeded:
                 self.assertIsNone(beets.get_album_detail(7))
                 self.assertTrue(all(not path.exists() for path in track_paths))
-                self.assertEqual(sidecar_path.exists(), sidecar)
+                self.assertFalse(sidecar_path.exists())
                 for request_id in (41, 42):
                     should_be_deleted = (
                         purge_pipeline and request_id == current_pipeline_id
@@ -529,6 +643,418 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                             request_id == 42 and not seed_discogs_pipeline
                         ),
                     )
+
+    @example(
+        reason="subprocess_error", album_present=False, orphan_items=False,
+        path_source="track", purge_pipeline=True,
+    )
+    @example(
+        reason="protocol_error", album_present=False, orphan_items=True,
+        path_source="art", purge_pipeline=True,
+    )
+    @given(
+        reason=st.sampled_from(("subprocess_error", "protocol_error")),
+        album_present=st.booleans(),
+        orphan_items=st.booleans(),
+        path_source=st.sampled_from(("track", "art", "none")),
+        purge_pipeline=st.booleans(),
+    )
+    def test_lost_delete_ack_always_requires_manual_recovery(
+        self,
+        reason: BeetsDeleteFailureReason,
+        album_present: bool,
+        orphan_items: bool,
+        path_source: str,
+        purge_pipeline: bool,
+    ) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41,
+            status="imported",
+            mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        ))
+        album_dir = Path("/music/Artist/Album")
+        detail: dict[str, object] = {
+            "id": 7,
+            "album": "Album",
+            "artist": "Artist",
+            "mb_albumid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "discogs_albumid": None,
+            "tracks": [],
+        }
+        if path_source == "track":
+            detail["tracks"] = [{"id": 1, "path": str(album_dir / "01.flac")}]
+        elif path_source == "art":
+            detail["artpath"] = str(album_dir / "cover.jpg")
+        beets = FakeBeetsDB()
+        beets.set_album_detail(7, detail)
+        notifications: list[str] = []
+
+        def failed_child(request: BeetsDeleteRequest) -> BeetsDeleteFailed:
+            if not album_present:
+                beets._album_detail.pop(request.album_id)
+            beets.set_orphan_items_present(request.album_id, orphan_items)
+            return BeetsDeleteFailed(
+                album_id=request.album_id,
+                reason=reason,
+                detail="generated child boundary failure",
+                album_still_present=album_present,
+            )
+
+        previous_disable = logging.root.manager.disable
+        logging.disable(logging.CRITICAL)
+        try:
+            result = delete_release_from_library(
+                pipeline_db=db,
+                beets_db=beets,
+                request=DeleteRequest(
+                    album_id=7,
+                    purge_pipeline=purge_pipeline,
+                ),
+                beets_delete_fn=failed_child,
+                notify_fn=lambda path: notifications.append(path) or (),
+            )
+        finally:
+            logging.disable(previous_disable)
+
+        expected_path = str(album_dir) if path_source != "none" else ""
+        context_retained = (
+            isinstance(result, DeleteIncomplete)
+            and result.album_name == "Album"
+            and result.artist_name == "Artist"
+            and result.former_album_path == expected_path
+            and result.pipeline_request_id == 41
+            and result.pipeline_status == "imported"
+            and result.acknowledgement_lost
+            and result.deleted_files is None
+            and result.deleted_artifacts is None
+            and "metadata may be gone" in result.detail
+            and "was preserved" in result.detail
+        )
+        assert_ambiguous_delete_fails_closed(
+            completed=isinstance(result, DeleteSuccess),
+            pipeline_present=db.get_request(41) is not None,
+            notification_count=len(notifications),
+            context_retained=context_retained,
+        )
+
+    @example(
+        track_presence=[True, True], art_present=True, sidecar_present=True,
+        unknown_payload=b"booklet", fault_at=-1, noop=False,
+    )
+    @example(
+        track_presence=[True], art_present=True, sidecar_present=True,
+        unknown_payload=None, fault_at=2, noop=False,
+    )
+    @given(
+        track_presence=st.lists(st.booleans(), min_size=1, max_size=4),
+        art_present=st.booleans(),
+        sidecar_present=st.booleans(),
+        unknown_payload=st.one_of(st.none(), st.binary(max_size=32)),
+        fault_at=st.integers(min_value=-1, max_value=7),
+        noop=st.booleans(),
+    )
+    def test_beets_delete_manifest_law_across_partial_worlds(
+        self,
+        track_presence: list[bool],
+        art_present: bool,
+        sidecar_present: bool,
+        unknown_payload: bytes | None,
+        fault_at: int,
+        noop: bool,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            targets: list[_OwnedPath] = []
+            for index, present in enumerate(track_presence):
+                path = root / f"{index:02d}.flac"
+                if present:
+                    path.write_bytes(bytes([index]))
+                targets.append(_OwnedPath(str(path), "track"))
+            art = root / "cover.jpg"
+            if art_present:
+                art.write_bytes(b"art")
+            targets.append(_OwnedPath(str(art), "art"))
+            sidecar = root / "cratedigger.json"
+            if sidecar_present:
+                sidecar.write_bytes(b"sidecar")
+            targets.append(_OwnedPath(str(sidecar), "sidecar"))
+            unknown = root / "booklet.pdf"
+            if unknown_payload is not None:
+                unknown.write_bytes(unknown_payload)
+
+            metadata_present = True
+            remove_calls = 0
+
+            def remove(path: str) -> None:
+                nonlocal remove_calls
+                call = remove_calls
+                remove_calls += 1
+                if call == fault_at:
+                    raise OSError("generated fault")
+                if noop:
+                    return
+                if os.path.lexists(path):
+                    os.remove(path)
+
+            def remove_metadata() -> None:
+                nonlocal metadata_present
+                metadata_present = False
+
+            outcome = _delete_manifest(
+                album_id=7, album_name="Album", artist_name="Artist",
+                owned_paths=tuple(targets), album_dirs=(str(root),),
+                metadata_remove=remove_metadata,
+                album_present=lambda: metadata_present,
+                remove_path=remove, prune_dir=lambda _path: None,
+            )
+
+            unknown_ok = (
+                unknown_payload is None
+                or (unknown.exists() and unknown.read_bytes() == unknown_payload)
+            )
+            if isinstance(outcome, BeetsDeleteCompleted):
+                assert_delete_postcondition(
+                    outcome="success",
+                    owned_paths_present=any(
+                        os.path.lexists(item.path) for item in targets),
+                    unknown_bytes_preserved=unknown_ok,
+                    beets_album_present=metadata_present,
+                    pipeline_present=False,
+                )
+            else:
+                self.assertIsInstance(outcome, BeetsDeleteFailed)
+                assert_delete_postcondition(
+                    outcome="cleanup_failure",
+                    owned_paths_present=any(
+                        os.path.lexists(item.path) for item in targets),
+                    unknown_bytes_preserved=unknown_ok,
+                    beets_album_present=metadata_present,
+                    pipeline_present=True,
+                )
+
+    @example(fault_call=1, unknown_payload=b"booklet")
+    @example(fault_call=2, unknown_payload=None)
+    @given(
+        fault_call=st.sampled_from((1, 2)),
+        unknown_payload=st.one_of(st.none(), st.binary(max_size=32)),
+    )
+    def test_unknown_enumeration_failure_retains_beets_pg_and_notifications(
+        self,
+        fault_call: int,
+        unknown_payload: bytes | None,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            track = root / "01.flac"
+            track.write_bytes(b"audio")
+            unknown = root / "booklet.pdf"
+            if unknown_payload is not None:
+                unknown.write_bytes(unknown_payload)
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=41,
+                status="imported",
+                mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            ))
+            beets = FakeBeetsDB()
+            beets.set_album_detail(7, {
+                "id": 7,
+                "album": "Album",
+                "artist": "Artist",
+                "mb_albumid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "discogs_albumid": None,
+                "path": str(root),
+                "tracks": [{"id": 1, "path": str(track)}],
+            })
+            list_calls = 0
+            notifications: list[str] = []
+
+            def list_with_fault(directory: Path) -> tuple[Path, ...]:
+                nonlocal list_calls
+                list_calls += 1
+                if list_calls == fault_call:
+                    raise OSError("generated enumeration fault")
+                return tuple(directory.iterdir())
+
+            def remove_metadata() -> None:
+                beets._album_detail.pop(7)
+
+            def failed_enumeration(
+                request: BeetsDeleteRequest,
+            ) -> BeetsDeleteCompleted | BeetsDeleteFailed:
+                return _delete_manifest(
+                    album_id=request.album_id,
+                    album_name="Album",
+                    artist_name="Artist",
+                    owned_paths=(_OwnedPath(str(track), "track"),),
+                    album_dirs=(str(root),),
+                    metadata_remove=remove_metadata,
+                    album_present=lambda: (
+                        beets.get_album_detail(request.album_id) is not None
+                    ),
+                    remove_path=lambda path: os.remove(path),
+                    prune_dir=lambda _path: None,
+                    list_dir=list_with_fault,
+                )
+
+            result = delete_release_from_library(
+                pipeline_db=db,
+                beets_db=beets,
+                request=DeleteRequest(album_id=7, purge_pipeline=True),
+                beets_delete_fn=failed_enumeration,
+                notify_fn=lambda path: notifications.append(path) or (),
+            )
+
+            assert_enumeration_failure_fails_closed(
+                completed=isinstance(result, DeleteSuccess),
+                beets_present=beets.get_album_detail(7) is not None,
+                pipeline_present=db.get_request(41) is not None,
+                notification_count=len(notifications),
+            )
+            self.assertIsInstance(result, DeleteIncomplete)
+            assert isinstance(result, DeleteIncomplete)
+            self.assertEqual(result.reason, "filesystem_error")
+            if unknown_payload is not None:
+                self.assertEqual(unknown.read_bytes(), unknown_payload)
+
+    @example(fault_stage="pre", purge_pipeline=True)
+    @example(fault_stage="post", purge_pipeline=True)
+    @example(fault_stage="progress", purge_pipeline=False)
+    @example(fault_stage="final", purge_pipeline=True)
+    @given(
+        fault_stage=st.sampled_from(("pre", "post", "progress", "final")),
+        purge_pipeline=st.booleans(),
+    )
+    def test_presence_probe_faults_retain_beets_pg_and_notifications(
+        self,
+        fault_stage: str,
+        purge_pipeline: bool,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            track = root / "01.flac"
+            track.write_bytes(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=41,
+                status="imported",
+                mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            ))
+            beets = FakeBeetsDB()
+            beets.set_album_detail(7, {
+                "id": 7,
+                "album": "Album",
+                "artist": "Artist",
+                "mb_albumid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "discogs_albumid": None,
+                "path": str(root),
+                "tracks": [{"id": 1, "path": str(track)}],
+            })
+            notifications: list[str] = []
+            probe_calls = 0
+            fault_call = {
+                "pre": 1,
+                "post": 2,
+                "progress": 2,
+                "final": 3,
+            }[fault_stage]
+
+            def probe(path: str) -> bool:
+                nonlocal probe_calls
+                probe_calls += 1
+                if probe_calls == fault_call:
+                    raise OSError(
+                        f"generated {fault_stage} presence-probe fault",
+                    )
+                try:
+                    os.lstat(path)
+                except FileNotFoundError:
+                    return False
+                return True
+
+            def remove(path: str) -> None:
+                if fault_stage == "progress":
+                    raise OSError("generated removal fault")
+                os.remove(path)
+
+            def remove_metadata() -> None:
+                beets._album_detail.pop(7)
+
+            def failed_probe(
+                request: BeetsDeleteRequest,
+            ) -> BeetsDeleteCompleted | BeetsDeleteFailed:
+                return _delete_manifest(
+                    album_id=request.album_id,
+                    album_name="Album",
+                    artist_name="Artist",
+                    owned_paths=(_OwnedPath(str(track), "track"),),
+                    album_dirs=(str(root),),
+                    metadata_remove=remove_metadata,
+                    album_present=lambda: (
+                        beets.get_album_detail(request.album_id) is not None
+                    ),
+                    remove_path=remove,
+                    prune_dir=lambda _path: None,
+                    path_exists=probe,
+                )
+
+            result = delete_release_from_library(
+                pipeline_db=db,
+                beets_db=beets,
+                request=DeleteRequest(
+                    album_id=7,
+                    purge_pipeline=purge_pipeline,
+                ),
+                beets_delete_fn=failed_probe,
+                notify_fn=lambda path: notifications.append(path) or (),
+            )
+
+            assert_presence_probe_failure_fails_closed(
+                completed=isinstance(result, DeleteSuccess),
+                beets_present=beets.get_album_detail(7) is not None,
+                pipeline_present=db.get_request(41) is not None,
+                notification_count=len(notifications),
+            )
+            self.assertIsInstance(result, DeleteIncomplete)
+            assert isinstance(result, DeleteIncomplete)
+            self.assertIn("presence", result.detail)
+            self.assertEqual(result.remaining_owned_paths, (str(track),))
+
+    @given(
+        mismatch_db=st.booleans(),
+        mismatch_root=st.booleans(),
+    )
+    @example(mismatch_db=True, mismatch_root=False)
+    @example(mismatch_db=False, mismatch_root=True)
+    def test_delete_configuration_authority_requires_both_exact_paths(
+        self,
+        mismatch_db: bool,
+        mismatch_root: bool,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            configured_db = base / "configured.db"
+            configured_db.touch()
+            configured_root = base / "configured-root"
+            configured_root.mkdir()
+            other_db = base / "other.db"
+            other_db.touch()
+            other_root = base / "other-root"
+            other_root.mkdir()
+            request = BeetsDeleteRequest(
+                album_id=7,
+                expected_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                library_db_path=str(other_db if mismatch_db else configured_db),
+                library_root=str(other_root if mismatch_root else configured_root),
+            )
+
+            authorized = _configuration_matches(
+                request, str(configured_db), str(configured_root),
+            )
+
+            self.assertEqual(authorized, not (mismatch_db or mismatch_root))
 
 
 class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
@@ -575,6 +1101,127 @@ class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
         after = snapshot_state(db, beets, request_ids=(41,), album_id=7)
         with self.assertRaisesRegex(AssertionError, "mutated owned state"):
             assert_rejection_preserved_state(before, after, rejected=True)
+
+    def test_delete_checker_kills_each_contract_mutant(self) -> None:
+        mutants = {
+            "omitted_art": dict(
+                outcome="success", owned_paths_present=True,
+                unknown_bytes_preserved=True, beets_album_present=False,
+                pipeline_present=False),
+            "omitted_sidecar": dict(
+                outcome="success", owned_paths_present=True,
+                unknown_bytes_preserved=True, beets_album_present=False,
+                pipeline_present=False),
+            "noop_success": dict(
+                outcome="success", owned_paths_present=True,
+                unknown_bytes_preserved=True, beets_album_present=False,
+                pipeline_present=False),
+            "unknown_overdelete": dict(
+                outcome="success", owned_paths_present=False,
+                unknown_bytes_preserved=False, beets_album_present=False,
+                pipeline_present=False),
+            "early_beets_delete": dict(
+                outcome="cleanup_failure", owned_paths_present=True,
+                unknown_bytes_preserved=True, beets_album_present=False,
+                pipeline_present=True),
+            "early_pg_delete": dict(
+                outcome="cleanup_failure", owned_paths_present=True,
+                unknown_bytes_preserved=True, beets_album_present=True,
+                pipeline_present=False),
+        }
+        for name, world in mutants.items():
+            with self.subTest(mutant=name), self.assertRaises(AssertionError):
+                assert_delete_postcondition(
+                    outcome=str(world["outcome"]),
+                    owned_paths_present=bool(world["owned_paths_present"]),
+                    unknown_bytes_preserved=bool(world["unknown_bytes_preserved"]),
+                    beets_album_present=bool(world["beets_album_present"]),
+                    pipeline_present=bool(world["pipeline_present"]),
+                )
+
+    def test_ack_checker_kills_each_fail_closed_mutant(self) -> None:
+        mutants = {
+            "metadata_absence_promoted": dict(
+                completed=True, pipeline_present=True,
+                notification_count=0, context_retained=True,
+            ),
+            "pipeline_purged": dict(
+                completed=False, pipeline_present=False,
+                notification_count=0, context_retained=True,
+            ),
+            "media_notified": dict(
+                completed=False, pipeline_present=True,
+                notification_count=1, context_retained=True,
+            ),
+            "operator_context_lost": dict(
+                completed=False, pipeline_present=True,
+                notification_count=0, context_retained=False,
+            ),
+        }
+        for name, world in mutants.items():
+            with self.subTest(mutant=name), self.assertRaises(AssertionError):
+                assert_ambiguous_delete_fails_closed(
+                    completed=bool(world["completed"]),
+                    pipeline_present=bool(world["pipeline_present"]),
+                    notification_count=int(world["notification_count"]),
+                    context_retained=bool(world["context_retained"]),
+                )
+
+    def test_enumeration_checker_kills_each_fail_closed_mutant(self) -> None:
+        mutants = {
+            "reported_success": dict(
+                completed=True, beets_present=True,
+                pipeline_present=True, notification_count=0,
+            ),
+            "beets_removed": dict(
+                completed=False, beets_present=False,
+                pipeline_present=True, notification_count=0,
+            ),
+            "pipeline_purged": dict(
+                completed=False, beets_present=True,
+                pipeline_present=False, notification_count=0,
+            ),
+            "media_notified": dict(
+                completed=False, beets_present=True,
+                pipeline_present=True, notification_count=1,
+            ),
+        }
+        for name, world in mutants.items():
+            with self.subTest(mutant=name), self.assertRaises(AssertionError):
+                assert_enumeration_failure_fails_closed(
+                    completed=bool(world["completed"]),
+                    beets_present=bool(world["beets_present"]),
+                    pipeline_present=bool(world["pipeline_present"]),
+                    notification_count=int(world["notification_count"]),
+                )
+
+    def test_presence_probe_checker_kills_each_fail_closed_mutant(self) -> None:
+        mutants = {
+            "reported_success": dict(
+                completed=True, beets_present=True,
+                pipeline_present=True, notification_count=0,
+            ),
+            "beets_removed": dict(
+                completed=False, beets_present=False,
+                pipeline_present=True, notification_count=0,
+            ),
+            "pipeline_purged": dict(
+                completed=False, beets_present=True,
+                pipeline_present=False, notification_count=0,
+            ),
+            "media_notified": dict(
+                completed=False, beets_present=True,
+                pipeline_present=True, notification_count=1,
+            ),
+        }
+        for name, world in mutants.items():
+            with self.subTest(mutant=name), self.assertRaises(AssertionError):
+                assert_presence_probe_failure_fails_closed(
+                    completed=bool(world["completed"]),
+                    beets_present=bool(world["beets_present"]),
+                    pipeline_present=bool(world["pipeline_present"]),
+                    notification_count=int(world["notification_count"]),
+                )
 
 
 if __name__ == "__main__":

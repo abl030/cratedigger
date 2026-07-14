@@ -12,6 +12,7 @@ from lib.pipeline_db.jellyfin_pins import _JellyfinPinsMixin
 from lib.pipeline_db.misc import _MiscMixin
 from lib.pipeline_db.search_ledger import _SearchLedgerMixin
 from lib.pipeline_db.transfer_ledger import _TransferLedgerMixin
+from lib.pipeline_db.terminal_outcomes import _TerminalOutcomesMixin
 
 
 class PipelineDB(
@@ -28,6 +29,7 @@ class PipelineDB(
     _MiscMixin,
     _SearchLedgerMixin,
     _TransferLedgerMixin,
+    _TerminalOutcomesMixin,
 ):
     """PostgreSQL-backed pipeline database.
 

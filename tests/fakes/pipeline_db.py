@@ -13,7 +13,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Optional, cast
 import msgspec
 
 
@@ -70,6 +70,13 @@ from lib.pipeline_db._shared import (
 )
 from lib.quality import (
     AlbumQualityEvidence,
+    CooldownConfig,
+)
+from lib import transitions
+from lib.terminal_outcomes import (
+    ImportTerminalOutcome,
+    PreviewTerminalOutcome,
+    TerminalOutcomeResult,
 )
 from lib.beets_db import ReleaseLocation
 from lib.release_identity import (
@@ -77,6 +84,119 @@ from lib.release_identity import (
     detect_release_source,
     normalize_release_id,
 )
+
+
+class _FakeTerminalTransitionsDB:
+    """Emit production-shaped write boundaries while mutating the fake."""
+
+    def __init__(
+        self,
+        db: "FakePipelineDB",
+        boundary: Callable[[str], None],
+    ) -> None:
+        self._db = db
+        self._boundary = boundary
+
+    def get_request(self, request_id: int) -> dict[str, Any] | None:
+        return self._db.get_request(request_id)
+
+    def set_downloading(
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        expected_status: str = "wanted",
+    ) -> bool:
+        del request_id, state_json, expected_status
+        raise ValueError("terminal outcomes cannot transition to downloading")
+
+    def reset_to_wanted(
+        self,
+        request_id: int,
+        *,
+        expected_status: str | None = None,
+        clear_retry_counters: bool = True,
+        **fields: Any,
+    ) -> bool:
+        applied = self._db.reset_to_wanted(
+            request_id,
+            expected_status=expected_status,
+            clear_retry_counters=clear_retry_counters,
+            **fields,
+        )
+        if applied:
+            self._boundary("request.wanted")
+        return applied
+
+    def reset_downloading_to_wanted(
+        self,
+        request_id: int,
+        *,
+        expected_status: str = "downloading",
+        **fields: Any,
+    ) -> bool:
+        applied = self._db.reset_downloading_to_wanted(
+            request_id,
+            expected_status=expected_status,
+            **fields,
+        )
+        if applied:
+            self._boundary("request.wanted")
+        return applied
+
+    def record_attempt(
+        self,
+        request_id: int,
+        attempt_type: str,
+        *,
+        expected_status: str,
+    ) -> bool:
+        applied = self._db.record_attempt(
+            request_id,
+            attempt_type,
+            expected_status=expected_status,
+        )
+        if applied:
+            self._boundary(f"request.attempt.{attempt_type}")
+        return applied
+
+    def mark_imported_with_rescue(
+        self,
+        request_id: int,
+        *,
+        expected_status: str | None = None,
+        **extra: Any,
+    ) -> bool:
+        applied = self._db.mark_imported_with_rescue(
+            request_id,
+            expected_status=expected_status,
+            **extra,
+        )
+        if applied:
+            self._boundary("request.imported")
+            if extra:
+                self._boundary("request.metadata")
+        return applied
+
+    def update_status(
+        self,
+        request_id: int,
+        status: str,
+        *,
+        expected_status: str | None = None,
+        **extra: Any,
+    ) -> bool:
+        applied = self._db.update_status(
+            request_id,
+            status,
+            expected_status=expected_status,
+            **extra,
+        )
+        if applied:
+            self._boundary("request.status")
+            if extra:
+                self._boundary("request.metadata")
+        return applied
 from lib.validation_envelope import (
     VALIDATION_PROJECTION_UNSET,
     ValidationProjectionUnset,
@@ -179,6 +299,8 @@ class FakePipelineDB:
         self._stamp_terminal_failures_error: Exception | None = None
         self._claim_terminal_failures_error: Exception | None = None
         self.denylist: list[DenylistEntry] = []
+        self.persist_import_terminal_outcome_calls: list[ImportTerminalOutcome] = []
+        self.persist_preview_terminal_outcome_calls: list[PreviewTerminalOutcome] = []
         self.bad_audio_hashes: list[BadAudioHashRow] = []
         # Call-count tracking for the bad-audio-hash gate. Tests that
         # used to assert ``mock.assert_called_once()`` / ``assert_not_called()``
@@ -1115,6 +1237,186 @@ class FakePipelineDB:
     def get_request(self, request_id: int) -> dict[str, Any] | None:
         return copy.deepcopy(self._requests.get(request_id))
 
+    def _terminal_state_snapshot(self) -> tuple[object, ...]:
+        return copy.deepcopy((
+            self._requests,
+            self._import_jobs,
+            self.download_logs,
+            self.denylist,
+            self.user_cooldowns,
+            self.status_history,
+            self.recorded_attempts,
+            self.cooldowns_applied,
+        ))
+
+    def _restore_terminal_state(self, snapshot: tuple[object, ...]) -> None:
+        (
+            self._requests,
+            self._import_jobs,
+            self.download_logs,
+            self.denylist,
+            self.user_cooldowns,
+            self.status_history,
+            self.recorded_attempts,
+            self.cooldowns_applied,
+        ) = cast(Any, snapshot)
+
+    def _terminal_outcome_write_boundary(self, index: int, label: str) -> None:
+        del index, label
+
+    def persist_import_terminal_outcome(
+        self,
+        command: ImportTerminalOutcome,
+    ) -> TerminalOutcomeResult:
+        snapshot = self._terminal_state_snapshot()
+        boundary_index = 0
+
+        def boundary(label: str) -> None:
+            nonlocal boundary_index
+            boundary_index += 1
+            self._terminal_outcome_write_boundary(boundary_index, label)
+
+        try:
+            transition_db = _FakeTerminalTransitionsDB(self, boundary)
+            applied = []
+            if command.initial_transition is not None:
+                applied.append(transitions.require_transition_applied(
+                    transitions.finalize_request(
+                        transition_db,
+                        command.request_id,
+                        command.initial_transition,
+                    )
+                ))
+            download_log_id = cast(Any, self.log_download)(
+                request_id=command.request_id,
+                **command.audit.as_log_kwargs(),
+            )
+            boundary("download_log")
+            for transition in command.post_audit_transitions:
+                applied.append(transitions.require_transition_applied(
+                    transitions.finalize_request(
+                        transition_db,
+                        command.request_id,
+                        transition,
+                    )
+                ))
+            cooled: set[str] = set()
+            for entry in command.denylists:
+                denied_before = len(self.denylist)
+                self.add_denylist(
+                    command.request_id,
+                    entry.username,
+                    entry.reason,
+                )
+                if len(self.denylist) > denied_before:
+                    boundary("denylist")
+                if entry.apply_cooldown and self.check_and_apply_cooldown(
+                    entry.username
+                ):
+                    cfg = CooldownConfig()
+                    self.add_cooldown(
+                        entry.username,
+                        _utcnow() + timedelta(days=cfg.cooldown_days),
+                        f"{cfg.failure_threshold} consecutive failures",
+                    )
+                    cooled.add(entry.username)
+                    boundary("cooldown")
+            if command.job.status == "completed":
+                job = self.mark_import_job_completed(
+                    command.import_job_id,
+                    result=command.job.result,
+                    message=command.job.message,
+                )
+            else:
+                assert command.job.error is not None
+                job = self.mark_import_job_failed(
+                    command.import_job_id,
+                    error=command.job.error,
+                    result=command.job.result,
+                    message=command.job.message,
+                )
+            if job is None or job.request_id != command.request_id:
+                raise RuntimeError("import job terminal compare-and-set failed")
+            boundary(f"import_job.{command.job.status}")
+        except Exception:
+            self._restore_terminal_state(snapshot)
+            raise
+        self.persist_import_terminal_outcome_calls.append(command)
+        return TerminalOutcomeResult(
+            download_log_id=download_log_id,
+            job=job,
+            transitions=tuple(applied),
+            cooled_down_users=frozenset(cooled),
+        )
+
+    def persist_preview_terminal_outcome(
+        self,
+        command: PreviewTerminalOutcome,
+    ) -> TerminalOutcomeResult:
+        snapshot = self._terminal_state_snapshot()
+        boundary_index = 0
+
+        def boundary(label: str) -> None:
+            nonlocal boundary_index
+            boundary_index += 1
+            self._terminal_outcome_write_boundary(boundary_index, label)
+
+        try:
+            transition_db = _FakeTerminalTransitionsDB(self, boundary)
+            applied = transitions.require_transition_applied(
+                transitions.finalize_request(
+                    transition_db,
+                    command.request_id,
+                    command.request_transition,
+                )
+            )
+            download_log_id = cast(Any, self.log_download)(
+                request_id=command.request_id,
+                **command.audit.as_log_kwargs(),
+            )
+            boundary("download_log")
+            cooled: set[str] = set()
+            for entry in command.denylists:
+                denied_before = len(self.denylist)
+                self.add_denylist(
+                    command.request_id,
+                    entry.username,
+                    entry.reason,
+                )
+                if len(self.denylist) > denied_before:
+                    boundary("denylist")
+                if entry.apply_cooldown and self.check_and_apply_cooldown(
+                    entry.username
+                ):
+                    cfg = CooldownConfig()
+                    self.add_cooldown(
+                        entry.username,
+                        _utcnow() + timedelta(days=cfg.cooldown_days),
+                        f"{cfg.failure_threshold} consecutive failures",
+                    )
+                    cooled.add(entry.username)
+                    boundary("cooldown")
+            job = self.mark_import_job_preview_failed(
+                command.import_job_id,
+                preview_status=command.preview_status,
+                error=command.error,
+                preview_result=command.preview_result,
+                message=command.message,
+            )
+            if job is None or job.request_id != command.request_id:
+                raise RuntimeError("preview job terminal compare-and-set failed")
+            boundary("import_job.preview_failed")
+        except Exception:
+            self._restore_terminal_state(snapshot)
+            raise
+        self.persist_preview_terminal_outcome_calls.append(command)
+        return TerminalOutcomeResult(
+            download_log_id=download_log_id,
+            job=job,
+            transitions=(applied,),
+            cooled_down_users=frozenset(cooled),
+        )
+
     def get_request_by_mb_release_id(self, mb_release_id: str) -> dict[str, Any] | None:
         for row in self._requests.values():
             if row.get("mb_release_id") == mb_release_id:
@@ -1799,6 +2101,11 @@ class FakePipelineDB:
 
     def add_denylist(self, request_id: int, username: str,
                      reason: str | None = None) -> None:
+        if any(
+            entry.request_id == request_id and entry.username == username
+            for entry in self.denylist
+        ):
+            return
         self.denylist.append(DenylistEntry(request_id, username, reason))
 
     def get_denylisted_users(self, request_id: int) -> list[dict[str, Any]]:
@@ -5602,13 +5909,40 @@ class FakePipelineDBSource:
         bv_result: Any,
         dest_path: Any = None,
         download_info: Any = None,
-    ) -> None:
-        self.mark_done_calls.append({
+        import_job_id: int | None = None,
+    ) -> Any:
+        call = {
             "album_record": album_record,
             "bv_result": bv_result,
             "dest_path": dest_path,
             "download_info": download_info,
-        })
+        }
+        if import_job_id is not None:
+            call["import_job_id"] = import_job_id
+        self.mark_done_calls.append(call)
+        if import_job_id is None or self.db.get_import_job(import_job_id) is None:
+            return None
+        from lib.dispatch import _do_mark_done
+        from lib.quality import DownloadInfo
+
+        request_id = getattr(album_record, "db_request_id", None)
+        if not isinstance(request_id, int):
+            return None
+        dl_info = (
+            download_info
+            if isinstance(download_info, DownloadInfo)
+            else DownloadInfo()
+        )
+        return _do_mark_done(
+            cast(Any, self.db),
+            request_id,
+            dl_info,
+            distance=getattr(bv_result, "distance", None),
+            scenario=getattr(bv_result, "scenario", None),
+            dest_path=dest_path,
+            detail=getattr(bv_result, "detail", None),
+            import_job_id=import_job_id,
+        )
 
     def reject_and_requeue(
         self,
@@ -5618,7 +5952,8 @@ class FakePipelineDBSource:
         download_info: Any = None,
         search_filetype_override: Any = None,
         cooled_down_users: set[str] | None = None,
-    ) -> int | None:
+        import_job_id: int | None = None,
+    ) -> Any:
         self.reject_and_requeue_calls.append({
             "album_record": album_record,
             "bv_result": bv_result,
@@ -5627,6 +5962,44 @@ class FakePipelineDBSource:
             "search_filetype_override": search_filetype_override,
             "cooled_down_users": cooled_down_users,
         })
+        if import_job_id is not None and self.db.get_import_job(import_job_id) is not None:
+            from lib.dispatch import _record_rejection_and_maybe_requeue
+            from lib.quality import DownloadInfo
+            from lib.terminal_outcomes import (
+                PendingImportTerminalOutcome,
+                TerminalDenylist,
+            )
+
+            request_id = getattr(album_record, "db_request_id", None)
+            if not isinstance(request_id, int):
+                return None
+            dl_info = (
+                download_info
+                if isinstance(download_info, DownloadInfo)
+                else DownloadInfo()
+            )
+            pending = _record_rejection_and_maybe_requeue(
+                cast(Any, self.db),
+                request_id,
+                dl_info,
+                detail=getattr(bv_result, "detail", None),
+                error=getattr(bv_result, "error", None),
+                validation_result=(
+                    dl_info.validation_result or bv_result.to_json()
+                ),
+                requeue=True,
+                search_filetype_override=search_filetype_override,
+                import_job_id=import_job_id,
+            )
+            assert isinstance(pending, PendingImportTerminalOutcome)
+            return pending.append_denylists(*(
+                TerminalDenylist(
+                    username,
+                    "beets validation rejected",
+                    apply_cooldown=True,
+                )
+                for username in sorted(usernames or ())
+            ))
         return None
 
     def close(self) -> None:
