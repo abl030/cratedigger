@@ -50,6 +50,16 @@ assertEqual(classify({
   type: 'Album', primary_types: [], secondary_types: [],
   format_qualifiers: ['Compilation'],
 }), 'Compilations', 'Discogs Compilation qualifier stays a compilation');
+assertEqual(classify({
+  primary_types: ['Album'], secondary_types: [], format_qualifiers: ['Remix'],
+  display_primary_types: ['Album'], display_secondary_types: ['Live'],
+  display_format_qualifiers: ['Remix', 'Demo'],
+}), 'Live', 'paired display Live evidence overrides selected Album/Remix evidence');
+assertEqual(classify({
+  primary_types: [], secondary_types: [], format_qualifiers: [],
+  display_primary_types: ['EP'], display_secondary_types: [],
+  display_format_qualifiers: [],
+}), 'EPs', 'paired display structural evidence fills a selected unknown type');
 
 // Analysis-style (primary_type)
 assertEqual(classify({ primary_type: 'Album' }), 'Albums', 'analysis primary_type Album');

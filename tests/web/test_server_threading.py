@@ -147,7 +147,7 @@ class TestConcurrentRequests(_WebServerCase):
             "/api/artist/compare?name=Test%20Artist&"
             f"mbid={artist_id}&discogs_id=3840"
         )
-        compare_key = f"meta:artist:compare:v6:{artist_id}:3840"
+        compare_key = f"meta:artist:compare:v8:{artist_id}:3840"
         entered = threading.Event()
         release = threading.Event()
         cache_written = threading.Event()

@@ -675,6 +675,87 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(row["pipeline_status"], "wanted")
         self.assertEqual(row["pipeline_id"], 8838)
 
+    def test_artist_compare_deloris_fraulein_pairs_masterless_release_exactly(self):
+        """Fraulein is one semantic work with two exact action identities."""
+        mb_id = "1c9e2970-b221-30ab-93c6-7896b52a240b"
+        mb_rg = {
+            "id": mb_id,
+            "title": "Fraulein",
+            "type": "Album",
+            "source": "mb", "identity_kind": "work",
+            "primary_types": ["Album"], "secondary_types": [],
+            "format_qualifiers": [], "provenance": ["ordinary"],
+            "first_release_date": "1998",
+            "artist_credit": "Deloris",
+            "primary_artist_id": self.ARTIST_ID,
+            "is_appearance": False,
+        }
+        discogs_release = {
+            "id": "3938744",
+            "title": "Fraulein",
+            "type": "Album",
+            "source": "discogs", "identity_kind": "release",
+            "primary_types": ["Album"], "secondary_types": [],
+            "format_qualifiers": [], "provenance": ["ordinary"],
+            "first_release_date": "1998",
+            "artist_credit": "Deloris",
+            "primary_artist_id": "361476",
+            "discogs_release_id": "3938744",
+            "is_appearance": False,
+        }
+        self.db.seed_request(make_request_row(
+            id=425,
+            artist_name="Deloris",
+            album_title="Fraulein",
+            mb_artist_id=self.ARTIST_ID,
+            mb_release_group_id=mb_id,
+            status="wanted",
+        ))
+        self.db.seed_request(make_request_row(
+            id=8840,
+            artist_name="Deloris",
+            album_title="Fraulein",
+            mb_release_id="3938744",
+            discogs_release_id="3938744",
+            mb_release_group_id=None,
+            status="wanted",
+        ))
+        library = [{
+            "mb_releasegroupid": mb_id,
+            "mb_albumid": "mb-release",
+            "album": "Fraulein",
+        }]
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("web.routes.browse.discogs_api") as mock_dg, \
+                patch("web.server.get_library_artist", return_value=library):
+            mock_mb.search_artists.return_value = [{
+                "id": self.ARTIST_ID, "name": "Deloris",
+            }]
+            mock_mb.get_artist_release_groups.return_value = _catalogue([mb_rg])
+            mock_mb.get_artist_name.return_value = "Deloris"
+            mock_dg.search_artists.return_value = [{
+                "id": "361476", "name": "Deloris",
+            }]
+            mock_dg.get_artist_releases.return_value = _catalogue(
+                [discogs_release]
+            )
+            mock_dg.get_artist_name.return_value = "Deloris"
+            status, data = self._get("/api/artist/compare?name=Deloris")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["both"]), 1)
+        pair = data["both"][0]
+        self.assertEqual(pair["mb"]["id"], mb_id)
+        self.assertTrue(pair["mb"]["in_library"])
+        self.assertEqual(pair["mb"]["pipeline_id"], 425)
+        self.assertEqual(pair["discogs"]["id"], "3938744")
+        self.assertEqual(pair["discogs"]["identity_kind"], "release")
+        self.assertFalse(pair["discogs"]["in_library"])
+        self.assertEqual(pair["discogs"]["pipeline_id"], 8840)
+        self.assertEqual(data["mb_unpaired"], [])
+        self.assertEqual(data["discogs_unpaired"], [])
+        self.assertEqual(data["discogs_ungrouped_releases"], [])
+
     def test_artist_compare_discogs_master_does_not_inherit_release_badge(self):
         """A Discogs master and leaf release share a numeric ID namespace.
 

@@ -68,12 +68,20 @@ The three evidence arrays are required, sorted, and duplicate-free; missing,
 wrongly typed, unsorted, or duplicated fields fail the artist request instead
 of silently falling back to the legacy representative-pressing scalar
 `type`. Cratedigger normalizes master rows as work identities and masterless
-rows as release identities. Only work identities enter the cross-source
-matcher. Ungrouped release identities are conserved in their own response
-bucket and navigate to the exact release endpoint. A mixed master (for
+rows as release identities. Both may enter the conservative cross-source
+association policy, but a masterless row always remains a release identity.
+Unmatched release identities stay conserved in the diagnostic response and
+navigate to the exact release endpoint from the artist page's collapsed Other
+releases area; they do not enter the work-level Missing buckets. Association
+never substitutes a pressing or confers counterpart ownership. A mixed master (for
 example, ordinary plus unofficial child pressings) keeps every provenance
 value so the UI can display that evidence without misclassifying the whole
-work as an ordinary or unofficial-only album.
+work as an ordinary or unofficial-only album. For an associated pair, positive
+MusicBrainz release-group primary or secondary type evidence authors the work's
+display section; Discogs structural and format-qualifier evidence is the
+fallback only when that MB work classification is genuinely unknown. This
+prevents edition-level Discogs Compilation/Live/etc. qualifiers from overriding
+a known MB work type while preserving the selected exact Discogs identity.
 
 Artist-row identity syntax is strict at the Cratedigger boundary: a master is
 a positive integer and a masterless row is exactly

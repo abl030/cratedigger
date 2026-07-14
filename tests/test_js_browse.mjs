@@ -82,6 +82,44 @@ function assertSafeRetryFailure(aid, rawSecret) {
   assert.doesNotMatch(artistBody.innerHTML, new RegExp(rawSecret), 'raw failure detail must stay hidden');
 }
 
+// Warm compare cache renders exactly once. Large artists produce megabytes of
+// collapsed Other-release markup, so repainting the fast source-only page
+// immediately before the complete catalogue is a visible performance bug.
+resetWorld();
+{
+  const aid = 'warm-discogs-id';
+  state.browseSource = 'discogs';
+  state.browseCache[aid] = {
+    fast: {
+      rgRes: { release_groups: [{
+        id: 'fast-only', title: 'Fast only', source: 'discogs',
+        identity_kind: 'work', provenance: ['ordinary'],
+      }] },
+      libRes: { albums: [] },
+    },
+    compare: {
+      both: [], mb_unpaired: [], discogs_unpaired: [{
+        id: 'complete', title: 'Complete catalogue', source: 'discogs',
+        identity_kind: 'work', provenance: ['ordinary'],
+      }], discogs_ungrouped_releases: [],
+    },
+    disamb: null,
+  };
+  let writes = 0;
+  let rendered = '';
+  Object.defineProperty(artistBody, 'innerHTML', {
+    configurable: true,
+    get() { return rendered; },
+    set(value) { writes++; rendered = value; },
+  });
+  await loadArtistPage(aid, 'Warm Artist');
+  assert.equal(writes, 1, 'warm compare cache must not paint the fast page first');
+  assert.match(rendered, /Complete catalogue/);
+  assert.doesNotMatch(rendered, /Fast only/);
+  delete artistBody.innerHTML;
+  artistBody.innerHTML = rendered;
+}
+
 // Resolver identity is backend-authored. Equal master/release numbers are
 // valid in separate Discogs namespaces and therefore prove nothing.
 {
@@ -281,6 +319,16 @@ resetWorld();
   await sourceSwitch;
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(state.browseArtist, { id: 'new-discogs-id', name: 'Race Artist' });
+  assert.match(
+    elements['source-hint'].innerHTML,
+    /Discogs<\/b> identities selected for expansions and actions/,
+    'source hint states the exact selected-identity contract',
+  );
+  assert.doesNotMatch(
+    elements['source-hint'].innerHTML,
+    /unpaired|ungrouped/i,
+    'source hint does not expose comparison topology',
+  );
   assert(requests.some(url => url.includes('/api/discogs/artist/new-discogs-id?')));
   assert.match(artistBody.innerHTML, />Retry</, 'current-source failure owns Retry');
 

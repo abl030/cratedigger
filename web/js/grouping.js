@@ -26,17 +26,19 @@ export const SECTION_ORDER = [
  * @returns {string}
  */
 export function classify(row) {
+  const secondaryTypes = row.display_secondary_types ?? row.secondary_types ?? [];
+  const formatQualifiers = row.display_format_qualifiers ?? row.format_qualifiers ?? [];
   const qualifiers = [
-    ...(row.secondary_types || []),
-    ...(row.format_qualifiers || []),
+    ...secondaryTypes,
+    ...formatQualifiers,
   ];
   if (qualifiers.includes('Compilation')) return 'Compilations';
   if (qualifiers.includes('Live')) return 'Live';
   if (qualifiers.includes('Remix')) return 'Remixes';
   if (qualifiers.includes('DJ-mix')) return 'DJ Mixes';
   if (qualifiers.includes('Demo')) return 'Demos';
-  if (row.primary_types !== undefined) {
-    const structural = row.primary_types || [];
+  if (row.display_primary_types !== undefined || row.primary_types !== undefined) {
+    const structural = row.display_primary_types ?? row.primary_types ?? [];
     if (structural.includes('Album')) return 'Albums';
     if (structural.includes('EP')) return 'EPs';
     if (structural.includes('Single')) return 'Singles';

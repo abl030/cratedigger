@@ -412,7 +412,7 @@ class WebDevServerLiveDbMetadataIntegrationTest(unittest.TestCase):
         self.assertIn("/api/artists/60/appearances", discogs.requests)
         self.assertIn("/api/artists/60", discogs.requests)
         self.assertTrue({
-            "meta:artist:compare:v6:test-mbid:60",
+            "meta:artist:compare:v8:test-mbid:60",
             "meta:mb:artist:test-mbid:name",
             "meta:discogs:artist:60:name",
         }.issubset(self.metadata_cache._store))

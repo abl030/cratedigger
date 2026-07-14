@@ -391,9 +391,9 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
                      and "compare" in k]
         self.assertEqual(
             meta_keys,
-            [f"meta:artist:compare:v6:{self.ARTIST_ID}:3840"],
-            "the bulk-consumer deployment must create a naturally cold "
-            "compare key without reusing a pre-bulk skeleton",
+            [f"meta:artist:compare:v8:{self.ARTIST_ID}:3840"],
+            "masterless-association semantics must create a naturally cold "
+            "compare key without reusing a pre-correction skeleton",
         )
 
     def test_compare_artist_names_are_canonical_not_user_supplied(self) -> None:
