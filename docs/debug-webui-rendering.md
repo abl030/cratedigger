@@ -44,7 +44,7 @@ async function loadReleaseGroup(id, el) {
 
 3. **`event.stopPropagation()` / click handler conflict** — the release group `.rg` div has an onclick that calls `loadReleaseGroup()`. The parent `.type-body` div might be collapsing/toggling when the click bubbles up incorrectly.
 
-4. **`relEl` not found** — `getElementById('rel-' + id)` returns null if the DOM element was removed by a parent toggle. The release group's `div#rel-{id}` lives inside a `.type-body` that can be toggled closed, which might destroy the element.
+4. **`relEl` not found** — expansion targets are namespaced as `rel-{source}-{identityKind}-{id}` and manual clicks prefer the clicked row's next sibling. A stale source/kind or a detached row therefore resolves no target. The `.releases` element lives inside a `.type-body`; verify the row was not replaced by a parent re-render while the fetch was in flight.
 
 5. **Variable shadowing** — `const r` in `await fetch(...)` shadows the `r` parameter in `.filter(r => ...)`. This could cause issues in some JS engines.
 

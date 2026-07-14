@@ -17,7 +17,7 @@ import {
  * One release-group row: year + title + badges + expansion target.
  * Shared by every section of the unified artist page (issue #575 PR4) —
  * In library, Missing, Appearances, Bootlegs, and the late-appended
- * "Only on <other source>" complement.
+ * unpaired work and ungrouped-release sections from the other source.
  *
  * @param {Object} rg - Release-group row from /api/artist or /api/discogs/artist
  *   (or a compare-bucket row for complement sections).
@@ -31,10 +31,13 @@ export function renderRgRow(rg, ctx) {
   const year = rg.first_release_date ? rg.first_release_date.slice(0, 4) : '';
   const creditNote = rg.artist_credit && rg.artist_credit.toLowerCase() !== ctx.nameLC
     ? `<span class="rg-meta"> - ${esc(rg.artist_credit)}</span>` : '';
-  const badges = renderStatusBadges(rg);
-  // Masterless Discogs releases have no child master to expand; the rg row
-  // is the leaf, so it carries data-release-id for search-by-ID ringing.
-  const leafAttr = rg.is_masterless ? ` data-release-id="${esc(rg.id)}"` : '';
+  const badges = renderStatusBadges(rg) + catalogueProvenanceBadges(rg);
+  const isReleaseUnit = rg.identity_kind === 'release';
+  const source = ctx.source || rg.source || state.browseSource;
+  const identityKind = isReleaseUnit ? 'release' : 'work';
+  // Ungrouped Discogs releases have no child master to expand; the row is
+  // the leaf, so it carries data-release-id for search-by-ID ringing.
+  const leafAttr = isReleaseUnit ? ` data-release-id="${esc(rg.id)}"` : '';
   // Search-plan inspector button — only when this rg has a pipeline
   // request. RG-level pipeline_id surfaces from the analysis overlay's
   // disambData snapshot via pipelineStore (see release_action_state.js).
@@ -46,17 +49,62 @@ export function renderRgRow(rg, ctx) {
     }).pipelineId,
   });
   const optParts = [];
-  if (rg.is_masterless) optParts.push('masterless:true');
-  if (ctx.source) optParts.push(`source:'${ctx.source}'`);
+  if (isReleaseUnit) optParts.push('masterless:true');
+  optParts.push(`source:'${source}'`);
+  optParts.push(`identityKind:'${identityKind}'`);
   const opts = `{${optParts.join(',')}}`;
   return `
-    <div class="rg" data-rg-id="${esc(rg.id)}"${leafAttr}>
+    <div class="rg" data-rg-id="${esc(rg.id)}" data-catalogue-source="${esc(source)}" data-identity-kind="${identityKind}" data-catalogue-id="${esc(rg.id)}"${leafAttr}>
       <div onclick="event.stopPropagation(); window.loadReleaseGroup(${jsArg(rg.id)}, this, ${opts})">
         <span class="rg-year">${year}</span> <span class="rg-title">${esc(rg.title)}</span>${creditNote}${badges}${spBtn}
       </div>
-      <div class="releases" id="rel-${esc(rg.id)}"></div>
+      <div class="releases" id="${esc(catalogueDomId(source, identityKind, rg.id))}"></div>
     </div>
   `;
+}
+
+/**
+ * Namespace expansion targets by catalogue and identity level. Discogs
+ * master 122 and Discogs release 122 are distinct identities and may both
+ * appear on one artist page.
+ * @param {string} source
+ * @param {'work'|'release'} identityKind
+ * @param {string|number} id
+ * @returns {string}
+ */
+export function catalogueDomId(source, identityKind, id) {
+  return `rel-${source}-${identityKind}-${String(id)}`;
+}
+
+/**
+ * Return the exact catalogue endpoint for an expandable identity.
+ * @param {string|number} id
+ * @param {string} source
+ * @param {'work'|'release'} identityKind
+ * @returns {string}
+ */
+export function releaseGroupRequestPath(id, source, identityKind) {
+  const encodedId = encodeURIComponent(String(id));
+  if (source === 'discogs') {
+    return identityKind === 'release'
+      ? `/api/discogs/release/${encodedId}`
+      : `/api/discogs/master/${encodedId}`;
+  }
+  return `/api/release-group/${encodedId}`;
+}
+
+/**
+ * Preserve mixed/exceptional master evidence on the collapsed work row.
+ * @param {Object} row
+ * @returns {string}
+ */
+export function catalogueProvenanceBadges(row) {
+  const provenance = new Set(row.provenance || []);
+  const labels = [];
+  if (provenance.has('promo')) labels.push('promo');
+  if (provenance.has('unofficial')) labels.push('unofficial');
+  return labels.map(label =>
+    `<span class="badge badge-nonofficial">${label}</span>`).join('');
 }
 
 /**
@@ -80,30 +128,36 @@ export function renderRgRow(rg, ctx) {
 export function applySearchTargetAfterDiscography(rgEl) {
   const expandId = state.searchTargetExpandId;
   if (!expandId) return;
-  // Source guard: only apply ring when the discography source matches
-  // the source the resolver returned. Avoids ringing the wrong row when
-  // the user is browsing MB but the resolver returned a Discogs target
-  // (or vice versa).
-  if (state.searchTargetSource && state.browseSource !== state.searchTargetSource) return;
+  const source = state.searchTargetSource || state.browseSource;
+  const identityKind = state.searchTargetIdentityKind || 'work';
+  const targetRow = /** @type {HTMLElement|undefined} */ (
+    Array.from(rgEl.querySelectorAll('.rg')).find(row =>
+      row.dataset.catalogueSource === source
+      && row.dataset.identityKind === identityKind
+      && row.dataset.catalogueId === String(expandId)));
+  if (!targetRow) return;
 
-  // Masterless: the rg row IS the leaf. Ring + scroll directly, no expand.
-  const masterlessRow = /** @type {HTMLElement|null} */ (
-    rgEl.querySelector(`.rg[data-release-id="${cssEscape(expandId)}"]`));
-  if (masterlessRow) {
-    openCollapsedAncestors(masterlessRow, rgEl);
-    masterlessRow.classList.add('search-target');
-    masterlessRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  // An ungrouped Discogs release is already the leaf. Ring + scroll it;
+  // there is no master expansion to fetch.
+  if (identityKind === 'release') {
+    openCollapsedAncestors(targetRow, rgEl);
+    targetRow.classList.add('search-target');
+    targetRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
     return;
   }
 
   // Non-masterless: find the parent rg row (no data-release-id) and
   // expand it via the same loadReleaseGroup helper that powers manual
   // clicks. The post-render hook in loadReleaseGroup applies the leaf ring.
-  const inner = /** @type {HTMLElement|null} */ (rgEl.querySelector(`#rel-${cssEscape(expandId)}`));
+  const inner = /** @type {HTMLElement|null} */ (targetRow.querySelector('.releases'));
   if (!inner) return;
   openCollapsedAncestors(inner, rgEl);
   if (inner.innerHTML) return;  // already expanded (cache re-render); ring will re-apply on next loadReleaseGroup
-  loadReleaseGroup(expandId, inner, { targetEl: inner });
+  loadReleaseGroup(expandId, inner, {
+    targetEl: inner,
+    source,
+    identityKind,
+  });
 }
 
 /**
@@ -304,38 +358,38 @@ export function renderPressingRow(rel, ctx) {
  * @param {HTMLElement} el - The clicked element (kept for signature compat)
  * @param {Object} [opts]
  * @param {HTMLElement} [opts.targetEl] - Where to render. Defaults to
- *   document.getElementById('rel-' + id) so existing call sites still work.
- *   Compare view passes its own div so its IDs don't collide with the
- *   Discography view's `rel-${id}` ones.
+ *   the clicked row's next sibling, then its source/kind-namespaced ID.
+ *   Compare view passes its own div explicitly.
  * @param {string} [opts.source] - 'mb' or 'discogs'. Defaults to
  *   state.browseSource. Compare view passes the explicit source so MB and
  *   Discogs pressings can be loaded independently for the same row.
+ * @param {'work'|'release'} [opts.identityKind] - Exact identity level.
+ *   Defaults to release for masterless rows and work otherwise.
  * @param {() => boolean} [opts.isStale] - Optional callback returning true
  *   when this load should be discarded. Checked after each await and
  *   before any DOM write. Used by the VA fallback (where the target
  *   element is a stable, never-replaced node so a stale write is visible)
  *   to thread the parent flow's in-flight token down. Artist-view callers
- *   omit it because their target #rel-X is detached on re-render.
+ *   omit it because their namespaced expansion target is detached on re-render.
  */
 export async function loadReleaseGroup(id, el, opts = {}) {
-  const relEl = opts.targetEl || document.getElementById('rel-' + id);
+  const source = opts.source || state.browseSource;
+  const identityKind = opts.identityKind || (opts.masterless ? 'release' : 'work');
+  const relEl = opts.targetEl
+    || el?.nextElementSibling
+    || document.getElementById(catalogueDomId(source, identityKind, id));
   if (!relEl) return;
   if (relEl.innerHTML) { relEl.innerHTML = ''; return; }
   relEl.innerHTML = '<div class="loading">Loading releases...</div>';
   const isStale = opts.isStale || (() => false);
   try {
-    const source = opts.source || state.browseSource;
     const isDiscogs = source === 'discogs';
-    // Masterless Discogs releases (is_masterless from the artist endpoint)
-    // have no upstream master row; their ``id`` is a release ID. Hit the
+    // Ungrouped Discogs release identities have no upstream master row;
+    // their ``id`` is a release ID. Hit the
     // release endpoint directly and synthesise a single-pressing list so
     // the rest of the rendering path is unchanged.
-    const masterless = isDiscogs && !!opts.masterless;
-    const url = masterless
-      ? `${API}/api/discogs/release/${id}`
-      : isDiscogs
-        ? `${API}/api/discogs/master/${id}`
-        : `${API}/api/release-group/${id}`;
+    const masterless = isDiscogs && identityKind === 'release';
+    const url = `${API}${releaseGroupRequestPath(id, source, identityKind)}`;
     // Warm the active-rg cache in parallel — the Browse-search inverted
     // Replace button per release row consults it. MB releases carry the
     // release-group id in the parent ``id`` here; Discogs masters don't

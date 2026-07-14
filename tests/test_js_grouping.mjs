@@ -38,6 +38,19 @@ assertEqual(classify({ type: 'Album', secondary_types: ['DJ-mix'] }), 'DJ Mixes'
 assertEqual(classify({ type: 'Album', secondary_types: ['Demo'] }), 'Demos', 'demo wins');
 assertEqual(classify({ type: 'Album', secondary_types: ['Mixtape/Street'] }), 'Other', 'unknown secondary -> Other');
 
+// Normalized artist rows: structural membership is authoritative. The legacy
+// representative scalar is never allowed to invent an Album/EP/Single.
+assertEqual(classify({
+  type: 'Album', primary_types: [], secondary_types: [], format_qualifiers: [],
+}), 'Other', 'empty structural evidence defeats representative scalar Album');
+assertEqual(classify({
+  type: 'Other', primary_types: ['EP'], secondary_types: [], format_qualifiers: [],
+}), 'EPs', 'positive structural EP evidence owns the section');
+assertEqual(classify({
+  type: 'Album', primary_types: [], secondary_types: [],
+  format_qualifiers: ['Compilation'],
+}), 'Compilations', 'Discogs Compilation qualifier stays a compilation');
+
 // Analysis-style (primary_type)
 assertEqual(classify({ primary_type: 'Album' }), 'Albums', 'analysis primary_type Album');
 assertEqual(classify({ primary_type: 'Single' }), 'Singles', 'analysis primary_type Single');

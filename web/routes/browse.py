@@ -10,6 +10,12 @@ import copy
 import urllib.error
 from typing import TYPE_CHECKING
 
+import msgspec
+
+from lib.artist_catalogue import (
+    ArtistCatalogueRow,
+    ArtistCompareSkeleton,
+)
 from lib.release_identity import (
     ReleaseIdentity,
     normalize_release_id,
@@ -70,49 +76,68 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
 _PIPELINE_BADGE_PRIORITY = {"downloading": 0, "wanted": 1, "manual": 2, "imported": 3}
 
 
-def _artist_pipeline_maps(name: str, mb_artist_id: str = "") -> tuple[dict, dict]:
-    """Best-status non-replaced request per release-group id and per
-    release id for one artist. Feeds the rg-row badge overlay (#575) —
-    the same state the pressing rows already show, surfaced one level up."""
+ArtistPipelineKey = tuple[str, str, str]
+ArtistPipelineMap = dict[ArtistPipelineKey, dict]
+
+
+def _artist_pipeline_map(name: str, mb_artist_id: str = "") -> ArtistPipelineMap:
+    """Best non-replaced request keyed by source + identity unit + id.
+
+    Discogs requests persist their exact master in ``mb_release_group_id``
+    and exact leaf in ``discogs_release_id``. Keeping those namespaces in the
+    key lets a work row receive its exact master overlay without allowing a
+    numerically equal leaf release to badge it.
+    """
     srv = _server()
-    by_rg: dict[str, dict] = {}
-    by_release: dict[str, dict] = {}
+    by_identity: ArtistPipelineMap = {}
+
+    def keep_best(key: ArtistPipelineKey, hit: dict) -> None:
+        current = by_identity.get(key)
+        if current is None or hit["_prio"] < current["_prio"]:
+            by_identity[key] = hit
+
     for row in srv.list_artist_requests(name, mb_artist_id):
         status = str(row["status"])
         if status == "replaced":
             continue
         prio = _PIPELINE_BADGE_PRIORITY.get(status, 9)
         hit = {"status": status, "id": row["id"], "_prio": prio}
-        for key, target in (
-            (row.get("mb_release_group_id"), by_rg),
-            (row.get("mb_release_id"), by_release),
-        ):
-            if not key:
-                continue
-            cur = target.get(str(key))
-            if cur is None or prio < cur["_prio"]:
-                target[str(key)] = hit
-    return by_rg, by_release
+        release_identity = ReleaseIdentity.from_fields(
+            row.get("mb_release_id"), row.get("discogs_release_id"),
+        )
+        group_id = row.get("mb_release_group_id")
+        source = (
+            "discogs"
+            if release_identity and release_identity.source == "discogs"
+            else "mb"
+        )
+        if group_id:
+            keep_best((source, "work", str(group_id)), hit)
+        if release_identity:
+            release_source = (
+                "discogs" if release_identity.source == "discogs" else "mb"
+            )
+            keep_best(
+                (release_source, "release", release_identity.release_id), hit,
+            )
+    return by_identity
 
 
-def _apply_rg_pipeline_overlay(rows: list[dict], by_rg: dict, by_release: dict) -> None:
-    """Badge rg-shaped rows with the artist's request state. Masterless
-    Discogs rows' ``id`` IS a release id, so fall through to the
-    release-id map; Discogs master ids match neither (requests key on
-    release ids), which is the accepted gap."""
-    for rg in rows:
-        rid = str(rg.get("id"))
-        hit = by_rg.get(rid) or by_release.get(rid)
+def _apply_rg_pipeline_overlay(
+    rows: list[ArtistCatalogueRow], by_identity: ArtistPipelineMap,
+) -> None:
+    """Badge rows only through an exact source/unit/id identity key."""
+    for row in rows:
+        hit = by_identity.get((row.source, row.identity_kind, row.id))
         if hit:
-            rg["pipeline_status"] = hit["status"]
-            rg["pipeline_id"] = hit["id"]
+            row.pipeline_status = hit["status"]
+            row.pipeline_id = hit["id"]
 
 
 def get_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], artist_id: str) -> None:
     srv = _server()
     try:
         rgs = srv.mb_api.get_artist_release_groups(artist_id)
-        official_rg_ids = srv.mb_api.get_official_release_group_ids(artist_id)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             status = 404
@@ -142,8 +167,6 @@ def get_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], artist_i
             "retryable": True,
         }, status=503)
         return
-    for rg in rgs:
-        rg["has_official"] = rg["id"] in official_rg_ids
     # Row-level in-library badge: requires the artist's library albums.
     # Frontend passes ?name= to avoid an extra MB lookup; without it the
     # name-fallback in get_albums_by_artist won't catch Discogs-tagged
@@ -153,9 +176,12 @@ def get_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], artist_i
     if name:
         lib = srv.get_library_artist(name, artist_id)
         annotate_in_library(rgs, [], lib, rank_fn=srv.compute_library_rank)
-        by_rg, by_release = _artist_pipeline_maps(name, artist_id)
-        _apply_rg_pipeline_overlay(rgs, by_rg, by_release)
-    h._json({"release_groups": rgs})  # type: ignore[attr-defined]
+        by_identity = _artist_pipeline_map(name, artist_id)
+        _apply_rg_pipeline_overlay(rgs, by_identity)
+    h._json({  # type: ignore[attr-defined]
+        "release_groups": msgspec.to_builtins(rgs),
+        "ungrouped_releases": [],
+    })
 
 
 def _build_disambiguate_skeleton(artist_id: str) -> dict:
@@ -373,22 +399,22 @@ def get_discogs_search(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
 def get_discogs_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], artist_id: str) -> None:
     srv = _server()
     artist_name = discogs_api.get_artist_name(int(artist_id))
-    masters = discogs_api.get_artist_releases(int(artist_id))
-    # Discogs has no bootleg/official distinction — mark all as official
-    for m in masters:
-        m["has_official"] = True
+    catalogue = discogs_api.get_artist_releases(int(artist_id))
     # Row-level in-library badge: same pattern as MB. Frontend passes
     # ?name=; without it we still get the canonical name from Discogs API.
     name = params.get("name", [""])[0].strip() or artist_name
     if name:
         lib = srv.get_library_artist(name, "")
-        annotate_in_library([], masters, lib, rank_fn=srv.compute_library_rank)
-        by_rg, by_release = _artist_pipeline_maps(name)
-        _apply_rg_pipeline_overlay(masters, by_rg, by_release)
+        annotate_in_library([], catalogue, lib, rank_fn=srv.compute_library_rank)
+        by_identity = _artist_pipeline_map(name)
+        _apply_rg_pipeline_overlay(catalogue, by_identity)
+    works = [row for row in catalogue if row.identity_kind == "work"]
+    ungrouped = [row for row in catalogue if row.identity_kind == "release"]
     h._json({  # type: ignore[attr-defined]
         "artist_id": artist_id,
         "artist_name": artist_name,
-        "release_groups": masters,
+        "release_groups": msgspec.to_builtins(works),
+        "ungrouped_releases": msgspec.to_builtins(ungrouped),
     })
 
 
@@ -457,7 +483,9 @@ def _resolve_compare_artist_ids(name: str, mbid: str,
     return mbid, discogs_id
 
 
-def _build_compare_skeleton(mbid: str, discogs_id: str) -> dict:
+def _build_compare_skeleton(
+    mbid: str, discogs_id: str,
+) -> ArtistCompareSkeleton:
     """Pure-metadata compare skeleton — no in_library overlay and
     deliberately no artist labels either.
 
@@ -471,23 +499,21 @@ def _build_compare_skeleton(mbid: str, discogs_id: str) -> dict:
     resolved `(mbid, discogs_id)` pair and pure-metadata inputs.
     """
     srv = _server()
-    mb_groups: list[dict] = []
+    mb_groups: list[ArtistCatalogueRow] = []
     if mbid:
         mb_groups = srv.mb_api.get_artist_release_groups(mbid)
-        official_rg_ids = srv.mb_api.get_official_release_group_ids(mbid)
-        for rg in mb_groups:
-            rg["has_official"] = rg["id"] in official_rg_ids
 
-    discogs_groups: list[dict] = []
+    discogs_groups: list[ArtistCatalogueRow] = []
     if discogs_id:
         discogs_groups = discogs_api.get_artist_releases(int(discogs_id))
 
     merged = merge_discographies(mb_groups, discogs_groups)
-    return {
-        "both": merged.both,
-        "mb_only": merged.mb_only,
-        "discogs_only": merged.discogs_only,
-    }
+    return ArtistCompareSkeleton(
+        both=merged.both,
+        mb_unpaired=merged.mb_unpaired,
+        discogs_unpaired=merged.discogs_unpaired,
+        discogs_ungrouped_releases=merged.discogs_ungrouped_releases,
+    )
 
 
 def _canonical_artist_labels(mbid: str, discogs_id: str) -> tuple[
@@ -512,12 +538,14 @@ def _canonical_artist_labels(mbid: str, discogs_id: str) -> tuple[
     return mb_artist, discogs_artist
 
 
-def _overlay_compare(skeleton: dict, name: str, mbid: str) -> dict:
+def _overlay_compare(
+    skeleton: ArtistCompareSkeleton, name: str, mbid: str,
+) -> ArtistCompareSkeleton:
     """Apply per-request `in_library` overlay to a cached compare
-    skeleton. Returns a new dict — does not mutate the cached value.
+    skeleton. Returns a new struct — does not mutate the cached value.
 
-    annotate_in_library mutates row dicts in place. We deep-copy the
-    skeleton first so the cached dict stays clean for the next request.
+    annotate_in_library mutates typed rows in place. We deep-copy the
+    skeleton first so the cached value stays clean for the next request.
     """
     srv = _server()
     response = copy.deepcopy(skeleton)
@@ -526,24 +554,22 @@ def _overlay_compare(skeleton: dict, name: str, mbid: str) -> dict:
 
     lib = srv.get_library_artist(name, mbid)
 
-    # Reconstruct flat mb_groups / discogs_groups lists that reference
-    # the dict instances inside the three buckets, so annotate_in_library
-    # mutates them in place (the 'both' bucket holds pairs, not flat rows).
-    mb_groups: list[dict] = []
-    discogs_groups: list[dict] = []
-    for pair in response["both"]:
-        if isinstance(pair.get("mb"), dict):
-            mb_groups.append(pair["mb"])
-        if isinstance(pair.get("discogs"), dict):
-            discogs_groups.append(pair["discogs"])
-    mb_groups.extend(response["mb_only"])
-    discogs_groups.extend(response["discogs_only"])
+    # Reconstruct flat MB / Discogs lists that reference the row instances
+    # inside each bucket, so annotate_in_library mutates them in place.
+    mb_groups: list[ArtistCatalogueRow] = []
+    discogs_groups: list[ArtistCatalogueRow] = []
+    for pair in response.both:
+        mb_groups.append(pair.mb)
+        discogs_groups.append(pair.discogs)
+    mb_groups.extend(response.mb_unpaired)
+    discogs_groups.extend(response.discogs_unpaired)
+    discogs_groups.extend(response.discogs_ungrouped_releases)
 
     annotate_in_library(mb_groups, discogs_groups, lib,
                         rank_fn=srv.compute_library_rank)
-    by_rg, by_release = _artist_pipeline_maps(name, mbid)
-    _apply_rg_pipeline_overlay(mb_groups, by_rg, by_release)
-    _apply_rg_pipeline_overlay(discogs_groups, by_rg, by_release)
+    by_identity = _artist_pipeline_map(name, mbid)
+    _apply_rg_pipeline_overlay(mb_groups, by_identity)
+    _apply_rg_pipeline_overlay(discogs_groups, by_identity)
     return response
 
 
@@ -557,8 +583,8 @@ def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     Album/EP/Single evidence cannot conflict, and a one-year source-date
     difference is accepted only when both sources positively overlap on type.
 
-    Returns three buckets so the UI can show what each source uniquely
-    contributes plus the matched-on-both core catalog.
+    Returns paired works, honestly named unpaired work buckets, and a separate
+    bucket for ungrouped Discogs release/pressing identities.
 
     Pure-metadata skeleton (both discographies + merge output) is cached
     under `meta:` — the expensive merge doesn't re-run on warm loads.
@@ -576,16 +602,20 @@ def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
 
     # Skeleton key is the resolved (mbid, discogs_id) pair — display
     # names are stamped on outside the cache from the canonical APIs.
-    cache_key = f"artist:compare:v4:{mbid or 'none'}:{discogs_id or 'none'}"
-    skeleton = _cache.memoize_meta(
+    cache_key = f"artist:compare:v6:{mbid or 'none'}:{discogs_id or 'none'}"
+    cached = _cache.memoize_meta(
         cache_key,
-        lambda: _build_compare_skeleton(mbid, discogs_id),
+        lambda: msgspec.to_builtins(
+            _build_compare_skeleton(mbid, discogs_id)
+        ),
     )
+    skeleton = msgspec.convert(cached, type=ArtistCompareSkeleton)
     response = _overlay_compare(skeleton, name, mbid)
     mb_artist, discogs_artist = _canonical_artist_labels(mbid, discogs_id)
-    response["mb_artist"] = mb_artist
-    response["discogs_artist"] = discogs_artist
-    h._json(response)  # type: ignore[attr-defined]
+    payload = msgspec.to_builtins(response)
+    payload["mb_artist"] = mb_artist
+    payload["discogs_artist"] = discogs_artist
+    h._json(payload)  # type: ignore[attr-defined]
 
 
 # ── Search-by-ID resolver ────────────────────────────────────────────
@@ -612,6 +642,7 @@ def _resolve_mb(srv, raw_id: str, kind: str) -> dict:
                 "artist_id": artist_id,
                 "artist_name": data.get("artist_name") or "",
                 "is_va": artist_id == _MB_VA_ARTIST_MBID,
+                "target_identity_kind": "work",
                 "expand_id": data.get("release_group_id") or raw_id,
                 "leaf_id": raw_id,
             }
@@ -628,6 +659,7 @@ def _resolve_mb(srv, raw_id: str, kind: str) -> dict:
         "artist_id": artist_id,
         "artist_name": rg.get("artist_name") or "",
         "is_va": artist_id == _MB_VA_ARTIST_MBID,
+        "target_identity_kind": "work",
         "expand_id": raw_id,
         "leaf_id": None,
     }
@@ -650,14 +682,20 @@ def _resolve_discogs(raw_id: str, kind: str) -> dict:
             # str-or-None; release_group_id is master_id (None when masterless).
             artist_id = data.get("artist_id") or ""
             rg_id = data.get("release_group_id")
-            # Masterless release: ring it in place — no parent master to expand.
-            expand_id = rg_id if rg_id else raw_id
+            # Masterless release: ring it in place — no parent master to
+            # expand. Identity kind comes from nullability, never numeric
+            # comparison: master 122 and grouped release 122 may coexist.
+            is_masterless = rg_id is None
+            expand_id = raw_id if is_masterless else str(rg_id)
             return {
                 "source": "discogs",
                 "kind": "release",
                 "artist_id": artist_id,
                 "artist_name": data.get("artist_name") or "",
                 "is_va": artist_id == _DISCOGS_VA_ARTIST_ID,
+                "target_identity_kind": (
+                    "release" if is_masterless else "work"
+                ),
                 "expand_id": expand_id,
                 "leaf_id": raw_id,
             }
@@ -674,6 +712,7 @@ def _resolve_discogs(raw_id: str, kind: str) -> dict:
         "artist_id": artist_id,
         "artist_name": master.get("artist_credit") or "",
         "is_va": artist_id == _DISCOGS_VA_ARTIST_ID,
+        "target_identity_kind": "work",
         "expand_id": raw_id,
         "leaf_id": None,
     }
@@ -705,7 +744,7 @@ def get_browse_resolve(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     if source == "discogs":
         discogs_api.require_mirror_configured()
 
-    cache_key = f"browse-resolve:{source}:{kind}:{raw_id}"
+    cache_key = f"browse-resolve:v2:{source}:{kind}:{raw_id}"
 
     def _run() -> dict:
         if source == "mb":
@@ -741,7 +780,8 @@ ROUTES: list[RouteRegistration] = [
     route(
         "GET", "/api/browse/resolve", get_browse_resolve,
         "Resolve a pasted MBID / Discogs ID / URL into the artist-view "
-        "drop-in target (source, kind, expand_id, leaf_id).",
+        "drop-in target (source, kind, target_identity_kind, expand_id, "
+        "leaf_id).",
         classified=True,
     ),
     route(

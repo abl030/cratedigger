@@ -17,7 +17,7 @@
 import { state, API, toast, updatePipelineStatus } from './state.js';
 import { esc } from './util.js';
 import { invalidateBrowseArtist } from './browse.js';
-import { cssEscape } from './discography.js';
+import { catalogueDomId, cssEscape } from './discography.js';
 
 /** @type {string[]} */
 export const _PRESSING_COLORS = ['#6af','#fa6','#6d6','#f6a','#af6','#6ff','#ff6','#a6f'];
@@ -174,7 +174,8 @@ export function applyAnalysisToExpansion(relEl, rgId) {
 export function applyAnalysisToOpenExpansions(containerEl, disambData) {
   for (const rg of disambData.release_groups || []) {
     const relEl = /** @type {HTMLElement|null} */ (
-      containerEl.querySelector(`#rel-${cssEscape(rg.release_group_id)}`));
+      containerEl.querySelector(
+        `#${cssEscape(catalogueDomId('mb', 'work', rg.release_group_id))}`));
     if (relEl && relEl.innerHTML && !relEl.querySelector('.loading')) {
       applyAnalysisToExpansion(relEl, rg.release_group_id);
     }
