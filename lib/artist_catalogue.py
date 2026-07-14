@@ -47,7 +47,7 @@ class ArtistCatalogueRow(msgspec.Struct, omit_defaults=True):
 
 
 class ArtistCataloguePair(msgspec.Struct):
-    """One conservative cross-source work pairing."""
+    """One conservative association retaining both exact identities."""
 
     mb: ArtistCatalogueRow
     discogs: ArtistCatalogueRow

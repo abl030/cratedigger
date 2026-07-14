@@ -583,8 +583,11 @@ def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     Album/EP/Single evidence cannot conflict, and a one-year source-date
     difference is accepted only when both sources positively overlap on type.
 
-    Returns paired works, honestly named unpaired work buckets, and a separate
-    bucket for ungrouped Discogs release/pressing identities.
+    Returns internal association diagnostics while conserving every source
+    identity. A paired Discogs row may be a master or a masterless release;
+    the latter retains ``identity_kind='release'``. Unmatched masters and
+    releases remain in their established wire buckets for conservation checks,
+    but those buckets are not page taxonomy.
 
     Pure-metadata skeleton (both discographies + merge output) is cached
     under `meta:` — the expensive merge doesn't re-run on warm loads.
@@ -602,7 +605,7 @@ def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
 
     # Skeleton key is the resolved (mbid, discogs_id) pair — display
     # names are stamped on outside the cache from the canonical APIs.
-    cache_key = f"artist:compare:v6:{mbid or 'none'}:{discogs_id or 'none'}"
+    cache_key = f"artist:compare:v7:{mbid or 'none'}:{discogs_id or 'none'}"
     cached = _cache.memoize_meta(
         cache_key,
         lambda: msgspec.to_builtins(

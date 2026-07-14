@@ -100,15 +100,11 @@ def _pair_is_allowed(
 ) -> bool:
     if mb_appearance != discogs_appearance:
         return False
-    if not mb_provenance or not discogs_provenance:
-        return False
-    if "ordinary" in mb_provenance or "ordinary" in discogs_provenance:
-        if not (
-            "ordinary" in mb_provenance
-            and "ordinary" in discogs_provenance
-        ):
-            return False
-    elif not (mb_provenance & discogs_provenance):
+    if (
+        mb_provenance
+        and discogs_provenance
+        and not (mb_provenance & discogs_provenance)
+    ):
         return False
     overlap = bool(mb_types & discogs_types)
     if mb_types and discogs_types and not overlap:
@@ -135,7 +131,10 @@ def assert_single_pairing(
     else:
         assert result.both == []
         assert len(result.mb_unpaired) == 1
-        assert len(result.discogs_unpaired) == 1
+        assert (
+            len(result.discogs_unpaired)
+            + len(result.discogs_ungrouped_releases)
+        ) == 1
 
 
 def assert_partition_is_one_to_one(
@@ -156,19 +155,31 @@ def assert_partition_is_one_to_one(
     assert set(discogs_ids) == expected_discogs_ids
 
 
-def assert_release_units_never_enter_work_buckets(
+def assert_release_identity_conserved(
     result: CompareBuckets,
     *, release_ids: set[str],
 ) -> None:
-    """Every pressing identity stays in the explicit ungrouped bucket."""
-    work_ids = {
-        pair.discogs.id for pair in result.both
-    } | {row.id for row in result.discogs_unpaired}
-    ungrouped_ids = {
-        row.id for row in result.discogs_ungrouped_releases
-    }
-    if work_ids & release_ids or ungrouped_ids != release_ids:
-        raise AssertionError("release identity crossed into a work bucket")
+    """A release may associate, but it never becomes a work identity."""
+    paired = [
+        pair.discogs for pair in result.both
+        if pair.discogs.id in release_ids
+    ]
+    unmatched = [
+        row for row in result.discogs_ungrouped_releases
+        if row.id in release_ids
+    ]
+    wrong_bucket = [
+        row for row in result.discogs_unpaired
+        if row.id in release_ids
+    ]
+    observed = paired + unmatched
+    if (
+        wrong_bucket
+        or {row.id for row in observed} != release_ids
+        or len(observed) != len(release_ids)
+        or any(row.identity_kind != "release" for row in observed)
+    ):
+        raise AssertionError("release identity was lost or rewritten as a work")
 
 
 def assert_wire_payload_rejected(payload: dict) -> None:
@@ -237,7 +248,7 @@ _PROVENANCE_SET = st.sets(
 
 
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
-    def test_release_unit_checker_rejects_wrong_unit_admission(self) -> None:
+    def test_release_identity_checker_rejects_work_bucket_rewrite(self) -> None:
         release = _discogs(
             year=2000, types=["Album"], appearance=False, id_="release-1",
         )
@@ -249,8 +260,28 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             discogs_ungrouped_releases=[],
         )
         with self.assertRaisesRegex(AssertionError, "release identity"):
-            assert_release_units_never_enter_work_buckets(
+            assert_release_identity_conserved(
                 bad, release_ids={"release-1"}
+            )
+
+    def test_pairing_checker_rejects_masterless_false_negative(self) -> None:
+        release = _discogs(
+            year=1998, types=["Album"], appearance=False,
+            id_="3938744",
+        )
+        release.identity_kind = "release"
+        with self.assertRaises(AssertionError):
+            assert_single_pairing(
+                CompareBuckets(
+                    both=[],
+                    mb_unpaired=[_mb(
+                        year=1998, type_="Album", appearance=False,
+                        id_="1c9e2970-b221-30ab-93c6-7896b52a240b",
+                    )],
+                    discogs_unpaired=[],
+                    discogs_ungrouped_releases=[release],
+                ),
+                expected_pair=True,
             )
 
     def test_single_pairing_checker_rejects_hidden_source_row(self) -> None:
@@ -462,7 +493,7 @@ class TestArtistCompareGenerated(unittest.TestCase):
             max_size=20,
         )
     )
-    def test_masterless_releases_are_conserved_outside_work_matching(
+    def test_unmatched_masterless_releases_are_conserved_exactly(
         self,
         releases: list[tuple[int, StructuralType, bool]],
     ) -> None:
@@ -481,9 +512,15 @@ class TestArtistCompareGenerated(unittest.TestCase):
 
         result = merge_discographies([], rows)
 
-        assert_release_units_never_enter_work_buckets(
+        assert_release_identity_conserved(
             result, release_ids={str(value[0]) for value in releases}
         )
+        assert_partition_is_one_to_one(
+            result,
+            expected_mb_ids=set(),
+            expected_discogs_ids={str(value[0]) for value in releases},
+        )
+
     @example(
         mb_year=2000,
         discogs_year=2001,
@@ -494,6 +531,31 @@ class TestArtistCompareGenerated(unittest.TestCase):
         misleading_scalar="Album",
         mb_provenance=["ordinary"],
         discogs_provenance=["unofficial"],
+        discogs_identity_kind="release",
+    )
+    @example(
+        mb_year=1998,
+        discogs_year=1998,
+        mb_type="Album",
+        discogs_types=["Album"],
+        mb_appearance=False,
+        discogs_appearance=False,
+        misleading_scalar="Album",
+        mb_provenance=["ordinary"],
+        discogs_provenance=["ordinary"],
+        discogs_identity_kind="release",
+    )
+    @example(
+        mb_year=1998,
+        discogs_year=1998,
+        mb_type="Other",
+        discogs_types=[],
+        mb_appearance=False,
+        discogs_appearance=False,
+        misleading_scalar="Other",
+        mb_provenance=[],
+        discogs_provenance=["ordinary"],
+        discogs_identity_kind="release",
     )
     @given(
         mb_year=_YEAR,
@@ -505,6 +567,7 @@ class TestArtistCompareGenerated(unittest.TestCase):
         misleading_scalar=st.sampled_from((*_STRUCTURAL_TYPES, "Other", "")),
         mb_provenance=_PROVENANCE_SET,
         discogs_provenance=_PROVENANCE_SET,
+        discogs_identity_kind=st.sampled_from(("work", "release")),
     )
     def test_pairing_matches_independent_policy_oracle(
         self,
@@ -517,6 +580,7 @@ class TestArtistCompareGenerated(unittest.TestCase):
         misleading_scalar: str,
         mb_provenance: list[Provenance],
         discogs_provenance: list[Provenance],
+        discogs_identity_kind: str,
     ) -> None:
         mb = _mb(
             year=mb_year, type_=mb_type, appearance=mb_appearance,
@@ -528,6 +592,9 @@ class TestArtistCompareGenerated(unittest.TestCase):
             appearance=discogs_appearance,
             scalar_type=misleading_scalar,
             provenance=discogs_provenance,
+        )
+        discogs.identity_kind = cast(
+            Literal["work", "release"], discogs_identity_kind,
         )
         result = merge_discographies([mb], [discogs])
         expected = _pair_is_allowed(
@@ -546,6 +613,10 @@ class TestArtistCompareGenerated(unittest.TestCase):
             expected_mb_ids={"mb"},
             expected_discogs_ids={"discogs"},
         )
+        if discogs_identity_kind == "release":
+            assert_release_identity_conserved(
+                result, release_ids={"discogs"},
+            )
 
     @given(
         title=st.text(min_size=1, max_size=24),

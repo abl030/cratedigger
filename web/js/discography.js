@@ -16,8 +16,8 @@ import {
 /**
  * One release-group row: year + title + badges + expansion target.
  * Shared by every section of the unified artist page (issue #575 PR4) —
- * In library, Missing, Appearances, Bootlegs, and the late-appended
- * unpaired work and ungrouped-release sections from the other source.
+ * In library, Missing, and Other releases, including masterless rows and
+ * rows sourced from the comparison catalogue.
  *
  * @param {Object} rg - Release-group row from /api/artist or /api/discogs/artist
  *   (or a compare-bucket row for complement sections).
@@ -31,11 +31,13 @@ export function renderRgRow(rg, ctx) {
   const year = rg.first_release_date ? rg.first_release_date.slice(0, 4) : '';
   const creditNote = rg.artist_credit && rg.artist_credit.toLowerCase() !== ctx.nameLC
     ? `<span class="rg-meta"> - ${esc(rg.artist_credit)}</span>` : '';
-  const badges = renderStatusBadges(rg) + catalogueProvenanceBadges(rg);
+  const badges = renderStatusBadges(rg)
+    + catalogueCounterpartBadges(rg)
+    + catalogueProvenanceBadges(rg);
   const isReleaseUnit = rg.identity_kind === 'release';
   const source = ctx.source || rg.source || state.browseSource;
   const identityKind = isReleaseUnit ? 'release' : 'work';
-  // Ungrouped Discogs releases have no child master to expand; the row is
+  // Masterless Discogs releases have no child master to expand; the row is
   // the leaf, so it carries data-release-id for search-by-ID ringing.
   const leafAttr = isReleaseUnit ? ` data-release-id="${esc(rg.id)}"` : '';
   // Search-plan inspector button — only when this rg has a pipeline
@@ -108,6 +110,21 @@ export function catalogueProvenanceBadges(row) {
 }
 
 /**
+ * Describe exact ownership of an associated counterpart without applying it
+ * to the selected identity. The selected row's standard badges and actions
+ * continue to use only its own source/kind/id overlay.
+ * @param {Object} row
+ * @returns {string}
+ */
+export function catalogueCounterpartBadges(row) {
+  const counterpart = row.counterpart;
+  if (!counterpart || counterpart.in_library !== true) return '';
+  const label = counterpart.source === 'mb' ? 'MusicBrainz' : 'Discogs';
+  const title = `Exact ${label} ${counterpart.identity_kind || 'identity'} ${counterpart.id} is in library`;
+  return `<span class="badge badge-library" title="${esc(title)}">other edition in library</span>`;
+}
+
+/**
  * Search-by-ID post-discography-render hook.
  *
  * Reads `state.searchTargetExpandId` / `state.searchTargetId`; if both
@@ -119,7 +136,7 @@ export function catalogueProvenanceBadges(row) {
  * itself with no expansion step.
  *
  * Walks ancestors and opens any collapsed `.type-body` sections — without
- * this, a target inside Appearances, Bootleg-only, or any own/EPs/Singles
+ * this, a target inside Other releases or any own/EPs/Singles
  * typed section is invisible even after the inner releases load (those
  * wrappers default to display:none until the .open class is added).
  *
@@ -164,7 +181,7 @@ export function applySearchTargetAfterDiscography(rgEl) {
  * Walk up from an element and add `.open` to every `.type-body` ancestor
  * up to (but not including) `stopEl`. Used by the search-by-ID hook so
  * the user actually sees the ringed target — without this, a target
- * inside Appearances, Bootleg-only, or any non-Albums typed section is
+ * inside Other releases or any non-Albums typed section is
  * present in the DOM but hidden behind a collapsed `display:none`
  * wrapper, leaving the user staring at a discography with nothing
  * visibly highlighted.
@@ -384,7 +401,7 @@ export async function loadReleaseGroup(id, el, opts = {}) {
   const isStale = opts.isStale || (() => false);
   try {
     const isDiscogs = source === 'discogs';
-    // Ungrouped Discogs release identities have no upstream master row;
+    // Masterless Discogs release identities have no upstream master row;
     // their ``id`` is a release ID. Hit the
     // release endpoint directly and synthesise a single-pressing list so
     // the rest of the rendering path is unchanged.

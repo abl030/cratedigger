@@ -109,23 +109,131 @@ class TestExtractYear(unittest.TestCase):
 
 
 class TestMergeDiscographies(unittest.TestCase):
-    def test_masterless_release_is_never_admitted_to_work_matching(self):
+    def test_masterless_release_can_associate_without_losing_release_identity(self):
         mb = _mb("Shared Title", "2000", id="mb-work")
-        mb.identity_kind = "work"
-        mb.provenance = ["ordinary"]
         release = _dg("Shared Title", "2000", id="discogs-release")
+        release.identity_kind = "release"
+
+        result = merge_discographies([mb], [release])
+
+        self.assertEqual(len(result.both), 1)
+        self.assertEqual(result.both[0].mb.id, "mb-work")
+        self.assertEqual(result.both[0].discogs.id, "discogs-release")
+        self.assertEqual(result.both[0].discogs.identity_kind, "release")
+        self.assertEqual(result.mb_unpaired, [])
+        self.assertEqual(result.discogs_unpaired, [])
+        self.assertEqual(result.discogs_ungrouped_releases, [])
+
+    def test_unknown_provenance_does_not_block_known_ordinary_release(self):
+        mb = _mb("The Split", "1998", id="mb-split", type_="Other")
+        mb.provenance = []
+        release = _dg(
+            "The Split", "1998", id="discogs-split", type_="Other",
+            primary_types=[],
+        )
         release.identity_kind = "release"
         release.provenance = ["ordinary"]
 
         result = merge_discographies([mb], [release])
 
-        self.assertEqual(result.both, [])
-        self.assertEqual([row.id for row in result.mb_unpaired], ["mb-work"])
-        self.assertEqual(result.discogs_unpaired, [])
+        self.assertEqual(len(result.both), 1)
+        self.assertEqual(result.both[0].discogs.id, "discogs-split")
+
+    def test_masterless_release_respects_every_conservative_guard(self):
+        cases = [
+            ("provenance", {"provenance": ["unofficial"]}),
+            ("appearance", {"is_appearance": True}),
+            ("structural type", {"primary_types": ["EP"]}),
+            ("year", {"first_release_date": "2004"}),
+        ]
+        for label, mutation in cases:
+            with self.subTest(label=label):
+                mb = _mb("Shared Title", "2000", id="mb-work")
+                release = _dg(
+                    "Shared Title", "2000", id="discogs-release",
+                )
+                release.identity_kind = "release"
+                for field, value in mutation.items():
+                    setattr(release, field, value)
+
+                result = merge_discographies([mb], [release])
+
+                self.assertEqual(result.both, [])
+                self.assertEqual(
+                    [row.id for row in result.mb_unpaired], ["mb-work"],
+                )
+                self.assertEqual(result.discogs_unpaired, [])
+                self.assertEqual(
+                    [row.id for row in result.discogs_ungrouped_releases],
+                    ["discogs-release"],
+                )
+
+    def test_deloris_exact_five_pair_world(self):
+        mb_rows = [
+            _mb("Fraulein", "1998", id="1c9e2970-b221-30ab-93c6-7896b52a240b"),
+            _mb(
+                "The Point In The War When We Knew We Were Lost / "
+                "Mapped Out In Our Thoughts",
+                "1998", id="54748ae6-a05e-4eb4-81e6-0576e126a9a9",
+                type_="Other",
+            ),
+            _mb(
+                "The Pointless Gift", "2000-12-05",
+                id="fdb22921-b4c5-3c49-b2d0-85cb69eec1f1",
+            ),
+            _mb(
+                "Fake Our Deaths", "2004-08-31",
+                id="c47860b5-6afd-3a30-af3a-bafe6efc21b5",
+            ),
+            _mb(
+                "Ten Lives", "2006-10-28",
+                id="93c519f2-92e9-3ef2-aa3a-8754c9d8a2b3",
+            ),
+        ]
+        mb_rows[1].provenance = []
+        discogs_rows = [
+            _dg("Fraulein", "1998", id="3938744"),
+            _dg(
+                "The Point In The War When We Knew We Were Lost / "
+                "Mapped Out In Our Thoughts",
+                "1998", id="461708", type_="Other", primary_types=[],
+            ),
+            _dg("The Pointless Gift", "2001", id="3088588"),
+            _dg(
+                "Fake Our Deaths", "2004-08-30", id="5087639",
+                type_="Other", primary_types=[],
+            ),
+            _dg(
+                "Ten Lives", "2006-10-28", id="5087646",
+                type_="Other", primary_types=[],
+            ),
+        ]
+        for row in discogs_rows:
+            row.identity_kind = "release"
+
+        result = merge_discographies(mb_rows, discogs_rows)
+
+        self.assertEqual(len(result.both), 5)
         self.assertEqual(
-            [row.id for row in result.discogs_ungrouped_releases],
-            ["discogs-release"],
+            [(pair.mb.title, pair.discogs.id) for pair in result.both],
+            [
+                ("Fraulein", "3938744"),
+                (
+                    "The Point In The War When We Knew We Were Lost / "
+                    "Mapped Out In Our Thoughts",
+                    "461708",
+                ),
+                ("The Pointless Gift", "3088588"),
+                ("Fake Our Deaths", "5087639"),
+                ("Ten Lives", "5087646"),
+            ],
         )
+        self.assertTrue(all(
+            pair.discogs.identity_kind == "release" for pair in result.both
+        ))
+        self.assertEqual(result.mb_unpaired, [])
+        self.assertEqual(result.discogs_unpaired, [])
+        self.assertEqual(result.discogs_ungrouped_releases, [])
 
     def test_same_title_work_with_different_provenance_stays_unpaired(self):
         mb = _mb("Shared Title", "2000", id="mb-work")

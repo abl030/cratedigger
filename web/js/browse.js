@@ -8,7 +8,11 @@ import {
   renderReleaseDetail,
 } from './discography.js';
 import { applyAnalysisChips, applyAnalysisToOpenExpansions } from './analysis.js';
-import { classifyArtistRows, renderArtistSections, renderUnpairedSourceSections } from './artist_page.js';
+import {
+  classifyArtistRows,
+  composeCompareCatalogue,
+  renderArtistSections,
+} from './artist_page.js';
 import { searchLabels, renderLabelSearchResults, openLabelDetail, closeLabelDetail } from './labels.js';
 
 /**
@@ -37,8 +41,8 @@ async function findArtistOnSource(name, src) {
 
 /**
  * Reflect the active metadata source in the toggle buttons + the hint line.
- * The selected source is the PRIMARY discography; the other source only
- * exposes conservatively unpaired work units from the other source below.
+ * The selected source authors expansion and action identity for associated
+ * rows. Both sources still contribute to one semantic catalogue.
  * Called from every place that changes browseSource so the
  * primary/complement story never goes stale. Single source of truth for
  * the source-toggle chrome — the two call sites used to duplicate the
@@ -53,8 +57,8 @@ function applySourceUI(src) {
   const hint = document.getElementById('source-hint');
   if (hint) {
     hint.innerHTML = src === 'discogs'
-      ? '<b class="src-primary">Discogs</b> is primary · unpaired MusicBrainz works are shown below'
-      : '<b class="src-primary">MusicBrainz</b> is primary · unpaired Discogs works and releases are shown below';
+      ? '<b class="src-primary">Discogs</b> identities selected for expansions and actions'
+      : '<b class="src-primary">MusicBrainz</b> identities selected for expansions and actions';
   }
 }
 
@@ -456,7 +460,14 @@ export async function loadArtistPage(aid, name) {
 
   const cached = state.browseCache[aid];
   if (cached && cached.fast) {
-    renderUnified(el, aid, name, cached.fast.rgRes, cached.fast.libRes);
+    // A warm comparison is already the complete catalogue. Painting the fast
+    // source-only page first would immediately replace a multi-megabyte DOM
+    // on large artists such as the Rolling Stones, causing visible flicker
+    // and doubling the expensive render work on every cache hit.
+    renderUnified(
+      el, aid, name, cached.fast.rgRes, cached.fast.libRes,
+      cached.compare || null,
+    );
     // Re-fire any decoration that never landed (navigated away before
     // the fetch returned, or a transient failure) — a null slot must
     // not become null-forever on cache hits.
@@ -466,9 +477,7 @@ export async function loadArtistPage(aid, name) {
     } else {
       fireAnalysis(el, aid, token);
     }
-    if (cached.compare) {
-      appendOtherSourceSection(el, name, cached.compare);
-    } else {
+    if (!cached.compare) {
       fireCompareComplement(el, aid, name, token);
     }
     return;
@@ -508,30 +517,67 @@ export async function loadArtistPage(aid, name) {
 }
 
 /**
- * Section + render the fast pair, then apply the search-by-ID hook.
+ * Render either the fast selected-source catalogue or the completed
+ * cross-source semantic catalogue, then apply the search-by-ID hook.
  * @param {HTMLElement} el
  * @param {string} aid
  * @param {string} name
  * @param {Object} rgRes - /api/[discogs/]artist response
  * @param {Object} libRes - /api/library/artist response
+ * @param {Object|null} [compare] - /api/artist/compare diagnostics
+ * @param {boolean} [preserveExpansions] - retain loaded exact rows on late fill
  */
-function renderUnified(el, aid, name, rgRes, libRes) {
+function renderUnified(
+  el, aid, name, rgRes, libRes, compare = null, preserveExpansions = false,
+) {
+  const expanded = preserveExpansions ? captureExpandedRows(el) : [];
+  const rows = compare
+    ? composeCompareCatalogue(compare, state.browseSource)
+    : [...(rgRes.release_groups || []), ...(rgRes.ungrouped_releases || [])];
   const sections = classifyArtistRows({
     artistId: aid,
     artistName: name,
-    releaseGroups: rgRes.release_groups || [],
-    ungroupedReleases: rgRes.ungrouped_releases || [],
+    releaseGroups: rows,
+    ungroupedReleases: [],
     libraryAlbums: libRes.albums || [],
   });
   el.innerHTML = renderArtistSections(sections, { artistId: aid, artistName: name });
+  restoreExpandedRows(el, expanded);
   applySearchTargetAfterDiscography(el);
 }
 
+/** Preserve already-loaded expansions across the one late compare render. */
+function captureExpandedRows(el) {
+  return Array.from(el.querySelectorAll('.rg')).flatMap(row => {
+    const detail = row.querySelector('.releases');
+    if (!detail || !detail.innerHTML) return [];
+    return [{
+      source: row.dataset.catalogueSource,
+      identityKind: row.dataset.identityKind,
+      id: row.dataset.catalogueId,
+      html: detail.innerHTML,
+    }];
+  });
+}
+
+/** Restore expansions only onto the same exact source/kind/id row. */
+function restoreExpandedRows(el, expanded) {
+  for (const saved of expanded) {
+    const row = Array.from(el.querySelectorAll('.rg')).find(candidate =>
+      candidate.dataset.catalogueSource === saved.source
+      && candidate.dataset.identityKind === saved.identityKind
+      && candidate.dataset.catalogueId === saved.id);
+    const detail = row?.querySelector('.releases');
+    if (detail) detail.innerHTML = saved.html;
+  }
+}
+
 /**
- * Background decoration 1: the MB↔Discogs compare complement. Appends
- * honest unpaired-work and ungrouped-release sections from
- * /api/artist/compare. Silent on failure — a mirror-less host 503s and
- * the page simply stays single-source.
+ * Background decoration 1: complete the semantic catalogue from
+ * /api/artist/compare. Pairing remains diagnostic; the page reprojects the
+ * full result into the simple musical sections using the selected source
+ * identity for paired rows. Silent on failure — the fast selected-source
+ * catalogue remains usable.
  * @param {HTMLElement} el
  * @param {string} aid
  * @param {string} name
@@ -546,37 +592,21 @@ async function fireCompareComplement(el, aid, name, token) {
     const data = await r.json();
     if (token !== artistPageToken) return;
     if (state.browseCache[aid]) state.browseCache[aid].compare = data;
-    appendOtherSourceSection(el, name, data);
+    const cached = state.browseCache[aid];
+    if (!cached?.fast) return;
+    renderUnified(
+      el, aid, name, cached.fast.rgRes, cached.fast.libRes, data, true,
+    );
+    if (cached.disamb) {
+      state.disambData = cached.disamb;
+      applyAnalysisChips(el, cached.disamb);
+      applyAnalysisToOpenExpansions(el, cached.disamb);
+    }
     // A search-by-ID target may live in the complement (e.g. a Discogs
     // release pasted while browsing MB) — re-run the ring hook now that
     // its row exists.
     applySearchTargetAfterDiscography(el);
   } catch (_e) { /* decoration only — the page is already rendered */ }
-}
-
-/**
- * Append the complement section (idempotent — skipped if present).
- * @param {HTMLElement} el
- * @param {string} name - Artist name
- * @param {Object} data - /api/artist/compare response
- */
-function appendOtherSourceSection(el, name, data) {
-  const isDiscogs = state.browseSource === 'discogs';
-  const rows = isDiscogs
-    ? (data.mb_unpaired || [])
-    : (data.discogs_unpaired || []);
-  const ungrouped = isDiscogs
-    ? []
-    : (data.discogs_ungrouped_releases || []);
-  const html = renderUnpairedSourceSections(
-    el.querySelector('#unpaired-other-source') ? [] : rows,
-    el.querySelector('#ungrouped-discogs-releases') ? [] : ungrouped,
-    {
-    artistName: name,
-    source: isDiscogs ? 'mb' : 'discogs',
-    },
-  );
-  if (html) el.insertAdjacentHTML('beforeend', html);
 }
 
 /**

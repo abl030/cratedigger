@@ -1,10 +1,10 @@
 """Conservative MB/Discogs artist-catalogue comparison.
 
 The adapters feed this module one shared semantic row shape. MusicBrainz
-release groups and Discogs masters are ``identity_kind='work'``. Masterless
-Discogs releases are ``identity_kind='release'`` and never participate in
-work pairing. Unpaired means exactly that: the conservative matcher did not
-pair the work; it is not a claim that the other source lacks it.
+release groups, Discogs masters, and masterless Discogs releases all describe
+the artist's semantic catalogue. A masterless row remains
+``identity_kind='release'`` even when it associates with an MB work: display
+association never rewrites pressing identity or authorizes substitution.
 """
 
 from __future__ import annotations
@@ -108,15 +108,11 @@ def _provenance_compatible(
     mb_row: ArtistCatalogueRow,
     discogs_row: ArtistCatalogueRow,
 ) -> bool:
-    """Require positive, compatible ordinary/exceptional provenance."""
+    """Reject positive conflicts without treating unknown as a conflict."""
     mb = frozenset(mb_row.provenance)
     discogs = frozenset(discogs_row.provenance)
     if not mb or not discogs:
-        return False
-    mb_ordinary = "ordinary" in mb
-    discogs_ordinary = "ordinary" in discogs
-    if mb_ordinary or discogs_ordinary:
-        return mb_ordinary and discogs_ordinary
+        return True
     return bool(mb & discogs)
 
 
@@ -124,29 +120,28 @@ def merge_discographies(
     mb_groups: list[ArtistCatalogueRow],
     discogs_groups: list[ArtistCatalogueRow],
 ) -> CompareBuckets:
-    """Pair work units conservatively and conserve release units separately.
+    """Associate semantic catalogue rows and conserve exact identities.
 
     Work pairing requires normalized-title equality, matching appearance
-    provenance, compatible ordinary/exceptional provenance, no known
+    provenance, no positive provenance conflict, no known
     structural-type conflict, and a conservative date rule. Exact years may
     pair when one source has unknown structural type; adjacent years require
-    positive overlapping structural evidence. Each source identity remains
-    present exactly once across the returned buckets.
+    positive overlapping structural evidence. Unknown provenance is not
+    negative evidence; when both sides are known their evidence sets must
+    overlap. Each source identity remains present exactly once across the
+    returned buckets, and a paired Discogs release remains a release.
     """
     if any(row.identity_kind != "work" for row in mb_groups):
         raise ValueError("MusicBrainz artist rows must be work identities")
 
-    discogs_works = [
-        row for row in discogs_groups if row.identity_kind == "work"
-    ]
-    discogs_releases = [
-        row for row in discogs_groups if row.identity_kind == "release"
-    ]
-    if len(discogs_works) + len(discogs_releases) != len(discogs_groups):
+    if any(
+        row.identity_kind not in {"work", "release"}
+        for row in discogs_groups
+    ):
         raise ValueError("unknown Discogs artist identity kind")
 
     by_norm: dict[str, list[int]] = defaultdict(list)
-    for index, row in enumerate(discogs_works):
+    for index, row in enumerate(discogs_groups):
         norm = normalize_title(row.title)
         if norm:
             by_norm[norm].append(index)
@@ -159,7 +154,7 @@ def merge_discographies(
         mb_appearance = mb_row.is_appearance
 
         for discogs_index in by_norm.get(norm, []):
-            discogs_row = discogs_works[discogs_index]
+            discogs_row = discogs_groups[discogs_index]
             if mb_appearance != discogs_row.is_appearance:
                 continue
             if not _provenance_compatible(mb_row, discogs_row):
@@ -219,17 +214,21 @@ def merge_discographies(
         else:
             both.append(ArtistCataloguePair(
                 mb=mb_row,
-                discogs=discogs_works[discogs_index],
+                discogs=discogs_groups[discogs_index],
             ))
 
-    discogs_unpaired = [
+    unmatched_discogs = [
         row
-        for index, row in enumerate(discogs_works)
+        for index, row in enumerate(discogs_groups)
         if index not in matched_discogs
     ]
     return CompareBuckets(
         both=both,
         mb_unpaired=mb_unpaired,
-        discogs_unpaired=discogs_unpaired,
-        discogs_ungrouped_releases=discogs_releases,
+        discogs_unpaired=[
+            row for row in unmatched_discogs if row.identity_kind == "work"
+        ],
+        discogs_ungrouped_releases=[
+            row for row in unmatched_discogs if row.identity_kind == "release"
+        ],
     )
