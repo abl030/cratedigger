@@ -429,23 +429,32 @@ export function confirmDeleteBeets(id, artist, album, trackCount, pipelineId = n
  * @returns {{message: string, error: boolean, completed: boolean}}
  */
 export function describeBeetsDeletion(data) {
+  const warnings = (data.notifications || []).filter(n => n.status === 'warning');
+  const preserved = data.preserved_paths || [];
+  const warningParts = [];
+  if (preserved.length) {
+    warningParts.push(`${preserved.length} unknown path${preserved.length === 1 ? '' : 's'} preserved`);
+  }
+  if (warnings.length) {
+    const details = warnings
+      .map(n => `${n.provider}: ${n.detail || 'unspecified warning'}`)
+      .join('; ');
+    warningParts.push(
+      `${warnings.length} media notification warning${warnings.length === 1 ? '' : 's'} (${details})`,
+    );
+  }
+  const warningSuffix = warningParts.length ? `; ${warningParts.join(', ')}` : '';
   if (data.status === 'ok') {
     const pipelineMsg = data.pipeline_deleted ? ', request removed' : '';
-    const warnings = (data.notifications || []).filter(n => n.status === 'warning');
-    const preserved = data.preserved_paths || [];
-    const warningParts = [];
-    if (preserved.length) warningParts.push(`${preserved.length} unknown path${preserved.length === 1 ? '' : 's'} preserved`);
-    if (warnings.length) warningParts.push(`${warnings.length} media notification warning${warnings.length === 1 ? '' : 's'}`);
-    const suffix = warningParts.length ? `; ${warningParts.join(', ')}` : '';
     return {
-      message: `Deleted: ${data.artist} - ${data.album} (${data.deleted_files} tracks, ${data.deleted_artifacts} owned artifacts${pipelineMsg})${suffix}`,
+      message: `Deleted: ${data.artist} - ${data.album} (${data.deleted_files} tracks, ${data.deleted_artifacts} owned artifacts${pipelineMsg})${warningSuffix}`,
       error: warningParts.length > 0,
       completed: true,
     };
   }
   if (data.status === 'partial' && data.album_deleted) {
     return {
-      message: `Album deleted, but pipeline request #${data.pipeline_id} remains. Retry pipeline cleanup after checking logs.`,
+      message: `Album deleted, but pipeline request #${data.pipeline_id} remains. Retry pipeline cleanup after checking logs${warningSuffix}.`,
       error: true,
       completed: true,
     };

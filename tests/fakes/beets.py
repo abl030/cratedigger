@@ -64,6 +64,7 @@ class FakeBeetsDB:
         self._albums_by_artist: dict[str, list[dict[str, Any]]] = {}
         self.list_release_identities_calls: int = 0
         self._album_detail: dict[int, dict[str, Any]] = {}
+        self._orphan_item_album_ids: set[int] = set()
         self.get_album_detail_calls: list[int] = []
         self._locate_queue: list[ReleaseLocation] = []
         self.locate_calls: list[str] = []
@@ -108,6 +109,12 @@ class FakeBeetsDB:
 
     def set_album_detail(self, album_id: int, detail: dict[str, Any]) -> None:
         self._album_detail[album_id] = copy.deepcopy(detail)
+
+    def set_orphan_items_present(self, album_id: int, present: bool = True) -> None:
+        if present:
+            self._orphan_item_album_ids.add(album_id)
+        else:
+            self._orphan_item_album_ids.discard(album_id)
 
     def set_min_bitrate(self, release_id: str, kbps: int | None) -> None:
         """Seed a per-release min bitrate. Keys are normalized like
@@ -262,6 +269,12 @@ class FakeBeetsDB:
         self.get_album_detail_calls.append(album_id)
         detail = self._album_detail.get(album_id)
         return copy.deepcopy(detail) if detail is not None else None
+
+    def album_and_items_absent(self, album_id: int) -> bool:
+        return (
+            album_id not in self._album_detail
+            and album_id not in self._orphan_item_album_ids
+        )
 
     @staticmethod
     def _selectors_for(release_id: str) -> tuple[str, ...]:

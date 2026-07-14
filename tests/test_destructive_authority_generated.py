@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import tempfile
 import unittest
@@ -22,7 +23,11 @@ from lib.destructive_release_service import (
     ban_source,
     delete_release_from_library,
 )
-from lib.beets_delete import BeetsDeleteCompleted, BeetsDeleteRequest
+from lib.beets_delete import (
+    BeetsDeleteCompleted,
+    BeetsDeleteFailureReason,
+    BeetsDeleteRequest,
+)
 from lib.beets_delete import (
     BeetsDeleteFailed,
     _OwnedPath,
@@ -118,6 +123,31 @@ def assert_delete_postcondition(
             raise AssertionError("PG partial state is not explicit")
     else:
         raise AssertionError(f"unknown outcome {outcome}")
+
+
+def assert_delete_ack_reconciliation_law(
+    *,
+    reason: str,
+    metadata_absent: bool,
+    retained_path: bool,
+    purge_pipeline: bool,
+    completed: bool,
+    pipeline_present: bool,
+    notification_count: int,
+) -> None:
+    """Only ambiguous acknowledgements plus exact absence may complete."""
+    should_complete = (
+        reason in {"subprocess_error", "protocol_error"}
+        and metadata_absent
+        and retained_path
+    )
+    if completed != should_complete:
+        raise AssertionError("lost-ack completion did not match the proof facts")
+    if notification_count != int(should_complete):
+        raise AssertionError("notification did not follow reconciled completion")
+    expected_pipeline_present = not (should_complete and purge_pipeline)
+    if pipeline_present != expected_pipeline_present:
+        raise AssertionError("pipeline purge did not remain the final phase")
 
 
 def _different_release(release_id: str) -> str:
@@ -585,6 +615,100 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                     )
 
     @example(
+        reason="subprocess_error", album_present=False, orphan_items=False,
+        path_source="track", purge_pipeline=True,
+    )
+    @example(
+        reason="protocol_error", album_present=False, orphan_items=True,
+        path_source="art", purge_pipeline=True,
+    )
+    @example(
+        reason="filesystem_error", album_present=False, orphan_items=False,
+        path_source="track", purge_pipeline=True,
+    )
+    @given(
+        reason=st.sampled_from((
+            "subprocess_error", "protocol_error", "filesystem_error",
+            "metadata_error", "postcondition_failed",
+        )),
+        album_present=st.booleans(),
+        orphan_items=st.booleans(),
+        path_source=st.sampled_from(("track", "art", "none")),
+        purge_pipeline=st.booleans(),
+    )
+    def test_lost_delete_ack_requires_authoritative_metadata_absence(
+        self,
+        reason: BeetsDeleteFailureReason,
+        album_present: bool,
+        orphan_items: bool,
+        path_source: str,
+        purge_pipeline: bool,
+    ) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41,
+            status="imported",
+            mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        ))
+        album_dir = Path("/music/Artist/Album")
+        detail: dict[str, object] = {
+            "id": 7,
+            "album": "Album",
+            "artist": "Artist",
+            "mb_albumid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "discogs_albumid": None,
+            "tracks": [],
+        }
+        if path_source == "track":
+            detail["tracks"] = [{"id": 1, "path": str(album_dir / "01.flac")}]
+        elif path_source == "art":
+            detail["artpath"] = str(album_dir / "cover.jpg")
+        beets = FakeBeetsDB()
+        beets.set_album_detail(7, detail)
+        notifications: list[str] = []
+
+        def failed_child(request: BeetsDeleteRequest) -> BeetsDeleteFailed:
+            if not album_present:
+                beets._album_detail.pop(request.album_id)
+            beets.set_orphan_items_present(request.album_id, orphan_items)
+            return BeetsDeleteFailed(
+                album_id=request.album_id,
+                reason=reason,
+                detail="generated child boundary failure",
+                album_still_present=album_present,
+            )
+
+        previous_disable = logging.root.manager.disable
+        logging.disable(logging.CRITICAL)
+        try:
+            result = delete_release_from_library(
+                pipeline_db=db,
+                beets_db=beets,
+                request=DeleteRequest(
+                    album_id=7,
+                    purge_pipeline=purge_pipeline,
+                ),
+                beets_delete_fn=failed_child,
+                notify_fn=lambda path: notifications.append(path) or (),
+            )
+        finally:
+            logging.disable(previous_disable)
+
+        assert_delete_ack_reconciliation_law(
+            reason=reason,
+            metadata_absent=(not album_present and not orphan_items),
+            retained_path=path_source != "none",
+            purge_pipeline=purge_pipeline,
+            completed=isinstance(result, DeleteSuccess),
+            pipeline_present=db.get_request(41) is not None,
+            notification_count=len(notifications),
+        )
+        if isinstance(result, DeleteSuccess):
+            self.assertEqual(result.album_name, "Album")
+            self.assertEqual(result.artist_name, "Artist")
+            self.assertEqual(result.former_album_path, str(album_dir))
+
+    @example(
         track_presence=[True, True], art_present=True, sidecar_present=True,
         unknown_payload=b"booklet", fault_at=-1, noop=False,
     )
@@ -794,6 +918,41 @@ class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
                     unknown_bytes_preserved=bool(world["unknown_bytes_preserved"]),
                     beets_album_present=bool(world["beets_album_present"]),
                     pipeline_present=bool(world["pipeline_present"]),
+                )
+
+    def test_ack_checker_kills_each_commit_boundary_mutant(self) -> None:
+        mutants = {
+            "blind_filesystem_reconciliation": dict(
+                reason="filesystem_error", metadata_absent=True,
+                retained_path=True, purge_pipeline=True, completed=True,
+                pipeline_present=False, notification_count=1,
+            ),
+            "orphan_items_accepted": dict(
+                reason="protocol_error", metadata_absent=False,
+                retained_path=True, purge_pipeline=True, completed=True,
+                pipeline_present=False, notification_count=1,
+            ),
+            "committed_protocol_delete_stranded": dict(
+                reason="protocol_error", metadata_absent=True,
+                retained_path=True, purge_pipeline=True, completed=False,
+                pipeline_present=True, notification_count=0,
+            ),
+            "missing_path_accepted": dict(
+                reason="subprocess_error", metadata_absent=True,
+                retained_path=False, purge_pipeline=False, completed=True,
+                pipeline_present=True, notification_count=1,
+            ),
+        }
+        for name, world in mutants.items():
+            with self.subTest(mutant=name), self.assertRaises(AssertionError):
+                assert_delete_ack_reconciliation_law(
+                    reason=str(world["reason"]),
+                    metadata_absent=bool(world["metadata_absent"]),
+                    retained_path=bool(world["retained_path"]),
+                    purge_pipeline=bool(world["purge_pipeline"]),
+                    completed=bool(world["completed"]),
+                    pipeline_present=bool(world["pipeline_present"]),
+                    notification_count=int(world["notification_count"]),
                 )
 
 

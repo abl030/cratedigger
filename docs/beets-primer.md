@@ -452,6 +452,16 @@ preflight. Beets metadata is removed with `delete=False` only after every
 owned artifact is absent; album, item, and flexible-field rows share one outer
 transaction with explicit rollback on any exception.
 
+The child commits that final metadata transaction before its JSON result can
+reach the parent, so a process exit or malformed/truncated acknowledgement is
+commit-ambiguous. The parent reconciles only those two boundary failures, and
+only when a fresh SQLite query proves both the exact album primary key and all
+items for that key are absent. The preflight name, artist, and former path are
+retained for the result and media notifications. Filesystem, metadata, and
+postcondition failures are never promoted this way. Optional pipeline purge
+still runs last, and Plex/Jellyfin notification still waits until the
+destructive locks have been released.
+
 Unknown content is never recursively guessed away. It remains on disk, appears
 in `preserved_paths`, and blocks directory pruning. Partial I/O leaves both the
 Beets row and pipeline row available for retry. Zero newly deleted files is

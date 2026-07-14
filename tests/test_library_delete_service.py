@@ -6,13 +6,21 @@ from __future__ import annotations
 import os
 import shutil
 import sqlite3
+import subprocess as sp
+import sys
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from typing import Iterator
+from unittest.mock import patch
 
 from lib.beets_db import BeetsDB
-from lib.beets_delete import BeetsDeleteCompleted, BeetsDeleteRequest
+from lib.beets_delete import (
+    BeetsDeleteCompleted,
+    BeetsDeleteFailed,
+    BeetsDeleteRequest,
+    run_beets_delete,
+)
 from lib.destructive_release_service import (
     DeleteAlbumNotFound,
     DeleteIncomplete,
@@ -57,7 +65,7 @@ class TestDeleteReleaseFromLibrary(unittest.TestCase):
 
     def _delete_fn(self, album_dir: str):
         def delete(request: BeetsDeleteRequest) -> BeetsDeleteCompleted:
-            with sqlite3.connect(self.db_path) as conn:
+            with closing(sqlite3.connect(self.db_path)) as conn:
                 rows = conn.execute(
                     "SELECT path FROM items WHERE album_id = ?", (request.album_id,),
                 ).fetchall()
@@ -69,6 +77,7 @@ class TestDeleteReleaseFromLibrary(unittest.TestCase):
                         os.remove(path)
                 conn.execute("DELETE FROM items WHERE album_id = ?", (request.album_id,))
                 conn.execute("DELETE FROM albums WHERE id = ?", (request.album_id,))
+                conn.commit()
             return BeetsDeleteCompleted(
                 album_id=request.album_id,
                 album_name="Test Album",
@@ -179,6 +188,218 @@ class TestDeleteReleaseFromLibrary(unittest.TestCase):
         self.assertIsNotNone(pipeline.get_request(42))
         with BeetsDB(self.db_path) as beets:
             self.assertIsNotNone(beets.get_album_detail(7))
+
+    def test_postcommit_subprocess_error_reconciles_and_purges_last(self) -> None:
+        class TrackingPipeline(FakePipelineDB):
+            active_locks = 0
+
+            @contextmanager
+            def advisory_lock(
+                self, namespace: int, key: int,
+            ) -> Iterator[bool]:
+                with super().advisory_lock(namespace, key) as acquired:
+                    if acquired:
+                        self.active_locks += 1
+                    try:
+                        yield acquired
+                    finally:
+                        if acquired:
+                            self.active_locks -= 1
+
+        track_path = self._seed_album()
+        pipeline = TrackingPipeline()
+        pipeline.seed_request(make_request_row(
+            id=42, status="imported", mb_release_id=RELEASE_UUID,
+        ))
+        notified: list[str] = []
+
+        def nonzero_after_commit(argv, **_kwargs):
+            os.remove(track_path)
+            with closing(sqlite3.connect(self.db_path)) as conn:
+                conn.execute(
+                    "DELETE FROM items WHERE album_id = ?", (7,),
+                )
+                conn.execute(
+                    "DELETE FROM albums WHERE id = ?", (7,),
+                )
+                conn.commit()
+            return sp.CompletedProcess(
+                argv, 23, stdout=b"", stderr=b"ack channel closed",
+            )
+
+        def commit_then_lose_ack(request: BeetsDeleteRequest):
+            return run_beets_delete(request, runner=nonzero_after_commit)
+
+        def notify_after_release(path: str):
+            self.assertEqual(pipeline.active_locks, 0)
+            notified.append(path)
+            return ()
+
+        with (
+            patch.dict(os.environ, {
+                "BEETSDIR": self.tmpdir,
+                "CRATEDIGGER_BEETS_PYTHON": sys.executable,
+                "CRATEDIGGER_RUNTIME_CONFIG": os.path.join(
+                    self.tmpdir, "missing-runtime.ini",
+                ),
+            }),
+            BeetsDB(self.db_path) as beets,
+        ):
+            result = delete_release_from_library(
+                pipeline_db=pipeline,
+                beets_db=beets,
+                request=DeleteRequest(
+                    album_id=7, purge_pipeline=True,
+                    expected_pipeline_id=42,
+                    expected_release_id=RELEASE_UUID,
+                ),
+                beets_delete_fn=commit_then_lose_ack,
+                notify_fn=notify_after_release,
+            )
+            retry = delete_release_from_library(
+                pipeline_db=pipeline,
+                beets_db=beets,
+                request=DeleteRequest(album_id=7, purge_pipeline=True),
+                beets_delete_fn=lambda _request: self.fail(
+                    "retry must stop at the parent preflight"),
+                notify_fn=lambda _path: self.fail(
+                    "retry must not notify a second time"),
+            )
+
+        self.assertIsInstance(result, DeleteSuccess)
+        assert isinstance(result, DeleteSuccess)
+        self.assertTrue(result.pipeline_deleted)
+        self.assertEqual(result.album_name, "Test Album")
+        self.assertEqual(result.artist_name, "Test Artist")
+        self.assertEqual(notified, [os.path.dirname(track_path)])
+        self.assertEqual(pipeline.active_locks, 0)
+        self.assertIsNone(pipeline.get_request(42))
+        self.assertIsInstance(retry, DeleteAlbumNotFound)
+
+    def test_postcommit_protocol_loss_reconciles_without_requested_purge(
+        self,
+    ) -> None:
+        track_path = self._seed_album()
+        pipeline = FakePipelineDB()
+        pipeline.seed_request(make_request_row(
+            id=42, status="imported", mb_release_id=RELEASE_UUID,
+        ))
+        notified: list[str] = []
+
+        def invalid_json_after_commit(argv, **_kwargs):
+            os.remove(track_path)
+            with closing(sqlite3.connect(self.db_path)) as conn:
+                conn.execute(
+                    "DELETE FROM items WHERE album_id = ?", (7,),
+                )
+                conn.execute(
+                    "DELETE FROM albums WHERE id = ?", (7,),
+                )
+                conn.commit()
+            return sp.CompletedProcess(argv, 0, stdout=b"{", stderr=b"")
+
+        def commit_then_lose_protocol(request: BeetsDeleteRequest):
+            return run_beets_delete(request, runner=invalid_json_after_commit)
+
+        with (
+            patch.dict(os.environ, {
+                "BEETSDIR": self.tmpdir,
+                "CRATEDIGGER_BEETS_PYTHON": sys.executable,
+                "CRATEDIGGER_RUNTIME_CONFIG": os.path.join(
+                    self.tmpdir, "missing-runtime.ini",
+                ),
+            }),
+            BeetsDB(self.db_path) as beets,
+        ):
+            result = delete_release_from_library(
+                pipeline_db=pipeline,
+                beets_db=beets,
+                request=DeleteRequest(album_id=7, purge_pipeline=False),
+                beets_delete_fn=commit_then_lose_protocol,
+                notify_fn=lambda path: notified.append(path) or (),
+            )
+            retry = delete_release_from_library(
+                pipeline_db=pipeline,
+                beets_db=beets,
+                request=DeleteRequest(album_id=7),
+            )
+
+        self.assertIsInstance(result, DeleteSuccess)
+        assert isinstance(result, DeleteSuccess)
+        self.assertFalse(result.pipeline_deleted)
+        self.assertIsNotNone(pipeline.get_request(42))
+        self.assertEqual(notified, [os.path.dirname(track_path)])
+        self.assertIsInstance(retry, DeleteAlbumNotFound)
+
+    def test_ack_loss_with_orphan_items_is_not_reconciled(self) -> None:
+        track_path = self._seed_album()
+        pipeline = FakePipelineDB()
+        pipeline.seed_request(make_request_row(
+            id=42, status="imported", mb_release_id=RELEASE_UUID,
+        ))
+
+        def album_only_commit(request: BeetsDeleteRequest) -> BeetsDeleteFailed:
+            with closing(sqlite3.connect(self.db_path)) as conn:
+                conn.execute(
+                    "DELETE FROM albums WHERE id = ?", (request.album_id,),
+                )
+                conn.commit()
+            return BeetsDeleteFailed(
+                album_id=request.album_id,
+                reason="protocol_error",
+                detail="planted partial metadata commit",
+                album_still_present=False,
+            )
+
+        with BeetsDB(self.db_path) as beets:
+            result = delete_release_from_library(
+                pipeline_db=pipeline,
+                beets_db=beets,
+                request=DeleteRequest(album_id=7, purge_pipeline=True),
+                beets_delete_fn=album_only_commit,
+                notify_fn=lambda _path: self.fail("incomplete delete must not notify"),
+            )
+            self.assertFalse(beets.album_and_items_absent(7))
+
+        self.assertIsInstance(result, DeleteIncomplete)
+        self.assertTrue(os.path.exists(track_path))
+        self.assertIsNotNone(pipeline.get_request(42))
+
+    def test_precommit_failure_retains_authority_and_retry_converges(self) -> None:
+        track_path = self._seed_album()
+        pipeline = FakePipelineDB()
+        pipeline.seed_request(make_request_row(
+            id=42, status="imported", mb_release_id=RELEASE_UUID,
+        ))
+        failure = BeetsDeleteFailed(
+            album_id=7,
+            reason="filesystem_error",
+            detail="planted unlink failure",
+            album_still_present=True,
+            remaining_owned_paths=(track_path,),
+        )
+
+        with BeetsDB(self.db_path) as beets:
+            first = delete_release_from_library(
+                pipeline_db=pipeline,
+                beets_db=beets,
+                request=DeleteRequest(album_id=7, purge_pipeline=True),
+                beets_delete_fn=lambda _request: failure,
+                notify_fn=lambda _path: self.fail("failed attempt must not notify"),
+            )
+            self.assertIsNotNone(beets.get_album_detail(7))
+            second = delete_release_from_library(
+                pipeline_db=pipeline,
+                beets_db=beets,
+                request=DeleteRequest(album_id=7, purge_pipeline=True),
+                beets_delete_fn=self._delete_fn(""),
+                notify_fn=lambda _path: (),
+            )
+
+        self.assertIsInstance(first, DeleteIncomplete)
+        self.assertIsInstance(second, DeleteSuccess)
+        self.assertFalse(os.path.exists(track_path))
+        self.assertIsNone(pipeline.get_request(42))
 
     def test_notifier_exception_is_typed_after_locks_release(self) -> None:
         class TrackingPipeline(FakePipelineDB):

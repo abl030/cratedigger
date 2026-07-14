@@ -631,6 +631,22 @@ class BeetsDB:
             "source": identity.source if identity else "unknown",
         }
 
+    def album_and_items_absent(self, album_id: int) -> bool:
+        """Prove the exact album PK and every item row for it are absent.
+
+        This is the parent-side commit-ack reconciliation check for pinned
+        Beets deletion. It deliberately addresses items by the original album
+        primary key rather than release identity, so an orphan item row cannot
+        be mistaken for a completed metadata transaction.
+        """
+        row = self._conn.execute(
+            "SELECT "
+            "NOT EXISTS (SELECT 1 FROM albums WHERE id = ?), "
+            "NOT EXISTS (SELECT 1 FROM items WHERE album_id = ?)",
+            (album_id, album_id),
+        ).fetchone()
+        return bool(row and row[0] and row[1])
+
     _ALBUM_SELECT = (
         "SELECT a.id, a.album, a.albumartist, a.year, a.mb_albumid, "
         "       a.albumtype, a.label, a.country, "

@@ -72,10 +72,19 @@ console.log('delete result UI never presents incomplete cleanup as success');
 
   const partial = describeBeetsDeletion({
     status: 'partial', album_deleted: true, pipeline_id: 42,
+    preserved_paths: ['/music/A/B/booklet.pdf'],
+    notifications: [{
+      provider: 'jellyfin',
+      status: 'warning',
+      detail: 'exact album item jf-7 remains observable after refresh submission',
+    }],
   });
   assertEqual(partial.completed, true, 'PG partial acknowledges album is already gone');
   assertEqual(partial.error, true, 'PG partial is not a normal success toast');
   assertContains(partial.message, 'pipeline request #42 remains', 'PG residual is actionable');
+  assertContains(partial.message, '1 unknown path preserved', 'PG partial keeps preserved-path warning visible');
+  assertContains(partial.message, '1 media notification warning', 'PG partial keeps media warning count visible');
+  assertContains(partial.message, 'jellyfin: exact album item jf-7 remains observable', 'PG partial keeps media warning detail visible');
 }
 
 console.log('delete result UI surfaces unknown content and notifier warnings');
@@ -84,12 +93,16 @@ console.log('delete result UI surfaces unknown content and notifier warnings');
     status: 'ok', artist: 'A', album: 'B', deleted_files: 2,
     deleted_artifacts: 4, pipeline_deleted: true,
     preserved_paths: ['/music/A/B/booklet.pdf'],
-    notifications: [{provider: 'jellyfin', status: 'warning'}],
+    notifications: [{
+      provider: 'jellyfin', status: 'warning',
+      detail: 'exact album item jf-7 remains observable',
+    }],
   });
   assertEqual(warning.completed, true, 'verified delete still completes');
   assertEqual(warning.error, true, 'warning result gets warning styling');
   assertContains(warning.message, '1 unknown path preserved', 'unknown content count visible');
   assertContains(warning.message, '1 media notification warning', 'notifier warning count visible');
+  assertContains(warning.message, 'jellyfin: exact album item jf-7 remains observable', 'notifier warning detail visible');
 }
 
 /** Independent expected encoder: JSON JS literal, then HTML attribute escaping. */

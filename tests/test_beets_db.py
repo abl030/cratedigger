@@ -10,6 +10,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -136,6 +137,31 @@ class TestBeetsDBConnection(unittest.TestCase):
     def test_context_manager(self) -> None:
         with BeetsDB(self.db_path) as db:
             self.assertIsNotNone(db)
+
+
+class TestAlbumAndItemsAbsent(unittest.TestCase):
+    """The lost-ack proof rejects partial Beets metadata commits."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "test.db")
+        _create_test_db(self.db_path)
+        _insert_album(
+            self.db_path, 7, "release-7",
+            [(320000, "/music/Artist/Album/01.mp3")],
+        )
+
+    def test_requires_album_and_items_to_be_absent(self) -> None:
+        with BeetsDB(self.db_path) as db:
+            self.assertFalse(db.album_and_items_absent(7))
+            with closing(sqlite3.connect(self.db_path)) as writer:
+                writer.execute("DELETE FROM albums WHERE id = 7")
+                writer.commit()
+            self.assertFalse(db.album_and_items_absent(7))
+            with closing(sqlite3.connect(self.db_path)) as writer:
+                writer.execute("DELETE FROM items WHERE album_id = 7")
+                writer.commit()
+            self.assertTrue(db.album_and_items_absent(7))
 
 
 class TestAlbumExists(unittest.TestCase):

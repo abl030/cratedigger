@@ -5052,6 +5052,16 @@ class TestFakeBeetsDB(unittest.TestCase):
         self.assertIsNone(beets.get_album_detail(8))
         self.assertEqual(beets.get_album_detail_calls, [7, 7, 8])
 
+    def test_album_and_items_absent_requires_both_absence_facts(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_album_detail(7, {"id": 7, "album": "A", "tracks": []})
+        self.assertFalse(beets.album_and_items_absent(7))
+        beets._album_detail.pop(7)
+        beets.set_orphan_items_present(7)
+        self.assertFalse(beets.album_and_items_absent(7))
+        beets.set_orphan_items_present(7, False)
+        self.assertTrue(beets.album_and_items_absent(7))
+
     def test_get_album_ids_by_mbids_derives_from_release_id_seeds(self) -> None:
         # Shares the set_album_ids_for_release seed store so presence
         # and album-id mapping can't disagree (the paired-consistency
