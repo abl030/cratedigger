@@ -67,7 +67,7 @@ against that reality, not against a hypothetical public exposure.
 | CD-SEC-14 | Critical | Remediated: destructive identifiers bind to one server-owned release | `lib/destructive_release_service.py` |
 | CD-SEC-15 | High | Remediated: typed fail-closed transitions and source-status CAS freeze `replaced` rows | `lib/transitions.py`, `lib/pipeline_db/requests.py` |
 | CD-SEC-16 | High | Remediated: destructive operations share importer locks | `lib/destructive_release_service.py` |
-| CD-SEC-17 | High | Terminal import outcomes persist as multiple autocommit statements | `lib/dispatch/outcome_actions.py`, `scripts/import_preview_worker.py` |
+| CD-SEC-17 | High | Remediated: job-backed terminal import outcomes commit atomically | `lib/pipeline_db/terminal_outcomes.py`, `scripts/importer.py` |
 | CD-SEC-18 | Medium | Track replacement is non-atomic | `lib/pipeline_db/misc.py` |
 | CD-SEC-19 | Medium | Import-job JSONB payloads bypass the strict wire-boundary policy | `lib/import_queue.py`, `scripts/importer.py` |
 
@@ -247,20 +247,30 @@ lock for exactly this data-loss boundary.
   barrier-controlled beets mutation. Add a server-validated confirmation to
   ban-source; its current browser `confirm()` is only a UI affordance.
 
-### CD-SEC-17 — Terminal import outcomes are non-atomic (High)
+### CD-SEC-17 — Job-backed terminal import outcomes commit atomically (High) — Remediated
 
-Successful and rejected outcomes persist request state, attempts, download
-audit, denylist state and import-job state as separate autocommit statements.
-The preview worker first marks a job terminal, then catches and suppresses any
-failure while requeueing/logging its parent; its own comment documents the
-result as a terminal job whose request remains `downloading` forever. The
-success path similarly marks a request `imported` before writing the mandatory
-download audit.
+Before remediation, successful and rejected outcomes persisted request state,
+attempts, download audit, denylist state and import-job state as separate
+autocommit statements. The preview worker first marked a job terminal, then
+caught and suppressed any failure while requeueing/logging its parent; its own
+comment documented the result as a terminal job whose request remained
+`downloading` forever. The success path similarly marked a request `imported`
+before writing the mandatory download audit.
 
 - **Remediation:** introduce one DB-layer transaction per terminal domain
   outcome. Existing helpers commit internally, so merely wrapping their current
   calls is insufficient. Add failure injection at every write boundary and
   assert all-or-none persisted state.
+
+  Implemented by the DB-owned `persist_import_terminal_outcome` and
+  `persist_preview_terminal_outcome` commands. They use cursor-level request,
+  audit, denylist/cooldown, attempt, and job writes under one explicit
+  transaction; callers only assemble typed intent. This includes the
+  job-backed automation `Completed` / `CompletionFailed` fallbacks as well as
+  dispatch-owned import outcomes and request-backed preview failures.
+  Real-PostgreSQL fault injection raises after every write boundary and proves
+  that a fresh connection observes either the original state or the complete
+  outcome.
 
 ## Priority 2
 
@@ -569,7 +579,8 @@ Priority data-loss / audit-integrity work:
       expected source status, including frozen `replaced` rows.
 - [ ] **CD-SEC-16** — hold the importer release lock across ban/delete beets
       mutations and return 409 on contention.
-- [ ] **CD-SEC-17** — persist each terminal import outcome in one DB transaction.
+- [x] **CD-SEC-17** — persist each covered job-backed terminal import outcome
+      in one DB transaction.
 
 Priority containment / integrity work:
 

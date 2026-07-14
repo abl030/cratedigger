@@ -10,6 +10,7 @@ from lib.dispatch import (
     _build_download_info,
     _record_rejection_and_maybe_requeue,
 )
+from lib.terminal_outcomes import PendingImportTerminalOutcome
 from lib.grab_list import GrabListEntry
 from lib.import_manifest import (
     move_failed_import_curated,
@@ -122,6 +123,7 @@ def _reject_request_auto_import(
     detail: str,
     scenario: str | None,
     error: str,
+    import_job_id: int | None = None,
 ) -> DispatchOutcome:
     """Reject a request auto-import when ownership can be proven safely."""
     db, request_id = _resolved_request_rejection_id(album_data, ctx)
@@ -166,7 +168,12 @@ def _reject_request_auto_import(
         dl_info.existing_min_bitrate = album_data.current_min_bitrate
         dl_info.slskd_filetype = dl_info.filetype
         dl_info.actual_filetype = dl_info.filetype
-    download_log_id = _record_rejection_and_maybe_requeue(
+    owned_import_job_id = (
+        import_job_id
+        if import_job_id is not None and db.get_import_job(import_job_id) is not None
+        else None
+    )
+    persisted = _record_rejection_and_maybe_requeue(
         db,
         request_id,
         dl_info,
@@ -174,10 +181,18 @@ def _reject_request_auto_import(
         error=failed_result.error,
         validation_result=failed_result.to_json(),
         requeue=True,
+        import_job_id=owned_import_job_id,
     )
+    if isinstance(persisted, PendingImportTerminalOutcome):
+        return DispatchOutcome(
+            success=False,
+            message=detail,
+            terminal_outcome=persisted,
+            post_commit_wrong_match_scenario=failed_result.scenario,
+        )
     _run_post_rejection_wrong_match_cleanup(
         ctx,
-        download_log_id,
+        persisted,
         scenario=failed_result.scenario,
     )
     return DispatchOutcome(success=False, message=detail)
@@ -210,20 +225,31 @@ def _handle_rejected_result(
         dl_info.slskd_filetype = dl_info.filetype
         dl_info.actual_filetype = dl_info.filetype
 
-    download_log_id = ctx.pipeline_db_source.reject_and_requeue(
+    db = ctx.pipeline_db_source._get_db()
+    owned_import_job_id = (
+        import_job_id
+        if import_job_id is not None and db.get_import_job(import_job_id) is not None
+        else None
+    )
+    persisted = ctx.pipeline_db_source.reject_and_requeue(
         album_data,
         bv_result,
         usernames=usernames,
         download_info=dl_info,
         search_filetype_override=_compute_rejection_backfill(album_data, ctx),
         cooled_down_users=ctx.cooled_down_users,
+        import_job_id=owned_import_job_id,
     )
-    _run_post_rejection_wrong_match_cleanup(
-        ctx,
-        download_log_id,
-        scenario=bv_result.scenario,
-        import_job_id=import_job_id,
+    pending = (
+        persisted if isinstance(persisted, PendingImportTerminalOutcome) else None
     )
+    if pending is None:
+        _run_post_rejection_wrong_match_cleanup(
+            ctx,
+            persisted,
+            scenario=bv_result.scenario,
+            import_job_id=import_job_id,
+        )
     logger.warning(
         "REJECTED: %s - %s (scenario=%s, distance=%s, detail=%s) "
         "| denylisted users: %s",
@@ -239,7 +265,14 @@ def _handle_rejected_result(
     message = f"Rejected: {scenario}"
     if detail:
         message = f"{message} - {detail}"
-    return DispatchOutcome(success=False, message=message)
+    return DispatchOutcome(
+        success=False,
+        message=message,
+        terminal_outcome=pending if import_job_id is not None else None,
+        post_commit_wrong_match_scenario=(
+            bv_result.scenario if import_job_id is not None else None
+        ),
+    )
 
 
 def _compute_rejection_backfill(

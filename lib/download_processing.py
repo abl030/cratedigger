@@ -20,6 +20,7 @@ from lib.staged_album import StagedAlbum
 
 if TYPE_CHECKING:
     from lib.context import CratediggerContext
+    from lib.terminal_outcomes import PendingImportTerminalOutcome
 
 logger = logging.getLogger("cratedigger")
 
@@ -28,12 +29,15 @@ logger = logging.getLogger("cratedigger")
 class Completed:
     """Local non-dispatch processing succeeded."""
 
+    terminal_outcome: PendingImportTerminalOutcome | None = None
+
 
 @dataclass(frozen=True)
 class CompletionFailed:
     """A non-dispatch local failure occurred."""
 
     reason: str
+    terminal_outcome: PendingImportTerminalOutcome | None = None
 
 
 @dataclass(frozen=True)

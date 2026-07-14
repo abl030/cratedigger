@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from lib.quality import (AlbumQualityEvidence, AudioQualityMeasurement,
                              DownloadInfo, ImportResult, SpectralDetail,
                              TargetQualityContract)
+    from lib.terminal_outcomes import PendingImportTerminalOutcome
 
 
 # U2: when the importer claim arrives without valid candidate evidence
@@ -78,6 +79,8 @@ class DispatchOutcome:
     message: str
     deferred: bool = False
     code: str | None = None
+    terminal_outcome: "PendingImportTerminalOutcome | None" = None
+    post_commit_wrong_match_scenario: str | None = None
 
 
 class DispatchCoreFn(Protocol):
@@ -230,7 +233,7 @@ _PREIMPORT_FACT_REJECT_DECISIONS = PREIMPORT_FACT_REJECTION_SCENARIOS
 
 
 
-QualityGateFn = Callable[..., None]
+QualityGateFn = Callable[..., object | None]
 """Type of the post-import quality-gate callable injected into
 ``dispatch_import_core``. Production passes :func:`_check_quality_gate_core`;
 tests can pass a stub or a recorder instead of patching the module

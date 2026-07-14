@@ -3031,7 +3031,7 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
         process_album = RecordingProcessAlbum(outcome=Completed())
-        dl_mod._run_completed_processing(
+        result = dl_mod._run_completed_processing(
             self._entry(), 42, self._state(), db, self._ctx(db),
             import_job_id=1,
             process_album_fn=process_album,
@@ -3040,7 +3040,10 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
             [call.import_job_id for call in process_album.calls],
             [1],
         )
+        assert isinstance(result, Completed)
         self.assertEqual(db.request(42)["status"], "imported")
+        self.assertIsNone(result.terminal_outcome)
+        self.assertEqual(db.download_logs, [])
 
     def test_completion_failed_resets_to_wanted_with_attempt(self):
         """Failure: ``process_completed_album`` returns ``CompletionFailed``
@@ -3053,7 +3056,7 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         process_album = RecordingProcessAlbum(outcome=CompletionFailed(
             reason="staged_path_missing",
         ))
-        dl_mod._run_completed_processing(
+        result = dl_mod._run_completed_processing(
             self._entry(), 42, self._state(), db, self._ctx(db),
             import_job_id=1,
             process_album_fn=process_album,
@@ -3062,7 +3065,10 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
             [call.import_job_id for call in process_album.calls],
             [1],
         )
+        assert isinstance(result, CompletionFailed)
         self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertIsNone(result.terminal_outcome)
+        self.assertEqual(db.download_logs, [])
 
     def test_completion_failed_after_inner_rejection_does_not_double_transition(self):
         """If ``process_completed_album`` already requeued the row, the outer
@@ -6354,8 +6360,8 @@ class TestU5PreviewWorkerSelfHealSlice(unittest.TestCase):
         assert updated is not None
         self.assertEqual(updated.preview_status, "measurement_failed")
         self.assertEqual(updated.status, "failed")
-        # The audit row cannot be written without a request_id; the
-        # worker absorbed the helper's raise (PREVIEW_SELF_HEAL_PARTIAL_FAILURE).
+        # The audit row cannot be written without a request_id, so this is a
+        # job-only precondition failure rather than a terminal domain bundle.
         outcomes = [log.outcome for log in db.download_logs]
         self.assertNotIn("measurement_failed", outcomes)
 
