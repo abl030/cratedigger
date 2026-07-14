@@ -10,15 +10,21 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal, Protocol, TypeAlias
+from typing import Any, Callable, Literal, Protocol, TypeAlias
 
 from lib import transitions
 from lib.audio_hash import AudioHashError, hash_audio_content
 from lib.beets_album_op import BeetsOpFailure
+from lib.beets_delete import (
+    BeetsDeleteFailed,
+    BeetsDeleteOutcome,
+    BeetsDeleteRequest,
+    run_beets_delete,
+)
+from lib.library_delete_notifiers import DeleteNotification, notify_library_delete
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
     ADVISORY_LOCK_NAMESPACE_RELEASE,
@@ -79,10 +85,14 @@ class SupportsDestructivePipelineDB(transitions.TransitionsDB, Protocol):
 class SupportsDestructiveBeetsDB(Protocol):
     """Beets surface needed for exact-identity destructive actions."""
 
+    @property
+    def library_db_path(self) -> str: ...
+    @property
+    def library_root(self) -> str: ...
     def get_album_detail(self, album_id: int) -> dict[str, object] | None: ...
+    def album_and_items_absent(self, album_id: int) -> bool: ...
     def get_item_paths(self, mb_release_id: str) -> list[tuple[int, str]]: ...
     def locate(self, release_id: str) -> object: ...
-    def delete_album(self, album_id: int) -> tuple[str, str, list[str]]: ...
 
 
 class FinalizeRequestFn(Protocol):
@@ -393,9 +403,13 @@ class DeleteSuccess:
     album_id: int
     album_name: str
     artist_name: str
+    former_album_path: str
     deleted_files: int
+    deleted_artifacts: int
     pipeline_deleted: bool
     deleted_pipeline_id: int | None
+    preserved_paths: tuple[str, ...]
+    notifications: tuple[DeleteNotification, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -428,17 +442,31 @@ class DeleteImporterBusy:
 class DeletePipelinePurgeFailure:
     album_id: int
     pipeline_request_id: int
+    album_name: str
+    artist_name: str
+    former_album_path: str
+    deleted_files: int
+    deleted_artifacts: int
+    preserved_paths: tuple[str, ...]
+    notifications: tuple[DeleteNotification, ...] = ()
 
 
 @dataclass(frozen=True)
-class DeleteBeetsFailure:
+class DeleteIncomplete:
     album_id: int
-
-
-@dataclass(frozen=True)
-class DeletePostPurgeBeetsFailure:
-    album_id: int
-    deleted_pipeline_id: int
+    album_name: str
+    artist_name: str
+    former_album_path: str
+    pipeline_request_id: int | None
+    pipeline_status: str | None
+    acknowledgement_lost: bool
+    reason: str
+    detail: str
+    album_still_present: bool
+    deleted_files: int | None
+    deleted_artifacts: int | None
+    remaining_owned_paths: tuple[str, ...]
+    preserved_paths: tuple[str, ...]
 
 
 DeleteResult: TypeAlias = (
@@ -448,24 +476,18 @@ DeleteResult: TypeAlias = (
     | DeleteLockContended
     | DeleteImporterBusy
     | DeletePipelinePurgeFailure
-    | DeleteBeetsFailure
-    | DeletePostPurgeBeetsFailure
+    | DeleteIncomplete
 )
 
 
-def _delete_album_files(file_paths: list[str]) -> int:
-    album_dir = os.path.dirname(file_paths[0]) if file_paths else None
-    deleted = 0
-    for path in file_paths:
-        if os.path.isfile(path):
-            os.remove(path)
-            deleted += 1
-    if album_dir and os.path.isdir(album_dir):
-        try:
-            os.rmdir(album_dir)
-        except OSError:
-            pass
-    return deleted
+BeetsDeleteFn = Callable[[BeetsDeleteRequest], BeetsDeleteOutcome]
+DeleteNotifyFn = Callable[[str], tuple[DeleteNotification, ...]]
+_ACK_AMBIGUOUS_DELETE_REASONS = frozenset({"subprocess_error", "protocol_error"})
+
+
+def _default_delete_notify(path: str) -> tuple[DeleteNotification, ...]:
+    from lib.config import read_runtime_config
+    return notify_library_delete(read_runtime_config(), path)
 
 
 def _delete_mismatch(
@@ -498,6 +520,91 @@ def _delete_confirmations_match(
     return _request_identity(pipeline_row) == identity
 
 
+def _preflight_former_album_path(detail: dict[str, object]) -> str:
+    """Retain the exact album directory for incomplete operator recovery."""
+    direct = detail.get("path")
+    if isinstance(direct, str) and direct:
+        return direct
+    tracks = detail.get("tracks")
+    if isinstance(tracks, list):
+        for track in tracks:
+            if not isinstance(track, dict):
+                continue
+            path = track.get("path")
+            if isinstance(path, str) and path:
+                return str(Path(path).parent)
+    artpath = detail.get("artpath")
+    if isinstance(artpath, str) and artpath:
+        return str(Path(artpath).parent)
+    return ""
+
+
+def _incomplete_delete_detail(
+    *,
+    failed: BeetsDeleteFailed,
+    former_album_path: str,
+    pipeline_row: dict[str, Any] | None,
+) -> str:
+    """Explain the manual boundary when the child acknowledgement is ambiguous."""
+    if failed.reason not in _ACK_AMBIGUOUS_DELETE_REASONS:
+        return failed.detail
+    if pipeline_row is None:
+        pipeline_context = "No authoritative pipeline request was present to purge."
+    else:
+        pipeline_context = (
+            f"Pipeline request #{int(pipeline_row['id'])} "
+            f"({str(pipeline_row.get('status') or 'unknown')}) was preserved."
+        )
+    path_context = (
+        f" Inspect the exact former album path {former_album_path!r} before "
+        "explicit recovery."
+        if former_album_path
+        else " Inspect the library manually before explicit recovery."
+    )
+    return (
+        "Beets acknowledgement was lost; filesystem deletion is unconfirmed "
+        "and Beets metadata may be gone. Do not assume files were deleted. "
+        f"{pipeline_context}{path_context} Child detail: {failed.detail}"
+    )
+
+
+def _delete_incomplete(
+    *,
+    album_id: int,
+    preflight_detail: dict[str, object],
+    pipeline_row: dict[str, Any] | None,
+    reason: str,
+    detail: str,
+    album_still_present: bool,
+    deleted_files: int | None,
+    deleted_artifacts: int | None,
+    remaining_owned_paths: tuple[str, ...],
+    preserved_paths: tuple[str, ...],
+) -> DeleteIncomplete:
+    return DeleteIncomplete(
+        album_id=album_id,
+        album_name=str(preflight_detail.get("album") or ""),
+        artist_name=str(preflight_detail.get("artist") or ""),
+        former_album_path=_preflight_former_album_path(preflight_detail),
+        pipeline_request_id=(
+            int(pipeline_row["id"]) if pipeline_row is not None else None
+        ),
+        pipeline_status=(
+            str(pipeline_row.get("status") or "unknown")
+            if pipeline_row is not None
+            else None
+        ),
+        acknowledgement_lost=reason in _ACK_AMBIGUOUS_DELETE_REASONS,
+        reason=reason,
+        detail=detail,
+        album_still_present=album_still_present,
+        deleted_files=deleted_files,
+        deleted_artifacts=deleted_artifacts,
+        remaining_owned_paths=remaining_owned_paths,
+        preserved_paths=preserved_paths,
+    )
+
+
 def _delete_under_release_lock(
     *,
     pipeline_db: SupportsDestructivePipelineDB,
@@ -505,6 +612,7 @@ def _delete_under_release_lock(
     request: DeleteRequest,
     identity: ReleaseIdentity,
     pipeline_row: dict[str, Any] | None,
+    beets_delete_fn: BeetsDeleteFn,
 ) -> DeleteResult:
     # Both identities are re-read after lock acquisition. This is the final
     # authority check before any DB, beets, or filesystem mutation.
@@ -527,6 +635,56 @@ def _delete_under_release_lock(
         ) is not None:
             return DeleteImporterBusy(request.album_id, int(current_pipeline["id"]))
 
+    beets_outcome = beets_delete_fn(BeetsDeleteRequest(
+        album_id=request.album_id,
+        expected_release_id=identity.release_id,
+        library_db_path=beets_db.library_db_path,
+        library_root=beets_db.library_root,
+    ))
+    if isinstance(beets_outcome, BeetsDeleteFailed):
+        album_still_present = (
+            beets_db.get_album_detail(request.album_id) is not None
+        )
+        former_album_path = _preflight_former_album_path(detail)
+        acknowledgement_lost = (
+            beets_outcome.reason in _ACK_AMBIGUOUS_DELETE_REASONS
+        )
+        return _delete_incomplete(
+            album_id=request.album_id,
+            preflight_detail=detail,
+            pipeline_row=current_pipeline,
+            reason=beets_outcome.reason,
+            detail=_incomplete_delete_detail(
+                failed=beets_outcome,
+                former_album_path=former_album_path,
+                pipeline_row=current_pipeline,
+            ),
+            album_still_present=album_still_present,
+            deleted_files=(
+                None if acknowledgement_lost else beets_outcome.deleted_tracks
+            ),
+            deleted_artifacts=(
+                None if acknowledgement_lost else beets_outcome.deleted_artifacts
+            ),
+            remaining_owned_paths=beets_outcome.remaining_owned_paths,
+            preserved_paths=beets_outcome.preserved_paths,
+        )
+    if not beets_db.album_and_items_absent(request.album_id):
+        return _delete_incomplete(
+            album_id=request.album_id,
+            preflight_detail=detail,
+            pipeline_row=current_pipeline,
+            reason="postcondition_failed",
+            detail="exact Beets album or item metadata survived the delete operation",
+            album_still_present=(
+                beets_db.get_album_detail(request.album_id) is not None
+            ),
+            deleted_files=beets_outcome.deleted_tracks,
+            deleted_artifacts=beets_outcome.deleted_artifacts,
+            remaining_owned_paths=(),
+            preserved_paths=beets_outcome.preserved_paths,
+        )
+
     deleted_pipeline_id: int | None = None
     if request.purge_pipeline and current_pipeline is not None:
         deleted_pipeline_id = int(current_pipeline["id"])
@@ -534,28 +692,27 @@ def _delete_under_release_lock(
             pipeline_db.delete_request(deleted_pipeline_id)
         except Exception:  # noqa: BLE001 -- typed operator outcome
             log.exception("Failed to purge pipeline request %s", deleted_pipeline_id)
-            return DeletePipelinePurgeFailure(request.album_id, deleted_pipeline_id)
-
-    try:
-        album_name, artist_name, file_paths = beets_db.delete_album(request.album_id)
-        deleted_files = _delete_album_files(file_paths)
-    except ValueError:
-        if deleted_pipeline_id is not None:
-            return DeletePostPurgeBeetsFailure(request.album_id, deleted_pipeline_id)
-        return DeleteAlbumNotFound(request.album_id)
-    except Exception:  # noqa: BLE001 -- typed operator outcome
-        log.exception("Beets delete failed for album %s", request.album_id)
-        if deleted_pipeline_id is not None:
-            return DeletePostPurgeBeetsFailure(request.album_id, deleted_pipeline_id)
-        return DeleteBeetsFailure(request.album_id)
+            return DeletePipelinePurgeFailure(
+                album_id=request.album_id,
+                pipeline_request_id=deleted_pipeline_id,
+                album_name=beets_outcome.album_name,
+                artist_name=beets_outcome.artist_name,
+                former_album_path=beets_outcome.former_album_path,
+                deleted_files=beets_outcome.deleted_tracks,
+                deleted_artifacts=beets_outcome.deleted_artifacts,
+                preserved_paths=beets_outcome.preserved_paths,
+            )
 
     return DeleteSuccess(
         album_id=request.album_id,
-        album_name=album_name,
-        artist_name=artist_name,
-        deleted_files=deleted_files,
+        album_name=beets_outcome.album_name,
+        artist_name=beets_outcome.artist_name,
+        former_album_path=beets_outcome.former_album_path,
+        deleted_files=beets_outcome.deleted_tracks,
+        deleted_artifacts=beets_outcome.deleted_artifacts,
         pipeline_deleted=deleted_pipeline_id is not None,
         deleted_pipeline_id=deleted_pipeline_id,
+        preserved_paths=beets_outcome.preserved_paths,
     )
 
 
@@ -566,6 +723,7 @@ def _delete_with_release_lock(
     request: DeleteRequest,
     identity: ReleaseIdentity,
     pipeline_row: dict[str, Any] | None,
+    beets_delete_fn: BeetsDeleteFn,
 ) -> DeleteResult:
     with pipeline_db.advisory_lock(
         ADVISORY_LOCK_NAMESPACE_RELEASE,
@@ -579,7 +737,26 @@ def _delete_with_release_lock(
             request=request,
             identity=identity,
             pipeline_row=pipeline_row,
+            beets_delete_fn=beets_delete_fn,
         )
+
+
+def _notify_completed_delete(
+    result: DeleteResult,
+    notify_fn: DeleteNotifyFn,
+) -> DeleteResult:
+    if isinstance(result, (DeleteSuccess, DeletePipelinePurgeFailure)):
+        try:
+            notifications = notify_fn(result.former_album_path)
+        except Exception as exc:  # noqa: BLE001 -- deletion is already committed
+            log.exception("Post-delete media notification failed")
+            detail = f"notification boundary failed: {type(exc).__name__}: {exc}"
+            notifications = (
+                DeleteNotification("plex", "warning", detail),
+                DeleteNotification("jellyfin", "warning", detail),
+            )
+        return replace(result, notifications=notifications)
+    return result
 
 
 def delete_release_from_library(
@@ -587,8 +764,12 @@ def delete_release_from_library(
     pipeline_db: SupportsDestructivePipelineDB,
     beets_db: SupportsDestructiveBeetsDB,
     request: DeleteRequest,
+    beets_delete_fn: BeetsDeleteFn | None = None,
+    notify_fn: DeleteNotifyFn | None = None,
 ) -> DeleteResult:
     """Delete the exact album identified by the server-owned beets row."""
+    delete_op = beets_delete_fn or run_beets_delete
+    notifier = notify_fn or _default_delete_notify
     detail = beets_db.get_album_detail(request.album_id)
     if detail is None:
         return DeleteAlbumNotFound(request.album_id)
@@ -602,13 +783,15 @@ def delete_release_from_library(
     assert identity is not None
 
     if pipeline_row is None:
-        return _delete_with_release_lock(
+        result = _delete_with_release_lock(
             pipeline_db=pipeline_db,
             beets_db=beets_db,
             request=request,
             identity=identity,
             pipeline_row=None,
+            beets_delete_fn=delete_op,
         )
+        return _notify_completed_delete(result, notifier)
 
     request_id = int(pipeline_row["id"])
     # IMPORT outer, RELEASE inner. See docs/advisory-locks.md.
@@ -626,10 +809,12 @@ def delete_release_from_library(
             )
         ):
             return _delete_mismatch(request, identity, current_pipeline)
-        return _delete_with_release_lock(
+        result = _delete_with_release_lock(
             pipeline_db=pipeline_db,
             beets_db=beets_db,
             request=request,
             identity=identity,
             pipeline_row=current_pipeline,
+            beets_delete_fn=delete_op,
         )
+    return _notify_completed_delete(result, notifier)

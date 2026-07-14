@@ -245,7 +245,6 @@ _LEAF_SEAM_PATTERNS = [
     # (album_exists, locate, search, etc.) are read-only query helpers
     # that can be exercised against a real test SQLite DB.
     re.compile(r"^lib\.beets_db\.BeetsDB$"),
-    re.compile(r"^lib\.beets_db\.BeetsDB\.delete_album$"),  # SQLite write + file delete seam
     # ``web.server._real_beets_db`` is already covered by the broader
     # ``^web\.server\.(...|_real_beets_db|...)`` pattern higher up
     # (MusicBrainz / Discogs / beets module-level boundaries).

@@ -157,6 +157,16 @@ field fails closed for the same reason: importer code may use that raw truthy
 value as its RELEASE lock key. Empty, whitespace, and zero sentinels remain
 absence; the same valid numeric Discogs ID in both columns remains one identity.
 
+Issue #698 closes the follow-up execution-integrity gap on this exact authority
+path: mutation is now pinned-Beets-owned, filesystem-first,
+postcondition-verified, and PostgreSQL-last. Unknown files are preserved,
+path/symlink escapes fail closed, and Plex/Jellyfin work runs after lock release.
+This hardens the existing destructive endpoint rather than adding another
+Beets mutation surface. A lost child acknowledgement is intentionally manual:
+PostgreSQL and preflight recovery context are retained, no media refresh is
+sent, and no success is inferred. Full automatic crash recovery belongs in a
+future durable delete queue serialized through the importer worker.
+
 Two destructive workflows accept multiple independently trusted identifiers
 without proving they describe the same release:
 
