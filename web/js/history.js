@@ -322,22 +322,32 @@ function buildEvidenceCardModel(h) {
   return { inCells, haveCells };
 }
 
+/**
+ * Mobile wording: each number carries its own label in place ("725k
+ * avg/455k min") instead of a detached trailing legend. Equal pairs (CBR
+ * albums) collapse to one number, the V0 cell stays the bare pair (the V0
+ * prefix is its label), and a converted source reads "FLAC→Opus". Full
+ * wording stays a tap away in the detail panel.
+ */
 function compactEvidenceValue(kind, value) {
+  const labelled = (label) => (_, a, b) =>
+    (a === b ? `${a}k` : `${a}k ${label}/${b}k min`);
   let compact = value
-    .replace(/(\d+)k avg \(min (\d+)k\)/g, '$1/$2k a/m')
-    .replace(/(\d+)k median \(min (\d+)k\)/g, '$1/$2k md/m')
-    .replace(/likely transcode/g, 'transcode');
+    .replace(/(\d+)k avg \(min (\d+)k\)/g, labelled('avg'))
+    .replace(/(\d+)k median \(min (\d+)k\)/g, labelled('med'));
   if (kind === 'v0') {
-    compact = compact.replace(/V0 (\d+)k avg \(min (\d+)k\)/g, 'V0 $1/$2k a/m');
+    compact = compact.replace(/V0 (\d+)k \w+\/(\d+)k min/g, 'V0 $1/$2k');
+  }
+  if (kind === 'source') {
+    compact = compact.replace(' - ', '→');
   }
   return compact;
 }
 
 function renderEvidenceCell(kind, value) {
-  const compact = compactEvidenceValue(kind, value);
   return `<span class="r-ev-cell r-ev-${kind}">`
     + `<span class="r-ev-full">${value}</span>`
-    + `<span class="r-ev-compact">${compact}</span>`
+    + `<span class="r-ev-compact">${compactEvidenceValue(kind, value)}</span>`
     + `</span>`;
 }
 
