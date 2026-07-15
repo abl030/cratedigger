@@ -490,6 +490,95 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(item["existing_v0_probe_min_bitrate"], 193)
         self.assertEqual(item["existing_v0_probe_avg_bitrate"], 256)
 
+    def test_deleted_triage_partial_v0_does_not_suppress_current_have(self):
+        """Music for Qigong Dancing: a lone audit V0 is not a HAVE row."""
+        import web.server as srv
+        from lib.quality import AlbumQualityV0Metric, AudioQualityMeasurement
+        from tests.helpers import make_album_quality_evidence
+
+        self.db.log_download(
+            100,
+            outcome="rejected",
+            validation_result={
+                "scenario": "high_distance",
+                "distance": 0.179,
+                "wrong_match_triage": {
+                    "action": "deleted_reject",
+                    "outcome": "deleted",
+                    "reason": "downgrade",
+                    "preview_verdict": "confident_reject",
+                    "preview_decision": "downgrade",
+                    "stage_chain": ["stage2_import:downgrade"],
+                    "current_measurement": {
+                        "format": None,
+                        "min_bitrate_kbps": None,
+                        "avg_bitrate_kbps": None,
+                        "median_bitrate_kbps": None,
+                        "spectral_grade": None,
+                        "spectral_bitrate_kbps": None,
+                    },
+                    "current_v0_probe": {
+                        "kind": "on_disk_research_v0",
+                        "min_bitrate_kbps": 245,
+                        "avg_bitrate_kbps": 268,
+                        "median_bitrate_kbps": 268,
+                    },
+                },
+            },
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="test-mbid-0100",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=96,
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=268,
+                median_bitrate_kbps=268,
+                source_lineage="on_disk_research",
+            ),
+            lineage_version=1,
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(self.db.set_request_current_evidence(100, stored.id))
+
+        beets = FakeBeetsDB()
+        beets.set_mbid_detail(
+            "test-mbid-0100",
+            {
+                "beets_format": "MP3",
+                "beets_bitrate": 320,
+                "beets_avg_bitrate": 320,
+            },
+        )
+        with patch.object(srv, "_beets_db", return_value=beets):
+            status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = data["log"][0]
+        self.assertEqual(item["badge"], "Triaged · deleted")
+        self.assertEqual(item["existing_format"], "MP3")
+        self.assertEqual(item["existing_min_bitrate"], 320)
+        self.assertEqual(item["existing_avg_bitrate"], 320)
+        self.assertEqual(item["existing_median_bitrate"], 320)
+        self.assertEqual(item["existing_spectral_grade"], "genuine")
+        self.assertEqual(item["existing_spectral_bitrate"], 96)
+        self.assertEqual(
+            item["existing_v0_probe_kind"], "on_disk_research"
+        )
+        self.assertEqual(item["existing_v0_probe_min_bitrate"], 245)
+        self.assertEqual(item["existing_v0_probe_avg_bitrate"], 268)
+
     def test_kept_would_import_completes_have_from_explicit_successor(self):
         import web.server as srv
         from lib.quality import AudioQualityMeasurement, ImportResult

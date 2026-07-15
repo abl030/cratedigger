@@ -202,6 +202,7 @@ function sourceStorageLabel(sourceFormat, storageFormat) {
 function buildEvidenceCardModel(h) {
   const basis = h.comparison_basis || null;
   const inCells = emptyEvidenceCells();
+  const failedDownload = h.outcome === 'timeout';
   const sourceFormat = h.source_format || h.slskd_filetype || h.original_filetype;
   const losslessSource = isLosslessSource(sourceFormat);
   const hasMaterializedMeasurement = Boolean(
@@ -270,6 +271,9 @@ function buildEvidenceCardModel(h) {
   if (h.v0_probe_avg_bitrate) {
     inCells.v0 = stripV0Phrase(h.v0_probe_avg_bitrate, h.v0_probe_min_bitrate);
   }
+  if (failedDownload) {
+    Object.assign(inCells, emptyEvidenceCells(), { source: '—' });
+  }
 
   const haveCells = emptyEvidenceCells();
   if (basis) {
@@ -318,14 +322,33 @@ function buildEvidenceCardModel(h) {
   return { inCells, haveCells };
 }
 
+function compactEvidenceValue(kind, value) {
+  let compact = value
+    .replace(/(\d+)k avg \(min (\d+)k\)/g, '$1/$2k a/m')
+    .replace(/(\d+)k median \(min (\d+)k\)/g, '$1/$2k md/m')
+    .replace(/likely transcode/g, 'transcode');
+  if (kind === 'v0') {
+    compact = compact.replace(/V0 (\d+)k avg \(min (\d+)k\)/g, 'V0 $1/$2k a/m');
+  }
+  return compact;
+}
+
+function renderEvidenceCell(kind, value) {
+  const compact = compactEvidenceValue(kind, value);
+  return `<span class="r-ev-cell r-ev-${kind}">`
+    + `<span class="r-ev-full">${value}</span>`
+    + `<span class="r-ev-compact">${compact}</span>`
+    + `</span>`;
+}
+
 function renderEvidenceRow(side, label, cells) {
   return `<span class="r-ev-row r-ev-${side}">`
     + `<strong class="r-ev-tag">${label}</strong>`
-    + `<span class="r-ev-cell r-ev-source">${cells.source}</span>`
-    + `<span class="r-ev-cell r-ev-metric">${cells.metric}</span>`
-    + `<span class="r-ev-cell r-ev-rank">${cells.rank}</span>`
-    + `<span class="r-ev-cell r-ev-spectral">${cells.spectral}</span>`
-    + `<span class="r-ev-cell r-ev-v0">${cells.v0}</span>`
+    + renderEvidenceCell('source', cells.source)
+    + renderEvidenceCell('metric', cells.metric)
+    + renderEvidenceCell('rank', cells.rank)
+    + renderEvidenceCell('spectral', cells.spectral)
+    + renderEvidenceCell('v0', cells.v0)
     + `</span>`;
 }
 

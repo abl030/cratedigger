@@ -78,6 +78,34 @@ def assert_current_library_have_is_projected(
         raise AssertionError("current library median did not populate compact HAVE")
 
 
+def assert_complete_have_snapshot_is_selected(
+    item: dict[str, object],
+    *,
+    expected_format: str,
+    expected_min: int,
+    expected_avg: int,
+    expected_median: int,
+    expected_spectral: str | None,
+    expected_v0: int | None,
+) -> None:
+    """Require one canonical HAVE snapshot, never a partial-field blend."""
+    assert_current_library_have_is_projected(
+        item,
+        expected_format=expected_format,
+        expected_min=expected_min,
+        expected_avg=expected_avg,
+        expected_median=expected_median,
+    )
+    if item.get("existing_spectral_grade") != expected_spectral:
+        raise AssertionError("partial attempt spectral leaked into canonical HAVE")
+    if item.get("existing_v0_probe_avg_bitrate") != expected_v0:
+        raise AssertionError("partial attempt V0 leaked into canonical HAVE")
+    if item.get("existing_spectral_attempted") is True:
+        raise AssertionError("partial attempt failure leaked into canonical HAVE")
+    if item.get("existing_spectral_error") is not None:
+        raise AssertionError("partial attempt error leaked into canonical HAVE")
+
+
 def assert_mutating_attempt_has_no_projected_have(item: dict[str, object]) -> None:
     if any(item.get(field) is not None for field in (
         "existing_format",
@@ -369,6 +397,150 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         )
         self.assertEqual(item["existing_spectral_grade"], current_spectral)
         self.assertEqual(item["existing_v0_probe_avg_bitrate"], current_v0)
+
+    @given(
+        card_kind=st.sampled_from(("deleted", "failed", "timeout")),
+        partial_kind=st.sampled_from((
+            "v0_only",
+            "spectral_only",
+            "format_only",
+            "minimum_only",
+            "spectral_failure_only",
+        )),
+        current_format=st.sampled_from(("MP3", "Opus", "FLAC")),
+        current_min=st.integers(min_value=1, max_value=2_000),
+        current_avg=st.integers(min_value=1, max_value=2_000),
+        current_median=st.integers(min_value=1, max_value=2_000),
+        current_spectral=st.one_of(
+            st.none(), st.sampled_from(("genuine", "likely_transcode", "suspect"))
+        ),
+        current_v0=st.one_of(
+            st.none(), st.integers(min_value=1, max_value=2_000)
+        ),
+    )
+    @example(
+        card_kind="deleted",
+        partial_kind="v0_only",
+        current_format="MP3",
+        current_min=320,
+        current_avg=320,
+        current_median=320,
+        current_spectral="genuine",
+        current_v0=268,
+    )
+    @example(
+        card_kind="failed",
+        partial_kind="minimum_only",
+        current_format="Opus",
+        current_min=93,
+        current_avg=129,
+        current_median=128,
+        current_spectral="suspect",
+        current_v0=256,
+    )
+    def test_partial_have_selects_one_complete_snapshot(
+        self,
+        card_kind: str,
+        partial_kind: str,
+        current_format: str,
+        current_min: int,
+        current_avg: int,
+        current_median: int,
+        current_spectral: str | None,
+        current_v0: int | None,
+    ) -> None:
+        item: dict[str, object] = {
+            "outcome": (
+                "rejected" if card_kind == "deleted" else card_kind
+            ),
+            "wrong_match_triage_action": (
+                "deleted_reject" if card_kind == "deleted" else None
+            ),
+            "existing_format": None,
+            "existing_min_bitrate": None,
+            "existing_avg_bitrate": None,
+            "existing_median_bitrate": None,
+            "existing_spectral_grade": None,
+            "existing_spectral_bitrate": None,
+            "existing_spectral_attempted": False,
+            "existing_spectral_error": None,
+            "existing_v0_probe_kind": None,
+            "existing_v0_probe_min_bitrate": None,
+            "existing_v0_probe_avg_bitrate": None,
+            "existing_v0_probe_median_bitrate": None,
+            "comparison_basis": None,
+        }
+        if partial_kind == "v0_only":
+            item.update({
+                "existing_v0_probe_kind": "on_disk_research_v0",
+                "existing_v0_probe_min_bitrate": 245,
+                "existing_v0_probe_avg_bitrate": 268,
+                "existing_v0_probe_median_bitrate": 268,
+            })
+        elif partial_kind == "spectral_only":
+            item.update({
+                "existing_spectral_grade": "likely_transcode",
+                "existing_spectral_bitrate": 96,
+            })
+        elif partial_kind == "format_only":
+            item["existing_format"] = "Legacy"
+        elif partial_kind == "minimum_only":
+            item["existing_min_bitrate"] = 7
+        else:
+            item.update({
+                "existing_spectral_attempted": True,
+                "existing_spectral_error": "legacy decode failure",
+            })
+
+        row: dict[str, object] = {
+            "_current_evidence_id": 42,
+            "_current_evidence_is_pre_attempt": True,
+            "_current_evidence_format": current_format,
+            "_current_evidence_min_bitrate": current_min,
+            "_current_evidence_avg_bitrate": current_avg,
+            "_current_evidence_median_bitrate": current_median,
+            "_current_evidence_spectral_grade": current_spectral,
+            "_current_evidence_spectral_bitrate": (
+                96 if current_spectral is not None else None
+            ),
+            "_current_evidence_v0_probe_kind": (
+                "on_disk_research_v0" if current_v0 is not None else None
+            ),
+            "_current_evidence_v0_probe_min_bitrate": (
+                current_v0 - 1 if current_v0 is not None else None
+            ),
+            "_current_evidence_v0_probe_avg_bitrate": current_v0,
+            "_current_evidence_v0_probe_median_bitrate": current_v0,
+        }
+        _project_current_library_have(item, row, {})
+
+        assert_complete_have_snapshot_is_selected(
+            item,
+            expected_format=current_format,
+            expected_min=current_min,
+            expected_avg=current_avg,
+            expected_median=current_median,
+            expected_spectral=current_spectral,
+            expected_v0=current_v0,
+        )
+
+    def test_complete_snapshot_checker_rejects_partial_field_blends(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "current library format"):
+            assert_complete_have_snapshot_is_selected(
+                {
+                    "existing_format": None,
+                    "existing_min_bitrate": None,
+                    "existing_avg_bitrate": None,
+                    "existing_median_bitrate": None,
+                    "existing_v0_probe_avg_bitrate": 268,
+                },
+                expected_format="MP3",
+                expected_min=320,
+                expected_avg=320,
+                expected_median=320,
+                expected_spectral=None,
+                expected_v0=268,
+            )
 
     @given(
         is_pre_attempt=st.booleans(),

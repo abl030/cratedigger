@@ -43,14 +43,15 @@ def _project_current_library_have(
     row: Mapping[str, object],
     _beets: Mapping[str, object],
 ) -> None:
-    """Fill legacy HAVE only from a provably pre-attempt exact snapshot.
+    """Select one complete, provably pre-attempt HAVE snapshot.
 
     HAVE is historical: what was on disk before this attempt. Successful and
     explicit import rows may have updated the request's current evidence, so
-    they never receive an overlay. Non-mutating legacy rows may use the
-    request's canonical evidence only when its measurement predates the
-    attempt. Live Beets data has no historical timestamp and is never evidence
-    for HAVE.
+    they never receive an overlay. A deleted-triage or failed row may carry a
+    partial embedded snapshot (for example Qigong's V0 probe with no codec or
+    bitrate); when canonical evidence predates the attempt, replace that
+    partial snapshot wholesale instead of mixing fields. Live Beets data has
+    no historical timestamp and is never evidence for HAVE.
     """
     attempt_measurement_fields = (
         "existing_format",
@@ -66,11 +67,34 @@ def _project_current_library_have(
         "existing_v0_probe_median_bitrate",
         "comparison_basis",
     )
-    if item.get("existing_spectral_attempted") is True or any(
-        item.get(field) is not None for field in attempt_measurement_fields
-    ):
-        return
     if item.get("outcome") in ("success", "force_import", "manual_import"):
+        return
+
+    attempt_has_any = (
+        item.get("existing_spectral_attempted") is True
+        or any(
+            item.get(field) is not None
+            for field in attempt_measurement_fields
+        )
+    )
+    attempt_has_complete_core = (
+        item.get("existing_format") is not None
+        and item.get("existing_min_bitrate") is not None
+        and item.get("existing_avg_bitrate") is not None
+    )
+    partial_snapshot_can_be_replaced = (
+        item.get("comparison_basis") is None
+        and (
+            item.get("outcome") in ("failed", "timeout")
+            or item.get("wrong_match_triage_action") in (
+                "deleted_reject",
+                "deleted_verified_lossless_parent",
+            )
+        )
+    )
+    if attempt_has_any and (
+        attempt_has_complete_core or not partial_snapshot_can_be_replaced
+    ):
         return
 
     current_projection = {
@@ -99,10 +123,19 @@ def _project_current_library_have(
             "_current_evidence_v0_probe_median_bitrate"
         ),
     }
+    current_has_complete_core = (
+        current_projection["existing_format"] is not None
+        and current_projection["existing_min_bitrate"] is not None
+        and current_projection["existing_avg_bitrate"] is not None
+    )
     if (
         row.get("_current_evidence_id") is not None
         and row.get("_current_evidence_is_pre_attempt") is True
+        and (not attempt_has_any or current_has_complete_core)
     ):
+        if attempt_has_any:
+            item["existing_spectral_attempted"] = False
+            item["existing_spectral_error"] = None
         item.update(current_projection)
 
 

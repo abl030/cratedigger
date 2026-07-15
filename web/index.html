@@ -360,16 +360,14 @@
   .r-ev-row { display: contents; }
   .r-evidence .r-ev-tag { color: #d3deea; font-weight: 900; font-size: 1.08em; line-height: 1; letter-spacing: 0.9px; text-shadow: 0 0 8px rgba(170, 205, 235, 0.24); }
   .r-ev-cell { min-width: 0; overflow-wrap: normal; word-break: normal; white-space: nowrap; }
+  .r-ev-compact { display: none; }
   @media (min-width: 721px) { .r-ev-v0 { padding-left: 1em; } }
   @media (max-width: 720px) {
-    .r-evidence { grid-template-columns: 4.3em minmax(5em, 0.8fr) minmax(0, 1.8fr); column-gap: 0.65em; row-gap: 4px; font-size: 1em; }
-    .r-ev-row { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; grid-template-rows: auto auto auto; row-gap: 1px; padding: 2px 0; }
-    .r-evidence .r-ev-tag { grid-column: 1; grid-row: 1 / 4; align-self: start; padding-top: 1px; font-size: 1.15em; }
-    .r-ev-source { grid-column: 2; grid-row: 1; }
-    .r-ev-metric { grid-column: 3; grid-row: 1; white-space: normal; }
-    .r-ev-rank { grid-column: 2; grid-row: 2; }
-    .r-ev-spectral { grid-column: 3; grid-row: 2; white-space: normal; }
-    .r-ev-v0 { grid-column: 2 / -1; grid-row: 3; white-space: normal; padding-bottom: 2px; }
+    .r-evidence { grid-template-columns: max-content max-content max-content max-content max-content max-content; column-gap: 1px; row-gap: 2px; font-size: clamp(9px, 2.55vw, 10px); font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: -0.2px; color: #92a2b1; }
+    .r-ev-row { display: contents; padding: 0; }
+    .r-evidence .r-ev-tag { grid-column: auto; grid-row: auto; align-self: baseline; padding: 0; font-size: 1em; letter-spacing: 0; }
+    .r-ev-source, .r-ev-metric, .r-ev-rank, .r-ev-spectral, .r-ev-v0 { grid-column: auto; grid-row: auto; white-space: nowrap; padding: 0; }
+    .r-ev-full { display: none; } .r-ev-compact { display: inline; }
   }
   /* Failure prose can carry raw paths + quoted transport errors — clamp
      it to two lines; the full text stays in the hover title. */

@@ -597,6 +597,63 @@ console.log('renderEvidenceStrip() requires a number — a codec label alone is 
   }
 }
 
+console.log('Download failures blank IN and keep the complete pre-attempt HAVE row');
+{
+  const strip = renderEvidenceFixture({
+    outcome: 'timeout',
+    source_format: 'FLAC',
+    source_min_bitrate: 455,
+    source_avg_bitrate: 725,
+    spectral_grade: 'likely_transcode',
+    spectral_bitrate: 96,
+    v0_probe_min_bitrate: 178,
+    v0_probe_avg_bitrate: 248,
+    existing_format: 'Opus',
+    existing_min_bitrate: 93,
+    existing_avg_bitrate: 129,
+    existing_median_bitrate: 128,
+    existing_spectral_grade: 'suspect',
+    existing_spectral_bitrate: 96,
+    existing_v0_probe_min_bitrate: 193,
+    existing_v0_probe_avg_bitrate: 256,
+  });
+  assertContains(
+    strip,
+    '<strong class="r-ev-tag">IN</strong><span class="r-ev-cell r-ev-source">',
+    'timeout renders the IN row',
+  );
+  assertContains(strip, '>—</span>', 'timeout leaves IN blank');
+  assertExcludes(strip, '725k avg', 'timeout hides incoming bitrate');
+  assertExcludes(strip, 'V0 248k avg', 'timeout hides incoming V0');
+  assertContains(strip, 'Opus', 'timeout keeps HAVE codec');
+  assertContains(strip, '129k avg (min 93k)', 'timeout keeps HAVE average and minimum');
+  assertContains(strip, '~96k suspect', 'timeout keeps HAVE spectral');
+  assertContains(strip, 'V0 256k avg (min 193k)', 'timeout keeps HAVE V0');
+}
+
+console.log('Import failures retain the grabbed candidate in IN');
+{
+  const strip = renderEvidenceFixture({
+    outcome: 'failed',
+    source_format: 'FLAC',
+    source_min_bitrate: 455,
+    source_avg_bitrate: 725,
+    spectral_grade: 'likely_transcode',
+    spectral_bitrate: 96,
+    v0_probe_min_bitrate: 178,
+    v0_probe_avg_bitrate: 248,
+    existing_format: 'Opus',
+    existing_min_bitrate: 93,
+    existing_avg_bitrate: 129,
+  });
+  assertContains(strip, '725k avg (min 455k)', 'failed import keeps incoming bitrate');
+  assertContains(strip, '~96k likely transcode', 'failed import keeps incoming spectral');
+  assertContains(strip, 'V0 248k avg (min 178k)', 'failed import keeps incoming V0');
+  assertContains(strip, '725/455k a/m', 'mobile metric keeps average and minimum');
+  assertContains(strip, '~96k transcode', 'mobile spectral keeps its floor and grade');
+  assertContains(strip, 'V0 248/178k a/m', 'mobile V0 keeps average and minimum');
+}
+
 console.log('renderEvidenceStrip() shows the on-disk format on the HAVE side');
 {
   // The Mothertongue case (#575): AAC 256 replacing unverified MP3 256.
@@ -1200,24 +1257,22 @@ console.log('evidence strip CSS preserves shared desktop/mobile alignment withou
   assertContains(css, 'grid-template-columns: 3.6em minmax(4.5em, 0.8fr) minmax(12em, 1.7fr) minmax(4.5em, 0.75fr) minmax(7.5em, 1fr) minmax(9em, 1.35fr)',
     'desktop reserves a full avg/min metric column before rank/spectral/V0');
   assertContains(css, '@media (max-width: 720px)', 'shared grid has a narrow-screen layout');
-  assertContains(css, 'grid-template-columns: 4.3em minmax(5em, 0.8fr) minmax(0, 1.8fr)',
-    'mobile uses a readable tag/source/detail three-column grid');
-  assertContains(css, 'row-gap: 4px; font-size: 1em;',
-    'mobile evidence stays at the card text size');
-  assertContains(css, 'grid-template-rows: auto auto auto;',
-    'each evidence side receives three compact rows');
-  assertContains(css, '.r-evidence .r-ev-tag { grid-column: 1; grid-row: 1 / 4;',
-    'IN/HAVE spans every row without touching source text');
-  assertContains(css, '.r-ev-source { grid-column: 2; grid-row: 1; }',
-    'source owns the first aligned field slot');
-  assertContains(css, '.r-ev-metric { grid-column: 3; grid-row: 1; white-space: normal; }',
-    'mobile metric owns the first detail slot and can wrap at spaces');
-  assertContains(css, '.r-ev-rank { grid-column: 2; grid-row: 2; }',
-    'rank owns the second aligned field slot');
-  assertContains(css, '.r-ev-spectral { grid-column: 3; grid-row: 2; white-space: normal; }',
-    'spectral provenance wraps only at word boundaries in its own slot');
-  assertContains(css, '.r-ev-v0 { grid-column: 2 / -1; grid-row: 3; white-space: normal;',
-    'mobile V0 provenance uses a full-width third row');
+  assertContains(css, 'grid-template-columns: max-content max-content max-content max-content max-content max-content;',
+    'mobile packs every evidence field into the same six aligned columns');
+  assertContains(css, 'column-gap: 1px; row-gap: 2px; font-size: clamp(9px, 2.55vw, 10px);',
+    'mobile removes inter-sample whitespace while keeping the two sides distinct');
+  assertContains(css, '.r-ev-compact { display: none; }',
+    'desktop keeps the full evidence wording');
+  assertContains(css, '.r-ev-full { display: none; } .r-ev-compact { display: inline; }',
+    'mobile swaps in bounded avg/min evidence wording');
+  assertContains(css, '.r-ev-row { display: contents; padding: 0; }',
+    'IN and HAVE each occupy exactly one parent-grid row');
+  assertContains(css, '.r-evidence .r-ev-tag { grid-column: auto; grid-row: auto;',
+    'IN/HAVE is the first cell on each packed row');
+  assertContains(css, '.r-ev-source, .r-ev-metric, .r-ev-rank, .r-ev-spectral, .r-ev-v0 { grid-column: auto; grid-row: auto; white-space: nowrap; padding: 0; }',
+    'all mobile samples stay on one line per side without wrapping');
+  assertExcludes(css, 'grid-template-rows: auto auto auto;',
+    'mobile no longer spends three physical rows on each evidence side');
   assertContains(css, '.r-evidence .r-ev-tag { color: #d3deea; font-weight: 900; font-size: 1.08em;',
     'IN/HAVE labels are visibly prominent');
   assertContains(css, '@media (min-width: 721px) { .r-ev-v0 { padding-left: 1em; } }',
