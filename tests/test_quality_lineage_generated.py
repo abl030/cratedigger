@@ -12,8 +12,10 @@ import msgspec
 from harness.import_one import projected_is_cbr_from_bitrates
 from lib.measurement import PreimportMeasurement
 from lib.import_preview import (
+    EnrichmentPlan,
     enrich_current_v0_research_for_preview,
     persist_exact_current_spectral_from_attempt,
+    plan_current_evidence_enrichment,
 )
 from lib.pipeline_db.download_log import _DownloadLogMixin
 from lib.quality import (
@@ -97,6 +99,26 @@ def assert_exact_current_spectral_persisted(
         raise AssertionError("attempt scan did not populate exact current evidence")
 
 
+def assert_enrichment_plan_never_remeasures(evidence, plan) -> None:
+    """Independent checker: enrichment only measures what is missing."""
+
+    measurement = evidence.measurement
+    if plan.spectral and (
+        measurement.spectral_grade is not None
+        or measurement.spectral_bitrate_kbps is not None
+    ):
+        raise AssertionError(
+            "enrichment plan re-measures spectral evidence that already exists"
+        )
+    if plan.v0 and (
+        evidence.v0_metric is not None
+        or evidence.on_disk_v0_research_attempted
+    ):
+        raise AssertionError(
+            "enrichment plan re-researches V0 evidence that already exists"
+        )
+
+
 class TestQualityLineagePins(unittest.TestCase):
     def test_research_once_checker_rejects_repeated_unmarked_probe(self):
         with self.assertRaisesRegex(AssertionError, "exactly one"):
@@ -104,6 +126,75 @@ class TestQualityLineagePins(unittest.TestCase):
                 probe_calls=2,
                 evidence_attempted=False,
             )
+
+    def test_enrichment_plan_checker_rejects_planted_remeasure(self):
+        graded = make_album_quality_evidence()  # default: genuine spectral
+        with self.assertRaisesRegex(AssertionError, "spectral"):
+            assert_enrichment_plan_never_remeasures(
+                graded, EnrichmentPlan(spectral=True, v0=False),
+            )
+        attempted = make_album_quality_evidence(
+            on_disk_v0_research_attempted=True,
+        )
+        with self.assertRaisesRegex(AssertionError, "V0"):
+            assert_enrichment_plan_never_remeasures(
+                attempted, EnrichmentPlan(spectral=False, v0=True),
+            )
+
+    def test_enrichment_plan_pin_complete_row_plans_nothing(self):
+        evidence = make_album_quality_evidence(
+            on_disk_v0_research_attempted=True,
+        )
+        plan = plan_current_evidence_enrichment(evidence)
+        self.assertFalse(plan.spectral)
+        self.assertFalse(plan.v0)
+
+    @given(
+        grade=st.one_of(
+            st.none(),
+            st.sampled_from(("genuine", "suspect", "likely_transcode")),
+        ),
+        spectral_bitrate=st.one_of(
+            st.none(), st.integers(min_value=32, max_value=500),
+        ),
+        v0_present=st.booleans(),
+        v0_attempted=st.booleans(),
+    )
+    @example(grade=None, spectral_bitrate=None,
+             v0_present=False, v0_attempted=False)
+    @example(grade="genuine", spectral_bitrate=None,
+             v0_present=False, v0_attempted=True)
+    def test_generated_enrichment_plan_measures_exactly_the_missing_pieces(
+        self, grade, spectral_bitrate, v0_present, v0_attempted,
+    ):
+        evidence = make_album_quality_evidence(
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                spectral_grade=grade,
+                spectral_bitrate_kbps=spectral_bitrate,
+            ),
+            v0_metric=(
+                AlbumQualityV0Metric(
+                    min_bitrate_kbps=201,
+                    avg_bitrate_kbps=259,
+                    median_bitrate_kbps=255,
+                    source_lineage="on_disk_research",
+                )
+                if v0_present
+                else None
+            ),
+            on_disk_v0_research_attempted=v0_attempted,
+        )
+        plan = plan_current_evidence_enrichment(evidence)
+        assert_enrichment_plan_never_remeasures(evidence, plan)
+        self.assertEqual(
+            plan.spectral,
+            grade is None and spectral_bitrate is None,
+        )
+        self.assertEqual(plan.v0, not v0_present and not v0_attempted)
 
     @given(
         projected_format=st.sampled_from(("OPUS 128", "MP3 V0", "FLAC")),

@@ -13,6 +13,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 import msgspec
@@ -20,6 +21,8 @@ import msgspec
 from lib.dispatch import run_import_one
 from lib.dispatch.types import ImportOneRun
 from lib.measurement import (
+    SpectralDetailAnalyzer,
+    analyze_spectral_audit_path,
     inspect_local_files,
     measure_preimport_state,
     spectral_detail_from_persisted_source,
@@ -540,6 +543,109 @@ def enrich_current_v0_research_for_preview(
             "claimed current evidence did not preserve the expected identity",
         )
     return EvidenceBuildResult(persisted, "ready")
+
+
+@dataclass(frozen=True)
+class EnrichmentPlan:
+    """Which measurements a current-evidence row is missing."""
+
+    spectral: bool
+    v0: bool
+
+    @property
+    def any(self) -> bool:
+        return self.spectral or self.v0
+
+
+def plan_current_evidence_enrichment(
+    evidence: AlbumQualityEvidence,
+) -> EnrichmentPlan:
+    """Pure decision: measure exactly the missing HAVE pieces.
+
+    Mirrors the once-only guards of the persist/claim helpers: any spectral
+    field present means the scan already happened; a V0 metric or the
+    attempted marker means the research probe already ran. Complete rows
+    therefore cost nothing to re-plan.
+    """
+    measurement = evidence.measurement
+    return EnrichmentPlan(
+        spectral=(
+            measurement.spectral_grade is None
+            and measurement.spectral_bitrate_kbps is None
+        ),
+        v0=(
+            evidence.v0_metric is None
+            and not evidence.on_disk_v0_research_attempted
+        ),
+    )
+
+
+def enrich_incomplete_current_evidence_for_request(
+    db: ImportPreviewDB,
+    *,
+    request_id: int,
+    spectral_analyzer: SpectralDetailAnalyzer = analyze_spectral_audit_path,
+    probe_fn: Callable[[str], V0ProbeEvidence | None] = (
+        probe_installed_album_as_v0
+    ),
+) -> str:
+    """Opportunistically complete a request's HAVE evidence in place.
+
+    Driven from the download-failure path: a failed download never reaches
+    preview, but the on-disk copy is right there — measure it now instead of
+    waiting for a download that may never succeed. Both writes go through
+    the preview-owned helpers, so the once-only, exact-snapshot, and
+    never-overwrite guards hold unchanged.
+
+    Returns "no_current_evidence" (nothing linked), "stale" (files changed
+    since capture), "complete" (nothing missing — zero cost), "enriched"
+    (every missing piece resolved), or "partial" (measurement ran but
+    something is still unresolved).
+    """
+    try:
+        current_id = db.get_request_current_evidence_id(request_id)
+        evidence = (
+            db.load_album_quality_evidence_by_id(current_id)
+            if current_id is not None
+            else None
+        )
+    except Exception:
+        logger.warning(
+            "Could not load current evidence for request %s",
+            request_id,
+            exc_info=True,
+        )
+        return "no_current_evidence"
+    if evidence is None or evidence.id is None:
+        return "no_current_evidence"
+    plan = plan_current_evidence_enrichment(evidence)
+    if not plan.any:
+        return "complete"
+    # Cheap freshness pre-check before any expensive measurement; the
+    # persist/claim helpers each re-verify under their own authority.
+    if not audio_snapshot_matches(evidence.source_path, evidence.files):
+        return "stale"
+    all_ok = True
+    if plan.spectral:
+        detail = spectral_analyzer(evidence.source_path)
+        spectral_result = persist_exact_current_spectral_from_attempt(
+            db,
+            request_id=request_id,
+            current_evidence=evidence,
+            measured_existing=detail,
+            measured_existing_path=evidence.source_path,
+        )
+        all_ok = all_ok and spectral_result.status == "ready"
+    if plan.v0:
+        v0_result = enrich_current_v0_research_for_preview(
+            db,
+            request_id=request_id,
+            expected_evidence_id=evidence.id,
+            expected_snapshot_fingerprint=evidence.snapshot_fingerprint,
+            probe_fn=probe_fn,
+        )
+        all_ok = all_ok and v0_result.status == "ready"
+    return "enriched" if all_ok else "partial"
 
 
 def load_current_evidence_for_preview(

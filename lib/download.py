@@ -319,11 +319,54 @@ def _enrich_timeout_reason(reason: str, files: list[DownloadFile]) -> str:
     return reason
 
 
+def _enrich_have_evidence_after_failure(
+    request_id: int,
+    ctx: CratediggerContext,
+    *,
+    enrich_fn: Callable[..., str] | None = None,
+) -> None:
+    """Fill missing HAVE evidence at a download-failure point.
+
+    A failed download never reaches preview — the only other place HAVE
+    spectral/V0 evidence gets completed — but the request's on-disk copy is
+    right there to measure. Budgeted per cycle so failure bursts never
+    balloon the loop; a complete row costs nothing and is not budgeted.
+    Never lets an enrichment error disturb failure bookkeeping.
+    """
+    if ctx.evidence_enrichment_budget <= 0:
+        return
+    try:
+        if enrich_fn is None:
+            from lib.import_preview import (
+                enrich_incomplete_current_evidence_for_request,
+            )
+            enrich_fn = enrich_incomplete_current_evidence_for_request
+        db = ctx.pipeline_db_source._get_db()
+        outcome = enrich_fn(db, request_id=request_id)
+    except Exception:
+        ctx.evidence_enrichment_budget -= 1
+        logger.warning(
+            "HAVE evidence enrichment failed for request %s",
+            request_id,
+            exc_info=True,
+        )
+        return
+    if outcome not in ("complete", "no_current_evidence", "stale"):
+        ctx.evidence_enrichment_budget -= 1
+        logger.info(
+            "HAVE evidence enrichment for request %s: %s",
+            request_id,
+            outcome,
+        )
+
+
 def _timeout_album(
     entry: GrabListEntry,
     request_id: int,
     reason: str,
     ctx: CratediggerContext,
+    *,
+    enrich_fn: Callable[..., str] | None = None,
 ) -> None:
     """Handle download timeout: cancel, log, reset to wanted."""
     cancel_and_delete(entry.files, ctx)
@@ -359,6 +402,7 @@ def _timeout_album(
             attempt_type="download",
         ),
     ))
+    _enrich_have_evidence_after_failure(request_id, ctx, enrich_fn=enrich_fn)
 
 
 def _persist_updated_download_state(
@@ -744,6 +788,7 @@ def _enqueue_completed_processing(
                     attempt_type="download",
                 ),
             ))
+            _enrich_have_evidence_after_failure(request_id, ctx)
             return None
         logger.warning(
             "Completed download for request %s could not be materialized "

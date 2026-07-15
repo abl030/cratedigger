@@ -108,6 +108,13 @@ class CratediggerContext:
     # per cycle; >3 sustained warrants investigation.
     cycle_searches_watchdog_killed: int = 0
 
+    # --- Per-cycle HAVE evidence enrichment budget. ---
+    # Download-phase failures opportunistically measure the request's
+    # on-disk copy (missing spectral / V0 research); this bounds how many
+    # such measurements one cycle may run so failure bursts never balloon
+    # the loop. Skip-if-complete costs nothing and is not budgeted.
+    evidence_enrichment_budget: int = 2
+
     # --- Per-cycle find_download pipeline counters (issue #217). ---
     find_download_queued: int = 0
     find_download_completed: int = 0

@@ -6405,5 +6405,143 @@ class TestPurgeCompletedTransfers(unittest.TestCase):
         self.assertEqual(slskd.transfers.cancel_download_calls, [])
 
 
+class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
+    """Download-phase failures opportunistically complete HAVE evidence.
+
+    The request's on-disk copy is already in the library, so a failed
+    download is a measurement opportunity, not a dead end: the hook fills
+    missing HAVE spectral/V0 evidence through the once-only preview-owned
+    helpers, bounded per cycle so failure bursts never balloon the loop.
+    """
+
+    def _recorder(self, outcome: str = "enriched", error: Exception | None = None):
+        calls: list[int] = []
+
+        def enrich(db: Any, *, request_id: int) -> str:
+            calls.append(request_id)
+            if error is not None:
+                raise error
+            return outcome
+
+        return enrich, calls
+
+    def _entry(self):
+        return make_grab_list_entry(
+            files=[make_download_file(filename="01.flac", id="xfer-1",
+                                      file_dir="Music\\Album",
+                                      username="peer", size=1000)],
+            filetype="flac", title="Album", artist="Artist",
+            mb_release_id="mb-uuid", db_request_id=42,
+        )
+
+    def test_fresh_context_has_default_budget(self):
+        ctx = make_ctx_with_fake_db(FakePipelineDB())
+        self.assertEqual(ctx.evidence_enrichment_budget, 2)
+
+    def test_work_outcome_consumes_budget(self):
+        from lib.download import _enrich_have_evidence_after_failure
+        ctx = make_ctx_with_fake_db(FakePipelineDB())
+        enrich, calls = self._recorder("enriched")
+
+        _enrich_have_evidence_after_failure(42, ctx, enrich_fn=enrich)
+
+        self.assertEqual(calls, [42])
+        self.assertEqual(ctx.evidence_enrichment_budget, 1)
+
+    def test_free_outcomes_do_not_consume_budget(self):
+        from lib.download import _enrich_have_evidence_after_failure
+        for outcome in ("complete", "no_current_evidence", "stale"):
+            with self.subTest(outcome=outcome):
+                ctx = make_ctx_with_fake_db(FakePipelineDB())
+                enrich, calls = self._recorder(outcome)
+
+                _enrich_have_evidence_after_failure(42, ctx, enrich_fn=enrich)
+
+                self.assertEqual(calls, [42])
+                self.assertEqual(ctx.evidence_enrichment_budget, 2)
+
+    def test_exhausted_budget_skips_enrichment(self):
+        from lib.download import _enrich_have_evidence_after_failure
+        ctx = make_ctx_with_fake_db(FakePipelineDB())
+        ctx.evidence_enrichment_budget = 0
+        enrich, calls = self._recorder("enriched")
+
+        _enrich_have_evidence_after_failure(42, ctx, enrich_fn=enrich)
+
+        self.assertEqual(calls, [])
+
+    def test_enrichment_error_is_contained_and_budgeted(self):
+        from lib.download import _enrich_have_evidence_after_failure
+        ctx = make_ctx_with_fake_db(FakePipelineDB())
+        enrich, calls = self._recorder(error=RuntimeError("scan exploded"))
+
+        _enrich_have_evidence_after_failure(42, ctx, enrich_fn=enrich)
+
+        self.assertEqual(calls, [42])
+        self.assertEqual(ctx.evidence_enrichment_budget, 1)
+
+    def test_timeout_album_runs_enrichment_after_failure_bookkeeping(self):
+        from lib.download import _timeout_album
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        ctx = make_ctx_with_fake_db(db)
+        enrich, calls = self._recorder("enriched")
+
+        with patch("lib.download.cancel_and_delete"):
+            _timeout_album(self._entry(), 42, "stalled", ctx, enrich_fn=enrich)
+
+        db.assert_log(self, 0, outcome="timeout")
+        self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertEqual(calls, [42])
+        self.assertEqual(ctx.evidence_enrichment_budget, 1)
+
+    def test_timeout_album_default_enrichment_marks_v0_attempted(self):
+        """Default wiring, no injection: a real (failing) probe still lands
+        the once-only attempted marker on the exact current snapshot."""
+        from lib.download import _timeout_album
+        from lib.quality import AudioQualityMeasurement
+        from lib.quality_evidence import snapshot_audio_files
+
+        source = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, source, ignore_errors=True)
+        with open(os.path.join(source, "01.mp3"), "wb") as handle:
+            handle.write(b"garbage bytes: ffmpeg will fail fast on these")
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        evidence = make_album_quality_evidence(
+            mb_release_id="mb-uuid",
+            source_path=source,
+            files=snapshot_audio_files(source),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=96,
+            ),
+            v0_metric=None,
+        )
+        db.upsert_album_quality_evidence(evidence)
+        stored = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        db.set_request_current_evidence(42, stored.id)
+        ctx = make_ctx_with_fake_db(db)
+
+        with patch("lib.download.cancel_and_delete"):
+            _timeout_album(self._entry(), 42, "stalled", ctx)
+
+        persisted = db.load_album_quality_evidence_by_id(stored.id)
+        assert persisted is not None
+        self.assertTrue(persisted.on_disk_v0_research_attempted)
+        self.assertEqual(ctx.evidence_enrichment_budget, 1)
+        db.assert_log(self, 0, outcome="timeout")
+        self.assertEqual(db.request(42)["status"], "wanted")
+
+
 if __name__ == "__main__":
     unittest.main()

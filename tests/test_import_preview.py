@@ -1,6 +1,7 @@
 """Tests for unified import preview service."""
 
 import os
+import shutil
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from lib.import_preview import (
     _prefer_successful_spectral_detail,
     compose_attempt_spectral_audit,
     enrich_current_v0_research_for_preview,
+    enrich_incomplete_current_evidence_for_request,
     persist_exact_current_spectral_from_attempt,
     load_persisted_existing_spectral,
     measure_and_persist_candidate_evidence,
@@ -1533,6 +1535,206 @@ if TYPE_CHECKING:
     # tests/test_wrong_match_cleanup_service.py for the rationale.
     _pipeline_db_satisfies_preview_protocol: _PreviewDB = cast("PipelineDB", None)
     _fake_db_satisfies_preview_protocol: _PreviewDB = cast("FakePipelineDB", None)
+
+
+class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
+    """Failure-point HAVE enrichment fills only what's missing, once."""
+
+    def _db(self) -> FakePipelineDB:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        return db
+
+    def _source_dir(self) -> str:
+        source = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, source, ignore_errors=True)
+        with open(os.path.join(source, "01.mp3"), "wb") as handle:
+            handle.write(b"not real audio but never inspected in this test")
+        return source
+
+    def _seed_current(
+        self,
+        db: FakePipelineDB,
+        source: str,
+        *,
+        spectral_present: bool,
+        v0_attempted: bool = False,
+    ):
+        evidence = make_album_quality_evidence(
+            mb_release_id="mbid-42",
+            source_path=source,
+            files=snapshot_audio_files(source),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                spectral_grade="genuine" if spectral_present else None,
+                spectral_bitrate_kbps=96 if spectral_present else None,
+            ),
+            v0_metric=None,
+            on_disk_v0_research_attempted=v0_attempted,
+        )
+        db.upsert_album_quality_evidence(evidence)
+        stored = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        db.set_request_current_evidence(42, stored.id)
+        return stored
+
+    def _spectral_recorder(self, detail: SpectralAnalysisDetail):
+        calls: list[str] = []
+
+        def analyzer(path: str) -> SpectralAnalysisDetail:
+            calls.append(path)
+            return detail
+
+        return analyzer, calls
+
+    def _probe_recorder(self):
+        calls: list[str] = []
+
+        def probe(path: str) -> V0ProbeEvidence:
+            calls.append(path)
+            return V0ProbeEvidence(
+                kind="on_disk_research_v0",
+                min_bitrate_kbps=201,
+                avg_bitrate_kbps=259,
+                median_bitrate_kbps=255,
+            )
+
+        return probe, calls
+
+    def _good_scan(self) -> SpectralAnalysisDetail:
+        return SpectralAnalysisDetail(
+            attempted=True, grade="genuine", bitrate_kbps=96,
+        )
+
+    def test_complete_row_skips_all_measurement(self):
+        db = self._db()
+        source = self._source_dir()
+        self._seed_current(db, source, spectral_present=True, v0_attempted=True)
+        analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
+        probe, probe_calls = self._probe_recorder()
+
+        outcome = enrich_incomplete_current_evidence_for_request(
+            db, request_id=42, spectral_analyzer=analyzer, probe_fn=probe,
+        )
+
+        self.assertEqual(outcome, "complete")
+        self.assertEqual(spectral_calls, [])
+        self.assertEqual(probe_calls, [])
+
+    def test_fills_both_missing_pieces(self):
+        db = self._db()
+        source = self._source_dir()
+        stored = self._seed_current(db, source, spectral_present=False)
+        assert stored.id is not None
+        analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
+        probe, probe_calls = self._probe_recorder()
+
+        outcome = enrich_incomplete_current_evidence_for_request(
+            db, request_id=42, spectral_analyzer=analyzer, probe_fn=probe,
+        )
+
+        self.assertEqual(outcome, "enriched")
+        self.assertEqual(spectral_calls, [source])
+        self.assertEqual(probe_calls, [source])
+        persisted = db.load_album_quality_evidence_by_id(stored.id)
+        assert persisted is not None
+        self.assertEqual(persisted.measurement.spectral_grade, "genuine")
+        self.assertEqual(persisted.measurement.spectral_bitrate_kbps, 96)
+        self.assertTrue(persisted.on_disk_v0_research_attempted)
+        assert persisted.v0_metric is not None
+        self.assertEqual(persisted.v0_metric.avg_bitrate_kbps, 259)
+
+    def test_fills_v0_only_when_spectral_present(self):
+        db = self._db()
+        source = self._source_dir()
+        self._seed_current(db, source, spectral_present=True)
+        analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
+        probe, probe_calls = self._probe_recorder()
+
+        outcome = enrich_incomplete_current_evidence_for_request(
+            db, request_id=42, spectral_analyzer=analyzer, probe_fn=probe,
+        )
+
+        self.assertEqual(outcome, "enriched")
+        self.assertEqual(spectral_calls, [])
+        self.assertEqual(probe_calls, [source])
+
+    def test_fills_spectral_only_when_v0_already_attempted(self):
+        db = self._db()
+        source = self._source_dir()
+        self._seed_current(
+            db, source, spectral_present=False, v0_attempted=True,
+        )
+        analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
+        probe, probe_calls = self._probe_recorder()
+
+        outcome = enrich_incomplete_current_evidence_for_request(
+            db, request_id=42, spectral_analyzer=analyzer, probe_fn=probe,
+        )
+
+        self.assertEqual(outcome, "enriched")
+        self.assertEqual(spectral_calls, [source])
+        self.assertEqual(probe_calls, [])
+
+    def test_stale_snapshot_measures_nothing(self):
+        db = self._db()
+        source = self._source_dir()
+        self._seed_current(db, source, spectral_present=False)
+        with open(os.path.join(source, "01.mp3"), "ab") as handle:
+            handle.write(b"changed after snapshot")
+        analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
+        probe, probe_calls = self._probe_recorder()
+
+        outcome = enrich_incomplete_current_evidence_for_request(
+            db, request_id=42, spectral_analyzer=analyzer, probe_fn=probe,
+        )
+
+        self.assertEqual(outcome, "stale")
+        self.assertEqual(spectral_calls, [])
+        self.assertEqual(probe_calls, [])
+
+    def test_without_current_evidence_returns_no_current_evidence(self):
+        db = self._db()
+        analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
+        probe, probe_calls = self._probe_recorder()
+
+        outcome = enrich_incomplete_current_evidence_for_request(
+            db, request_id=42, spectral_analyzer=analyzer, probe_fn=probe,
+        )
+
+        self.assertEqual(outcome, "no_current_evidence")
+        self.assertEqual(spectral_calls, [])
+        self.assertEqual(probe_calls, [])
+
+    def test_failed_spectral_scan_reports_partial(self):
+        db = self._db()
+        source = self._source_dir()
+        stored = self._seed_current(
+            db, source, spectral_present=False, v0_attempted=True,
+        )
+        assert stored.id is not None
+        analyzer, spectral_calls = self._spectral_recorder(
+            SpectralAnalysisDetail(attempted=True, error="sox exploded"),
+        )
+        probe, probe_calls = self._probe_recorder()
+
+        outcome = enrich_incomplete_current_evidence_for_request(
+            db, request_id=42, spectral_analyzer=analyzer, probe_fn=probe,
+        )
+
+        self.assertEqual(outcome, "partial")
+        self.assertEqual(spectral_calls, [source])
+        self.assertEqual(probe_calls, [])
+        persisted = db.load_album_quality_evidence_by_id(stored.id)
+        assert persisted is not None
+        self.assertIsNone(persisted.measurement.spectral_grade)
+        self.assertIsNone(persisted.measurement.spectral_bitrate_kbps)
 
 
 class TestPreviewDBProtocolParity(unittest.TestCase):
