@@ -269,6 +269,10 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
     # Existing rows are v1; every new separated-lineage writer emits v3.
     lineage_version: int = 3
     v0_metric: AlbumQualityV0Metric | None = None
+    # Preview-owned, content-snapshot-local idempotence marker. A failed or
+    # empty on-disk V0 research probe is still an attempt; import/cleanup
+    # consumers never execute the probe and policy never reads this flag.
+    on_disk_v0_research_attempted: bool = False
     verified_lossless_proof: VerifiedLosslessProof | None = None
     # U1 (migration 019) preview-evidence facts. The unified decider
     # ``full_pipeline_decision_from_evidence`` reads these as typed facts
@@ -299,6 +303,9 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
             target_is_cbr=self.target_is_cbr,
             lineage_version=self.lineage_version,
             v0_metric=self.v0_metric,
+            on_disk_v0_research_attempted=(
+                self.on_disk_v0_research_attempted
+            ),
             verified_lossless_proof=self.verified_lossless_proof,
             audio_corrupt=self.audio_corrupt,
             folder_layout=self.folder_layout,

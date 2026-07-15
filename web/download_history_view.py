@@ -31,6 +31,8 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     created_at: str | None
     beets_scenario: str | None
     beets_distance: float | None
+    source_download_log_id: int | None
+    original_beets_distance: float | None
     beets_detail: str | None
     soulseek_username: str | None
     error_message: str | None

@@ -22,7 +22,6 @@ Exit codes:
 
 import argparse
 import json
-import math
 import os
 import select
 import signal
@@ -80,6 +79,16 @@ from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          measured_import_decision,
                          provisional_lossless_decision, transcode_detection,
                          v0_probe_overrides_spectral)
+from lib.v0_probe import (
+    V0_CODEC,
+    V0_CODEC_ARGS,
+    V0_METADATA_ARGS,
+    conversion_timeout_seconds as _conversion_timeout_seconds,
+    folder_bitrates as _get_folder_bitrates,
+    probe_duration_seconds as _probe_duration_seconds,
+    probe_files_as_v0 as _temp_v0_probe,
+    v0_probe_from_bitrates as _shared_v0_probe_from_bitrates,
+)
 HARNESS = os.path.join(os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh")
 HARNESS_TIMEOUT = 300
 IMPORT_TIMEOUT = 1800
@@ -490,11 +499,11 @@ FLAC_SPEC = ConversionSpec(
 
 # V0 verification spec — always used as the first conversion step for FLAC
 V0_SPEC = ConversionSpec(
-    codec="libmp3lame",
-    codec_args=("-q:a", "0"),
+    codec=V0_CODEC,
+    codec_args=V0_CODEC_ARGS,
     extension="mp3",
     label="mp3 v0",
-    metadata_args=("-map_metadata", "0", "-id3v2_version", "3"),
+    metadata_args=V0_METADATA_ARGS,
 )
 
 
@@ -579,55 +588,6 @@ def parse_verified_lossless_target(spec: str) -> ConversionSpec:
 # ---------------------------------------------------------------------------
 # Quality checking
 # ---------------------------------------------------------------------------
-
-
-def _get_folder_bitrates(folder_path,
-                         ext_filter: set[str] | None = None) -> list[int]:
-    """Probe per-track bitrates (kbps) for audio files in a folder via ffprobe.
-
-    Uses audio stream bitrate (excludes cover art overhead). Falls back
-    to format bitrate for VBR MP3s where stream bitrate is N/A.
-
-    ext_filter: if provided, only measure files with these extensions
-    (e.g. {".mp3"} to measure only V0 files when FLAC coexists).
-
-    Returns a list of strictly-positive bitrates (kbps) in filesystem-listed
-    order. Use _get_folder_min_bitrate() for the min-aggregate helper.
-    """
-    bitrates: list[int] = []
-    for fname in os.listdir(folder_path):
-        ext = os.path.splitext(fname)[1].lower()
-        if ext not in AUDIO_EXTENSIONS:
-            continue
-        if ext_filter is not None and ext not in ext_filter:
-            continue
-        fpath = os.path.join(folder_path, fname)
-        try:
-            # Try audio stream bitrate first (accurate for CBR, excludes cover art)
-            result = subprocess.run(
-                ["ffprobe", "-v", "error",
-                 "-select_streams", "a:0",
-                 "-show_entries", "stream=bit_rate",
-                 "-of", "csv=p=0", fpath],
-                capture_output=True, text=True, errors="replace", timeout=30,
-            )
-            br_str = result.stdout.strip().rstrip(",")
-            # VBR MP3s return N/A for stream bitrate — fall back to format
-            if not br_str or not br_str.isdigit():
-                result = subprocess.run(
-                    ["ffprobe", "-v", "error",
-                     "-show_entries", "format=bit_rate",
-                     "-of", "csv=p=0", fpath],
-                    capture_output=True, text=True, errors="replace", timeout=30,
-                )
-                br_str = result.stdout.strip().rstrip(",")
-            if br_str and br_str.isdigit():
-                br_kbps = int(br_str) // 1000
-                if br_kbps > 0:
-                    bitrates.append(br_kbps)
-        except Exception:
-            continue
-    return bitrates
 
 
 def _get_folder_min_bitrate(folder_path,
@@ -751,14 +711,7 @@ def _v0_probe_from_bitrates(
     *,
     kind: str = V0_PROBE_LOSSLESS_SOURCE,
 ) -> V0ProbeEvidence | None:
-    if not bitrates:
-        return None
-    return V0ProbeEvidence(
-        kind=kind,
-        min_bitrate_kbps=min(bitrates),
-        avg_bitrate_kbps=int(sum(bitrates) / len(bitrates)),
-        median_bitrate_kbps=int(statistics.median(bitrates)),
-    )
+    return _shared_v0_probe_from_bitrates(bitrates, kind=kind)
 
 
 def _existing_v0_probe_from_args(args: argparse.Namespace) -> V0ProbeEvidence | None:
@@ -806,49 +759,6 @@ def _probe_native_lossy_as_v0(album_path: str) -> V0ProbeEvidence | None:
         album_path, lossy_files, kind=V0_PROBE_NATIVE_LOSSY_RESEARCH)
 
 
-def _temp_v0_probe(
-    album_path: str, files: list[str], *, kind: str,
-) -> V0ProbeEvidence | None:
-    """Re-encode the given audio files to V0 in a temp dir and measure them."""
-    with tempfile.TemporaryDirectory(prefix="cratedigger-v0-probe-") as temp_dir:
-        failed = 0
-        for index, fname in enumerate(files):
-            src_path = os.path.join(album_path, fname)
-            base = os.path.splitext(os.path.basename(fname))[0]
-            out_path = os.path.join(temp_dir, f"{index:03d}-{base}.mp3")
-            cmd = [
-                "ffmpeg", "-i", src_path,
-                "-ac", "2",
-                "-c:a", V0_SPEC.codec, *V0_SPEC.codec_args,
-                *V0_SPEC.metadata_args,
-                "-y", out_path,
-            ]
-            # Same duration-scaled budget as convert_lossless — a flat 300s
-            # makes this probe loop measurement_failed forever on long-form
-            # tracks (the 24h "7 Skies H3") for keep-lossless requests.
-            probe_timeout = _conversion_timeout_seconds(
-                _probe_duration_seconds(src_path))
-            try:
-                result = subprocess.run(
-                    cmd, capture_output=True, text=True, errors="replace",
-                    timeout=probe_timeout)
-            except subprocess.TimeoutExpired:
-                failed += 1
-                continue
-            if (
-                result.returncode != 0
-                or not os.path.exists(out_path)
-                or os.path.getsize(out_path) == 0
-            ):
-                failed += 1
-
-        if failed:
-            _log(f"  [V0 PROBE] {failed} temporary probe conversion(s) failed (kind={kind})")
-            return None
-        bitrates = _get_folder_bitrates(temp_dir, ext_filter={".mp3"})
-        return _v0_probe_from_bitrates(bitrates, kind=kind)
-
-
 def _remove_files_by_ext(folder: str, ext: str) -> None:
     """Remove all files with the given extension from a directory."""
     for fname in os.listdir(folder):
@@ -887,54 +797,6 @@ def _probe_source_channels(path: str) -> int | None:
     if isinstance(channels, int) and channels > 0:
         return channels
     return None
-
-
-def _probe_duration_seconds(path: str) -> float | None:
-    """Read total playback duration (seconds) from an audio file via mutagen.
-
-    Returns the float duration or ``None`` if the probe fails. mutagen reads
-    the stream header (FLAC STREAMINFO etc.), not the whole file, so this is
-    cheap even for multi-GB sources. Used to scale the ffmpeg conversion
-    timeout to track length — see ``_conversion_timeout_seconds``.
-    """
-    try:
-        from mutagen import File as _MutagenFile  # type: ignore[import-untyped,attr-defined]  # pyright: ignore[reportPrivateImportUsage]
-    except ImportError:
-        return None
-    try:
-        mf = _MutagenFile(path)
-    except Exception:
-        return None
-    if mf is None:
-        return None
-    length = getattr(getattr(mf, "info", None), "length", None)
-    if isinstance(length, (int, float)) and length > 0:
-        return float(length)
-    return None
-
-
-# Conversion timeout budget — a flat 300s is fine for songs but guarantees a
-# TimeoutExpired on long-form single tracks (the 24-hour Flaming Lips
-# "7 Skies H3" cannot transcode to V0 in 5 minutes, so request 4873 looped
-# measurement_failed forever). Scale the budget to the source duration:
-# assume the encoder sustains at least ~4x realtime, add fixed headroom, and
-# floor at 300s so normal-length tracks are unaffected. The budget is only a
-# ceiling — fast encodes finish well under it; it just lets slow/huge ones
-# complete instead of being killed mid-stream.
-_CONVERSION_TIMEOUT_FLOOR_S = 300
-_CONVERSION_MIN_REALTIME_FACTOR = 4
-_CONVERSION_TIMEOUT_HEADROOM_S = 120
-
-
-def _conversion_timeout_seconds(duration_s: float | None) -> int:
-    """ffmpeg conversion budget (seconds) scaled to source duration (pure)."""
-    if duration_s is None or duration_s <= 0:
-        return _CONVERSION_TIMEOUT_FLOOR_S
-    scaled = (
-        math.ceil(duration_s / _CONVERSION_MIN_REALTIME_FACTOR)
-        + _CONVERSION_TIMEOUT_HEADROOM_S
-    )
-    return max(_CONVERSION_TIMEOUT_FLOOR_S, scaled)
 
 
 def convert_lossless(album_path: str, spec: ConversionSpec,

@@ -34,20 +34,16 @@ function formatV0Probe(avg, kind, min = undefined) {
 }
 
 /**
- * Compact strip form of a V0 probe: "V0 255k avg", research probes
- * qualified "(from lossy)" — same vocabulary as formatV0Probe.
+ * Compact strip form of a V0 probe: "V0 255k avg (min 224k)". The compact
+ * comparison stops at the minimum; probe-kind provenance remains available
+ * in the expanded V0 probe row via formatV0Probe.
  * @param {number|string} avg
- * @param {string|undefined} kind
  * @param {number|string|undefined} min
  * @returns {string}
  */
-function stripV0Phrase(avg, kind, min = undefined) {
+function stripV0Phrase(avg, min = undefined) {
   const floor = min !== null && min !== undefined ? ` (min ${esc(min)}k)` : '';
-  const base = `V0 ${esc(avg)}k avg${floor}`;
-  if (!kind || kind === 'lossless_source_v0') return base;
-  if (kind === 'native_lossy_research_v0') return `${base} (from lossy)`;
-  if (kind === 'on_disk_research_v0') return `${base} (on-disk re-encode)`;
-  return `${base} (${esc(kind)})`;
+  return `V0 ${esc(avg)}k avg${floor}`;
 }
 
 /**
@@ -160,6 +156,8 @@ export function renderEvidenceStrip(h) {
   const hasMeasurement = Boolean(
     h.actual_min_bitrate || h.spectral_bitrate || h.spectral_grade
     || h.spectral_error || h.existing_spectral_error
+    || h.source_min_bitrate || h.source_avg_bitrate
+    || h.source_median_bitrate
     || h.v0_probe_avg_bitrate || h.existing_min_bitrate
     || h.existing_spectral_bitrate || h.existing_v0_probe_avg_bitrate
     || h.comparison_basis,
@@ -167,18 +165,30 @@ export function renderEvidenceStrip(h) {
   if (!hasMeasurement) return '';
 
   const basis = h.comparison_basis || null;
-  const inParts = [];
+  const inCells = { source: '', metric: '', rank: '', spectral: '', v0: '' };
+  const sourceFormat = h.source_format || h.slskd_filetype || h.original_filetype;
+  const collapsedConvertedSource = Boolean(h.was_converted && sourceFormat);
   if (basis) {
     // The persisted basis IS the comparison the decider performed —
     // render it instead of re-deriving labels from min bitrate (request
     // 6039: min-derived labels turned a real avg 196→288 rank upgrade
     // into "IN MP3 V2 · 194k HAVE MP3 194k").
-    const sourceFormat = h.source_format || h.slskd_filetype || h.original_filetype;
-    const sourcePrefix = h.was_converted && sourceFormat
-      ? `${esc(String(sourceFormat).toUpperCase())} → ` : '';
-    inParts.push(`${sourcePrefix}${basisSidePhrase(basis, 'new')}`);
+    if (collapsedConvertedSource) {
+      // Collapsed evidence names the measured source only. Target/output
+      // lineage belongs in the expanded detail, where it cannot make a
+      // target bitrate look like a property of the source codec.
+      inCells.source = esc(String(sourceFormat).toUpperCase());
+    } else {
+      inCells.source = esc(String(basis.new_format || '?').toUpperCase());
+      inCells.metric = basisValuePhrase(basis, 'new');
+      inCells.rank = esc(basis.new_rank);
+    }
   } else {
-    if (h.downloaded_label) inParts.push(esc(h.downloaded_label));
+    if (collapsedConvertedSource) {
+      inCells.source = esc(String(sourceFormat).toUpperCase());
+    } else if (h.downloaded_label) {
+      inCells.source = esc(h.downloaded_label);
+    }
     // Labelled "min": bare numbers on a card that also shows avg-labelled
     // basis and V0 values invite exactly the min-vs-avg confusion the
     // basis exists to kill (request 8781 operator report).
@@ -190,12 +200,11 @@ export function renderEvidenceStrip(h) {
       && h.v0_probe_min_bitrate !== undefined
       && Number(h.actual_min_bitrate) === Number(h.v0_probe_min_bitrate)
     );
-    if (h.actual_min_bitrate && !minIsLosslessSourceProbe) {
-      inParts.push(`min ${esc(h.actual_min_bitrate)}k`);
+    const sourceMin = h.actual_min_bitrate || h.source_min_bitrate;
+    if (sourceMin && !minIsLosslessSourceProbe && !collapsedConvertedSource) {
+      inCells.metric = `min ${esc(sourceMin)}k`;
     }
   }
-  const materialized = materializedOutputPhrase(h);
-  if (materialized) inParts.push(materialized);
   if (h.spectral_grade) {
     // With a basis, the clamped rank value already carries the floor —
     // repeating "~250k" in the grade chip would double it up.
@@ -207,54 +216,64 @@ export function renderEvidenceStrip(h) {
       ? `~${esc(h.spectral_bitrate)}k ` : '';
     const sgColor = h.spectral_grade === 'genuine' ? '#6d6'
       : h.spectral_grade === 'suspect' ? '#d66' : '#aa8';
-    inParts.push(`<span style="color:${sgColor};">${floor}${spectralGradeLabel(h.spectral_grade)}</span>`);
+    inCells.spectral = `<span style="color:${sgColor};">${floor}${spectralGradeLabel(h.spectral_grade)}</span>`;
   } else if (h.spectral_attempted && h.spectral_error) {
-    inParts.push(`<span style="color:#d66;" title="${esc(h.spectral_error)}">spectral failed</span>`);
+    inCells.spectral = `<span style="color:#d66;" title="${esc(h.spectral_error)}">spectral failed</span>`;
   }
-  // V0 on every candidate: whichever probe ran, show it (qualified when
-  // it's a research probe of a lossy source, so lineages stay legible).
+  // V0 on every candidate: keep the compact comparison numeric and bounded.
+  // Probe-kind provenance remains in the expanded V0 probe row.
   if (h.v0_probe_avg_bitrate) {
-    inParts.push(stripV0Phrase(
-      h.v0_probe_avg_bitrate, h.v0_probe_kind, h.v0_probe_min_bitrate));
+    inCells.v0 = stripV0Phrase(h.v0_probe_avg_bitrate, h.v0_probe_min_bitrate);
   }
 
-  const haveParts = [];
+  const haveCells = { source: '', metric: '', rank: '', spectral: '', v0: '' };
   // Lead with "MP3 min 256k" as one piece — the codec class is often the
   // deciding metric (a rank upgrade at equal bitrate is unreadable
   // without it), and the min label keeps it distinct from the avg-labelled
   // basis/V0 values on the same card.
   if (basis) {
-    haveParts.push(basisSidePhrase(basis, 'existing'));
+    haveCells.source = esc(String(basis.existing_format || '?').toUpperCase());
+    haveCells.metric = basisValuePhrase(basis, 'existing');
+    haveCells.rank = esc(basis.existing_rank);
   } else if (h.existing_format && h.existing_min_bitrate) {
-    haveParts.push(`${esc(h.existing_format)} min ${esc(h.existing_min_bitrate)}k`);
+    haveCells.source = esc(h.existing_format);
+    haveCells.metric = `min ${esc(h.existing_min_bitrate)}k`;
   } else if (h.existing_format) {
-    haveParts.push(esc(h.existing_format));
+    haveCells.source = esc(h.existing_format);
   } else if (h.existing_min_bitrate) {
-    haveParts.push(`min ${esc(h.existing_min_bitrate)}k`);
+    haveCells.metric = `min ${esc(h.existing_min_bitrate)}k`;
   }
   if (h.existing_spectral_grade) {
     const floor = h.existing_spectral_bitrate ? `~${esc(h.existing_spectral_bitrate)}k ` : '';
     const color = h.existing_spectral_grade === 'genuine' ? '#6d6'
       : h.existing_spectral_grade === 'suspect' ? '#d66' : '#aa8';
-    haveParts.push(`<span style="color:${color};">${floor}${spectralGradeLabel(h.existing_spectral_grade)}</span>`);
+    haveCells.spectral = `<span style="color:${color};">${floor}${spectralGradeLabel(h.existing_spectral_grade)}</span>`;
   } else if (h.existing_spectral_attempted && h.existing_spectral_error) {
-    haveParts.push(`<span style="color:#d66;" title="${esc(h.existing_spectral_error)}">spectral failed</span>`);
+    haveCells.spectral = `<span style="color:#d66;" title="${esc(h.existing_spectral_error)}">spectral failed</span>`;
   } else if (h.existing_spectral_bitrate) {
     // Historical attempts measured only the existing floor, not its grade.
-    haveParts.push(`ungraded (~${esc(h.existing_spectral_bitrate)}k)`);
+    haveCells.spectral = `ungraded (~${esc(h.existing_spectral_bitrate)}k)`;
   }
   if (h.existing_v0_probe_avg_bitrate) {
-    haveParts.push(stripV0Phrase(
+    haveCells.v0 = stripV0Phrase(
       h.existing_v0_probe_avg_bitrate,
-      h.existing_v0_probe_kind,
-      h.existing_v0_probe_min_bitrate));
+      h.existing_v0_probe_min_bitrate);
   }
 
-  if (inParts.length === 0 && haveParts.length === 0) return '';
-  const inHtml = inParts.length ? inParts.join(' · ') : '—';
-  const haveHtml = haveParts.length ? haveParts.join(' · ') : '—';
-  return `<span class="r-evidence"><span class="r-ev-tag">IN</span> ${inHtml}`
-    + ` <span class="r-ev-tag">HAVE</span> ${haveHtml}</span>`;
+  const hasCells = (cells) => Object.values(cells).some(Boolean);
+  if (!hasCells(inCells) && !hasCells(haveCells)) return '';
+  const row = (side, label, cells) => `<span class="r-ev-row r-ev-${side}">`
+    + `<strong class="r-ev-tag">${label}</strong>`
+    + `<span class="r-ev-cell r-ev-source">${cells.source}</span>`
+    + `<span class="r-ev-cell r-ev-metric">${cells.metric}</span>`
+    + `<span class="r-ev-cell r-ev-rank">${cells.rank}</span>`
+    + `<span class="r-ev-cell r-ev-spectral">${cells.spectral}</span>`
+    + `<span class="r-ev-cell r-ev-v0">${cells.v0}</span>`
+    + `</span>`;
+  return `<span class="r-evidence">`
+    + row('in', 'IN', inCells)
+    + row('have', 'HAVE', haveCells)
+    + `</span>`;
 }
 
 /**
@@ -358,30 +377,23 @@ export function renderDownloadHistoryItem(h) {
     rows.push(['Spectral', '—']);
   }
 
-  // V0 probe row: rendered for EVERY probe kind — V0 runs on every
-  // candidate (lossless sources get the gold-standard source probe;
-  // native-lossy sources get a real ffmpeg V0-transcode research probe)
-  // and the numbers are load-bearing operator data. formatV0Probe
-  // qualifies research probes "(from lossy)" on BOTH sides, so a
-  // mixed-lineage comparison stays legible instead of being hidden.
-  //
-  // The "(was X)" suffix is V0-probe vs V0-probe only. We deliberately
-  // do NOT fall back to the existing raw min bitrate: painting a
-  // V0-probe avg next to a container min bitrate reads as a fake
-  // upgrade (e.g. "239kbps avg (was 92kbps)" compares two different
-  // metrics). When there's no existing probe, the row shows the
-  // candidate alone. Each probe owns its own optional minimum so a temporary
-  // V0 floor can never be mistaken for the source container's bitrate.
-  if (h.v0_probe_avg_bitrate) {
-    const candidate = formatV0Probe(
-      h.v0_probe_avg_bitrate, h.v0_probe_kind, h.v0_probe_min_bitrate);
-    const was = h.existing_v0_probe_avg_bitrate
+  // V0 probe row: render whichever side exists and label both sides
+  // explicitly. Probe-kind provenance belongs here (not in the compact
+  // strip), and a HAVE-only historical row must remain visible. We never
+  // substitute either side's raw container minimum for a missing probe.
+  if (h.v0_probe_avg_bitrate || h.existing_v0_probe_avg_bitrate) {
+    const candidate = h.v0_probe_avg_bitrate
+      ? formatV0Probe(
+        h.v0_probe_avg_bitrate, h.v0_probe_kind, h.v0_probe_min_bitrate)
+      : '—';
+    const existing = h.existing_v0_probe_avg_bitrate
       ? formatV0Probe(
         h.existing_v0_probe_avg_bitrate,
         h.existing_v0_probe_kind,
         h.existing_v0_probe_min_bitrate)
-      : null;
-    rows.push(['V0 probe', withWas(candidate, was)]);
+      : '—';
+    rows.push(['V0 probe', `<span class="r-ev-tag">IN</span> ${candidate} `
+      + `<span class="r-ev-tag">HAVE</span> ${existing}`]);
   }
 
   // Compared row — the persisted comparison basis, rendered verbatim.
@@ -415,7 +427,10 @@ export function renderDownloadHistoryItem(h) {
   }
 
   if (outcome === 'force_import') {
-    rows.push(['Distance', '<span style="color:#6af;">overridden</span>']);
+    const original = h.original_beets_distance != null
+      ? ` <span class="p-hist-was">(was ${parseFloat(h.original_beets_distance).toFixed(3)})</span>`
+      : '';
+    rows.push(['Distance', `<span style="color:#6af;">overridden</span>${original}`]);
   } else if (h.beets_distance != null) {
     rows.push(['Distance', parseFloat(h.beets_distance).toFixed(3)]);
   } else {

@@ -147,6 +147,12 @@ class TestEnvelopeContract(unittest.TestCase):
             self.assertIn(key, ValidationResultEnvelope.__struct_fields__)
 
     def test_triage_audit_round_trips_through_json(self) -> None:
+        from lib.quality import (
+            AudioQualityMeasurement,
+            QualityComparisonBasis,
+            V0ProbeEvidence,
+        )
+
         audit = WrongMatchTriageAudit(
             action="deleted_reject",
             outcome="deleted",
@@ -159,6 +165,41 @@ class TestEnvelopeContract(unittest.TestCase):
             stage_chain=["preview", "spectral"],
             cleared_rows=1,
             deleted_path="/p",
+            candidate_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=201,
+                avg_bitrate_kbps=259,
+                format="MP3",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=96,
+            ),
+            current_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                format="MP3",
+                is_cbr=True,
+            ),
+            candidate_v0_probe=V0ProbeEvidence(
+                kind="native_lossy_research_v0",
+                min_bitrate_kbps=201,
+                avg_bitrate_kbps=259,
+            ),
+            current_v0_probe=V0ProbeEvidence(
+                kind="on_disk_research_v0",
+                min_bitrate_kbps=202,
+                avg_bitrate_kbps=260,
+            ),
+            comparison_basis=QualityComparisonBasis(
+                verdict="worse",
+                branch="same_rank_bitrate",
+                new_rank="transparent",
+                existing_rank="transparent",
+                new_metric="avg",
+                existing_metric="avg",
+                new_value_kbps=259,
+                existing_value_kbps=320,
+                new_format="MP3",
+                existing_format="MP3",
+            ),
         )
         wire = msgspec.json.encode(audit)
         env = decode_validation_envelope(

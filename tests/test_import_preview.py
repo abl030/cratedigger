@@ -12,6 +12,7 @@ from lib.import_preview import (
     ImportPreviewValues,
     _prefer_successful_spectral_detail,
     compose_attempt_spectral_audit,
+    enrich_current_v0_research_for_preview,
     load_persisted_existing_spectral,
     measure_and_persist_candidate_evidence,
     preview_import_from_path,
@@ -24,8 +25,10 @@ from lib.quality import (
     SpectralAnalysisDetail,
     SpectralDetail,
     TargetQualityContract,
+    V0ProbeEvidence,
     full_pipeline_decision,
 )
+from lib.quality_evidence import EvidenceBuildResult, snapshot_audio_files
 
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
@@ -380,6 +383,198 @@ class TestImportPreviewPath(unittest.TestCase):
         with open(os.path.join(source, "01.mp3"), "wb") as handle:
             handle.write(b"not real audio but never inspected in this test")
         return source
+
+    def _seed_current_without_v0(
+        self,
+        db: FakePipelineDB,
+        source: str,
+    ):
+        evidence = make_album_quality_evidence(
+            mb_release_id="mbid-42",
+            source_path=source,
+            files=snapshot_audio_files(source),
+            v0_metric=None,
+        )
+        db.upsert_album_quality_evidence(evidence)
+        stored = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        db.set_request_current_evidence(42, stored.id)
+        return stored
+
+    def test_preview_v0_research_attempt_is_persisted_once_after_failure(self):
+        db = self._db()
+        source = self._source_dir()
+        calls: list[str] = []
+        try:
+            current = self._seed_current_without_v0(db, source)
+            assert current.id is not None
+
+            def failed_probe(path: str):
+                calls.append(path)
+                raise RuntimeError("ffmpeg failed")
+
+            first = enrich_current_v0_research_for_preview(
+                db,
+                request_id=42,
+                expected_evidence_id=current.id,
+                expected_snapshot_fingerprint=current.snapshot_fingerprint,
+                probe_fn=failed_probe,
+            )
+            second = enrich_current_v0_research_for_preview(
+                db,
+                request_id=42,
+                expected_evidence_id=current.id,
+                expected_snapshot_fingerprint=current.snapshot_fingerprint,
+                probe_fn=failed_probe,
+            )
+
+            self.assertEqual(first.status, "ready")
+            self.assertEqual(second.status, "ready")
+            self.assertEqual(calls, [source])
+            assert second.evidence is not None
+            self.assertTrue(second.evidence.on_disk_v0_research_attempted)
+            self.assertIsNone(second.evidence.v0_metric)
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_preview_v0_research_persists_neutral_metric(self):
+        db = self._db()
+        source = self._source_dir()
+        try:
+            current = self._seed_current_without_v0(db, source)
+            assert current.id is not None
+            result = enrich_current_v0_research_for_preview(
+                db,
+                request_id=42,
+                expected_evidence_id=current.id,
+                expected_snapshot_fingerprint=current.snapshot_fingerprint,
+                probe_fn=lambda _path: V0ProbeEvidence(
+                    kind="on_disk_research_v0",
+                    min_bitrate_kbps=201,
+                    avg_bitrate_kbps=259,
+                    median_bitrate_kbps=255,
+                ),
+            )
+
+            self.assertEqual(result.status, "ready")
+            assert result.evidence is not None
+            self.assertTrue(result.evidence.on_disk_v0_research_attempted)
+            assert result.evidence.v0_metric is not None
+            self.assertEqual(
+                result.evidence.v0_metric.source_lineage,
+                "on_disk_research",
+            )
+            self.assertEqual(result.evidence.v0_metric.avg_bitrate_kbps, 259)
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_preview_v0_research_requires_exact_current_snapshot(self):
+        db = self._db()
+        source = self._source_dir()
+        calls: list[str] = []
+        try:
+            current = self._seed_current_without_v0(db, source)
+            assert current.id is not None
+
+            def probe(path: str):
+                calls.append(path)
+                return None
+
+            wrong_id = enrich_current_v0_research_for_preview(
+                db,
+                request_id=42,
+                expected_evidence_id=current.id + 1,
+                expected_snapshot_fingerprint=current.snapshot_fingerprint,
+                probe_fn=probe,
+            )
+            with open(os.path.join(source, "01.mp3"), "ab") as handle:
+                handle.write(b"changed")
+            stale = enrich_current_v0_research_for_preview(
+                db,
+                request_id=42,
+                expected_evidence_id=current.id,
+                expected_snapshot_fingerprint=current.snapshot_fingerprint,
+                probe_fn=probe,
+            )
+
+            self.assertEqual(wrong_id.status, "stale")
+            self.assertEqual(stale.status, "stale")
+            self.assertEqual(calls, [])
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_preview_v0_research_releases_claim_when_probe_changes_files(self):
+        db = self._db()
+        source = self._source_dir()
+        try:
+            current = self._seed_current_without_v0(db, source)
+            assert current.id is not None
+
+            def mutating_probe(path: str) -> V0ProbeEvidence:
+                with open(os.path.join(path, "01.mp3"), "ab") as handle:
+                    handle.write(b"changed during probe")
+                return V0ProbeEvidence(
+                    kind="on_disk_research_v0",
+                    min_bitrate_kbps=201,
+                    avg_bitrate_kbps=259,
+                    median_bitrate_kbps=255,
+                )
+
+            result = enrich_current_v0_research_for_preview(
+                db,
+                request_id=42,
+                expected_evidence_id=current.id,
+                expected_snapshot_fingerprint=current.snapshot_fingerprint,
+                probe_fn=mutating_probe,
+            )
+
+            self.assertEqual(result.status, "stale")
+            persisted = db.load_album_quality_evidence_by_id(current.id)
+            assert persisted is not None
+            self.assertFalse(persisted.on_disk_v0_research_attempted)
+            self.assertIsNone(persisted.v0_metric)
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_preview_v0_research_releases_claim_when_current_link_changes(self):
+        db = self._db()
+        source = self._source_dir()
+        try:
+            current = self._seed_current_without_v0(db, source)
+            assert current.id is not None
+
+            def relinking_probe(_path: str) -> V0ProbeEvidence:
+                db.set_request_current_evidence(42, None)
+                return V0ProbeEvidence(
+                    kind="on_disk_research_v0",
+                    min_bitrate_kbps=201,
+                    avg_bitrate_kbps=259,
+                    median_bitrate_kbps=255,
+                )
+
+            result = enrich_current_v0_research_for_preview(
+                db,
+                request_id=42,
+                expected_evidence_id=current.id,
+                expected_snapshot_fingerprint=current.snapshot_fingerprint,
+                probe_fn=relinking_probe,
+            )
+
+            self.assertEqual(result.status, "stale")
+            persisted = db.load_album_quality_evidence_by_id(current.id)
+            assert persisted is not None
+            self.assertFalse(persisted.on_disk_v0_research_attempted)
+            self.assertIsNone(persisted.v0_metric)
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
 
     def _direct_preview_override(self, db: FakePipelineDB) -> int | None:
         source = self._source_dir()
@@ -789,6 +984,81 @@ class TestImportPreviewPath(unittest.TestCase):
             self.assertEqual(preview.decision, "evidence_persist_failed")
             assert preview.import_result is not None
             self.assertEqual(preview.import_result.spectral, audit)
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_production_preview_prepares_have_before_candidate_ready(self):
+        order: list[str] = []
+
+        class RecordingPipelineDB(FakePipelineDB):
+            def claim_current_v0_research_attempt(
+                self,
+                *,
+                request_id: int,
+                expected_evidence_id: int,
+                expected_snapshot_fingerprint: str,
+            ) -> bool:
+                order.append("prepare_have")
+                super().claim_current_v0_research_attempt(
+                    request_id=request_id,
+                    expected_evidence_id=expected_evidence_id,
+                    expected_snapshot_fingerprint=expected_snapshot_fingerprint,
+                )
+                # Model a concurrent preview winning the claim. The loader
+                # must reload that committed marker without running ffmpeg;
+                # this test is about orchestration order, not probe behavior.
+                return False
+
+        db = RecordingPipelineDB()
+        request = self._db().get_request(42)
+        assert request is not None
+        db.seed_request(request)
+        source = self._source_dir()
+
+        def measure(*args, **kwargs):
+            order.append("measure_candidate")
+            return PreimportMeasurement(
+                audio_corrupt=True,
+                corrupt_files=["01.mp3"],
+                folder_layout="flat",
+                audio_file_count=1,
+            )
+
+        def persist(*args, **kwargs):
+            order.append("persist_candidate")
+            return EvidenceBuildResult(
+                make_album_quality_evidence(mb_release_id="candidate-ready"),
+                "ready",
+            )
+
+        try:
+            self._seed_current_without_v0(db, source)
+            with patch(
+                "lib.config.read_runtime_config",
+                return_value=CratediggerConfig(
+                    beets_harness_path="/fake/harness/run_beets_harness.sh",
+                    pipeline_db_enabled=True,
+                ),
+            ), patch(
+                "lib.import_preview.inspect_local_files",
+                return_value=LocalFileInspection(filetype="mp3"),
+            ), patch(
+                "lib.import_preview.measure_preimport_state",
+                side_effect=measure,
+            ):
+                result = measure_and_persist_candidate_evidence(
+                    db,
+                    request_id=42,
+                    path=source,
+                    persist_measurement_fn=persist,
+                )
+
+            self.assertEqual(result.verdict, "evidence_ready")
+            self.assertEqual(
+                order,
+                ["prepare_have", "measure_candidate", "persist_candidate"],
+            )
         finally:
             import shutil
             shutil.rmtree(source, ignore_errors=True)

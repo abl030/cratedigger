@@ -140,6 +140,7 @@ def make_album_quality_evidence(
     target_format: str | None = None,
     target_is_cbr: bool | None = None,
     lineage_version: int = 3,
+    on_disk_v0_research_attempted: bool = False,
 ) -> AlbumQualityEvidence:
     """Build production-shaped active album-quality evidence.
 
@@ -192,6 +193,7 @@ def make_album_quality_evidence(
         ),
         lineage_version=lineage_version,
         v0_metric=v0_metric,
+        on_disk_v0_research_attempted=on_disk_v0_research_attempted,
         verified_lossless_proof=verified_lossless_proof,
     )
 

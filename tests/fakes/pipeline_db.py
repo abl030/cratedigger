@@ -67,6 +67,7 @@ from lib.pipeline_db._shared import (
 )
 from lib.quality import (
     AlbumQualityEvidence,
+    AlbumQualityV0Metric,
     CooldownConfig,
 )
 from lib import transitions
@@ -1797,6 +1798,7 @@ class FakePipelineDB:
                      existing_v0_probe_avg_bitrate: int | None = None,
                      existing_v0_probe_median_bitrate: int | None = None,
                      transfer_detail: Any = None,
+                     source_download_log_id: int | None = None,
                      **extra: Any) -> int:
         """Record a download_log row.
 
@@ -1873,6 +1875,7 @@ class FakePipelineDB:
             import_result=import_result,
             transfer_detail=transfer_detail,
             id=new_log_id,
+            source_download_log_id=source_download_log_id,
             extra=auxiliary,
         ))
         return new_log_id
@@ -2513,6 +2516,26 @@ class FakePipelineDB:
             raise ValueError("; ".join(errors))
         key = (evidence.mb_release_id, evidence.snapshot_fingerprint)
         existing = self.album_quality_evidence.get(key)
+        # V0 is an atomic tuple. A stale writer with no metric preserves the
+        # whole stored fact; a valid incoming metric replaces it wholesale.
+        if (
+            existing is not None
+            and existing.v0_metric is not None
+            and evidence.v0_metric is None
+        ):
+            evidence = msgspec.structs.replace(
+                evidence,
+                v0_metric=existing.v0_metric,
+            )
+        if (
+            existing is not None
+            and existing.on_disk_v0_research_attempted
+            and not evidence.on_disk_v0_research_attempted
+        ):
+            evidence = msgspec.structs.replace(
+                evidence,
+                on_disk_v0_research_attempted=True,
+            )
         if existing is not None and existing.id is not None:
             evidence_id = existing.id
         else:
@@ -2541,6 +2564,84 @@ class FakePipelineDB:
             (mb_release_id, snapshot_fingerprint)
         )
         return copy.deepcopy(evidence) if evidence is not None else None
+
+    def claim_current_v0_research_attempt(
+        self,
+        *,
+        request_id: int,
+        expected_evidence_id: int,
+        expected_snapshot_fingerprint: str,
+    ) -> bool:
+        request = self._requests.get(int(request_id))
+        evidence = self._evidence_by_id.get(int(expected_evidence_id))
+        if (
+            request is None
+            or request.get("current_evidence_id") != int(expected_evidence_id)
+            or evidence is None
+            or evidence.snapshot_fingerprint != expected_snapshot_fingerprint
+            or evidence.v0_metric is not None
+            or evidence.on_disk_v0_research_attempted
+        ):
+            return False
+        claimed = copy.deepcopy(msgspec.structs.replace(
+            evidence,
+            on_disk_v0_research_attempted=True,
+        ))
+        key = (claimed.mb_release_id, claimed.snapshot_fingerprint)
+        self.album_quality_evidence[key] = claimed
+        self._evidence_by_id[int(expected_evidence_id)] = claimed
+        return True
+
+    def persist_current_v0_research_metric(
+        self,
+        *,
+        request_id: int,
+        expected_evidence_id: int,
+        expected_snapshot_fingerprint: str,
+        metric: AlbumQualityV0Metric,
+    ) -> bool:
+        request = self._requests.get(int(request_id))
+        evidence = self._evidence_by_id.get(int(expected_evidence_id))
+        if (
+            request is None
+            or request.get("current_evidence_id") != int(expected_evidence_id)
+            or evidence is None
+            or evidence.snapshot_fingerprint != expected_snapshot_fingerprint
+            or not evidence.on_disk_v0_research_attempted
+            or evidence.v0_metric is not None
+        ):
+            return False
+        completed = copy.deepcopy(msgspec.structs.replace(
+            evidence,
+            v0_metric=metric,
+        ))
+        key = (completed.mb_release_id, completed.snapshot_fingerprint)
+        self.album_quality_evidence[key] = completed
+        self._evidence_by_id[int(expected_evidence_id)] = completed
+        return True
+
+    def release_current_v0_research_attempt(
+        self,
+        *,
+        expected_evidence_id: int,
+        expected_snapshot_fingerprint: str,
+    ) -> bool:
+        evidence = self._evidence_by_id.get(int(expected_evidence_id))
+        if (
+            evidence is None
+            or evidence.snapshot_fingerprint != expected_snapshot_fingerprint
+            or not evidence.on_disk_v0_research_attempted
+            or evidence.v0_metric is not None
+        ):
+            return False
+        released = copy.deepcopy(msgspec.structs.replace(
+            evidence,
+            on_disk_v0_research_attempted=False,
+        ))
+        key = (released.mb_release_id, released.snapshot_fingerprint)
+        self.album_quality_evidence[key] = released
+        self._evidence_by_id[int(expected_evidence_id)] = released
+        return True
 
     def set_import_job_candidate_evidence(
         self,
@@ -4312,6 +4413,15 @@ class FakePipelineDB:
             "transfer_detail": entry.transfer_detail,
             "created_at": entry.created_at,
             "candidate_evidence_id": entry.candidate_evidence_id,
+            "source_download_log_id": entry.source_download_log_id,
+            "original_beets_distance": next(
+                (
+                    origin.beets_distance
+                    for origin in self.download_logs
+                    if origin.id == entry.source_download_log_id
+                ),
+                None,
+            ),
             # Migration 037 — source discriminator + YT JSONB. Mirrors
             # the production read seam (every consumer sees these two
             # columns whether or not the row originated from YT).
@@ -4329,6 +4439,23 @@ class FakePipelineDB:
         if ev is not None:
             ev_m = ev.measurement
             ev_v0 = ev.v0_metric
+            source_semantic = ev.lineage_version == 3
+            if source_semantic \
+                    and row.get("source_format") is None \
+                    and ev_m.format is not None:
+                row["source_format"] = ev_m.format
+            if source_semantic \
+                    and row.get("source_min_bitrate") is None \
+                    and ev_m.min_bitrate_kbps is not None:
+                row["source_min_bitrate"] = ev_m.min_bitrate_kbps
+            if source_semantic \
+                    and row.get("source_avg_bitrate") is None \
+                    and ev_m.avg_bitrate_kbps is not None:
+                row["source_avg_bitrate"] = ev_m.avg_bitrate_kbps
+            if source_semantic \
+                    and row.get("source_median_bitrate") is None \
+                    and ev_m.median_bitrate_kbps is not None:
+                row["source_median_bitrate"] = ev_m.median_bitrate_kbps
             if row.get("spectral_grade") is None \
                     and ev_m is not None and ev_m.spectral_grade is not None:
                 row["spectral_grade"] = ev_m.spectral_grade
@@ -4338,11 +4465,23 @@ class FakePipelineDB:
                 row["spectral_bitrate"] = ev_m.spectral_bitrate_kbps
             if row.get("v0_probe_kind") is None \
                     and ev_v0 is not None and ev_v0.source_lineage is not None:
-                row["v0_probe_kind"] = ev_v0.source_lineage
+                row["v0_probe_kind"] = {
+                    "lossless_source": "lossless_source_v0",
+                    "native_lossy_research": "native_lossy_research_v0",
+                    "on_disk_research": "on_disk_research_v0",
+                }.get(ev_v0.source_lineage, ev_v0.source_lineage)
+            if row.get("v0_probe_min_bitrate") is None \
+                    and ev_v0 is not None \
+                    and ev_v0.min_bitrate_kbps is not None:
+                row["v0_probe_min_bitrate"] = ev_v0.min_bitrate_kbps
             if row.get("v0_probe_avg_bitrate") is None \
                     and ev_v0 is not None \
                     and ev_v0.avg_bitrate_kbps is not None:
                 row["v0_probe_avg_bitrate"] = ev_v0.avg_bitrate_kbps
+            if row.get("v0_probe_median_bitrate") is None \
+                    and ev_v0 is not None \
+                    and ev_v0.median_bitrate_kbps is not None:
+                row["v0_probe_median_bitrate"] = ev_v0.median_bitrate_kbps
         return row
 
     # --- Wrong-match review queue ---

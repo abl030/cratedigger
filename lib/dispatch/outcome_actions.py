@@ -62,6 +62,7 @@ def _reject_import_from_evidence_decision(
     source_path_cleanup_scenario: str,
     cooled_down_users: set[str] | None,
     import_job_id: int | None = None,
+    source_download_log_id: int | None = None,
     quality_ranks: QualityRankConfig | None = None,
 ) -> DispatchOutcome:
     """Record a persisted-evidence rejection before beets can mutate files.
@@ -140,6 +141,7 @@ def _reject_import_from_evidence_decision(
         staged_path=staged_path,
         attempt_result=attempt_result,
         import_job_id=import_job_id,
+        source_download_log_id=source_download_log_id,
     )
     if action.denylist:
         usernames = extract_usernames(files or [])
@@ -203,6 +205,7 @@ def _do_mark_done(
     clear_stale_v0_probe: bool = True,
     attempt_result: ImportAttemptResult | None = None,
     import_job_id: int | None = None,
+    source_download_log_id: int | None = None,
 ) -> int | None | PendingImportTerminalOutcome:
     """Mark album as imported — standalone version of DatabaseSource.mark_done.
 
@@ -303,6 +306,7 @@ def _do_mark_done(
         validation_result=validation_result,
         final_format=dl_info.final_format,
         **_v0_probe_log_fields(dl_info),
+        source_download_log_id=source_download_log_id,
     )
     if import_job_id is not None:
         return PendingImportTerminalOutcome(
@@ -431,6 +435,7 @@ def _record_rejection_and_maybe_requeue(
     staged_path: str | None = None,
     attempt_result: ImportAttemptResult | None = None,
     import_job_id: int | None = None,
+    source_download_log_id: int | None = None,
 ) -> int | PendingImportTerminalOutcome:
     """Importer-side rejection entry point.
 
@@ -480,6 +485,7 @@ def _record_rejection_and_maybe_requeue(
                                       if dl_info.current_spectral else None),
         "import_result": dl_info.import_result,
         "validation_result": validation_result,
+        "source_download_log_id": source_download_log_id,
     }
     log_download_kwargs.update(_v0_probe_log_fields(dl_info))
     if import_job_id is not None:

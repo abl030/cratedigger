@@ -58,6 +58,7 @@ class TerminalDownloadAudit:
     existing_v0_probe_min_bitrate: int | None = None
     existing_v0_probe_avg_bitrate: int | None = None
     existing_v0_probe_median_bitrate: int | None = None
+    source_download_log_id: int | None = None
 
     def as_log_kwargs(self) -> dict[str, object]:
         """Return the exact public ``log_download`` keyword projection."""

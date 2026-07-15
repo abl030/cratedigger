@@ -332,24 +332,27 @@ def audit_v0_probe_from_metric(
 ) -> V0ProbeEvidence | None:
     """Build ``V0ProbeEvidence`` from a persisted v0_metric for audit/log use.
 
-    Returns a probe for *any* metric with ``kind`` reflecting source lineage
-    (``lossless_source_v0`` for true lossless-container probes;
-    ``neutral_v0_research`` otherwise). Policy code that needs a comparable
-    probe must keep filtering via :func:`is_comparable_lossless_source_probe`
-    — this helper exists so audit/UI surfaces can read a probe from *every*
-    download, including native-lossy research probes.
+    Returns a probe for *any* metric with the exact persisted audit kind for
+    its source lineage. Policy code that needs a comparable probe must keep
+    filtering via :func:`is_comparable_lossless_source_probe` — this helper
+    exists so audit/UI surfaces can read a probe from *every* download,
+    including native-lossy and on-disk research probes.
     """
 
     if metric is None:
         return None
     # download_log.v0_probe_kind CHECK constraint (migration 007) only
-    # accepts the three persisted kinds. ``neutral_v0_research`` is an
-    # in-memory marker used inside ``full_pipeline_decision_from_evidence``
-    # to mean "non-comparable" and must never be written to the DB.
-    kind = (
-        V0_PROBE_LOSSLESS_SOURCE
-        if metric.source_lineage == V0_SOURCE_LINEAGE_LOSSLESS_SOURCE
-        else V0_PROBE_NATIVE_LOSSY_RESEARCH
+    # accepts the three persisted audit kinds. ``neutral_v0_research`` is an
+    # in-memory policy marker and must never be written to the DB.
+    kind_by_lineage = {
+        V0_SOURCE_LINEAGE_LOSSLESS_SOURCE: V0_PROBE_LOSSLESS_SOURCE,
+        V0_SOURCE_LINEAGE_NATIVE_LOSSY_RESEARCH:
+            V0_PROBE_NATIVE_LOSSY_RESEARCH,
+        V0_SOURCE_LINEAGE_ON_DISK_RESEARCH: V0_PROBE_ON_DISK_RESEARCH,
+    }
+    kind = kind_by_lineage.get(
+        metric.source_lineage or "",
+        V0_PROBE_NATIVE_LOSSY_RESEARCH,
     )
     return V0ProbeEvidence(
         kind=kind,

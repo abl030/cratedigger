@@ -28,6 +28,9 @@ class DownloadLogRow:
     id: int = 0
     # Migration 021: addressing FK to album_quality_evidence(id).
     candidate_evidence_id: int | None = None
+    # Migration 052: exact validation/download row that produced a later
+    # force/manual import audit row.
+    source_download_log_id: int | None = None
     # Migration 037 — source discriminator + YT-specific JSONB blob.
     # ``source`` defaults to ``'slskd'`` matching the production NOT NULL
     # DEFAULT. ``youtube_metadata`` is NULL unless this row was written

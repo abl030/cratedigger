@@ -27,6 +27,12 @@ from typing import Any, cast
 
 import msgspec
 
+from lib.quality import (
+    AudioQualityMeasurement,
+    QualityComparisonBasis,
+    V0ProbeEvidence,
+)
+
 
 class WrongMatchTriageAudit(msgspec.Struct, frozen=True, omit_defaults=True):
     """Cleanup/triage audit persisted under ``wrong_match_triage``.
@@ -50,6 +56,14 @@ class WrongMatchTriageAudit(msgspec.Struct, frozen=True, omit_defaults=True):
     deleted_path: str | None = None
     path_missing: bool = False
     error: str | None = None
+    # Exact cleanup-attempt snapshots. These are deliberately embedded in
+    # the audit blob: joining album_requests.current_evidence_id later would
+    # rewrite history after a future upgrade.
+    candidate_measurement: AudioQualityMeasurement | None = None
+    current_measurement: AudioQualityMeasurement | None = None
+    candidate_v0_probe: V0ProbeEvidence | None = None
+    current_v0_probe: V0ProbeEvidence | None = None
+    comparison_basis: QualityComparisonBasis | None = None
 
 
 class ValidationResultEnvelope(msgspec.Struct, frozen=True):

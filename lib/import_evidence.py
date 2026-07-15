@@ -382,7 +382,6 @@ def load_current_evidence_for_action(
             ),
         )
 
-
 def _candidate_action_status(status: str) -> str:
     if status in {"missing", "unowned", "empty_fileset"}:
         return CANDIDATE_STATUS_MISSING

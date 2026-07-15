@@ -396,6 +396,43 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         self.assertEqual(float(row["beets_distance"]), 0.04)
         self.assertEqual(row["prior_unfindable_category"], "artist_absent")
 
+    def test_job_backed_force_audit_preserves_origin_distance(self):
+        db, request_id, job_id = _seed_running_import()
+        self.addCleanup(db.close)
+        origin_id = db.log_download(
+            request_id,
+            outcome="rejected",
+            validation_result=(
+                '{"valid":false,"distance":0.2328,"scenario":"high_distance"}'
+            ),
+        )
+        outcome = ImportTerminalOutcome(
+            request_id=request_id,
+            import_job_id=job_id,
+            initial_transition=transitions.RequestTransition.to_imported(
+                imported_path="/music/Atomic/Outcome",
+            ),
+            audit=TerminalDownloadAudit(
+                outcome="force_import",
+                validation_result=(
+                    '{"valid":true,"distance":0.0,"scenario":"force_import"}'
+                ),
+                source_download_log_id=origin_id,
+            ),
+            job=ImportJobTerminal(
+                status="completed",
+                result={"success": True},
+                message="done",
+            ),
+        )
+
+        result = db.persist_import_terminal_outcome(outcome)
+
+        row = db.get_download_log_entry(result.download_log_id)
+        assert row is not None
+        self.assertEqual(row["source_download_log_id"], origin_id)
+        self.assertAlmostEqual(float(row["original_beets_distance"]), 0.2328)
+
     def _run_job_backed_automation_result(
         self,
         db: PipelineDB,

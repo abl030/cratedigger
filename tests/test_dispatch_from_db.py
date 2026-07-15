@@ -106,7 +106,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
     """Orchestration tests — assert domain state after force/manual import."""
 
     def _dispatch(self, force=True, ir=None, outcome_label=None,
-                  source_username=None,
+                  source_username=None, source_download_log_id=None,
                   **req_overrides):
         """Drive a force/manual import through the evidence-gated dispatch path.
 
@@ -134,6 +134,13 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         req = make_request_row(**req_kwargs)
         db.seed_request(req)
         _seed_single_track(db, 42)
+        if source_download_log_id is True:
+            source_download_log_id = db.log_download(
+                42,
+                outcome="rejected",
+                beets_distance=0.2328,
+                beets_scenario="high_distance",
+            )
 
         if ir is None:
             ir = make_import_result(decision="import", new_min_bitrate=320)
@@ -219,6 +226,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                     force=force, source_username=source_username,
                     outcome_label=outcome_label,
                     import_job_id=import_job_id,
+                    download_log_id=source_download_log_id,
                     quality_gate_fn=mock_gate,
                 )
                 cmd = ext.run.call_args[0][0] if ext.run.call_args else []
@@ -248,6 +256,11 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         logs = r["db"].download_logs
         self.assertEqual(len(logs), 1)
         self.assertEqual(logs[0].outcome, "force_import")
+
+    def test_successful_force_import_records_explicit_source_log(self):
+        r = self._dispatch(source_download_log_id=True)
+        logs = r["db"].download_logs
+        self.assertEqual(logs[-1].source_download_log_id, logs[0].id)
 
     def test_successful_force_and_manual_imports_run_post_import_pipeline(self):
         for force in (True, False):

@@ -415,6 +415,7 @@ def dispatch_import_core(
                         source_path_cleanup_scenario=scenario,
                         cooled_down_users=cooled_down_users,
                         import_job_id=candidate_import_job_id,
+                        source_download_log_id=candidate_download_log_id,
                         quality_ranks=(
                             cfg.quality_ranks if cfg is not None else None
                         ),
@@ -510,7 +511,8 @@ def dispatch_import_core(
                     ).to_json(),
                     staged_path=path,
                     attempt_result=attempt_result,
-                    import_job_id=candidate_import_job_id)
+                    import_job_id=candidate_import_job_id,
+                    source_download_log_id=candidate_download_log_id)
                 if isinstance(pending, PendingImportTerminalOutcome):
                     terminal_outcome = pending
                 outcome_message = f"No JSON result (rc={run.returncode})"
@@ -551,7 +553,8 @@ def dispatch_import_core(
                             decision != "preflight_existing"
                         ),
                         attempt_result=attempt_result,
-                        import_job_id=candidate_import_job_id)
+                        import_job_id=candidate_import_job_id,
+                        source_download_log_id=candidate_download_log_id)
                     if isinstance(pending, PendingImportTerminalOutcome):
                         terminal_outcome = pending
                     try:
@@ -759,7 +762,8 @@ def dispatch_import_core(
                                            ).to_json()),
                         staged_path=path,
                         attempt_result=attempt_result,
-                        import_job_id=candidate_import_job_id)
+                        import_job_id=candidate_import_job_id,
+                        source_download_log_id=candidate_download_log_id)
                     if isinstance(pending, PendingImportTerminalOutcome):
                         terminal_outcome = pending
                     if narrowed_override is not None:
@@ -907,7 +911,8 @@ def dispatch_import_core(
                 ).to_json(),
                 staged_path=path,
                 attempt_result=attempt_result,
-                import_job_id=candidate_import_job_id)
+                import_job_id=candidate_import_job_id,
+                source_download_log_id=candidate_download_log_id)
             if isinstance(pending, PendingImportTerminalOutcome):
                 terminal_outcome = pending
             outcome_message = "Import timed out"
@@ -926,7 +931,8 @@ def dispatch_import_core(
                 ).to_json(),
                 staged_path=path,
                 attempt_result=attempt_result,
-                import_job_id=candidate_import_job_id)
+                import_job_id=candidate_import_job_id,
+                source_download_log_id=candidate_download_log_id)
             if isinstance(pending, PendingImportTerminalOutcome):
                 terminal_outcome = pending
             outcome_message = "Unhandled exception"

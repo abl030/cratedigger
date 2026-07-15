@@ -236,7 +236,10 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
 
         history = detail.download_history[0]
         self.assertEqual(history.wrong_match_triage_action, "deleted_reject")
-        self.assertIn("spectral", history.wrong_match_triage_summary or "")
+        self.assertEqual(
+            history.wrong_match_triage_summary,
+            "deleted: requeue upgrade",
+        )
         self.assertEqual(history.wrong_match_triage_preview_verdict,
                          "confident_reject")
         self.assertEqual(history.wrong_match_triage_stage_chain,

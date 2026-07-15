@@ -356,11 +356,12 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 v0_probe_kind, v0_probe_min_bitrate,
                 v0_probe_avg_bitrate, v0_probe_median_bitrate,
                 existing_v0_probe_kind, existing_v0_probe_min_bitrate,
-                existing_v0_probe_avg_bitrate, existing_v0_probe_median_bitrate
+                existing_v0_probe_avg_bitrate, existing_v0_probe_median_bitrate,
+                source_download_log_id
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s
             ) RETURNING id
             """,
             (
@@ -399,6 +400,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 audit.existing_v0_probe_min_bitrate,
                 audit.existing_v0_probe_avg_bitrate,
                 audit.existing_v0_probe_median_bitrate,
+                audit.source_download_log_id,
             ),
         )
         row = cur.fetchone()
