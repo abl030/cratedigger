@@ -1,14 +1,19 @@
 """Filetype specs / identity matching + search-tier helpers.
 
-Extracted verbatim from the monolithic ``lib/quality.py`` (issue #477).
-Pure move: every definition is AST-identical to the original.
+Extracted from the monolithic ``lib/quality.py`` (issue #477).  This module
+also owns the pure policy that maps trusted current quality evidence to search
+tier overrides.
 """
 
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence
+from typing import Any, Literal, Optional, Sequence
 
-from lib.quality.evidence_types import AlbumQualityEvidenceFile
-from lib.quality.ranks import QualityRankConfig, quality_rank
+from lib.quality.evidence_types import (
+    AlbumQualityEvidenceFile,
+    AudioQualityMeasurement,
+)
+from lib.quality.import_result_types import SpectralAnalysisDetail
+from lib.quality.ranks import QualityRank, QualityRankConfig, measurement_rank
 
 
 QUALITY_UPGRADE_TIERS = "lossless,mp3 v0,mp3 320,aac,opus,ogg"
@@ -85,36 +90,49 @@ def resolve_user_requeue_override(existing_override: str | None) -> str:
 
 def rejection_backfill_override(
     *,
-    is_cbr: bool,
-    min_bitrate_kbps: int | None,
-    spectral_grade: str | None,
-    verified_lossless: bool,
+    current_measurement: AudioQualityMeasurement | None,
+    spectral_evidence_source: Literal[
+        "attempt_have_audit", "linked_current_evidence"
+    ],
+    have_spectral_audit: SpectralAnalysisDetail | None = None,
     cfg: "QualityRankConfig | None" = None,
 ) -> str | None:
-    """Backfill search_filetype_override for pre-quality-gate albums stuck in download loops.
+    """Constrain a transparent, spectrally genuine HAVE copy to lossless.
 
-    When a download is rejected (e.g. downgrade) and search_filetype_override is NULL,
-    albums with decent quality on disk keep downloading the same tier forever
-    because the quality gate only fires after successful imports.
+    ``current_measurement`` is the exact installed release. Import callers
+    must select ``attempt_have_audit`` and pass their independently collected
+    HAVE audit; a missing/incomplete/failed audit never falls back to the
+    measurement's persisted spectral fields. Validation and diagnostic
+    callers select ``linked_current_evidence`` only after loading the request's
+    complete, exact-release evidence row.
 
-    Returns QUALITY_LOSSLESS when the on-disk rank is at or above
-    ``cfg.gate_min_rank`` (the same threshold the post-import quality gate
-    uses) — the only upgrade left is a verified lossless source.
-
-    ``cfg`` defaults to ``QualityRankConfig.defaults()``. Threading the live
-    runtime cfg keeps backfill in lockstep with the gate when an operator
-    tunes ``gate_min_rank``.
+    The threshold is deliberately the canonical ``TRANSPARENT`` rank, not
+    ``cfg.gate_min_rank``: merely excellent lossy copies can still be improved
+    by another lossy source.  Codecs without a rank band (for example Ogg)
+    stay ``UNKNOWN`` and fail open to continued searching.
     """
     if cfg is None:
         cfg = QualityRankConfig.defaults()
-    if verified_lossless:
+    if current_measurement is None:
+        return None
+
+    if spectral_evidence_source == "attempt_have_audit":
+        if have_spectral_audit is None:
+            return None
+        if (
+            not have_spectral_audit.attempted
+            or have_spectral_audit.error is not None
+        ):
+            return None
+        spectral_grade = have_spectral_audit.grade
+    elif spectral_evidence_source == "linked_current_evidence":
+        spectral_grade = current_measurement.spectral_grade
+    else:
         return None
     if spectral_grade != "genuine":
         return None
-    if min_bitrate_kbps is None:
-        return None
-    rank = quality_rank("mp3", min_bitrate_kbps, is_cbr=is_cbr, cfg=cfg)
-    if rank >= cfg.gate_min_rank:
+
+    if measurement_rank(current_measurement, cfg) == QualityRank.TRANSPARENT:
         return QUALITY_LOSSLESS
     return None
 

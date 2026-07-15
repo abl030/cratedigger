@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Generated contract checks for targeted post-import Jellyfin refreshes."""
+"""Generated contract checks for path-scoped post-import Jellyfin updates."""
 
 from __future__ import annotations
 
 from email.message import Message
 import io
+import json
 import unittest
 import urllib.error
 import urllib.request
@@ -17,11 +18,11 @@ from lib.config import CratediggerConfig
 from lib.util import trigger_jellyfin_scan
 
 
-_SAFE_ID = st.text(
-    alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-",
+_SAFE_SEGMENT = st.text(
+    alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 _-",
     min_size=1,
     max_size=64,
-)
+).filter(lambda value: value not in {".", ".."})
 _TOKEN = st.text(
     alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-",
     min_size=1,
@@ -42,19 +43,21 @@ class _QueuedResponse:
         return b""
 
 
-def _cfg(library_id: str, token: str) -> CratediggerConfig:
+def _cfg(token: str) -> CratediggerConfig:
     return CratediggerConfig(
+        beets_directory="/music",
         jellyfin_url="http://jellyfin:8096",
         jellyfin_token=token,
-        jellyfin_library_id=library_id,
+        jellyfin_path_map="/music:/jellyfin/music",
     )
 
 
 class TestTargetedJellyfinRefreshGenerated(unittest.TestCase):
-    @given(library_id=_SAFE_ID, token=_TOKEN)
-    def test_targeted_refresh_is_exact_safe_scoped_submission(
+    @given(artist=_SAFE_SEGMENT, album=_SAFE_SEGMENT, token=_TOKEN)
+    def test_media_update_contains_only_the_changed_album(
         self,
-        library_id: str,
+        artist: str,
+        album: str,
         token: str,
     ) -> None:
         calls: list[tuple[urllib.request.Request, float]] = []
@@ -70,34 +73,44 @@ class TestTargetedJellyfinRefreshGenerated(unittest.TestCase):
             patch("lib.util.urllib.request.urlopen", side_effect=urlopen),
             self.assertLogs("cratedigger", level="INFO"),
         ):
-            result = trigger_jellyfin_scan(_cfg(library_id, token))
+            result = trigger_jellyfin_scan(
+                _cfg(token), f"/music/{artist}/{album}")
 
         self.assertIsNone(result)  # HTTP 204 means queued, never converged.
         self.assertEqual(len(calls), 1)
         request, timeout = calls[0]
         self.assertEqual(
             request.full_url,
-            f"http://jellyfin:8096/Items/{library_id}/Refresh"
-            "?metadataRefreshMode=Default"
-            "&imageRefreshMode=Default"
-            "&replaceAllMetadata=false"
-            "&replaceAllImages=false",
+            "http://jellyfin:8096/Library/Media/Updated",
         )
-        self.assertNotIn("recursive", request.full_url)
-        self.assertNotIn("/Library/Refresh", request.full_url)
+        self.assertIsInstance(request.data, bytes)
+        assert isinstance(request.data, bytes)
+        self.assertEqual(
+            json.loads(request.data),
+            {"Updates": [{
+                "Path": f"/jellyfin/music/{artist}/{album}",
+                "UpdateType": "Modified",
+            }]},
+        )
+        self.assertNotIn("/Items/", request.full_url)
+        self.assertNotEqual(
+            request.full_url, "http://jellyfin:8096/Library/Refresh")
         self.assertEqual(request.get_method(), "POST")
         self.assertEqual(request.get_header("X-emby-token"), token)
+        self.assertEqual(request.get_header("Content-type"), "application/json")
         self.assertEqual(timeout, 10)
 
     @given(
-        library_id=_SAFE_ID,
+        artist=_SAFE_SEGMENT,
+        album=_SAFE_SEGMENT,
         token=_TOKEN,
         failure=st.sampled_from(("url", "http", "runtime")),
         http_status=st.sampled_from((404, 429, 500, 503)),
     )
     def test_targeted_refresh_contains_leaf_failures_without_broad_fallback(
         self,
-        library_id: str,
+        artist: str,
+        album: str,
         token: str,
         failure: str,
         http_status: int,
@@ -125,8 +138,12 @@ class TestTargetedJellyfinRefreshGenerated(unittest.TestCase):
             patch("lib.util.urllib.request.urlopen", side_effect=urlopen),
             self.assertLogs("cratedigger", level="WARNING"),
         ):
-            result = trigger_jellyfin_scan(_cfg(library_id, token))
+            result = trigger_jellyfin_scan(
+                _cfg(token), f"/music/{artist}/{album}")
 
         self.assertIsNone(result)
         self.assertEqual(len(calls), 1)
-        self.assertNotIn("/Library/Refresh", calls[0].full_url)
+        self.assertEqual(
+            calls[0].full_url,
+            "http://jellyfin:8096/Library/Media/Updated",
+        )

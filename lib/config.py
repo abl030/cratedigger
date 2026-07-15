@@ -179,7 +179,7 @@ class CratediggerConfig:
     jellyfin_url: Optional[str] = None
     jellyfin_token: Optional[str] = None
     jellyfin_token_file: str = ""
-    jellyfin_library_id: Optional[str] = None  # optional; full refresh if unset
+    jellyfin_library_id: Optional[str] = None  # deletion-observation fallback
     jellyfin_path_map: Optional[str] = None  # "local_prefix:container_prefix" e.g. "/mnt/virtio/Music/Beets:/mnt/fuse/Media/Music/Beets"
 
     # --- Paths (derived from args) ---

@@ -3,9 +3,9 @@
 When an album is upgraded (re-imported at higher quality), beets replaces the
 on-disk files and the Jellyfin rescan recreates the album's Audio items with
 ``DateCreated`` stamped from file ctime, wrongly surfacing the album in
-'Recently Added'. These three methods back the capture-then-reconcile loop in
-``lib/jellyfin_pin_service.py`` that restores the original date. See migration
-046 for the schema rationale (notably the landed-detector snapshot columns).
+'Recently Added'. These methods back the capture-then-reconcile loop in
+``lib/jellyfin_pin_service.py`` that clamps new Audio dates to the captured
+pre-upgrade maximum. See migration 046 for the table's original rationale.
 """
 import json
 from datetime import datetime
@@ -31,8 +31,8 @@ class _JellyfinPinsMixin(_PipelineDBBase):
         request_id: int | None,
     ) -> int:
         """Record a pending pin capturing an album's pre-upgrade
-        ``DateCreated`` plus the item-id snapshot the reconciler's
-        landed-detector compares against. Returns the new pin id.
+        maximum Audio ``DateCreated`` plus the item-id snapshot the
+        reconciler compares against. Returns the new pin id.
         """
         cur = self._execute(
             """
@@ -57,7 +57,7 @@ class _JellyfinPinsMixin(_PipelineDBBase):
     ) -> list[dict[str, Any]]:
         """Return pending pins captured before ``captured_before``, oldest
         first. The cutoff is the reconciler's settle window; the real
-        "may we act yet" gate is the landed-detector in the service.
+        "may we act yet" gate is the id/date detector in the service.
         """
         cur = self._execute(
             """

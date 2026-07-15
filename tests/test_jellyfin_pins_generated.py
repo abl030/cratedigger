@@ -10,19 +10,18 @@ entry points over ``FakePipelineDB`` with the Jellyfin client seams injected:
 1. **P1 (only the original is written)** — the reconciler never writes any
    value other than the pin's captured ``original_date_created`` into
    Jellyfin, whatever the live state does.
-2. **P2 (never finalize before the rescan lands)** — while the album item id
-   and children id-set still match the capture snapshot, the pin is never
-   written to and never marked done: it stays pending within the TTL and
-   expires (with zero writes) past it. This detector replaces Plex's
-   ``addedAt.locked``; closing a pin before the rescan re-stamps the items
-   would silently resurrect the bug.
+2. **P2 (never finalize before the rescan lands)** — the pin stays pending
+   until an item id changes or an Audio ``DateCreated`` becomes newer than
+   the captured album maximum. The date branch is load-bearing because
+   Jellyfin can restamp a same-path Audio row without changing its id.
 3. **P3 (terminal-state correctness)** — done ⟹ the rescan landed, every
    drifted item (album + audio children) was written, and no write failed;
    skipped ⟺ the album is no longer locatable; a failed write or an
    erroring client always leaves the pin pending.
-4. **P4 (capture snapshot fidelity)** — a capture either persists a pin that
-   mirrors exactly what the finder returned (original date, album id,
-   children ids, path, request id) or persists nothing.
+4. **P4 (capture snapshot fidelity)** — a capture persists the earlier of
+   Jellyfin's maximum Audio ``DateCreated`` and Plex's preserved historical
+   ``addedAt``, plus the item ids, path, and request id; a genuinely new album
+   persists nothing.
 
 The deterministic pins for these same invariants live in
 tests/test_jellyfin_pin_service.py.
@@ -57,7 +56,12 @@ NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
 GRACE_SECONDS = 180
 TTL_HOURS = 48
 
-_DATES = ["D-orig", "D-old-1", "D-old-2", "D-bumped"]
+_DATES = [
+    "2025-01-01T00:00:00Z",
+    "2025-06-01T00:00:00Z",
+    "2026-01-01T00:00:00Z",
+    "2026-07-15T00:00:00Z",
+]
 _CHILD_POOL = ["c1", "c2", "c3", "n1", "n2"]
 
 
@@ -85,7 +89,8 @@ class World:
     @property
     def landed(self) -> bool:
         return (self.live_album_recreated
-                or {i for i, _ in self.live_children} != set(self.snapshot_children))
+                or {i for i, _ in self.live_children} != set(self.snapshot_children)
+                or any(date > self.original for _, date in self.live_children))
 
     @property
     def settled(self) -> bool:
@@ -103,8 +108,8 @@ class World:
 
     @property
     def drifted_ids(self) -> set[str]:
-        out = {i for i, d in self.live_children if d != self.original}
-        if self.live_album_date != self.original:
+        out = {i for i, d in self.live_children if d > self.original}
+        if self.live_album_date > self.original:
             out.add(self.live_album_id)
         return out
 
@@ -184,7 +189,7 @@ def assert_only_original_written(res: RunResult) -> None:
 
 def assert_unsettled_never_finalized(res: RunResult) -> None:
     """P2: rescan not observably settled ⇒ zero writes, pending-until-TTL /
-    expired-after. Covers both the ids-unchanged case and the mid-scan
+    expired-after. Covers unchanged ids with no newer dates and the mid-scan
     zero-children window."""
     w = res.world
     if not w.past_grace:
@@ -242,28 +247,50 @@ class TestReconcileProperties(unittest.TestCase):
 class TestCaptureProperty(unittest.TestCase):
     @given(
         found=st.booleans(),
-        date=st.sampled_from(_DATES),
-        children=st.lists(st.sampled_from(_CHILD_POOL), unique=True, max_size=4),
+        album_date=st.sampled_from(_DATES),
+        children=st.lists(
+            st.tuples(st.sampled_from(_CHILD_POOL), st.sampled_from(_DATES)),
+            unique_by=lambda pair: pair[0],
+            max_size=4,
+        ),
+        historical_date=st.one_of(st.none(), st.sampled_from(_DATES)),
     )
     def test_capture_snapshot_mirrors_finder_or_writes_nothing(
-            self, found: bool, date: str, children: list[str]):
+            self, found: bool, album_date: str,
+            children: list[tuple[str, str]], historical_date: str | None):
         db = FakePipelineDB()
-        ref = JellyfinAlbumRef(item_id="alb-1", date_created=date) if found else None
+        ref = (
+            JellyfinAlbumRef(item_id="alb-1", date_created=album_date)
+            if found else None
+        )
         res = capture_jellyfin_date_created_pin(
             _cfg(), db, "Artist/2026 - Album", 42,
+            historical_added_at=(
+                int(datetime.fromisoformat(
+                    historical_date.replace("Z", "+00:00")
+                ).timestamp())
+                if historical_date is not None else None
+            ),
             find_fn=lambda cfg, path: ref,
             children_fn=lambda cfg, iid: [
-                JellyfinItemRef(item_id=i, date_created="D-old-1")
-                for i in children])
+                JellyfinItemRef(item_id=item_id, date_created=date)
+                for item_id, date in children])
         if not found:
             self.assertEqual(res.outcome, "no_album")
             self.assertEqual(db.jellyfin_date_created_pins, [])
             return
         self.assertEqual(res.outcome, "captured")
         pin = db.jellyfin_date_created_pins[0]
-        self.assertEqual(pin["original_date_created"], date)
+        expected_date = max(
+            (date for _, date in children), default=album_date)
+        if historical_date is not None:
+            expected_date = min(expected_date, historical_date)
+        self.assertEqual(pin["original_date_created"], expected_date)
         self.assertEqual(pin["album_item_id"], "alb-1")
-        self.assertEqual(pin["children_item_ids"], children)
+        self.assertEqual(
+            pin["children_item_ids"],
+            [item_id for item_id, _ in children],
+        )
         self.assertEqual(pin["imported_path"], "Artist/2026 - Album")
         self.assertEqual(pin["request_id"], 42)
         self.assertEqual(pin["status"], "pending")
@@ -274,23 +301,26 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
 
     def _world(self, **kw) -> World:
         base = dict(
-            original="D-orig", snapshot_children=["c1"], age_minutes=10,
+            original="2026-01-01T00:00:00Z", snapshot_children=["c1"],
+            age_minutes=10,
             find_outcome="present", children_raises=False,
-            live_album_recreated=False, live_album_date="D-orig",
-            live_children=[("c1", "D-old-1")], set_fail_ids=set())
+            live_album_recreated=False,
+            live_album_date="2026-01-01T00:00:00Z",
+            live_children=[("c1", "2025-01-01T00:00:00Z")],
+            set_fail_ids=set())
         base.update(kw)
         return World(**base)  # type: ignore[arg-type]
 
     def test_only_original_checker_trips_on_foreign_value(self):
         res = RunResult(world=self._world(), status="pending",
-                        set_calls=[("c1", "D-bumped", True)])
+                        set_calls=[("c1", "2026-07-15T00:00:00Z", True)])
         with self.assertRaises(AssertionError):
             assert_only_original_written(res)
 
     def test_unsettled_checker_trips_on_write_before_rescan(self):
-        # ids match the snapshot (not landed) yet a write happened.
+        # Ids match and no current date is newer (not landed), yet a write happened.
         res = RunResult(world=self._world(), status="pending",
-                        set_calls=[("c1", "D-orig", True)])
+                        set_calls=[("c1", "2026-01-01T00:00:00Z", True)])
         with self.assertRaises(AssertionError):
             assert_unsettled_never_finalized(res)
 
@@ -311,9 +341,11 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
 
     def test_terminal_checker_trips_on_done_with_failed_write(self):
         res = RunResult(
-            world=self._world(live_children=[("n1", "D-bumped")],
-                              set_fail_ids={"n1"}),
-            status="done", set_calls=[("n1", "D-orig", False)])
+            world=self._world(
+                live_children=[("n1", "2026-07-15T00:00:00Z")],
+                set_fail_ids={"n1"}),
+            status="done",
+            set_calls=[("n1", "2026-01-01T00:00:00Z", False)])
         with self.assertRaises(AssertionError):
             assert_terminal_state_correct(res)
 

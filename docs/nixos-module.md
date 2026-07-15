@@ -37,7 +37,7 @@ The flake export is a wrapper that pins the module's package set to **cratedigge
 | `beets.validation.{enable,distanceThreshold,stagingDir,trackingFile,verifiedLosslessTarget}` | sensible defaults | Beets validation config. |
 | `web.{enable,port,beetsDb,redis.host,redis.port}` | port=8085 | Web UI config. `web.redis.*` follows the shared app Redis defaults unless explicitly overridden. |
 | `notifiers.plex.{enable,url,tokenFile,librarySectionId,pathMap}` | disabled | Plex notifier. |
-| `notifiers.jellyfin.{enable,url,tokenFile,libraryId,pathMap}` | disabled | Jellyfin notifier; a configured `libraryId` sends the metadata-safe targeted music-library refresh, while null preserves broad `POST /Library/Refresh`; `pathMap` (local:remote prefix swap) enables the "Recently Added" DateCreated pin (issues #574/#697, `docs/jellyfin-primer.md`). |
+| `notifiers.jellyfin.{enable,url,tokenFile,libraryId,pathMap}` | disabled | Jellyfin notifier. Every import reports only its mapped final album path through `POST /Library/Media/Updated`; `pathMap` supplies Jellyfin's view of that path and enables the upgrade DateCreated pin. `libraryId` is only a deletion-observation fallback (issues #574/#697, `docs/jellyfin-primer.md`). |
 | `healthCheck.{enable,onFailureCommand}` | enabled, no recovery | Pre-cycle slskd healthcheck. `onFailureCommand` runs to recover (e.g. `systemctl restart slskd.service`). |
 | `releaseSettings.*` / `searchSettings.*` / `downloadSettings.*` | match config.ini defaults | Pipeline tunables. See "Search loop tunables" below for the trio that caps the slskd search window. |
 | `qualityRanks.*` | mirror of `QualityRankConfig.defaults()` | See docs/quality-ranks.md § "Tuning reference (Nix options)". |

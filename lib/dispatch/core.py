@@ -28,10 +28,9 @@ from lib.quality import (AlbumQualityEvidenceDecisionFacts, DownloadInfo,
                          dispatch_action, evidence_decision_name,
                          extract_usernames,
                          full_pipeline_decision_from_evidence,
-                         narrow_override_on_downgrade,
                          narrow_override_on_lossless_source_lock,
                          override_bitrate_from_current_evidence,
-                         rejection_backfill_override)
+                         resolve_rejection_search_override)
 from lib.quality_evidence import (audit_v0_probe_from_metric,
                                   legacy_current_lossless_v0_probe_from_request)
 from lib.util import cleanup_disambiguation_orphans
@@ -417,6 +416,9 @@ def dispatch_import_core(
                         cooled_down_users=cooled_down_users,
                         import_job_id=candidate_import_job_id,
                         source_download_log_id=candidate_download_log_id,
+                        quality_ranks=(
+                            cfg.quality_ranks if cfg is not None else None
+                        ),
                     )
                 quality_evidence_action_file = _write_quality_evidence_action_file(
                     candidate=evidence_gate.candidate,
@@ -706,40 +708,22 @@ def dispatch_import_core(
                         else None
                     )
 
-                    if decision == "downgrade":
+                    if decision in ("downgrade", "transcode_downgrade"):
                         try:
                             req_row = db.get_request(request_id)
                             current_override = req_row.get("search_filetype_override") if req_row else None
-                            narrowed_override = narrow_override_on_downgrade(
-                                current_override, dl_info)
-                            if narrowed_override is None and current_override is None and req_row:
-                                from lib.beets_db import BeetsDB
-                                from lib.quality import QualityRankConfig
-                                _gate_cfg = (
-                                    cfg.quality_ranks if cfg is not None
-                                    else QualityRankConfig.defaults())
-                                with BeetsDB() as beets:
-                                    beets_info = beets.get_album_info(
-                                        mb_release_id, _gate_cfg)
-                                if beets_info:
-                                    narrowed_override = rejection_backfill_override(
-                                        is_cbr=beets_info.is_cbr,
-                                        min_bitrate_kbps=beets_info.min_bitrate_kbps,
-                                        spectral_grade=req_row.get(
-                                            "current_spectral_grade"),
-                                        verified_lossless=bool(
-                                            req_row.get("verified_lossless")),
-                                        cfg=_gate_cfg,
-                                    )
-                                    if narrowed_override:
-                                        logger.info(
-                                            f"BACKFILL: {label} search_filetype_override=NULL"
-                                            f" → '{narrowed_override}' on downgrade"
-                                            f" ({beets_info.min_bitrate_kbps}kbps,"
-                                            f" cbr={beets_info.is_cbr})")
                         except Exception:
                             logger.debug(
                                 "Failed to inspect search_filetype_override before downgrade reset")
+                        narrowed_override = resolve_rejection_search_override(
+                            decision=decision,
+                            current_override=current_override,
+                            dl_info=dl_info,
+                            current_measurement=ir.current_measurement,
+                            spectral_evidence_source="attempt_have_audit",
+                            have_spectral_audit=ir.spectral.existing,
+                            cfg=cfg.quality_ranks if cfg is not None else None,
+                        ).override
 
                     elif decision == "lossless_source_locked":
                         # R7 / AE2: once the library row carries a comparable
@@ -858,19 +842,24 @@ def dispatch_import_core(
                     # restore it and keep upgrades out of "Recently Added"
                     # (migration 040). No-op for genuinely-new albums (not yet
                     # in Plex) and when Plex is unconfigured; best-effort.
+                    plex_original_added_at: int | None = None
                     try:
                         from lib.plex_pin_service import capture_plex_added_at_pin
-                        capture_plex_added_at_pin(
+                        plex_pin = capture_plex_added_at_pin(
                             cfg, db, ir.postflight.imported_path, request_id)
+                        plex_original_added_at = plex_pin.original_added_at
                     except Exception:
                         logger.exception(
                             "PLEX PIN: capture wiring failed (non-fatal)")
                     _trigger_plex(cfg, ir.postflight.imported_path)
-                    # Same capture-before-refresh dance for Jellyfin
+                    # Same capture-before-refresh dance for Jellyfin. Plex's
+                    # preserved historical value is also the floor for
+                    # Jellyfin: a prior Jellyfin rebuild must not become the
+                    # new definition of when an old album joined the library.
                     # (migration 046, issue #574): snapshot the album's
-                    # DateCreated + item ids while the pre-upgrade items
-                    # still exist, so the reconciler can restore the date
-                    # once the rescan re-stamps them. No-op for
+                    # maximum Audio DateCreated + item ids while the
+                    # pre-upgrade items still exist, so the reconciler can
+                    # clamp any forward date bump once the update lands. No-op for
                     # genuinely-new albums and when Jellyfin is
                     # unconfigured; best-effort.
                     try:
@@ -878,11 +867,16 @@ def dispatch_import_core(
                             capture_jellyfin_date_created_pin,
                         )
                         capture_jellyfin_date_created_pin(
-                            cfg, db, ir.postflight.imported_path, request_id)
+                            cfg,
+                            db,
+                            ir.postflight.imported_path,
+                            request_id,
+                            historical_added_at=plex_original_added_at,
+                        )
                     except Exception:
                         logger.exception(
                             "JELLYFIN PIN: capture wiring failed (non-fatal)")
-                    _trigger_jellyfin(cfg)
+                    _trigger_jellyfin(cfg, ir.postflight.imported_path)
                 if action.cleanup and _should_cleanup_path(scenario, action):
                     # Issue #89: force/manual paths pass the user's
                     # ``failed_imports/…`` folder as ``path`` — cleanup is

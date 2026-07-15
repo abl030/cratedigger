@@ -8,6 +8,7 @@ by stale ``current_spectral_bitrate`` (issue #18).
 import argparse
 
 from lib import transitions
+from lib.release_identity import normalize_release_id
 from scripts.pipeline_cli._format import _fmt_br
 
 # Module-level DI seam for ``transitions.finalize_request`` — see
@@ -97,6 +98,26 @@ def cmd_quality(db, args):
     # rule. When set, lossy candidates short-circuit to reject inside the
     # provisional lane regardless of how their on-disk avg compares.
     existing_v0_probe_avg = req.get("current_lossless_source_v0_probe_avg_bitrate")
+
+    linked_current_measurement = None
+    try:
+        evidence_id = db.get_request_current_evidence_id(args.id)
+        evidence = (
+            db.load_album_quality_evidence_by_id(evidence_id)
+            if evidence_id is not None
+            else None
+        )
+        if (
+            evidence is not None
+            and not evidence.policy_incomplete_reasons()
+            and normalize_release_id(evidence.mb_release_id)
+            == normalize_release_id(req.get("mb_release_id"))
+        ):
+            linked_current_measurement = evidence.measurement
+    except Exception:
+        # This is a diagnostic command. Missing/stale evidence must fail open
+        # without reviving the legacy request spectral scalar as authority.
+        linked_current_measurement = None
 
     print(f"  {label}")
     print(f"  Status: {req['status']}")
@@ -200,21 +221,19 @@ def cmd_quality(db, args):
         print(f"  Quality gate:  NO DATA (not yet imported)")
 
     # --- Rejection backfill status ---
-    backfill = (
-        rejection_backfill_override(
-            is_cbr=is_cbr, min_bitrate_kbps=min_br,
-            spectral_grade=spectral_grade, verified_lossless=verified,
-            cfg=rank_cfg
-        )
-        if gate_unavailable_reason is None
-        else None
+    backfill = rejection_backfill_override(
+        current_measurement=linked_current_measurement,
+        spectral_evidence_source="linked_current_evidence",
+        cfg=rank_cfg,
     )
-    if gate_unavailable_reason is not None:
-        print("  Backfill:      unavailable (materialized MP3 mode unknown)")
-    elif backfill and not q_override:
+    if backfill and backfill != q_override:
         print(f"  Backfill:      would set search_filetype_override='{backfill}' on next rejection")
-    elif q_override:
+    elif q_override == "lossless":
         print(f"  Backfill:      not needed (search_filetype_override already set)")
+    elif q_override:
+        print("  Backfill:      won't fire lossless-only (ordinary per-tier narrowing remains)")
+    elif linked_current_measurement is None:
+        print("  Backfill:      won't fire (linked current evidence unavailable)")
     else:
         print(f"  Backfill:      won't fire (conditions not met)")
 
@@ -405,25 +424,11 @@ def cmd_quality(db, args):
             elif gate_unavailable_reason is not None:
                 print("      no backfill simulation (current MP3 mode unknown)")
             else:
-                # Simulate spectral propagation: on downgrade rejection,
-                # the download's spectral would be written to on-disk state.
-                # Use the download's spectral_grade to compute the backfill.
-                dl_spectral = params.get("spectral_grade")
-                propagated = rejection_backfill_override(
-                    is_cbr=is_cbr,
-                    min_bitrate_kbps=min_br,
-                    spectral_grade=dl_spectral if dl_spectral else spectral_grade,
-                    verified_lossless=verified,
-                    cfg=rank_cfg,
-                )
-                if propagated:
-                    tiers, _ = search_tiers(propagated, [])
-                    print(f"      backfill → override='{propagated}'"
-                          f" (next: {', '.join(tiers)})")
-                else:
-                    print(f"      no backfill"
-                          f" (spectral={dl_spectral or spectral_grade or 'none'},"
-                          f" keep all tiers)")
+                # Importer narrowing requires an independent attempt-local
+                # audit of the exact HAVE copy. Candidate spectral fields in
+                # this scenario are deliberately not substituted for it.
+                print("      no backfill simulation "
+                      "(attempt-local HAVE audit not modeled; keep all tiers)")
 
 
 def cmd_repair_spectral(db, args):

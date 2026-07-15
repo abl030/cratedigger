@@ -956,7 +956,9 @@ class MbidReplaceService:
                 f"plex rescan failed: {type(exc).__name__}: {exc}"
             )
         try:
-            trigger_jellyfin_scan(self.config)
+            trigger_jellyfin_scan(
+                self.config, imported_path=old_imported_path
+            )
         except Exception as exc:  # noqa: BLE001
             warnings.append(
                 f"jellyfin rescan failed: {type(exc).__name__}: {exc}"
