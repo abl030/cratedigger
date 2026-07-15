@@ -1943,6 +1943,49 @@ class TestCmdQuality(unittest.TestCase):
             output,
         )
 
+    def test_backfill_linked_evidence_is_independent_of_beets_display(self):
+        """Complete linked evidence remains actionable when Beets is absent."""
+        from lib.quality import AudioQualityMeasurement
+
+        request_row = make_request_row(
+            id=8502,
+            status="imported",
+            mb_release_id="mbid-linked-without-beets",
+            artist_name="Linked Artist",
+            album_title="Linked Without Beets",
+            min_bitrate=320,
+            current_spectral_grade=None,
+            verified_lossless=False,
+            final_format="MP3",
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="mbid-linked-without-beets",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                is_cbr=True,
+                spectral_grade="genuine",
+            ),
+            codec="mp3",
+            container="mp3",
+            storage_format="MP3",
+        )
+
+        output = self._run_quality(
+            request_row,
+            runtime_target=None,
+            beets_info=None,
+            current_evidence=evidence,
+        )
+
+        self.assertIn("Quality gate:  UNAVAILABLE", output)
+        self.assertIn(
+            "Backfill:      would set search_filetype_override='lossless'",
+            output,
+        )
+
     def test_backfill_does_not_use_unlinked_request_scalar(self):
         from lib.beets_db import AlbumInfo
 

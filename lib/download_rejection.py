@@ -304,6 +304,7 @@ def _compute_rejection_backfill(
             return None
         override = rejection_backfill_override(
             current_measurement=evidence.measurement,
+            spectral_evidence_source="linked_current_evidence",
             cfg=ctx.cfg.quality_ranks,
         )
         if override:

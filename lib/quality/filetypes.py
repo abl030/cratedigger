@@ -6,7 +6,7 @@ tier overrides.
 """
 
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence
+from typing import Any, Literal, Optional, Sequence
 
 from lib.quality.evidence_types import (
     AlbumQualityEvidenceFile,
@@ -91,17 +91,20 @@ def resolve_user_requeue_override(existing_override: str | None) -> str:
 def rejection_backfill_override(
     *,
     current_measurement: AudioQualityMeasurement | None,
+    spectral_evidence_source: Literal[
+        "attempt_have_audit", "linked_current_evidence"
+    ],
     have_spectral_audit: SpectralAnalysisDetail | None = None,
     cfg: "QualityRankConfig | None" = None,
 ) -> str | None:
     """Constrain a transparent, spectrally genuine HAVE copy to lossless.
 
-    ``current_measurement`` is the exact installed release.  Import attempts
-    pass their independently collected HAVE audit; when supplied, that audit
-    is authoritative and an incomplete/failed audit never falls back to the
-    measurement's persisted spectral fields.  Validation rejects have no
-    attempt audit and may use the spectral fields on their linked current-
-    evidence measurement directly.
+    ``current_measurement`` is the exact installed release. Import callers
+    must select ``attempt_have_audit`` and pass their independently collected
+    HAVE audit; a missing/incomplete/failed audit never falls back to the
+    measurement's persisted spectral fields. Validation and diagnostic
+    callers select ``linked_current_evidence`` only after loading the request's
+    complete, exact-release evidence row.
 
     The threshold is deliberately the canonical ``TRANSPARENT`` rank, not
     ``cfg.gate_min_rank``: merely excellent lossy copies can still be improved
@@ -113,15 +116,19 @@ def rejection_backfill_override(
     if current_measurement is None:
         return None
 
-    if have_spectral_audit is not None:
+    if spectral_evidence_source == "attempt_have_audit":
+        if have_spectral_audit is None:
+            return None
         if (
             not have_spectral_audit.attempted
             or have_spectral_audit.error is not None
         ):
             return None
         spectral_grade = have_spectral_audit.grade
-    else:
+    elif spectral_evidence_source == "linked_current_evidence":
         spectral_grade = current_measurement.spectral_grade
+    else:
+        return None
     if spectral_grade != "genuine":
         return None
 

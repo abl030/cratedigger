@@ -537,6 +537,80 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
         self.assertIsNone(row["target_format"])
         self.assertIsNone(row["current_spectral_grade"])
 
+    def test_downgrade_missing_have_audit_does_not_fallback_to_measurement(self) -> None:
+        """A failed preview-audit decode must fail open to all search tiers."""
+        from lib.dispatch import _reject_import_from_evidence_decision
+        from lib.dispatch.types import ImportAttemptResult
+        from lib.quality import (
+            AudioQualityMeasurement,
+            ImportResult,
+            QualityRankConfig,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=43,
+            status="downloading",
+            search_filetype_override=None,
+            target_format=None,
+        ))
+        malformed_job = MagicMock(
+            preview_result={
+                "import_result": {
+                    "version": 3,
+                    "spectral": "malformed-preview-audit",
+                },
+            },
+        )
+        with patch.object(db, "get_import_job", return_value=malformed_job):
+            attempt_result = ImportAttemptResult.from_import_job(
+                db,  # type: ignore[arg-type]
+                9001,
+            )
+        self.assertIsNone(attempt_result.audit)
+        attempt_result.merge(ImportResult(
+            decision="downgrade",
+            source_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=226,
+                avg_bitrate_kbps=226,
+                format="MP3",
+            ),
+            current_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                is_cbr=True,
+                # Persisted measurement state must not impersonate the
+                # missing attempt-local HAVE audit.
+                spectral_grade="genuine",
+            ),
+        ))
+
+        with patch_dispatch_externals():
+            _reject_import_from_evidence_decision(
+                db=db,  # type: ignore[arg-type]
+                request_id=43,
+                dl_info=DownloadInfo(filetype="mp3", username="qreature"),
+                attempt_result=attempt_result,
+                distance=0.0,
+                decision="downgrade",
+                detail="preview audit decode failed before rejection",
+                requeue_on_failure=True,
+                validation_result=None,
+                staged_path="/tmp/missing-have-audit",
+                scenario="quality_downgrade",
+                files=None,
+                source_path_cleanup_scenario="quality_downgrade",
+                cooled_down_users=None,
+                quality_ranks=QualityRankConfig.defaults(),
+            )
+
+        row = db.request(43)
+        self.assertEqual(row["status"], "wanted")
+        self.assertIsNone(row["search_filetype_override"])
+        self.assertIsNone(row["target_format"])
+
 
 class TestRejectImportFromEvidenceDecisionForcedRequeue(unittest.TestCase):
     """U11 invariant: the four folder/audio-integrity facts always self-heal.

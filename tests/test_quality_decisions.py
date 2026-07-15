@@ -2304,6 +2304,7 @@ class TestRejectionBackfillOverride(unittest.TestCase):
         )
         return rejection_backfill_override(
             current_measurement=measurement,
+            spectral_evidence_source="attempt_have_audit",
             have_spectral_audit=audit,
             cfg=cfg,
         )
@@ -2512,6 +2513,7 @@ class TestTransparentGenuineLossyRejectionBackfill(unittest.TestCase):
         )
         return rejection_backfill_override(
             current_measurement=measurement,
+            spectral_evidence_source="attempt_have_audit",
             have_spectral_audit=audit,
             cfg=QualityRankConfig.defaults(),
         )
@@ -2556,6 +2558,25 @@ class TestTransparentGenuineLossyRejectionBackfill(unittest.TestCase):
                     grade=grade,
                     error=error,
                 ))
+
+    def test_absent_attempt_audit_never_uses_measurement_grade(self):
+        from lib.quality import rejection_backfill_override
+
+        cfg = QualityRankConfig.defaults()
+        measurement = AudioQualityMeasurement(
+            min_bitrate_kbps=cfg.mp3_cbr.transparent,
+            avg_bitrate_kbps=cfg.mp3_cbr.transparent,
+            format="MP3",
+            is_cbr=True,
+            spectral_grade="genuine",
+        )
+
+        self.assertIsNone(rejection_backfill_override(
+            current_measurement=measurement,
+            spectral_evidence_source="attempt_have_audit",
+            have_spectral_audit=None,
+            cfg=cfg,
+        ))
 
 
 # ============================================================================

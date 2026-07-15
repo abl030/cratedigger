@@ -389,7 +389,8 @@ Known wart: library rows imported before this policy landed (2026-05-17)
 have NULL spectral / V0 / bad-hash fields and may have lossy
 `search_filetype_override` values. They keep the old behaviour —
 wrong-match triage cannot reject same-source duplicates against them
-and the search-narrowing only fires on new `lossless_source_locked`
-events — until each row is re-imported or force-imported. Forward-only
-by design; no backfill. See
+and validation-rejection narrowing cannot use them until complete linked
+current evidence exists. Fresh importer attempts can still narrow from an
+independent completed HAVE audit, and `lossless_source_locked` remains a
+separate narrowing path. Forward-only by design; no bulk backfill. See
 `docs/brainstorms/2026-05-17-propagate-source-evidence-on-transcode-requirements.md`.

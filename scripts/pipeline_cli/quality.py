@@ -221,20 +221,17 @@ def cmd_quality(db, args):
         print(f"  Quality gate:  NO DATA (not yet imported)")
 
     # --- Rejection backfill status ---
-    backfill = (
-        rejection_backfill_override(
-            current_measurement=linked_current_measurement,
-            cfg=rank_cfg,
-        )
-        if gate_unavailable_reason is None
-        else None
+    backfill = rejection_backfill_override(
+        current_measurement=linked_current_measurement,
+        spectral_evidence_source="linked_current_evidence",
+        cfg=rank_cfg,
     )
-    if gate_unavailable_reason is not None:
-        print("  Backfill:      unavailable (materialized MP3 mode unknown)")
-    elif backfill and not q_override:
+    if backfill and not q_override:
         print(f"  Backfill:      would set search_filetype_override='{backfill}' on next rejection")
     elif q_override:
         print(f"  Backfill:      not needed (search_filetype_override already set)")
+    elif linked_current_measurement is None:
+        print("  Backfill:      won't fire (linked current evidence unavailable)")
     else:
         print(f"  Backfill:      won't fire (conditions not met)")
 

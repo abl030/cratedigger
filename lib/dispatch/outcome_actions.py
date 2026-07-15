@@ -110,6 +110,7 @@ def _reject_import_from_evidence_decision(
     if decision in ("downgrade", "transcode_downgrade"):
         search_filetype_override = rejection_backfill_override(
             current_measurement=import_result.current_measurement,
+            spectral_evidence_source="attempt_have_audit",
             have_spectral_audit=import_result.spectral.existing,
             cfg=quality_ranks,
         )

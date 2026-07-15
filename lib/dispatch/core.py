@@ -713,6 +713,7 @@ def dispatch_import_core(
                         )
                         narrowed_override = rejection_backfill_override(
                             current_measurement=ir.current_measurement,
+                            spectral_evidence_source="attempt_have_audit",
                             have_spectral_audit=ir.spectral.existing,
                             cfg=_gate_cfg,
                         )

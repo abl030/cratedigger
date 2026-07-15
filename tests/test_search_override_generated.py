@@ -21,12 +21,13 @@ CFG = QualityRankConfig.defaults()
 
 def assert_transparent_have_search_override(
     measurement: AudioQualityMeasurement,
-    audit: SpectralAnalysisDetail,
+    audit: SpectralAnalysisDetail | None,
     actual: str | None,
     cfg: QualityRankConfig,
 ) -> None:
     trusted_genuine = (
-        audit.attempted
+        audit is not None
+        and audit.attempted
         and audit.error is None
         and audit.grade == "genuine"
     )
@@ -66,14 +67,17 @@ def have_worlds(draw):
             st.none(), st.sampled_from(["flac", "alac", "wav", "mp3"])
         )),
     )
-    attempted = draw(st.booleans())
-    audit = SpectralAnalysisDetail(
-        attempted=attempted,
-        grade=draw(st.one_of(st.none(), st.sampled_from([
-            "genuine", "marginal", "suspect", "likely_transcode",
-        ]))),
-        error=draw(st.one_of(st.none(), st.just("spectral failed"))),
-    )
+    audit = draw(st.one_of(
+        st.none(),
+        st.builds(
+            SpectralAnalysisDetail,
+            attempted=st.booleans(),
+            grade=st.one_of(st.none(), st.sampled_from([
+                "genuine", "marginal", "suspect", "likely_transcode",
+            ])),
+            error=st.one_of(st.none(), st.just("spectral failed")),
+        ),
+    ))
     return measurement, audit, cfg
 
 
@@ -99,6 +103,17 @@ class TestTransparentHaveSearchOverrideChecker(unittest.TestCase):
 class TestGeneratedTransparentHaveSearchOverride(unittest.TestCase):
     @example(world=(
         AudioQualityMeasurement(
+            min_bitrate_kbps=CFG.mp3_cbr.transparent,
+            avg_bitrate_kbps=CFG.mp3_cbr.transparent,
+            format="MP3",
+            is_cbr=True,
+            spectral_grade="genuine",
+        ),
+        None,
+        CFG,
+    ))
+    @example(world=(
+        AudioQualityMeasurement(
             min_bitrate_kbps=CFG.mp3_cbr.excellent,
             avg_bitrate_kbps=CFG.mp3_cbr.excellent,
             format="MP3",
@@ -112,6 +127,7 @@ class TestGeneratedTransparentHaveSearchOverride(unittest.TestCase):
         measurement, audit, cfg = world
         actual = rejection_backfill_override(
             current_measurement=measurement,
+            spectral_evidence_source="attempt_have_audit",
             have_spectral_audit=audit,
             cfg=cfg,
         )
