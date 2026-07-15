@@ -84,16 +84,16 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/dashboard.py", 481, "5e3b8177198ccbed"): (
         "dashboard WHERE and ORDER fragments come from closed enum branches"
     ),
-    ("lib/pipeline_db/download_log.py", 660, "a4d9b82e27a004bb"): (
+    ("lib/pipeline_db/download_log.py", 734, "a4d9b82e27a004bb"): (
         "validation key is selected from a closed server-owned vocabulary"
     ),
-    ("lib/pipeline_db/download_log.py", 712, "e0154e89026dc8ef"): (
+    ("lib/pipeline_db/download_log.py", 786, "e0154e89026dc8ef"): (
         "validation key is selected from a closed server-owned vocabulary"
     ),
-    ("lib/pipeline_db/download_log.py", 730, "1ca75e0c21fa6d7e"): (
+    ("lib/pipeline_db/download_log.py", 804, "1ca75e0c21fa6d7e"): (
         "validation key is closed vocabulary and IN list is value placeholders"
     ),
-    ("lib/pipeline_db/download_log.py", 747, "d87a36ba1d1768e7"): (
+    ("lib/pipeline_db/download_log.py", 821, "d87a36ba1d1768e7"): (
         "JSON path key is selected from a closed server-owned vocabulary"
     ),
     ("lib/pipeline_db/import_jobs.py", 105, "ecf3d1844c67f653"): (
@@ -161,7 +161,7 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/terminal_outcomes.py", 299, "0a9c4396d1185b94"): (
         "atomic terminal typed transition CASes the source status selected by the DAG"
     ),
-    ("lib/pipeline_db/download_log.py", 329, "b04c5ae9eb3423c1"): (
+    ("lib/pipeline_db/download_log.py", 403, "b04c5ae9eb3423c1"): (
         "atomic abandoned-import recovery performs downloading-to-wanted CAS"
     ),
     ("lib/pipeline_db/requests.py", 245, "558917722283199d"): (

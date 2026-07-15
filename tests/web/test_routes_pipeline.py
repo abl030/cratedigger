@@ -172,7 +172,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
             "pipeline log counts",
         )
 
-    def test_pipeline_log_current_beets_projection_keeps_min_and_average(self):
+    def test_pipeline_log_beets_never_backfills_attempt_have(self):
         import web.server as srv
 
         beets = FakeBeetsDB()
@@ -190,6 +190,417 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["log"][0]["beets_bitrate"], 194)
         self.assertEqual(data["log"][0]["beets_avg_bitrate"], 288)
+        self.assertIsNone(data["log"][0]["existing_format"])
+        self.assertIsNone(data["log"][0]["existing_min_bitrate"])
+
+    def test_new_import_never_projects_post_import_current_evidence(self):
+        from lib.quality import AudioQualityMeasurement
+        from tests.helpers import make_album_quality_evidence
+
+        evidence = make_album_quality_evidence(
+            mb_release_id="test-mbid-0100",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=117,
+                avg_bitrate_kbps=131,
+                median_bitrate_kbps=132,
+                format="Opus",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(self.db.set_request_current_evidence(100, stored.id))
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["log"][0]["badge"], "Imported")
+        self.assertIsNone(data["log"][0]["existing_format"])
+        self.assertIsNone(data["log"][0]["existing_min_bitrate"])
+
+    def test_later_current_evidence_never_rewrites_rejected_attempt_have(self):
+        from datetime import timedelta
+
+        from lib.quality import AudioQualityMeasurement
+        from tests.helpers import make_album_quality_evidence
+
+        log_id = self.db.log_download(
+            100,
+            outcome="rejected",
+            beets_scenario="high_distance",
+        )
+        attempt = next(row for row in self.db.download_logs if row.id == log_id)
+        evidence = make_album_quality_evidence(
+            mb_release_id="test-mbid-0100",
+            measured_at=attempt.created_at + timedelta(seconds=1),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=117,
+                avg_bitrate_kbps=131,
+                median_bitrate_kbps=132,
+                format="Opus",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(self.db.set_request_current_evidence(100, stored.id))
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        self.assertIsNone(item["existing_format"])
+        self.assertIsNone(item["existing_min_bitrate"])
+
+    def test_pipeline_log_attempt_have_evidence_wins_over_current_beets(self):
+        import web.server as srv
+
+        self.db.log_download(
+            100,
+            outcome="rejected",
+            validation_result={
+                "scenario": "high_distance",
+                "distance": 0.22,
+                "wrong_match_triage": {
+                    "action": "deleted_reject",
+                    "outcome": "deleted",
+                    "reason": "suspect_lossless_downgrade",
+                    "preview_verdict": "confident_reject",
+                    "preview_decision": "downgrade",
+                    "stage_chain": ["stage2_import:downgrade"],
+                    "current_measurement": {
+                        "format": "AAC",
+                        "min_bitrate_kbps": 256,
+                        "avg_bitrate_kbps": 288,
+                    },
+                },
+            },
+        )
+        # Canonical request evidence is independently authoritative; the
+        # route must not require Beets' lookup to return the album first.
+        beets = FakeBeetsDB()
+        with patch.object(srv, "_beets_db", return_value=beets):
+            status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["log"][0]["existing_format"], "AAC")
+        self.assertEqual(data["log"][0]["existing_min_bitrate"], 256)
+
+    def test_kept_would_import_uses_complete_canonical_current_have(self):
+        import web.server as srv
+        from lib.quality import (
+            AlbumQualityV0Metric,
+            AudioQualityMeasurement,
+            ImportResult,
+            TargetQualityContract,
+        )
+        from tests.helpers import make_album_quality_evidence
+
+        source_log_id = self.db.log_download(
+            100,
+            outcome="rejected",
+            validation_result={
+                "scenario": "high_distance",
+                "distance": 0.2328,
+                "wrong_match_triage": {
+                    "action": "kept_would_import",
+                    "outcome": "kept_would_import",
+                    "reason": "import",
+                    "preview_verdict": "would_import",
+                    "preview_decision": "import",
+                    "stage_chain": ["stage2_import:import"],
+                },
+            },
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="test-mbid-0100",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=118,
+                avg_bitrate_kbps=124,
+                median_bitrate_kbps=122,
+                format="Opus",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=96,
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=246,
+                avg_bitrate_kbps=258,
+                median_bitrate_kbps=257,
+                source_lineage="lossless_source",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(self.db.set_request_current_evidence(100, stored.id))
+        self.db.log_download(
+            100,
+            outcome="force_import",
+            source_download_log_id=source_log_id,
+            was_converted=True,
+            import_result=ImportResult(
+                decision="import",
+                source_measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=529,
+                    avg_bitrate_kbps=648,
+                    median_bitrate_kbps=642,
+                    format="FLAC",
+                ),
+                current_measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=118,
+                    avg_bitrate_kbps=124,
+                    median_bitrate_kbps=122,
+                    format="Opus",
+                ),
+                target_quality_contract=(
+                    TargetQualityContract.from_explicit_label("opus 128")
+                ),
+                materialized_measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=118,
+                    avg_bitrate_kbps=124,
+                    median_bitrate_kbps=122,
+                    format="Opus",
+                ),
+            ).to_json(),
+        )
+        beets = FakeBeetsDB()
+        beets.set_mbid_detail(
+            "test-mbid-0100",
+            {
+                "beets_format": "Opus",
+                "beets_bitrate": 118,
+                "beets_avg_bitrate": 124,
+            },
+        )
+        with patch.object(srv, "_beets_db", return_value=beets):
+            status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(
+            row for row in data["log"]
+            if row["wrong_match_triage_action"] == "kept_would_import"
+        )
+        self.assertEqual(item["wrong_match_triage_action"], "kept_would_import")
+        self.assertEqual(item["badge"], "Triaged · kept")
+        self.assertEqual(item["badge_class"], "badge-warn")
+        self.assertEqual(item["border_color"], "#a33")
+        self.assertEqual(item["existing_format"], "Opus")
+        self.assertEqual(item["existing_min_bitrate"], 118)
+        self.assertEqual(item["existing_avg_bitrate"], 124)
+        self.assertEqual(item["existing_median_bitrate"], 122)
+        self.assertEqual(item["existing_spectral_grade"], "likely_transcode")
+        self.assertEqual(item["existing_spectral_bitrate"], 96)
+        self.assertEqual(item["existing_v0_probe_kind"], "lossless_source")
+        self.assertEqual(item["existing_v0_probe_min_bitrate"], 246)
+        self.assertEqual(item["existing_v0_probe_avg_bitrate"], 258)
+        self.assertEqual(item["materialized_format"], "Opus")
+        self.assertEqual(item["materialized_min_bitrate"], 118)
+        self.assertEqual(item["materialized_avg_bitrate"], 124)
+        self.assertEqual(item["target_contract_format"], "opus 128")
+
+    def test_deleted_triage_uses_complete_canonical_current_have(self):
+        import web.server as srv
+        from lib.quality import AlbumQualityV0Metric, AudioQualityMeasurement
+        from tests.helpers import make_album_quality_evidence
+
+        self.db.log_download(
+            100,
+            outcome="rejected",
+            validation_result={
+                "scenario": "high_distance",
+                "distance": 0.221,
+                "wrong_match_triage": {
+                    "action": "deleted_reject",
+                    "outcome": "deleted",
+                    "reason": "suspect_lossless_downgrade",
+                    "preview_verdict": "confident_reject",
+                    "preview_decision": "suspect_lossless_downgrade",
+                    "stage_chain": ["stage2_import:suspect_lossless_downgrade"],
+                },
+            },
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="test-mbid-0100",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=93,
+                avg_bitrate_kbps=129,
+                median_bitrate_kbps=128,
+                format="Opus",
+                spectral_grade="suspect",
+                spectral_bitrate_kbps=96,
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=193,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=258,
+                source_lineage="lossless_source",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(self.db.set_request_current_evidence(100, stored.id))
+
+        beets = FakeBeetsDB()
+        beets.set_mbid_detail(
+            "test-mbid-0100",
+            {
+                "beets_format": "Opus",
+                "beets_bitrate": 93,
+                "beets_avg_bitrate": 129,
+            },
+        )
+        with patch.object(srv, "_beets_db", return_value=beets):
+            status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = data["log"][0]
+        self.assertEqual(item["badge"], "Triaged · deleted")
+        self.assertEqual(item["existing_format"], "Opus")
+        self.assertEqual(item["existing_min_bitrate"], 93)
+        self.assertEqual(item["existing_avg_bitrate"], 129)
+        self.assertEqual(item["existing_median_bitrate"], 128)
+        self.assertEqual(item["existing_spectral_grade"], "suspect")
+        self.assertEqual(item["existing_spectral_bitrate"], 96)
+        self.assertEqual(item["existing_v0_probe_kind"], "lossless_source")
+        self.assertEqual(item["existing_v0_probe_min_bitrate"], 193)
+        self.assertEqual(item["existing_v0_probe_avg_bitrate"], 256)
+
+    def test_kept_would_import_completes_have_from_explicit_successor(self):
+        import web.server as srv
+        from lib.quality import AudioQualityMeasurement, ImportResult
+
+        source_log_id = self.db.log_download(
+            100,
+            outcome="rejected",
+            validation_result={
+                "scenario": "high_distance",
+                "distance": 0.172,
+                "wrong_match_triage": {
+                    "action": "kept_would_import",
+                    "outcome": "kept_would_import",
+                    "reason": "import",
+                    "preview_verdict": "would_import",
+                    "preview_decision": "import",
+                    "stage_chain": ["stage2_import:import"],
+                    "current_measurement": {
+                        "format": None,
+                        "min_bitrate_kbps": None,
+                        "avg_bitrate_kbps": None,
+                        "median_bitrate_kbps": None,
+                        "spectral_grade": "likely_transcode",
+                        "spectral_bitrate_kbps": 160,
+                    },
+                    "current_v0_probe": {
+                        "kind": "on_disk_research_v0",
+                        "min_bitrate_kbps": 160,
+                        "avg_bitrate_kbps": 241,
+                        "median_bitrate_kbps": 251,
+                    },
+                },
+            },
+        )
+        self.db.log_download(
+            100,
+            outcome="force_import",
+            source_download_log_id=source_log_id,
+            was_converted=True,
+            import_result=ImportResult(
+                decision="import",
+                source_measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=732,
+                    avg_bitrate_kbps=944,
+                    median_bitrate_kbps=961,
+                    format="FLAC",
+                ),
+                current_measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=153,
+                    avg_bitrate_kbps=228,
+                    median_bitrate_kbps=236,
+                    format="MP3",
+                    spectral_grade="likely_transcode",
+                    spectral_bitrate_kbps=160,
+                ),
+                materialized_measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=99,
+                    avg_bitrate_kbps=128,
+                    median_bitrate_kbps=127,
+                    format="Opus",
+                ),
+            ).to_json(),
+        )
+        beets = FakeBeetsDB()
+        beets.set_mbid_detail(
+            "test-mbid-0100",
+            {
+                "beets_format": "Opus",
+                "beets_bitrate": 99,
+                "beets_avg_bitrate": 128,
+            },
+        )
+        with patch.object(srv, "_beets_db", return_value=beets):
+            status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(
+            row for row in data["log"]
+            if row["wrong_match_triage_action"] == "kept_would_import"
+        )
+        self.assertEqual(item["existing_format"], "MP3")
+        self.assertEqual(item["existing_min_bitrate"], 153)
+        self.assertEqual(item["existing_avg_bitrate"], 228)
+        self.assertEqual(item["existing_median_bitrate"], 236)
+        self.assertEqual(item["existing_spectral_grade"], "likely_transcode")
+        self.assertEqual(item["existing_v0_probe_avg_bitrate"], 241)
+        self.assertEqual(item["materialized_format"], "Opus")
+        self.assertEqual(item["materialized_min_bitrate"], 99)
+        self.assertEqual(item["materialized_avg_bitrate"], 128)
+
+        with patch.object(srv, "_beets_db", return_value=beets):
+            filtered_status, filtered_data = self._get(
+                "/api/pipeline/log?outcome=rejected"
+            )
+
+        self.assertEqual(filtered_status, 200)
+        filtered_item = next(
+            row for row in filtered_data["log"]
+            if row["wrong_match_triage_action"] == "kept_would_import"
+        )
+        self.assertEqual(filtered_item["existing_format"], "MP3")
+        self.assertEqual(filtered_item["existing_min_bitrate"], 153)
+        self.assertEqual(filtered_item["existing_avg_bitrate"], 228)
+        self.assertEqual(filtered_item["existing_median_bitrate"], 236)
+        self.assertEqual(
+            filtered_item["existing_spectral_grade"], "likely_transcode"
+        )
+        self.assertEqual(filtered_item["existing_v0_probe_avg_bitrate"], 241)
+        self.assertEqual(filtered_item["materialized_format"], "Opus")
+        self.assertEqual(filtered_item["materialized_min_bitrate"], 99)
+        self.assertEqual(filtered_item["materialized_avg_bitrate"], 128)
 
     def test_pipeline_log_projects_complete_canonical_candidate_evidence(self):
         from lib.quality import AlbumQualityV0Metric, AudioQualityMeasurement

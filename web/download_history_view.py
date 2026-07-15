@@ -64,6 +64,8 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     spectral_grade: str | None
     spectral_bitrate: int | None
     existing_min_bitrate: int | None
+    existing_avg_bitrate: int | None
+    existing_median_bitrate: int | None
     existing_spectral_bitrate: int | None
     existing_spectral_grade: str | None
     spectral_attempted: bool | None

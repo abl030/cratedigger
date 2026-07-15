@@ -346,7 +346,7 @@ console.log('renderRecentsItems() uses the main badge for deleted triage');
     album_title: 'For Screening Purposes Only',
     artist_name: 'Test Icicles',
     badge: 'Triaged · deleted',
-    badge_class: 'badge-library',
+    badge_class: 'badge-rejected',
     border_color: '#a33',
     summary: 'Wrong match (dist 0.190) · moundsofass',
     wrong_match_triage_summary: 'deleted: spectral reject',
@@ -356,10 +356,33 @@ console.log('renderRecentsItems() uses the main badge for deleted triage');
     'original wrong-match summary remains visible');
   assertContains(html, 'Triaged · deleted',
     'deleted triage is the primary row badge');
+  assertContains(html, 'badge badge-rejected',
+    'deleted triage remains visually rejected');
   assertExcludes(html, 'recents-triage-label',
     'deleted triage does not render a second competing status label');
   assertContains(html, 'mp3_spectral:reject',
     'triage detail appears in hover text');
+}
+
+console.log('renderRecentsItems() uses an amber main badge for kept triage');
+{
+  const html = renderRecentsFixture([{
+    id: 726,
+    request_id: 802,
+    created_at: '2026-07-14T18:36:33+00:00',
+    album_title: 'Amaterasu Shiroi',
+    artist_name: 'Eldar',
+    badge: 'Triaged · kept',
+    badge_class: 'badge-warn',
+    border_color: '#a33',
+    summary: 'Wrong match (dist 0.233) · R@v@scholl',
+    wrong_match_triage_summary: 'kept: would import',
+    wrong_match_triage_detail: 'action: kept would import',
+  }]);
+  assertContains(html, 'Triaged · kept', 'kept triage is the primary row badge');
+  assertContains(html, 'badge badge-warn', 'kept triage uses the amber badge class');
+  assertExcludes(html, 'recents-triage-label',
+    'kept triage does not render a second competing status label');
 }
 
 console.log('renderRecentsItems() escapes wrong-match triage chip fields');

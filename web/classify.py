@@ -174,6 +174,8 @@ class ClassifiedEntry(msgspec.Struct):
     # The classifier owns the final attempt-local projection for both normal
     # import rows and persisted wrong-match triage snapshots.
     existing_min_bitrate: int | None = None
+    existing_avg_bitrate: int | None = None
+    existing_median_bitrate: int | None = None
     v0_probe_kind: str | None = None
     v0_probe_min_bitrate: int | None = None
     v0_probe_avg_bitrate: int | None = None
@@ -315,7 +317,12 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
     core = _classify(entry, triage_action=triage["action"])
     summary = _build_summary(entry, core.badge, core.verdict)
     downloaded_label = _build_downloaded_label(entry)
-    existing_format = _extract_existing_format(entry)
+    (
+        existing_format,
+        existing_min_bitrate,
+        existing_avg_bitrate,
+        existing_median_bitrate,
+    ) = _extract_existing_measurement(entry)
     materialized = _extract_materialized_measurement(entry)
     lineage = _extract_quality_lineage(entry)
     disambig_reason, disambig_detail = _extract_disambiguation_failure(entry)
@@ -341,6 +348,9 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         )
     if current_measurement is not None:
         existing_format = current_measurement.format
+        existing_min_bitrate = current_measurement.min_bitrate_kbps
+        existing_avg_bitrate = current_measurement.avg_bitrate_kbps
+        existing_median_bitrate = current_measurement.median_bitrate_kbps
         spectral = (
             spectral[0], spectral[1],
             current_measurement.spectral_grade,
@@ -387,10 +397,9 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         spectral_error=spectral[5],
         existing_spectral_attempted=spectral[6],
         existing_spectral_error=spectral[7],
-        existing_min_bitrate=(
-            current_measurement.min_bitrate_kbps
-            if current_measurement is not None else entry.existing_min_bitrate
-        ),
+        existing_min_bitrate=existing_min_bitrate,
+        existing_avg_bitrate=existing_avg_bitrate,
+        existing_median_bitrate=existing_median_bitrate,
         v0_probe_kind=(
             candidate_v0.kind if candidate_v0 is not None else entry.v0_probe_kind
         ),
@@ -509,14 +518,20 @@ def _extract_attempt_spectral(
     )
 
 
-def _extract_existing_format(entry: LogEntry) -> Optional[str]:
-    """The on-disk codec at download time, from
-    ``import_result.current_measurement.format``. None when the blob is
-    missing/legacy — renderers fall back to the bare bitrate suffix."""
+def _extract_existing_measurement(
+    entry: LogEntry,
+) -> tuple[str | None, int | None, int | None, int | None]:
+    """The complete on-disk bitrate snapshot used by this attempt."""
     ir = _parse_import_result(entry)
     if ir is None or ir.current_measurement is None:
-        return None
-    return ir.current_measurement.format
+        return (None, entry.existing_min_bitrate, None, None)
+    measurement = ir.current_measurement
+    return (
+        measurement.format,
+        measurement.min_bitrate_kbps,
+        measurement.avg_bitrate_kbps,
+        measurement.median_bitrate_kbps,
+    )
 
 
 def _extract_materialized_measurement(
@@ -720,9 +735,13 @@ def _classify(
     # --- Rejected ---
     if entry.outcome == "rejected":
         verdict = _rejection_verdict(entry)
+        if triage_action in ("kept_would_import", "kept_uncertain"):
+            return _Classification(
+                "Triaged · kept", "badge-warn", "#a33", verdict
+            )
         if triage_action in ("deleted_reject", "deleted_verified_lossless_parent"):
             return _Classification(
-                "Triaged · deleted", "badge-library", "#6a5", verdict
+                "Triaged · deleted", "badge-rejected", "#a33", verdict
             )
         return _Classification("Rejected", "badge-rejected", "#a33", verdict)
 
@@ -799,7 +818,20 @@ def _classify(
             if entry.search_filetype_override:
                 return _classify_search_filetype_override(entry, is_verified_lossless)
             basis = _entry_comparison_basis(entry)
-            if basis is not None:
+            if basis is not None and basis.verified_lossless_bypass:
+                # The evidence rows already carry the exact comparison. Keep
+                # the collapsed footer on the older concise upgrade grammar;
+                # the basis trace ("Equivalent ... both transparent") is an
+                # internal decision explanation, not a useful success label.
+                verdict = _upgrade_verdict(
+                    entry.existing_min_bitrate,
+                    _downloaded_min_bitrate_kbps(entry),
+                    entry.was_converted,
+                    entry.original_filetype,
+                    True,
+                    actual_filetype=entry.actual_filetype,
+                )
+            elif basis is not None:
                 verdict = _upgrade_verdict_from_basis(
                     basis, entry.was_converted, entry.original_filetype,
                     is_verified_lossless)
