@@ -8,23 +8,19 @@ and sometimes recreates the MusicAlbum item too. Jellyfin's 'Recently
 Added'/Latest row orders albums by their children's ``DateCreated``, so the
 upgrade wrongly surfaces at the top. This module preserves the original date:
 
-  capture   (importer, BEFORE the Jellyfin refresh): read the album's current
-            ``DateCreated`` and snapshot its item id + Audio children ids as a
-            pending pin. A genuinely-new album isn't in Jellyfin yet, so
-            nothing is captured — the table self-selects upgrades.
+  capture   (importer, BEFORE the Jellyfin refresh): read the maximum
+            ``DateCreated`` across the album's Audio children (the value that
+            actually orders Jellyfin's music Latest rows) and snapshot the
+            item ids. A genuinely-new album isn't in Jellyfin yet, so nothing
+            is captured — the table self-selects upgrades.
   reconcile (5-min cratedigger cycle): for each pending pin past the settle
             window, re-find the album and check whether the rescan has LANDED
-            — the album item id or the children id-set differs from the
-            snapshot. Only then write the original ``DateCreated`` back onto
-            the album and every drifted child. Until it lands the pin stays
-            pending (Jellyfin has no Plex-style field lock, our refresh
-            trigger is a full-library scan of unbounded duration, and inotify
-            on the fuse mount Jellyfin reads may never fire — so a fixed
-            grace window alone would close pins the scan hasn't re-stamped
-            yet). A pin whose rescan never becomes observable expires after a
-            TTL: a same-filename upgrade keeps item ids, and Jellyfin never
-            re-stamps an existing item's ``DateCreated``, so there is nothing
-            to fix.
+            — an item id differs from the snapshot OR an existing Audio item's
+            date is newer than the captured maximum. The date branch is
+            load-bearing: Jellyfin 10.11 restamps same-path items from file
+            ctime when their mtime changes without changing their ids. Clamp
+            only newer dates back to the captured maximum. Until Jellyfin
+            exposes either signal the pin stays pending, then expires at TTL.
 
 The Jellyfin client (find/children/set) lives in ``lib/util.py``; all three
 functions take kwarg-DI seams so tests drive them without touching the
@@ -90,12 +86,11 @@ class _PinDBProto(Protocol):
 # the rescan certainly hasn't started.
 DEFAULT_GRACE_SECONDS = 180
 
-# A pin whose rescan never becomes observable (album id and children id-set
-# still match the snapshot) is closed after this long. Jellyfin's nightly
-# scheduled scan bounds "the rescan eventually runs" at ~24h; 48h covers it
-# with margin. The expiring case is benign by construction: ids unchanged
-# means Jellyfin kept the items, and it never re-stamps an existing item's
-# DateCreated, so the album never surfaced in Recently Added.
+# A pin whose album update never becomes observable (ids unchanged and no
+# Audio date newer than the captured maximum) is closed after this long.
+# Jellyfin's nightly scheduled scan bounds eventual observation at ~24h; 48h
+# covers it with margin. Expiry is benign for Recently Added because no child
+# crossed the captured album maximum.
 DEFAULT_TTL_HOURS = 48
 
 
@@ -141,10 +136,12 @@ def capture_jellyfin_date_created_pin(
     find_fn: FindFn = jellyfin_find_album_by_path,
     children_fn: ChildrenFn = jellyfin_get_album_children,
 ) -> CaptureResult:
-    """Read the album currently at ``imported_path`` and stash its
-    ``DateCreated`` plus the item-id snapshot as a pending pin. MUST be called
-    BEFORE the Jellyfin refresh fires, so the old items still carry their
-    pre-upgrade state. Best-effort: never raises."""
+    """Stash the album's maximum Audio date and item-id snapshot.
+
+    MUST run before the Jellyfin media update so the children still carry the
+    pre-upgrade dates that determine the album's current Latest position.
+    Best-effort: never raises.
+    """
     if not _jellyfin_pin_enabled(cfg) or not imported_path:
         return CaptureResult("disabled")
     try:
@@ -158,9 +155,13 @@ def capture_jellyfin_date_created_pin(
         return CaptureResult("no_album")
     try:
         children = children_fn(cfg, ref.item_id)
+        original_date_created = max(
+            (child.date_created for child in children if child.date_created),
+            default=ref.date_created,
+        )
         pin_id = db.add_jellyfin_date_created_pin(
             imported_path=imported_path,
-            original_date_created=ref.date_created,
+            original_date_created=original_date_created,
             album_item_id=ref.item_id,
             children_item_ids=[c.item_id for c in children],
             request_id=request_id,
@@ -172,8 +173,9 @@ def capture_jellyfin_date_created_pin(
         return CaptureResult("error")
     logger.info(
         "JELLYFIN PIN: captured DateCreated=%s for %r (%s — %s; pin %d, request %s)",
-        ref.date_created, imported_path, ref.artist, ref.name, pin_id, request_id)
-    return CaptureResult("captured", pin_id, ref.date_created)
+        original_date_created, imported_path, ref.artist, ref.name, pin_id,
+        request_id)
+    return CaptureResult("captured", pin_id, original_date_created)
 
 
 def reconcile_jellyfin_date_created_pins(
@@ -188,11 +190,11 @@ def reconcile_jellyfin_date_created_pins(
     children_fn: ChildrenFn = jellyfin_get_album_children,
     set_fn: SetFn = jellyfin_set_date_created,
 ) -> ReconcileResult:
-    """Process pending pins past the settle window. A pin is acted on only
-    once the rescan is observable (item ids drifted from the capture
-    snapshot); then the original ``DateCreated`` is written onto the album
-    and every drifted Audio child. Best-effort — per-pin failures are logged
-    and counted, never raised."""
+    """Clamp post-upgrade dates after the album update becomes observable.
+
+    Item-id drift and Audio dates newer than the captured maximum are the two
+    landing signals. Best-effort: per-pin failures are logged and counted.
+    """
     if not _jellyfin_pin_enabled(cfg):
         return ReconcileResult()
     cutoff = now - timedelta(seconds=grace_seconds)
@@ -220,10 +222,14 @@ def reconcile_jellyfin_date_created_pins(
                 skipped += 1
                 continue
             children = children_fn(cfg, ref.item_id)
-            landed = (
+            ids_changed = (
                 ref.item_id != snapshot_album_id
                 or {c.item_id for c in children} != snapshot_children
             )
+            date_bumped = any(
+                child.date_created > original for child in children
+            )
+            landed = ids_changed or date_bumped
             # A landed rescan showing ZERO audio children against a non-empty
             # snapshot is a mid-scan window (old items deleted, new ones not
             # yet inserted) — the new items don't exist to write to yet.
@@ -245,7 +251,7 @@ def reconcile_jellyfin_date_created_pins(
             targets += [(c.item_id, c.date_created) for c in children]
             writes = failures = 0
             for item_id, current in targets:
-                if current == original:
+                if current <= original:
                     continue
                 if set_fn(cfg, item_id, original):
                     writes += 1

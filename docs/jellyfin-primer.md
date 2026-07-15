@@ -23,24 +23,36 @@ Upstream: https://jellyfin.org/
 
 ## How Cratedigger Talks To Jellyfin
 
-Scan notifier: `lib/util.py::trigger_jellyfin_scan(cfg)` — called from
+Scan notifier: `lib/util.py::trigger_jellyfin_scan(cfg, imported_path)` — called from
 `lib/dispatch/` after every successful import that sets
-`action.trigger_notifiers = True`. Sends `POST /Library/Refresh` (or
-`POST /Items/<library_id>/Refresh` when `library_id` is configured) with the
-`X-Emby-Token` header. Best-effort — failures don't block the import. The
-configured targeted post-import and Replace form is exactly:
+`action.trigger_notifiers = True`. It maps the final beets album directory to
+Jellyfin's view of the same path and sends exactly one filesystem-change
+notification:
 
 ```http
-POST /Items/<library_id>/Refresh?metadataRefreshMode=Default&imageRefreshMode=Default&replaceAllMetadata=false&replaceAllImages=false
+POST /Library/Media/Updated
+Content-Type: application/json
+
+{"Updates":[{"Path":"/mnt/fuse/Media/Music/Beets/Artist/Album","UpdateType":"Modified"}]}
 ```
 
-Jellyfin 10.11.11 recurses intrinsically for this endpoint, so the request
-deliberately has no `recursive` parameter. `Default` loads tags for genuinely
-new albums and Audio children; both replace-all flags stay false so existing
-curated metadata is not wiped. The response is normally HTTP 204, which means
-the asynchronous refresh was queued — never that it converged. The configured
-item ID keeps the operation scoped to the music library. Leaving the ID unset
-deliberately preserves the unchanged `POST /Library/Refresh` behavior.
+Jellyfin 10.11.11 ignores `UpdateType`, resolves the exact existing album, or
+walks upward to the nearest indexed ancestor for a genuinely new album. That
+ancestor can be the artist or, for a first album by a new artist, the music
+library root. Reporting the album directory is enough for an extension
+change: folder validation removes the vanished MP3 item and creates/probes the
+new Opus item. A new album's first refresh reads embedded tags and media info
+and runs its metadata/image providers. The endpoint is asynchronous; HTTP 204
+means queued, never converged.
+
+There is deliberately no collection refresh and no broad fallback. If the
+album path cannot be mapped, the notifier logs and stops. Jellyfin exposes no
+single request that both reconciles changed children and forbids all metadata
+or image consideration on the affected existing album/ancestor;
+`Media/Updated` is its narrowest supported filesystem-change boundary. The
+acceptance VM therefore proves the outcomes Cratedigger can require: new-album
+metadata and cover art land, an existing curated album remains unchanged, and
+a separate library is not scanned.
 
 For library deletion, Cratedigger locates the exact `MusicAlbum` by the former
 mapped Beets path and refreshes that item after destructive locks are released.
@@ -71,34 +83,29 @@ deliberate differences:
 - **Capture** (`lib/jellyfin_pin_service.py::capture_jellyfin_date_created_pin`,
   called in `lib/dispatch/core.py` *before* the refresh): locate the album by
   its folder path (exact `Path` match after the `path_map` translation) and
-  stash its current `DateCreated` **plus a snapshot of the album item id and
-  its Audio children ids** as a `pending` row in `jellyfin_date_created_pins`.
+  stash the **maximum `DateCreated` across its Audio children** (the value
+  Jellyfin actually uses to order grouped music Latest), plus a snapshot of
+  the album and Audio item ids, as a `pending` row.
   A genuinely-new album isn't in Jellyfin yet, so nothing is captured — the
   table self-selects upgrades.
 - **Reconcile** (`reconcile_jellyfin_date_created_pins`, each 5-min
   cratedigger cycle): a pin is acted on only once the rescan is **observable**
-  — the album item id or the children id-set differs from the snapshot. Then
-  the original `DateCreated` is written back onto the album and every drifted
-  Audio child, and the pin is marked `done`. Until it lands the pin stays
-  `pending` (up to a 48h TTL → `expired`).
+  — an item id differs from the snapshot **or an Audio item's date becomes
+  newer than the captured maximum**. Only newer album/Audio dates are clamped
+  back to that maximum, preserving the album's prior Recently Added position.
+  Until it lands the pin stays `pending` (up to a 48h TTL → `expired`).
 
 Why the landed-detector instead of Plex's fixed 180s settle window + field
 lock:
 
-1. **No lock exists.** Jellyfin has no `DateCreated.locked`. But it also only
-   stamps `DateCreated` at item *creation* — an existing item's date survives
-   every subsequent scan — so a one-time write-back sticks.
-2. **The rescan window is unbounded.** The refresh request is asynchronous
-   even when `library_id` targets only music (and remains a full-library
-   refresh when unset); inotify on the fuse mount may never fire, leaving the
-   nightly scheduled scan (~24h) as the backstop. Closing a pin before the
-   rescan re-stamped the items would write to the doomed OLD items and leave
-   nothing to fix the new ones — so the reconciler waits for observable drift
-   instead of trusting a clock.
-3. **A pin that never lands is benign.** Ids unchanged means Jellyfin kept
-   the items (e.g. a same-filename upgrade), and it never re-stamps kept
-   items — the album never surfaced in Recently Added. The TTL just closes
-   the row (`expired`).
+1. **No lock exists.** Jellyfin has no `DateCreated.locked`, so restoration
+   happens after the asynchronous album update becomes observable.
+2. **Ids are not enough.** Jellyfin's metadata service rewrites an existing
+   same-path Audio item's `DateCreated` from file ctime when its mtime changes.
+   The newer-date detector catches that case even though the item id survives.
+3. **Only forward bumps matter.** Existing tracks can naturally have dates
+   older than the album maximum. They are left alone; only a date newer than
+   the captured maximum can move the grouped album forward in Latest.
 
 The Plex and Jellyfin orchestration modules deliberately remain separate.
 Their shared outline is smaller than their backend contracts: epoch integer
@@ -135,11 +142,10 @@ path_map = /mnt/virtio/Music/Beets:/mnt/fuse/Media/Music/Beets
 
 `path_map` composes with `[Beets] directory` exactly like the Plex one
 (absolutize relative `imported_path`, then prefix-swap — see
-`docs/plex-primer.md` § "How paths get to Plex"). Without it the pin can't
-locate albums (find returns nothing, captures report `disabled`/`no_album`);
-the plain scan notifier works without it. `library_id` is independent: set it
-to target the music library's `/Items/{id}/Refresh`, or omit it for
-`/Library/Refresh`. Via the Nix module these are
+`docs/plex-primer.md` § "How paths get to Plex"). It drives both the path
+notification and the pin's exact album lookup. `library_id` is independent
+and is used only as the fallback target for the separate library-deletion
+observer. Via the Nix module these are
 `services.cratedigger.notifiers.jellyfin.libraryId` and `.pathMap`.
 
 ## API Access
@@ -195,8 +201,8 @@ Gotchas:
    `waiting` means the rescan hasn't visibly landed yet (check that the
    refresh trigger fired and the scheduled scan schedule).
 3. Check the album's dates directly (album + children endpoints above) —
-   after a successful pin, album and all Audio children carry the original
-   `DateCreated`.
+   after a successful pin, no album or Audio child date is newer than the
+   captured pre-upgrade maximum. Naturally older child dates stay untouched.
 
 ## Documentation Links
 

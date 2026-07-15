@@ -742,7 +742,7 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
             "lib.mbid_replace_service.trigger_plex_scan"
         ) as mock_plex, patch(
             "lib.mbid_replace_service.trigger_jellyfin_scan"
-        ):
+        ) as mock_jellyfin:
             svc = self._make_service(db)
             result = svc.replace_request_mbid(
                 42, target_mb_release_id=NEW_MBID,
@@ -758,6 +758,12 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         _, plex_kwargs = mock_plex.call_args
         self.assertEqual(
             plex_kwargs.get("imported_path"),
+            "/mnt/virtio/Music/Beets/Pet Grief/Old Pressing",
+        )
+        mock_jellyfin.assert_called_once()
+        _, jellyfin_kwargs = mock_jellyfin.call_args
+        self.assertEqual(
+            jellyfin_kwargs.get("imported_path"),
             "/mnt/virtio/Music/Beets/Pet Grief/Old Pressing",
         )
 

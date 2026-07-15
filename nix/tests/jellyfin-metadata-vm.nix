@@ -47,7 +47,7 @@ pkgs.testers.nixosTest {
     pipeline_dsn = "postgresql:///root?host=/run/postgresql"
     existing_path = "/srv/target/Legacy Artist/1999 - Existing Tagged Album"
     existing_track = existing_path + "/01.flac"
-    replacement_track = existing_path + "/01-upgraded.flac"
+    replacement_track = existing_path + "/01.opus"
     client_auth = (
         'MediaBrowser Client="Cratedigger VM", DeviceId="metadata-vm", '
         'Device="NixOS", Version="1"'
@@ -69,14 +69,20 @@ pkgs.testers.nixosTest {
     def get_json(path, *, token):
         return json.loads(curl(path, token=token))
 
-    def make_flac(path, *, album, album_artist, title, year, genre, track, disc):
+    def make_audio(
+        path, *, codec="flac", album, album_artist, title, year, genre,
+        track, disc
+    ):
         machine.succeed("install -d -m 0755 " + shlex.quote(path.rsplit("/", 1)[0]))
         command = [
             "ffmpeg", "-y", "-loglevel", "error",
             "-f", "lavfi", "-i", "sine=frequency=440:duration=0.25",
-            "-c:a", "flac",
+            "-c:a", codec,
             "-metadata", "album=" + album,
             "-metadata", "album_artist=" + album_artist,
+            # Mirror the two album-artist aliases present on real Beets Opus
+            # files, rather than relying on ffmpeg's single default spelling.
+            "-metadata", "ALBUM ARTIST=" + album_artist,
             "-metadata", "artist=" + album_artist,
             "-metadata", "title=" + title,
             "-metadata", "date=" + str(year),
@@ -84,6 +90,14 @@ pkgs.testers.nixosTest {
             "-metadata", "track=" + str(track),
             "-metadata", "disc=" + str(disc),
             path,
+        ]
+        machine.succeed(" ".join(shlex.quote(part) for part in command))
+
+    def make_cover(path):
+        command = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=c=navy:s=32x32",
+            "-frames:v", "1", path,
         ]
         machine.succeed(" ".join(shlex.quote(part) for part in command))
 
@@ -120,9 +134,25 @@ pkgs.testers.nixosTest {
     token = auth["AccessToken"]
     user_id = get_json("/Users/Me", token=token)["Id"]
 
+    # File-system change reports are intentionally debounced by Jellyfin.
+    # Keep the real FileRefresher path, but shorten its test-only delay so the
+    # VM proves convergence rather than spending a minute per notification.
+    server_config = get_json("/System/Configuration", token=token)
+    server_config["LibraryMonitorDelay"] = 1
+    machine.succeed(
+        "printf %s " + shlex.quote(json.dumps(server_config))
+        + " > /tmp/jellyfin-server-config.json"
+    )
+    curl(
+        "/System/Configuration",
+        token=token,
+        method="POST",
+        body="/tmp/jellyfin-server-config.json",
+    )
+
     # The existing album is indexed first, then manually curated through the
     # same full-DTO update contract Cratedigger's DateCreated pin uses.
-    make_flac(
+    make_audio(
         existing_track,
         album="Existing Tagged Album",
         album_artist="Legacy Artist",
@@ -132,6 +162,7 @@ pkgs.testers.nixosTest {
         track=1,
         disc=1,
     )
+    make_cover(existing_path + "/cover.jpg")
     machine.succeed("install -d -m 0755 /srv/unrelated")
 
     target_query = urlencode({
@@ -174,7 +205,7 @@ pkgs.testers.nixosTest {
             "ParentId": parent_id,
             "Recursive": "true",
             "IncludeItemTypes": "MusicAlbum",
-            "Fields": "Path,Genres,ProductionYear,AlbumArtists,Overview,LockData",
+            "Fields": "Path,Genres,ProductionYear,AlbumArtists,Overview,LockData,ImageTags",
         })
         return get_json("/Items?" + query, token=token)["Items"]
 
@@ -205,6 +236,8 @@ pkgs.testers.nixosTest {
         "/Items/" + existing["Id"] + "?userId=" + user_id,
         token=token,
     )
+    existing_image_tag = existing_dto.get("ImageTags", {}).get("Primary")
+    assert existing_image_tag, existing_dto
     existing_dto["Name"] = "Curated Existing Name"
     existing_dto["Overview"] = "Operator-authored archival note"
     existing_dto["LockData"] = True
@@ -222,7 +255,7 @@ pkgs.testers.nixosTest {
     # Add both a target fixture and an unrelated fixture only after initial
     # indexing. Realtime monitoring is disabled on both libraries, so only
     # an accidentally broad refresh can discover the unrelated album.
-    make_flac(
+    make_audio(
         "/srv/target/Tagged Album Artist/2024 - Notifier Metadata Album/01.flac",
         album="Notifier Metadata Album",
         album_artist="Tagged Album Artist",
@@ -232,7 +265,7 @@ pkgs.testers.nixosTest {
         track=1,
         disc=1,
     )
-    make_flac(
+    make_audio(
         "/srv/target/Tagged Album Artist/2024 - Notifier Metadata Album/02.flac",
         album="Notifier Metadata Album",
         album_artist="Tagged Album Artist",
@@ -242,7 +275,10 @@ pkgs.testers.nixosTest {
         track=2,
         disc=1,
     )
-    make_flac(
+    make_cover(
+        "/srv/target/Tagged Album Artist/2024 - Notifier Metadata Album/cover.jpg"
+    )
+    make_audio(
         "/srv/unrelated/Other Artist/2023 - Unrelated Album/01.flac",
         album="Unrelated Album",
         album_artist="Other Artist",
@@ -260,10 +296,15 @@ pkgs.testers.nixosTest {
         "from lib.util import trigger_jellyfin_scan; "
         "import sys; "
         "trigger_jellyfin_scan(CratediggerConfig("
+        "beets_directory='/srv/target', "
         "jellyfin_url='http://127.0.0.1:8096', "
-        "jellyfin_token=sys.argv[1], jellyfin_library_id=sys.argv[2]))"
+        "jellyfin_token=sys.argv[1]), sys.argv[2])"
     )
-    run_cratedigger(notifier, token, target_id)
+    run_cratedigger(
+        notifier,
+        token,
+        "/srv/target/Tagged Album Artist/2024 - Notifier Metadata Album",
+    )
 
     new_album = {}
     children = []
@@ -303,6 +344,8 @@ pkgs.testers.nixosTest {
             "Tagged Album Artist"
         ]:
             return False
+        if not candidate.get("ImageTags", {}).get("Primary"):
+            return False
         new_album.update(candidate)
         children[:] = observed_children
         return True
@@ -315,6 +358,7 @@ pkgs.testers.nixosTest {
     assert album_artists == ["Tagged Album Artist"], new_album
     assert new_album.get("ProductionYear") == 2024, new_album
     assert "Archival" in new_album.get("Genres", []), new_album
+    assert new_album.get("ImageTags", {}).get("Primary"), new_album
 
     child_projection = [
         (row.get("Album"), row.get("IndexNumber"), row.get("ParentIndexNumber"))
@@ -360,6 +404,7 @@ pkgs.testers.nixosTest {
     )
     assert curated["Name"] == "Curated Existing Name", curated
     assert curated.get("Overview") == "Operator-authored archival note", curated
+    assert curated.get("ImageTags", {}).get("Primary") == existing_image_tag, curated
 
     # Production DateCreated pin lifecycle: stamp a deliberately old value
     # with the full-DTO setter, capture it into real PostgreSQL, replace the
@@ -419,8 +464,10 @@ pkgs.testers.nixosTest {
     assert capture_result["original_date_created"] == captured_original, capture_result
     pin_id = capture_result["pin_id"]
 
-    make_flac(
-        replacement_track,
+    staged_replacement = "/tmp/01.opus"
+    make_audio(
+        staged_replacement,
+        codec="libopus",
         album="Existing Tagged Album",
         album_artist="Legacy Artist",
         title="Legacy Track Remastered",
@@ -429,8 +476,15 @@ pkgs.testers.nixosTest {
         track=1,
         disc=1,
     )
+    # Beets exposes a completed file at its final library path.  Stage the
+    # encoded file outside the watched tree so Jellyfin cannot ingest a
+    # half-written Opus stream before Cratedigger reports the final path.
+    machine.succeed(
+        "mv " + shlex.quote(staged_replacement) + " "
+        + shlex.quote(replacement_track)
+    )
     machine.succeed("rm " + shlex.quote(existing_track))
-    run_cratedigger(notifier, token, target_id)
+    run_cratedigger(notifier, token, existing_path)
 
     current_existing = {}
     current_children = []
@@ -442,6 +496,8 @@ pkgs.testers.nixosTest {
         observed_children = audio_children(matches[0]["Id"])
         observed_ids = {row["Id"] for row in observed_children}
         if len(observed_children) != 1 or observed_ids == snapshot_child_ids:
+            return False
+        if observed_children[0].get("Path") != replacement_track:
             return False
         current_existing.update(matches[0])
         current_children[:] = observed_children

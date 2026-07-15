@@ -1,5 +1,6 @@
 """Tests for lib/util.py — pure utility functions extracted from cratedigger.py."""
 
+import json
 import os
 import shutil
 import tempfile
@@ -674,62 +675,62 @@ class TestTriggerJellyfinScan(unittest.TestCase):
     """Tests for trigger_jellyfin_scan()."""
 
     def _make_cfg(self, url: str | None = "http://jelly:8096",
-                  token: str | None = "api-key-123",
-                  library_id: str | None = None):
+                  token: str | None = "api-key-123"):
         cfg = MagicMock()
         cfg.jellyfin_url = url
         cfg.jellyfin_token = token
-        cfg.jellyfin_library_id = library_id
+        cfg.beets_directory = "/mnt/virtio/Music/Beets"
+        cfg.jellyfin_path_map = (
+            "/mnt/virtio/Music/Beets:/mnt/fuse/Media/Music/Beets"
+        )
         cfg.resolved_jellyfin_token.return_value = token
         return cfg
 
     @patch("lib.util.urllib.request.urlopen")
-    def test_calls_library_refresh_endpoint(self, mock_urlopen):
+    def test_reports_only_the_changed_album_path(self, mock_urlopen):
         from lib.util import trigger_jellyfin_scan
         mock_resp = MagicMock()
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.read.return_value = b""
         mock_urlopen.return_value = mock_resp
-        trigger_jellyfin_scan(self._make_cfg())
-        req = mock_urlopen.call_args[0][0]
-        self.assertEqual(req.full_url, "http://jelly:8096/Library/Refresh")
-        self.assertEqual(req.get_header("X-emby-token"), "api-key-123")
-        self.assertEqual(req.get_method(), "POST")
-
-    @patch("lib.util.urllib.request.urlopen")
-    def test_scoped_refresh_with_library_id(self, mock_urlopen):
-        from lib.util import trigger_jellyfin_scan
-        mock_resp = MagicMock()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_resp.read.return_value = b""
-        mock_urlopen.return_value = mock_resp
-        trigger_jellyfin_scan(self._make_cfg(library_id="abc123"))
-        req = mock_urlopen.call_args[0][0]
-        self.assertEqual(
-            req.full_url,
-            "http://jelly:8096/Items/abc123/Refresh"
-            "?metadataRefreshMode=Default"
-            "&imageRefreshMode=Default"
-            "&replaceAllMetadata=false"
-            "&replaceAllImages=false",
+        trigger_jellyfin_scan(
+            self._make_cfg(),
+            "/mnt/virtio/Music/Beets/Artist/2026 - Album",
         )
-        self.assertNotIn("recursive", req.full_url)
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.full_url, "http://jelly:8096/Library/Media/Updated")
         self.assertEqual(req.get_header("X-emby-token"), "api-key-123")
+        self.assertEqual(req.get_header("Content-type"), "application/json")
+        self.assertEqual(req.get_method(), "POST")
+        self.assertEqual(
+            json.loads(req.data),
+            {"Updates": [{
+                "Path": "/mnt/fuse/Media/Music/Beets/Artist/2026 - Album",
+                "UpdateType": "Modified",
+            }]},
+        )
+        self.assertNotIn("/Items/", req.full_url)
+        self.assertNotEqual(req.full_url, "http://jelly:8096/Library/Refresh")
 
     def test_noop_when_no_url(self):
         from lib.util import trigger_jellyfin_scan
-        trigger_jellyfin_scan(self._make_cfg(url=None))  # should not raise
+        trigger_jellyfin_scan(self._make_cfg(url=None), "Artist/Album")
 
     def test_noop_when_no_token(self):
         from lib.util import trigger_jellyfin_scan
-        trigger_jellyfin_scan(self._make_cfg(token=None))  # should not raise
+        trigger_jellyfin_scan(self._make_cfg(token=None), "Artist/Album")
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_noop_when_album_path_cannot_be_mapped(self, mock_urlopen):
+        from lib.util import trigger_jellyfin_scan
+        trigger_jellyfin_scan(self._make_cfg(), "/outside/library/Album")
+        mock_urlopen.assert_not_called()
 
     @patch("lib.util.urllib.request.urlopen", side_effect=Exception("connection refused"))
     def test_does_not_raise_on_failure(self, mock_urlopen):
         from lib.util import trigger_jellyfin_scan
-        trigger_jellyfin_scan(self._make_cfg())  # best-effort, no raise
+        trigger_jellyfin_scan(self._make_cfg(), "Artist/Album")
 
 
 class TestNotifiersReadSecretsFromFiles(unittest.TestCase):
@@ -779,15 +780,19 @@ class TestNotifiersReadSecretsFromFiles(unittest.TestCase):
         from lib.util import trigger_jellyfin_scan
         token_path = self._write("jf-token", "jellyfin-live-tok\n")
         cfg = CratediggerConfig(
+            beets_directory="/mnt/virtio/Music/Beets",
             jellyfin_url="http://jellyfin:8096",
             jellyfin_token_file=token_path,
+            jellyfin_path_map=(
+                "/mnt/virtio/Music/Beets:/mnt/fuse/Media/Music/Beets"
+            ),
         )
         mock_resp = MagicMock()
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.read.return_value = b""
         mock_urlopen.return_value = mock_resp
-        trigger_jellyfin_scan(cfg)
+        trigger_jellyfin_scan(cfg, "Artist/Album")
         req = mock_urlopen.call_args[0][0]
         self.assertEqual(req.get_header("X-emby-token"), "jellyfin-live-tok")
 
@@ -802,7 +807,7 @@ class TestNotifiersReadSecretsFromFiles(unittest.TestCase):
         from lib.config import CratediggerConfig
         from lib.util import trigger_jellyfin_scan
         cfg = CratediggerConfig(jellyfin_url="http://jellyfin:8096")
-        trigger_jellyfin_scan(cfg)
+        trigger_jellyfin_scan(cfg, "Artist/Album")
 
 
 class TestPlexAddedAtPinClient(unittest.TestCase):
