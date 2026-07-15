@@ -363,10 +363,20 @@
   .r-ev-compact { display: none; }
   @media (min-width: 721px) { .r-ev-v0 { padding-left: 1em; } }
   @media (max-width: 720px) {
-    .r-evidence { grid-template-columns: max-content max-content max-content max-content max-content max-content; column-gap: 1px; row-gap: 2px; font-size: clamp(9px, 2.55vw, 10px); font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: -0.2px; color: #92a2b1; }
-    .r-ev-row { display: contents; padding: 0; }
-    .r-evidence .r-ev-tag { grid-column: auto; grid-row: auto; align-self: baseline; padding: 0; font-size: 1em; letter-spacing: 0; }
-    .r-ev-source, .r-ev-metric, .r-ev-rank, .r-ev-spectral, .r-ev-v0 { grid-column: auto; grid-row: auto; white-space: nowrap; padding: 0; }
+    /* Mobile: the same shared grid as desktop, sized for cross-card
+       scanning at 12px. Tag and source columns are FIXED so the bitrate
+       column starts at the same x on every card; the V0 column ends
+       flush right on every card (the flexible spectral column eats the
+       slack between them, ellipsizing under pressure — its color still
+       tells the grade). Number columns are max-content and never shrink.
+       The rank slot is never populated on strips, so its track is 0.
+       The bitrate column is floored at a labelled-pair width so a bare
+       CBR value ("320k") keeps the same column edges as a full pair —
+       only rare 4-digit pairs grow past it. One line per side,
+       guaranteed. Compact wording labels each number in place (avg/min
+       beside the values), never "a/m". */
+    .r-evidence { grid-template-columns: 2.9em 3.2em minmax(8.5em, max-content) 0 minmax(3em, 1fr) max-content; column-gap: 0.45em; font-size: 12px; line-height: 1.5; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #92a2b1; }
+    .r-ev-cell { overflow: hidden; text-overflow: ellipsis; }
     .r-ev-full { display: none; } .r-ev-compact { display: inline; }
   }
   /* Failure prose can carry raw paths + quoted transport errors — clamp

@@ -649,9 +649,32 @@ console.log('Import failures retain the grabbed candidate in IN');
   assertContains(strip, '725k avg (min 455k)', 'failed import keeps incoming bitrate');
   assertContains(strip, '~96k likely transcode', 'failed import keeps incoming spectral');
   assertContains(strip, 'V0 248k avg (min 178k)', 'failed import keeps incoming V0');
-  assertContains(strip, '725/455k a/m', 'mobile metric keeps average and minimum');
-  assertContains(strip, '~96k transcode', 'mobile spectral keeps its floor and grade');
-  assertContains(strip, 'V0 248/178k a/m', 'mobile V0 keeps average and minimum');
+  assertContains(strip, '>725k avg/455k min<', 'mobile metric labels each number in place');
+  const spectralCount = strip.split('~96k likely transcode').length - 1;
+  if (spectralCount === 2) { passed++; } else {
+    failed++;
+    console.error(`  FAIL: mobile spectral keeps the full "likely transcode" wording (the column ellipsizes instead); got ${spectralCount} of 2 spans`);
+  }
+  assertContains(strip, 'V0 248/178k<', 'mobile V0 stays the bare pair — its label is the V0 prefix');
+  assertExcludes(strip, 'a/m', 'the cryptic a/m shorthand is dead');
+}
+
+console.log('renderEvidenceStrip() collapses equal avg/min pairs to one number on mobile');
+{
+  const strip = renderEvidenceFixture({
+    source_format: 'MP3',
+    source_min_bitrate: 320,
+    source_avg_bitrate: 320,
+    existing_format: 'MP3',
+    existing_min_bitrate: 192,
+    existing_avg_bitrate: 192,
+    existing_v0_probe_avg_bitrate: 245,
+    existing_v0_probe_min_bitrate: 245,
+  });
+  assertContains(strip, '320k avg (min 320k)', 'desktop wording keeps both numbers');
+  assertContains(strip, '>320k<', 'mobile collapses a CBR pair to one number');
+  assertExcludes(strip, '320k avg/320k min', 'no redundant equal pair on mobile');
+  assertContains(strip, '>V0 245k<', 'an equal V0 pair collapses too');
 }
 
 console.log('renderEvidenceStrip() shows the on-disk format on the HAVE side');
@@ -985,10 +1008,12 @@ console.log('Amaterasu Shiroi: force import HAVE stays pre-import');
   assertExcludes(strip, '>transparent</span>',
     'HAVE does not substitute the decision rank for spectral data');
   assertExcludes(strip, '>excellent</span>', 'decision rank stays out of compact HAVE');
+  // One cell renders the phrase twice (full + compact span); a leak into
+  // HAVE would double that to 4.
   const spectralCount = strip.split('~96k likely transcode').length - 1;
-  if (spectralCount === 1) { passed++; } else {
+  if (spectralCount === 2) { passed++; } else {
     failed++;
-    console.error(`  FAIL: candidate spectral belongs only to IN; rendered ${spectralCount} times`);
+    console.error(`  FAIL: candidate spectral belongs only to IN; rendered ${spectralCount} spans, expected 2`);
   }
   const v0Count = strip.split('V0 258k avg (min 246k)').length - 1;
   if (v0Count === 1) { passed++; } else {
@@ -1249,30 +1274,30 @@ console.log('Iron & Wine: the temporary V0 minimum never wears the FLAC label');
     'detail existing V0 owns its minimum');
 }
 
-console.log('evidence strip CSS preserves shared desktop/mobile alignment without mid-word wraps');
+console.log('evidence strip CSS keeps desktop alignment and gives mobile readable aligned one-line rows');
 {
   const css = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
   assertContains(css, '.r-ev-row { display: contents; }',
-    'row wrappers participate in the parent grid instead of defining independent columns');
+    'desktop row wrappers participate in the parent grid instead of defining independent columns');
   assertContains(css, 'grid-template-columns: 3.6em minmax(4.5em, 0.8fr) minmax(12em, 1.7fr) minmax(4.5em, 0.75fr) minmax(7.5em, 1fr) minmax(9em, 1.35fr)',
     'desktop reserves a full avg/min metric column before rank/spectral/V0');
   assertContains(css, '@media (max-width: 720px)', 'shared grid has a narrow-screen layout');
-  assertContains(css, 'grid-template-columns: max-content max-content max-content max-content max-content max-content;',
-    'mobile packs every evidence field into the same six aligned columns');
-  assertContains(css, 'column-gap: 1px; row-gap: 2px; font-size: clamp(9px, 2.55vw, 10px);',
-    'mobile removes inter-sample whitespace while keeping the two sides distinct');
+  assertContains(css, '.r-evidence { grid-template-columns: 2.9em 3.2em minmax(8.5em, max-content) 0 minmax(3em, 1fr) max-content; column-gap: 0.45em; font-size: 12px;',
+    'mobile fixes tag+source and floors the bitrate column at a labelled-pair width, so a bare CBR value keeps the same column edges as the pair above it');
+  assertContains(css, 'font-family: system-ui,',
+    'mobile uses the narrow system font so full lines fit without squeezing');
+  assertContains(css, '.r-ev-cell { overflow: hidden; text-overflow: ellipsis; }',
+    'squeezed cells drop end characters instead of wrapping');
+  assertContains(css, '.r-ev-full { display: none; } .r-ev-compact { display: inline; }',
+    'mobile swaps in the spelled-out compact wording');
   assertContains(css, '.r-ev-compact { display: none; }',
     'desktop keeps the full evidence wording');
-  assertContains(css, '.r-ev-full { display: none; } .r-ev-compact { display: inline; }',
-    'mobile swaps in bounded avg/min evidence wording');
-  assertContains(css, '.r-ev-row { display: contents; padding: 0; }',
-    'IN and HAVE each occupy exactly one parent-grid row');
-  assertContains(css, '.r-evidence .r-ev-tag { grid-column: auto; grid-row: auto;',
-    'IN/HAVE is the first cell on each packed row');
-  assertContains(css, '.r-ev-source, .r-ev-metric, .r-ev-rank, .r-ev-spectral, .r-ev-v0 { grid-column: auto; grid-row: auto; white-space: nowrap; padding: 0; }',
-    'all mobile samples stay on one line per side without wrapping');
+  assertExcludes(css, 'clamp(9px', 'mobile never shrinks evidence below readable size');
+  assertExcludes(css, 'grid-template-columns: max-content max-content max-content max-content max-content max-content;',
+    'the six-column mobile crush cannot return');
+  assertExcludes(css, 'column-gap: 1px', 'the 1px column crush cannot return');
   assertExcludes(css, 'grid-template-rows: auto auto auto;',
-    'mobile no longer spends three physical rows on each evidence side');
+    'mobile does not spend three physical rows on each evidence side');
   assertContains(css, '.r-evidence .r-ev-tag { color: #d3deea; font-weight: 900; font-size: 1.08em;',
     'IN/HAVE labels are visibly prominent');
   assertContains(css, '@media (min-width: 721px) { .r-ev-v0 { padding-left: 1em; } }',
