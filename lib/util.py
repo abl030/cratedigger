@@ -745,44 +745,67 @@ def plex_set_added_at(
 # === Jellyfin integration ===
 
 
-def trigger_jellyfin_scan(cfg: CratediggerConfig) -> None:
-    """Trigger a Jellyfin library scan after import. Best-effort — failures don't block.
+def trigger_jellyfin_scan(
+    cfg: CratediggerConfig,
+    imported_path: str | None,
+) -> None:
+    """Report one changed album directory to Jellyfin, best-effort.
 
-    If jellyfin_library_id is set, refreshes just that library item with
-    Jellyfin's metadata-safe ``Default`` modes. Otherwise triggers the
-    unchanged full-library refresh.
+    Jellyfin's filesystem-change endpoint resolves an existing album exactly,
+    or walks to its nearest indexed ancestor to discover a genuinely new
+    album. It then reconciles that affected item/ancestor with its normal
+    metadata and image defaults. A missing/unmappable path is deliberately a
+    no-op: post-import notification must never degrade into a collection
+    refresh.
     """
     if not cfg.jellyfin_url:
-        logger.debug("JELLYFIN: skipped scan (no url configured)")
+        logger.debug("JELLYFIN: skipped media update (no url configured)")
         return
     try:
         token = cfg.resolved_jellyfin_token()
         if not token:
-            logger.debug("JELLYFIN: skipped scan (no token configured)")
+            logger.debug("JELLYFIN: skipped media update (no token configured)")
             return
-        if cfg.jellyfin_library_id:
-            url = (
-                f"{cfg.jellyfin_url}/Items/{cfg.jellyfin_library_id}/Refresh"
-                "?metadataRefreshMode=Default"
-                "&imageRefreshMode=Default"
-                "&replaceAllMetadata=false"
-                "&replaceAllImages=false"
+        if not imported_path:
+            logger.warning("JELLYFIN: skipped media update (no album path)")
+            return
+        container_path = _jellyfin_container_path(cfg, imported_path)
+        if not container_path:
+            logger.warning(
+                "JELLYFIN: skipped media update for unmappable album path %r",
+                imported_path,
             )
-        else:
-            url = f"{cfg.jellyfin_url}/Library/Refresh"
+            return
+        if cfg.jellyfin_path_map:
+            _local_prefix, container_prefix = cfg.jellyfin_path_map.split(":", 1)
+            if os.path.commonpath((container_path, container_prefix)) != os.path.normpath(
+                container_prefix
+            ):
+                logger.warning(
+                    "JELLYFIN: skipped media update outside configured library: %r",
+                    container_path,
+                )
+                return
+        payload = {
+            "Updates": [{
+                "Path": container_path,
+                "UpdateType": "Modified",
+            }],
+        }
         req = urllib.request.Request(
-            url,
+            f"{cfg.jellyfin_url}/Library/Media/Updated",
+            data=json.dumps(payload).encode("utf-8"),
             method="POST",
-            headers={"X-Emby-Token": token},
+            headers={
+                "X-Emby-Token": token,
+                "Content-Type": "application/json",
+            },
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             resp.read()
-        if cfg.jellyfin_library_id:
-            logger.info(f"JELLYFIN: triggered library refresh for item {cfg.jellyfin_library_id}")
-        else:
-            logger.info("JELLYFIN: triggered full library refresh")
+        logger.info("JELLYFIN: reported changed album %s", container_path)
     except Exception as e:
-        logger.warning(f"JELLYFIN: scan trigger failed: {e}")
+        logger.warning(f"JELLYFIN: media update failed: {e}")
 
 
 def request_jellyfin_refresh(
@@ -981,8 +1004,9 @@ def jellyfin_set_date_created(
     Fetches the item's full dto (Jellyfin's update endpoint REPLACES the item
     metadata — omitted fields are wiped, so a partial body is data loss) and
     posts it back with only DateCreated changed. Jellyfin only stamps
-    ``DateCreated`` at item creation, so the restored value survives future
-    scans without a Plex-style field lock. Returns ``True`` on HTTP 200/204.
+    ``DateCreated`` during item creation or changed-file ingestion, so a
+    post-update restoration survives ordinary scans without a Plex-style
+    field lock. Returns ``True`` on HTTP 200/204.
 
     The single-item GET needs a userId in Jellyfin 10.11; any user works for
     reading the dto, so the first user on the server is used."""

@@ -1066,9 +1066,9 @@ in {
           default = null;
           example = "music-library-item-id";
           description = ''
-            Jellyfin music library item ID for a targeted
-            POST /Items/{id}/Refresh. Null preserves the full-library
-            POST /Library/Refresh fallback.
+            Jellyfin music library item ID used only as the fallback target
+            when observing an album deletion. Post-import notifications use
+            the final album path and never refresh this collection item.
           '';
         };
         pathMap = mkOption {
@@ -1076,11 +1076,9 @@ in {
           default = "";
           example = "/mnt/virtio/Music/Beets:/mnt/fuse/Media/Music/Beets";
           description = ''
-            local:remote path remap for the "Recently Added" DateCreated pin
-            (issue #574) — the prefix swap from the beets library path on
-            this host to the path Jellyfin's music library sees the same
-            files at. Required for the pin to locate albums in Jellyfin;
-            the plain scan notifier works without it.
+            local:remote path remap from the beets library path on this host
+            to the path Jellyfin sees. Used by both the album-path media
+            update and the "Recently Added" DateCreated pin.
           '';
         };
       };

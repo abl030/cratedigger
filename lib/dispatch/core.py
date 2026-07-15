@@ -864,9 +864,9 @@ def dispatch_import_core(
                     _trigger_plex(cfg, ir.postflight.imported_path)
                     # Same capture-before-refresh dance for Jellyfin
                     # (migration 046, issue #574): snapshot the album's
-                    # DateCreated + item ids while the pre-upgrade items
-                    # still exist, so the reconciler can restore the date
-                    # once the rescan re-stamps them. No-op for
+                    # maximum Audio DateCreated + item ids while the
+                    # pre-upgrade items still exist, so the reconciler can
+                    # clamp any forward date bump once the update lands. No-op for
                     # genuinely-new albums and when Jellyfin is
                     # unconfigured; best-effort.
                     try:
@@ -878,7 +878,7 @@ def dispatch_import_core(
                     except Exception:
                         logger.exception(
                             "JELLYFIN PIN: capture wiring failed (non-fatal)")
-                    _trigger_jellyfin(cfg)
+                    _trigger_jellyfin(cfg, ir.postflight.imported_path)
                 if action.cleanup and _should_cleanup_path(scenario, action):
                     # Issue #89: force/manual paths pass the user's
                     # ``failed_imports/…`` folder as ``path`` — cleanup is

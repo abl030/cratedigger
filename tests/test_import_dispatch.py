@@ -603,12 +603,16 @@ class TestDispatchImport(unittest.TestCase):
         }
 
     def test_import_success(self):
-        ir = make_import_result(decision="import")
+        imported_path = "/mnt/virtio/Music/Beets/Test Artist/2026 - Test Album"
+        ir = make_import_result(
+            decision="import", imported_path=imported_path)
         r = self._dispatch(ir)
         self.assertEqual(r["db"].request(42)["status"], "imported")
         self.assertEqual(len(r["db"].download_logs), 1)
         self.assertEqual(r["db"].download_logs[0].outcome, "success")
         r["mock_jellyfin"].assert_called_once()
+        self.assertEqual(
+            r["mock_jellyfin"].call_args.args[1], imported_path)
         r["mock_cleanup"].assert_called_once()
         r["mock_gate"].assert_called_once()
 

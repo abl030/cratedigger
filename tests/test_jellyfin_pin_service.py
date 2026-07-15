@@ -49,11 +49,13 @@ class TestCapture(unittest.TestCase):
             children_fn=lambda cfg, iid: _children(
                 ("tr-1", "2026-01-01T00:00:00Z"), ("tr-2", "2026-01-02T00:00:00Z")))
         self.assertEqual(res.outcome, "captured")
-        self.assertEqual(res.original_date_created, ORIGINAL)
+        self.assertEqual(
+            res.original_date_created, "2026-01-02T00:00:00Z")
         self.assertEqual(len(db.jellyfin_date_created_pins), 1)
         pin = db.jellyfin_date_created_pins[0]
         self.assertEqual(pin["imported_path"], "Muse/2026 - The Wow! Signal")
-        self.assertEqual(pin["original_date_created"], ORIGINAL)
+        self.assertEqual(
+            pin["original_date_created"], "2026-01-02T00:00:00Z")
         self.assertEqual(pin["album_item_id"], "alb-1")
         self.assertEqual(pin["children_item_ids"], ["tr-1", "tr-2"])
         self.assertEqual(pin["request_id"], 8812)
@@ -217,6 +219,28 @@ class TestReconcile(unittest.TestCase):
         # Album already at original → not written; the two drifted children
         # are written back to the ORIGINAL value (invariant 4).
         self.assertEqual(set_calls, [("new-1", ORIGINAL), ("new-2", ORIGINAL)])
+        self.assertEqual(self._pin(db, pin_id)["status"], "done")
+
+    def test_same_ids_with_newer_dates_are_a_landed_upgrade(self):
+        """Jellyfin restamps changed same-path Audio rows without changing ids."""
+        db = FakePipelineDB()
+        pin_id = self._seed(db, children=("tr-1", "tr-2"))
+        set_calls = []
+        res = self._reconcile(
+            db,
+            find_fn=lambda cfg, path: _album(
+                item_id="alb-1", date_created=BUMPED),
+            children_fn=lambda cfg, iid: _children(
+                ("tr-1", BUMPED),
+                ("tr-2", "2026-01-01T00:00:00Z"),
+            ),
+            set_fn=lambda cfg, iid, val: set_calls.append((iid, val)) or True,
+        )
+        self.assertEqual(res.pinned, 1)
+        self.assertEqual(
+            set_calls,
+            [("alb-1", ORIGINAL), ("tr-1", ORIGINAL)],
+        )
         self.assertEqual(self._pin(db, pin_id)["status"], "done")
 
     def test_landed_via_album_recreation_restores_album_too(self):
