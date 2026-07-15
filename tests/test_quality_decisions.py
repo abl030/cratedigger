@@ -28,6 +28,7 @@ from lib.quality import (
     DownloadInfo,
     rejected_download_tier,
     narrow_override_on_downgrade,
+    resolve_rejection_search_override,
     TRANSCODE_MIN_BITRATE_KBPS,
     # Codec-aware rank model (issue #60)
     QualityRank,
@@ -2242,6 +2243,76 @@ class TestNarrowOverrideOnDowngrade(unittest.TestCase):
         dl = DownloadInfo(slskd_filetype="mp3", is_vbr=False, bitrate=320000)
         result = narrow_override_on_downgrade("lossless, mp3 v0, mp3 320", dl)
         self.assertEqual(result, "lossless,mp3 v0")
+
+
+class TestResolveRejectionSearchOverride(unittest.TestCase):
+    """Transparent HAVE narrowing precedes ordinary per-tier convergence."""
+
+    def setUp(self):
+        self.cfg = QualityRankConfig.defaults()
+        self.measurement = AudioQualityMeasurement(
+            min_bitrate_kbps=self.cfg.mp3_cbr.transparent,
+            avg_bitrate_kbps=self.cfg.mp3_cbr.transparent,
+            format="MP3",
+            is_cbr=True,
+            spectral_grade="genuine",
+        )
+        self.download = DownloadInfo(
+            filetype="mp3",
+            bitrate=245000,
+            is_vbr=True,
+        )
+
+    def test_trusted_transparent_have_wins_over_full_ladder(self):
+        from lib.quality import SpectralAnalysisDetail, QUALITY_UPGRADE_TIERS
+
+        resolution = resolve_rejection_search_override(
+            decision="downgrade",
+            current_override=QUALITY_UPGRADE_TIERS,
+            dl_info=self.download,
+            current_measurement=self.measurement,
+            spectral_evidence_source="attempt_have_audit",
+            have_spectral_audit=SpectralAnalysisDetail(
+                attempted=True,
+                grade="genuine",
+            ),
+            cfg=self.cfg,
+        )
+        self.assertEqual(resolution.override, "lossless")
+        self.assertEqual(resolution.reason, "transparent_have")
+
+    def test_missing_audit_falls_back_to_rejected_tier_removal(self):
+        from lib.quality import QUALITY_UPGRADE_TIERS
+
+        resolution = resolve_rejection_search_override(
+            decision="downgrade",
+            current_override=QUALITY_UPGRADE_TIERS,
+            dl_info=self.download,
+            current_measurement=self.measurement,
+            spectral_evidence_source="attempt_have_audit",
+            have_spectral_audit=None,
+            cfg=self.cfg,
+        )
+        self.assertEqual(
+            resolution.override,
+            "lossless,mp3 320,aac,opus,ogg",
+        )
+        self.assertEqual(resolution.reason, "rejected_tier")
+
+    def test_transcode_downgrade_without_audit_preserves_override(self):
+        from lib.quality import QUALITY_UPGRADE_TIERS
+
+        resolution = resolve_rejection_search_override(
+            decision="transcode_downgrade",
+            current_override=QUALITY_UPGRADE_TIERS,
+            dl_info=self.download,
+            current_measurement=self.measurement,
+            spectral_evidence_source="attempt_have_audit",
+            have_spectral_audit=None,
+            cfg=self.cfg,
+        )
+        self.assertIsNone(resolution.override)
+        self.assertEqual(resolution.reason, "preserve")
 
 
 class TestNarrowOverrideOnLosslessSourceLock(unittest.TestCase):

@@ -1986,6 +1986,59 @@ class TestCmdQuality(unittest.TestCase):
             output,
         )
 
+    def test_backfill_replaces_full_upgrade_ladder_from_linked_evidence(self):
+        """Only an already-lossless override makes positive backfill a no-op."""
+        from lib.quality import AudioQualityMeasurement, QUALITY_UPGRADE_TIERS
+
+        request_row = make_request_row(
+            id=8503,
+            status="imported",
+            mb_release_id="mbid-linked-upgrade-ladder",
+            artist_name="Linked Artist",
+            album_title="Linked Upgrade Ladder",
+            min_bitrate=320,
+            current_spectral_grade=None,
+            verified_lossless=False,
+            final_format="MP3",
+            search_filetype_override=QUALITY_UPGRADE_TIERS,
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="mbid-linked-upgrade-ladder",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                is_cbr=True,
+                spectral_grade="genuine",
+            ),
+            codec="mp3",
+            container="mp3",
+            storage_format="MP3",
+        )
+
+        output = self._run_quality(
+            request_row,
+            runtime_target=None,
+            current_evidence=evidence,
+        )
+
+        self.assertIn(
+            "Backfill:      would set search_filetype_override='lossless'",
+            output,
+        )
+        self.assertNotIn("Backfill:      not needed", output)
+
+        already_lossless = dict(request_row)
+        already_lossless["id"] = 8504
+        already_lossless["search_filetype_override"] = "lossless"
+        output = self._run_quality(
+            already_lossless,
+            runtime_target=None,
+            current_evidence=evidence,
+        )
+        self.assertIn("Backfill:      not needed", output)
+
     def test_backfill_does_not_use_unlinked_request_scalar(self):
         from lib.beets_db import AlbumInfo
 

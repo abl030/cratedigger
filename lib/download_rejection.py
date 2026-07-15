@@ -284,13 +284,12 @@ def _compute_rejection_backfill(
     request_id = album_data.db_request_id
     if not request_id or not ctx.pipeline_db_source:
         return None
-    if album_data.db_search_filetype_override:
-        return None
     try:
         db = ctx.pipeline_db_source._get_db()
         request = db.get_request(request_id)
-        if not request or request.get("search_filetype_override"):
+        if not request:
             return None
+        current_override = request.get("search_filetype_override")
         evidence_id = db.get_request_current_evidence_id(request_id)
         if evidence_id is None:
             return None
@@ -307,17 +306,19 @@ def _compute_rejection_backfill(
             spectral_evidence_source="linked_current_evidence",
             cfg=ctx.cfg.quality_ranks,
         )
-        if override:
+        if override and override != current_override:
             logger.info(
-                "BACKFILL: %s - %s search_filetype_override=NULL → %r "
+                "BACKFILL: %s - %s search_filetype_override=%r → %r "
                 "(linked current evidence: format=%s, spectral=%s)",
                 album_data.artist,
                 album_data.title,
+                current_override,
                 override,
                 evidence.measurement.format,
                 evidence.measurement.spectral_grade,
             )
-        return override
+            return override
+        return None
     except Exception:
         logger.debug("BACKFILL: failed to load linked current evidence", exc_info=True)
         return None

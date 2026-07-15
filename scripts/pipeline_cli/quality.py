@@ -226,10 +226,12 @@ def cmd_quality(db, args):
         spectral_evidence_source="linked_current_evidence",
         cfg=rank_cfg,
     )
-    if backfill and not q_override:
+    if backfill and backfill != q_override:
         print(f"  Backfill:      would set search_filetype_override='{backfill}' on next rejection")
-    elif q_override:
+    elif q_override == "lossless":
         print(f"  Backfill:      not needed (search_filetype_override already set)")
+    elif q_override:
+        print("  Backfill:      won't fire lossless-only (ordinary per-tier narrowing remains)")
     elif linked_current_measurement is None:
         print("  Backfill:      won't fire (linked current evidence unavailable)")
     else:

@@ -479,7 +479,7 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
             id=42,
             status="downloading",
             current_spectral_grade=None,
-            search_filetype_override=None,
+            search_filetype_override=QUALITY_UPGRADE_TIERS,
             target_format=None,
         ))
         current = AudioQualityMeasurement(
@@ -551,7 +551,7 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
         db.seed_request(make_request_row(
             id=43,
             status="downloading",
-            search_filetype_override=None,
+            search_filetype_override=QUALITY_UPGRADE_TIERS,
             target_format=None,
         ))
         malformed_job = MagicMock(
@@ -591,7 +591,11 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
             _reject_import_from_evidence_decision(
                 db=db,  # type: ignore[arg-type]
                 request_id=43,
-                dl_info=DownloadInfo(filetype="mp3", username="qreature"),
+                dl_info=DownloadInfo(
+                    filetype="mp3",
+                    username="qreature",
+                    is_vbr=True,
+                ),
                 attempt_result=attempt_result,
                 distance=0.0,
                 decision="downgrade",
@@ -608,7 +612,10 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
 
         row = db.request(43)
         self.assertEqual(row["status"], "wanted")
-        self.assertIsNone(row["search_filetype_override"])
+        self.assertEqual(
+            row["search_filetype_override"],
+            "lossless,mp3 320,aac,opus,ogg",
+        )
         self.assertIsNone(row["target_format"])
 
 

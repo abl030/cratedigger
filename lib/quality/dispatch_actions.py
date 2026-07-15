@@ -1,15 +1,20 @@
-"""DispatchAction layer: post-decision action derivation + override narrowing.
-
-Extracted verbatim from the monolithic ``lib/quality.py`` (issue #477).
-Pure move: every definition is AST-identical to the original.
-"""
+"""Pure post-decision action derivation and search-override narrowing."""
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
-from lib.quality.evidence_types import SPECTRAL_TRANSCODE_GRADES
+from lib.quality.evidence_types import (
+    AudioQualityMeasurement,
+    SPECTRAL_TRANSCODE_GRADES,
+)
 from lib.quality.download_state import DownloadInfo
-from lib.quality.filetypes import LOSSLESS_CODECS, QUALITY_LOSSLESS
+from lib.quality.filetypes import (
+    LOSSLESS_CODECS,
+    QUALITY_LOSSLESS,
+    rejection_backfill_override,
+)
+from lib.quality.import_result_types import SpectralAnalysisDetail
+from lib.quality.ranks import QualityRankConfig
 from lib.quality.decisions import (
     DECISION_LOSSLESS_SOURCE_LOCKED,
     DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
@@ -172,6 +177,62 @@ def narrow_override_on_downgrade(search_filetype_override: str | None,
     if not narrowed:
         return None  # Don't remove the last tier
     return ",".join(narrowed)
+
+
+@dataclass(frozen=True)
+class RejectionSearchOverrideResolution:
+    """Pure result of importer rejection-search convergence."""
+
+    override: str | None
+    reason: Literal["transparent_have", "rejected_tier", "preserve"]
+
+
+def resolve_rejection_search_override(
+    *,
+    decision: str | None,
+    current_override: str | None,
+    dl_info: DownloadInfo,
+    current_measurement: AudioQualityMeasurement | None,
+    spectral_evidence_source: Literal[
+        "attempt_have_audit", "linked_current_evidence"
+    ],
+    have_spectral_audit: SpectralAnalysisDetail | None = None,
+    cfg: QualityRankConfig | None = None,
+) -> RejectionSearchOverrideResolution:
+    """Resolve importer narrowing in its single production order.
+
+    A trusted transparent HAVE copy wins and closes every lossy tier. When
+    that stronger rule fails open, ordinary downgrades retain the established
+    rejected-tier removal. Transcode downgrades and unrelated decisions leave
+    the existing override untouched by returning ``override=None``.
+    """
+    if decision not in ("downgrade", "transcode_downgrade"):
+        return RejectionSearchOverrideResolution(None, "preserve")
+
+    transparent_override = rejection_backfill_override(
+        current_measurement=current_measurement,
+        spectral_evidence_source=spectral_evidence_source,
+        have_spectral_audit=have_spectral_audit,
+        cfg=cfg,
+    )
+    if transparent_override is not None:
+        return RejectionSearchOverrideResolution(
+            transparent_override,
+            "transparent_have",
+        )
+
+    if decision == "downgrade":
+        tier_override = narrow_override_on_downgrade(
+            current_override,
+            dl_info,
+        )
+        if tier_override is not None:
+            return RejectionSearchOverrideResolution(
+                tier_override,
+                "rejected_tier",
+            )
+
+    return RejectionSearchOverrideResolution(None, "preserve")
 
 
 def narrow_override_on_lossless_source_lock(

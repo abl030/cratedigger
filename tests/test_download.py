@@ -5770,6 +5770,7 @@ class TestComputeRejectionBackfillCfgThreading(unittest.TestCase):
         linked_grade: str | None = "genuine",
         link_evidence=True,
         evidence_mbid="mbid-test",
+        existing_override: str | None = None,
     ):
         from lib.quality import AudioQualityMeasurement
 
@@ -5780,7 +5781,7 @@ class TestComputeRejectionBackfillCfgThreading(unittest.TestCase):
             # Deliberately stale: linked evidence is authoritative.
             current_spectral_grade="genuine",
             verified_lossless=False,
-            search_filetype_override=None,
+            search_filetype_override=existing_override,
         ))
 
         from types import SimpleNamespace
@@ -5789,7 +5790,7 @@ class TestComputeRejectionBackfillCfgThreading(unittest.TestCase):
 
         album_data = make_grab_list_entry(
             db_request_id=42,
-            db_search_filetype_override=None,
+            db_search_filetype_override=existing_override,
             mb_release_id="mbid-test",
         )
         if link_evidence:
@@ -5854,6 +5855,46 @@ class TestComputeRejectionBackfillCfgThreading(unittest.TestCase):
             on_disk_min_bitrate=320,
         )
         self.assertEqual(self._run(album_data, ctx), QUALITY_LOSSLESS)
+
+    def test_full_upgrade_ladder_narrows_from_linked_transparent_have(self):
+        from lib.quality import (
+            QUALITY_UPGRADE_TIERS,
+            QualityRankConfig,
+        )
+
+        album_data, ctx = self._setup(
+            quality_ranks=QualityRankConfig.defaults(),
+            on_disk_min_bitrate=320,
+            existing_override=QUALITY_UPGRADE_TIERS,
+        )
+
+        self.assertEqual(self._run(album_data, ctx), "lossless")
+
+    def test_full_upgrade_ladder_is_preserved_when_linked_rule_fails(self):
+        from lib.quality import (
+            QUALITY_UPGRADE_TIERS,
+            QualityRankConfig,
+        )
+
+        album_data, ctx = self._setup(
+            quality_ranks=QualityRankConfig.defaults(),
+            on_disk_min_bitrate=320,
+            linked_grade="suspect",
+            existing_override=QUALITY_UPGRADE_TIERS,
+        )
+
+        self.assertIsNone(self._run(album_data, ctx))
+
+    def test_already_lossless_override_is_a_noop(self):
+        from lib.quality import QualityRankConfig
+
+        album_data, ctx = self._setup(
+            quality_ranks=QualityRankConfig.defaults(),
+            on_disk_min_bitrate=320,
+            existing_override="lossless",
+        )
+
+        self.assertIsNone(self._run(album_data, ctx))
 
     def test_missing_linked_evidence_ignores_stale_request_scalar(self):
         from lib.quality import QualityRankConfig

@@ -379,7 +379,9 @@ complete current-evidence row. Candidate spectral results and the legacy
 request scalar are not substitutes. MP3, AAC, and Opus participate through
 `measurement_rank`; codecs without canonical bands (currently Ogg), merely
 EXCELLENT lossy copies, and missing/failed/suspect/marginal audits fail open and
-keep the full search ladder. A positive result writes only
+do not authorize lossless-only narrowing. Ordinary downgrade convergence still
+removes the exact rejected tier from an existing search ladder. A positive
+result writes only
 `search_filetype_override="lossless"`: `target_format` remains untouched, and
 `search_tiers` disables the catch-all fallback for that override. The normal
 forever cadence continues, now searching only for the remaining meaningful

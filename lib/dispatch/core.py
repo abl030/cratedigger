@@ -22,16 +22,15 @@ finalize_request = transitions.finalize_request
 
 from lib.processing_paths import normalize_source_dirs
 from lib.quality import (AlbumQualityEvidenceDecisionFacts, DownloadInfo,
-                         ImportResult, QUALITY_UPGRADE_TIERS, QualityRankConfig,
+                         ImportResult, QUALITY_UPGRADE_TIERS,
                          TargetQualityContract, ValidationResult,
                          comparison_basis_from_decision,
                          dispatch_action, evidence_decision_name,
                          extract_usernames,
                          full_pipeline_decision_from_evidence,
-                         narrow_override_on_downgrade,
                          narrow_override_on_lossless_source_lock,
                          override_bitrate_from_current_evidence,
-                         rejection_backfill_override)
+                         resolve_rejection_search_override)
 from lib.quality_evidence import (audit_v0_probe_from_metric,
                                   legacy_current_lossless_v0_probe_from_request)
 from lib.util import cleanup_disambiguation_orphans
@@ -707,25 +706,21 @@ def dispatch_import_core(
                     )
 
                     if decision in ("downgrade", "transcode_downgrade"):
-                        _gate_cfg = (
-                            cfg.quality_ranks if cfg is not None
-                            else QualityRankConfig.defaults()
-                        )
-                        narrowed_override = rejection_backfill_override(
-                            current_measurement=ir.current_measurement,
-                            spectral_evidence_source="attempt_have_audit",
-                            have_spectral_audit=ir.spectral.existing,
-                            cfg=_gate_cfg,
-                        )
                         try:
                             req_row = db.get_request(request_id)
                             current_override = req_row.get("search_filetype_override") if req_row else None
-                            if narrowed_override is None and decision == "downgrade":
-                                narrowed_override = narrow_override_on_downgrade(
-                                    current_override, dl_info)
                         except Exception:
                             logger.debug(
                                 "Failed to inspect search_filetype_override before downgrade reset")
+                        narrowed_override = resolve_rejection_search_override(
+                            decision=decision,
+                            current_override=current_override,
+                            dl_info=dl_info,
+                            current_measurement=ir.current_measurement,
+                            spectral_evidence_source="attempt_have_audit",
+                            have_spectral_audit=ir.spectral.existing,
+                            cfg=cfg.quality_ranks if cfg is not None else None,
+                        ).override
 
                     elif decision == "lossless_source_locked":
                         # R7 / AE2: once the library row carries a comparable

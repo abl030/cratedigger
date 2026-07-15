@@ -2,9 +2,9 @@
 """Simulator scenario test suite for pipeline quality decisions.
 
 Tests the COMPOSITION of decision functions — full_pipeline_decision() +
-rejection_backfill_override() + search_tiers — against a matrix of album states
-and download scenarios. Catches interaction bugs between stages that unit tests
-on individual functions miss.
+resolve_rejection_search_override() + search_tiers — against a matrix of album
+states and download scenarios. Catches interaction bugs between stages that
+unit tests on individual functions miss.
 
 GitHub issue #32.
 """
@@ -23,8 +23,8 @@ from lib.quality import (
     SpectralAnalysisDetail,
     compute_effective_override_bitrate,
     full_pipeline_decision,
-    narrow_override_on_downgrade,
     rejection_backfill_override,
+    resolve_rejection_search_override,
     search_tiers,
 )
 
@@ -327,48 +327,42 @@ def simulate(album: AlbumState, download: DownloadScenario,
         **download.dl_params(),
     )
 
-    # Simulate attempt-local HAVE audit + backfill for rejections.
-    backfill = None
-    if (
-        not result["imported"]
-        and result["keep_searching"]
-        and result["stage2_import"] in ("downgrade", "transcode_downgrade")
-    ):
-        backfill = rejection_backfill_override(
-            current_measurement=AudioQualityMeasurement(
-                min_bitrate_kbps=album.min_bitrate,
-                avg_bitrate_kbps=album.avg_bitrate,
-                format=_derive_album_format(album),
-                is_cbr=album.is_cbr,
-                spectral_grade=album.spectral_grade,
-                spectral_bitrate_kbps=album.spectral_bitrate,
-                verified_lossless=album.verified_lossless,
+    # Use the same pure ordering as both importer rejection paths.
+    resolution = resolve_rejection_search_override(
+        decision=result["stage2_import"],
+        current_override=album.search_filetype_override,
+        dl_info=DownloadInfo(
+            slskd_filetype="flac" if download.is_flac else "mp3",
+            is_vbr=(
+                download.is_vbr
+                if download.is_vbr is not None
+                else not download.is_cbr
             ),
-            spectral_evidence_source="attempt_have_audit",
-            have_spectral_audit=SpectralAnalysisDetail(
-                attempted=download.have_spectral_attempted,
-                grade=download.have_spectral_grade,
-                error=download.have_spectral_error,
-            ),
-        )
-
-    # Production applies the transparent-HAVE rule first, then retains the
-    # established per-tier downgrade narrowing when that rule fails open.
-    rejection_override = backfill
-    if rejection_override is None and result["stage2_import"] == "downgrade":
-        rejection_override = narrow_override_on_downgrade(
-            album.search_filetype_override,
-            DownloadInfo(
-                slskd_filetype="flac" if download.is_flac else "mp3",
-                is_vbr=(
-                    download.is_vbr
-                    if download.is_vbr is not None
-                    else not download.is_cbr
-                ),
-                bitrate=(download.avg_bitrate or download.min_bitrate) * 1000,
-                was_converted=download.converted_count > 0,
-            ),
-        )
+            bitrate=(download.avg_bitrate or download.min_bitrate) * 1000,
+            was_converted=download.converted_count > 0,
+        ),
+        current_measurement=AudioQualityMeasurement(
+            min_bitrate_kbps=album.min_bitrate,
+            avg_bitrate_kbps=album.avg_bitrate,
+            format=_derive_album_format(album),
+            is_cbr=album.is_cbr,
+            spectral_grade=album.spectral_grade,
+            spectral_bitrate_kbps=album.spectral_bitrate,
+            verified_lossless=album.verified_lossless,
+        ),
+        spectral_evidence_source="attempt_have_audit",
+        have_spectral_audit=SpectralAnalysisDetail(
+            attempted=download.have_spectral_attempted,
+            grade=download.have_spectral_grade,
+            error=download.have_spectral_error,
+        ),
+    )
+    rejection_override = resolution.override
+    backfill = (
+        resolution.override
+        if resolution.reason == "transparent_have"
+        else None
+    )
 
     # Model search_filetype_override after the full cycle.
     # This mirrors _check_quality_gate_core() in lib/dispatch/quality_gate.py:
