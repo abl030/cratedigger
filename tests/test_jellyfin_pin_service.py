@@ -61,6 +61,38 @@ class TestCapture(unittest.TestCase):
         self.assertEqual(pin["request_id"], 8812)
         self.assertEqual(pin["status"], "pending")
 
+    def test_plex_history_clamps_a_polluted_jellyfin_baseline(self):
+        """A Jellyfin rebuild must not redefine an old album as newly added."""
+        db = FakePipelineDB()
+        historical = int(datetime(
+            2010, 6, 10, 10, 10, 38, tzinfo=timezone.utc
+        ).timestamp())
+        res = capture_jellyfin_date_created_pin(
+            _cfg(), db, "Eldar/2010 - Amaterasu Shiroi", 2506,
+            historical_added_at=historical,
+            find_fn=lambda cfg, path: _album(
+                date_created="2026-07-14T02:03:57.0000000Z"),
+            children_fn=lambda cfg, iid: _children(
+                ("tr-1", "2026-07-14T02:03:57.0000000Z")))
+        self.assertEqual(res.outcome, "captured")
+        self.assertEqual(res.original_date_created, "2010-06-10T10:10:38Z")
+        self.assertEqual(
+            db.jellyfin_date_created_pins[0]["original_date_created"],
+            "2010-06-10T10:10:38Z",
+        )
+
+    def test_plex_history_never_moves_a_jellyfin_baseline_forward(self):
+        db = FakePipelineDB()
+        later = int(datetime(
+            2026, 7, 11, tzinfo=timezone.utc
+        ).timestamp())
+        res = capture_jellyfin_date_created_pin(
+            _cfg(), db, "A/B", 1,
+            historical_added_at=later,
+            find_fn=lambda cfg, path: _album(),
+            children_fn=lambda cfg, iid: [])
+        self.assertEqual(res.original_date_created, ORIGINAL)
+
     def test_no_album_writes_no_pin(self):
         # Invariant 1: genuinely-new albums self-select out — no pin.
         db = FakePipelineDB()

@@ -838,15 +838,20 @@ def dispatch_import_core(
                     # restore it and keep upgrades out of "Recently Added"
                     # (migration 040). No-op for genuinely-new albums (not yet
                     # in Plex) and when Plex is unconfigured; best-effort.
+                    plex_original_added_at: int | None = None
                     try:
                         from lib.plex_pin_service import capture_plex_added_at_pin
-                        capture_plex_added_at_pin(
+                        plex_pin = capture_plex_added_at_pin(
                             cfg, db, ir.postflight.imported_path, request_id)
+                        plex_original_added_at = plex_pin.original_added_at
                     except Exception:
                         logger.exception(
                             "PLEX PIN: capture wiring failed (non-fatal)")
                     _trigger_plex(cfg, ir.postflight.imported_path)
-                    # Same capture-before-refresh dance for Jellyfin
+                    # Same capture-before-refresh dance for Jellyfin. Plex's
+                    # preserved historical value is also the floor for
+                    # Jellyfin: a prior Jellyfin rebuild must not become the
+                    # new definition of when an old album joined the library.
                     # (migration 046, issue #574): snapshot the album's
                     # maximum Audio DateCreated + item ids while the
                     # pre-upgrade items still exist, so the reconciler can
@@ -858,7 +863,12 @@ def dispatch_import_core(
                             capture_jellyfin_date_created_pin,
                         )
                         capture_jellyfin_date_created_pin(
-                            cfg, db, ir.postflight.imported_path, request_id)
+                            cfg,
+                            db,
+                            ir.postflight.imported_path,
+                            request_id,
+                            historical_added_at=plex_original_added_at,
+                        )
                     except Exception:
                         logger.exception(
                             "JELLYFIN PIN: capture wiring failed (non-fatal)")

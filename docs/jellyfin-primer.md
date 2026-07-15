@@ -85,7 +85,10 @@ deliberate differences:
   its folder path (exact `Path` match after the `path_map` translation) and
   stash the **maximum `DateCreated` across its Audio children** (the value
   Jellyfin actually uses to order grouped music Latest), plus a snapshot of
-  the album and Audio item ids, as a `pending` row.
+  the album and Audio item ids, as a `pending` row. When Plex already knows
+  the album, its preserved pre-upgrade `addedAt` is an older historical floor:
+  the Jellyfin pin uses the earlier value. This prevents a prior Jellyfin
+  rebuild or broken refresh from becoming the new baseline forever.
   A genuinely-new album isn't in Jellyfin yet, so nothing is captured — the
   table self-selects upgrades.
 - **Reconcile** (`reconcile_jellyfin_date_created_pins`, each 5-min
