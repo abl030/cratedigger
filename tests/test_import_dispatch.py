@@ -462,6 +462,81 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
         assert log.import_result is not None
         self.assertEqual(ImportResult.from_json(log.import_result).spectral, audit)
 
+    def test_lemonade_downgrade_persists_lossless_only_from_have_audit(self) -> None:
+        """Request 5524: linked evidence is spectrally empty; attempt HAVE wins."""
+        from lib.dispatch import _reject_import_from_evidence_decision
+        from lib.dispatch.types import ImportAttemptResult
+        from lib.quality import (
+            AudioQualityMeasurement,
+            ImportResult,
+            QualityRankConfig,
+            SpectralAnalysisDetail,
+            SpectralDetail,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            current_spectral_grade=None,
+            search_filetype_override=None,
+            target_format=None,
+        ))
+        current = AudioQualityMeasurement(
+            min_bitrate_kbps=320,
+            avg_bitrate_kbps=320,
+            median_bitrate_kbps=320,
+            format="MP3",
+            is_cbr=True,
+            spectral_grade=None,
+        )
+        audit = SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True,
+                grade="genuine",
+            ),
+            existing=SpectralAnalysisDetail(
+                attempted=True,
+                grade="genuine",
+            ),
+        )
+        attempt_result = ImportAttemptResult(audit)
+        attempt_result.merge(ImportResult(
+            decision="downgrade",
+            source_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=226,
+                avg_bitrate_kbps=226,
+                median_bitrate_kbps=226,
+                format="MP3",
+            ),
+            current_measurement=current,
+        ))
+
+        with patch_dispatch_externals():
+            _reject_import_from_evidence_decision(
+                db=db,  # type: ignore[arg-type]
+                request_id=42,
+                dl_info=DownloadInfo(filetype="mp3", username="qreature"),
+                attempt_result=attempt_result,
+                distance=0.0,
+                decision="downgrade",
+                detail="import-time persisted evidence rejected candidate",
+                requeue_on_failure=True,
+                validation_result=None,
+                staged_path="/tmp/lemonade",
+                scenario="quality_downgrade",
+                files=None,
+                source_path_cleanup_scenario="quality_downgrade",
+                cooled_down_users=None,
+                quality_ranks=QualityRankConfig.defaults(),
+            )
+
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["search_filetype_override"], "lossless")
+        self.assertIsNone(row["target_format"])
+        self.assertIsNone(row["current_spectral_grade"])
+
 
 class TestRejectImportFromEvidenceDecisionForcedRequeue(unittest.TestCase):
     """U11 invariant: the four folder/audio-integrity facts always self-heal.
@@ -639,6 +714,45 @@ class TestDispatchImport(unittest.TestCase):
                                 prev_min_bitrate=192)
         r = self._dispatch(ir)
         self.assertEqual(r["db"].request(42)["status"], "imported")
+
+    def test_downgrade_narrows_transparent_genuine_have_to_lossless(self):
+        """The real post-subprocess dispatch persists the pure-policy result."""
+        from lib.quality import SpectralAnalysisDetail, SpectralDetail
+
+        ir = ImportResult(
+            decision="downgrade",
+            source_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=226,
+                avg_bitrate_kbps=226,
+                median_bitrate_kbps=226,
+                format="MP3",
+                is_cbr=False,
+            ),
+            current_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                is_cbr=True,
+            ),
+            spectral=SpectralDetail(
+                existing=SpectralAnalysisDetail(
+                    attempted=True,
+                    grade="genuine",
+                ),
+            ),
+        )
+
+        result = self._dispatch(ir, request_overrides={
+            "current_spectral_grade": None,
+            "search_filetype_override": None,
+            "target_format": None,
+        })
+
+        row = result["db"].request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["search_filetype_override"], "lossless")
+        self.assertIsNone(row["target_format"])
 
     def test_import_clears_stale_current_source_probe(self):
         ir = make_import_result(decision="import", new_min_bitrate=245)

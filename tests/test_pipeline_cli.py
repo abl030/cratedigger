@@ -24,7 +24,7 @@ import scripts.pipeline_cli.album_requests as pipeline_cli_album_requests
 import scripts.pipeline_cli.long_tail as pipeline_cli_long_tail
 from scripts import pipeline_cli
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import make_album_quality_evidence, make_request_row
 from lib.transitions import TransitionConflict, TransitionConflictKind
 from tests.test_beets_db import _create_test_db, _insert_album
 
@@ -1696,11 +1696,20 @@ class TestCmdQuality(unittest.TestCase):
         runtime_target: str | None,
         beets_info: Any = ...,
         beets_error: Exception | None = None,
+        current_evidence: Any | None = None,
     ):
         from lib.quality import QualityRankConfig
 
         db = FakePipelineDB()
         db.seed_request(request_row)
+        if current_evidence is not None:
+            db.upsert_album_quality_evidence(current_evidence)
+            persisted = db.find_album_quality_evidence(
+                mb_release_id=current_evidence.mb_release_id,
+                snapshot_fingerprint=current_evidence.snapshot_fingerprint,
+            )
+            assert persisted is not None and persisted.id is not None
+            db.set_request_current_evidence(request_row["id"], persisted.id)
 
         if beets_info is ...:
             beets_info = SimpleNamespace(
@@ -1880,6 +1889,92 @@ class TestCmdQuality(unittest.TestCase):
         self.assertIn("Quality gate:  DONE", output)
         self.assertIn("(rank=TRANSPARENT)", output)
         self.assertIn("is_cbr=False", output)
+
+    def test_backfill_uses_linked_current_evidence_not_request_scalar(self):
+        from lib.beets_db import AlbumInfo
+        from lib.quality import AudioQualityMeasurement
+
+        request_row = make_request_row(
+            id=8500,
+            status="imported",
+            mb_release_id="mbid-linked-transparent",
+            artist_name="Linked Artist",
+            album_title="Linked Album",
+            min_bitrate=320,
+            # Deliberately stale; the linked row below is authoritative.
+            current_spectral_grade="suspect",
+            verified_lossless=False,
+            final_format="MP3",
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="mbid-linked-transparent",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                is_cbr=True,
+                spectral_grade="genuine",
+            ),
+            codec="mp3",
+            container="mp3",
+            storage_format="MP3",
+        )
+        beets_info = AlbumInfo(
+            album_id=8500,
+            track_count=10,
+            min_bitrate_kbps=320,
+            avg_bitrate_kbps=320,
+            median_bitrate_kbps=320,
+            format="MP3",
+            is_cbr=True,
+            album_path="/Beets/Linked Artist/Linked Album",
+        )
+
+        output = self._run_quality(
+            request_row,
+            runtime_target=None,
+            beets_info=beets_info,
+            current_evidence=evidence,
+        )
+
+        self.assertIn(
+            "Backfill:      would set search_filetype_override='lossless'",
+            output,
+        )
+
+    def test_backfill_does_not_use_unlinked_request_scalar(self):
+        from lib.beets_db import AlbumInfo
+
+        request_row = make_request_row(
+            id=8501,
+            status="imported",
+            mb_release_id="mbid-unlinked-transparent",
+            artist_name="Unlinked Artist",
+            album_title="Unlinked Album",
+            min_bitrate=320,
+            current_spectral_grade="genuine",
+            verified_lossless=False,
+            final_format="MP3",
+        )
+        beets_info = AlbumInfo(
+            album_id=8501,
+            track_count=10,
+            min_bitrate_kbps=320,
+            avg_bitrate_kbps=320,
+            median_bitrate_kbps=320,
+            format="MP3",
+            is_cbr=True,
+            album_path="/Beets/Unlinked Artist/Unlinked Album",
+        )
+
+        output = self._run_quality(
+            request_row,
+            runtime_target=None,
+            beets_info=beets_info,
+        )
+
+        self.assertIn("Backfill:      won't fire", output)
 
     def test_quality_label_matches_gate_after_spectral_clamp(self):
         """AFX Analord 09 regression: displayed rank label must match the gate verdict.

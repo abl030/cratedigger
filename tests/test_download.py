@@ -29,6 +29,7 @@ from lib.download_recovery import ProcessingPathKind, ProcessingPathLocation
 from lib.pipeline_db import TransferLedgerRow
 from lib.slskd_client import TransferSnapshot
 from tests.helpers import (
+    make_album_quality_evidence,
     make_ctx_with_fake_db,
     make_download_directory,
     make_download_file,
@@ -5759,31 +5760,31 @@ class TestReconstructGrabListEntry(unittest.TestCase):
 # lib/quality/ so a future refactor can't silently drop the cfg argument.
 
 class TestComputeRejectionBackfillCfgThreading(unittest.TestCase):
-    """_compute_rejection_backfill must thread ctx.cfg.quality_ranks through
-    to rejection_backfill_override."""
+    """Validation rejects use linked current evidence and live rank config."""
 
-    def _setup(self, *, gate_min_rank, on_disk_min_bitrate=180):
-        """Build the fixtures: fake DB with a genuine non-lossless request,
-        a ctx with the requested gate_min_rank, and a mock BeetsDB returning
-        an MP3 VBR album at on_disk_min_bitrate."""
-        from lib.quality import QualityRankConfig
-        from lib.beets_db import AlbumInfo
+    def _setup(
+        self,
+        *,
+        quality_ranks,
+        on_disk_min_bitrate=180,
+        linked_grade: str | None = "genuine",
+        link_evidence=True,
+        evidence_mbid="mbid-test",
+    ):
+        from lib.quality import AudioQualityMeasurement
 
         fake_db = FakePipelineDB()
         fake_db.seed_request(make_request_row(
             id=42,
             mb_release_id="mbid-test",
+            # Deliberately stale: linked evidence is authoritative.
             current_spectral_grade="genuine",
             verified_lossless=False,
             search_filetype_override=None,
         ))
 
-        # Real CratediggerConfig is heavy; a SimpleNamespace with quality_ranks
-        # is enough — _compute_rejection_backfill only reads ctx.cfg.quality_ranks.
         from types import SimpleNamespace
-        cfg = SimpleNamespace(
-            quality_ranks=QualityRankConfig(gate_min_rank=gate_min_rank),
-        )
+        cfg = SimpleNamespace(quality_ranks=quality_ranks)
         ctx = make_ctx_with_fake_db(fake_db, cfg=cfg)
 
         album_data = make_grab_list_entry(
@@ -5791,45 +5792,98 @@ class TestComputeRejectionBackfillCfgThreading(unittest.TestCase):
             db_search_filetype_override=None,
             mb_release_id="mbid-test",
         )
+        if link_evidence:
+            evidence = make_album_quality_evidence(
+                mb_release_id=evidence_mbid,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=on_disk_min_bitrate,
+                    avg_bitrate_kbps=on_disk_min_bitrate,
+                    median_bitrate_kbps=on_disk_min_bitrate,
+                    format="MP3",
+                    is_cbr=False,
+                    spectral_grade=linked_grade,
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="MP3",
+            )
+            fake_db.upsert_album_quality_evidence(evidence)
+            persisted = fake_db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert persisted is not None and persisted.id is not None
+            fake_db.set_request_current_evidence(42, persisted.id)
+        return album_data, ctx
 
-        beets_info = AlbumInfo(
-            album_id=1, track_count=10,
-            min_bitrate_kbps=on_disk_min_bitrate,
-            avg_bitrate_kbps=on_disk_min_bitrate,
-            format="MP3", is_cbr=False,
-            album_path="/Beets/A/B",
-        )
-        return album_data, ctx, beets_info
-
-    def _run(self, album_data, ctx, beets_info):
+    def _run(self, album_data, ctx):
         from lib.download_rejection import _compute_rejection_backfill
-        with patch("lib.beets_db.BeetsDB") as mock_beets_cls:
-            mock_beets = MagicMock()
-            mock_beets.__enter__ = MagicMock(return_value=mock_beets)
-            mock_beets.__exit__ = MagicMock(return_value=False)
-            mock_beets.get_album_info.return_value = beets_info
-            mock_beets_cls.return_value = mock_beets
-            return _compute_rejection_backfill(album_data, ctx)
+        return _compute_rejection_backfill(album_data, ctx)
 
-    def test_lenient_gate_min_rank_fires_backfill(self):
-        """gate_min_rank=GOOD: 180kbps VBR genuine → GOOD rank → backfill fires."""
-        from lib.quality import QualityRank, QUALITY_LOSSLESS
-        album_data, ctx, beets_info = self._setup(
-            gate_min_rank=QualityRank.GOOD)
-        result = self._run(album_data, ctx, beets_info)
-        self.assertEqual(result, QUALITY_LOSSLESS,
-                         "lenient cfg must reach rejection_backfill_override")
+    def test_custom_transparent_band_fires_backfill(self):
+        """The caller's codec bands, not gate_min_rank, reach the policy."""
+        from lib.quality import CodecRankBands, QualityRankConfig, QUALITY_LOSSLESS
 
-    def test_default_gate_min_rank_blocks_backfill(self):
-        """Default gate_min_rank=EXCELLENT: same 180kbps blocks (GOOD < EXCELLENT)."""
-        from lib.quality import QualityRank
-        album_data, ctx, beets_info = self._setup(
-            gate_min_rank=QualityRank.EXCELLENT)
-        result = self._run(album_data, ctx, beets_info)
-        self.assertIsNone(result,
-                          "strict cfg must also reach rejection_backfill_override "
-                          "— if cfg threading were broken, both branches would "
-                          "use the same default and this assertion would silently pass")
+        custom = QualityRankConfig(
+            mp3_vbr=CodecRankBands(
+                transparent=180,
+                excellent=170,
+                good=130,
+                acceptable=96,
+            ),
+        )
+        album_data, ctx = self._setup(quality_ranks=custom)
+        result = self._run(album_data, ctx)
+        self.assertEqual(result, QUALITY_LOSSLESS)
+
+    def test_default_transparent_band_blocks_excellent_have(self):
+        from lib.quality import QualityRankConfig
+
+        album_data, ctx = self._setup(
+            quality_ranks=QualityRankConfig.defaults(),
+        )
+        result = self._run(album_data, ctx)
+        self.assertIsNone(result)
+
+    def test_default_transparent_mp3_have_fires_backfill(self):
+        """The validation-reject caller recognizes a normal CBR 320 HAVE."""
+        from lib.quality import QualityRankConfig, QUALITY_LOSSLESS
+
+        album_data, ctx = self._setup(
+            quality_ranks=QualityRankConfig.defaults(),
+            on_disk_min_bitrate=320,
+        )
+        self.assertEqual(self._run(album_data, ctx), QUALITY_LOSSLESS)
+
+    def test_missing_linked_evidence_ignores_stale_request_scalar(self):
+        from lib.quality import QualityRankConfig
+
+        album_data, ctx = self._setup(
+            quality_ranks=QualityRankConfig.defaults(),
+            on_disk_min_bitrate=320,
+            link_evidence=False,
+        )
+        self.assertIsNone(self._run(album_data, ctx))
+
+    def test_linked_evidence_without_genuine_grade_fails_open(self):
+        from lib.quality import QualityRankConfig
+
+        album_data, ctx = self._setup(
+            quality_ranks=QualityRankConfig.defaults(),
+            on_disk_min_bitrate=320,
+            linked_grade=None,
+        )
+        self.assertIsNone(self._run(album_data, ctx))
+
+    def test_linked_evidence_for_another_pressing_fails_open(self):
+        from lib.quality import QualityRankConfig
+
+        album_data, ctx = self._setup(
+            quality_ranks=QualityRankConfig.defaults(),
+            on_disk_min_bitrate=320,
+            evidence_mbid="other-mbid",
+        )
+        self.assertIsNone(self._run(album_data, ctx))
 
 
 if TYPE_CHECKING:

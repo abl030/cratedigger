@@ -22,7 +22,7 @@ finalize_request = transitions.finalize_request
 
 from lib.processing_paths import normalize_source_dirs
 from lib.quality import (AlbumQualityEvidenceDecisionFacts, DownloadInfo,
-                         ImportResult, QUALITY_UPGRADE_TIERS,
+                         ImportResult, QUALITY_UPGRADE_TIERS, QualityRankConfig,
                          TargetQualityContract, ValidationResult,
                          comparison_basis_from_decision,
                          dispatch_action, evidence_decision_name,
@@ -416,6 +416,9 @@ def dispatch_import_core(
                         source_path_cleanup_scenario=scenario,
                         cooled_down_users=cooled_down_users,
                         import_job_id=candidate_import_job_id,
+                        quality_ranks=(
+                            cfg.quality_ranks if cfg is not None else None
+                        ),
                     )
                 quality_evidence_action_file = _write_quality_evidence_action_file(
                     candidate=evidence_gate.candidate,
@@ -703,37 +706,22 @@ def dispatch_import_core(
                         else None
                     )
 
-                    if decision == "downgrade":
+                    if decision in ("downgrade", "transcode_downgrade"):
+                        _gate_cfg = (
+                            cfg.quality_ranks if cfg is not None
+                            else QualityRankConfig.defaults()
+                        )
+                        narrowed_override = rejection_backfill_override(
+                            current_measurement=ir.current_measurement,
+                            have_spectral_audit=ir.spectral.existing,
+                            cfg=_gate_cfg,
+                        )
                         try:
                             req_row = db.get_request(request_id)
                             current_override = req_row.get("search_filetype_override") if req_row else None
-                            narrowed_override = narrow_override_on_downgrade(
-                                current_override, dl_info)
-                            if narrowed_override is None and current_override is None and req_row:
-                                from lib.beets_db import BeetsDB
-                                from lib.quality import QualityRankConfig
-                                _gate_cfg = (
-                                    cfg.quality_ranks if cfg is not None
-                                    else QualityRankConfig.defaults())
-                                with BeetsDB() as beets:
-                                    beets_info = beets.get_album_info(
-                                        mb_release_id, _gate_cfg)
-                                if beets_info:
-                                    narrowed_override = rejection_backfill_override(
-                                        is_cbr=beets_info.is_cbr,
-                                        min_bitrate_kbps=beets_info.min_bitrate_kbps,
-                                        spectral_grade=req_row.get(
-                                            "current_spectral_grade"),
-                                        verified_lossless=bool(
-                                            req_row.get("verified_lossless")),
-                                        cfg=_gate_cfg,
-                                    )
-                                    if narrowed_override:
-                                        logger.info(
-                                            f"BACKFILL: {label} search_filetype_override=NULL"
-                                            f" → '{narrowed_override}' on downgrade"
-                                            f" ({beets_info.min_bitrate_kbps}kbps,"
-                                            f" cbr={beets_info.is_cbr})")
+                            if narrowed_override is None and decision == "downgrade":
+                                narrowed_override = narrow_override_on_downgrade(
+                                    current_override, dl_info)
                         except Exception:
                             logger.debug(
                                 "Failed to inspect search_filetype_override before downgrade reset")

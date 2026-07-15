@@ -371,6 +371,20 @@ produces query strategies, and the filetype filter is applied
 downstream in `lib/enqueue.py::effective_search_tiers` from the request's
 override column.
 
+A second lossless-only narrowing applies when a rejected attempt proves that
+the exact installed HAVE copy is both **TRANSPARENT** under the canonical
+codec rank bands and spectrally **genuine**. The importer uses the independent
+attempt-local HAVE audit; validation rejects may use only the request's linked,
+complete current-evidence row. Candidate spectral results and the legacy
+request scalar are not substitutes. MP3, AAC, and Opus participate through
+`measurement_rank`; codecs without canonical bands (currently Ogg), merely
+EXCELLENT lossy copies, and missing/failed/suspect/marginal audits fail open and
+keep the full search ladder. A positive result writes only
+`search_filetype_override="lossless"`: `target_format` remains untouched, and
+`search_tiers` disables the catch-all fallback for that override. The normal
+forever cadence continues, now searching only for the remaining meaningful
+upgrade: lossless.
+
 Known wart: library rows imported before this policy landed (2026-05-17)
 have NULL spectral / V0 / bad-hash fields and may have lossy
 `search_filetype_override` values. They keep the old behaviour —

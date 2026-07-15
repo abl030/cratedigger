@@ -18,6 +18,7 @@ from lib.import_manifest import (
 )
 from lib.processing_paths import source_dirs_for_album
 from lib.quality import ValidationResult, rejection_backfill_override
+from lib.release_identity import normalize_release_id
 from lib.staged_album import StagedAlbum
 from lib.util import log_validation_result
 from lib.wrong_match_policy import rejection_scenario_is_wrong_match_candidate
@@ -279,7 +280,7 @@ def _compute_rejection_backfill(
     album_data: GrabListEntry,
     ctx: CratediggerContext,
 ) -> str | None:
-    """Check if search_filetype_override should be backfilled on rejection."""
+    """Narrow from linked current evidence after a validation rejection."""
     request_id = album_data.db_request_id
     if not request_id or not ctx.pipeline_db_source:
         return None
@@ -290,34 +291,32 @@ def _compute_rejection_backfill(
         request = db.get_request(request_id)
         if not request or request.get("search_filetype_override"):
             return None
-        from lib.beets_db import BeetsDB
-
-        with BeetsDB() as beets:
-            info = beets.get_album_info(
-                album_data.mb_release_id,
-                ctx.cfg.quality_ranks,
-            )
-        if not info:
+        evidence_id = db.get_request_current_evidence_id(request_id)
+        if evidence_id is None:
+            return None
+        evidence = db.load_album_quality_evidence_by_id(evidence_id)
+        if evidence is None or evidence.policy_incomplete_reasons():
+            return None
+        if (
+            normalize_release_id(evidence.mb_release_id)
+            != normalize_release_id(album_data.mb_release_id)
+        ):
             return None
         override = rejection_backfill_override(
-            is_cbr=info.is_cbr,
-            min_bitrate_kbps=info.min_bitrate_kbps,
-            spectral_grade=request.get("current_spectral_grade"),
-            verified_lossless=bool(request.get("verified_lossless")),
+            current_measurement=evidence.measurement,
             cfg=ctx.cfg.quality_ranks,
         )
         if override:
             logger.info(
                 "BACKFILL: %s - %s search_filetype_override=NULL → %r "
-                "(on-disk: %skbps, cbr=%s, spectral=%s)",
+                "(linked current evidence: format=%s, spectral=%s)",
                 album_data.artist,
                 album_data.title,
                 override,
-                info.min_bitrate_kbps,
-                info.is_cbr,
-                request.get("current_spectral_grade"),
+                evidence.measurement.format,
+                evidence.measurement.spectral_grade,
             )
         return override
     except Exception:
-        logger.debug("BACKFILL: failed to check on-disk state", exc_info=True)
+        logger.debug("BACKFILL: failed to load linked current evidence", exc_info=True)
         return None

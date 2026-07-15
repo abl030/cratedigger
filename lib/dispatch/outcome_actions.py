@@ -20,8 +20,10 @@ from lib import transitions
 # ``lib.dispatch.outcome_actions.finalize_request``.
 finalize_request = transitions.finalize_request
 
-from lib.quality import (DownloadInfo, ValidationResult, dispatch_action, extract_usernames,
-                         is_comparable_lossless_source_probe)
+from lib.quality import (DownloadInfo, QualityRankConfig, ValidationResult,
+                         dispatch_action, extract_usernames,
+                         is_comparable_lossless_source_probe,
+                         rejection_backfill_override)
 
 from lib.dispatch.types import (DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
                                 DispatchOutcome, ImportAttemptResult,
@@ -60,6 +62,7 @@ def _reject_import_from_evidence_decision(
     source_path_cleanup_scenario: str,
     cooled_down_users: set[str] | None,
     import_job_id: int | None = None,
+    quality_ranks: QualityRankConfig | None = None,
 ) -> DispatchOutcome:
     """Record a persisted-evidence rejection before beets can mutate files.
 
@@ -103,6 +106,13 @@ def _reject_import_from_evidence_decision(
         scenario=decision or scenario,
         detail=detail,
     ).to_json()
+    search_filetype_override = None
+    if decision in ("downgrade", "transcode_downgrade"):
+        search_filetype_override = rejection_backfill_override(
+            current_measurement=import_result.current_measurement,
+            have_spectral_audit=import_result.spectral.existing,
+            cfg=quality_ranks,
+        )
     terminal_outcome = _record_rejection_and_maybe_requeue(
         db,
         request_id,
@@ -111,6 +121,7 @@ def _reject_import_from_evidence_decision(
         error=None,
         requeue=effective_requeue,
         outcome_label="rejected",
+        search_filetype_override=search_filetype_override,
         validation_result=rejection_validation,
         staged_path=staged_path,
         attempt_result=attempt_result,
