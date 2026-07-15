@@ -20,8 +20,10 @@ from lib import transitions
 # ``lib.dispatch.outcome_actions.finalize_request``.
 finalize_request = transitions.finalize_request
 
-from lib.quality import (DownloadInfo, ValidationResult, dispatch_action, extract_usernames,
-                         is_comparable_lossless_source_probe)
+from lib.quality import (DownloadInfo, QualityRankConfig, ValidationResult,
+                         dispatch_action, extract_usernames,
+                         is_comparable_lossless_source_probe,
+                         resolve_rejection_search_override)
 
 from lib.dispatch.types import (DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
                                 DispatchOutcome, ImportAttemptResult,
@@ -60,6 +62,7 @@ def _reject_import_from_evidence_decision(
     source_path_cleanup_scenario: str,
     cooled_down_users: set[str] | None,
     import_job_id: int | None = None,
+    quality_ranks: QualityRankConfig | None = None,
 ) -> DispatchOutcome:
     """Record a persisted-evidence rejection before beets can mutate files.
 
@@ -103,6 +106,27 @@ def _reject_import_from_evidence_decision(
         scenario=decision or scenario,
         detail=detail,
     ).to_json()
+    search_filetype_override = None
+    if decision in ("downgrade", "transcode_downgrade"):
+        current_override = None
+        try:
+            request = db.get_request(request_id)
+            current_override = (
+                request.get("search_filetype_override") if request else None
+            )
+        except Exception:
+            logger.debug(
+                "Failed to inspect search_filetype_override before rejection"
+            )
+        search_filetype_override = resolve_rejection_search_override(
+            decision=decision,
+            current_override=current_override,
+            dl_info=dl_info,
+            current_measurement=import_result.current_measurement,
+            spectral_evidence_source="attempt_have_audit",
+            have_spectral_audit=import_result.spectral.existing,
+            cfg=quality_ranks,
+        ).override
     terminal_outcome = _record_rejection_and_maybe_requeue(
         db,
         request_id,
@@ -111,6 +135,7 @@ def _reject_import_from_evidence_decision(
         error=None,
         requeue=effective_requeue,
         outcome_label="rejected",
+        search_filetype_override=search_filetype_override,
         validation_result=rejection_validation,
         staged_path=staged_path,
         attempt_result=attempt_result,

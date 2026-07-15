@@ -166,12 +166,14 @@ from lib.quality.decisions import (
 )
 from lib.quality.dispatch_actions import (
     DispatchAction,
+    RejectionSearchOverrideResolution,
     compute_effective_override_bitrate,
     dispatch_action,
     extract_usernames,
     narrow_override_on_downgrade,
     narrow_override_on_lossless_source_lock,
     rejected_download_tier,
+    resolve_rejection_search_override,
 )
 from lib.quality.pipeline import (
     AlbumQualityEvidenceDecisionFacts,
@@ -261,6 +263,7 @@ __all__ = [
     "QualityRank",
     "QualityRankConfig",
     "RankBitrateMetric",
+    "RejectionSearchOverrideResolution",
     "SPECTRAL_TRANSCODE_GRADES",
     "SpectralAnalysisDetail",
     "SpectralDetail",
@@ -345,6 +348,7 @@ __all__ = [
     "reduce_poll_cycle",
     "rejected_download_tier",
     "rejection_backfill_override",
+    "resolve_rejection_search_override",
     "resolve_user_requeue_override",
     "search_cache_keys_for_identity",
     "search_tiers",

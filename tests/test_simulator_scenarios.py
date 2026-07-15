@@ -2,9 +2,9 @@
 """Simulator scenario test suite for pipeline quality decisions.
 
 Tests the COMPOSITION of decision functions — full_pipeline_decision() +
-rejection_backfill_override() + search_tiers — against a matrix of album states
-and download scenarios. Catches interaction bugs between stages that unit tests
-on individual functions miss.
+resolve_rejection_search_override() + search_tiers — against a matrix of album
+states and download scenarios. Catches interaction bugs between stages that
+unit tests on individual functions miss.
 
 GitHub issue #32.
 """
@@ -12,15 +12,19 @@ GitHub issue #32.
 import os
 import sys
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.quality import (
+    AudioQualityMeasurement,
+    DownloadInfo,
     QUALITY_UPGRADE_TIERS,
+    SpectralAnalysisDetail,
     compute_effective_override_bitrate,
     full_pipeline_decision,
     rejection_backfill_override,
+    resolve_rejection_search_override,
     search_tiers,
 )
 
@@ -94,6 +98,11 @@ class DownloadScenario:
     avg_bitrate: int | None = None
     candidate_v0_probe_avg: int | None = None
     candidate_v0_probe_min: int | None = None
+    # Independent exact-release HAVE audit from this attempted import.  This
+    # is intentionally not derived from the candidate's spectral fields.
+    have_spectral_attempted: bool = False
+    have_spectral_grade: str | None = None
+    have_spectral_error: str | None = None
 
     def dl_params(self) -> dict:
         """Download-side kwargs for full_pipeline_decision()."""
@@ -318,18 +327,42 @@ def simulate(album: AlbumState, download: DownloadScenario,
         **download.dl_params(),
     )
 
-    # Simulate spectral propagation + backfill for rejections
-    backfill = None
-    if not result["imported"] and result["keep_searching"]:
-        if not album.search_filetype_override:
-            dl_spectral = download.spectral_grade
-            propagated_grade = dl_spectral if dl_spectral else album.spectral_grade
-            backfill = rejection_backfill_override(
-                is_cbr=album.is_cbr,
-                min_bitrate_kbps=album.min_bitrate,
-                spectral_grade=propagated_grade,
-                verified_lossless=album.verified_lossless,
-            )
+    # Use the same pure ordering as both importer rejection paths.
+    resolution = resolve_rejection_search_override(
+        decision=result["stage2_import"],
+        current_override=album.search_filetype_override,
+        dl_info=DownloadInfo(
+            slskd_filetype="flac" if download.is_flac else "mp3",
+            is_vbr=(
+                download.is_vbr
+                if download.is_vbr is not None
+                else not download.is_cbr
+            ),
+            bitrate=(download.avg_bitrate or download.min_bitrate) * 1000,
+            was_converted=download.converted_count > 0,
+        ),
+        current_measurement=AudioQualityMeasurement(
+            min_bitrate_kbps=album.min_bitrate,
+            avg_bitrate_kbps=album.avg_bitrate,
+            format=_derive_album_format(album),
+            is_cbr=album.is_cbr,
+            spectral_grade=album.spectral_grade,
+            spectral_bitrate_kbps=album.spectral_bitrate,
+            verified_lossless=album.verified_lossless,
+        ),
+        spectral_evidence_source="attempt_have_audit",
+        have_spectral_audit=SpectralAnalysisDetail(
+            attempted=download.have_spectral_attempted,
+            grade=download.have_spectral_grade,
+            error=download.have_spectral_error,
+        ),
+    )
+    rejection_override = resolution.override
+    backfill = (
+        resolution.override
+        if resolution.reason == "transparent_have"
+        else None
+    )
 
     # Model search_filetype_override after the full cycle.
     # This mirrors _check_quality_gate_core() in lib/dispatch/quality_gate.py:
@@ -341,7 +374,11 @@ def simulate(album: AlbumState, download: DownloadScenario,
     gate = result["stage3_quality_gate"]
     if not result["imported"]:
         # Rejection: override stays (or backfill sets it)
-        override_after = backfill if backfill else album.search_filetype_override
+        override_after = (
+            rejection_override
+            if rejection_override is not None
+            else album.search_filetype_override
+        )
     elif gate == "accept":
         override_after = None  # production clears search_filetype_override on accept
     elif gate == "requeue_upgrade":
@@ -440,8 +477,8 @@ class TestSimulatorInvariants(unittest.TestCase):
                 self.assertNotIn(r.stage2_import,
                                  ("downgrade", "transcode_downgrade"))
 
-    def test_verified_lossless_never_backfills(self):
-        """Albums already verified lossless should never trigger backfill."""
+    def test_verified_lossless_without_have_audit_never_backfills(self):
+        """Source provenance alone cannot replace a trusted HAVE audit."""
         for album in ALBUM_STATES:
             if not album.verified_lossless:
                 continue
@@ -519,8 +556,8 @@ class TestSimulatorInvariants(unittest.TestCase):
                     if r.imported:
                         self.assertIsNone(r.backfill_override)
 
-    def test_search_filetype_override_suppresses_backfill(self):
-        """Albums with existing search_filetype_override skip backfill entirely."""
+    def test_existing_override_without_have_audit_does_not_backfill(self):
+        """Existing override fixtures cannot fabricate a missing HAVE audit."""
         for album in ALBUM_STATES:
             if album.search_filetype_override is None:
                 continue
@@ -610,14 +647,18 @@ class TestNamedRegressions(unittest.TestCase):
         )
 
     def test_stars_of_the_lid_loop(self):
-        """CBR 320 genuine on disk + MP3 downgrade -> backfill fires -> flac only.
+        """CBR 320 + genuine HAVE audit narrows a downgrade to lossless.
 
         Bug: CBR 320 genuine albums kept downloading MP3s rejected as
         downgrades. Without backfill, search_filetype_override stays NULL and the
         pipeline re-searches all tiers forever.
         """
         album = ALBUM_MAP["cbr_320_genuine"]
-        r = simulate(album, DL_MAP["mp3_v0_240"])
+        r = simulate(album, replace(
+            DL_MAP["mp3_v0_240"],
+            have_spectral_attempted=True,
+            have_spectral_grade="genuine",
+        ))
 
         self.assertFalse(r.imported)
         self.assertEqual(r.stage2_import, "downgrade")
@@ -656,20 +697,22 @@ class TestNamedRegressions(unittest.TestCase):
         self.assertEqual(r3.stage2_import, "downgrade")
 
     def test_scientists_no_spectral_loop(self):
-        """CBR 320 no spectral + CBR 320 genuine download -> propagation -> backfill.
+        """Candidate genuine cannot stand in for a missing HAVE audit.
 
         Bug: CBR 320 albums with no spectral data looped forever:
         1. CBR 320 downloads rejected as downgrade (320 <= 320)
         2. No spectral on disk -> backfill can't fire (needs genuine grade)
-        3. Download's spectral grade must propagate to break the loop
+        3. Candidate spectral is not evidence about the installed HAVE copy.
         """
         album = ALBUM_MAP["cbr_320_no_spectral"]
         r = simulate(album, DL_MAP["cbr_320_genuine"])
 
         self.assertFalse(r.imported)
         self.assertEqual(r.stage2_import, "downgrade")
-        self.assertEqual(r.backfill_override, "lossless",
-                         "Download's genuine spectral must propagate to break CBR loop")
+        self.assertIsNone(
+            r.backfill_override,
+            "candidate spectral must not authorize lossless-only search",
+        )
 
     def test_scientists_suspect_download_no_backfill(self):
         """CBR 320 no spectral + suspect download -> no backfill, keep all tiers.
@@ -976,19 +1019,21 @@ class TestNamedRegressions(unittest.TestCase):
         self.assertEqual(r.stage2_import, "downgrade")
 
     def test_upgrade_button_unanalysed_album(self):
-        """CBR 320 no spectral: first genuine download breaks the loop.
+        """Candidate-only genuine evidence keeps search tiers open.
 
         User hits "Upgrade" on an unanalysed CBR 320 album. The first download
-        with genuine spectral grade (even if rejected as downgrade) propagates
-        its spectral -> backfill fires -> narrows to flac-only.
+        with genuine candidate spectral may still be a downgrade, but it says
+        nothing about HAVE and therefore cannot narrow search.
         """
         album = ALBUM_MAP["cbr_320_no_spectral"]
         for dl_name in ("cbr_320_genuine", "cbr_256_genuine", "cbr_192_genuine"):
             with self.subTest(dl=dl_name):
                 r = simulate(album, DL_MAP[dl_name])
                 self.assertFalse(r.imported)
-                self.assertEqual(r.backfill_override, "lossless",
-                                 f"{dl_name} must propagate genuine spectral -> backfill")
+                self.assertIsNone(
+                    r.backfill_override,
+                    f"{dl_name} candidate spectral must not authorize backfill",
+                )
 
     # ------------------------------------------------------------------
     # Issue #60 — codec-aware cross-codec regressions
@@ -1323,15 +1368,15 @@ class TestVerifiedLosslessMatrix(unittest.TestCase):
 # ============================================================================
 
 class TestBackfillPropagation(unittest.TestCase):
-    """Spectral propagation from downloads into backfill logic."""
+    """Attempt-local HAVE provenance controls backfill logic."""
 
     def test_genuine_download_propagates_to_no_spectral_album(self):
-        """Download's genuine grade is used when album has no spectral data."""
+        """Candidate-only genuine evidence is retained as a negative pin."""
         album = ALBUM_MAP["cbr_320_no_spectral"]
         for dl_name in ("cbr_320_genuine", "cbr_256_genuine", "cbr_192_genuine"):
             with self.subTest(dl=dl_name):
                 r = simulate(album, DL_MAP[dl_name])
-                self.assertEqual(r.backfill_override, "lossless")
+                self.assertIsNone(r.backfill_override)
 
     def test_suspect_download_does_not_propagate_backfill(self):
         """Suspect spectral grade does not trigger backfill."""
@@ -1342,11 +1387,13 @@ class TestBackfillPropagation(unittest.TestCase):
                 self.assertIsNone(r.backfill_override)
 
     def test_no_spectral_download_uses_album_grade(self):
-        """Downloads without spectral fall back to album's grade for backfill."""
+        """Missing attempt audit does not fall back to an album scalar."""
         album = ALBUM_MAP["cbr_320_genuine"]
         r = simulate(album, DL_MAP["mp3_v0_240"])
-        self.assertEqual(r.backfill_override, "lossless",
-                         "Album's genuine grade used when download has no spectral")
+        self.assertIsNone(
+            r.backfill_override,
+            "missing HAVE audit must not fall back to persisted scalar state",
+        )
 
     def test_no_spectral_either_side_no_backfill(self):
         """No spectral on album or download -> backfill can't fire."""
@@ -1364,48 +1411,96 @@ class TestBackfillPropagation(unittest.TestCase):
                                   "No spectral anywhere -> no backfill possible")
 
     def test_low_bitrate_album_no_backfill(self):
-        """Album with genuine spectral but bitrate < 210 -> no backfill."""
+        """Trusted genuine audit cannot promote a non-transparent HAVE."""
         album = ALBUM_MAP["cbr_192_genuine"]
         # CBR 192 genuine rejected by downloads at or below 192
         for dl_name in ("mp3_v2_190", "cbr_192_no_spectral"):
             with self.subTest(dl=dl_name):
-                r = simulate(album, DL_MAP[dl_name])
+                r = simulate(album, replace(
+                    DL_MAP[dl_name],
+                    have_spectral_attempted=True,
+                    have_spectral_grade="genuine",
+                ))
                 if not r.imported and r.keep_searching:
                     self.assertIsNone(r.backfill_override,
                                       "192 < 210 -> backfill should not fire")
 
-    def test_existing_override_suppresses_backfill(self):
-        """Albums with search_filetype_override already set skip backfill entirely."""
+    def test_existing_lossless_override_without_have_audit_is_preserved(self):
+        """Missing HAVE evidence cannot alter an existing narrow override."""
         album = ALBUM_MAP["cbr_320_genuine_flac_override"]
         for dl in DOWNLOAD_SCENARIOS:
             with self.subTest(dl=dl.name):
                 r = simulate(album, dl)
                 self.assertIsNone(r.backfill_override)
+                if not r.imported:
+                    self.assertEqual(
+                        r.search_filetype_override_after,
+                        "lossless",
+                    )
+
+    def test_full_upgrade_ladder_narrows_from_trusted_transparent_have(self):
+        """The transparent rule runs before preserving an existing override."""
+        album = replace(
+            ALBUM_MAP["cbr_320_genuine"],
+            search_filetype_override=QUALITY_UPGRADE_TIERS,
+        )
+        download = replace(
+            DL_MAP["mp3_v0_240"],
+            have_spectral_attempted=True,
+            have_spectral_grade="genuine",
+        )
+
+        result = simulate(album, download)
+
+        self.assertEqual(result.stage2_import, "downgrade")
+        self.assertEqual(result.backfill_override, "lossless")
+        self.assertEqual(result.search_filetype_override_after, "lossless")
+
+    def test_full_upgrade_ladder_keeps_per_tier_narrowing_without_have_audit(self):
+        """The pre-existing rejected-tier removal survives a failed audit."""
+        album = replace(
+            ALBUM_MAP["cbr_320_genuine"],
+            search_filetype_override=QUALITY_UPGRADE_TIERS,
+        )
+
+        result = simulate(album, DL_MAP["mp3_v0_240"])
+
+        self.assertEqual(result.stage2_import, "downgrade")
+        self.assertIsNone(result.backfill_override)
+        self.assertEqual(
+            result.search_filetype_override_after,
+            "lossless,mp3 320,aac,opus,ogg",
+        )
 
     def test_spectral_propagation_essential_for_loop_breaking(self):
-        """Prove that spectral propagation is required to break the CBR loop.
-
-        Without propagation (using only the album's spectral grade), the
-        cbr_320_no_spectral album would never backfill — its spectral grade
-        is None, which doesn't meet backfill requirements.
-        """
+        """Only explicit genuine HAVE audit breaks the transparent CBR loop."""
         album = ALBUM_MAP["cbr_320_no_spectral"]
         dl = DL_MAP["cbr_320_genuine"]
 
-        # WITHOUT propagation: backfill uses album's spectral grade (None)
-        backfill_without = rejection_backfill_override(
-            is_cbr=album.is_cbr,
+        measurement = AudioQualityMeasurement(
             min_bitrate_kbps=album.min_bitrate,
-            spectral_grade=album.spectral_grade,  # None
-            verified_lossless=album.verified_lossless,
+            avg_bitrate_kbps=album.min_bitrate,
+            format="MP3",
+            is_cbr=True,
         )
-        self.assertIsNone(backfill_without,
-                          "Without propagation, backfill can't fire (grade is None)")
+        backfill_without = rejection_backfill_override(
+            current_measurement=measurement,
+            spectral_evidence_source="attempt_have_audit",
+            have_spectral_audit=SpectralAnalysisDetail(attempted=False),
+        )
+        self.assertIsNone(backfill_without)
 
-        # WITH propagation (current behavior): uses download's genuine grade
-        r = simulate(album, dl)
+        # Candidate genuineness alone remains insufficient.
+        self.assertIsNone(simulate(album, dl).backfill_override)
+
+        # The independently audited exact on-disk HAVE copy is decisive.
+        r = simulate(album, replace(
+            dl,
+            have_spectral_attempted=True,
+            have_spectral_grade="genuine",
+        ))
         self.assertEqual(r.backfill_override, "lossless",
-                         "With propagation, download's genuine grade enables backfill")
+                         "trusted HAVE audit enables backfill")
 
 
 class TestReconciliationFlowScenarios(unittest.TestCase):
