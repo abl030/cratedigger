@@ -22,10 +22,15 @@ from lib.quality import (
     evidence_decision_name,
     full_pipeline_decision_from_evidence,
     narrow_override_on_lossless_source_lock,
+    AudioQualityMeasurement,
+    QualityComparisonBasis,
+    V0ProbeEvidence,
+    comparison_basis_from_decision,
 )
 from lib.quality_evidence import (
     QualityEvidenceDB,
     load_candidate_evidence_for_source,
+    audit_v0_probe_from_metric,
 )
 from lib.util import resolve_failed_path
 from lib.validation_envelope import (
@@ -149,6 +154,11 @@ class WrongMatchCleanupOutcome(msgspec.Struct, frozen=True):
     path_missing: bool = False
     error: str | None = None
     decision: dict[str, Any] = msgspec.field(default_factory=dict)
+    candidate_measurement: AudioQualityMeasurement | None = None
+    current_measurement: AudioQualityMeasurement | None = None
+    candidate_v0_probe: V0ProbeEvidence | None = None
+    current_v0_probe: V0ProbeEvidence | None = None
+    comparison_basis: QualityComparisonBasis | None = None
 
     def to_dict(self) -> dict[str, object]:
         return msgspec.to_builtins(self)
@@ -414,6 +424,8 @@ def _cleanup_wrong_match(
             preview_decision="verified_lossless_parent",
             cleanup_eligible=True,
             decision=None,
+            candidate_evidence=candidate.evidence,
+            current_evidence=current_evidence,
         )
 
     decision = full_pipeline_decision_from_evidence(
@@ -444,6 +456,8 @@ def _cleanup_wrong_match(
             preview_decision=preview_decision,
             cleanup_eligible=cleanup_eligible,
             decision=decision,
+            candidate_evidence=candidate.evidence,
+            current_evidence=current_evidence,
         )
     if verdict != "confident_reject" or not cleanup_eligible:
         return _result(
@@ -456,6 +470,8 @@ def _cleanup_wrong_match(
             preview_decision=preview_decision,
             cleanup_eligible=cleanup_eligible,
             decision=decision,
+            candidate_evidence=candidate.evidence,
+            current_evidence=current_evidence,
         )
 
     return _perform_cleanup_deletion(
@@ -472,6 +488,8 @@ def _cleanup_wrong_match(
         preview_decision=preview_decision,
         cleanup_eligible=cleanup_eligible,
         decision=decision,
+        candidate_evidence=candidate.evidence,
+        current_evidence=current_evidence,
     )
 
 
@@ -490,6 +508,8 @@ def _perform_cleanup_deletion(
     preview_decision: str | None,
     cleanup_eligible: bool,
     decision: dict[str, Any] | None,
+    candidate_evidence: AlbumQualityEvidence,
+    current_evidence: AlbumQualityEvidence | None,
 ) -> WrongMatchCleanupOutcome:
     """Acquire WMCL lock, re-check active jobs, delete the source, translate the result."""
     lock_key = wrong_match_cleanup_lock_key(
@@ -513,6 +533,8 @@ def _perform_cleanup_deletion(
                 preview_decision=preview_decision,
                 cleanup_eligible=cleanup_eligible,
                 decision=decision,
+                candidate_evidence=candidate_evidence,
+                current_evidence=current_evidence,
             )
 
         active_jobs = _matching_active_jobs(
@@ -534,6 +556,8 @@ def _perform_cleanup_deletion(
                 preview_decision=preview_decision,
                 cleanup_eligible=cleanup_eligible,
                 decision=decision,
+                candidate_evidence=candidate_evidence,
+                current_evidence=current_evidence,
             )
 
         cleanup = cleanup_wrong_match_source(
@@ -555,6 +579,8 @@ def _perform_cleanup_deletion(
             cleanup_eligible=cleanup_eligible,
             decision=decision,
             error=cleanup.error,
+            candidate_evidence=candidate_evidence,
+            current_evidence=current_evidence,
         )
     if cleanup.path_missing:
         return _result(
@@ -569,6 +595,8 @@ def _perform_cleanup_deletion(
             decision=decision,
             cleared_rows=cleanup.cleared_rows,
             path_missing=True,
+            candidate_evidence=candidate_evidence,
+            current_evidence=current_evidence,
         )
 
     # R8 / AE2: when the cleanup fired because of `lossless_source_locked`,
@@ -606,6 +634,8 @@ def _perform_cleanup_deletion(
                         decision=decision,
                         cleared_rows=cleanup.cleared_rows,
                         deleted_path=cleanup.deleted_path,
+                        candidate_evidence=candidate_evidence,
+                        current_evidence=current_evidence,
                     )
                 logger.info(
                     "wrong_match_cleanup: narrowed search_filetype_override"
@@ -633,6 +663,8 @@ def _perform_cleanup_deletion(
         decision=decision,
         cleared_rows=cleanup.cleared_rows,
         deleted_path=cleanup.deleted_path,
+        candidate_evidence=candidate_evidence,
+        current_evidence=current_evidence,
     )
 
 
@@ -815,7 +847,37 @@ def _result(
     deleted_path: str | None = None,
     path_missing: bool = False,
     error: str | None = None,
+    candidate_evidence: AlbumQualityEvidence | None = None,
+    current_evidence: AlbumQualityEvidence | None = None,
 ) -> WrongMatchCleanupOutcome:
+    ambiguous_source_lineage = any(
+        evidence is not None and evidence.lineage_version != 3
+        for evidence in (candidate_evidence, current_evidence)
+    )
+    # Migration 050 lineage-v1 measurements may be target projections. A
+    # comparison basis derived from either one is source-shaped too, so do not
+    # even decode it at the cleanup audit boundary.
+    basis = (
+        None if ambiguous_source_lineage
+        else comparison_basis_from_decision(decision)
+    )
+
+    def audit_measurement(
+        evidence: AlbumQualityEvidence | None,
+    ) -> AudioQualityMeasurement | None:
+        if evidence is None:
+            return None
+        if evidence.lineage_version == 3:
+            return evidence.measurement
+        # Spectral facts were never target projections. Preserve only that
+        # valid subset, while an explicit empty measurement makes Recents
+        # fail closed instead of falling back to ambiguous source values.
+        measurement = evidence.measurement
+        return AudioQualityMeasurement(
+            spectral_grade=measurement.spectral_grade,
+            spectral_bitrate_kbps=measurement.spectral_bitrate_kbps,
+        )
+
     return WrongMatchCleanupOutcome(
         download_log_id=download_log_id,
         outcome=outcome,
@@ -831,6 +893,17 @@ def _result(
         deleted_path=deleted_path,
         path_missing=path_missing,
         error=error,
+        candidate_measurement=audit_measurement(candidate_evidence),
+        current_measurement=audit_measurement(current_evidence),
+        candidate_v0_probe=audit_v0_probe_from_metric(
+            candidate_evidence.v0_metric
+            if candidate_evidence is not None else None
+        ),
+        current_v0_probe=audit_v0_probe_from_metric(
+            current_evidence.v0_metric
+            if current_evidence is not None else None
+        ),
+        comparison_basis=basis,
     )
 
 def _audit_action(outcome: str) -> str:
@@ -878,6 +951,11 @@ def _cleanup_audit_payload(
         deleted_path=result.deleted_path,
         path_missing=result.path_missing,
         error=result.error,
+        candidate_measurement=result.candidate_measurement,
+        current_measurement=result.current_measurement,
+        candidate_v0_probe=result.candidate_v0_probe,
+        current_v0_probe=result.current_v0_probe,
+        comparison_basis=result.comparison_basis,
     )
 
 

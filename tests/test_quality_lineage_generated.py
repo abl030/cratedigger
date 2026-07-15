@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 
 from hypothesis import example, given, strategies as st
+import msgspec
 
 from harness.import_one import projected_is_cbr_from_bitrates
 from lib.measurement import PreimportMeasurement
+from lib.import_preview import enrich_current_v0_research_for_preview
+from lib.pipeline_db.download_log import _DownloadLogMixin
 from lib.quality import (
+    AlbumQualityV0Metric,
     AlbumQualityEvidenceFile,
     AudioQualityMeasurement,
     ImportResult,
@@ -17,11 +23,24 @@ from lib.quality import (
     TargetQualityContract,
     V0ProbeEvidence,
     full_pipeline_decision,
+    full_pipeline_decision_from_evidence,
     gate_rank,
     measured_import_decision,
     quality_gate_decision,
 )
-from lib.quality_evidence import evidence_from_import_result, evidence_from_measurement
+from lib.quality_evidence import (
+    evidence_from_import_result,
+    evidence_from_measurement,
+    snapshot_audio_files,
+)
+from lib.wrong_match_cleanup_service import (
+    OUTCOME_KEPT_UNCERTAIN,
+    _cleanup_audit_payload,
+    _result,
+)
+from tests.fakes import FakePipelineDB
+from tests.helpers import make_album_quality_evidence, make_request_row
+from web.classify import LogEntry, classify_log_entry
 
 
 def assert_source_target_lineage(result: ImportResult) -> None:
@@ -42,7 +61,350 @@ def assert_source_target_lineage(result: ImportResult) -> None:
         raise AssertionError("output measurement must use a bare codec label")
 
 
+def assert_research_v0_is_policy_neutral(
+    before: dict[str, object],
+    after: dict[str, object],
+) -> None:
+    if before != after:
+        raise AssertionError("on-disk research V0 changed quality policy")
+
+
+def assert_research_attempted_once_per_snapshot(
+    *,
+    probe_calls: int,
+    evidence_attempted: bool,
+) -> None:
+    """Independent checker for the preview retry/idempotence invariant."""
+
+    if probe_calls != 1 or not evidence_attempted:
+        raise AssertionError(
+            "unchanged evidence snapshot must record exactly one V0 research attempt"
+        )
+
+
 class TestQualityLineagePins(unittest.TestCase):
+    def test_research_once_checker_rejects_repeated_unmarked_probe(self):
+        with self.assertRaisesRegex(AssertionError, "exactly one"):
+            assert_research_attempted_once_per_snapshot(
+                probe_calls=2,
+                evidence_attempted=False,
+            )
+
+    @given(
+        projected_format=st.sampled_from(("OPUS 128", "MP3 V0", "FLAC")),
+        source_min=st.integers(min_value=1, max_value=2000),
+        source_avg=st.integers(min_value=1, max_value=2000),
+        source_median=st.integers(min_value=1, max_value=2000),
+        spectral_bitrate=st.integers(min_value=1, max_value=2000),
+        v0_avg=st.integers(min_value=1, max_value=500),
+    )
+    @example(
+        projected_format="OPUS 128",
+        source_min=121,
+        source_avg=128,
+        source_median=127,
+        spectral_bitrate=224,
+        v0_avg=259,
+    )
+    def test_generated_v1_download_overlay_fails_closed_for_source_fields(
+        self,
+        projected_format: str,
+        source_min: int,
+        source_avg: int,
+        source_median: int,
+        spectral_bitrate: int,
+        v0_avg: int,
+    ) -> None:
+        row = _DownloadLogMixin._overlay_evidence_onto_download_log_row({
+            "_evidence_lineage_version": 1,
+            "_evidence_source_format": projected_format,
+            "_evidence_source_min_bitrate": source_min,
+            "_evidence_source_avg_bitrate": source_avg,
+            "_evidence_source_median_bitrate": source_median,
+            "_evidence_spectral_grade": "likely_transcode",
+            "_evidence_spectral_bitrate": spectral_bitrate,
+            "_evidence_v0_probe_kind": "on_disk_research",
+            "_evidence_v0_probe_min_bitrate": 201,
+            "_evidence_v0_probe_avg_bitrate": v0_avg,
+            "_evidence_v0_probe_median_bitrate": 255,
+        })
+
+        self.assertIsNone(row.get("source_format"))
+        self.assertIsNone(row.get("source_min_bitrate"))
+        self.assertIsNone(row.get("source_avg_bitrate"))
+        self.assertIsNone(row.get("source_median_bitrate"))
+        self.assertEqual(row["spectral_grade"], "likely_transcode")
+        self.assertEqual(row["spectral_bitrate"], spectral_bitrate)
+        self.assertEqual(row["v0_probe_kind"], "on_disk_research_v0")
+        self.assertEqual(row["v0_probe_avg_bitrate"], v0_avg)
+
+    @given(
+        candidate_lineage=st.sampled_from((1, 3)),
+        current_lineage=st.sampled_from((1, 3)),
+        candidate_avg=st.integers(min_value=32, max_value=500),
+        current_avg=st.integers(min_value=32, max_value=500),
+        candidate_spectral=st.integers(min_value=32, max_value=500),
+        current_spectral=st.integers(min_value=32, max_value=500),
+    )
+    @example(
+        candidate_lineage=1,
+        current_lineage=3,
+        candidate_avg=128,
+        current_avg=320,
+        candidate_spectral=96,
+        current_spectral=160,
+    )
+    @example(
+        candidate_lineage=3,
+        current_lineage=3,
+        candidate_avg=288,
+        current_avg=196,
+        candidate_spectral=224,
+        current_spectral=160,
+    )
+    def test_generated_cleanup_audit_classify_respects_lineage_version(
+        self,
+        candidate_lineage: int,
+        current_lineage: int,
+        candidate_avg: int,
+        current_avg: int,
+        candidate_spectral: int,
+        current_spectral: int,
+    ) -> None:
+        candidate = make_album_quality_evidence(
+            mb_release_id="generated-candidate",
+            lineage_version=candidate_lineage,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=candidate_avg,
+                avg_bitrate_kbps=candidate_avg,
+                median_bitrate_kbps=candidate_avg,
+                format="MP3",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=candidate_spectral,
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=201,
+                avg_bitrate_kbps=259,
+                median_bitrate_kbps=255,
+                source_lineage="native_lossy_research",
+            ),
+        )
+        current = make_album_quality_evidence(
+            mb_release_id="generated-current",
+            lineage_version=current_lineage,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=current_avg,
+                avg_bitrate_kbps=current_avg,
+                median_bitrate_kbps=current_avg,
+                format="Opus",
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=current_spectral,
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=202,
+                avg_bitrate_kbps=260,
+                median_bitrate_kbps=256,
+                source_lineage="on_disk_research",
+            ),
+        )
+        outcome = _result(
+            1,
+            OUTCOME_KEPT_UNCERTAIN,
+            decision={
+                "comparison_basis": {
+                    "verdict": "better",
+                    "branch": "metric_tiebreak",
+                    "new_rank": "transparent",
+                    "existing_rank": "good",
+                    "new_metric": "avg",
+                    "existing_metric": "avg",
+                    "new_value_kbps": candidate_avg,
+                    "existing_value_kbps": current_avg,
+                    "new_format": "MP3",
+                    "existing_format": "Opus",
+                },
+            },
+            candidate_evidence=candidate,
+            current_evidence=current,
+        )
+        audit = _cleanup_audit_payload(outcome)
+        classified = classify_log_entry(LogEntry(
+            outcome="rejected",
+            validation_result={
+                "scenario": "wrong_match",
+                "wrong_match_triage": msgspec.to_builtins(audit),
+            },
+        ))
+
+        self.assertEqual(
+            classified.source_format,
+            "MP3" if candidate_lineage == 3 else None,
+        )
+        self.assertEqual(
+            classified.source_avg_bitrate,
+            candidate_avg if candidate_lineage == 3 else None,
+        )
+        self.assertEqual(
+            classified.existing_format,
+            "Opus" if current_lineage == 3 else None,
+        )
+        self.assertEqual(
+            classified.existing_min_bitrate,
+            current_avg if current_lineage == 3 else None,
+        )
+        self.assertEqual(classified.spectral_bitrate, candidate_spectral)
+        self.assertEqual(
+            classified.existing_spectral_bitrate, current_spectral)
+        self.assertEqual(classified.v0_probe_avg_bitrate, 259)
+        self.assertEqual(classified.existing_v0_probe_avg_bitrate, 260)
+        self.assertEqual(
+            classified.comparison_basis is not None,
+            candidate_lineage == 3 and current_lineage == 3,
+        )
+
+    @given(
+        repeats=st.integers(min_value=2, max_value=8),
+        payload_size=st.integers(min_value=1, max_value=128),
+    )
+    @example(repeats=5, payload_size=27)
+    def test_generated_failed_v0_research_runs_once_per_snapshot(
+        self,
+        repeats: int,
+        payload_size: int,
+    ) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, mb_release_id="generated-have"))
+        probe_calls = 0
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"x" * payload_size)
+            evidence = make_album_quality_evidence(
+                mb_release_id="generated-have",
+                source_path=source,
+                files=snapshot_audio_files(source),
+                v0_metric=None,
+            )
+            db.upsert_album_quality_evidence(evidence)
+            stored = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            db.set_request_current_evidence(42, stored.id)
+
+            def failed_probe(_path: str):
+                nonlocal probe_calls
+                probe_calls += 1
+                return None
+
+            result = None
+            for _ in range(repeats):
+                result = enrich_current_v0_research_for_preview(
+                    db,
+                    request_id=42,
+                    expected_evidence_id=stored.id,
+                    expected_snapshot_fingerprint=stored.snapshot_fingerprint,
+                    probe_fn=failed_probe,
+                )
+
+            assert result is not None and result.evidence is not None
+            assert_research_attempted_once_per_snapshot(
+                probe_calls=probe_calls,
+                evidence_attempted=(
+                    result.evidence.on_disk_v0_research_attempted
+                ),
+            )
+
+    def test_on_disk_research_v0_does_not_change_quality_decision(self):
+        candidate = make_album_quality_evidence(
+            mb_release_id="candidate",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=256,
+                avg_bitrate_kbps=256,
+                format="MP3",
+                is_cbr=True,
+            ),
+        )
+        current = make_album_quality_evidence(
+            mb_release_id="current",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                format="MP3",
+                is_cbr=True,
+            ),
+        )
+        enriched = msgspec.structs.replace(
+            current,
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=201,
+                avg_bitrate_kbps=259,
+                median_bitrate_kbps=255,
+                source_lineage="on_disk_research",
+            ),
+        )
+        assert_research_v0_is_policy_neutral(
+            full_pipeline_decision_from_evidence(candidate, current),
+            full_pipeline_decision_from_evidence(candidate, enriched),
+        )
+
+    def test_policy_neutral_checker_rejects_a_changed_decision(self):
+        with self.assertRaisesRegex(AssertionError, "changed quality policy"):
+            assert_research_v0_is_policy_neutral(
+                {"stage2_import": "downgrade"},
+                {"stage2_import": "import"},
+            )
+
+    @given(
+        candidate_kbps=st.integers(min_value=32, max_value=500),
+        current_kbps=st.integers(min_value=32, max_value=500),
+        probe_min=st.integers(min_value=32, max_value=320),
+        probe_avg=st.integers(min_value=32, max_value=320),
+    )
+    @example(
+        candidate_kbps=320,
+        current_kbps=320,
+        probe_min=201,
+        probe_avg=259,
+    )
+    def test_generated_on_disk_research_v0_is_policy_neutral(
+        self,
+        candidate_kbps: int,
+        current_kbps: int,
+        probe_min: int,
+        probe_avg: int,
+    ) -> None:
+        candidate = make_album_quality_evidence(
+            mb_release_id="candidate-generated",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=candidate_kbps,
+                avg_bitrate_kbps=candidate_kbps,
+                format="MP3",
+                is_cbr=True,
+            ),
+        )
+        current = make_album_quality_evidence(
+            mb_release_id="current-generated",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=current_kbps,
+                avg_bitrate_kbps=current_kbps,
+                format="MP3",
+                is_cbr=True,
+            ),
+        )
+        enriched = msgspec.structs.replace(
+            current,
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=probe_min,
+                avg_bitrate_kbps=probe_avg,
+                median_bitrate_kbps=probe_avg,
+                source_lineage="on_disk_research",
+            ),
+        )
+        assert_research_v0_is_policy_neutral(
+            full_pipeline_decision_from_evidence(candidate, current),
+            full_pipeline_decision_from_evidence(candidate, enriched),
+        )
     def test_flac_to_opus_keeps_four_facts_separate(self):
         source = AudioQualityMeasurement(
             min_bitrate_kbps=742,

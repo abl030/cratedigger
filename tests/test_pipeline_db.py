@@ -2200,6 +2200,78 @@ class TestDownloadLog(unittest.TestCase):
         self.assertEqual(len(history), 2)
         self.assertEqual(history[0]["soulseek_username"], "user2")
 
+    def test_force_import_round_trips_explicit_origin_and_distance(self):
+        source_id = self.db.log_download(
+            self.req_id,
+            "source-peer",
+            "flac",
+            "/failed/source",
+            outcome="rejected",
+            validation_result=json.dumps({
+                "scenario": "high_distance",
+                "distance": 0.2328,
+            }),
+        )
+        force_id = self.db.log_download(
+            self.req_id,
+            "source-peer",
+            "flac",
+            "/failed/source",
+            outcome="force_import",
+            source_download_log_id=source_id,
+        )
+
+        row = self.db.get_download_log_entry(force_id)
+        assert row is not None
+        self.assertEqual(row["source_download_log_id"], source_id)
+        self.assertAlmostEqual(
+            cast(float, row["original_beets_distance"]), 0.2328)
+
+        recent = {item["id"]: item for item in self.db.get_log(limit=10)}
+        self.assertAlmostEqual(
+            cast(float, recent[force_id]["original_beets_distance"]), 0.2328)
+
+    def test_candidate_evidence_source_overlay_is_consistent_across_reads(self):
+        from lib.quality import AudioQualityMeasurement
+
+        log_id = self.db.log_download(
+            self.req_id,
+            outcome="rejected",
+            validation_result=json.dumps({"scenario": "high_distance"}),
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="download-overlay-source",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=201,
+                avg_bitrate_kbps=259,
+                median_bitrate_kbps=255,
+                format="MP3",
+            ),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.db.set_download_log_candidate_evidence(log_id, stored.id)
+
+        rows = [
+            self.db.get_download_log_entry(log_id),
+            self.db.get_download_history(self.req_id)[0],
+            self.db.get_download_history_batch([self.req_id])[self.req_id][0],
+            next(row for row in self.db.get_log() if row["id"] == log_id),
+            self.db.get_latest_download_summaries(
+                [self.req_id]
+            )[self.req_id]["latest"],
+        ]
+        for row in rows:
+            assert row is not None
+            self.assertEqual(row["source_format"], "MP3")
+            self.assertEqual(row["source_min_bitrate"], 201)
+            self.assertEqual(row["source_avg_bitrate"], 259)
+            self.assertEqual(row["source_median_bitrate"], 255)
+
     def test_get_log_imported_filter_excludes_rejected_rows(self):
         """Contract guard: only truly-imported rows count as "imported".
 
@@ -4113,6 +4185,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
             container="flac",
             storage_format="flac",
             target_format="lossless",
+            on_disk_v0_research_attempted=True,
             v0_metric=AlbumQualityV0Metric(
                 min_bitrate_kbps=165,
                 avg_bitrate_kbps=228,
@@ -4137,6 +4210,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
 
         assert loaded is not None
         self.assertEqual(loaded.measurement.format, "flac")
+        self.assertTrue(loaded.on_disk_v0_research_attempted)
         self.assertTrue(loaded.measurement.verified_lossless)
         self.assertEqual(loaded.target_format, "lossless")
         self.assertFalse(loaded.target_is_cbr)
@@ -4149,6 +4223,132 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         )
         assert loaded.v0_metric is not None
         self.assertEqual(loaded.v0_metric.avg_bitrate_kbps, 228)
+
+    def test_v0_research_claim_is_atomic_across_connections(self):
+        from lib.pipeline_db import PipelineDB
+
+        evidence = self._seed(
+            mb_release_id="evidence-uuid",
+            v0_metric=None,
+            on_disk_v0_research_attempted=False,
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(self.db.set_request_current_evidence(
+            self.req_id, stored.id))
+
+        db_two = PipelineDB(TEST_DSN)
+        barrier = threading.Barrier(2)
+
+        def claim(db) -> bool:
+            barrier.wait(timeout=5)
+            return db.claim_current_v0_research_attempt(
+                request_id=self.req_id,
+                expected_evidence_id=stored.id,
+                expected_snapshot_fingerprint=stored.snapshot_fingerprint,
+            )
+
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(claim, (self.db, db_two)))
+        finally:
+            db_two.close()
+
+        self.assertEqual(results.count(True), 1)
+        self.assertEqual(results.count(False), 1)
+        claimed = self.db.load_album_quality_evidence_by_id(stored.id)
+        assert claimed is not None
+        self.assertTrue(claimed.on_disk_v0_research_attempted)
+        self.assertIsNone(claimed.v0_metric)
+
+    def test_v0_research_attempt_marker_is_monotonic_on_upsert(self):
+        evidence = self._seed(
+            mb_release_id="monotonic-attempt",
+            v0_metric=None,
+            on_disk_v0_research_attempted=True,
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stale_writer = msgspec.structs.replace(
+            evidence,
+            on_disk_v0_research_attempted=False,
+            storage_format="mp3",
+        )
+
+        self.db.upsert_album_quality_evidence(stale_writer)
+
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None
+        self.assertTrue(stored.on_disk_v0_research_attempted)
+        self.assertEqual(stored.storage_format, "mp3")
+
+    def test_upsert_without_v0_preserves_complete_stored_v0_tuple(self):
+        from lib.quality import AlbumQualityV0Metric
+
+        metric = AlbumQualityV0Metric(
+            min_bitrate_kbps=201,
+            avg_bitrate_kbps=259,
+            median_bitrate_kbps=255,
+            source_lineage="on_disk_research",
+            source_provenance="installed album ffmpeg V0",
+            proof_provenance="exact content snapshot",
+        )
+        evidence = self._seed(
+            mb_release_id="preserve-v0-tuple",
+            v0_metric=metric,
+            on_disk_v0_research_attempted=True,
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+
+        with self.assertRaisesRegex(
+            ValueError, "v0_metric must include at least one bitrate metric"
+        ):
+            self.db.upsert_album_quality_evidence(msgspec.structs.replace(
+                evidence,
+                v0_metric=AlbumQualityV0Metric(
+                    source_lineage="on_disk_research",
+                ),
+            ))
+
+        stale_writer = msgspec.structs.replace(
+            evidence,
+            v0_metric=None,
+            on_disk_v0_research_attempted=False,
+            storage_format="mp3",
+        )
+        self.db.upsert_album_quality_evidence(stale_writer)
+
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None
+        self.assertEqual(stored.v0_metric, metric)
+        self.assertTrue(stored.on_disk_v0_research_attempted)
+        self.assertEqual(stored.storage_format, "mp3")
+
+        replacement = AlbumQualityV0Metric(
+            avg_bitrate_kbps=261,
+            source_lineage="native_lossy_research",
+        )
+        self.db.upsert_album_quality_evidence(msgspec.structs.replace(
+            evidence,
+            v0_metric=replacement,
+            on_disk_v0_research_attempted=False,
+        ))
+        replaced = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert replaced is not None
+        self.assertEqual(replaced.v0_metric, replacement)
+        self.assertTrue(replaced.on_disk_v0_research_attempted)
 
     def test_duplicate_content_address_upsert_replaces_snapshot_rows(self):
         from lib.quality import AlbumQualityEvidenceFile
@@ -5823,7 +6023,9 @@ class TestGetWrongMatches(unittest.TestCase):
         self.assertEqual(entry["spectral_grade"], "suspect")
         self.assertEqual(entry["spectral_bitrate"], 18)
         self.assertEqual(entry["v0_probe_kind"], "lossless_source_v0")
+        self.assertEqual(entry["v0_probe_min_bitrate"], 200)
         self.assertEqual(entry["v0_probe_avg_bitrate"], 245)
+        self.assertEqual(entry["v0_probe_median_bitrate"], 240)
 
         history = self.db.get_download_history(self.req1)
         self.assertEqual(len(history), 1)
@@ -5833,6 +6035,62 @@ class TestGetWrongMatches(unittest.TestCase):
         batch = self.db.get_download_history_batch([self.req1])
         self.assertEqual(batch[self.req1][0]["spectral_grade"], "suspect")
         self.assertEqual(batch[self.req1][0]["v0_probe_kind"], "lossless_source_v0")
+
+        recent = {row["id"]: row for row in self.db.get_log(limit=50)}
+        self.assertEqual(recent[log_id]["spectral_grade"], "suspect")
+        self.assertEqual(recent[log_id]["v0_probe_min_bitrate"], 200)
+        self.assertEqual(recent[log_id]["v0_probe_avg_bitrate"], 245)
+        self.assertEqual(recent[log_id]["v0_probe_median_bitrate"], 240)
+
+    def test_v1_download_history_overlay_fails_closed_for_source_projection(self):
+        """Historical target-shaped measurements never become source facts."""
+        from lib.quality import (
+            AlbumQualityV0Metric,
+            AudioQualityMeasurement,
+        )
+
+        log_id = self.db.log_download(
+            request_id=self.req1,
+            soulseek_username="historical-v1",
+            outcome="rejected",
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="wm-uuid-1",
+            lineage_version=1,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=121,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=127,
+                format="OPUS 128",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=96,
+            ),
+            storage_format="OPUS 128",
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=201,
+                avg_bitrate_kbps=259,
+                median_bitrate_kbps=255,
+                source_lineage="on_disk_research",
+            ),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.db.set_download_log_candidate_evidence(log_id, persisted.id)
+
+        entry = self.db.get_download_log_entry(log_id)
+        assert entry is not None
+        self.assertIsNone(entry.get("source_format"))
+        self.assertIsNone(entry.get("source_min_bitrate"))
+        self.assertIsNone(entry.get("source_avg_bitrate"))
+        self.assertIsNone(entry.get("source_median_bitrate"))
+        self.assertEqual(entry["spectral_grade"], "likely_transcode")
+        self.assertEqual(entry["spectral_bitrate"], 96)
+        self.assertEqual(entry["v0_probe_kind"], "on_disk_research_v0")
+        self.assertEqual(entry["v0_probe_avg_bitrate"], 259)
 
     def test_download_history_keeps_explicit_denorm_when_evidence_missing(self):
         """Legacy rows without an evidence FK fall back to denorm columns.

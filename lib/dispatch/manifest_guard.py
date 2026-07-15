@@ -66,6 +66,7 @@ def _guard_reject(
     detail: str,
     scenario: str,
     import_job_id: int | None = None,
+    source_download_log_id: int | None = None,
 ) -> DispatchOutcome:
     """Reject a force/manual import at the manifest guard.
 
@@ -117,6 +118,7 @@ def _guard_reject(
         staged_path=failed_path,
         attempt_result=attempt_result,
         import_job_id=import_job_id,
+        source_download_log_id=source_download_log_id,
     )
     return DispatchOutcome(
         success=False,
@@ -177,14 +179,16 @@ def _guard_force_manual_audio_manifest(
             db, request_id=request_id, failed_path=failed_path,
             source_username=source_username, detail=detail,
             scenario="incomplete_fileset", attempt_result=attempt_result,
-            import_job_id=import_job_id)
+            import_job_id=import_job_id,
+            source_download_log_id=download_log_id)
 
     def extra(detail: str, *, scenario: str = "untracked_audio") -> DispatchOutcome:
         return _guard_reject(
             db, request_id=request_id, failed_path=failed_path,
             source_username=source_username, detail=detail,
             scenario=scenario, attempt_result=attempt_result,
-            import_job_id=import_job_id)
+            import_job_id=import_job_id,
+            source_download_log_id=download_log_id)
 
     # Empty source: the canonical empty_fileset early-exit in the evidence
     # pipeline self-heals this. Returning None lets the import flow reach it.

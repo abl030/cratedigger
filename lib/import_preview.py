@@ -31,6 +31,7 @@ from lib.quality_evidence import (
     legacy_current_lossless_v0_probe_from_request,
     load_or_backfill_current_evidence,
     audit_v0_probe_from_metric,
+    neutral_v0_metric_from_probe,
     persist_candidate_evidence_from_import_result,
     persist_candidate_evidence_from_measurement,
     snapshot_audio_files,
@@ -39,6 +40,7 @@ from lib.quality import (
     LOSSLESS_CODECS,
     V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
     AlbumQualityEvidence,
+    AlbumQualityV0Metric,
     AudioQualityMeasurement,
     ImportResult,
     MeasurementFailure,
@@ -48,6 +50,7 @@ from lib.quality import (
     SpectralAnalysisDetail,
     SpectralDetail,
     TargetQualityContract,
+    V0ProbeEvidence,
     classify_full_pipeline_decision,
     classify_quality_import_stages,
     compute_effective_override_bitrate,
@@ -56,6 +59,7 @@ from lib.quality import (
 )
 from lib.util import repair_mp3_headers, resolve_failed_path
 from lib.validation_envelope import decode_validation_envelope
+from lib.v0_probe import probe_installed_album_as_v0
 
 logger = logging.getLogger("cratedigger")
 
@@ -104,6 +108,30 @@ class ImportPreviewDB(QualityEvidenceDB, Protocol):
     """
 
     def get_download_log_entry(self, log_id: int) -> dict[str, Any] | None: ...
+
+    def claim_current_v0_research_attempt(
+        self,
+        *,
+        request_id: int,
+        expected_evidence_id: int,
+        expected_snapshot_fingerprint: str,
+    ) -> bool: ...
+
+    def persist_current_v0_research_metric(
+        self,
+        *,
+        request_id: int,
+        expected_evidence_id: int,
+        expected_snapshot_fingerprint: str,
+        metric: AlbumQualityV0Metric,
+    ) -> bool: ...
+
+    def release_current_v0_research_attempt(
+        self,
+        *,
+        expected_evidence_id: int,
+        expected_snapshot_fingerprint: str,
+    ) -> bool: ...
 
 
 def load_persisted_existing_spectral(
@@ -163,6 +191,296 @@ def load_persisted_existing_spectral(
         ),
         True,
     )
+
+
+def enrich_current_v0_research_for_preview(
+    db: ImportPreviewDB,
+    *,
+    request_id: int,
+    expected_evidence_id: int,
+    expected_snapshot_fingerprint: str,
+    probe_fn: Callable[[str], V0ProbeEvidence | None] = (
+        probe_installed_album_as_v0
+    ),
+) -> EvidenceBuildResult:
+    """Research missing HAVE V0 once for one exact current snapshot.
+
+    This is deliberately preview-owned. Import and cleanup actions only read
+    the persisted row. The exact current FK, evidence id, fingerprint, and
+    on-disk audio snapshot must all still agree before the probe can run, so
+    deploy orchestration can safely invoke the helper for a known historical
+    row without introducing a one-shot script or a proximity-based lookup.
+
+    A probe exception or ``None`` result is still persisted as an attempted
+    research fact. Since the marker lives on the content-addressed evidence
+    row, an unchanged snapshot is never re-encoded while a changed snapshot
+    naturally receives a fresh row and another opportunity.
+    """
+
+    try:
+        current_id = db.get_request_current_evidence_id(request_id)
+        if current_id != expected_evidence_id:
+            return EvidenceBuildResult(
+                None,
+                "stale",
+                "request current evidence no longer matches expected id",
+            )
+        evidence = db.load_album_quality_evidence_by_id(expected_evidence_id)
+    except Exception as exc:
+        return EvidenceBuildResult(
+            None,
+            "failed",
+            f"{type(exc).__name__}: {exc}",
+        )
+    if evidence is None:
+        return EvidenceBuildResult(None, "missing", "current evidence is missing")
+    if evidence.snapshot_fingerprint != expected_snapshot_fingerprint:
+        return EvidenceBuildResult(
+            None,
+            "stale",
+            "current evidence fingerprint no longer matches expected snapshot",
+        )
+    if not audio_snapshot_matches(evidence.source_path, evidence.files):
+        return EvidenceBuildResult(
+            None,
+            "stale",
+            "current album files changed since evidence capture",
+        )
+    if evidence.id != expected_evidence_id:
+        return EvidenceBuildResult(
+            None,
+            "stale",
+            "loaded evidence identity no longer matches expected id",
+        )
+    if evidence.v0_metric is not None or evidence.on_disk_v0_research_attempted:
+        return EvidenceBuildResult(evidence, "ready")
+
+    try:
+        claimed = db.claim_current_v0_research_attempt(
+            request_id=request_id,
+            expected_evidence_id=expected_evidence_id,
+            expected_snapshot_fingerprint=expected_snapshot_fingerprint,
+        )
+    except Exception as exc:
+        return EvidenceBuildResult(
+            None,
+            "failed",
+            f"{type(exc).__name__}: {exc}",
+        )
+    if not claimed:
+        # Another preview may have won the claim after our initial read. Its
+        # committed marker is enough to make this caller once-only; reload the
+        # exact row so callers see the claimed state without probing again.
+        try:
+            current_id = db.get_request_current_evidence_id(request_id)
+            claimed_evidence = db.load_album_quality_evidence_by_id(
+                expected_evidence_id
+            )
+        except Exception as exc:
+            return EvidenceBuildResult(
+                None,
+                "failed",
+                f"{type(exc).__name__}: {exc}",
+            )
+        if current_id != expected_evidence_id:
+            return EvidenceBuildResult(
+                None,
+                "stale",
+                "request current evidence changed before V0 research claim",
+            )
+        if (
+            claimed_evidence is None
+            or claimed_evidence.id != expected_evidence_id
+            or claimed_evidence.mb_release_id != evidence.mb_release_id
+            or claimed_evidence.snapshot_fingerprint
+                != expected_snapshot_fingerprint
+        ):
+            return EvidenceBuildResult(
+                None,
+                "stale",
+                "evidence identity changed before V0 research claim",
+            )
+        if (
+            claimed_evidence.v0_metric is not None
+            or claimed_evidence.on_disk_v0_research_attempted
+        ):
+            return EvidenceBuildResult(claimed_evidence, "ready")
+        return EvidenceBuildResult(
+            None,
+            "failed",
+            "current evidence V0 research claim was not acquired",
+        )
+
+    metric = None
+    try:
+        metric = neutral_v0_metric_from_probe(probe_fn(evidence.source_path))
+    except Exception:  # noqa: BLE001 - neutral research must remain fail-soft
+        logger.warning(
+            "Current on-disk V0 research probe failed for %s",
+            evidence.source_path,
+            exc_info=True,
+        )
+
+    # ffmpeg may run for long enough that the request link or album bytes can
+    # change underneath it. Recheck every authority component after the probe
+    # and before writing a metric. A live stale caller releases its marker;
+    # only a process crash intentionally leaves the once-only claim behind.
+    try:
+        current_id = db.get_request_current_evidence_id(request_id)
+        refreshed = db.load_album_quality_evidence_by_id(expected_evidence_id)
+        fresh = (
+            current_id == expected_evidence_id
+            and refreshed is not None
+            and refreshed.id == expected_evidence_id
+            and refreshed.mb_release_id == evidence.mb_release_id
+            and refreshed.snapshot_fingerprint == expected_snapshot_fingerprint
+            and audio_snapshot_matches(refreshed.source_path, refreshed.files)
+        )
+    except Exception as exc:
+        try:
+            db.release_current_v0_research_attempt(
+                expected_evidence_id=expected_evidence_id,
+                expected_snapshot_fingerprint=expected_snapshot_fingerprint,
+            )
+        except Exception:
+            logger.warning(
+                "Unable to release unverifiable V0 research claim %s",
+                expected_evidence_id,
+                exc_info=True,
+            )
+        return EvidenceBuildResult(
+            None,
+            "failed",
+            f"{type(exc).__name__}: {exc}",
+        )
+    if not fresh:
+        try:
+            db.release_current_v0_research_attempt(
+                expected_evidence_id=expected_evidence_id,
+                expected_snapshot_fingerprint=expected_snapshot_fingerprint,
+            )
+        except Exception as exc:
+            return EvidenceBuildResult(
+                None,
+                "failed",
+                f"{type(exc).__name__}: {exc}",
+            )
+        return EvidenceBuildResult(
+            None,
+            "stale",
+            "current evidence changed while V0 research probe was running",
+        )
+
+    if metric is not None:
+        try:
+            persisted_metric = db.persist_current_v0_research_metric(
+                request_id=request_id,
+                expected_evidence_id=expected_evidence_id,
+                expected_snapshot_fingerprint=expected_snapshot_fingerprint,
+                metric=metric,
+            )
+        except Exception as exc:
+            return EvidenceBuildResult(
+                None,
+                "failed",
+                f"{type(exc).__name__}: {exc}",
+            )
+        if not persisted_metric:
+            try:
+                db.release_current_v0_research_attempt(
+                    expected_evidence_id=expected_evidence_id,
+                    expected_snapshot_fingerprint=expected_snapshot_fingerprint,
+                )
+            except Exception as exc:
+                return EvidenceBuildResult(
+                    None,
+                    "failed",
+                    f"{type(exc).__name__}: {exc}",
+                )
+            return EvidenceBuildResult(
+                None,
+                "stale",
+                "current evidence changed before V0 research persistence",
+            )
+
+    try:
+        persisted = db.load_album_quality_evidence_by_id(expected_evidence_id)
+    except Exception as exc:
+        return EvidenceBuildResult(
+            None,
+            "failed",
+            f"{type(exc).__name__}: {exc}",
+        )
+    if (
+        persisted is None
+        or persisted.id != expected_evidence_id
+        or persisted.snapshot_fingerprint != expected_snapshot_fingerprint
+        or not persisted.on_disk_v0_research_attempted
+    ):
+        return EvidenceBuildResult(
+            None,
+            "failed",
+            "claimed current evidence did not preserve the expected identity",
+        )
+    return EvidenceBuildResult(persisted, "ready")
+
+
+def load_current_evidence_for_preview(
+    db: ImportPreviewDB,
+    *,
+    request_id: int,
+    mb_release_id: str,
+    quality_ranks: QualityRankConfig,
+    beets_library_root: str,
+    preloaded_evidence: AlbumQualityEvidence | None,
+    preloaded_authoritative: bool,
+) -> AlbumQualityEvidence | None:
+    """Load/backfill HAVE and perform preview-owned neutral enrichment."""
+
+    current = preloaded_evidence
+    if current is None and not preloaded_authoritative:
+        try:
+            load_result = load_or_backfill_current_evidence(
+                db,
+                request_id=request_id,
+                mb_release_id=mb_release_id,
+                quality_ranks=quality_ranks,
+                beets_library_root=beets_library_root,
+            )
+            current = load_result.evidence
+        except Exception:
+            logger.warning(
+                "Unable to load/backfill preview HAVE evidence for request %s",
+                request_id,
+                exc_info=True,
+            )
+            return None
+
+    # Backfill returns its pre-upsert value; reload through the exact request
+    # FK so the public enrichment helper always receives the surviving id.
+    try:
+        evidence_id = db.get_request_current_evidence_id(request_id)
+        if evidence_id is not None:
+            linked = db.load_album_quality_evidence_by_id(evidence_id)
+            if linked is not None:
+                current = linked
+    except Exception:
+        logger.warning(
+            "Unable to resolve preview HAVE evidence for request %s",
+            request_id,
+            exc_info=True,
+        )
+        return current
+
+    if current is None or current.id is None:
+        return current
+    enriched = enrich_current_v0_research_for_preview(
+        db,
+        request_id=request_id,
+        expected_evidence_id=current.id,
+        expected_snapshot_fingerprint=current.snapshot_fingerprint,
+    )
+    return enriched.evidence if enriched.evidence is not None else current
 
 
 def preserve_existing_source_spectral(
@@ -694,6 +1012,21 @@ def measure_and_persist_candidate_evidence(
         existing_spectral_evidence,
         current_evidence_authoritative,
     ) = load_persisted_existing_spectral(db, request_id, req)
+    current_evidence = load_current_evidence_for_preview(
+        db,
+        request_id=request_id,
+        mb_release_id=mbid,
+        quality_ranks=cfg.quality_ranks,
+        beets_library_root=getattr(cfg, "beets_directory", ""),
+        preloaded_evidence=current_evidence,
+        preloaded_authoritative=current_evidence_authoritative,
+    )
+    if current_evidence is not None:
+        current_m = current_evidence.measurement
+        existing_spectral_evidence = spectral_detail_from_persisted_source(
+            current_m.spectral_grade,
+            current_m.spectral_bitrate_kbps,
+        )
     preserve_have_source = preserve_existing_source_spectral(current_evidence)
 
     temp_root = tempfile.mkdtemp(prefix="cratedigger-import-preview-")
@@ -823,18 +1156,6 @@ def measure_and_persist_candidate_evidence(
 
         # --- Harness path: measurement allows continuing ---
         existing_v0_probe = legacy_current_lossless_v0_probe_from_request(req)
-        if current_evidence is None and not current_evidence_authoritative:
-            try:
-                current_result = load_or_backfill_current_evidence(
-                    db,
-                    request_id=request_id,
-                    mb_release_id=mbid,
-                    quality_ranks=cfg.quality_ranks,
-                    beets_library_root=getattr(cfg, "beets_directory", ""),
-                )
-                current_evidence = current_result.evidence
-            except Exception:
-                current_evidence = None
         existing_spectral = measurement.existing_spectral
         existing_grade = (
             existing_spectral.grade

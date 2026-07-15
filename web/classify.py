@@ -36,6 +36,8 @@ class LogEntry:
     # match result
     beets_scenario: Optional[str] = None
     beets_distance: Optional[float] = None
+    source_download_log_id: Optional[int] = None
+    original_beets_distance: Optional[float] = None
     beets_detail: Optional[str] = None
     soulseek_username: Optional[str] = None
     error_message: Optional[str] = None
@@ -53,6 +55,12 @@ class LogEntry:
     original_filetype: Optional[str] = None
     actual_filetype: Optional[str] = None
     actual_min_bitrate: Optional[int] = None   # kbps
+    # Immutable candidate-evidence presentation fallback for historical rows
+    # without a native import_result/source projection.
+    source_format: Optional[str] = None
+    source_min_bitrate: Optional[int] = None
+    source_avg_bitrate: Optional[int] = None
+    source_median_bitrate: Optional[int] = None
     slskd_filetype: Optional[str] = None
     spectral_grade: Optional[str] = None
     spectral_bitrate: Optional[int] = None     # kbps
@@ -163,6 +171,17 @@ class ClassifiedEntry(msgspec.Struct):
     spectral_error: str | None = None
     existing_spectral_attempted: bool | None = None
     existing_spectral_error: str | None = None
+    # The classifier owns the final attempt-local projection for both normal
+    # import rows and persisted wrong-match triage snapshots.
+    existing_min_bitrate: int | None = None
+    v0_probe_kind: str | None = None
+    v0_probe_min_bitrate: int | None = None
+    v0_probe_avg_bitrate: int | None = None
+    v0_probe_median_bitrate: int | None = None
+    existing_v0_probe_kind: str | None = None
+    existing_v0_probe_min_bitrate: int | None = None
+    existing_v0_probe_avg_bitrate: int | None = None
+    existing_v0_probe_median_bitrate: int | None = None
 
 
 class ImportJobDisplay(msgspec.Struct, frozen=True):
@@ -292,7 +311,8 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
 
     Returns a ClassifiedEntry with badge, verdict, summary, and downloaded_label.
     """
-    core = _classify(entry)
+    triage = _extract_wrong_match_triage(entry)
+    core = _classify(entry, triage_action=triage["action"])
     summary = _build_summary(entry, core.badge, core.verdict)
     downloaded_label = _build_downloaded_label(entry)
     existing_format = _extract_existing_format(entry)
@@ -300,9 +320,37 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
     lineage = _extract_quality_lineage(entry)
     disambig_reason, disambig_detail = _extract_disambiguation_failure(entry)
     bad_extensions = _extract_bad_extensions(entry)
-    triage = _extract_wrong_match_triage(entry)
     basis = _entry_comparison_basis(entry)
     spectral = _extract_attempt_spectral(entry)
+    candidate_measurement = triage["candidate_measurement"]
+    current_measurement = triage["current_measurement"]
+    if candidate_measurement is not None:
+        lineage = (
+            candidate_measurement.format,
+            candidate_measurement.min_bitrate_kbps,
+            candidate_measurement.avg_bitrate_kbps,
+            candidate_measurement.median_bitrate_kbps,
+            None,
+            None,
+        )
+        spectral = (
+            candidate_measurement.spectral_grade,
+            candidate_measurement.spectral_bitrate_kbps,
+            spectral[2], spectral[3], spectral[4], spectral[5],
+            spectral[6], spectral[7],
+        )
+    if current_measurement is not None:
+        existing_format = current_measurement.format
+        spectral = (
+            spectral[0], spectral[1],
+            current_measurement.spectral_grade,
+            current_measurement.spectral_bitrate_kbps,
+            spectral[4], spectral[5], spectral[6], spectral[7],
+        )
+    if triage["comparison_basis"] is not None:
+        basis = triage["comparison_basis"]
+    candidate_v0 = triage["candidate_v0_probe"]
+    current_v0 = triage["current_v0_probe"]
     return ClassifiedEntry(
         badge=core.badge, badge_class=core.badge_class,
         border_color=core.border_color, verdict=core.verdict,
@@ -339,6 +387,41 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         spectral_error=spectral[5],
         existing_spectral_attempted=spectral[6],
         existing_spectral_error=spectral[7],
+        existing_min_bitrate=(
+            current_measurement.min_bitrate_kbps
+            if current_measurement is not None else entry.existing_min_bitrate
+        ),
+        v0_probe_kind=(
+            candidate_v0.kind if candidate_v0 is not None else entry.v0_probe_kind
+        ),
+        v0_probe_min_bitrate=(
+            candidate_v0.min_bitrate_kbps
+            if candidate_v0 is not None else entry.v0_probe_min_bitrate
+        ),
+        v0_probe_avg_bitrate=(
+            candidate_v0.avg_bitrate_kbps
+            if candidate_v0 is not None else entry.v0_probe_avg_bitrate
+        ),
+        v0_probe_median_bitrate=(
+            candidate_v0.median_bitrate_kbps
+            if candidate_v0 is not None else entry.v0_probe_median_bitrate
+        ),
+        existing_v0_probe_kind=(
+            current_v0.kind
+            if current_v0 is not None else entry.existing_v0_probe_kind
+        ),
+        existing_v0_probe_min_bitrate=(
+            current_v0.min_bitrate_kbps
+            if current_v0 is not None else entry.existing_v0_probe_min_bitrate
+        ),
+        existing_v0_probe_avg_bitrate=(
+            current_v0.avg_bitrate_kbps
+            if current_v0 is not None else entry.existing_v0_probe_avg_bitrate
+        ),
+        existing_v0_probe_median_bitrate=(
+            current_v0.median_bitrate_kbps
+            if current_v0 is not None else entry.existing_v0_probe_median_bitrate
+        ),
     )
 
 
@@ -356,7 +439,14 @@ def _extract_quality_lineage(
 
     ir = _parse_import_result(entry)
     if ir is None:
-        return None, None, None, None, None, None
+        return (
+            entry.source_format,
+            entry.source_min_bitrate,
+            entry.source_avg_bitrate,
+            entry.source_median_bitrate,
+            None,
+            None,
+        )
     target = (
         ir.target_quality_contract.format
         if ir.target_quality_contract is not None
@@ -366,10 +456,19 @@ def _extract_quality_lineage(
         return None, None, None, None, target, ir.legacy_projection_version
     source = ir.source_measurement
     return (
-        source.format if source is not None else None,
-        source.min_bitrate_kbps if source is not None else None,
-        source.avg_bitrate_kbps if source is not None else None,
-        source.median_bitrate_kbps if source is not None else None,
+        source.format if source is not None else entry.source_format,
+        (
+            source.min_bitrate_kbps
+            if source is not None else entry.source_min_bitrate
+        ),
+        (
+            source.avg_bitrate_kbps
+            if source is not None else entry.source_avg_bitrate
+        ),
+        (
+            source.median_bitrate_kbps
+            if source is not None else entry.source_median_bitrate
+        ),
         target,
         None,
     )
@@ -469,6 +568,11 @@ def _empty_wrong_match_triage() -> dict[str, Any]:
         "preview_decision": None,
         "stage_chain": [],
         "detail": None,
+        "candidate_measurement": None,
+        "current_measurement": None,
+        "candidate_v0_probe": None,
+        "current_v0_probe": None,
+        "comparison_basis": None,
     }
 
 
@@ -476,21 +580,6 @@ def _humanize_token(value: str | None) -> str | None:
     if not value:
         return None
     return value.replace("_", " ").replace("-", " ").strip()
-
-
-def _stage_failure_family(stage_chain: list[str]) -> str | None:
-    text = " ".join(stage_chain).lower()
-    if not text:
-        return None
-    if "spectral" in text:
-        return "spectral"
-    if any(token in text for token in ("preimport", "audio", "nested")):
-        return "preimport"
-    if any(token in text for token in ("quality", "downgrade", "requeue")):
-        return "quality"
-    if "post" in text and "gate" in text:
-        return "post-import"
-    return None
 
 
 def _wrong_match_action_label(action: str | None) -> str | None:
@@ -523,12 +612,9 @@ def _build_wrong_match_triage_summary(
     if not action and not reason and not preview_verdict and not preview_decision:
         return None
 
-    family = _stage_failure_family(stage_chain)
     label = _wrong_match_action_label(action)
 
     if action == "deleted_reject":
-        if family:
-            return f"deleted: {family} reject"
         detail = (_humanize_token(reason)
                   or _humanize_token(preview_decision)
                   or _humanize_token(preview_verdict))
@@ -616,15 +702,28 @@ def _extract_wrong_match_triage(entry: LogEntry) -> dict[str, Any]:
         "preview_decision": triage.preview_decision,
         "stage_chain": triage.stage_chain,
         "detail": detail,
+        "candidate_measurement": triage.candidate_measurement,
+        "current_measurement": triage.current_measurement,
+        "candidate_v0_probe": triage.candidate_v0_probe,
+        "current_v0_probe": triage.current_v0_probe,
+        "comparison_basis": triage.comparison_basis,
     }
 
 
-def _classify(entry: LogEntry) -> _Classification:
+def _classify(
+    entry: LogEntry,
+    *,
+    triage_action: str | None = None,
+) -> _Classification:
     """Build the typed core classification for one log entry."""
 
     # --- Rejected ---
     if entry.outcome == "rejected":
         verdict = _rejection_verdict(entry)
+        if triage_action in ("deleted_reject", "deleted_verified_lossless_parent"):
+            return _Classification(
+                "Triaged · deleted", "badge-library", "#6a5", verdict
+            )
         return _Classification("Rejected", "badge-rejected", "#a33", verdict)
 
     # --- Timeout (download-phase; outcome="timeout" is written ONLY by
@@ -889,6 +988,8 @@ def _downloaded_min_bitrate_kbps(entry: LogEntry) -> int | None:
     if ir is not None and ir.source_measurement is not None:
         if ir.source_measurement.min_bitrate_kbps is not None:
             return ir.source_measurement.min_bitrate_kbps
+    if entry.source_min_bitrate:
+        return entry.source_min_bitrate
     if entry.bitrate:
         return entry.bitrate // 1000
     return None
@@ -1185,7 +1286,7 @@ def _build_downloaded_label(entry: LogEntry) -> str:
 
     Examples: "MP3 320", "FLAC (converted to MP3 V0)", "MP3 V2"
     """
-    fmt = entry.actual_filetype or entry.filetype or ""
+    fmt = entry.actual_filetype or entry.source_format or entry.filetype or ""
     if not fmt:
         return ""
 

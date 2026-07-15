@@ -191,6 +191,68 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["log"][0]["beets_bitrate"], 194)
         self.assertEqual(data["log"][0]["beets_avg_bitrate"], 288)
 
+    def test_pipeline_log_projects_complete_canonical_candidate_evidence(self):
+        from lib.quality import AlbumQualityV0Metric, AudioQualityMeasurement
+        from tests.helpers import make_album_quality_evidence
+
+        log_id = self.db.log_download(
+            100,
+            outcome="rejected",
+            validation_result={
+                "scenario": "high_distance",
+                "distance": 0.2328,
+                "wrong_match_triage": {
+                    "action": "deleted_reject",
+                    "reason": "requeue_upgrade",
+                    "preview_verdict": "confident_reject",
+                    "preview_decision": "requeue_upgrade",
+                    "stage_chain": ["quality:reject"],
+                },
+            },
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="pipeline-log-overlay",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=201,
+                avg_bitrate_kbps=259,
+                median_bitrate_kbps=255,
+                format="MP3",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=96,
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=201,
+                avg_bitrate_kbps=259,
+                median_bitrate_kbps=255,
+                source_lineage="native_lossy_research",
+            ),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.db.set_download_log_candidate_evidence(log_id, stored.id)
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        self.assertEqual(item["badge"], "Triaged · deleted")
+        self.assertEqual(item["source_format"], "MP3")
+        self.assertEqual(item["source_min_bitrate"], 201)
+        self.assertEqual(item["source_avg_bitrate"], 259)
+        self.assertEqual(item["source_median_bitrate"], 255)
+        self.assertEqual(item["downloaded_label"], "MP3 V2")
+        self.assertEqual(item["spectral_grade"], "likely_transcode")
+        self.assertEqual(item["spectral_bitrate"], 96)
+        self.assertEqual(item["v0_probe_kind"],
+                         "native_lossy_research_v0")
+        self.assertEqual(item["v0_probe_min_bitrate"], 201)
+        self.assertEqual(item["v0_probe_avg_bitrate"], 259)
+        self.assertEqual(item["v0_probe_median_bitrate"], 255)
+
     def test_disk_coverage_contract(self):
         import web.server as srv
 
@@ -259,8 +321,10 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(item["verdict"], "Wrong match (dist 0.190)")
         self.assertEqual(item["summary"],
                          "Wrong match (dist 0.190) · moundsofass")
+        self.assertEqual(item["badge"], "Triaged · deleted")
         self.assertEqual(item["wrong_match_triage_action"], "deleted_reject")
-        self.assertIn("spectral", item["wrong_match_triage_summary"])
+        self.assertIn("requeue upgrade", item["wrong_match_triage_summary"])
+        self.assertNotIn("spectral", item["wrong_match_triage_summary"])
         self.assertEqual(item["wrong_match_triage_stage_chain"],
                          ["mp3_spectral:reject"])
 
@@ -514,8 +578,10 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
 
         self.assertEqual(status, 200)
         item = data["history"][0]
+        self.assertEqual(item["badge"], "Triaged · deleted")
         self.assertEqual(item["wrong_match_triage_action"], "deleted_reject")
-        self.assertIn("spectral", item["wrong_match_triage_summary"])
+        self.assertIn("requeue upgrade", item["wrong_match_triage_summary"])
+        self.assertNotIn("spectral", item["wrong_match_triage_summary"])
         self.assertEqual(item["wrong_match_triage_preview_verdict"],
                          "confident_reject")
         self.assertEqual(item["wrong_match_triage_stage_chain"],

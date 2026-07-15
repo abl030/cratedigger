@@ -27,6 +27,7 @@ from lib.import_preview import (
     PREVIEW_VERDICT_EVIDENCE_READY,
     PREVIEW_VERDICT_MEASUREMENT_FAILED,
     ImportPreviewResult,
+    load_current_evidence_for_preview,
     load_persisted_existing_spectral,
     measure_and_persist_candidate_evidence,
     preserve_existing_source_spectral,
@@ -50,6 +51,7 @@ from lib.measurement import (
     analyze_spectral_audit_path,
     collect_release_attempt_spectral_audit,
     existing_spectral_resolver_for_config,
+    spectral_detail_from_persisted_source,
 )
 from lib.quality import (
     ActiveDownloadState,
@@ -448,13 +450,30 @@ def process_claimed_preview_job(
             try:
                 req = db.get_request(job.request_id) or {}
                 mb_release_id = str(req.get("mb_release_id") or "")
-                current_evidence, persisted_existing, _ = (
+                current_evidence, persisted_existing, authoritative = (
                     load_persisted_existing_spectral(
                         db,
                         job.request_id,
                         req,
                     )
                 )
+                preview_cfg = read_runtime_config()
+                current_evidence = load_current_evidence_for_preview(
+                    db,
+                    request_id=job.request_id,
+                    mb_release_id=mb_release_id,
+                    quality_ranks=preview_cfg.quality_ranks,
+                    beets_library_root=getattr(
+                        preview_cfg, "beets_directory", ""
+                    ),
+                    preloaded_evidence=current_evidence,
+                    preloaded_authoritative=authoritative,
+                )
+                if current_evidence is not None:
+                    persisted_existing = spectral_detail_from_persisted_source(
+                        current_evidence.measurement.spectral_grade,
+                        current_evidence.measurement.spectral_bitrate_kbps,
+                    )
                 preserve_have_source = preserve_existing_source_spectral(
                     current_evidence,
                 )

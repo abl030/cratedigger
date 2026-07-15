@@ -334,7 +334,7 @@ class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
             },
         )
 
-    def test_deleted_spectral_reject_surfaces_without_changing_original_verdict(self):
+    def test_deleted_spectral_reject_becomes_triaged_deleted_badge(self):
         result = classify_log_entry(self._rejected_with_triage({
             "action": "deleted_reject",
             "reason": "spectral_reject",
@@ -343,7 +343,8 @@ class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
             "stage_chain": ["stage1_spectral:reject"],
         }))
 
-        self.assertEqual(result.badge, "Rejected")
+        self.assertEqual(result.badge, "Triaged · deleted")
+        self.assertEqual(result.badge_class, "badge-library")
         self.assertEqual(result.verdict, "Wrong match (dist 0.190)")
         self.assertEqual(result.summary,
                          "Wrong match (dist 0.190) · moundsofass")
@@ -358,23 +359,78 @@ class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
         self.assertIn("deleted", result.wrong_match_triage_summary or "")
         self.assertIn("spectral", result.wrong_match_triage_summary or "")
 
-    def test_stage_chain_supplies_spectral_fallback_when_reason_is_generic(self):
+    def test_non_reject_spectral_stage_never_overrides_persisted_reason(self):
         result = classify_log_entry(self._rejected_with_triage({
             "action": "deleted_reject",
-            "reason": "requeue_upgrade",
+            "reason": "suspect_lossless_downgrade",
             "preview_verdict": "confident_reject",
-            "preview_decision": "requeue_upgrade",
+            "preview_decision": "downgrade",
             "stage_chain": [
-                "stage0_spectral_gate:would_run",
-                "mp3_spectral:reject",
+                "stage0_spectral_gate:import",
+                "stage1_spectral:skipped_vbr_high_avg",
+                "stage2_import:downgrade",
             ],
         }))
 
         self.assertEqual(result.wrong_match_triage_action, "deleted_reject")
         self.assertIn("deleted", result.wrong_match_triage_summary or "")
-        self.assertIn("spectral", result.wrong_match_triage_summary or "")
-        self.assertNotIn("requeue upgrade",
+        self.assertIn("suspect lossless downgrade",
+                      result.wrong_match_triage_summary or "")
+        self.assertNotIn("spectral reject",
                          result.wrong_match_triage_summary or "")
+
+    def test_triage_snapshot_projects_ordinary_in_have_evidence(self):
+        result = classify_log_entry(self._rejected_with_triage({
+            "action": "deleted_reject",
+            "outcome": "deleted",
+            "reason": "suspect_lossless_downgrade",
+            "candidate_measurement": {
+                "min_bitrate_kbps": 201,
+                "avg_bitrate_kbps": 320,
+                "format": "MP3",
+                "spectral_grade": "likely_transcode",
+                "spectral_bitrate_kbps": 96,
+            },
+            "current_measurement": {
+                "min_bitrate_kbps": 320,
+                "avg_bitrate_kbps": 320,
+                "format": "MP3",
+                "is_cbr": True,
+            },
+            "candidate_v0_probe": {
+                "kind": "native_lossy_research_v0",
+                "min_bitrate_kbps": 201,
+                "avg_bitrate_kbps": 259,
+            },
+            "current_v0_probe": {
+                "kind": "on_disk_research_v0",
+                "min_bitrate_kbps": 202,
+                "avg_bitrate_kbps": 260,
+            },
+            "comparison_basis": {
+                "verdict": "worse",
+                "branch": "same_rank_bitrate",
+                "new_rank": "transparent",
+                "existing_rank": "transparent",
+                "new_metric": "avg",
+                "existing_metric": "avg",
+                "new_value_kbps": 320,
+                "existing_value_kbps": 320,
+                "new_format": "MP3",
+                "existing_format": "MP3",
+            },
+        }))
+
+        self.assertEqual(result.source_format, "MP3")
+        self.assertEqual(result.source_avg_bitrate, 320)
+        self.assertEqual(result.existing_format, "MP3")
+        self.assertEqual(result.existing_min_bitrate, 320)
+        self.assertEqual(result.spectral_grade, "likely_transcode")
+        self.assertEqual(result.v0_probe_avg_bitrate, 259)
+        self.assertEqual(result.existing_v0_probe_kind,
+                         "on_disk_research_v0")
+        self.assertEqual(result.existing_v0_probe_avg_bitrate, 260)
+        self.assertIsNotNone(result.comparison_basis)
 
     def test_kept_would_import_surfaces_importable_summary(self):
         result = classify_log_entry(self._rejected_with_triage({
@@ -414,7 +470,8 @@ class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
         ))
 
         self.assertEqual(result.wrong_match_triage_action, "deleted_reject")
-        self.assertIn("spectral", result.wrong_match_triage_summary or "")
+        self.assertIn("requeue upgrade", result.wrong_match_triage_summary or "")
+        self.assertNotIn("spectral", result.wrong_match_triage_summary or "")
         self.assertEqual(result.wrong_match_triage_stage_chain,
                          ["stage1_spectral:reject"])
 

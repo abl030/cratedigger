@@ -3263,7 +3263,7 @@ class TestPinStatusDomainMigration(unittest.TestCase):
         dsn = _create_fresh_database(name)
         try:
             applied = apply_migrations(dsn, DEFAULT_MIGRATIONS_DIR)
-            self.assertEqual(applied[-1].version, 51)
+            self.assertEqual(applied[-1].version, 52)
             self.assertEqual(
                 self._query(
                     dsn,
@@ -3611,6 +3611,309 @@ class TestSimplifySlskdTransferOwnershipMigration(unittest.TestCase):
         finally:
             _drop_database(name)
 
+
+@requires_postgres
+class TestDownloadLogOriginMigration(unittest.TestCase):
+    """Migration 052 makes force/manual audit lineage explicit and valid."""
+
+    def _copy_through(self, target: str, version: int) -> None:
+        for migration in discover_migrations(DEFAULT_MIGRATIONS_DIR):
+            if migration.version <= version:
+                shutil.copy2(migration.path, target)
+
+    def _seed_request(self, cur, suffix: str) -> int:
+        cur.execute("""
+            INSERT INTO album_requests
+                (artist_name, album_title, source, status)
+            VALUES (%s, %s, 'request', 'wanted')
+            RETURNING id
+        """, (f"Origin {suffix}", f"Album {suffix}"))
+        row = cur.fetchone()
+        assert row is not None
+        return int(row[0])
+
+    def _seed_log(
+        self,
+        cur,
+        *,
+        request_id: int,
+        outcome: str,
+        created_at: str,
+    ) -> int:
+        cur.execute("""
+            INSERT INTO download_log (request_id, outcome, created_at)
+            VALUES (%s, %s, %s) RETURNING id
+        """, (request_id, outcome, created_at))
+        row = cur.fetchone()
+        assert row is not None
+        return int(row[0])
+
+    def _seed_completed_force_job(
+        self,
+        cur,
+        *,
+        request_id: int,
+        source_id: int,
+        dismissal_id: int,
+        completed_at: str,
+    ) -> int:
+        cur.execute("""
+            INSERT INTO import_jobs (
+                job_type, status, request_id, payload, result, completed_at
+            ) VALUES (
+                'force_import', 'completed', %s,
+                jsonb_build_object('download_log_id', %s),
+                jsonb_build_object(
+                    'wrong_match_dismissal',
+                    jsonb_build_object('download_log_id', %s)
+                ),
+                %s
+            ) RETURNING id
+        """, (request_id, source_id, dismissal_id, completed_at))
+        row = cur.fetchone()
+        assert row is not None
+        return int(row[0])
+
+    def test_exact_historical_force_bundle_is_backfilled(self) -> None:
+        name = "cratedigger_test_download_origin_052_exact"
+        dsn = _create_fresh_database(name)
+        try:
+            with tempfile.TemporaryDirectory() as migrations_dir:
+                self._copy_through(migrations_dir, 51)
+                apply_migrations(dsn, migrations_dir)
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        request_id = self._seed_request(cur, "exact")
+                        source_id = self._seed_log(
+                            cur,
+                            request_id=request_id,
+                            outcome="rejected",
+                            created_at="2026-07-14T01:00:00Z",
+                        )
+                        output_id = self._seed_log(
+                            cur,
+                            request_id=request_id,
+                            outcome="force_import",
+                            created_at="2026-07-14T01:05:00Z",
+                        )
+                        self._seed_completed_force_job(
+                            cur,
+                            request_id=request_id,
+                            source_id=source_id,
+                            dismissal_id=source_id,
+                            completed_at="2026-07-14T01:05:00Z",
+                        )
+                finally:
+                    conn.close()
+
+                self._copy_through(migrations_dir, 52)
+                self.assertEqual(
+                    [m.version for m in apply_migrations(dsn, migrations_dir)],
+                    [52],
+                )
+                conn = psycopg2.connect(dsn)
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT source_download_log_id FROM download_log "
+                            "WHERE id = %s",
+                            (output_id,),
+                        )
+                        self.assertEqual(cur.fetchone(), (source_id,))
+                finally:
+                    conn.close()
+        finally:
+            _drop_database(name)
+
+    def test_ambiguous_and_nonmatching_force_bundles_remain_unlinked(self) -> None:
+        name = "cratedigger_test_download_origin_052_reject"
+        dsn = _create_fresh_database(name)
+        try:
+            with tempfile.TemporaryDirectory() as migrations_dir:
+                self._copy_through(migrations_dir, 51)
+                apply_migrations(dsn, migrations_dir)
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        request_id = self._seed_request(cur, "reject")
+                        source_id = self._seed_log(
+                            cur,
+                            request_id=request_id,
+                            outcome="rejected",
+                            created_at="2026-07-14T02:00:00Z",
+                        )
+                        other_source_id = self._seed_log(
+                            cur,
+                            request_id=request_id,
+                            outcome="rejected",
+                            created_at="2026-07-14T02:01:00Z",
+                        )
+                        ambiguous_output = self._seed_log(
+                            cur,
+                            request_id=request_id,
+                            outcome="force_import",
+                            created_at="2026-07-14T02:05:00Z",
+                        )
+                        for _ in range(2):
+                            self._seed_completed_force_job(
+                                cur,
+                                request_id=request_id,
+                                source_id=source_id,
+                                dismissal_id=source_id,
+                                completed_at="2026-07-14T02:05:00Z",
+                            )
+                        mismatched_output = self._seed_log(
+                            cur,
+                            request_id=request_id,
+                            outcome="force_import",
+                            created_at="2026-07-14T02:10:00Z",
+                        )
+                        self._seed_completed_force_job(
+                            cur,
+                            request_id=request_id,
+                            source_id=source_id,
+                            dismissal_id=other_source_id,
+                            completed_at="2026-07-14T02:10:00Z",
+                        )
+                        timestamp_output = self._seed_log(
+                            cur,
+                            request_id=request_id,
+                            outcome="force_import",
+                            created_at="2026-07-14T02:15:00Z",
+                        )
+                        self._seed_completed_force_job(
+                            cur,
+                            request_id=request_id,
+                            source_id=source_id,
+                            dismissal_id=source_id,
+                            completed_at="2026-07-14T02:15:01Z",
+                        )
+                finally:
+                    conn.close()
+
+                self._copy_through(migrations_dir, 52)
+                apply_migrations(dsn, migrations_dir)
+                conn = psycopg2.connect(dsn)
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT id, source_download_log_id
+                            FROM download_log
+                            WHERE id = ANY(%s)
+                            ORDER BY id
+                        """, ([
+                            ambiguous_output,
+                            mismatched_output,
+                            timestamp_output,
+                        ],))
+                        self.assertEqual(cur.fetchall(), [
+                            (ambiguous_output, None),
+                            (mismatched_output, None),
+                            (timestamp_output, None),
+                        ])
+                finally:
+                    conn.close()
+        finally:
+            _drop_database(name)
+
+    def test_self_fk_constraint_and_partial_index(self) -> None:
+        conn = psycopg2.connect(TEST_DSN)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT is_nullable
+                    FROM information_schema.columns
+                    WHERE table_name = 'download_log'
+                      AND column_name = 'source_download_log_id'
+                """)
+                self.assertEqual(cur.fetchone(), ("YES",))
+                cur.execute("""
+                    SELECT is_nullable, column_default
+                    FROM information_schema.columns
+                    WHERE table_name = 'album_quality_evidence'
+                      AND column_name = 'on_disk_v0_research_attempted'
+                """)
+                marker_column = cur.fetchone()
+                assert marker_column is not None
+                self.assertEqual(marker_column[0], "NO")
+                self.assertIn("false", marker_column[1].lower())
+                cur.execute("""
+                    SELECT constraint_name
+                    FROM information_schema.table_constraints
+                    WHERE table_name = 'download_log'
+                      AND constraint_type = 'FOREIGN KEY'
+                      AND constraint_name LIKE '%source_download_log_id%'
+                """)
+                self.assertIsNotNone(cur.fetchone())
+                cur.execute("""
+                    SELECT indexdef
+                    FROM pg_indexes
+                    WHERE tablename = 'download_log'
+                      AND indexname = 'idx_download_log_source_download_log_id'
+                """)
+                index_row = cur.fetchone()
+                assert index_row is not None
+                self.assertIn("WHERE (source_download_log_id IS NOT NULL)",
+                              index_row[0])
+
+                cur.execute("""
+                    INSERT INTO album_requests
+                        (artist_name, album_title, source, status)
+                    VALUES ('Origin Artist', 'Origin Album', 'request', 'wanted')
+                    RETURNING id
+                """)
+                request_row = cur.fetchone()
+                assert request_row is not None
+                request_id = request_row[0]
+                cur.execute("""
+                    INSERT INTO download_log (request_id, outcome)
+                VALUES (%s, 'rejected') RETURNING id
+                """, (request_id,))
+                origin_row = cur.fetchone()
+                assert origin_row is not None
+                origin_id = origin_row[0]
+                cur.execute("""
+                    INSERT INTO download_log
+                        (request_id, outcome, source_download_log_id)
+                    VALUES (%s, 'force_import', %s)
+                """, (request_id, origin_id))
+
+                cur.execute("SAVEPOINT invalid_origin")
+                with self.assertRaises(psycopg2.errors.ForeignKeyViolation):
+                    cur.execute("""
+                        INSERT INTO download_log
+                            (request_id, outcome, source_download_log_id)
+                        VALUES (%s, 'force_import', 9223372036854775807)
+                    """, (request_id,))
+                cur.execute("ROLLBACK TO SAVEPOINT invalid_origin")
+
+                cur.execute("SELECT nextval(pg_get_serial_sequence('download_log', 'id'))")
+                self_row = cur.fetchone()
+                assert self_row is not None
+                self_id = self_row[0]
+                cur.execute("SAVEPOINT self_origin")
+                with self.assertRaises(psycopg2.errors.CheckViolation):
+                    cur.execute("""
+                        INSERT INTO download_log
+                            (id, request_id, outcome, source_download_log_id)
+                        VALUES (%s, %s, 'force_import', %s)
+                    """, (self_id, request_id, self_id))
+                cur.execute("ROLLBACK TO SAVEPOINT self_origin")
+
+                cur.execute("""
+                    SELECT name FROM schema_migrations WHERE version = 52
+                """)
+                self.assertEqual(cur.fetchone(), ("download_log_origin",))
+        finally:
+            conn.rollback()
+            conn.close()
+
+
+@requires_postgres
+class TestSimplifySlskdTransferOwnershipCurrentSchema(unittest.TestCase):
     def test_current_schema_records_051_without_attempt_indexes(self) -> None:
         conn = psycopg2.connect(TEST_DSN)
         try:

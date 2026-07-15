@@ -356,8 +356,20 @@
   .p-hist-forensics summary { cursor: pointer; user-select: none; color: #556; font-size: 0.9em; }
   .p-hist-forensics summary:hover, .p-hist-forensics[open] summary { color: #889; }
   /* Compact IN/HAVE evidence strip on Recents list rows (issue #575). */
-  .r-evidence { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.95em; color: #7a8a99; }
-  .r-evidence .r-ev-tag { color: #556; font-weight: 600; font-size: 0.85em; letter-spacing: 0.5px; }
+  .r-evidence { display: grid; grid-template-columns: 3.6em minmax(4.5em, 1.05fr) minmax(5.5em, 1fr) minmax(4.5em, 0.85fr) minmax(6.5em, 1fr) minmax(8em, 1.35fr); column-gap: 0.7em; row-gap: 2px; align-items: baseline; width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.95em; color: #7a8a99; }
+  .r-ev-row { display: contents; }
+  .r-evidence .r-ev-tag { color: #d3deea; font-weight: 900; font-size: 1.08em; line-height: 1; letter-spacing: 0.9px; text-shadow: 0 0 8px rgba(170, 205, 235, 0.24); }
+  .r-ev-cell { min-width: 0; overflow-wrap: normal; word-break: normal; white-space: nowrap; }
+  @media (max-width: 720px) {
+    .r-evidence { grid-template-columns: 4.3em minmax(5em, 0.8fr) minmax(0, 1.8fr); column-gap: 0.65em; row-gap: 4px; font-size: 1em; }
+    .r-ev-row { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; grid-template-rows: auto auto auto; row-gap: 1px; padding: 2px 0; }
+    .r-evidence .r-ev-tag { grid-column: 1; grid-row: 1 / 4; align-self: start; padding-top: 1px; font-size: 1.15em; }
+    .r-ev-source { grid-column: 2; grid-row: 1; }
+    .r-ev-metric { grid-column: 3; grid-row: 1; }
+    .r-ev-rank { grid-column: 2; grid-row: 2; }
+    .r-ev-spectral { grid-column: 3; grid-row: 2; white-space: normal; }
+    .r-ev-v0 { grid-column: 2 / -1; grid-row: 3; white-space: normal; padding-bottom: 2px; }
+  }
   /* Failure prose can carry raw paths + quoted transport errors — clamp
      it to two lines; the full text stays in the hover title. */
   .r-summary { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-align: left; }

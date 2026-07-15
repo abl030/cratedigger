@@ -105,23 +105,97 @@ class _DownloadLogMixin(_PipelineDBBase):
                            "rejected" (rejected + failed + timeout),
                            or None for all
         """
-        base = """
-            SELECT dl.*,
-                   ar.album_title, ar.artist_name, ar.mb_release_id,
-                   ar.year, ar.country, ar.status AS request_status,
-                   ar.min_bitrate AS request_min_bitrate,
-                   ar.prev_min_bitrate, ar.search_filetype_override,
-                   ar.source AS request_source
-            FROM download_log dl
-            JOIN album_requests ar ON dl.request_id = ar.id
-        """
         if outcome_filter == "imported":
-            base += " WHERE dl.outcome IN ('success', 'force_import')"
+            query = """
+                SELECT dl.*,
+                       e.format AS _evidence_source_format,
+                       e.min_bitrate_kbps AS _evidence_source_min_bitrate,
+                       e.avg_bitrate_kbps AS _evidence_source_avg_bitrate,
+                       e.median_bitrate_kbps AS _evidence_source_median_bitrate,
+                       e.lineage_version AS _evidence_lineage_version,
+                       e.spectral_grade AS _evidence_spectral_grade,
+                       e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
+                       e.v0_source_lineage AS _evidence_v0_probe_kind,
+                       e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
+                       e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
+                       e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
+                       origin.beets_distance AS original_beets_distance,
+                       ar.album_title, ar.artist_name, ar.mb_release_id,
+                       ar.year, ar.country, ar.status AS request_status,
+                       ar.min_bitrate AS request_min_bitrate,
+                       ar.prev_min_bitrate, ar.search_filetype_override,
+                       ar.source AS request_source
+                FROM download_log dl
+                LEFT JOIN album_quality_evidence e
+                    ON e.id = dl.candidate_evidence_id
+                LEFT JOIN download_log origin
+                    ON origin.id = dl.source_download_log_id
+                JOIN album_requests ar ON dl.request_id = ar.id
+                WHERE dl.outcome IN ('success', 'force_import')
+                ORDER BY dl.created_at DESC LIMIT %s
+            """
         elif outcome_filter == "rejected":
-            base += " WHERE dl.outcome IN ('rejected', 'failed', 'timeout')"
-        base += " ORDER BY dl.created_at DESC LIMIT %s"
-        cur = self._execute(base, (limit,))
-        return [dict(r) for r in cur.fetchall()]
+            query = """
+                SELECT dl.*,
+                       e.format AS _evidence_source_format,
+                       e.min_bitrate_kbps AS _evidence_source_min_bitrate,
+                       e.avg_bitrate_kbps AS _evidence_source_avg_bitrate,
+                       e.median_bitrate_kbps AS _evidence_source_median_bitrate,
+                       e.lineage_version AS _evidence_lineage_version,
+                       e.spectral_grade AS _evidence_spectral_grade,
+                       e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
+                       e.v0_source_lineage AS _evidence_v0_probe_kind,
+                       e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
+                       e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
+                       e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
+                       origin.beets_distance AS original_beets_distance,
+                       ar.album_title, ar.artist_name, ar.mb_release_id,
+                       ar.year, ar.country, ar.status AS request_status,
+                       ar.min_bitrate AS request_min_bitrate,
+                       ar.prev_min_bitrate, ar.search_filetype_override,
+                       ar.source AS request_source
+                FROM download_log dl
+                LEFT JOIN album_quality_evidence e
+                    ON e.id = dl.candidate_evidence_id
+                LEFT JOIN download_log origin
+                    ON origin.id = dl.source_download_log_id
+                JOIN album_requests ar ON dl.request_id = ar.id
+                WHERE dl.outcome IN ('rejected', 'failed', 'timeout')
+                ORDER BY dl.created_at DESC LIMIT %s
+            """
+        else:
+            query = """
+                SELECT dl.*,
+                       e.format AS _evidence_source_format,
+                       e.min_bitrate_kbps AS _evidence_source_min_bitrate,
+                       e.avg_bitrate_kbps AS _evidence_source_avg_bitrate,
+                       e.median_bitrate_kbps AS _evidence_source_median_bitrate,
+                       e.lineage_version AS _evidence_lineage_version,
+                       e.spectral_grade AS _evidence_spectral_grade,
+                       e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
+                       e.v0_source_lineage AS _evidence_v0_probe_kind,
+                       e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
+                       e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
+                       e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
+                       origin.beets_distance AS original_beets_distance,
+                       ar.album_title, ar.artist_name, ar.mb_release_id,
+                       ar.year, ar.country, ar.status AS request_status,
+                       ar.min_bitrate AS request_min_bitrate,
+                       ar.prev_min_bitrate, ar.search_filetype_override,
+                       ar.source AS request_source
+                FROM download_log dl
+                LEFT JOIN album_quality_evidence e
+                    ON e.id = dl.candidate_evidence_id
+                LEFT JOIN download_log origin
+                    ON origin.id = dl.source_download_log_id
+                JOIN album_requests ar ON dl.request_id = ar.id
+                ORDER BY dl.created_at DESC LIMIT %s
+            """
+        cur = self._execute(query, (limit,))
+        return [
+            self._overlay_evidence_onto_download_log_row(dict(r))
+            for r in cur.fetchall()
+        ]
 
 
     # --- Download logging ---
@@ -171,6 +245,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                      # migration 043) — a list of FileFailureDetail
                      # dicts (via msgspec.to_builtins), or None.
                      transfer_detail: Any = None,
+                     source_download_log_id: int | None = None,
                      ) -> int:
         beets_distance_value, beets_scenario_value = derive_validation_log_columns(
             validation_result,
@@ -193,10 +268,10 @@ class _DownloadLogMixin(_PipelineDBBase):
                 v0_probe_avg_bitrate, v0_probe_median_bitrate,
                 existing_v0_probe_kind, existing_v0_probe_min_bitrate,
                 existing_v0_probe_avg_bitrate, existing_v0_probe_median_bitrate,
-                transfer_detail
+                transfer_detail, source_download_log_id
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (
             request_id, soulseek_username, filetype, download_path,
@@ -215,6 +290,7 @@ class _DownloadLogMixin(_PipelineDBBase):
             existing_v0_probe_avg_bitrate, existing_v0_probe_median_bitrate,
             psycopg2.extras.Json(transfer_detail)
             if transfer_detail is not None else None,
+            source_download_log_id,
         ))
         row = cur.fetchone()
         self.conn.commit()
@@ -345,25 +421,6 @@ class _DownloadLogMixin(_PipelineDBBase):
     # ``dl.*`` automatically projects ``source`` and ``youtube_metadata``
     # (migration 037) onto every consumer; no additional column list
     # change is needed here.
-    # History queries compose from these two named parts so variants
-    # (plain SELECT vs DISTINCT ON) build explicitly instead of
-    # string-replacing tokens inside a finished statement (#433).
-    _DOWNLOAD_LOG_HISTORY_COLUMNS = """
-            dl.*,
-            e.spectral_grade        AS _evidence_spectral_grade,
-            e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
-            e.v0_source_lineage     AS _evidence_v0_probe_kind,
-            e.v0_avg_bitrate_kbps   AS _evidence_v0_probe_avg_bitrate
-    """
-    _DOWNLOAD_LOG_HISTORY_FROM = """
-        FROM download_log dl
-        LEFT JOIN album_quality_evidence e
-            ON e.id = dl.candidate_evidence_id
-    """
-    _DOWNLOAD_LOG_HISTORY_SELECT = (
-        "SELECT" + _DOWNLOAD_LOG_HISTORY_COLUMNS + _DOWNLOAD_LOG_HISTORY_FROM
-    )
-
     # Evidence stores lineage as ``lossless_source`` / ``native_lossy_research``;
     # download_log.v0_probe_kind stores the wire-shaped kind
     # ``lossless_source_v0`` / ``native_lossy_research_v0`` (constrained by
@@ -380,13 +437,27 @@ class _DownloadLogMixin(_PipelineDBBase):
     def _overlay_evidence_onto_download_log_row(
         cls, row: dict[str, Any]
     ) -> dict[str, Any]:
-        for legacy, overlay in (
-            ("spectral_grade",       "_evidence_spectral_grade"),
-            ("spectral_bitrate",     "_evidence_spectral_bitrate"),
-            ("v0_probe_kind",        "_evidence_v0_probe_kind"),
-            ("v0_probe_avg_bitrate", "_evidence_v0_probe_avg_bitrate"),
+        # Migration 050 deliberately marks historical evidence as lineage v1:
+        # its measurement format/bitrates may be a projected target rather
+        # than facts about the downloaded source. Only v3 proves those fields
+        # source-semantic. Spectral and V0 facts were never target projections,
+        # so they remain safe to recover from either lineage.
+        source_semantic = row.pop("_evidence_lineage_version", None) == 3
+        for legacy, overlay, requires_source_semantic in (
+            ("source_format",          "_evidence_source_format", True),
+            ("source_min_bitrate",     "_evidence_source_min_bitrate", True),
+            ("source_avg_bitrate",     "_evidence_source_avg_bitrate", True),
+            ("source_median_bitrate",  "_evidence_source_median_bitrate", True),
+            ("spectral_grade",       "_evidence_spectral_grade", False),
+            ("spectral_bitrate",     "_evidence_spectral_bitrate", False),
+            ("v0_probe_kind",        "_evidence_v0_probe_kind", False),
+            ("v0_probe_min_bitrate", "_evidence_v0_probe_min_bitrate", False),
+            ("v0_probe_avg_bitrate", "_evidence_v0_probe_avg_bitrate", False),
+            ("v0_probe_median_bitrate", "_evidence_v0_probe_median_bitrate", False),
         ):
             evidence_value = row.pop(overlay, None)
+            if requires_source_semantic and not source_semantic:
+                continue
             if row.get(legacy) is None and evidence_value is not None:
                 if legacy == "v0_probe_kind":
                     evidence_value = cls._EVIDENCE_LINEAGE_TO_PROBE_KIND.get(
@@ -399,7 +470,27 @@ class _DownloadLogMixin(_PipelineDBBase):
     def get_download_log_entry(self, log_id: int) -> dict[str, Any] | None:
         """Get a single download_log entry by its ID."""
         cur = self._execute(
-            self._DOWNLOAD_LOG_HISTORY_SELECT + " WHERE dl.id = %s",
+            """
+            SELECT dl.*,
+                   e.format AS _evidence_source_format,
+                   e.min_bitrate_kbps AS _evidence_source_min_bitrate,
+                   e.avg_bitrate_kbps AS _evidence_source_avg_bitrate,
+                   e.median_bitrate_kbps AS _evidence_source_median_bitrate,
+                   e.lineage_version AS _evidence_lineage_version,
+                   e.spectral_grade AS _evidence_spectral_grade,
+                   e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
+                   e.v0_source_lineage AS _evidence_v0_probe_kind,
+                   e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
+                   e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
+                   e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
+                   origin.beets_distance AS original_beets_distance
+            FROM download_log dl
+            LEFT JOIN album_quality_evidence e
+                ON e.id = dl.candidate_evidence_id
+            LEFT JOIN download_log origin
+                ON origin.id = dl.source_download_log_id
+            WHERE dl.id = %s
+            """,
             (log_id,),
         )
         row = cur.fetchone()
@@ -409,8 +500,28 @@ class _DownloadLogMixin(_PipelineDBBase):
 
     def get_download_history(self, request_id):
         cur = self._execute(
-            self._DOWNLOAD_LOG_HISTORY_SELECT
-            + " WHERE dl.request_id = %s ORDER BY dl.id DESC",
+            """
+            SELECT dl.*,
+                   e.format AS _evidence_source_format,
+                   e.min_bitrate_kbps AS _evidence_source_min_bitrate,
+                   e.avg_bitrate_kbps AS _evidence_source_avg_bitrate,
+                   e.median_bitrate_kbps AS _evidence_source_median_bitrate,
+                   e.lineage_version AS _evidence_lineage_version,
+                   e.spectral_grade AS _evidence_spectral_grade,
+                   e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
+                   e.v0_source_lineage AS _evidence_v0_probe_kind,
+                   e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
+                   e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
+                   e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
+                   origin.beets_distance AS original_beets_distance
+            FROM download_log dl
+            LEFT JOIN album_quality_evidence e
+                ON e.id = dl.candidate_evidence_id
+            LEFT JOIN download_log origin
+                ON origin.id = dl.source_download_log_id
+            WHERE dl.request_id = %s
+            ORDER BY dl.id DESC
+            """,
             (request_id,),
         )
         return [
@@ -426,11 +537,30 @@ class _DownloadLogMixin(_PipelineDBBase):
         """
         if not request_ids:
             return {}
-        ph = ",".join(["%s"] * len(request_ids))
         cur = self._execute(
-            self._DOWNLOAD_LOG_HISTORY_SELECT
-            + f" WHERE dl.request_id IN ({ph}) ORDER BY dl.id DESC",
-            tuple(request_ids),
+            """
+            SELECT dl.*,
+                   e.format AS _evidence_source_format,
+                   e.min_bitrate_kbps AS _evidence_source_min_bitrate,
+                   e.avg_bitrate_kbps AS _evidence_source_avg_bitrate,
+                   e.median_bitrate_kbps AS _evidence_source_median_bitrate,
+                   e.lineage_version AS _evidence_lineage_version,
+                   e.spectral_grade AS _evidence_spectral_grade,
+                   e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
+                   e.v0_source_lineage AS _evidence_v0_probe_kind,
+                   e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
+                   e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
+                   e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
+                   origin.beets_distance AS original_beets_distance
+            FROM download_log dl
+            LEFT JOIN album_quality_evidence e
+                ON e.id = dl.candidate_evidence_id
+            LEFT JOIN download_log origin
+                ON origin.id = dl.source_download_log_id
+            WHERE dl.request_id = ANY(%s)
+            ORDER BY dl.id DESC
+            """,
+            ([int(request_id) for request_id in request_ids],),
         )
         result: dict[int, list[dict]] = {}
         for row in cur.fetchall():
@@ -458,13 +588,31 @@ class _DownloadLogMixin(_PipelineDBBase):
             return {}
         ids = [int(r) for r in request_ids]
         latest_cur = self._execute(
-            "SELECT * FROM ("
-            "SELECT DISTINCT ON (dl.request_id)"
-            + self._DOWNLOAD_LOG_HISTORY_COLUMNS
-            + self._DOWNLOAD_LOG_HISTORY_FROM
-            + " WHERE dl.request_id = ANY(%s)"
-            " ORDER BY dl.request_id, dl.id DESC"
-            ") latest",
+            """
+            SELECT * FROM (
+                SELECT DISTINCT ON (dl.request_id)
+                       dl.*,
+                       e.format AS _evidence_source_format,
+                       e.min_bitrate_kbps AS _evidence_source_min_bitrate,
+                       e.avg_bitrate_kbps AS _evidence_source_avg_bitrate,
+                       e.median_bitrate_kbps AS _evidence_source_median_bitrate,
+                       e.lineage_version AS _evidence_lineage_version,
+                       e.spectral_grade AS _evidence_spectral_grade,
+                       e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
+                       e.v0_source_lineage AS _evidence_v0_probe_kind,
+                       e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
+                       e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
+                       e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
+                       origin.beets_distance AS original_beets_distance
+                FROM download_log dl
+                LEFT JOIN album_quality_evidence e
+                    ON e.id = dl.candidate_evidence_id
+                LEFT JOIN download_log origin
+                    ON origin.id = dl.source_download_log_id
+                WHERE dl.request_id = ANY(%s)
+                ORDER BY dl.request_id, dl.id DESC
+            ) latest
+            """,
             (ids,),
         )
         result: dict[int, dict] = {}

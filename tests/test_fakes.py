@@ -204,6 +204,111 @@ class TestFakePipelineDB(unittest.TestCase):
 
         self.assertEqual(db.get_request_current_evidence_id(42), persisted.id)
 
+    def test_album_quality_evidence_v0_claim_is_once_only(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, mb_release_id="mb-claim-1"))
+        evidence = make_album_quality_evidence(
+            mb_release_id="mb-claim-1",
+            v0_metric=None,
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_request_current_evidence(42, persisted.id)
+
+        first = db.claim_current_v0_research_attempt(
+            request_id=42,
+            expected_evidence_id=persisted.id,
+            expected_snapshot_fingerprint=persisted.snapshot_fingerprint,
+        )
+        second = db.claim_current_v0_research_attempt(
+            request_id=42,
+            expected_evidence_id=persisted.id,
+            expected_snapshot_fingerprint=persisted.snapshot_fingerprint,
+        )
+
+        self.assertTrue(first)
+        self.assertFalse(second)
+        claimed = db.load_album_quality_evidence_by_id(persisted.id)
+        assert claimed is not None
+        self.assertTrue(claimed.on_disk_v0_research_attempted)
+
+    def test_album_quality_evidence_attempt_marker_is_monotonic(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42))
+        evidence = make_album_quality_evidence(
+            mb_release_id="mb-monotonic-1",
+            v0_metric=None,
+            on_disk_v0_research_attempted=True,
+        )
+        db.upsert_album_quality_evidence(evidence)
+
+        db.upsert_album_quality_evidence(msgspec.structs.replace(
+            evidence,
+            on_disk_v0_research_attempted=False,
+        ))
+
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None
+        self.assertTrue(persisted.on_disk_v0_research_attempted)
+
+    def test_album_quality_evidence_absent_v0_preserves_stored_tuple(self):
+        from lib.quality import AlbumQualityV0Metric
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42))
+        metric = AlbumQualityV0Metric(
+            min_bitrate_kbps=201,
+            avg_bitrate_kbps=259,
+            median_bitrate_kbps=255,
+            source_lineage="on_disk_research",
+            source_provenance="installed album ffmpeg V0",
+            proof_provenance="exact content snapshot",
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="mb-preserve-v0-1",
+            v0_metric=metric,
+            on_disk_v0_research_attempted=True,
+        )
+        db.upsert_album_quality_evidence(evidence)
+
+        db.upsert_album_quality_evidence(msgspec.structs.replace(
+            evidence,
+            v0_metric=None,
+            on_disk_v0_research_attempted=False,
+        ))
+
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None
+        self.assertEqual(persisted.v0_metric, metric)
+        self.assertTrue(persisted.on_disk_v0_research_attempted)
+
+        replacement = AlbumQualityV0Metric(
+            avg_bitrate_kbps=261,
+            source_lineage="native_lossy_research",
+        )
+        db.upsert_album_quality_evidence(msgspec.structs.replace(
+            evidence,
+            v0_metric=replacement,
+            on_disk_v0_research_attempted=False,
+        ))
+        replaced = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert replaced is not None
+        self.assertEqual(replaced.v0_metric, replacement)
+        self.assertTrue(replaced.on_disk_v0_research_attempted)
+
     def test_album_quality_evidence_dedupes_by_content_key(self):
         """Upserting the same (mbid, fingerprint) twice keeps one row."""
         db = FakePipelineDB()

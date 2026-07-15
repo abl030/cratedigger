@@ -66,6 +66,7 @@ class _EvidenceMixin(_PipelineDBBase):
                     v0_min_bitrate_kbps, v0_avg_bitrate_kbps,
                     v0_median_bitrate_kbps, v0_source_lineage,
                     v0_source_provenance, v0_proof_provenance,
+                    on_disk_v0_research_attempted,
                     verified_lossless_proof_origin,
                     verified_lossless_source, verified_lossless_classifier,
                     verified_lossless_detail,
@@ -75,9 +76,15 @@ class _EvidenceMixin(_PipelineDBBase):
                     updated_at
                 )
                 VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, -- identity + path
+                    %s, %s, %s, -- measurement time + codec/container
+                    %s, %s, %s, %s, -- storage/target + lineage
+                    %s, %s, %s, %s, %s, -- bitrate/format/mode
+                    %s, %s, %s, %s, -- spectral/lossless/conversion
+                    %s, %s, %s, %s, %s, %s, -- V0 metric
+                    %s, -- on-disk V0 research attempted
+                    %s, %s, %s, %s, -- verified-lossless proof
+                    %s, %s, %s, %s, %s, %s, -- preview facts
                     NOW()
                 )
                 ON CONFLICT (mb_release_id, snapshot_fingerprint)
@@ -99,12 +106,56 @@ class _EvidenceMixin(_PipelineDBBase):
                     spectral_bitrate_kbps = EXCLUDED.spectral_bitrate_kbps,
                     verified_lossless = EXCLUDED.verified_lossless,
                     was_converted_from = EXCLUDED.was_converted_from,
-                    v0_min_bitrate_kbps = EXCLUDED.v0_min_bitrate_kbps,
-                    v0_avg_bitrate_kbps = EXCLUDED.v0_avg_bitrate_kbps,
-                    v0_median_bitrate_kbps = EXCLUDED.v0_median_bitrate_kbps,
-                    v0_source_lineage = EXCLUDED.v0_source_lineage,
-                    v0_source_provenance = EXCLUDED.v0_source_provenance,
-                    v0_proof_provenance = EXCLUDED.v0_proof_provenance,
+                    -- V0 is one atomic fact, not six independently mergeable
+                    -- columns. A valid incoming metric has a lineage and at
+                    -- least one bitrate; replace the whole tuple in that case.
+                    -- An absent or partial incoming tuple preserves the whole
+                    -- stored tuple so stale writers cannot mix or erase it.
+                    v0_min_bitrate_kbps = CASE WHEN
+                        EXCLUDED.v0_source_lineage IS NOT NULL AND
+                        (EXCLUDED.v0_min_bitrate_kbps IS NOT NULL OR
+                         EXCLUDED.v0_avg_bitrate_kbps IS NOT NULL OR
+                         EXCLUDED.v0_median_bitrate_kbps IS NOT NULL)
+                        THEN EXCLUDED.v0_min_bitrate_kbps
+                        ELSE album_quality_evidence.v0_min_bitrate_kbps END,
+                    v0_avg_bitrate_kbps = CASE WHEN
+                        EXCLUDED.v0_source_lineage IS NOT NULL AND
+                        (EXCLUDED.v0_min_bitrate_kbps IS NOT NULL OR
+                         EXCLUDED.v0_avg_bitrate_kbps IS NOT NULL OR
+                         EXCLUDED.v0_median_bitrate_kbps IS NOT NULL)
+                        THEN EXCLUDED.v0_avg_bitrate_kbps
+                        ELSE album_quality_evidence.v0_avg_bitrate_kbps END,
+                    v0_median_bitrate_kbps = CASE WHEN
+                        EXCLUDED.v0_source_lineage IS NOT NULL AND
+                        (EXCLUDED.v0_min_bitrate_kbps IS NOT NULL OR
+                         EXCLUDED.v0_avg_bitrate_kbps IS NOT NULL OR
+                         EXCLUDED.v0_median_bitrate_kbps IS NOT NULL)
+                        THEN EXCLUDED.v0_median_bitrate_kbps
+                        ELSE album_quality_evidence.v0_median_bitrate_kbps END,
+                    v0_source_lineage = CASE WHEN
+                        EXCLUDED.v0_source_lineage IS NOT NULL AND
+                        (EXCLUDED.v0_min_bitrate_kbps IS NOT NULL OR
+                         EXCLUDED.v0_avg_bitrate_kbps IS NOT NULL OR
+                         EXCLUDED.v0_median_bitrate_kbps IS NOT NULL)
+                        THEN EXCLUDED.v0_source_lineage
+                        ELSE album_quality_evidence.v0_source_lineage END,
+                    v0_source_provenance = CASE WHEN
+                        EXCLUDED.v0_source_lineage IS NOT NULL AND
+                        (EXCLUDED.v0_min_bitrate_kbps IS NOT NULL OR
+                         EXCLUDED.v0_avg_bitrate_kbps IS NOT NULL OR
+                         EXCLUDED.v0_median_bitrate_kbps IS NOT NULL)
+                        THEN EXCLUDED.v0_source_provenance
+                        ELSE album_quality_evidence.v0_source_provenance END,
+                    v0_proof_provenance = CASE WHEN
+                        EXCLUDED.v0_source_lineage IS NOT NULL AND
+                        (EXCLUDED.v0_min_bitrate_kbps IS NOT NULL OR
+                         EXCLUDED.v0_avg_bitrate_kbps IS NOT NULL OR
+                         EXCLUDED.v0_median_bitrate_kbps IS NOT NULL)
+                        THEN EXCLUDED.v0_proof_provenance
+                        ELSE album_quality_evidence.v0_proof_provenance END,
+                    on_disk_v0_research_attempted =
+                        album_quality_evidence.on_disk_v0_research_attempted
+                        OR EXCLUDED.on_disk_v0_research_attempted,
                     verified_lossless_proof_origin =
                         EXCLUDED.verified_lossless_proof_origin,
                     verified_lossless_source =
@@ -182,6 +233,7 @@ class _EvidenceMixin(_PipelineDBBase):
                 v0.source_lineage if v0 else None,
                 v0.source_provenance if v0 else None,
                 v0.proof_provenance if v0 else None,
+                evidence.on_disk_v0_research_attempted,
                 proof.proof_origin if proof else None,
                 proof.source if proof else None,
                 proof.classifier if proof else None,
@@ -254,6 +306,140 @@ class _EvidenceMixin(_PipelineDBBase):
         )
         file_rows = [dict(r) for r in files_cur.fetchall()]
         return self._album_quality_evidence_from_row(dict(row), file_rows)
+
+
+    def claim_current_v0_research_attempt(
+        self,
+        *,
+        request_id: int,
+        expected_evidence_id: int,
+        expected_snapshot_fingerprint: str,
+    ) -> bool:
+        """Atomically claim the once-only on-disk V0 encode.
+
+        The attempted marker is the claim: it is committed before ffmpeg runs,
+        so concurrent previews and a worker crash cannot encode the same
+        content-addressed snapshot again. The request FK and evidence identity
+        are checked in the same UPDATE that flips the marker.
+        """
+        cur = self._execute(
+            """
+            UPDATE album_quality_evidence AS evidence
+            SET on_disk_v0_research_attempted = TRUE,
+                updated_at = NOW()
+            FROM album_requests AS request
+            WHERE request.id = %s
+              AND request.current_evidence_id = evidence.id
+              AND evidence.id = %s
+              AND evidence.snapshot_fingerprint = %s
+              AND evidence.on_disk_v0_research_attempted = FALSE
+              AND evidence.v0_min_bitrate_kbps IS NULL
+              AND evidence.v0_avg_bitrate_kbps IS NULL
+              AND evidence.v0_median_bitrate_kbps IS NULL
+              AND evidence.v0_source_lineage IS NULL
+              AND evidence.v0_source_provenance IS NULL
+              AND evidence.v0_proof_provenance IS NULL
+            RETURNING evidence.id
+            """,
+            (
+                int(request_id),
+                int(expected_evidence_id),
+                expected_snapshot_fingerprint,
+            ),
+        )
+        claimed = cur.fetchone() is not None
+        self.conn.commit()
+        return claimed
+
+
+    def persist_current_v0_research_metric(
+        self,
+        *,
+        request_id: int,
+        expected_evidence_id: int,
+        expected_snapshot_fingerprint: str,
+        metric: AlbumQualityV0Metric,
+    ) -> bool:
+        """Complete a claimed probe without widening its authority.
+
+        Completion rechecks the exact current request FK and evidence content
+        address atomically. It only fills a still-empty metric on an already
+        claimed row, and never overwrites another producer's evidence.
+        """
+        cur = self._execute(
+            """
+            UPDATE album_quality_evidence AS evidence
+            SET v0_min_bitrate_kbps = %s,
+                v0_avg_bitrate_kbps = %s,
+                v0_median_bitrate_kbps = %s,
+                v0_source_lineage = %s,
+                v0_source_provenance = %s,
+                v0_proof_provenance = %s,
+                updated_at = NOW()
+            FROM album_requests AS request
+            WHERE request.id = %s
+              AND request.current_evidence_id = evidence.id
+              AND evidence.id = %s
+              AND evidence.snapshot_fingerprint = %s
+              AND evidence.on_disk_v0_research_attempted = TRUE
+              AND evidence.v0_min_bitrate_kbps IS NULL
+              AND evidence.v0_avg_bitrate_kbps IS NULL
+              AND evidence.v0_median_bitrate_kbps IS NULL
+              AND evidence.v0_source_lineage IS NULL
+              AND evidence.v0_source_provenance IS NULL
+              AND evidence.v0_proof_provenance IS NULL
+            RETURNING evidence.id
+            """,
+            (
+                metric.min_bitrate_kbps,
+                metric.avg_bitrate_kbps,
+                metric.median_bitrate_kbps,
+                metric.source_lineage,
+                metric.source_provenance,
+                metric.proof_provenance,
+                int(request_id),
+                int(expected_evidence_id),
+                expected_snapshot_fingerprint,
+            ),
+        )
+        persisted = cur.fetchone() is not None
+        self.conn.commit()
+        return persisted
+
+
+    def release_current_v0_research_attempt(
+        self,
+        *,
+        expected_evidence_id: int,
+        expected_snapshot_fingerprint: str,
+    ) -> bool:
+        """Release a live claim when the post-probe snapshot became stale.
+
+        A crash intentionally leaves the marker claimed (fail-soft and
+        once-only). This release is only for a caller that survived the probe
+        and proved its pre-probe evidence identity is no longer current.
+        """
+        cur = self._execute(
+            """
+            UPDATE album_quality_evidence
+            SET on_disk_v0_research_attempted = FALSE,
+                updated_at = NOW()
+            WHERE id = %s
+              AND snapshot_fingerprint = %s
+              AND on_disk_v0_research_attempted = TRUE
+              AND v0_min_bitrate_kbps IS NULL
+              AND v0_avg_bitrate_kbps IS NULL
+              AND v0_median_bitrate_kbps IS NULL
+              AND v0_source_lineage IS NULL
+              AND v0_source_provenance IS NULL
+              AND v0_proof_provenance IS NULL
+            RETURNING id
+            """,
+            (int(expected_evidence_id), expected_snapshot_fingerprint),
+        )
+        released = cur.fetchone() is not None
+        self.conn.commit()
+        return released
 
 
     def set_import_job_candidate_evidence(
@@ -408,6 +594,9 @@ class _EvidenceMixin(_PipelineDBBase):
             target_is_cbr=row.get("target_is_cbr"),
             lineage_version=int(row.get("lineage_version") or 1),
             v0_metric=v0_metric,
+            on_disk_v0_research_attempted=bool(
+                row.get("on_disk_v0_research_attempted", False)
+            ),
             verified_lossless_proof=proof,
             audio_corrupt=bool(row.get("audio_corrupt", False)),
             folder_layout=row.get("folder_layout") or "flat",

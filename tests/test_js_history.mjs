@@ -8,6 +8,7 @@ import {
   renderEvidenceStrip as renderEvidenceFixture,
   __test__,
 } from '../web/js/history.js';
+import { readFileSync } from 'node:fs';
 const { formatV0Probe, formatSpectral, withWas } = __test__;
 
 let passed = 0;
@@ -168,7 +169,7 @@ console.log('legacy existing floor-only Recents labels the missing grade');
     'legacy HAVE floor cannot read like a complete spectral grade');
 }
 
-console.log('renderDownloadHistoryItem() renders lossless V0 probe with inline (was X) comparison');
+console.log('renderDownloadHistoryItem() labels both V0 probe sides explicitly');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'success',
@@ -183,16 +184,17 @@ console.log('renderDownloadHistoryItem() renders lossless V0 probe with inline (
 
   assertContains(html, 'class="p-hist-label">V0 probe</span>',
     'V0 probe row present for lossless source');
-  assertContains(html, '228kbps avg', 'candidate V0 probe avg rendered');
-  assertContains(html, 'class="p-hist-was">(was 171kbps avg)',
-    'existing V0 probe appears inline as (was X) on the V0 probe row');
+  assertContains(html, '>IN</span> 228kbps avg',
+    'candidate V0 probe avg renders on the labelled IN side');
+  assertContains(html, '>HAVE</span> 171kbps avg',
+    'existing V0 probe renders on the labelled HAVE side');
   assertContains(html, 'Stored as', 'final format label rendered');
   assertContains(html, 'OPUS 128 contract', 'final format rendered as contract');
   assertExcludes(html, '(lossless_source_v0)',
     'lossless probe omits the noisy kind suffix');
 }
 
-console.log('renderDownloadHistoryItem() omits the V0 probe (was X) suffix when existing has no comparable V0 probe');
+console.log('renderDownloadHistoryItem() leaves HAVE empty without a comparable V0 probe');
 {
   // Lossless candidate over a library album with no recorded V0 probe.
   // The V0-probe row must NOT borrow the existing raw min bitrate as a
@@ -215,11 +217,10 @@ console.log('renderDownloadHistoryItem() omits the V0 probe (was X) suffix when 
 
   assertContains(html, 'class="p-hist-label">V0 probe</span>',
     'V0 probe row present');
-  // The V0-probe value cell carries the candidate alone — no fabricated
-  // "(was X)". A precise cell match (not a whole-HTML substring) so the
-  // Bitrate row's legitimate "(was 192kbps)" cannot leak into this assertion.
-  assertContains(html, '<span class="p-hist-value">260kbps avg</span>',
-    'V0 probe value has no (was X) suffix when existing has no V0 probe');
+  assertContains(html, '>IN</span> 260kbps avg',
+    'candidate V0 probe remains on the IN side');
+  assertContains(html, '>HAVE</span> —',
+    'missing existing probe is explicit without borrowing its raw minimum');
   assertExcludes(html, 'class="p-hist-was">(was 192kbps)',
     'legacy minimums are not projected as materialized output');
 }
@@ -252,7 +253,7 @@ console.log('renderDownloadHistoryItem() renders the V0 probe row for research p
     'research candidate minimum is not relabelled as output');
 }
 
-console.log('renderDownloadHistoryItem() V0 was-suffix is kind-aware');
+console.log('renderDownloadHistoryItem() V0 side labels retain kind provenance');
 {
   // dl 36660: lossless-source candidate probe (255) vs the library
   // album's native-lossy research probe (250). Both render — the
@@ -267,8 +268,24 @@ console.log('renderDownloadHistoryItem() V0 was-suffix is kind-aware');
     existing_v0_probe_avg_bitrate: 250,
   });
   assertContains(html, '255kbps avg', 'lossless-source probe renders bare');
-  assertContains(html, '(was 250kbps avg (from lossy))',
-    'existing research probe renders with its qualifier');
+  assertContains(html, '>HAVE</span> 250kbps avg (from lossy)',
+    'existing research probe renders with its qualifier on HAVE');
+}
+
+console.log('renderDownloadHistoryItem() renders HAVE-only V0 provenance');
+{
+  const html = renderDownloadHistoryFixture({
+    outcome: 'rejected',
+    created_at: '2026-07-15T00:00:00+00:00',
+    existing_v0_probe_kind: 'on_disk_research_v0',
+    existing_v0_probe_min_bitrate: 201,
+    existing_v0_probe_avg_bitrate: 259,
+  });
+  assertContains(html, 'class="p-hist-label">V0 probe</span>',
+    'HAVE-only evidence still creates the expanded V0 row');
+  assertContains(html, '>IN</span> —', 'missing candidate probe is explicit');
+  assertContains(html, '>HAVE</span> 259kbps avg · min 201kbps (on-disk re-encode)',
+    'HAVE-only probe retains its detailed provenance');
 }
 
 console.log('renderDownloadHistoryItem() keeps a consistent row vocabulary across codecs');
@@ -396,13 +413,15 @@ console.log('renderDownloadHistoryItem() shows "overridden" instead of the fake 
     soulseek_username: 'pimpek1977',
     created_at: '2026-07-10T07:03:00+00:00',
     downloaded_label: 'FLAC (converted to OPUS V0)',
-    beets_distance: 0.0,
+    beets_distance: null,
+    original_beets_distance: 0.2328,
     verdict: 'Force imported after manual review',
   });
 
   assertContains(html, 'class="p-hist-label">Distance</span>',
     'Distance row present on force imports');
   assertContains(html, 'overridden', 'force-import distance reads overridden');
+  assertContains(html, '(was 0.233)', 'force-import distance retains its origin measurement');
   assertExcludes(html, '0.000', 'the fake beets 0.000 never renders');
 }
 
@@ -497,12 +516,57 @@ console.log('renderEvidenceStrip() builds the compact IN/HAVE comparison');
     existing_min_bitrate: 320,
   });
   assertContains(strip, 'class="r-evidence"', 'strip wrapper class');
+  assertContains(strip, 'class="r-ev-row r-ev-in"', 'IN is a semantic grid row');
+  assertContains(strip, 'class="r-ev-row r-ev-have"', 'HAVE is a semantic grid row');
+  for (const slot of ['source', 'metric', 'rank', 'spectral', 'v0']) {
+    const count = strip.split(`r-ev-${slot}`).length - 1;
+    if (count === 2) { passed++; } else {
+      failed++;
+      console.error(`  FAIL: ${slot} must occupy the same explicit slot in both rows; got ${count}`);
+    }
+  }
+  assertExcludes(strip, 'r-ev-value', 'rows do not collapse back to one freeform value cell');
   assertContains(strip, 'IN', 'IN side labelled');
   assertContains(strip, 'MP3 320', 'incoming label rendered');
   assertContains(strip, 'min 245k', 'incoming measured bitrate rendered with the min label');
   assertContains(strip, '~160k', 'incoming spectral floor rendered');
   assertContains(strip, 'HAVE', 'HAVE side labelled');
   assertContains(strip, 'min 320k', 'on-disk bitrate rendered with the min label');
+}
+
+console.log('renderEvidenceStrip() keeps converted source bare in collapsed rows');
+{
+  const strip = renderEvidenceFixture({
+    source_format: 'FLAC',
+    was_converted: true,
+    final_format: 'opus 128',
+    comparison_basis: {
+      verdict: 'better', branch: 'rank',
+      new_rank: 'excellent', existing_rank: 'good',
+      new_metric: 'contract', existing_metric: 'avg',
+      new_value_kbps: 128, existing_value_kbps: 96,
+      new_format: 'opus 128', existing_format: 'Opus',
+      spectral_clamped: false, tolerance_kbps: null,
+      verified_lossless_bypass: false,
+    },
+  });
+  assertContains(strip, '>FLAC</span>', 'collapsed IN row names the measured source codec');
+  assertExcludes(strip, 'FLAC →', 'collapsed row does not show a conversion arrow');
+  assertExcludes(strip, 'OPUS 128', 'target/output contract is not labelled as source bitrate');
+}
+
+console.log('renderEvidenceStrip() renders canonical candidate evidence as ordinary IN');
+{
+  const strip = renderEvidenceFixture({
+    downloaded_label: 'MP3 V2',
+    source_format: 'MP3',
+    source_min_bitrate: 201,
+    source_avg_bitrate: 259,
+    source_median_bitrate: 255,
+  });
+  assertContains(strip, '>IN</strong>', 'historical triage evidence keeps the normal IN row');
+  assertContains(strip, '>MP3 V2</span>', 'candidate evidence supplies the source label');
+  assertContains(strip, '>min 201k</span>', 'candidate evidence supplies the source minimum');
 }
 
 console.log('renderEvidenceStrip() returns empty string when no evidence exists');
@@ -544,7 +608,8 @@ console.log('renderEvidenceStrip() shows the on-disk format on the HAVE side');
     existing_format: 'MP3',
     existing_min_bitrate: 256,
   });
-  assertContains(strip, 'MP3 min 256k', 'HAVE side leads with the on-disk format, min-labelled');
+  assertContains(strip, '>MP3</span>', 'HAVE side leads with the on-disk format');
+  assertContains(strip, '>min 256k</span>', 'HAVE bitrate stays min-labelled in its shared slot');
 }
 
 console.log('renderDownloadHistoryItem() does not infer output from legacy min fields');
@@ -596,22 +661,28 @@ console.log('renderDownloadHistoryItem() calls only explicit quality labels cont
   assertContains(explicitOpus, 'OPUS 128 contract', 'numeric target is a contract');
 }
 
-console.log('renderEvidenceStrip() shows research V0 probes with the from-lossy qualifier');
+console.log('renderEvidenceStrip() stops compact V0 probes after the minimum');
 {
-  // V0 runs on everything; the strip shows whichever probe each side has,
-  // qualified so research probes never read as lossless-source proof.
-  const strip = renderEvidenceFixture({
-    downloaded_label: 'MP3 V0',
-    actual_min_bitrate: 232,
-    v0_probe_kind: 'native_lossy_research_v0',
-    v0_probe_avg_bitrate: 247,
-    existing_format: 'AAC',
-    existing_min_bitrate: 256,
-    existing_v0_probe_kind: 'native_lossy_research_v0',
-    existing_v0_probe_avg_bitrate: 250,
-  });
-  assertContains(strip, 'V0 247k avg (from lossy)', 'IN research probe qualified');
-  assertContains(strip, 'V0 250k avg (from lossy)', 'HAVE research probe qualified');
+  // Probe-kind provenance belongs to expanded details. Every compact kind
+  // gets the same bounded numeric form so long qualifiers cannot overflow.
+  for (const kind of [
+    'lossless_source_v0',
+    'native_lossy_research_v0',
+    'on_disk_research_v0',
+    'future_probe_kind',
+  ]) {
+    const strip = renderEvidenceFixture({
+      downloaded_label: 'MP3 V0',
+      actual_min_bitrate: 232,
+      v0_probe_kind: kind,
+      v0_probe_avg_bitrate: 247,
+      v0_probe_min_bitrate: 224,
+    });
+    assertContains(strip, 'V0 247k avg (min 224k)', `${kind} keeps avg and min`);
+    assertExcludes(strip, 'from lossy', `${kind} omits lossy provenance`);
+    assertExcludes(strip, 'on-disk re-encode', `${kind} omits re-encode provenance`);
+    assertExcludes(strip, 'future_probe_kind', `${kind} omits raw kind provenance`);
+  }
 }
 
 console.log('renderEvidenceStrip() escapes injected values');
@@ -631,6 +702,10 @@ console.log('renderEvidenceStrip() renders the persisted comparison basis when p
   const strip = renderEvidenceFixture({
     downloaded_label: 'MP3 V2',
     actual_min_bitrate: 194,
+    materialized_format: 'MP3',
+    materialized_min_bitrate: 195,
+    materialized_avg_bitrate: 320,
+    materialized_median_bitrate: 320,
     spectral_grade: 'genuine',
     spectral_bitrate: 160,
     existing_format: 'MP3',
@@ -653,6 +728,19 @@ console.log('renderEvidenceStrip() renders the persisted comparison basis when p
   assertContains(strip, '~160k genuine',
     'ordinary avg basis does not suppress a distinct spectral floor');
   assertExcludes(strip, 'MP3 V2', 'min-derived label replaced by the basis');
+  assertExcludes(strip, 'actual MP3',
+    'materialized output stays in expanded detail instead of crowding the compact source strip');
+
+  const detail = renderDownloadHistoryFixture({
+    outcome: 'success',
+    created_at: '2026-07-15T00:00:00+00:00',
+    materialized_format: 'MP3',
+    materialized_min_bitrate: 195,
+    materialized_avg_bitrate: 320,
+    materialized_median_bitrate: 320,
+  });
+  assertContains(detail, 'MP3 avg 320kbps · min 195kbps',
+    'expanded detail retains the materialized output lineage');
 }
 
 console.log('Gas: contract, V0 proof, and materialized Opus output stay distinct');
@@ -693,11 +781,12 @@ console.log('Gas: contract, V0 proof, and materialized Opus output stay distinct
       verified_lossless_bypass: false,
     },
   });
-  assertContains(strip, 'OPUS 128 contract', 'declared target is labelled contract');
-  assertContains(strip, 'FLAC → OPUS 128 contract',
-    'source codec remains distinct from the target contract');
-  assertContains(strip, 'actual OPUS avg 132k (min 102k)',
-    'materialized output carries its own codec and measurements');
+  assertContains(strip, '>FLAC</span>', 'collapsed strip names only the measured source codec');
+  assertExcludes(strip, 'FLAC →', 'collapsed source does not imply a source-to-target measurement');
+  assertExcludes(strip, 'OPUS 128 contract',
+    'target contract remains in expanded details instead of the source strip');
+  assertExcludes(strip, 'actual OPUS avg 132k (min 102k)',
+    'materialized output remains in expanded details instead of the source strip');
   assertContains(strip, 'V0 224k avg', 'source V0 proof remains explicit');
   assertExcludes(strip, 'OPUS 128 min 191k', 'V0 minimum never wears an Opus label');
 
@@ -776,10 +865,11 @@ console.log('Iron & Wine: the temporary V0 minimum never wears the FLAC label');
     existing_v0_probe_min_bitrate: 223,
     existing_v0_probe_avg_bitrate: 232,
   });
-  assertContains(strip, 'IN</span> FLAC ·', 'source remains labelled FLAC');
-  assertExcludes(strip, 'FLAC · min 165k', 'V0 minimum is not a FLAC measurement');
+  assertContains(strip, '>FLAC</span>', 'source remains labelled FLAC');
+  assertExcludes(strip, '>min 165k</span>', 'V0 minimum is not a FLAC measurement');
   assertContains(strip, 'V0 171k avg (min 165k)', 'candidate V0 owns its minimum');
-  assertContains(strip, 'Opus min 114k', 'materialized existing Opus keeps its real floor');
+  assertContains(strip, '>Opus</span>', 'materialized existing Opus keeps its codec slot');
+  assertContains(strip, '>min 114k</span>', 'materialized existing Opus keeps its real floor');
   assertContains(strip, 'V0 232k avg (min 223k)', 'existing source V0 owns its minimum');
 
   const detail = renderDownloadHistoryFixture({
@@ -798,6 +888,42 @@ console.log('Iron & Wine: the temporary V0 minimum never wears the FLAC label');
     'detail candidate V0 owns its minimum');
   assertContains(detail, '232kbps avg · min 223kbps',
     'detail existing V0 owns its minimum');
+}
+
+console.log('evidence strip CSS preserves shared desktop/mobile alignment without mid-word wraps');
+{
+  const css = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
+  assertContains(css, '.r-ev-row { display: contents; }',
+    'row wrappers participate in the parent grid instead of defining independent columns');
+  assertContains(css, 'grid-template-columns: 3.6em minmax(4.5em, 1.05fr) minmax(5.5em, 1fr) minmax(4.5em, 0.85fr) minmax(6.5em, 1fr) minmax(8em, 1.35fr)',
+    'label/source/metric/rank/spectral/V0 use six shared columns');
+  assertContains(css, '@media (max-width: 720px)', 'shared grid has a narrow-screen layout');
+  assertContains(css, 'grid-template-columns: 4.3em minmax(5em, 0.8fr) minmax(0, 1.8fr)',
+    'mobile uses a readable tag/source/detail three-column grid');
+  assertContains(css, 'row-gap: 4px; font-size: 1em;',
+    'mobile evidence stays at the card text size');
+  assertContains(css, 'grid-template-rows: auto auto auto;',
+    'each evidence side receives three compact rows');
+  assertContains(css, '.r-evidence .r-ev-tag { grid-column: 1; grid-row: 1 / 4;',
+    'IN/HAVE spans every row without touching source text');
+  assertContains(css, '.r-ev-source { grid-column: 2; grid-row: 1; }',
+    'source owns the first aligned field slot');
+  assertContains(css, '.r-ev-metric { grid-column: 3; grid-row: 1; }',
+    'metric owns the first aligned detail slot');
+  assertContains(css, '.r-ev-rank { grid-column: 2; grid-row: 2; }',
+    'rank owns the second aligned field slot');
+  assertContains(css, '.r-ev-spectral { grid-column: 3; grid-row: 2; white-space: normal; }',
+    'spectral provenance wraps only at word boundaries in its own slot');
+  assertContains(css, '.r-ev-v0 { grid-column: 2 / -1; grid-row: 3; white-space: normal;',
+    'mobile V0 provenance uses a full-width third row');
+  assertContains(css, '.r-evidence .r-ev-tag { color: #d3deea; font-weight: 900; font-size: 1.08em;',
+    'IN/HAVE labels are visibly prominent');
+  assertExcludes(css, '.r-ev-cell { min-width: 0; overflow-wrap: anywhere;',
+    'evidence tokens never use arbitrary mid-word wrapping');
+  assertExcludes(css, 'repeat(5, minmax(0, 1fr))',
+    'mobile evidence never collapses every field into equal tiny columns');
+  assertExcludes(css, 'grid-template-columns: 2.8em minmax(3.4em',
+    'the overlapping five-column mobile layout cannot return');
 }
 
 console.log('renderEvidenceStrip() marks spectral-clamped rank values with ~');

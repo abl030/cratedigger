@@ -337,7 +337,7 @@ console.log('renderRecentsItems() shows bad-extension postflight warning chip');
     'bad extension filename appears in hover detail');
 }
 
-console.log('renderRecentsItems() shows wrong-match triage audit chip');
+console.log('renderRecentsItems() uses the main badge for deleted triage');
 {
   const html = renderRecentsFixture([{
     id: 725,
@@ -345,8 +345,8 @@ console.log('renderRecentsItems() shows wrong-match triage audit chip');
     created_at: '2026-04-25T23:25:00+00:00',
     album_title: 'For Screening Purposes Only',
     artist_name: 'Test Icicles',
-    badge: 'Rejected',
-    badge_class: 'badge-rejected',
+    badge: 'Triaged · deleted',
+    badge_class: 'badge-library',
     border_color: '#a33',
     summary: 'Wrong match (dist 0.190) · moundsofass',
     wrong_match_triage_summary: 'deleted: spectral reject',
@@ -354,10 +354,10 @@ console.log('renderRecentsItems() shows wrong-match triage audit chip');
   }]);
   assertContains(html, 'Wrong match (dist 0.190) · moundsofass',
     'original wrong-match summary remains visible');
-  assertContains(html, 'triage - deleted spectral reject',
-    'triage label rendered in recents metadata');
-  assertContains(html, 'recents-triage-label',
-    'triage label uses the visible yellow recents style');
+  assertContains(html, 'Triaged · deleted',
+    'deleted triage is the primary row badge');
+  assertExcludes(html, 'recents-triage-label',
+    'deleted triage does not render a second competing status label');
   assertContains(html, 'mp3_spectral:reject',
     'triage detail appears in hover text');
 }

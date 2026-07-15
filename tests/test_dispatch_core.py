@@ -266,6 +266,11 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             active_download_state={"files": [], "filetype": "flac"},
         ))
         log_id = db.log_download(request_id=42, outcome="rejected")
+        job = db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=42,
+            payload=manual_import_payload(failed_path="/tmp/pending"),
+        )
 
         tmpdir = tempfile.mkdtemp()
         current_dir = tempfile.mkdtemp()
@@ -326,6 +331,9 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 verified_lossless_target="opus 128",
             )
             with patch_dispatch_externals() as ext:
+                ext.run.side_effect = AssertionError(
+                    "importer measurement/probe mutant executed"
+                )
                 with _patch_beets_album(current_dir, min_bitrate=116):
                     result = dispatch_import_core(
                         path=tmpdir,
@@ -344,12 +352,21 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                         cfg=cfg,
                         requeue_on_failure=False,
                         candidate_download_log_id=log_id,
+                        candidate_import_job_id=job.id,
                     )
 
             self.assertFalse(result.success)
             ext.run.assert_not_called()
-            self.assertEqual(db.download_logs[-1].outcome, "rejected")
-            denylisted = [entry.username for entry in db.denylist]
+            self.assertIsNotNone(result.terminal_outcome)
+            assert result.terminal_outcome is not None
+            self.assertEqual(result.terminal_outcome.audit.outcome, "rejected")
+            self.assertEqual(
+                result.terminal_outcome.audit.source_download_log_id,
+                log_id,
+            )
+            denylisted = [
+                entry.username for entry in result.terminal_outcome.denylists
+            ]
             self.assertIn("baduser", denylisted)
         finally:
             import shutil
@@ -655,6 +672,9 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             )
             with patch_dispatch_externals() as ext, \
                  _patch_beets_album(current_dir, min_bitrate=320):
+                ext.run.side_effect = AssertionError(
+                    "importer measurement/probe mutant executed"
+                )
                 result = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",

@@ -49,6 +49,7 @@ from lib.wrong_match_cleanup_service import (
 )
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
+from web.classify import LogEntry, classify_log_entry
 
 
 def _cfg() -> types.SimpleNamespace:
@@ -724,11 +725,30 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         # parent quality and a downgrade candidate could pass as would_import.
         source = _make_source(self.tmp, "wanted-current-source")
         log_id = _log_wrong_match(self.db, 1, source)
+        candidate = msgspec.structs.replace(
+            _evidence(source),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=96,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=126,
+                format="MP3",
+                spectral_grade="genuine",
+            ),
+        )
         self.db.set_download_log_candidate_evidence(
             log_id,
-            _store_evidence(self.db, _evidence(source)),
+            _store_evidence(self.db, candidate),
         )
-        current = _evidence(source, mb_release_id="mbid-1")
+        current = msgspec.structs.replace(
+            _evidence(source, mb_release_id="mbid-1"),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=252,
+                format="MP3",
+                spectral_grade="genuine",
+            ),
+        )
         self._set_current_evidence_helper(
             lambda *_a, **_kw: CurrentEvidenceActionResult(
                 evidence=current,
@@ -736,52 +756,107 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
             )
         )
 
-        cleanup = types.SimpleNamespace(
-            success=True,
-            error=None,
-            path_missing=False,
-            cleared_rows=1,
-            deleted_path=source,
-        )
-        reject_decision = {
-            "preimport_audio": None,
-            "preimport_nested": None,
-            "preimport_bad_hash": None,
-            "preimport_empty_fileset": None,
-            "stage0_spectral_gate": None,
-            "stage1_spectral": None,
-            "stage2_import": "reject",
-            "stage3_quality_gate": "reject",
-            "final_status": "wanted",
-            "imported": False,
-            "denylisted": False,
-            "keep_searching": True,
-            "target_final_format": None,
-            "verified_lossless": False,
-        }
-        with patch(
-            "lib.wrong_match_cleanup_service.full_pipeline_decision_from_evidence",
-            return_value=reject_decision,
-        ) as decider, patch(
-            "lib.wrong_match_cleanup_service.classify_full_pipeline_decision",
-            return_value=("confident_reject", True, "downgrade"),
-        ), patch(
-            "lib.wrong_match_cleanup_service.evidence_decision_name",
-            return_value="downgrade",
-        ), patch(
-            "lib.wrong_match_cleanup_service.cleanup_wrong_match_source",
-            return_value=cleanup,
-        ):
-            result = cleanup_wrong_match(self.db, log_id, cfg=_cfg())
+        result = cleanup_wrong_match(self.db, log_id, cfg=_cfg())
 
         self.assertEqual(result.outcome, OUTCOME_DELETED)
-        decider.assert_called_once()
-        _candidate_arg, current_arg = decider.call_args.args[:2]
-        self.assertIs(current_arg, current)
+        self.assertFalse(os.path.exists(source))
         self.mock_current_evidence_helper.assert_called_once()
         helper_kwargs = self.mock_current_evidence_helper.call_args.kwargs
         self.assertEqual(helper_kwargs["mb_release_id"], "mbid-1")
         self.assertEqual(helper_kwargs["request_id"], 1)
+        audit = decode_validation_envelope(
+            next(row for row in self.db.download_logs if row.id == log_id)
+            .validation_result
+        ).wrong_match_triage
+        assert audit is not None
+        self.assertEqual(audit.candidate_measurement, candidate.measurement)
+        self.assertEqual(audit.current_measurement, current.measurement)
+        self.assertEqual(audit.preview_decision, "downgrade")
+
+    def test_v1_cleanup_audit_classification_keeps_only_spectral_and_v0(self) -> None:
+        """Cleanup audit cannot resurrect target-projected v1 source facts."""
+        source = _make_source(self.tmp, "v1-audit-source")
+        log_id = _log_wrong_match(self.db, 1, source)
+        candidate = msgspec.structs.replace(
+            _evidence(source),
+            lineage_version=1,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=121,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=127,
+                format="OPUS 128",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=96,
+            ),
+            storage_format="OPUS 128",
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=201,
+                avg_bitrate_kbps=259,
+                median_bitrate_kbps=255,
+                source_lineage="native_lossy_research",
+            ),
+        )
+        self.db.set_download_log_candidate_evidence(
+            log_id, _store_evidence(self.db, candidate))
+        current = msgspec.structs.replace(
+            _evidence(source, mb_release_id="mbid-1"),
+            lineage_version=1,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=195,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3 V0",
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=160,
+            ),
+            storage_format="MP3 V0",
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=202,
+                avg_bitrate_kbps=260,
+                median_bitrate_kbps=256,
+                source_lineage="on_disk_research",
+            ),
+        )
+        self._set_current_evidence_helper(
+            lambda *_a, **_kw: CurrentEvidenceActionResult(
+                evidence=current,
+                provenance=ActionEvidenceProvenance(current_status="loaded"),
+            )
+        )
+        result = cleanup_wrong_match(self.db, log_id, cfg=_cfg())
+
+        self.assertEqual(result.outcome, OUTCOME_DELETED)
+        self.assertFalse(os.path.exists(source))
+        raw = self.db.get_download_log_entry(log_id)
+        assert raw is not None
+        audit = decode_validation_envelope(
+            raw["validation_result"]
+        ).wrong_match_triage
+        assert audit is not None
+        assert audit.candidate_measurement is not None
+        assert audit.current_measurement is not None
+        self.assertIsNone(audit.candidate_measurement.format)
+        self.assertIsNone(audit.candidate_measurement.avg_bitrate_kbps)
+        self.assertEqual(audit.candidate_measurement.spectral_grade,
+                         "likely_transcode")
+        self.assertIsNone(audit.current_measurement.format)
+        self.assertIsNone(audit.current_measurement.avg_bitrate_kbps)
+        self.assertEqual(audit.current_measurement.spectral_grade, "genuine")
+        self.assertIsNone(audit.comparison_basis)
+        self.assertIsNotNone(audit.candidate_v0_probe)
+        self.assertIsNotNone(audit.current_v0_probe)
+
+        classified = classify_log_entry(LogEntry.from_row(raw))
+        self.assertIsNone(classified.source_format)
+        self.assertIsNone(classified.source_min_bitrate)
+        self.assertIsNone(classified.source_avg_bitrate)
+        self.assertIsNone(classified.existing_format)
+        self.assertIsNone(classified.existing_min_bitrate)
+        self.assertIsNone(classified.comparison_basis)
+        self.assertEqual(classified.spectral_grade, "likely_transcode")
+        self.assertEqual(classified.existing_spectral_grade, "genuine")
+        self.assertEqual(classified.v0_probe_avg_bitrate, 259)
+        self.assertEqual(classified.existing_v0_probe_avg_bitrate, 260)
 
     def test_beets_absent_passes_current_none_to_reducer(self) -> None:
         """Helper returns None (no Beets album) → reducer sees current=None."""
