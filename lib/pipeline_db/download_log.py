@@ -119,6 +119,19 @@ class _DownloadLogMixin(_PipelineDBBase):
                        e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
                        e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
                        e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
+                       current_evidence.id AS _current_evidence_id,
+                       (current_evidence.measured_at <= dl.created_at)
+                           AS _current_evidence_is_pre_attempt,
+                       current_evidence.format AS _current_evidence_format,
+                       current_evidence.min_bitrate_kbps AS _current_evidence_min_bitrate,
+                       current_evidence.avg_bitrate_kbps AS _current_evidence_avg_bitrate,
+                       current_evidence.median_bitrate_kbps AS _current_evidence_median_bitrate,
+                       current_evidence.spectral_grade AS _current_evidence_spectral_grade,
+                       current_evidence.spectral_bitrate_kbps AS _current_evidence_spectral_bitrate,
+                       current_evidence.v0_source_lineage AS _current_evidence_v0_probe_kind,
+                       current_evidence.v0_min_bitrate_kbps AS _current_evidence_v0_probe_min_bitrate,
+                       current_evidence.v0_avg_bitrate_kbps AS _current_evidence_v0_probe_avg_bitrate,
+                       current_evidence.v0_median_bitrate_kbps AS _current_evidence_v0_probe_median_bitrate,
                        origin.beets_distance AS original_beets_distance,
                        ar.album_title, ar.artist_name, ar.mb_release_id,
                        ar.year, ar.country, ar.status AS request_status,
@@ -131,6 +144,8 @@ class _DownloadLogMixin(_PipelineDBBase):
                 LEFT JOIN download_log origin
                     ON origin.id = dl.source_download_log_id
                 JOIN album_requests ar ON dl.request_id = ar.id
+                LEFT JOIN album_quality_evidence current_evidence
+                    ON current_evidence.id = ar.current_evidence_id
                 WHERE dl.outcome IN ('success', 'force_import')
                 ORDER BY dl.created_at DESC LIMIT %s
             """
@@ -148,6 +163,19 @@ class _DownloadLogMixin(_PipelineDBBase):
                        e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
                        e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
                        e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
+                       current_evidence.id AS _current_evidence_id,
+                       (current_evidence.measured_at <= dl.created_at)
+                           AS _current_evidence_is_pre_attempt,
+                       current_evidence.format AS _current_evidence_format,
+                       current_evidence.min_bitrate_kbps AS _current_evidence_min_bitrate,
+                       current_evidence.avg_bitrate_kbps AS _current_evidence_avg_bitrate,
+                       current_evidence.median_bitrate_kbps AS _current_evidence_median_bitrate,
+                       current_evidence.spectral_grade AS _current_evidence_spectral_grade,
+                       current_evidence.spectral_bitrate_kbps AS _current_evidence_spectral_bitrate,
+                       current_evidence.v0_source_lineage AS _current_evidence_v0_probe_kind,
+                       current_evidence.v0_min_bitrate_kbps AS _current_evidence_v0_probe_min_bitrate,
+                       current_evidence.v0_avg_bitrate_kbps AS _current_evidence_v0_probe_avg_bitrate,
+                       current_evidence.v0_median_bitrate_kbps AS _current_evidence_v0_probe_median_bitrate,
                        origin.beets_distance AS original_beets_distance,
                        ar.album_title, ar.artist_name, ar.mb_release_id,
                        ar.year, ar.country, ar.status AS request_status,
@@ -160,6 +188,8 @@ class _DownloadLogMixin(_PipelineDBBase):
                 LEFT JOIN download_log origin
                     ON origin.id = dl.source_download_log_id
                 JOIN album_requests ar ON dl.request_id = ar.id
+                LEFT JOIN album_quality_evidence current_evidence
+                    ON current_evidence.id = ar.current_evidence_id
                 WHERE dl.outcome IN ('rejected', 'failed', 'timeout')
                 ORDER BY dl.created_at DESC LIMIT %s
             """
@@ -177,6 +207,19 @@ class _DownloadLogMixin(_PipelineDBBase):
                        e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
                        e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
                        e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
+                       current_evidence.id AS _current_evidence_id,
+                       (current_evidence.measured_at <= dl.created_at)
+                           AS _current_evidence_is_pre_attempt,
+                       current_evidence.format AS _current_evidence_format,
+                       current_evidence.min_bitrate_kbps AS _current_evidence_min_bitrate,
+                       current_evidence.avg_bitrate_kbps AS _current_evidence_avg_bitrate,
+                       current_evidence.median_bitrate_kbps AS _current_evidence_median_bitrate,
+                       current_evidence.spectral_grade AS _current_evidence_spectral_grade,
+                       current_evidence.spectral_bitrate_kbps AS _current_evidence_spectral_bitrate,
+                       current_evidence.v0_source_lineage AS _current_evidence_v0_probe_kind,
+                       current_evidence.v0_min_bitrate_kbps AS _current_evidence_v0_probe_min_bitrate,
+                       current_evidence.v0_avg_bitrate_kbps AS _current_evidence_v0_probe_avg_bitrate,
+                       current_evidence.v0_median_bitrate_kbps AS _current_evidence_v0_probe_median_bitrate,
                        origin.beets_distance AS original_beets_distance,
                        ar.album_title, ar.artist_name, ar.mb_release_id,
                        ar.year, ar.country, ar.status AS request_status,
@@ -189,6 +232,8 @@ class _DownloadLogMixin(_PipelineDBBase):
                 LEFT JOIN download_log origin
                     ON origin.id = dl.source_download_log_id
                 JOIN album_requests ar ON dl.request_id = ar.id
+                LEFT JOIN album_quality_evidence current_evidence
+                    ON current_evidence.id = ar.current_evidence_id
                 ORDER BY dl.created_at DESC LIMIT %s
             """
         cur = self._execute(query, (limit,))
@@ -196,6 +241,35 @@ class _DownloadLogMixin(_PipelineDBBase):
             self._overlay_evidence_onto_download_log_row(dict(r))
             for r in cur.fetchall()
         ]
+
+
+    def get_linked_import_logs(
+        self,
+        source_log_ids: list[int],
+    ) -> list[dict[str, object]]:
+        """Fetch mutating successors for an explicit set of audit rows.
+
+        Recents filters select the rows which are displayed, but a kept
+        wrong-match row still needs the force/manual import which explicitly
+        links back to it. Fetch those companions independently so changing a
+        filter cannot change the displayed evidence.
+        """
+        if not source_log_ids:
+            return []
+        cur = self._execute(
+            """
+            SELECT dl.*,
+                   origin.beets_distance AS original_beets_distance
+            FROM download_log dl
+            LEFT JOIN download_log origin
+                ON origin.id = dl.source_download_log_id
+            WHERE dl.source_download_log_id = ANY(%s)
+              AND dl.outcome IN ('success', 'force_import', 'manual_import')
+            ORDER BY dl.id DESC
+            """,
+            ([int(log_id) for log_id in source_log_ids],),
+        )
+        return [dict(row) for row in cur.fetchall()]
 
 
     # --- Download logging ---

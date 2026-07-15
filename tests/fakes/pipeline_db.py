@@ -3421,10 +3421,80 @@ class FakePipelineDB:
                     "search_filetype_override"),
                 "request_source": req.get("source"),
             })
+            current_evidence_id = req.get("current_evidence_id")
+            current_evidence = (
+                self._evidence_by_id.get(int(current_evidence_id))
+                if current_evidence_id is not None else None
+            )
+            current_measurement = (
+                current_evidence.measurement
+                if current_evidence is not None else None
+            )
+            current_v0 = (
+                current_evidence.v0_metric
+                if current_evidence is not None else None
+            )
+            joined.update({
+                "_current_evidence_id": (
+                    current_evidence.id if current_evidence is not None else None
+                ),
+                "_current_evidence_is_pre_attempt": (
+                    current_evidence.measured_at <= entry.created_at
+                    if current_evidence is not None else None
+                ),
+                "_current_evidence_format": (
+                    current_measurement.format
+                    if current_measurement is not None else None
+                ),
+                "_current_evidence_min_bitrate": (
+                    current_measurement.min_bitrate_kbps
+                    if current_measurement is not None else None
+                ),
+                "_current_evidence_avg_bitrate": (
+                    current_measurement.avg_bitrate_kbps
+                    if current_measurement is not None else None
+                ),
+                "_current_evidence_median_bitrate": (
+                    current_measurement.median_bitrate_kbps
+                    if current_measurement is not None else None
+                ),
+                "_current_evidence_spectral_grade": (
+                    current_measurement.spectral_grade
+                    if current_measurement is not None else None
+                ),
+                "_current_evidence_spectral_bitrate": (
+                    current_measurement.spectral_bitrate_kbps
+                    if current_measurement is not None else None
+                ),
+                "_current_evidence_v0_probe_kind": (
+                    current_v0.source_lineage if current_v0 is not None else None
+                ),
+                "_current_evidence_v0_probe_min_bitrate": (
+                    current_v0.min_bitrate_kbps if current_v0 is not None else None
+                ),
+                "_current_evidence_v0_probe_avg_bitrate": (
+                    current_v0.avg_bitrate_kbps if current_v0 is not None else None
+                ),
+                "_current_evidence_v0_probe_median_bitrate": (
+                    current_v0.median_bitrate_kbps if current_v0 is not None else None
+                ),
+            })
             rows.append(joined)
             if len(rows) >= limit:
                 break
         return rows
+
+    def get_linked_import_logs(
+        self,
+        source_log_ids: list[int],
+    ) -> list[dict[str, object]]:
+        wanted = {int(log_id) for log_id in source_log_ids}
+        return [
+            self._download_log_to_dict(entry)
+            for entry in reversed(self.download_logs)
+            if entry.source_download_log_id in wanted
+            and entry.outcome in ("success", "force_import", "manual_import")
+        ]
 
     def get_by_status(
         self,

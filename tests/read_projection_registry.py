@@ -269,6 +269,19 @@ def _seed_get_log(db: Any) -> "list[dict[str, Any]]":
     return list(db.get_log())
 
 
+def _seed_get_linked_import_logs(db: Any) -> "list[dict[str, Any]]":
+    rid = db.add_request(
+        "Parity Artist", "Parity Album", "request",
+        mb_release_id="linked-import-log-parity")
+    source_id = db.log_download(rid, outcome="rejected")
+    db.log_download(
+        rid,
+        outcome="force_import",
+        source_download_log_id=source_id,
+    )
+    return list(db.get_linked_import_logs([source_id]))
+
+
 # --- search_log projections -----------------------------------------------
 
 def _seed_get_search_history(db: Any) -> "list[dict[str, Any]]":
@@ -450,6 +463,7 @@ PARITY_REGISTRY: "dict[str, Seeder]" = {
     "get_download_history_batch": _seed_get_download_history_batch,
     "get_latest_download_summaries": _seed_get_latest_download_summaries,
     "get_log": _seed_get_log,
+    "get_linked_import_logs": _seed_get_linked_import_logs,
     # search_log projections.
     "get_search_history": _seed_get_search_history,
     "get_search_history_page": _seed_get_search_history_page,

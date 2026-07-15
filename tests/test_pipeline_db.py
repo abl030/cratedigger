@@ -2231,6 +2231,42 @@ class TestDownloadLog(unittest.TestCase):
         self.assertAlmostEqual(
             cast(float, recent[force_id]["original_beets_distance"]), 0.2328)
 
+    def test_linked_import_logs_ignore_recents_outcome_filter(self):
+        source_id = self.db.log_download(
+            self.req_id,
+            "source-peer",
+            "flac",
+            "/failed/source",
+            outcome="rejected",
+            validation_result=json.dumps({
+                "scenario": "high_distance",
+                "distance": 0.2328,
+            }),
+        )
+        linked_id = self.db.log_download(
+            self.req_id,
+            "source-peer",
+            "flac",
+            "/failed/source",
+            outcome="force_import",
+            source_download_log_id=source_id,
+        )
+        self.db.log_download(
+            self.req_id,
+            "unrelated-peer",
+            "mp3",
+            "/Incoming/A/B",
+            outcome="success",
+        )
+
+        linked = self.db.get_linked_import_logs([source_id])
+
+        self.assertEqual([row["id"] for row in linked], [linked_id])
+        self.assertEqual(linked[0]["source_download_log_id"], source_id)
+        self.assertAlmostEqual(
+            cast(float, linked[0]["original_beets_distance"]), 0.2328
+        )
+
     def test_candidate_evidence_source_overlay_is_consistent_across_reads(self):
         from lib.quality import AudioQualityMeasurement
 

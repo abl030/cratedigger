@@ -565,8 +565,9 @@ console.log('renderEvidenceStrip() renders canonical candidate evidence as ordin
     source_median_bitrate: 255,
   });
   assertContains(strip, '>IN</strong>', 'historical triage evidence keeps the normal IN row');
-  assertContains(strip, '>MP3 V2</span>', 'candidate evidence supplies the source label');
-  assertContains(strip, '>min 201k</span>', 'candidate evidence supplies the source minimum');
+  assertContains(strip, '>MP3</span>', 'candidate evidence supplies the source codec');
+  assertContains(strip, '>259k avg (min 201k)</span>',
+    'candidate evidence supplies its average and minimum');
 }
 
 console.log('renderEvidenceStrip() returns empty string when no evidence exists');
@@ -610,6 +611,21 @@ console.log('renderEvidenceStrip() shows the on-disk format on the HAVE side');
   });
   assertContains(strip, '>MP3</span>', 'HAVE side leads with the on-disk format');
   assertContains(strip, '>min 256k</span>', 'HAVE bitrate stays min-labelled in its shared slot');
+}
+
+console.log('renderEvidenceStrip() renders a supplied pre-attempt HAVE snapshot');
+{
+  // Historical renderers receive only the evidence that belonged to the
+  // attempt; a later current-library snapshot must never be projected here.
+  const strip = renderEvidenceFixture({
+    source_format: 'FLAC',
+    source_min_bitrate: 455,
+    source_avg_bitrate: 725,
+    existing_format: 'Opus',
+    existing_min_bitrate: 93,
+  });
+  assertContains(strip, '>Opus</span>', 'pre-attempt format populates HAVE');
+  assertContains(strip, '>min 93k</span>', 'pre-attempt minimum populates HAVE');
 }
 
 console.log('renderDownloadHistoryItem() does not infer output from legacy min fields');
@@ -720,10 +736,14 @@ console.log('renderEvidenceStrip() renders the persisted comparison basis when p
       verified_lossless_bypass: false,
     },
   });
-  assertContains(strip, 'avg 288k', 'IN side shows the deciding avg');
-  assertContains(strip, 'transparent', 'IN side shows the rank');
-  assertContains(strip, 'avg 196k', 'HAVE side shows the deciding avg');
-  assertContains(strip, 'good', 'HAVE side shows the rank');
+  assertContains(strip, '288k avg (min 194k)',
+    'IN side shows the deciding average and actual minimum');
+  assertExcludes(strip, '>transparent</span>',
+    'compact IN leaves decision ranks to the expanded detail');
+  assertContains(strip, '196k avg (min 194k)',
+    'HAVE side shows the deciding average and actual minimum');
+  assertExcludes(strip, '>good</span>',
+    'compact HAVE leaves decision ranks to the expanded detail');
   assertContains(strip, 'genuine', 'spectral grade chip survives');
   assertContains(strip, '~160k genuine',
     'ordinary avg basis does not suppress a distinct spectral floor');
@@ -746,6 +766,7 @@ console.log('renderEvidenceStrip() renders the persisted comparison basis when p
 console.log('Gas: contract, V0 proof, and materialized Opus output stay distinct');
 {
   const strip = renderEvidenceFixture({
+    outcome: 'force_import',
     downloaded_label: 'FLAC → OPUS 128',
     source_format: 'FLAC',
     source_min_bitrate: 742,
@@ -781,12 +802,26 @@ console.log('Gas: contract, V0 proof, and materialized Opus output stay distinct
       verified_lossless_bypass: false,
     },
   });
-  assertContains(strip, '>FLAC</span>', 'collapsed strip names only the measured source codec');
-  assertExcludes(strip, 'FLAC →', 'collapsed source does not imply a source-to-target measurement');
+  assertContains(strip, '>FLAC - Opus</span>',
+    'IN suffixes the source codec with the selected storage codec');
+  assertContains(strip, '>132k avg (min 102k)</span>',
+    'IN metric stays numeric so it aligns with HAVE');
+  assertExcludes(strip, 'FLAC →', 'collapsed source uses the compact suffix grammar');
   assertExcludes(strip, 'OPUS 128 contract',
     'target contract remains in expanded details instead of the source strip');
-  assertExcludes(strip, 'actual OPUS avg 132k (min 102k)',
-    'materialized output remains in expanded details instead of the source strip');
+  assertContains(strip, '>MP3</span>',
+    'HAVE names the pre-import codec');
+  assertContains(strip, '>128k avg (min 128k)</span>',
+    'HAVE uses the pre-import measurement');
+  const outputCount = strip.split('132k avg (min 102k)').length - 1;
+  if (outputCount === 1) { passed++; } else {
+    failed++;
+    console.error(`  FAIL: materialized output belongs only to IN; rendered ${outputCount} times`);
+  }
+  assertExcludes(strip, '>transparent</span>',
+    'compact HAVE never substitutes a decision rank for measured spectral data');
+  assertContains(strip, '~128k suspect',
+    'HAVE keeps the existing spectral measurement after conversion');
   assertContains(strip, 'V0 224k avg', 'source V0 proof remains explicit');
   assertExcludes(strip, 'OPUS 128 min 191k', 'V0 minimum never wears an Opus label');
 
@@ -843,6 +878,273 @@ console.log('Gas: contract, V0 proof, and materialized Opus output stay distinct
   assertExcludes(detail, '>Min bitrate<', 'ambiguous unqualified row is gone');
 }
 
+console.log('Amaterasu Shiroi: force import HAVE stays pre-import');
+{
+  const strip = renderEvidenceFixture({
+    outcome: 'force_import',
+    source_format: 'FLAC',
+    source_min_bitrate: 529,
+    source_avg_bitrate: 648,
+    source_median_bitrate: 642,
+    target_contract_format: 'opus 128',
+    was_converted: true,
+    spectral_grade: 'likely_transcode',
+    spectral_bitrate: 96,
+    v0_probe_kind: 'lossless_source_v0',
+    v0_probe_min_bitrate: 246,
+    v0_probe_avg_bitrate: 258,
+    materialized_format: 'Opus',
+    materialized_min_bitrate: 118,
+    materialized_avg_bitrate: 124,
+    materialized_median_bitrate: 122,
+    existing_format: 'Opus',
+    existing_min_bitrate: 90,
+    existing_avg_bitrate: 101,
+    existing_median_bitrate: 99,
+    existing_spectral_grade: 'suspect',
+    existing_spectral_bitrate: 80,
+    existing_v0_probe_kind: 'lossless_source_v0',
+    existing_v0_probe_min_bitrate: 201,
+    existing_v0_probe_avg_bitrate: 220,
+    comparison_basis: {
+      verdict: 'better', branch: 'rank',
+      new_rank: 'transparent', existing_rank: 'excellent',
+      new_metric: 'contract', existing_metric: 'avg',
+      new_value_kbps: 128, existing_value_kbps: 96,
+      new_format: 'opus 128', existing_format: 'opus',
+      spectral_clamped: true, tolerance_kbps: null,
+      verified_lossless_bypass: false,
+    },
+  });
+  assertContains(strip, '>FLAC - Opus</span>',
+    'IN keeps the downloaded source and suffixes its storage codec');
+  assertContains(strip, '>124k avg (min 118k)</span>',
+    'IN metric contains only measured output bytes');
+  assertContains(strip, '~96k likely transcode', 'IN keeps source spectral evidence');
+  assertContains(strip, 'V0 258k avg (min 246k)', 'IN keeps its source V0 probe');
+  assertContains(strip, '>OPUS</span>', 'HAVE names the pre-import copy');
+  assertContains(strip, '>101k avg (min 90k)</span>',
+    'HAVE is populated from pre-import bytes');
+  assertExcludes(strip, '>transparent</span>',
+    'HAVE does not substitute the decision rank for spectral data');
+  assertExcludes(strip, '>excellent</span>', 'decision rank stays out of compact HAVE');
+  const spectralCount = strip.split('~96k likely transcode').length - 1;
+  if (spectralCount === 1) { passed++; } else {
+    failed++;
+    console.error(`  FAIL: candidate spectral belongs only to IN; rendered ${spectralCount} times`);
+  }
+  const v0Count = strip.split('V0 258k avg (min 246k)').length - 1;
+  if (v0Count === 1) { passed++; } else {
+    failed++;
+    console.error(`  FAIL: candidate V0 belongs only to IN; rendered ${v0Count} times`);
+  }
+  assertContains(strip, '~80k suspect', 'HAVE keeps its own spectral snapshot');
+  assertContains(strip, 'V0 220k avg (min 201k)', 'HAVE keeps its own V0 snapshot');
+}
+
+console.log('Absentee Schmotime: an upgrade keeps the pre-import copy in HAVE');
+{
+  // Live issue #709 regression: the converted output belongs to IN, while
+  // HAVE remains the MP3 snapshot which the upgrade decision replaced.
+  const strip = renderEvidenceFixture({
+    outcome: 'success',
+    badge: 'Upgraded',
+    source_format: 'FLAC',
+    source_min_bitrate: 863,
+    source_avg_bitrate: 967,
+    source_median_bitrate: 950,
+    target_contract_format: 'opus 128',
+    was_converted: true,
+    spectral_grade: 'genuine',
+    v0_probe_kind: 'lossless_source_v0',
+    v0_probe_min_bitrate: 258,
+    v0_probe_avg_bitrate: 268,
+    materialized_format: 'Opus',
+    materialized_min_bitrate: 127,
+    materialized_avg_bitrate: 136,
+    materialized_median_bitrate: 134,
+    existing_format: 'MP3',
+    existing_min_bitrate: 320,
+    existing_avg_bitrate: 320,
+    existing_median_bitrate: 320,
+    existing_spectral_grade: 'genuine',
+    existing_v0_probe_kind: 'native_lossy_research_v0',
+    existing_v0_probe_min_bitrate: 258,
+    existing_v0_probe_avg_bitrate: 268,
+    comparison_basis: {
+      verdict: 'equivalent', branch: 'cross_family_same_rank',
+      new_rank: 'transparent', existing_rank: 'transparent',
+      new_metric: 'contract', existing_metric: 'avg',
+      new_value_kbps: 128, existing_value_kbps: 320,
+      new_format: 'opus 128', existing_format: 'mp3',
+      spectral_clamped: false, tolerance_kbps: null,
+      verified_lossless_bypass: true,
+    },
+  });
+  assertContains(strip, '>FLAC - Opus</span>', 'IN names the converted source');
+  assertContains(strip, '>136k avg (min 127k)</span>', 'IN uses measured Opus output');
+  assertContains(strip, '>MP3</span>', 'HAVE keeps the pre-import codec');
+  assertContains(strip, '>320k avg (min 320k)</span>',
+    'HAVE keeps the pre-import bitrate snapshot');
+  assertExcludes(strip, '>transparent</span>',
+    'compact upgrade leaves the internal rank in expanded detail');
+  const incomingMetricCount = strip.split('136k avg (min 127k)').length - 1;
+  if (incomingMetricCount === 1) { passed++; } else {
+    failed++;
+    console.error(`  FAIL: incoming output must appear once; rendered ${incomingMetricCount} times`);
+  }
+}
+
+console.log('every attempted import keeps materialized IN separate from historical HAVE');
+{
+  for (const [outcome, badge] of [
+    ['success', 'Upgraded'],
+    ['success', 'Provisional'],
+    ['force_import', 'Force imported'],
+    ['manual_import', 'Imported'],
+  ]) {
+    for (const storage of ['Opus', 'MP3']) {
+      for (const existing of ['MP3', 'AAC', 'Opus']) {
+        for (const offset of [0, 37, 149]) {
+        const incomingAvg = 121 + offset;
+        const incomingMin = 101 + offset;
+        const existingAvg = 211 + offset;
+        const existingMin = 191 + offset;
+        const strip = renderEvidenceFixture({
+          outcome, badge, was_converted: true,
+          source_format: 'FLAC', target_contract_format: storage === 'Opus'
+            ? 'opus 128' : 'mp3 v0',
+          materialized_format: storage,
+          materialized_avg_bitrate: incomingAvg,
+          materialized_min_bitrate: incomingMin,
+          existing_format: existing,
+          existing_avg_bitrate: existingAvg,
+          existing_min_bitrate: existingMin,
+        });
+        assertContains(strip, `>${existing}</span>`,
+          'generated upgrade HAVE keeps its pre-import codec');
+        assertContains(strip, `>${existingAvg}k avg (min ${existingMin}k)</span>`,
+          'generated upgrade HAVE keeps its pre-import measurements');
+        const incomingCount = strip.split(`${incomingAvg}k avg (min ${incomingMin}k)`).length - 1;
+        if (incomingCount === 1) { passed++; } else {
+          failed++;
+          console.error(`  FAIL: attempted output bled into HAVE (${outcome}/${storage}/${existing}/${offset})`);
+        }
+        }
+      }
+    }
+  }
+}
+
+console.log('Forty Days: provisional HAVE stays the comparable on-disk copy');
+{
+  // Live issue #709 regression: a provisional candidate has a materialized
+  // output measurement, but HAVE must remain the pre-attempt library snapshot
+  // used by the decision so every IN field compares top-to-bottom.
+  const strip = renderEvidenceFixture({
+    outcome: 'success',
+    badge: 'Provisional',
+    source_format: 'FLAC',
+    source_min_bitrate: 485,
+    source_avg_bitrate: 600,
+    source_median_bitrate: 618,
+    target_contract_format: 'opus 128',
+    was_converted: true,
+    spectral_grade: 'likely_transcode',
+    spectral_bitrate: 96,
+    v0_probe_kind: 'lossless_source_v0',
+    v0_probe_min_bitrate: 200,
+    v0_probe_avg_bitrate: 223,
+    existing_format: 'Opus',
+    existing_min_bitrate: 103,
+    existing_avg_bitrate: 113,
+    existing_median_bitrate: 114,
+    existing_spectral_grade: 'likely_transcode',
+    existing_spectral_bitrate: 96,
+    existing_v0_probe_kind: 'lossless_source_v0',
+    existing_v0_probe_min_bitrate: 173,
+    existing_v0_probe_avg_bitrate: 207,
+    materialized_format: 'Opus',
+    materialized_min_bitrate: 106,
+    materialized_avg_bitrate: 122,
+  });
+  assertContains(strip, '>FLAC - Opus</span>',
+    'IN names the provisional source and selected storage codec');
+  assertContains(strip, '>122k avg (min 106k)</span>',
+    'IN metric contains only the measured provisional result');
+  assertContains(strip, 'V0 223k avg (min 200k)', 'IN keeps source V0 evidence');
+  assertContains(strip, '>Opus</span>', 'HAVE names the comparable library copy');
+  assertContains(strip, '>113k avg (min 103k)</span>',
+    'HAVE reports average and minimum for the pre-attempt copy');
+  assertContains(strip, '~96k likely transcode', 'HAVE keeps spectral evidence');
+  assertContains(strip, 'V0 207k avg (min 173k)', 'HAVE keeps its V0 probe');
+  assertExcludes(strip, 'avg 122k (min 106k)',
+    'candidate output does not replace provisional comparison evidence');
+}
+
+console.log('Actual Life 3: current canonical evidence fully populates triage HAVE');
+{
+  const strip = renderEvidenceFixture({
+    outcome: 'rejected',
+    badge: 'Triaged · deleted',
+    source_format: 'FLAC',
+    source_min_bitrate: 455,
+    source_avg_bitrate: 725,
+    spectral_grade: 'likely_transcode',
+    spectral_bitrate: 96,
+    v0_probe_kind: 'lossless_source_v0',
+    v0_probe_min_bitrate: 178,
+    v0_probe_avg_bitrate: 248,
+    existing_format: 'Opus',
+    existing_min_bitrate: 93,
+    existing_avg_bitrate: 129,
+    existing_spectral_grade: 'suspect',
+    existing_spectral_bitrate: 96,
+    existing_v0_probe_kind: 'lossless_source_v0',
+    existing_v0_probe_min_bitrate: 193,
+    existing_v0_probe_avg_bitrate: 256,
+  });
+  assertContains(strip, '>FLAC</span>', 'retained lossless keeps the bare source label');
+  assertContains(strip, '>725k avg (min 455k)</span>',
+    'retained lossless metric reports average plus minimum');
+  assertContains(strip, '>Opus</span>', 'triage HAVE names the current copy');
+  assertContains(strip, '>129k avg (min 93k)</span>',
+    'triage HAVE reports average plus minimum');
+  assertContains(strip, '~96k suspect', 'triage HAVE keeps current spectral evidence');
+  assertContains(strip, 'V0 256k avg (min 193k)',
+    'triage HAVE keeps the canonical current V0 probe');
+}
+
+console.log('lossless storage labels distinguish V0 from retained FLAC');
+{
+  const v0 = renderEvidenceFixture({
+    outcome: 'success', badge: 'Imported', was_converted: true,
+    source_format: 'FLAC', source_min_bitrate: 600, source_avg_bitrate: 800,
+    target_contract_format: 'mp3 v0',
+    materialized_format: 'MP3', materialized_min_bitrate: 220,
+    materialized_avg_bitrate: 245,
+  });
+  assertContains(v0, '>FLAC - V0</span>',
+    'V0 target is suffixed to the lossless source label');
+  assertContains(v0, '>245k avg (min 220k)</span>',
+    'V0 target leaves the metric column numeric');
+  const newImportMetricCount = v0.split('245k avg (min 220k)').length - 1;
+  if (newImportMetricCount === 1) { passed++; } else {
+    failed++;
+    console.error(`  FAIL: first import must leave HAVE empty; output rendered ${newImportMetricCount} times`);
+  }
+  assertContains(v0, '>—</span>',
+    'first import makes the absent pre-import HAVE explicit');
+
+  const flac = renderEvidenceFixture({
+    outcome: 'success', badge: 'New', was_converted: false,
+    source_format: 'FLAC', source_min_bitrate: 455, source_avg_bitrate: 725,
+  });
+  assertContains(flac, '>FLAC</span>', 'retained FLAC target keeps the bare codec label');
+  assertContains(flac, '>725k avg (min 455k)</span>',
+    'retained FLAC metric contains only its actual bytes');
+}
+
 console.log('Iron & Wine: the temporary V0 minimum never wears the FLAC label');
 {
   const strip = renderEvidenceFixture({
@@ -868,8 +1170,8 @@ console.log('Iron & Wine: the temporary V0 minimum never wears the FLAC label');
   assertContains(strip, '>FLAC</span>', 'source remains labelled FLAC');
   assertExcludes(strip, '>min 165k</span>', 'V0 minimum is not a FLAC measurement');
   assertContains(strip, 'V0 171k avg (min 165k)', 'candidate V0 owns its minimum');
-  assertContains(strip, '>Opus</span>', 'materialized existing Opus keeps its codec slot');
-  assertContains(strip, '>min 114k</span>', 'materialized existing Opus keeps its real floor');
+  assertContains(strip, '>Opus</span>', 'pre-attempt existing Opus keeps its codec slot');
+  assertContains(strip, '>min 114k</span>', 'pre-attempt existing Opus keeps its real floor');
   assertContains(strip, 'V0 232k avg (min 223k)', 'existing source V0 owns its minimum');
 
   const detail = renderDownloadHistoryFixture({
@@ -895,8 +1197,8 @@ console.log('evidence strip CSS preserves shared desktop/mobile alignment withou
   const css = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
   assertContains(css, '.r-ev-row { display: contents; }',
     'row wrappers participate in the parent grid instead of defining independent columns');
-  assertContains(css, 'grid-template-columns: 3.6em minmax(4.5em, 1.05fr) minmax(5.5em, 1fr) minmax(4.5em, 0.85fr) minmax(6.5em, 1fr) minmax(8em, 1.35fr)',
-    'label/source/metric/rank/spectral/V0 use six shared columns');
+  assertContains(css, 'grid-template-columns: 3.6em minmax(4.5em, 0.8fr) minmax(12em, 1.7fr) minmax(4.5em, 0.75fr) minmax(7.5em, 1fr) minmax(9em, 1.35fr)',
+    'desktop reserves a full avg/min metric column before rank/spectral/V0');
   assertContains(css, '@media (max-width: 720px)', 'shared grid has a narrow-screen layout');
   assertContains(css, 'grid-template-columns: 4.3em minmax(5em, 0.8fr) minmax(0, 1.8fr)',
     'mobile uses a readable tag/source/detail three-column grid');
@@ -908,8 +1210,8 @@ console.log('evidence strip CSS preserves shared desktop/mobile alignment withou
     'IN/HAVE spans every row without touching source text');
   assertContains(css, '.r-ev-source { grid-column: 2; grid-row: 1; }',
     'source owns the first aligned field slot');
-  assertContains(css, '.r-ev-metric { grid-column: 3; grid-row: 1; }',
-    'metric owns the first aligned detail slot');
+  assertContains(css, '.r-ev-metric { grid-column: 3; grid-row: 1; white-space: normal; }',
+    'mobile metric owns the first detail slot and can wrap at spaces');
   assertContains(css, '.r-ev-rank { grid-column: 2; grid-row: 2; }',
     'rank owns the second aligned field slot');
   assertContains(css, '.r-ev-spectral { grid-column: 3; grid-row: 2; white-space: normal; }',
@@ -918,6 +1220,10 @@ console.log('evidence strip CSS preserves shared desktop/mobile alignment withou
     'mobile V0 provenance uses a full-width third row');
   assertContains(css, '.r-evidence .r-ev-tag { color: #d3deea; font-weight: 900; font-size: 1.08em;',
     'IN/HAVE labels are visibly prominent');
+  assertContains(css, '@media (min-width: 721px) { .r-ev-v0 { padding-left: 1em; } }',
+    'desktop V0 keeps a visible gutter after long spectral labels');
+  assertContains(css, '.recents-triage-label { color: #d66; font-weight: 600; }',
+    'secondary triage annotations stay rejection-coloured');
   assertExcludes(css, '.r-ev-cell { min-width: 0; overflow-wrap: anywhere;',
     'evidence tokens never use arbitrary mid-word wrapping');
   assertExcludes(css, 'repeat(5, minmax(0, 1fr))',

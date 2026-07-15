@@ -344,7 +344,8 @@ class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
         }))
 
         self.assertEqual(result.badge, "Triaged · deleted")
-        self.assertEqual(result.badge_class, "badge-library")
+        self.assertEqual(result.badge_class, "badge-rejected")
+        self.assertEqual(result.border_color, "#a33")
         self.assertEqual(result.verdict, "Wrong match (dist 0.190)")
         self.assertEqual(result.summary,
                          "Wrong match (dist 0.190) · moundsofass")
@@ -425,6 +426,7 @@ class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
         self.assertEqual(result.source_avg_bitrate, 320)
         self.assertEqual(result.existing_format, "MP3")
         self.assertEqual(result.existing_min_bitrate, 320)
+        self.assertEqual(result.existing_avg_bitrate, 320)
         self.assertEqual(result.spectral_grade, "likely_transcode")
         self.assertEqual(result.v0_probe_avg_bitrate, 259)
         self.assertEqual(result.existing_v0_probe_kind,
@@ -441,7 +443,9 @@ class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
             "stage_chain": ["stage2_import:import"],
         }))
 
-        self.assertEqual(result.badge, "Rejected")
+        self.assertEqual(result.badge, "Triaged · kept")
+        self.assertEqual(result.badge_class, "badge-warn")
+        self.assertEqual(result.border_color, "#a33")
         self.assertEqual(result.wrong_match_triage_action, "kept_would_import")
         self.assertIn("kept", result.wrong_match_triage_summary or "")
         self.assertIn("import", result.wrong_match_triage_summary or "")
@@ -2077,8 +2081,45 @@ class TestClassifyComparisonBasis(unittest.TestCase):
         c = classify_log_entry(entry)
         self.assertEqual(
             c.verdict,
-            "Equivalent: MP3 avg 250k vs avg 248k (within 5k)"
-            " — imported: verified lossless")
+            "Upgrade: MP3 V0 to MP3 V0, verified lossless")
+
+    def test_schmotime_verified_lossless_upgrade_restores_concise_copy(self):
+        entry = _entry(
+            outcome="success",
+            was_converted=True,
+            original_filetype="flac",
+            actual_filetype="opus",
+            actual_min_bitrate=127,
+            existing_min_bitrate=320,
+            spectral_grade="genuine",
+            soulseek_username="trelospatrinos",
+            import_result={
+                "version": 2,
+                "decision": "import",
+                "comparison_basis": {
+                    "verdict": "equivalent",
+                    "branch": "cross_family_same_rank",
+                    "new_rank": "transparent",
+                    "existing_rank": "transparent",
+                    "new_metric": "contract",
+                    "existing_metric": "avg",
+                    "new_value_kbps": 128,
+                    "existing_value_kbps": 320,
+                    "new_format": "opus 128",
+                    "existing_format": "mp3",
+                    "spectral_clamped": False,
+                    "tolerance_kbps": None,
+                    "verified_lossless_bypass": True,
+                },
+            },
+        )
+        result = classify_log_entry(entry)
+        self.assertEqual(result.badge, "Upgraded")
+        self.assertEqual(
+            result.summary,
+            "Upgrade: MP3 320 to OPUS 127k, from FLAC, verified lossless"
+            " · trelospatrinos",
+        )
 
     def test_flac_conversion_suffixes_survive_basis_path(self):
         basis = self._basis_dict(self._SAY_HELLO_NEW, self._SAY_HELLO_EXISTING)

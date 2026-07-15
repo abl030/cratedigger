@@ -138,71 +138,116 @@ function basisSidePhrase(basis, side) {
     + ` · ${esc(rank)}`;
 }
 
-/**
- * Compact one-line IN/HAVE evidence comparison for list rows.
- *
- * Same numbers as the detail grid (measured incoming vs on-disk at the
- * time of THIS download), compressed for glance-ability: the Recents
- * list renders it under the title so quality decisions read without
- * expanding the card. Returns '' when neither side has measurements
- * (download-phase failures have nothing to compare).
- * @param {Object} h - Download history entry / recents log item from the API
- * @returns {string} HTML string, or '' when there is no evidence
- */
-export function renderEvidenceStrip(h) {
-  // A strip is a comparison — it needs at least one NUMBER. A codec
-  // label alone (failed downloads carry a filetype but no measurements)
-  // would render a noisy "IN MP3 HAVE —" on every failure row.
-  const hasMeasurement = Boolean(
-    h.actual_min_bitrate || h.spectral_bitrate || h.spectral_grade
-    || h.spectral_error || h.existing_spectral_error
-    || h.source_min_bitrate || h.source_avg_bitrate
-    || h.source_median_bitrate
-    || h.v0_probe_avg_bitrate || h.existing_min_bitrate
-    || h.existing_spectral_bitrate || h.existing_v0_probe_avg_bitrate
-    || h.comparison_basis,
-  );
-  if (!hasMeasurement) return '';
+function emptyEvidenceCells() {
+  return { source: '', metric: '', rank: '', spectral: '', v0: '' };
+}
 
+function avgMinPhrase(avg, median, min) {
+  if (avg != null) {
+    return `${esc(avg)}k avg${min != null ? ` (min ${esc(min)}k)` : ''}`;
+  }
+  if (median != null) {
+    return `${esc(median)}k median${min != null ? ` (min ${esc(min)}k)` : ''}`;
+  }
+  return min != null ? `min ${esc(min)}k` : '';
+}
+
+function comparisonMetricPhrase(avg, median, min, basis, side) {
+  if (avg != null || median != null) return avgMinPhrase(avg, median, min);
+  if (!basis) return avgMinPhrase(null, null, min);
+
+  const metric = side === 'new' ? basis.new_metric : basis.existing_metric;
+  const value = side === 'new' ? basis.new_value_kbps : basis.existing_value_kbps;
+  if (basis.spectral_clamped && basis.branch === 'rank') {
+    return basisValuePhrase(basis, side);
+  }
+  if (metric === 'avg') return avgMinPhrase(value, null, min);
+  if (metric === 'median') return avgMinPhrase(null, value, min);
+  if (min != null) return avgMinPhrase(null, null, min);
+  return basisValuePhrase(basis, side);
+}
+
+function isLosslessSource(format) {
+  return ['FLAC', 'ALAC', 'WAV', 'AIFF'].includes(
+    String(format || '').trim().toUpperCase(),
+  );
+}
+
+function storageFormatLabel(h, fallback) {
+  const contract = String(h.target_contract_format || '').toLowerCase();
+  if (/\bv0\b/.test(contract)) return 'V0';
+  if (contract.includes('opus')) return 'Opus';
+  if (contract.includes('flac')) return 'FLAC';
+  const format = h.materialized_format || fallback || '';
+  const normalized = String(format).trim();
+  return normalized.toUpperCase() === 'OPUS' ? 'Opus' : normalized.toUpperCase();
+}
+
+function sourceStorageLabel(sourceFormat, storageFormat) {
+  const source = String(sourceFormat || '').trim().toUpperCase();
+  const storage = String(storageFormat || '').trim();
+  if (!storage || source === storage.toUpperCase()) return source;
+  return `${source} - ${storage}`;
+}
+
+/**
+ * Normalize every Recents outcome into the same two-sided card model.
+ *
+ * IN always means the downloaded source; a lossless source suffixes the
+ * selected storage codec in its source cell so its metric stays vertically
+ * aligned with HAVE. HAVE always means the on-disk snapshot from before this
+ * attempt. Materialized output is candidate evidence and therefore belongs
+ * only to IN; a first import has an empty HAVE row.
+ */
+function buildEvidenceCardModel(h) {
   const basis = h.comparison_basis || null;
-  const inCells = { source: '', metric: '', rank: '', spectral: '', v0: '' };
+  const inCells = emptyEvidenceCells();
   const sourceFormat = h.source_format || h.slskd_filetype || h.original_filetype;
-  const collapsedConvertedSource = Boolean(h.was_converted && sourceFormat);
-  if (basis) {
-    // The persisted basis IS the comparison the decider performed —
-    // render it instead of re-deriving labels from min bitrate (request
-    // 6039: min-derived labels turned a real avg 196→288 rank upgrade
-    // into "IN MP3 V2 · 194k HAVE MP3 194k").
-    if (collapsedConvertedSource) {
-      // Collapsed evidence names the measured source only. Target/output
-      // lineage belongs in the expanded detail, where it cannot make a
-      // target bitrate look like a property of the source codec.
-      inCells.source = esc(String(sourceFormat).toUpperCase());
-    } else {
-      inCells.source = esc(String(basis.new_format || '?').toUpperCase());
-      inCells.metric = basisValuePhrase(basis, 'new');
-      inCells.rank = esc(basis.new_rank);
-    }
+  const losslessSource = isLosslessSource(sourceFormat);
+  const hasMaterializedMeasurement = Boolean(
+    h.materialized_format
+    && (h.materialized_avg_bitrate != null
+      || h.materialized_median_bitrate != null
+      || h.materialized_min_bitrate != null),
+  );
+  if (sourceFormat) {
+    inCells.source = esc(String(sourceFormat).toUpperCase());
+  } else if (basis?.new_format) {
+    inCells.source = esc(String(basis.new_format).toUpperCase());
+  } else if (h.downloaded_label) {
+    inCells.source = esc(h.downloaded_label);
+  }
+  if (losslessSource && hasMaterializedMeasurement) {
+    const storage = storageFormatLabel(h, h.materialized_format);
+    inCells.source = esc(sourceStorageLabel(sourceFormat, storage));
+    const bytes = avgMinPhrase(
+      h.materialized_avg_bitrate,
+      h.materialized_median_bitrate,
+      h.materialized_min_bitrate,
+    );
+    inCells.metric = bytes;
   } else {
-    if (collapsedConvertedSource) {
-      inCells.source = esc(String(sourceFormat).toUpperCase());
-    } else if (h.downloaded_label) {
-      inCells.source = esc(h.downloaded_label);
-    }
-    // Labelled "min": bare numbers on a card that also shows avg-labelled
-    // basis and V0 values invite exactly the min-vs-avg confusion the
-    // basis exists to kill (request 8781 operator report).
-    const minIsLosslessSourceProbe = (
-      h.legacy_projection_version != null
+    const projectedMinIsV0Probe = (
+      h.source_min_bitrate == null
+      && h.legacy_projection_version != null
       && (h.v0_probe_kind === 'lossless_source_v0'
         || h.v0_probe_kind === 'lossless_source')
-      && h.v0_probe_min_bitrate !== null
-      && h.v0_probe_min_bitrate !== undefined
+      && h.v0_probe_min_bitrate != null
       && Number(h.actual_min_bitrate) === Number(h.v0_probe_min_bitrate)
     );
-    const sourceMin = h.actual_min_bitrate || h.source_min_bitrate;
-    if (sourceMin && !minIsLosslessSourceProbe && !collapsedConvertedSource) {
-      inCells.metric = `min ${esc(sourceMin)}k`;
+    const sourceMin = projectedMinIsV0Probe
+      ? null : (h.source_min_bitrate ?? h.actual_min_bitrate);
+    const bytes = comparisonMetricPhrase(
+      h.source_avg_bitrate,
+      h.source_median_bitrate,
+      sourceMin,
+      basis,
+      'new',
+    );
+    if (losslessSource && bytes) {
+      inCells.metric = bytes;
+    } else if (bytes) {
+      inCells.metric = bytes;
     }
   }
   if (h.spectral_grade) {
@@ -226,22 +271,29 @@ export function renderEvidenceStrip(h) {
     inCells.v0 = stripV0Phrase(h.v0_probe_avg_bitrate, h.v0_probe_min_bitrate);
   }
 
-  const haveCells = { source: '', metric: '', rank: '', spectral: '', v0: '' };
-  // Lead with "MP3 min 256k" as one piece — the codec class is often the
-  // deciding metric (a rank upgrade at equal bitrate is unreadable
-  // without it), and the min label keeps it distinct from the avg-labelled
-  // basis/V0 values on the same card.
+  const haveCells = emptyEvidenceCells();
   if (basis) {
     haveCells.source = esc(String(basis.existing_format || '?').toUpperCase());
-    haveCells.metric = basisValuePhrase(basis, 'existing');
-    haveCells.rank = esc(basis.existing_rank);
-  } else if (h.existing_format && h.existing_min_bitrate) {
-    haveCells.source = esc(h.existing_format);
-    haveCells.metric = `min ${esc(h.existing_min_bitrate)}k`;
+    haveCells.metric = comparisonMetricPhrase(
+      h.existing_avg_bitrate,
+      h.existing_median_bitrate,
+      h.existing_min_bitrate,
+      basis,
+      'existing',
+    );
   } else if (h.existing_format) {
     haveCells.source = esc(h.existing_format);
-  } else if (h.existing_min_bitrate) {
-    haveCells.metric = `min ${esc(h.existing_min_bitrate)}k`;
+    haveCells.metric = avgMinPhrase(
+      h.existing_avg_bitrate,
+      h.existing_median_bitrate,
+      h.existing_min_bitrate,
+    );
+  } else {
+    haveCells.metric = avgMinPhrase(
+      h.existing_avg_bitrate,
+      h.existing_median_bitrate,
+      h.existing_min_bitrate,
+    );
   }
   if (h.existing_spectral_grade) {
     const floor = h.existing_spectral_bitrate ? `~${esc(h.existing_spectral_bitrate)}k ` : '';
@@ -259,10 +311,15 @@ export function renderEvidenceStrip(h) {
       h.existing_v0_probe_avg_bitrate,
       h.existing_v0_probe_min_bitrate);
   }
+  if (!Object.values(haveCells).some(Boolean)) {
+    haveCells.source = '—';
+  }
 
-  const hasCells = (cells) => Object.values(cells).some(Boolean);
-  if (!hasCells(inCells) && !hasCells(haveCells)) return '';
-  const row = (side, label, cells) => `<span class="r-ev-row r-ev-${side}">`
+  return { inCells, haveCells };
+}
+
+function renderEvidenceRow(side, label, cells) {
+  return `<span class="r-ev-row r-ev-${side}">`
     + `<strong class="r-ev-tag">${label}</strong>`
     + `<span class="r-ev-cell r-ev-source">${cells.source}</span>`
     + `<span class="r-ev-cell r-ev-metric">${cells.metric}</span>`
@@ -270,9 +327,37 @@ export function renderEvidenceStrip(h) {
     + `<span class="r-ev-cell r-ev-spectral">${cells.spectral}</span>`
     + `<span class="r-ev-cell r-ev-v0">${cells.v0}</span>`
     + `</span>`;
+}
+
+/**
+ * Compact one-line IN/HAVE evidence comparison for every list-row outcome.
+ * @param {Object} h - Download history entry / recents log item from the API
+ * @returns {string} HTML string, or '' when there is no evidence
+ */
+export function renderEvidenceStrip(h) {
+  // A strip is a comparison — it needs at least one NUMBER. A codec
+  // label alone (failed downloads carry a filetype but no measurements)
+  // would render a noisy "IN MP3 HAVE —" on every failure row.
+  const hasMeasurement = Boolean(
+    h.actual_min_bitrate || h.spectral_bitrate || h.spectral_grade
+    || h.spectral_error || h.existing_spectral_error
+    || h.source_min_bitrate || h.source_avg_bitrate
+    || h.source_median_bitrate
+    || h.v0_probe_avg_bitrate || h.existing_min_bitrate
+    || h.existing_spectral_bitrate || h.existing_v0_probe_avg_bitrate
+    || h.materialized_min_bitrate || h.materialized_avg_bitrate
+    || h.materialized_median_bitrate
+    || h.comparison_basis,
+  );
+  if (!hasMeasurement) return '';
+
+  const { inCells, haveCells } = buildEvidenceCardModel(h);
+
+  const hasCells = (cells) => Object.values(cells).some(Boolean);
+  if (!hasCells(inCells) && !hasCells(haveCells)) return '';
   return `<span class="r-evidence">`
-    + row('in', 'IN', inCells)
-    + row('have', 'HAVE', haveCells)
+    + renderEvidenceRow('in', 'IN', inCells)
+    + renderEvidenceRow('have', 'HAVE', haveCells)
     + `</span>`;
 }
 
