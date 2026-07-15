@@ -10,9 +10,10 @@ upgrade wrongly surfaces at the top. This module preserves the original date:
 
   capture   (importer, BEFORE the Jellyfin refresh): read the maximum
             ``DateCreated`` across the album's Audio children (the value that
-            actually orders Jellyfin's music Latest rows) and snapshot the
-            item ids. A genuinely-new album isn't in Jellyfin yet, so nothing
-            is captured — the table self-selects upgrades.
+            actually orders Jellyfin's music Latest rows), clamp it to Plex's
+            older preserved ``addedAt`` when available, and snapshot the item
+            ids. A genuinely-new album isn't in Jellyfin yet, so nothing is
+            captured — the table self-selects upgrades.
   reconcile (5-min cratedigger cycle): for each pending pin past the settle
             window, re-find the album and check whether the rescan has LANDED
             — an item id differs from the snapshot OR an existing Audio item's
@@ -40,7 +41,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 from lib.pipeline_db.pin_status import JellyfinTerminalPinStatus
@@ -133,13 +134,17 @@ def capture_jellyfin_date_created_pin(
     imported_path: str | None,
     request_id: int | None,
     *,
+    historical_added_at: int | None = None,
     find_fn: FindFn = jellyfin_find_album_by_path,
     children_fn: ChildrenFn = jellyfin_get_album_children,
 ) -> CaptureResult:
-    """Stash the album's maximum Audio date and item-id snapshot.
+    """Stash the album's historical Audio date and item-id snapshot.
 
     MUST run before the Jellyfin media update so the children still carry the
     pre-upgrade dates that determine the album's current Latest position.
+    ``historical_added_at`` is Plex's preserved original epoch value. It can
+    only move the Jellyfin baseline backwards, repairing a prior Jellyfin
+    rebuild or refresh that had already polluted the captured child dates.
     Best-effort: never raises.
     """
     if not _jellyfin_pin_enabled(cfg) or not imported_path:
@@ -159,6 +164,18 @@ def capture_jellyfin_date_created_pin(
             (child.date_created for child in children if child.date_created),
             default=ref.date_created,
         )
+        if historical_added_at is not None:
+            historical = datetime.fromtimestamp(
+                historical_added_at, tz=timezone.utc
+            )
+            captured = datetime.fromisoformat(
+                original_date_created.replace("Z", "+00:00")
+            )
+            if historical < captured:
+                original_date_created = (
+                    historical.isoformat(timespec="seconds")
+                    .replace("+00:00", "Z")
+                )
         pin_id = db.add_jellyfin_date_created_pin(
             imported_path=imported_path,
             original_date_created=original_date_created,

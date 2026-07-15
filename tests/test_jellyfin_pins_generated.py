@@ -18,9 +18,10 @@ entry points over ``FakePipelineDB`` with the Jellyfin client seams injected:
    drifted item (album + audio children) was written, and no write failed;
    skipped ⟺ the album is no longer locatable; a failed write or an
    erroring client always leaves the pin pending.
-4. **P4 (capture snapshot fidelity)** — a capture persists the maximum Audio
-   ``DateCreated`` that actually drives music Latest, plus the item ids,
-   path, and request id; a genuinely new album persists nothing.
+4. **P4 (capture snapshot fidelity)** — a capture persists the earlier of
+   Jellyfin's maximum Audio ``DateCreated`` and Plex's preserved historical
+   ``addedAt``, plus the item ids, path, and request id; a genuinely new album
+   persists nothing.
 
 The deterministic pins for these same invariants live in
 tests/test_jellyfin_pin_service.py.
@@ -252,10 +253,11 @@ class TestCaptureProperty(unittest.TestCase):
             unique_by=lambda pair: pair[0],
             max_size=4,
         ),
+        historical_date=st.one_of(st.none(), st.sampled_from(_DATES)),
     )
     def test_capture_snapshot_mirrors_finder_or_writes_nothing(
             self, found: bool, album_date: str,
-            children: list[tuple[str, str]]):
+            children: list[tuple[str, str]], historical_date: str | None):
         db = FakePipelineDB()
         ref = (
             JellyfinAlbumRef(item_id="alb-1", date_created=album_date)
@@ -263,6 +265,12 @@ class TestCaptureProperty(unittest.TestCase):
         )
         res = capture_jellyfin_date_created_pin(
             _cfg(), db, "Artist/2026 - Album", 42,
+            historical_added_at=(
+                int(datetime.fromisoformat(
+                    historical_date.replace("Z", "+00:00")
+                ).timestamp())
+                if historical_date is not None else None
+            ),
             find_fn=lambda cfg, path: ref,
             children_fn=lambda cfg, iid: [
                 JellyfinItemRef(item_id=item_id, date_created=date)
@@ -275,6 +283,8 @@ class TestCaptureProperty(unittest.TestCase):
         pin = db.jellyfin_date_created_pins[0]
         expected_date = max(
             (date for _, date in children), default=album_date)
+        if historical_date is not None:
+            expected_date = min(expected_date, historical_date)
         self.assertEqual(pin["original_date_created"], expected_date)
         self.assertEqual(pin["album_item_id"], "alb-1")
         self.assertEqual(
