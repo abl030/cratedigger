@@ -36,6 +36,7 @@ from lib.pipeline_db import (  # noqa: E402
     TransferLedgerRow,
 )
 from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS  # noqa: E402
+from lib.quality import AudioQualityMeasurement  # noqa: E402
 
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
@@ -4300,6 +4301,55 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         assert claimed is not None
         self.assertTrue(claimed.on_disk_v0_research_attempted)
         self.assertIsNone(claimed.v0_metric)
+
+    def test_current_spectral_write_requires_exact_empty_current_snapshot(self):
+        evidence = self._seed(
+            mb_release_id="evidence-uuid",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                spectral_grade=None,
+                spectral_bitrate_kbps=None,
+            ),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(self.db.set_request_current_evidence(
+            self.req_id, stored.id))
+
+        self.assertFalse(self.db.persist_current_spectral_measurement(
+            request_id=self.req_id,
+            expected_evidence_id=stored.id,
+            expected_snapshot_fingerprint="wrong",
+            grade="genuine",
+            bitrate_kbps=96,
+        ))
+        self.assertTrue(self.db.persist_current_spectral_measurement(
+            request_id=self.req_id,
+            expected_evidence_id=stored.id,
+            expected_snapshot_fingerprint=stored.snapshot_fingerprint,
+            grade="genuine",
+            bitrate_kbps=96,
+        ))
+        self.assertFalse(self.db.persist_current_spectral_measurement(
+            request_id=self.req_id,
+            expected_evidence_id=stored.id,
+            expected_snapshot_fingerprint=stored.snapshot_fingerprint,
+            grade="likely_transcode",
+            bitrate_kbps=160,
+        ))
+        self.db.upsert_album_quality_evidence(evidence)
+
+        loaded = self.db.load_album_quality_evidence_by_id(stored.id)
+        assert loaded is not None
+        self.assertEqual(loaded.measurement.spectral_grade, "genuine")
+        self.assertEqual(loaded.measurement.spectral_bitrate_kbps, 96)
 
     def test_v0_research_attempt_marker_is_monotonic_on_upsert(self):
         evidence = self._seed(

@@ -20,7 +20,11 @@ from lib.pipeline_db import (
     TransferLedgerRow,
 )
 from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS
-from lib.quality import SpectralMeasurement, ValidationResult
+from lib.quality import (
+    AudioQualityMeasurement,
+    SpectralMeasurement,
+    ValidationResult,
+)
 from tests.fakes import (
     FakeBeetsDB,
     FakeCursor,
@@ -235,6 +239,59 @@ class TestFakePipelineDB(unittest.TestCase):
         claimed = db.load_album_quality_evidence_by_id(persisted.id)
         assert claimed is not None
         self.assertTrue(claimed.on_disk_v0_research_attempted)
+
+    def test_album_quality_evidence_current_spectral_write_is_exact(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, mb_release_id="mb-spectral-1"))
+        evidence = make_album_quality_evidence(
+            mb_release_id="mb-spectral-1",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                spectral_grade=None,
+                spectral_bitrate_kbps=None,
+            ),
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_request_current_evidence(42, persisted.id)
+
+        wrong_fingerprint = db.persist_current_spectral_measurement(
+            request_id=42,
+            expected_evidence_id=persisted.id,
+            expected_snapshot_fingerprint="wrong",
+            grade="genuine",
+            bitrate_kbps=96,
+        )
+        exact = db.persist_current_spectral_measurement(
+            request_id=42,
+            expected_evidence_id=persisted.id,
+            expected_snapshot_fingerprint=persisted.snapshot_fingerprint,
+            grade="genuine",
+            bitrate_kbps=96,
+        )
+        overwrite = db.persist_current_spectral_measurement(
+            request_id=42,
+            expected_evidence_id=persisted.id,
+            expected_snapshot_fingerprint=persisted.snapshot_fingerprint,
+            grade="likely_transcode",
+            bitrate_kbps=160,
+        )
+        db.upsert_album_quality_evidence(evidence)
+
+        self.assertFalse(wrong_fingerprint)
+        self.assertTrue(exact)
+        self.assertFalse(overwrite)
+        stored = db.load_album_quality_evidence_by_id(persisted.id)
+        assert stored is not None
+        self.assertEqual(stored.measurement.spectral_grade, "genuine")
+        self.assertEqual(stored.measurement.spectral_bitrate_kbps, 96)
 
     def test_album_quality_evidence_attempt_marker_is_monotonic(self):
         db = FakePipelineDB()

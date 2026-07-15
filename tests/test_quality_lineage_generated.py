@@ -11,7 +11,10 @@ import msgspec
 
 from harness.import_one import projected_is_cbr_from_bitrates
 from lib.measurement import PreimportMeasurement
-from lib.import_preview import enrich_current_v0_research_for_preview
+from lib.import_preview import (
+    enrich_current_v0_research_for_preview,
+    persist_exact_current_spectral_from_attempt,
+)
 from lib.pipeline_db.download_log import _DownloadLogMixin
 from lib.quality import (
     AlbumQualityV0Metric,
@@ -20,6 +23,7 @@ from lib.quality import (
     ImportResult,
     MeasuredImportDecisionInput,
     QualityRankConfig,
+    SpectralAnalysisDetail,
     TargetQualityContract,
     V0ProbeEvidence,
     full_pipeline_decision,
@@ -80,6 +84,17 @@ def assert_research_attempted_once_per_snapshot(
         raise AssertionError(
             "unchanged evidence snapshot must record exactly one V0 research attempt"
         )
+
+
+def assert_exact_current_spectral_persisted(
+    *,
+    expected_grade: str,
+    expected_bitrate: int | None,
+    actual_grade: str | None,
+    actual_bitrate: int | None,
+) -> None:
+    if (actual_grade, actual_bitrate) != (expected_grade, expected_bitrate):
+        raise AssertionError("attempt scan did not populate exact current evidence")
 
 
 class TestQualityLineagePins(unittest.TestCase):
@@ -720,6 +735,66 @@ class TestQualityLineagePins(unittest.TestCase):
 
 class TestQualityLineageGenerated(unittest.TestCase):
     @given(
+        grade=st.sampled_from(("genuine", "suspect", "likely_transcode")),
+        bitrate=st.one_of(st.none(), st.integers(min_value=32, max_value=500)),
+        payload_size=st.integers(min_value=1, max_value=128),
+    )
+    @example(grade="genuine", bitrate=96, payload_size=27)
+    def test_attempt_scan_populates_only_the_exact_current_snapshot(
+        self,
+        grade: str,
+        bitrate: int | None,
+        payload_size: int,
+    ) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, mb_release_id="generated-have"))
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"x" * payload_size)
+            evidence = make_album_quality_evidence(
+                mb_release_id="generated-have",
+                source_path=source,
+                files=snapshot_audio_files(source),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=320,
+                    avg_bitrate_kbps=320,
+                    median_bitrate_kbps=320,
+                    format="MP3",
+                    spectral_grade=None,
+                    spectral_bitrate_kbps=None,
+                ),
+            )
+            db.upsert_album_quality_evidence(evidence)
+            stored = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            db.set_request_current_evidence(42, stored.id)
+
+            result = persist_exact_current_spectral_from_attempt(
+                db,
+                request_id=42,
+                current_evidence=stored,
+                measured_existing=SpectralAnalysisDetail(
+                    attempted=True,
+                    grade=grade,
+                    bitrate_kbps=bitrate,
+                ),
+                measured_existing_path=source,
+            )
+
+            assert result.evidence is not None
+            assert_exact_current_spectral_persisted(
+                expected_grade=grade,
+                expected_bitrate=bitrate,
+                actual_grade=result.evidence.measurement.spectral_grade,
+                actual_bitrate=(
+                    result.evidence.measurement.spectral_bitrate_kbps
+                ),
+            )
+
+    @given(
         label=st.sampled_from(("mp3 v0", "MP3 V0", "mp3 320", " MP3 320 ")),
         supplied_mode=st.booleans(),
     )
@@ -1247,6 +1322,15 @@ class TestQualityLineageGenerated(unittest.TestCase):
 
 
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
+    def test_exact_current_spectral_checker_rejects_a_blank_have(self):
+        with self.assertRaisesRegex(AssertionError, "exact current evidence"):
+            assert_exact_current_spectral_persisted(
+                expected_grade="genuine",
+                expected_bitrate=96,
+                actual_grade=None,
+                actual_bitrate=None,
+            )
+
     def test_source_target_checker_rejects_target_labelled_proxy(self):
         planted_bad = ImportResult(
             source_measurement=AudioQualityMeasurement(

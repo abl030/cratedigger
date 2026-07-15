@@ -13,6 +13,7 @@ from lib.import_preview import (
     _prefer_successful_spectral_detail,
     compose_attempt_spectral_audit,
     enrich_current_v0_research_for_preview,
+    persist_exact_current_spectral_from_attempt,
     load_persisted_existing_spectral,
     measure_and_persist_candidate_evidence,
     preview_import_from_path,
@@ -403,6 +404,189 @@ class TestImportPreviewPath(unittest.TestCase):
         assert stored is not None and stored.id is not None
         db.set_request_current_evidence(42, stored.id)
         return stored
+
+    def test_attempt_scan_persists_qigong_current_spectral_snapshot(self):
+        """Qigong: the exact installed HAVE scan becomes durable evidence."""
+        db = self._db()
+        source = self._source_dir()
+        try:
+            evidence = make_album_quality_evidence(
+                mb_release_id="mbid-42",
+                source_path=source,
+                files=snapshot_audio_files(source),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=320,
+                    avg_bitrate_kbps=320,
+                    median_bitrate_kbps=320,
+                    format="MP3",
+                    spectral_grade=None,
+                    spectral_bitrate_kbps=None,
+                ),
+                lineage_version=1,
+            )
+            db.upsert_album_quality_evidence(evidence)
+            stored = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            db.set_request_current_evidence(42, stored.id)
+
+            result = persist_exact_current_spectral_from_attempt(
+                db,
+                request_id=42,
+                current_evidence=stored,
+                measured_existing=SpectralAnalysisDetail(
+                    attempted=True,
+                    grade="genuine",
+                    bitrate_kbps=96,
+                    suspect_pct=52.17,
+                ),
+                measured_existing_path=source,
+            )
+
+            self.assertEqual(result.status, "ready")
+            assert result.evidence is not None
+            self.assertEqual(result.evidence.measurement.spectral_grade, "genuine")
+            self.assertEqual(
+                result.evidence.measurement.spectral_bitrate_kbps,
+                96,
+            )
+            self.assertEqual(result.evidence.id, stored.id)
+            self.assertEqual(
+                result.evidence.snapshot_fingerprint,
+                stored.snapshot_fingerprint,
+            )
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_attempt_scan_cannot_persist_for_a_different_installed_path(self):
+        db = self._db()
+        source = self._source_dir()
+        other = self._source_dir()
+        try:
+            evidence = make_album_quality_evidence(
+                mb_release_id="mbid-42",
+                source_path=source,
+                files=snapshot_audio_files(source),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=320,
+                    avg_bitrate_kbps=320,
+                    median_bitrate_kbps=320,
+                    format="MP3",
+                    spectral_grade=None,
+                    spectral_bitrate_kbps=None,
+                ),
+            )
+            db.upsert_album_quality_evidence(evidence)
+            current = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert current is not None and current.id is not None
+            db.set_request_current_evidence(42, current.id)
+            result = persist_exact_current_spectral_from_attempt(
+                db,
+                request_id=42,
+                current_evidence=current,
+                measured_existing=SpectralAnalysisDetail(
+                    attempted=True,
+                    grade="genuine",
+                    bitrate_kbps=96,
+                ),
+                measured_existing_path=other,
+            )
+
+            self.assertEqual(result.status, "stale")
+            persisted = db.load_album_quality_evidence_by_id(current.id)
+            assert persisted is not None
+            self.assertIsNone(persisted.measurement.spectral_grade)
+            self.assertIsNone(persisted.measurement.spectral_bitrate_kbps)
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+            shutil.rmtree(other, ignore_errors=True)
+
+    def test_measurement_worker_wires_have_scan_into_current_evidence(self):
+        db = self._db()
+        source = self._source_dir()
+        try:
+            evidence = make_album_quality_evidence(
+                mb_release_id="mbid-42",
+                source_path=source,
+                files=snapshot_audio_files(source),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=320,
+                    avg_bitrate_kbps=320,
+                    median_bitrate_kbps=320,
+                    format="MP3",
+                    spectral_grade=None,
+                    spectral_bitrate_kbps=None,
+                ),
+            )
+            db.upsert_album_quality_evidence(evidence)
+            current = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert current is not None and current.id is not None
+            db.set_request_current_evidence(42, current.id)
+            measurement = PreimportMeasurement(
+                audio_corrupt=True,
+                corrupt_files=["01.mp3"],
+                folder_layout="flat",
+                audio_file_count=1,
+                existing_spectral_path=source,
+                spectral_audit=SpectralDetail(
+                    candidate=SpectralAnalysisDetail(
+                        attempted=True,
+                        grade="likely_transcode",
+                        bitrate_kbps=96,
+                    ),
+                    existing=SpectralAnalysisDetail(
+                        attempted=True,
+                        grade="genuine",
+                        bitrate_kbps=96,
+                    ),
+                ),
+            )
+            candidate = make_album_quality_evidence(
+                mb_release_id="mbid-42-candidate"
+            )
+            with patch(
+                "lib.config.read_runtime_config",
+                return_value=CratediggerConfig(
+                    beets_harness_path="/fake/harness/run_beets_harness.sh",
+                    pipeline_db_enabled=True,
+                ),
+            ), patch(
+                "lib.import_preview.inspect_local_files",
+                return_value=LocalFileInspection(filetype="mp3"),
+            ), patch(
+                "lib.import_preview.measure_preimport_state",
+                return_value=measurement,
+            ):
+                result = measure_and_persist_candidate_evidence(
+                    db,
+                    request_id=42,
+                    path=source,
+                    persist_measurement_fn=(
+                        lambda *args, **kwargs: EvidenceBuildResult(
+                            candidate,
+                            "ready",
+                        )
+                    ),
+                )
+
+            self.assertEqual(result.verdict, "evidence_ready")
+            persisted = db.load_album_quality_evidence_by_id(current.id)
+            assert persisted is not None
+            self.assertEqual(persisted.measurement.spectral_grade, "genuine")
+            self.assertEqual(persisted.measurement.spectral_bitrate_kbps, 96)
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
 
     def test_preview_v0_research_attempt_is_persisted_once_after_failure(self):
         db = self._db()

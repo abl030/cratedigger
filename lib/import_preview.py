@@ -109,6 +109,16 @@ class ImportPreviewDB(QualityEvidenceDB, Protocol):
 
     def get_download_log_entry(self, log_id: int) -> dict[str, Any] | None: ...
 
+    def persist_current_spectral_measurement(
+        self,
+        *,
+        request_id: int,
+        expected_evidence_id: int,
+        expected_snapshot_fingerprint: str,
+        grade: str,
+        bitrate_kbps: int | None,
+    ) -> bool: ...
+
     def claim_current_v0_research_attempt(
         self,
         *,
@@ -132,6 +142,113 @@ class ImportPreviewDB(QualityEvidenceDB, Protocol):
         expected_evidence_id: int,
         expected_snapshot_fingerprint: str,
     ) -> bool: ...
+
+
+def persist_exact_current_spectral_from_attempt(
+    db: ImportPreviewDB,
+    *,
+    request_id: int,
+    current_evidence: AlbumQualityEvidence | None,
+    measured_existing: SpectralAnalysisDetail | None,
+    measured_existing_path: str | None,
+) -> EvidenceBuildResult:
+    """Fill missing HAVE spectral fields from its exact attempt-time scan.
+
+    ``measure_preimport_state`` independently scans the exact installed
+    release before an import decision. This helper makes that successful scan
+    durable on the already-linked, content-addressed current evidence row. It
+    never rescans, never overwrites spectral provenance, and refuses a Beets
+    path that is not the path snapshotted by the evidence row.
+    """
+    if current_evidence is None or current_evidence.id is None:
+        return EvidenceBuildResult(None, "missing", "current evidence is missing")
+    measurement = current_evidence.measurement
+    if (
+        measurement.spectral_grade is not None
+        or measurement.spectral_bitrate_kbps is not None
+    ):
+        return EvidenceBuildResult(current_evidence, "ready")
+    if (
+        measured_existing is None
+        or not measured_existing.attempted
+        or measured_existing.error is not None
+        or measured_existing.grade is None
+    ):
+        return EvidenceBuildResult(
+            current_evidence,
+            "incomplete",
+            "attempt did not produce a successful HAVE spectral grade",
+        )
+    if (
+        not measured_existing_path
+        or os.path.realpath(measured_existing_path)
+        != os.path.realpath(current_evidence.source_path)
+    ):
+        return EvidenceBuildResult(
+            current_evidence,
+            "stale",
+            "attempt HAVE path does not match current evidence path",
+        )
+    try:
+        current_id = db.get_request_current_evidence_id(request_id)
+        refreshed = db.load_album_quality_evidence_by_id(current_evidence.id)
+    except Exception as exc:
+        return EvidenceBuildResult(None, "failed", f"{type(exc).__name__}: {exc}")
+    if (
+        current_id != current_evidence.id
+        or refreshed is None
+        or refreshed.id != current_evidence.id
+        or refreshed.mb_release_id != current_evidence.mb_release_id
+        or refreshed.snapshot_fingerprint != current_evidence.snapshot_fingerprint
+        or os.path.realpath(refreshed.source_path)
+            != os.path.realpath(measured_existing_path)
+        or not audio_snapshot_matches(refreshed.source_path, refreshed.files)
+    ):
+        return EvidenceBuildResult(
+            current_evidence,
+            "stale",
+            "current evidence changed before HAVE spectral persistence",
+        )
+    refreshed_measurement = refreshed.measurement
+    if (
+        refreshed_measurement.spectral_grade is not None
+        or refreshed_measurement.spectral_bitrate_kbps is not None
+    ):
+        return EvidenceBuildResult(refreshed, "ready")
+    try:
+        persisted = db.persist_current_spectral_measurement(
+            request_id=request_id,
+            expected_evidence_id=current_evidence.id,
+            expected_snapshot_fingerprint=current_evidence.snapshot_fingerprint,
+            grade=measured_existing.grade,
+            bitrate_kbps=measured_existing.bitrate_kbps,
+        )
+        loaded = db.load_album_quality_evidence_by_id(current_evidence.id)
+        linked_id = db.get_request_current_evidence_id(request_id)
+    except Exception as exc:
+        return EvidenceBuildResult(None, "failed", f"{type(exc).__name__}: {exc}")
+    if (
+        linked_id != current_evidence.id
+        or loaded is None
+        or loaded.id != current_evidence.id
+        or loaded.snapshot_fingerprint != current_evidence.snapshot_fingerprint
+    ):
+        return EvidenceBuildResult(
+            current_evidence,
+            "stale",
+            "current evidence changed during HAVE spectral persistence",
+        )
+    loaded_measurement = loaded.measurement
+    if not persisted and (
+        loaded_measurement.spectral_grade is None
+        and loaded_measurement.spectral_bitrate_kbps is None
+    ):
+        return EvidenceBuildResult(
+            loaded,
+            "stale",
+            "exact current evidence rejected HAVE spectral persistence",
+        )
+    return EvidenceBuildResult(loaded, "ready")
 
 
 def load_persisted_existing_spectral(
@@ -1069,6 +1186,15 @@ def measure_and_persist_candidate_evidence(
                 propagate_download_to_existing=False,
                 precomputed_inspection=inspection,
             )
+            spectral_result = persist_exact_current_spectral_from_attempt(
+                db,
+                request_id=request_id,
+                current_evidence=current_evidence,
+                measured_existing=measurement.spectral_audit.existing,
+                measured_existing_path=measurement.existing_spectral_path,
+            )
+            if spectral_result.evidence is not None:
+                current_evidence = spectral_result.evidence
         except Exception as exc:
             return _measurement_failed_result(
                 mode="path",
@@ -1504,6 +1630,15 @@ def preview_import_from_path(
             propagate_download_to_existing=False,
             precomputed_inspection=inspection,
         )
+        spectral_result = persist_exact_current_spectral_from_attempt(
+            db,
+            request_id=request_id,
+            current_evidence=current_evidence,
+            measured_existing=measurement.spectral_audit.existing,
+            measured_existing_path=measurement.existing_spectral_path,
+        )
+        if spectral_result.evidence is not None:
+            current_evidence = spectral_result.evidence
 
         # Four-fact reject (mirror worker-mode lines 517-522). ``nested_layout``
         # is already handled by the ``inspection.has_nested_audio`` branch

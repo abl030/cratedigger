@@ -102,8 +102,18 @@ class _EvidenceMixin(_PipelineDBBase):
                     median_bitrate_kbps = EXCLUDED.median_bitrate_kbps,
                     format = EXCLUDED.format,
                     is_cbr = EXCLUDED.is_cbr,
-                    spectral_grade = EXCLUDED.spectral_grade,
-                    spectral_bitrate_kbps = EXCLUDED.spectral_bitrate_kbps,
+                    -- Spectral is one atomic fact. A grade makes an incoming
+                    -- pair valid (genuine legitimately has no bitrate); an
+                    -- empty or bitrate-only stale writer preserves the whole
+                    -- stored pair so it cannot erase an attempt-time scan.
+                    spectral_grade = CASE WHEN
+                        EXCLUDED.spectral_grade IS NOT NULL
+                        THEN EXCLUDED.spectral_grade
+                        ELSE album_quality_evidence.spectral_grade END,
+                    spectral_bitrate_kbps = CASE WHEN
+                        EXCLUDED.spectral_grade IS NOT NULL
+                        THEN EXCLUDED.spectral_bitrate_kbps
+                        ELSE album_quality_evidence.spectral_bitrate_kbps END,
                     verified_lossless = EXCLUDED.verified_lossless,
                     was_converted_from = EXCLUDED.was_converted_from,
                     -- V0 is one atomic fact, not six independently mergeable
@@ -350,6 +360,44 @@ class _EvidenceMixin(_PipelineDBBase):
         claimed = cur.fetchone() is not None
         self.conn.commit()
         return claimed
+
+
+    def persist_current_spectral_measurement(
+        self,
+        *,
+        request_id: int,
+        expected_evidence_id: int,
+        expected_snapshot_fingerprint: str,
+        grade: str,
+        bitrate_kbps: int | None,
+    ) -> bool:
+        """Fill spectral fields on one exact, still-current empty snapshot."""
+        cur = self._execute(
+            """
+            UPDATE album_quality_evidence AS evidence
+            SET spectral_grade = %s,
+                spectral_bitrate_kbps = %s,
+                updated_at = NOW()
+            FROM album_requests AS request
+            WHERE request.id = %s
+              AND request.current_evidence_id = evidence.id
+              AND evidence.id = %s
+              AND evidence.snapshot_fingerprint = %s
+              AND evidence.spectral_grade IS NULL
+              AND evidence.spectral_bitrate_kbps IS NULL
+            RETURNING evidence.id
+            """,
+            (
+                grade,
+                bitrate_kbps,
+                int(request_id),
+                int(expected_evidence_id),
+                expected_snapshot_fingerprint,
+            ),
+        )
+        persisted = cur.fetchone() is not None
+        self.conn.commit()
+        return persisted
 
 
     def persist_current_v0_research_metric(

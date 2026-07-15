@@ -269,6 +269,7 @@ class PreimportMeasurement(msgspec.Struct, frozen=True):
     download_spectral: SpectralMeasurement | None = None
     existing_spectral: SpectralMeasurement | None = None
     existing_min_bitrate: int | None = None
+    existing_spectral_path: str | None = None
     folder_layout: Literal["flat", "nested"] = "flat"
     audio_file_count: int = 0
     filetype_band: str = ""
@@ -610,6 +611,7 @@ def measure_preimport_state(
         candidate=SpectralAnalysisDetail(attempted=False),
         existing=persisted_existing,
     )
+    existing_spectral_path: str | None = None
 
     # --- Audio integrity gate ---
     corrupt_files: list[str] = []
@@ -622,7 +624,7 @@ def measure_preimport_state(
             logger.warning(
                 f"AUDIO CORRUPT: {label} "
                 f"({len(corrupt_files)} files failed ffmpeg decode)")
-            spectral_audit = collect_release_attempt_spectral_audit(
+            spectral_audit, existing_lookup = collect_release_attempt_spectral_audit(
                 path,
                 mb_release_id,
                 existing_spectral_evidence=persisted_existing,
@@ -631,7 +633,8 @@ def measure_preimport_state(
                 ),
                 analyzer=audit_analyzer,
                 existing_resolver=audit_resolver,
-            )[0]
+            )
+            existing_spectral_path = existing_lookup.path
             return PreimportMeasurement(
                 corrupt_files=corrupt_files,
                 audio_corrupt=audio_corrupt,
@@ -645,6 +648,7 @@ def measure_preimport_state(
                     download_min_bitrate_bps
                 ),
                 is_vbr=download_is_vbr,
+                existing_spectral_path=existing_spectral_path,
                 spectral_audit=spectral_audit,
             )
 
@@ -672,7 +676,7 @@ def measure_preimport_state(
                 logger.warning(
                     f"BAD HASH MATCH: {label} "
                     f"hash_id={match.bad_hash_id} track={match.track_path}")
-                spectral_audit = collect_release_attempt_spectral_audit(
+                spectral_audit, existing_lookup = collect_release_attempt_spectral_audit(
                     path,
                     mb_release_id,
                     existing_spectral_evidence=persisted_existing,
@@ -681,7 +685,8 @@ def measure_preimport_state(
                     ),
                     analyzer=audit_analyzer,
                     existing_resolver=audit_resolver,
-                )[0]
+                )
+                existing_spectral_path = existing_lookup.path
                 return PreimportMeasurement(
                     corrupt_files=[],
                     audio_corrupt=False,
@@ -697,6 +702,7 @@ def measure_preimport_state(
                         download_min_bitrate_bps
                     ),
                     is_vbr=download_is_vbr,
+                    existing_spectral_path=existing_spectral_path,
                     spectral_audit=spectral_audit,
                 )
 
@@ -770,6 +776,7 @@ def measure_preimport_state(
             analyzer=audit_analyzer,
             existing_resolver=audit_resolver,
         )
+        existing_spectral_path = existing_lookup.path
         candidate_audit = spectral_audit.candidate
         assert candidate_audit is not None
         download_spectral = SpectralMeasurement.from_parts(
@@ -827,7 +834,7 @@ def measure_preimport_state(
         # Normal harness-bound codecs collect the candidate inside
         # import_one.py before conversion. Fill only HAVE here so the attempt
         # remains two-sided without paying for a duplicate candidate scan.
-        spectral_audit = collect_release_attempt_spectral_audit(
+        spectral_audit, existing_lookup = collect_release_attempt_spectral_audit(
             path,
             mb_release_id,
             existing_spectral_evidence=persisted_existing,
@@ -837,7 +844,8 @@ def measure_preimport_state(
             analyzer=audit_analyzer,
             existing_resolver=audit_resolver,
             candidate_detail=spectral_audit.candidate,
-        )[0]
+        )
+        existing_spectral_path = existing_lookup.path
 
     # --- Persist spectral state to DB (issue #90 propagation) ---
     # This MUST fire on every measurement where spectral was collected,
@@ -870,6 +878,7 @@ def measure_preimport_state(
         download_spectral=download_spectral,
         existing_spectral=existing_spectral,
         existing_min_bitrate=existing_min_bitrate,
+        existing_spectral_path=existing_spectral_path,
         folder_layout=folder_layout,
         audio_file_count=audio_file_count,
         filetype_band=filetype_band,

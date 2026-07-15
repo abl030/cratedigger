@@ -2516,6 +2516,23 @@ class FakePipelineDB:
             raise ValueError("; ".join(errors))
         key = (evidence.mb_release_id, evidence.snapshot_fingerprint)
         existing = self.album_quality_evidence.get(key)
+        # Spectral is an atomic pair. A stale writer without a grade cannot
+        # erase a successful attempt-time scan on the same audio snapshot.
+        if (
+            existing is not None
+            and existing.measurement.spectral_grade is not None
+            and evidence.measurement.spectral_grade is None
+        ):
+            evidence = msgspec.structs.replace(
+                evidence,
+                measurement=msgspec.structs.replace(
+                    evidence.measurement,
+                    spectral_grade=existing.measurement.spectral_grade,
+                    spectral_bitrate_kbps=(
+                        existing.measurement.spectral_bitrate_kbps
+                    ),
+                ),
+            )
         # V0 is an atomic tuple. A stale writer with no metric preserves the
         # whole stored fact; a valid incoming metric replaces it wholesale.
         if (
@@ -2590,6 +2607,40 @@ class FakePipelineDB:
         key = (claimed.mb_release_id, claimed.snapshot_fingerprint)
         self.album_quality_evidence[key] = claimed
         self._evidence_by_id[int(expected_evidence_id)] = claimed
+        return True
+
+    def persist_current_spectral_measurement(
+        self,
+        *,
+        request_id: int,
+        expected_evidence_id: int,
+        expected_snapshot_fingerprint: str,
+        grade: str,
+        bitrate_kbps: int | None,
+    ) -> bool:
+        request = self._requests.get(int(request_id))
+        evidence = self._evidence_by_id.get(int(expected_evidence_id))
+        if (
+            request is None
+            or request.get("current_evidence_id") != int(expected_evidence_id)
+            or evidence is None
+            or evidence.snapshot_fingerprint != expected_snapshot_fingerprint
+            or evidence.measurement.spectral_grade is not None
+            or evidence.measurement.spectral_bitrate_kbps is not None
+        ):
+            return False
+        measurement = msgspec.structs.replace(
+            evidence.measurement,
+            spectral_grade=grade,
+            spectral_bitrate_kbps=bitrate_kbps,
+        )
+        completed = copy.deepcopy(msgspec.structs.replace(
+            evidence,
+            measurement=measurement,
+        ))
+        key = (completed.mb_release_id, completed.snapshot_fingerprint)
+        self.album_quality_evidence[key] = completed
+        self._evidence_by_id[int(expected_evidence_id)] = completed
         return True
 
     def persist_current_v0_research_metric(
