@@ -518,13 +518,14 @@ console.log('renderEvidenceStrip() builds the compact IN/HAVE comparison');
   assertContains(strip, 'class="r-evidence"', 'strip wrapper class');
   assertContains(strip, 'class="r-ev-row r-ev-in"', 'IN is a semantic grid row');
   assertContains(strip, 'class="r-ev-row r-ev-have"', 'HAVE is a semantic grid row');
-  for (const slot of ['source', 'metric', 'rank', 'spectral', 'v0']) {
+  for (const slot of ['source', 'metric', 'spectral', 'v0']) {
     const count = strip.split(`r-ev-${slot}`).length - 1;
     if (count === 2) { passed++; } else {
       failed++;
       console.error(`  FAIL: ${slot} must occupy the same explicit slot in both rows; got ${count}`);
     }
   }
+  assertExcludes(strip, 'r-ev-rank', 'rows do not render the permanently empty rank slot');
   assertExcludes(strip, 'r-ev-value', 'rows do not collapse back to one freeform value cell');
   assertContains(strip, 'IN', 'IN side labelled');
   assertContains(strip, 'MP3 320', 'incoming label rendered');
@@ -1279,10 +1280,10 @@ console.log('evidence strip CSS keeps desktop alignment and gives mobile readabl
   const css = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
   assertContains(css, '.r-ev-row { display: contents; }',
     'desktop row wrappers participate in the parent grid instead of defining independent columns');
-  assertContains(css, 'grid-template-columns: 3.6em minmax(4.5em, 0.8fr) minmax(12em, 1.7fr) minmax(4.5em, 0.75fr) minmax(7.5em, 1fr) minmax(9em, 1.35fr)',
-    'desktop reserves a full avg/min metric column before rank/spectral/V0');
+  assertContains(css, 'grid-template-columns: 3.6em minmax(4.5em, 0.8fr) minmax(12em, 1.7fr) minmax(7.5em, 1fr) minmax(9em, 1.35fr)',
+    'desktop reserves aligned tag/source/metric/spectral/V0 columns');
   assertContains(css, '@media (max-width: 720px)', 'shared grid has a narrow-screen layout');
-  assertContains(css, '.r-evidence { grid-template-columns: 2.9em 3.2em minmax(8.5em, max-content) 0 minmax(3em, 1fr) max-content; column-gap: 0.45em; font-size: 12px;',
+  assertContains(css, '.r-evidence { grid-template-columns: 2.9em 3.2em minmax(8.5em, max-content) minmax(3em, 1fr) max-content; column-gap: 0.45em; font-size: 12px;',
     'mobile fixes tag+source and floors the bitrate column at a labelled-pair width, so a bare CBR value keeps the same column edges as the pair above it');
   assertContains(css, 'font-family: system-ui,',
     'mobile uses the narrow system font so full lines fit without squeezing');
@@ -1310,6 +1311,10 @@ console.log('evidence strip CSS keeps desktop alignment and gives mobile readabl
     'mobile evidence never collapses every field into equal tiny columns');
   assertExcludes(css, 'grid-template-columns: 2.8em minmax(3.4em',
     'the overlapping five-column mobile layout cannot return');
+  assertExcludes(css, 'minmax(4.5em, 0.75fr)',
+    'desktop does not reserve a track for the permanently empty rank slot');
+  assertExcludes(css, 'minmax(8.5em, max-content) 0 minmax(3em, 1fr)',
+    'mobile does not retain a zero-width track for the permanently empty rank slot');
 }
 
 console.log('renderEvidenceStrip() marks spectral-clamped rank values with ~');

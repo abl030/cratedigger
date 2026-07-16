@@ -356,7 +356,7 @@
   .p-hist-forensics summary { cursor: pointer; user-select: none; color: #556; font-size: 0.9em; }
   .p-hist-forensics summary:hover, .p-hist-forensics[open] summary { color: #889; }
   /* Compact IN/HAVE evidence strip on Recents list rows (issue #575). */
-  .r-evidence { display: grid; grid-template-columns: 3.6em minmax(4.5em, 0.8fr) minmax(12em, 1.7fr) minmax(4.5em, 0.75fr) minmax(7.5em, 1fr) minmax(9em, 1.35fr); column-gap: 0.7em; row-gap: 2px; align-items: baseline; width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.95em; color: #7a8a99; }
+  .r-evidence { display: grid; grid-template-columns: 3.6em minmax(4.5em, 0.8fr) minmax(12em, 1.7fr) minmax(7.5em, 1fr) minmax(9em, 1.35fr); column-gap: 0.7em; row-gap: 2px; align-items: baseline; width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.95em; color: #7a8a99; }
   .r-ev-row { display: contents; }
   .r-evidence .r-ev-tag { color: #d3deea; font-weight: 900; font-size: 1.08em; line-height: 1; letter-spacing: 0.9px; text-shadow: 0 0 8px rgba(170, 205, 235, 0.24); }
   .r-ev-cell { min-width: 0; overflow-wrap: normal; word-break: normal; white-space: nowrap; }
@@ -369,13 +369,12 @@
        flush right on every card (the flexible spectral column eats the
        slack between them, ellipsizing under pressure — its color still
        tells the grade). Number columns are max-content and never shrink.
-       The rank slot is never populated on strips, so its track is 0.
        The bitrate column is floored at a labelled-pair width so a bare
        CBR value ("320k") keeps the same column edges as a full pair —
        only rare 4-digit pairs grow past it. One line per side,
        guaranteed. Compact wording labels each number in place (avg/min
        beside the values), never "a/m". */
-    .r-evidence { grid-template-columns: 2.9em 3.2em minmax(8.5em, max-content) 0 minmax(3em, 1fr) max-content; column-gap: 0.45em; font-size: 12px; line-height: 1.5; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #92a2b1; }
+    .r-evidence { grid-template-columns: 2.9em 3.2em minmax(8.5em, max-content) minmax(3em, 1fr) max-content; column-gap: 0.45em; font-size: 12px; line-height: 1.5; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #92a2b1; }
     .r-ev-cell { overflow: hidden; text-overflow: ellipsis; }
     .r-ev-full { display: none; } .r-ev-compact { display: inline; }
   }
