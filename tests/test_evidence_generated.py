@@ -207,6 +207,244 @@ class TestGeneratedEvidenceLifecycle(unittest.TestCase):
         )
 
 
+@dataclass(frozen=True)
+class BlankPathWorld:
+    """One current-evidence world varying source_path recordability."""
+    source_path_kind: str      # "blank" | "whitespace" | "real"
+    spectral_grade: str | None
+    min_bitrate: int
+    avg_bitrate: int
+    # Converted-from-lossless rows interact with the lossless-source-V0
+    # fail-closed branch: without a request V0 scalar to resurrect, the
+    # action loader must fail closed rather than rebuild (a disk rebuild
+    # would lose the lossless-source provenance).
+    was_converted_from: str | None = None
+    request_has_v0_scalar: bool = False
+
+
+@st.composite
+def blank_path_worlds(draw) -> BlankPathWorld:
+    min_bitrate = draw(st.integers(min_value=1, max_value=400))
+    return BlankPathWorld(
+        source_path_kind=draw(
+            st.sampled_from(("blank", "whitespace", "real"))
+        ),
+        spectral_grade=draw(
+            st.sampled_from((None, "genuine", "likely_transcode"))
+        ),
+        min_bitrate=min_bitrate,
+        avg_bitrate=min_bitrate + draw(st.integers(min_value=0, max_value=100)),
+        was_converted_from=draw(st.sampled_from((None, "flac"))),
+        request_has_v0_scalar=draw(st.booleans()),
+    )
+
+
+def assert_blank_path_outcome(
+    *,
+    source_path_kind: str,
+    requires_lossless_v0: bool,
+    has_v0_backfill_source: bool,
+    current_status: str | None,
+    available: bool,
+    result_source_path: str | None,
+) -> None:
+    """A blank-source_path row is never authoritative for an action.
+
+    The invariant behind download_log 37206 (French Quarter): a row whose
+    recorded path is blank can never be re-verified against disk nor
+    enriched with HAVE spectral, so the loader must rebuild it — never
+    hand it to the decision as ``loaded``. The one legitimate non-rebuild
+    outcome is the pre-existing lossless-source-V0 guard: a row that
+    requires the lossless-source V0 metric and has no request scalar to
+    resurrect fails closed instead (a disk rebuild would fabricate
+    provenance). That V0 lifecycle is the property above; here it only
+    shapes which blank-path outcome is legal.
+    """
+    if source_path_kind == "real":
+        if not requires_lossless_v0 and current_status != "loaded":
+            raise AssertionError(
+                "complete current evidence with a real source_path must "
+                f"load as authoritative (got {current_status})")
+        return
+    if current_status == "loaded":
+        raise AssertionError(
+            "blank-source_path current evidence was loaded as authoritative")
+    if requires_lossless_v0 and not has_v0_backfill_source:
+        if available:
+            raise AssertionError(
+                "lossless-source row without a V0 backfill source "
+                "must fail closed, not become available")
+        return
+    if not available:
+        raise AssertionError(
+            "blank-source_path row must rebuild from album_info, "
+            "not fail closed")
+    if not (result_source_path or "").strip():
+        raise AssertionError(
+            "rebuilt action evidence still carries a blank source_path")
+
+
+def _run_blank_path_world(
+    world: BlankPathWorld,
+) -> tuple[str | None, bool, str | None]:
+    """Build the world's on-disk + DB state and run the action loader."""
+    root = tempfile.mkdtemp(prefix="cratedigger-blankpath-gen-")
+    try:
+        with open(os.path.join(root, "01 - Track.mp3"), "wb") as handle:
+            handle.write(b"generated-audio")
+
+        request_id = 1
+        mbid = "blank-path-generated-mbid"
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=request_id, mb_release_id=mbid))
+        if world.request_has_v0_scalar:
+            db.update_request_fields(
+                request_id,
+                current_lossless_source_v0_probe_min_bitrate=190,
+                current_lossless_source_v0_probe_avg_bitrate=200,
+                current_lossless_source_v0_probe_median_bitrate=200,
+            )
+
+        source_path = {
+            "blank": "",
+            "whitespace": "   ",
+            "real": root,
+        }[world.source_path_kind]
+        current = make_album_quality_evidence(
+            mb_release_id=mbid,
+            source_path=source_path,
+            files=snapshot_audio_files(root),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=world.min_bitrate,
+                avg_bitrate_kbps=world.avg_bitrate,
+                median_bitrate_kbps=world.avg_bitrate,
+                format="MP3",
+                is_cbr=False,
+                spectral_grade=world.spectral_grade,
+                spectral_bitrate_kbps=(
+                    96 if world.spectral_grade == "likely_transcode" else None
+                ),
+                was_converted_from=world.was_converted_from,
+            ),
+            v0_metric=None,
+        )
+        db.upsert_album_quality_evidence(current)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=mbid,
+            snapshot_fingerprint=current.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_request_current_evidence(request_id, persisted.id)
+
+        result = ensure_current_evidence_for_action(
+            db,
+            request_id=request_id,
+            mb_release_id=mbid,
+            current_album_path=root,
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=world.min_bitrate,
+                avg_bitrate_kbps=world.avg_bitrate,
+                median_bitrate_kbps=world.avg_bitrate,
+                is_cbr=False,
+                album_path=root,
+                format="MP3",
+            ),
+        )
+        return (
+            result.provenance.current_status,
+            result.available,
+            result.evidence.source_path if result.evidence is not None else None,
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+# The exact French Quarter shape (download_log 37206): a 2026-05-16
+# library-backfill row with min 186 / avg 194 and no spectral, whose blank
+# source_path kept every HAVE enrichment guard refusing forever.
+_FRENCH_QUARTER_WORLD = BlankPathWorld(
+    source_path_kind="blank",
+    spectral_grade=None,
+    min_bitrate=186,
+    avg_bitrate=194,
+)
+
+# The fail-closed seam: a blank-path row that is ALSO converted-from-
+# lossless with no request V0 scalar must fail closed, not rebuild.
+_BLANK_LOSSLESS_NO_SCALAR_WORLD = BlankPathWorld(
+    source_path_kind="blank",
+    spectral_grade=None,
+    min_bitrate=108,
+    avg_bitrate=114,
+    was_converted_from="flac",
+    request_has_v0_scalar=False,
+)
+
+
+class TestGeneratedBlankSourcePath(unittest.TestCase):
+    """Action-loader invariants over generated source_path worlds."""
+
+    @given(world=blank_path_worlds())
+    @example(world=_FRENCH_QUARTER_WORLD)
+    @example(world=_BLANK_LOSSLESS_NO_SCALAR_WORLD)
+    def test_blank_source_path_is_never_authoritative(self, world):
+        current_status, available, result_source_path = (
+            _run_blank_path_world(world)
+        )
+        assert_blank_path_outcome(
+            source_path_kind=world.source_path_kind,
+            requires_lossless_v0=(
+                world.was_converted_from is not None
+                or world.request_has_v0_scalar
+            ),
+            has_v0_backfill_source=world.request_has_v0_scalar,
+            current_status=current_status,
+            available=available,
+            result_source_path=result_source_path,
+        )
+
+
+class TestBlankPathCheckerTripsOnViolations(unittest.TestCase):
+    """Known-bad self-tests for the blank-path invariant checker."""
+
+    def test_trips_on_loaded_blank_path(self):
+        with self.assertRaises(AssertionError):
+            assert_blank_path_outcome(
+                source_path_kind="blank", requires_lossless_v0=False,
+                has_v0_backfill_source=False, current_status="loaded",
+                available=True, result_source_path="")
+
+    def test_trips_on_fail_closed_instead_of_rebuild(self):
+        with self.assertRaises(AssertionError):
+            assert_blank_path_outcome(
+                source_path_kind="blank", requires_lossless_v0=False,
+                has_v0_backfill_source=False, current_status="failed",
+                available=False, result_source_path=None)
+
+    def test_trips_on_rebuilt_row_still_blank(self):
+        with self.assertRaises(AssertionError):
+            assert_blank_path_outcome(
+                source_path_kind="whitespace", requires_lossless_v0=False,
+                has_v0_backfill_source=False, current_status="backfilled",
+                available=True, result_source_path="   ")
+
+    def test_trips_on_real_path_not_loading(self):
+        with self.assertRaises(AssertionError):
+            assert_blank_path_outcome(
+                source_path_kind="real", requires_lossless_v0=False,
+                has_v0_backfill_source=False, current_status="backfilled",
+                available=True, result_source_path="/library/album")
+
+    def test_trips_on_lossless_no_scalar_becoming_available(self):
+        with self.assertRaises(AssertionError):
+            assert_blank_path_outcome(
+                source_path_kind="blank", requires_lossless_v0=True,
+                has_v0_backfill_source=False, current_status="backfilled",
+                available=True, result_source_path="/library/album")
+
+
 class TestLifecycleCheckerTripsOnViolations(unittest.TestCase):
     """Known-bad self-tests for the lifecycle invariant checker."""
 

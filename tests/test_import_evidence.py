@@ -293,6 +293,87 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             stale_evidence_id,
         )
 
+    def _persist_blank_path_current(self) -> int:
+        """Legacy backfill shape: matching snapshot, empty source_path.
+
+        The download_log 37206 (French Quarter) row: a 2026-05-16 library
+        backfill wrote current evidence with ``source_path=''``, which no
+        enrichment helper can ever complete (every persist guard compares
+        against the recorded path), so the import decision stayed
+        spectrally blind forever.
+        """
+        evidence = make_album_quality_evidence(
+            mb_release_id="release-1",
+            source_path="",
+            files=snapshot_audio_files(self.root),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.db.set_request_current_evidence(42, persisted.id)
+        return persisted.id
+
+    def test_blank_source_path_current_evidence_is_never_loaded(self):
+        self._persist_blank_path_current()
+
+        result = ensure_current_evidence_for_action(
+            self.db,
+            request_id=42,
+            mb_release_id="release-1",
+            current_album_path=self.root,
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=186,
+                avg_bitrate_kbps=194,
+                median_bitrate_kbps=194,
+                is_cbr=False,
+                album_path=self.root,
+                format="MP3",
+            ),
+        )
+
+        self.assertNotEqual(result.provenance.current_status, "loaded")
+        self.assertTrue(result.available)
+        self.assertEqual(result.provenance.current_status, "backfilled")
+        self.assertIn(
+            "source_path",
+            result.provenance.fallback_reason or "",
+        )
+        assert result.evidence is not None
+        self.assertEqual(result.evidence.source_path, self.root)
+
+    def test_blank_source_path_rebuild_repairs_the_row_in_place(self):
+        """Same files ⇒ same content address ⇒ the upsert must repair
+        ``source_path`` on the linked row so enrichment can complete it."""
+        stale_id = self._persist_blank_path_current()
+
+        ensure_current_evidence_for_action(
+            self.db,
+            request_id=42,
+            mb_release_id="release-1",
+            current_album_path=self.root,
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=186,
+                avg_bitrate_kbps=194,
+                median_bitrate_kbps=194,
+                is_cbr=False,
+                album_path=self.root,
+                format="MP3",
+            ),
+        )
+
+        linked_id = self.db.get_request_current_evidence_id(42)
+        self.assertEqual(linked_id, stale_id)
+        linked = self.db.load_album_quality_evidence_by_id(linked_id)
+        assert linked is not None
+        self.assertEqual(linked.source_path, self.root)
+
     def test_stale_current_evidence_is_not_reused_as_preloaded_backfill(self):
         self._persist_current()
         with open(os.path.join(self.root, "01 - Track.mp3"), "ab") as handle:
