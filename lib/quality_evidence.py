@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+import msgspec
+
 from lib.quality import (
     LOSSLESS_CODECS,
     V0_PROBE_LOSSLESS_SOURCE,
@@ -125,6 +127,18 @@ class EvidenceBuildResult:
     @property
     def available(self) -> bool:
         return self.evidence is not None
+
+
+def current_evidence_rebuild_reasons(
+    evidence: AlbumQualityEvidence,
+) -> list[str]:
+    """Return reasons a current-library snapshot must be measured again."""
+    reasons = evidence.policy_incomplete_reasons()
+    if evidence.lineage_version != 3:
+        reasons.append(
+            f"lineage_version {evidence.lineage_version} must be rebuilt as 3"
+        )
+    return reasons
 
 
 _LOSSLESS_CONTAINERS = {"flac", "alac", "wav", "aiff", "ape"}
@@ -1060,13 +1074,13 @@ def backfill_current_evidence_from_album_info(
     downstream readers can fetch via FK rather than scanning by mbid.
     """
     request_row = db.get_request(request_id)
+    existing_id = db.get_request_current_evidence_id(request_id)
+    existing = (
+        db.load_album_quality_evidence_by_id(existing_id)
+        if existing_id is not None
+        else None
+    )
     if verified_lossless_proof is None and preserve_existing_verified_lossless_proof:
-        existing_id = db.get_request_current_evidence_id(request_id)
-        existing = (
-            db.load_album_quality_evidence_by_id(existing_id)
-            if existing_id is not None
-            else None
-        )
         if (
             existing is not None
             and existing.measurement.verified_lossless
@@ -1079,6 +1093,44 @@ def backfill_current_evidence_from_album_info(
         request_row=request_row,
         verified_lossless_proof=verified_lossless_proof,
     )
+    if (
+        result.evidence is not None
+        and existing is not None
+        and existing.snapshot_fingerprint == result.evidence.snapshot_fingerprint
+    ):
+        # A lineage repair remeasures the same immutable content address. Keep
+        # its original capture time so historical failure cards remain
+        # provably pre-attempt, and retain exact-snapshot neutral research that
+        # does not need to be repeated merely because the row became v3.
+        measurement = result.evidence.measurement
+        existing_measurement = existing.measurement
+        if existing_measurement.spectral_grade is not None:
+            # Spectral grade owns the whole atomic fact, including an
+            # explicitly absent bitrate. Never combine request-row scalars
+            # with the exact-snapshot measurement.
+            measurement = msgspec.structs.replace(
+                measurement,
+                spectral_grade=existing_measurement.spectral_grade,
+                spectral_bitrate_kbps=(
+                    existing_measurement.spectral_bitrate_kbps
+                ),
+            )
+        result = EvidenceBuildResult(
+            msgspec.structs.replace(
+                result.evidence,
+                measurement=measurement,
+                measured_at=existing.measured_at,
+                # V0 is likewise one atomic neutral fact. The persisted
+                # content-addressed metric outranks legacy request scalars.
+                v0_metric=existing.v0_metric or result.evidence.v0_metric,
+                on_disk_v0_research_attempted=(
+                    result.evidence.on_disk_v0_research_attempted
+                    or existing.on_disk_v0_research_attempted
+                ),
+            ),
+            result.status,
+            result.reason,
+        )
     if result.evidence is not None:
         db.upsert_album_quality_evidence(result.evidence)
         persisted = db.find_album_quality_evidence(
@@ -1182,7 +1234,7 @@ def load_or_backfill_current_evidence(
             else None
         )
     if existing is not None:
-        errors = existing.policy_incomplete_reasons()
+        errors = current_evidence_rebuild_reasons(existing)
         if not errors:
             return EvidenceBuildResult(existing, "ready")
 

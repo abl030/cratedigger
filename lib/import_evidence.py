@@ -24,6 +24,7 @@ from lib.quality_evidence import (
     QualityEvidenceDB,
     audio_snapshot_matches,
     backfill_current_evidence_from_album_info,
+    current_evidence_rebuild_reasons,
     load_candidate_evidence_for_source,
     load_or_backfill_current_evidence,
 )
@@ -182,8 +183,8 @@ def ensure_current_evidence_for_action(
             else "current album files changed since evidence capture"
         )
         if (
-            errors
-            and existing_requires_lossless_source_v0
+            existing_requires_lossless_source_v0
+            and not _has_lossless_source_v0_metric(existing)
             and not existing_snapshot_stale
             and not _request_has_current_lossless_source_v0(request_row)
         ):
@@ -292,7 +293,7 @@ def _current_action_incomplete_reasons(
     *,
     require_lossless_source_v0: bool = False,
 ) -> list[str]:
-    reasons = evidence.policy_incomplete_reasons()
+    reasons = current_evidence_rebuild_reasons(evidence)
     if (
         (require_lossless_source_v0 or _requires_lossless_source_v0_metric(
             evidence,

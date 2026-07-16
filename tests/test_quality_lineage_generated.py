@@ -11,11 +11,13 @@ from hypothesis import example, given, strategies as st
 import msgspec
 
 from harness.import_one import projected_is_cbr_from_bitrates
+from lib.import_evidence import ensure_current_evidence_for_action
 from lib.measurement import PreimportMeasurement
 from lib.import_preview import (
     EnrichmentPlan,
     enrich_current_v0_research_for_preview,
     enrich_incomplete_current_evidence_for_request,
+    load_current_evidence_for_preview,
     prepare_current_evidence_for_failure,
     persist_exact_current_spectral_from_attempt,
     plan_current_evidence_enrichment,
@@ -139,6 +141,54 @@ def assert_failure_enrichment_matches_library_membership(
         raise AssertionError("absent release did not retain no-HAVE outcome")
 
 
+def assert_failure_v1_refresh_phases(
+    *,
+    outcome: str,
+    initial_lineage: int,
+    prepared_lineage: int | None,
+    refresh_status: str,
+    final_lineage: int | None,
+) -> None:
+    """A failed attempt defers v1 rebuilding until the request is wanted."""
+    if outcome != "ready":
+        raise AssertionError("installed current evidence was not prepared")
+    if initial_lineage == 1 and prepared_lineage != 1:
+        raise AssertionError("failure preparation rebuilt v1 before wanted")
+    if refresh_status != "wanted":
+        raise AssertionError("failure refresh ran before request became wanted")
+    if final_lineage != 3:
+        raise AssertionError("post-failure refresh retained ambiguous lineage")
+
+
+def assert_import_attempt_uses_v3_current_evidence(
+    *,
+    initial_lineage: int,
+    decision_lineage: int | None,
+) -> None:
+    """An actual import attempt may not decide from ambiguous v1 evidence."""
+    if initial_lineage == 1 and decision_lineage != 3:
+        raise AssertionError("import attempt retained ambiguous current lineage")
+
+
+def assert_action_refresh_preserves_lossless_source_v0(
+    *,
+    decision_lineage: int | None,
+    v0_source_lineage: str | None,
+    v0_average: int | None,
+    spectral_grade: str | None,
+    spectral_bitrate: int | None,
+) -> None:
+    """Lineage repair must retain exact-snapshot neutral facts atomically."""
+    if decision_lineage != 3:
+        raise AssertionError("action did not rebuild current evidence as v3")
+    if v0_source_lineage != "lossless_source":
+        raise AssertionError("action discarded lossless-source V0 evidence")
+    if v0_average != 195:
+        raise AssertionError("action replaced exact-snapshot V0 evidence")
+    if (spectral_grade, spectral_bitrate) != ("likely_transcode", 96):
+        raise AssertionError("action mixed exact-snapshot spectral evidence")
+
+
 class TestQualityLineagePins(unittest.TestCase):
     def test_research_once_checker_rejects_repeated_unmarked_probe(self):
         with self.assertRaisesRegex(AssertionError, "exactly one"):
@@ -167,6 +217,33 @@ class TestQualityLineagePins(unittest.TestCase):
                 album_present=True,
                 current_evidence_id=None,
                 outcome="no_current_evidence",
+            )
+
+    def test_failure_lineage_checker_rejects_eager_v1_rebuild(self):
+        with self.assertRaisesRegex(AssertionError, "before wanted"):
+            assert_failure_v1_refresh_phases(
+                outcome="ready",
+                initial_lineage=1,
+                prepared_lineage=3,
+                refresh_status="wanted",
+                final_lineage=3,
+            )
+
+    def test_import_attempt_checker_rejects_v1_decision_evidence(self):
+        with self.assertRaisesRegex(AssertionError, "ambiguous current lineage"):
+            assert_import_attempt_uses_v3_current_evidence(
+                initial_lineage=1,
+                decision_lineage=1,
+            )
+
+    def test_action_refresh_checker_rejects_lost_lossless_source_v0(self):
+        with self.assertRaisesRegex(AssertionError, "discarded"):
+            assert_action_refresh_preserves_lossless_source_v0(
+                decision_lineage=3,
+                v0_source_lineage=None,
+                v0_average=None,
+                spectral_grade="likely_transcode",
+                spectral_bitrate=96,
             )
 
     def test_enrichment_plan_pin_complete_row_plans_nothing(self):
@@ -275,6 +352,9 @@ class TestQualityLineagePins(unittest.TestCase):
                     outcome = enrich_incomplete_current_evidence_for_request(
                         db,
                         request_id=42,
+                        mb_release_id="mbid-42",
+                        quality_ranks=QualityRankConfig.defaults(),
+                        beets_library_root=source,
                         spectral_analyzer=lambda _path: SpectralAnalysisDetail(
                             attempted=True,
                             grade="genuine",
@@ -287,6 +367,277 @@ class TestQualityLineagePins(unittest.TestCase):
             album_present=album_present,
             current_evidence_id=db.get_request_current_evidence_id(42),
             outcome=outcome,
+        )
+
+    @given(
+        minimum=st.integers(min_value=32, max_value=320),
+        average=st.integers(min_value=32, max_value=320),
+        median=st.integers(min_value=32, max_value=320),
+    )
+    @example(minimum=256, average=256, median=256)
+    def test_generated_failed_download_rebuilds_v1_current_evidence(
+        self,
+        minimum: int,
+        average: int,
+        median: int,
+    ) -> None:
+        from lib.beets_db import AlbumInfo
+        from tests.fakes import FakeBeetsDB
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-42",
+            status="downloading",
+        ))
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.m4a"), "wb") as handle:
+                handle.write(b"generated legacy current-library bytes")
+            legacy = make_album_quality_evidence(
+                mb_release_id="mbid-42",
+                source_path=source,
+                files=snapshot_audio_files(source),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=minimum,
+                    avg_bitrate_kbps=average,
+                    median_bitrate_kbps=median,
+                    format="AAC",
+                    is_cbr=False,
+                    spectral_grade="genuine",
+                ),
+                lineage_version=1,
+                v0_metric=AlbumQualityV0Metric(
+                    min_bitrate_kbps=259,
+                    avg_bitrate_kbps=267,
+                    median_bitrate_kbps=269,
+                    source_lineage="native_lossy_research",
+                ),
+            )
+            db.upsert_album_quality_evidence(legacy)
+            stored = db.find_album_quality_evidence(
+                mb_release_id=legacy.mb_release_id,
+                snapshot_fingerprint=legacy.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            db.set_request_current_evidence(42, stored.id)
+            fake_beets = FakeBeetsDB()
+            fake_beets.set_album_info("mbid-42", AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=minimum,
+                avg_bitrate_kbps=average,
+                median_bitrate_kbps=median,
+                is_cbr=False,
+                album_path=source,
+                format="AAC",
+            ))
+
+            with patch(
+                "lib.beets_db.BeetsDB",
+                side_effect=AssertionError(
+                    "pre-log failure phase must not open Beets"
+                ),
+            ):
+                prepared = prepare_current_evidence_for_failure(
+                    db,
+                    request_id=42,
+                    mb_release_id="mbid-42",
+                    quality_ranks=QualityRankConfig.defaults(),
+                    beets_library_root=source,
+                )
+
+            current_id = db.get_request_current_evidence_id(42)
+            prepared_current = db.load_album_quality_evidence_by_id(current_id)
+            db.update_status(42, "wanted", expected_status="downloading")
+            refresh_status = str(db.request(42)["status"])
+            with patch("lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets):
+                enriched = enrich_incomplete_current_evidence_for_request(
+                    db,
+                    request_id=42,
+                    mb_release_id="mbid-42",
+                    quality_ranks=QualityRankConfig.defaults(),
+                    beets_library_root=source,
+                    spectral_analyzer=lambda _path: SpectralAnalysisDetail(
+                        attempted=True,
+                        grade="genuine",
+                        bitrate_kbps=96,
+                    ),
+                    probe_fn=lambda _path: None,
+                )
+
+        current = db.load_album_quality_evidence_by_id(current_id)
+        self.assertEqual(enriched, "enriched")
+        assert_failure_v1_refresh_phases(
+            outcome=prepared,
+            initial_lineage=1,
+            prepared_lineage=(
+                prepared_current.lineage_version
+                if prepared_current is not None
+                else None
+            ),
+            refresh_status=refresh_status,
+            final_lineage=(current.lineage_version if current is not None else None),
+        )
+        assert current is not None
+        self.assertEqual(current.measurement.min_bitrate_kbps, minimum)
+        self.assertEqual(current.measurement.avg_bitrate_kbps, average)
+        self.assertEqual(current.measurement.median_bitrate_kbps, median)
+
+    @given(
+        minimum=st.integers(min_value=32, max_value=320),
+        average=st.integers(min_value=32, max_value=320),
+        median=st.integers(min_value=32, max_value=320),
+    )
+    @example(minimum=256, average=256, median=256)
+    def test_generated_import_attempt_rebuilds_v1_current_evidence(
+        self,
+        minimum: int,
+        average: int,
+        median: int,
+    ) -> None:
+        from lib.beets_db import AlbumInfo
+        from tests.fakes import FakeBeetsDB
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-42",
+            status="downloading",
+            current_spectral_grade="genuine",
+            current_spectral_bitrate=None,
+            current_lossless_source_v0_probe_min_bitrate=211,
+            current_lossless_source_v0_probe_avg_bitrate=222,
+            current_lossless_source_v0_probe_median_bitrate=220,
+        ))
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.m4a"), "wb") as handle:
+                handle.write(b"generated import-attempt library bytes")
+            legacy = make_album_quality_evidence(
+                mb_release_id="mbid-42",
+                source_path=source,
+                files=snapshot_audio_files(source),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=minimum,
+                    avg_bitrate_kbps=average,
+                    median_bitrate_kbps=median,
+                    format="AAC",
+                    is_cbr=False,
+                    spectral_grade="likely_transcode",
+                    spectral_bitrate_kbps=96,
+                    was_converted_from="flac",
+                ),
+                lineage_version=1,
+                v0_metric=AlbumQualityV0Metric(
+                    min_bitrate_kbps=189,
+                    avg_bitrate_kbps=195,
+                    median_bitrate_kbps=195,
+                    source_lineage="lossless_source",
+                ),
+            )
+            db.upsert_album_quality_evidence(legacy)
+            stored = db.find_album_quality_evidence(
+                mb_release_id=legacy.mb_release_id,
+                snapshot_fingerprint=legacy.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            db.set_request_current_evidence(42, stored.id)
+            fake_beets = FakeBeetsDB()
+            fake_beets.set_album_info("mbid-42", AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=minimum,
+                avg_bitrate_kbps=average,
+                median_bitrate_kbps=median,
+                is_cbr=False,
+                album_path=source,
+                format="AAC",
+            ))
+
+            with patch(
+                "lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets,
+            ):
+                current = load_current_evidence_for_preview(
+                    db,
+                    request_id=42,
+                    mb_release_id="mbid-42",
+                    quality_ranks=QualityRankConfig.defaults(),
+                    beets_library_root=source,
+                    preloaded_evidence=stored,
+                    preloaded_authoritative=True,
+                )
+
+            action_db = FakePipelineDB()
+            action_db.seed_request(make_request_row(
+                id=42,
+                mb_release_id="mbid-42",
+                status="downloading",
+                current_spectral_grade="genuine",
+                current_spectral_bitrate=None,
+                current_lossless_source_v0_probe_min_bitrate=211,
+                current_lossless_source_v0_probe_avg_bitrate=222,
+                current_lossless_source_v0_probe_median_bitrate=220,
+            ))
+            action_db.upsert_album_quality_evidence(legacy)
+            action_stored = action_db.find_album_quality_evidence(
+                mb_release_id=legacy.mb_release_id,
+                snapshot_fingerprint=legacy.snapshot_fingerprint,
+            )
+            assert action_stored is not None and action_stored.id is not None
+            action_db.set_request_current_evidence(42, action_stored.id)
+            action = ensure_current_evidence_for_action(
+                action_db,
+                request_id=42,
+                mb_release_id="mbid-42",
+                current_album_path=source,
+                album_info=AlbumInfo(
+                    album_id=1,
+                    track_count=1,
+                    min_bitrate_kbps=minimum,
+                    avg_bitrate_kbps=average,
+                    median_bitrate_kbps=median,
+                    is_cbr=False,
+                    album_path=source,
+                    format="AAC",
+                ),
+            )
+
+        assert_import_attempt_uses_v3_current_evidence(
+            initial_lineage=1,
+            decision_lineage=(current.lineage_version if current is not None else None),
+        )
+        assert current is not None
+        self.assertEqual(current.measurement.min_bitrate_kbps, minimum)
+        self.assertEqual(current.measurement.avg_bitrate_kbps, average)
+        self.assertEqual(current.measurement.median_bitrate_kbps, median)
+        action_evidence = action.evidence
+        assert_action_refresh_preserves_lossless_source_v0(
+            decision_lineage=(
+                action_evidence.lineage_version
+                if action_evidence is not None
+                else None
+            ),
+            v0_source_lineage=(
+                action_evidence.v0_metric.source_lineage
+                if action_evidence is not None
+                and action_evidence.v0_metric is not None
+                else None
+            ),
+            v0_average=(
+                action_evidence.v0_metric.avg_bitrate_kbps
+                if action_evidence is not None
+                and action_evidence.v0_metric is not None
+                else None
+            ),
+            spectral_grade=(
+                action_evidence.measurement.spectral_grade
+                if action_evidence is not None
+                else None
+            ),
+            spectral_bitrate=(
+                action_evidence.measurement.spectral_bitrate_kbps
+                if action_evidence is not None
+                else None
+            ),
         )
 
     @given(

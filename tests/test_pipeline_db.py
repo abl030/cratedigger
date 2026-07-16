@@ -4498,13 +4498,24 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
                 container="mp3",
             ),
         ]
-        first = self._seed(mb_release_id="mbid-replace", files=files_v1)
+        first = msgspec.structs.replace(
+            self._seed(mb_release_id="mbid-replace", files=files_v1),
+            lineage_version=1,
+        )
         self.db.upsert_album_quality_evidence(first)
+        original = self.db.find_album_quality_evidence(
+            mb_release_id=first.mb_release_id,
+            snapshot_fingerprint=first.snapshot_fingerprint,
+        )
+        assert original is not None and original.id is not None
 
-        # Same content address, but mutate a non-keyed field (storage_format)
-        # — the upsert should replace.
-        import msgspec
-        replaced = msgspec.structs.replace(first, storage_format="mp3")
+        # Same content address, but mutate non-keyed fields. Failure-time
+        # current-evidence repair relies on this exact v1 -> v3 in-place path.
+        replaced = msgspec.structs.replace(
+            first,
+            storage_format="mp3",
+            lineage_version=3,
+        )
         self.db.upsert_album_quality_evidence(replaced)
 
         loaded = self.db.find_album_quality_evidence(
@@ -4512,7 +4523,9 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
             snapshot_fingerprint=first.snapshot_fingerprint,
         )
         assert loaded is not None
+        self.assertEqual(loaded.id, original.id)
         self.assertEqual(loaded.storage_format, "mp3")
+        self.assertEqual(loaded.lineage_version, 3)
 
         # Only one row exists for this content address.
         cur = self.db._execute(
