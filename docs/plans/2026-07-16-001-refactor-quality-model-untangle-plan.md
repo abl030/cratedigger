@@ -31,7 +31,7 @@ Issue #708 exposed four semantic collisions: `gate_min_rank` conflated acceptanc
 
 ### Key Decisions
 
-Decisions 1–10 were settled in the issue #711 thread (2026-07-16 settlement pass); the thread records each superseded alternative. Decisions 11–15 were settled in this session.
+Decisions 1–10 and 16 were settled in the issue #711 thread (2026-07-16 settlement pass); the thread records each superseded alternative. Decisions 11–15 were settled in this session.
 
 1. **Verified-lossless proof is the sole, absolute terminal boundary.** No automatic candidate — lossy or lossless — crosses it in either direction; there is nothing left to acquire. Operator Replace/re-request is the only way back in and is never blocked by proof.
 2. **No acceptance floor; `gate_min_rank` is retired outright.** First acquisition is gated by identity and structural usability, not quality. Quality ranks govern relative replacement and search scope only. This supersedes the issue body's "acceptance floor" framing.
@@ -95,12 +95,12 @@ Decisions 1–10 were settled in the issue #711 thread (2026-07-16 settlement pa
 - R24. Codec detection labels downloaded bytes by actual codec: Opus-in-Ogg is `opus` (existing bands); true Vorbis is `vorbis` with new bands. `ogg` remains the container/search selector.
 - R25. Vorbis bands (measured album-average, one table, no `is_cbr` branch): TRANSPARENT 192 / EXCELLENT 160 / GOOD 112 / ACCEPTABLE 96 / POOR below 96.
 - R26. WMA is first-class with bands mirroring the MP3-CBR table: TRANSPARENT 320 / EXCELLENT 256 / GOOD 192 / ACCEPTABLE 128 / POOR below 128.
-- R27. The generic relabel-as-MP3 fallback is deleted with no replacement; decodable audio with no rank family ranks UNKNOWN = 0 — anything ranked upgrades over it, it upgrades over nothing, UNKNOWN vs UNKNOWN keeps searching, and it claims no ceiling and triggers no narrowing. Undecodable audio remains `audio_corrupt`.
+- R27. The generic relabel-as-MP3 fallback is deleted with no replacement, and its pins invert rather than delete: `test_vorbis_folder_falls_back_to_mp3` flips into the first-class Vorbis behavior, with the empty-folder sibling pin of the same fallback reviewed alongside. Decodable audio with no rank family ranks UNKNOWN = 0 — anything ranked upgrades over it, it upgrades over nothing, UNKNOWN vs UNKNOWN keeps searching, and it claims no ceiling and triggers no narrowing. Undecodable audio remains `audio_corrupt`.
 - R28. Bitrate never substitutes for spectral authority: a candidate or HAVE graded `suspect`/`likely_transcode` gains no genuine status and no narrowing from any band value.
 
 **Regression contract**
 
-- R29. Exactly five named change families flip, each inverted into named negative pins rather than deleted: (1) verified-lossless inversion; (2) terminal lossy accept abolished — canonical pin `test_mp3_v0_240`, with the full flipping set enumerated by name before behavior changes; (3) grade-blind CBR narrowing loosened to transparent+genuine; (4) absence-verifies inverted — `test_flac_no_spectral_is_verified`, `test_lossless_no_spectral_is_verified`, and the converted-path `None` branches; (5) lossless re-import over proof inverted — `test_genuine_flac_reimports_verified`.
+- R29. Exactly five named change families flip in the album/scenario corpus, each inverted into named negative pins rather than deleted; the codec-label pin flip (R27) is additional to these: (1) verified-lossless inversion; (2) terminal lossy accept abolished — canonical pin `test_mp3_v0_240`, with the full flipping set enumerated by name before behavior changes; (3) grade-blind CBR narrowing loosened to transparent+genuine; (4) absence-verifies inverted — `test_flac_no_spectral_is_verified`, `test_lossless_no_spectral_is_verified`, and the converted-path `None` branches; (5) lossless re-import over proof inverted — `test_genuine_flac_reimports_verified`.
 - R30. Everything else in the album/scenario corpus is protected: no bulk updates, weakening, or deletion; the Fred again.. minimum-track boundary and the V0-override positive pins (Bill Hicks, Sundowner) stay unchanged.
 - R31. Every new invariant ships as a deterministic pin plus generated property with known-bad fault injection; generated coverage supplements the corpus, never replaces it.
 - R32. Vorbis/WMA coverage includes threshold edges at and immediately below each band value, cross-codec parity, Vorbis vs Opus-in-Ogg detection, and named scenarios from the live Ogg cohort.
@@ -119,6 +119,7 @@ stateDiagram-v2
     Verified: imported - terminal
     [*] --> NoHave
     NoHave --> Lossy: any usable exact-release copy
+    NoHave --> Genuine: transparent + genuine copy
     NoHave --> Provisional: suspect lossless source
     NoHave --> Verified: genuine or override lossless source
     Lossy --> Lossy: proven improvement replaces
