@@ -2049,5 +2049,94 @@ class TestTargetFormatDispatch(unittest.TestCase):
         self.assertNotIn("--target-format", cmd)
 
 
+class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
+    """End-to-end slice for the path-changing-upgrade pin capture: dispatch
+    threads ``postflight.replaced_albums`` into the REAL
+    ``capture_jellyfin_date_created_pin`` → REAL ``jellyfin_find_album_by_path``
+    (old-path fallback), with only the Jellyfin HTTP leaf
+    (``lib.util._jellyfin_get_json``) faked."""
+
+    NEW_REL = "Test Artist/0000 - Test Album"
+    OLD_ABS = "/lib/Beets/Test Artist/2007 - Test Album"
+    OLD_CONTAINER = "/jf/Test Artist/2007 - Test Album"
+    ORIGINAL = "2026-04-01T00:00:00Z"
+
+    def _fake_get_json(self, cfg, path, **params):
+        if path == "/Items" and params.get("includeItemTypes") == "MusicAlbum":
+            return {"Items": [{
+                "Id": "alb-old",
+                "Path": self.OLD_CONTAINER,
+                "DateCreated": self.ORIGINAL,
+                "Name": "Test Album",
+                "AlbumArtist": "Test Artist",
+            }]}
+        if path == "/Items" and params.get("includeItemTypes") == "MusicArtist":
+            return {"Items": []}
+        if path == "/Items" and "parentId" in params:
+            return {"Items": [
+                {"Id": "tr-old-1", "DateCreated": self.ORIGINAL},
+            ]}
+        return {"Items": []}
+
+    def test_replaced_album_old_path_reaches_capture_and_pins(self):
+        from lib.dispatch import dispatch_import_core
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"}))
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+            beets_directory="/lib/Beets",
+            jellyfin_url="http://jf:8096",
+            jellyfin_token="tok",
+            jellyfin_path_map="/lib/Beets:/jf",
+        )
+        ir = make_import_result(
+            decision="import", imported_path=self.NEW_REL)
+        ir.postflight.replaced_albums = [DuplicateRemoveCandidate(
+            beets_album_id=3902,
+            mb_albumid="test-mbid",
+            album_path=self.OLD_ABS,
+            item_count=19,
+        )]
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch_dispatch_externals(), \
+                 patch("lib.dispatch.subprocess_runner.parse_import_result",
+                       return_value=ir), \
+                 patch("lib.util._jellyfin_get_json",
+                       side_effect=self._fake_get_json):
+                dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="test-mbid",
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=DownloadInfo(filetype="mp3"),
+                    distance=0.05,
+                    scenario="strong_match",
+                    files=[MagicMock(username="user1",
+                                     filename="01 - Track.mp3")],
+                    cfg=cfg,
+                    quality_gate_fn=noop_quality_gate,
+                )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        self.assertEqual(len(db.jellyfin_date_created_pins), 1)
+        pin = db.jellyfin_date_created_pins[0]
+        # The pre-upgrade item was found at the replaced album's OLD path;
+        # the pin joins on the NEW path for the reconciler.
+        self.assertEqual(pin["imported_path"], self.NEW_REL)
+        self.assertEqual(pin["album_item_id"], "alb-old")
+        self.assertEqual(pin["children_item_ids"], ["tr-old-1"])
+        self.assertEqual(pin["original_date_created"], self.ORIGINAL)
+        self.assertEqual(pin["request_id"], 42)
+
+
 if __name__ == "__main__":
     unittest.main()

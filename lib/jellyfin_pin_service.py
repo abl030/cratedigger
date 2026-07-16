@@ -4,24 +4,39 @@ Background (migration 046, issue #574 — the Jellyfin sibling of the Plex loop
 in ``lib/plex_pin_service.py``): an upgrade re-import replaces an album's
 on-disk files; the Jellyfin rescan deletes the album's Audio items and
 recreates them with ``DateCreated`` stamped from file ctime (= import time),
-and sometimes recreates the MusicAlbum item too. Jellyfin's 'Recently
-Added'/Latest row orders albums by their children's ``DateCreated``, so the
-upgrade wrongly surfaces at the top. This module preserves the original date:
+and sometimes recreates the MusicAlbum item too. Jellyfin's music Latest /
+'Recently Added' row orders albums by the MusicAlbum item's OWN
+``DateCreated`` (children only qualify the album for inclusion — verified in
+Jellyfin source, ``BaseItemRepository.GetLatestItemList``), and item identity
+is a hash of the item path, so both a same-path re-stamp and a path change
+wrongly surface the upgrade at the top. This module preserves the original
+date, writing it to the album and every Audio child:
 
   capture   (importer, BEFORE the Jellyfin refresh): read the maximum
-            ``DateCreated`` across the album's Audio children (the value that
-            actually orders Jellyfin's music Latest rows), clamp it to Plex's
-            older preserved ``addedAt`` when available, and snapshot the item
-            ids. A genuinely-new album isn't in Jellyfin yet, so nothing is
-            captured — the table self-selects upgrades.
+            ``DateCreated`` across the album's Audio children, clamp it to
+            Plex's older preserved ``addedAt`` when available, and snapshot
+            the item ids. A path-changing upgrade (year-token drift etc.)
+            leaves NOTHING at the new path, so lookup falls back to the
+            replaced beets albums' old paths (threaded from the harness
+            dup-guard). If no pre-upgrade item is findable anywhere but the
+            replaced paths prove this was an upgrade, a FLOOR pin (no item-id
+            snapshot) is written from the pipeline's own floor date — the
+            upgrade must never look newer than when its files first existed
+            (the 2026-07-16 Arcade Fire "B-Sides & Rarities" incident). A
+            genuinely-new album has no replaced albums and isn't in Jellyfin
+            yet, so nothing is captured — the table self-selects upgrades.
   reconcile (5-min cratedigger cycle): for each pending pin past the settle
             window, re-find the album and check whether the rescan has LANDED
-            — an item id differs from the snapshot OR an existing Audio item's
-            date is newer than the captured maximum. The date branch is
+            — an item id differs from the snapshot (a None snapshot matches
+            any album: the floor-pin case) OR an existing Audio item's date
+            is newer than the captured maximum. The date branch is
             load-bearing: Jellyfin 10.11 restamps same-path items from file
-            ctime when their mtime changes without changing their ids. Clamp
-            only newer dates back to the captured maximum. Until Jellyfin
-            exposes either signal the pin stays pending, then expires at TTL.
+            ctime when their mtime changes without changing their ids.
+            Nothing at the pinned path is a WAIT signal (the new folder only
+            exists in Jellyfin once the rescan lands), closing as 'skipped'
+            at TTL. Clamp only newer dates back to the captured value. Until
+            a landing signal appears the pin stays pending, then expires at
+            TTL.
 
 The Jellyfin client (find/children/set) lives in ``lib/util.py``; all three
 functions take kwarg-DI seams so tests drive them without touching the
@@ -70,7 +85,7 @@ class _PinDBProto(Protocol):
 
     def add_jellyfin_date_created_pin(
         self, *, imported_path: str, original_date_created: str,
-        album_item_id: str, children_item_ids: list[str],
+        album_item_id: str | None, children_item_ids: list[str],
         request_id: int | None) -> int: ...
 
     def get_pending_jellyfin_date_created_pins(
@@ -80,6 +95,9 @@ class _PinDBProto(Protocol):
     def mark_jellyfin_date_created_pin(
         self, pin_id: int, *, status: JellyfinTerminalPinStatus,
         reconciled_at: datetime) -> None: ...
+
+    def get_oldest_request_chain_created_at(
+        self, request_id: int) -> datetime | None: ...
 
 
 # A pin is only looked at this long after capture — not a completion
@@ -98,7 +116,10 @@ DEFAULT_TTL_HOURS = 48
 @dataclass(frozen=True)
 class CaptureResult:
     """Outcome of a capture attempt. ``outcome`` is one of:
-    ``captured`` (pin written), ``no_album`` (genuinely-new, nothing to pin),
+    ``captured`` (pin written from a found pre-upgrade item — at the new
+    path or a replaced album's old path), ``floor_captured`` (upgrade proven
+    by replaced albums but no item findable; pin written from the pipeline's
+    own floor date), ``no_album`` (genuinely-new, nothing to pin),
     ``disabled`` (Jellyfin not configured / no path), ``error`` (best-effort
     fail)."""
     outcome: str
@@ -128,6 +149,31 @@ def _jellyfin_pin_enabled(cfg: "CratediggerConfig") -> bool:
     return bool(cfg.jellyfin_url and cfg.resolved_jellyfin_token())
 
 
+def _floor_original_date(
+    db: "PipelineDB | _PinDBProto",
+    request_id: int | None,
+    historical_added_at: int | None,
+) -> str | None:
+    """The pipeline's own 'files first existed' floor, as a Jellyfin ISO
+    string: the earlier of Plex's preserved ``addedAt`` and the oldest
+    ``created_at`` across the request's replace chain. None when neither
+    source exists."""
+    candidates: list[datetime] = []
+    if historical_added_at is not None:
+        candidates.append(
+            datetime.fromtimestamp(historical_added_at, tz=timezone.utc))
+    if request_id is not None:
+        oldest = db.get_oldest_request_chain_created_at(request_id)
+        if oldest is not None:
+            if oldest.tzinfo is None:
+                oldest = oldest.replace(tzinfo=timezone.utc)
+            candidates.append(oldest)
+    if not candidates:
+        return None
+    return (min(candidates).astimezone(timezone.utc)
+            .isoformat(timespec="seconds").replace("+00:00", "Z"))
+
+
 def capture_jellyfin_date_created_pin(
     cfg: "CratediggerConfig",
     db: "PipelineDB | _PinDBProto",
@@ -135,29 +181,75 @@ def capture_jellyfin_date_created_pin(
     request_id: int | None,
     *,
     historical_added_at: int | None = None,
+    replaced_album_paths: list[str] | None = None,
     find_fn: FindFn = jellyfin_find_album_by_path,
     children_fn: ChildrenFn = jellyfin_get_album_children,
 ) -> CaptureResult:
     """Stash the album's historical Audio date and item-id snapshot.
 
-    MUST run before the Jellyfin media update so the children still carry the
-    pre-upgrade dates that determine the album's current Latest position.
+    MUST run before the Jellyfin media update so the pre-upgrade items still
+    carry the dates that determine the album's current Latest position.
     ``historical_added_at`` is Plex's preserved original epoch value. It can
     only move the Jellyfin baseline backwards, repairing a prior Jellyfin
     rebuild or refresh that had already polluted the captured child dates.
-    Best-effort: never raises.
+
+    ``replaced_album_paths`` are the beets albums the import's dup-guard let
+    beets remove — where the album lived BEFORE a path-changing upgrade.
+    Jellyfin item identity is a hash of the path, so after such an upgrade the
+    pre-upgrade items exist only at those old paths; the new path holds
+    nothing yet. Lookup order is new path, then each old path. When nothing is
+    findable anywhere but replaced paths prove this was an upgrade, a FLOOR
+    pin (no item-id snapshot) is written from the pipeline's own floor date so
+    the upgrade still can't surface as newly added. A genuinely-new album (no
+    replaced paths, no Jellyfin item) writes nothing. Best-effort: never
+    raises.
     """
     if not _jellyfin_pin_enabled(cfg) or not imported_path:
         return CaptureResult("disabled")
+    lookup_paths = [imported_path]
+    for old_path in replaced_album_paths or []:
+        if old_path and old_path not in lookup_paths:
+            lookup_paths.append(old_path)
+    ref = None
     try:
-        ref = find_fn(cfg, imported_path)
+        for lookup_path in lookup_paths:
+            ref = find_fn(cfg, lookup_path)
+            if ref is not None:
+                break
     except Exception:
         logger.warning(
             "JELLYFIN PIN: capture lookup failed for %r (request %s) — non-fatal",
             imported_path, request_id, exc_info=True)
         return CaptureResult("error")
     if ref is None:
-        return CaptureResult("no_album")
+        if not replaced_album_paths:
+            return CaptureResult("no_album")
+        try:
+            original = _floor_original_date(db, request_id, historical_added_at)
+            if original is None:
+                logger.warning(
+                    "JELLYFIN PIN: upgrade of %r (request %s) replaced %d "
+                    "album(s) but no pre-upgrade item and no floor date — "
+                    "cannot pin", imported_path, request_id,
+                    len(replaced_album_paths))
+                return CaptureResult("no_album")
+            pin_id = db.add_jellyfin_date_created_pin(
+                imported_path=imported_path,
+                original_date_created=original,
+                album_item_id=None,
+                children_item_ids=[],
+                request_id=request_id,
+            )
+        except Exception:
+            logger.warning(
+                "JELLYFIN PIN: floor capture failed for %r — non-fatal",
+                imported_path, exc_info=True)
+            return CaptureResult("error")
+        logger.info(
+            "JELLYFIN PIN: floor-captured DateCreated=%s for %r "
+            "(no pre-upgrade item; pin %d, request %s)",
+            original, imported_path, pin_id, request_id)
+        return CaptureResult("floor_captured", pin_id, original)
     try:
         children = children_fn(cfg, ref.item_id)
         original_date_created = max(
@@ -209,8 +301,11 @@ def reconcile_jellyfin_date_created_pins(
 ) -> ReconcileResult:
     """Clamp post-upgrade dates after the album update becomes observable.
 
-    Item-id drift and Audio dates newer than the captured maximum are the two
-    landing signals. Best-effort: per-pin failures are logged and counted.
+    Item-id drift (against a None snapshot, any album counts) and Audio dates
+    newer than the captured maximum are the landing signals; an absent album
+    waits (the pinned path may not exist in Jellyfin until the rescan lands)
+    and closes as 'skipped' at TTL. Best-effort: per-pin failures are logged
+    and counted.
     """
     if not _jellyfin_pin_enabled(cfg):
         return ReconcileResult()
@@ -228,29 +323,40 @@ def reconcile_jellyfin_date_created_pins(
         pin_id = pin["id"]
         path = pin["imported_path"]
         original = str(pin["original_date_created"])
-        snapshot_album_id = str(pin["album_item_id"])
+        raw_album_id = pin["album_item_id"]
+        snapshot_album_id = None if raw_album_id is None else str(raw_album_id)
         snapshot_children = set(pin["children_item_ids"])
         try:
             ref = find_fn(cfg, path)
             if ref is None:
-                # Album no longer locatable (removed/renamed since capture).
-                db.mark_jellyfin_date_created_pin(
-                    pin_id, status="skipped", reconciled_at=now)
-                skipped += 1
+                # Nothing at the pinned path YET. After a path-changing
+                # upgrade the new folder only appears in Jellyfin once the
+                # rescan lands, so absence is a wait signal, not a terminal
+                # one. An album genuinely removed since capture closes at TTL.
+                if pin["captured_at"] < now - timedelta(hours=ttl_hours):
+                    db.mark_jellyfin_date_created_pin(
+                        pin_id, status="skipped", reconciled_at=now)
+                    skipped += 1
+                else:
+                    waiting += 1
                 continue
             children = children_fn(cfg, ref.item_id)
+            # A None snapshot is a floor pin: no pre-upgrade item existed at
+            # capture, so ANY album now at the path is the landed rescan.
             ids_changed = (
-                ref.item_id != snapshot_album_id
+                snapshot_album_id is None
+                or ref.item_id != snapshot_album_id
                 or {c.item_id for c in children} != snapshot_children
             )
             date_bumped = any(
                 child.date_created > original for child in children
             )
             landed = ids_changed or date_bumped
-            # A landed rescan showing ZERO audio children against a non-empty
-            # snapshot is a mid-scan window (old items deleted, new ones not
-            # yet inserted) — the new items don't exist to write to yet.
-            settled = landed and (bool(children) or not snapshot_children)
+            # A landed rescan showing ZERO audio children is the mid-scan
+            # window (old items deleted / album row inserted, new Audio rows
+            # not yet) — wait until the children exist so one write pass
+            # covers the album and every child together.
+            settled = landed and bool(children)
             if not settled:
                 # The rescan hasn't visibly (fully) happened yet. Writing now
                 # would pin the OLD items (about to be deleted) and close the

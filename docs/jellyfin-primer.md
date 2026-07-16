@@ -66,15 +66,26 @@ and emits a warning when the item was never observable or remains present.
 Failures are surfaced as warnings on the already completed delete rather than
 rolling library state back.
 
-### "Recently Added" pin on upgrades (migration 046, issue #574)
+### "Recently Added" pin on upgrades (migrations 046 + 053, issue #574)
 
 An upgrade re-import replaces an album's on-disk files. The Jellyfin rescan
 deletes the album's old Audio items and creates new ones, stamping each new
 item's `DateCreated` from file ctime (= import time) — and sometimes
 recreates the MusicAlbum item too (observed live: 1 of 3 upgrades).
-Jellyfin's "Recently Added"/Latest row orders albums by their **children's**
-`DateCreated`, so the upgraded album wrongly jumps to the top even when the
-album item kept its original date.
+Jellyfin's music "Recently Added"/Latest row orders albums by the **MusicAlbum
+item's own** `DateCreated` (children only qualify the album for inclusion —
+verified in Jellyfin source, `BaseItemRepository.GetLatestItemList`), and
+**item identity is an MD5 of the item path**
+(`LibraryManager.GetNewItemIdInternal`), so a re-created album — same path or
+new path — jumps to the top.
+
+The path-identity fact makes **path-changing upgrades** the hard case (live
+incident 2026-07-16: Arcade Fire "B-Sides & Rarities", whose folder moved
+`2007 - …` → `0000 - …` when MusicBrainz dropped the release date): the
+pre-upgrade items exist only at the *old* path, and the *new* path holds
+nothing until the rescan lands. Jellyfin has no provider-id reconciliation
+and never migrates an item across a path change — delete-old + create-new in
+one scan pass is structural, so the pin system must absorb it.
 
 Cratedigger preserves the original date with a capture-then-reconcile loop —
 the Jellyfin sibling of the Plex `addedAt` pin (migration 040), with two
@@ -83,20 +94,34 @@ deliberate differences:
 - **Capture** (`lib/jellyfin_pin_service.py::capture_jellyfin_date_created_pin`,
   called in `lib/dispatch/core.py` *before* the refresh): locate the album by
   its folder path (exact `Path` match after the `path_map` translation) and
-  stash the **maximum `DateCreated` across its Audio children** (the value
-  Jellyfin actually uses to order grouped music Latest), plus a snapshot of
-  the album and Audio item ids, as a `pending` row. When Plex already knows
-  the album, its preserved pre-upgrade `addedAt` is an older historical floor:
-  the Jellyfin pin uses the earlier value. This prevents a prior Jellyfin
-  rebuild or broken refresh from becoming the new baseline forever.
-  A genuinely-new album isn't in Jellyfin yet, so nothing is captured — the
-  table self-selects upgrades.
+  stash the **maximum `DateCreated` across its Audio children**, plus a
+  snapshot of the album and Audio item ids, as a `pending` row. Lookup order
+  is the new imported path, then each **replaced beets album's old path**
+  (`postflight.replaced_albums`, threaded from the harness dup-guard's
+  allowed removals) — that's where the pre-upgrade items live after a
+  path-changing upgrade. When Plex already knows the album, its preserved
+  pre-upgrade `addedAt` is an older historical floor: the Jellyfin pin uses
+  the earlier value. This prevents a prior Jellyfin rebuild or broken refresh
+  from becoming the new baseline forever.
+  When nothing is findable anywhere but replaced albums prove the import was
+  an upgrade, a **floor pin** (migration 053: `album_item_id` NULL, empty
+  children snapshot) is written from the pipeline's own floor — the earlier
+  of Plex's preserved `addedAt` and the oldest `created_at` across the
+  request's replace chain — so an upgrade can never look newer than when the
+  pipeline first knew of its files. A genuinely-new album has no replaced
+  albums and isn't in Jellyfin yet, so nothing is captured — the table
+  self-selects upgrades.
 - **Reconcile** (`reconcile_jellyfin_date_created_pins`, each 5-min
   cratedigger cycle): a pin is acted on only once the rescan is **observable**
-  — an item id differs from the snapshot **or an Audio item's date becomes
-  newer than the captured maximum**. Only newer album/Audio dates are clamped
-  back to that maximum, preserving the album's prior Recently Added position.
-  Until it lands the pin stays `pending` (up to a 48h TTL → `expired`).
+  — an item id differs from the snapshot (a NULL snapshot matches any album:
+  the floor-pin case) **or an Audio item's date becomes newer than the
+  captured maximum**. An **absent album waits** rather than closing: after a
+  path-changing upgrade the pinned (new) path only exists in Jellyfin once
+  the rescan lands; still-absent at TTL closes as `skipped`. A landed album
+  with zero Audio children is the mid-scan window and also waits. Only newer
+  album/Audio dates are clamped back to the captured value, preserving the
+  album's prior Recently Added position. Until a landing signal appears the
+  pin stays `pending` (up to a 48h TTL → `expired`).
 
 Why the landed-detector instead of Plex's fixed 180s settle window + field
 lock:

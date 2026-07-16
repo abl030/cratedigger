@@ -1289,6 +1289,81 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
             result = json.loads(sentinel.removeprefix("__IMPORT_RESULT__"))
             self.assertEqual(result["decision"], "quality_evidence_action_failed")
 
+    def test_replaced_albums_from_run_import_cross_the_sentinel(self):
+        """The dup-guard's allowed removals (the replaced pre-upgrade copies)
+        must reach ``postflight.replaced_albums`` in the emitted
+        ImportResult — the Jellyfin pin capture reads their old paths after
+        a path-changing upgrade."""
+        from harness import import_one
+        from lib.beets_db import AlbumInfo
+        from lib.quality import DuplicateRemoveCandidate
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            album = os.path.join(tmpdir, "album")
+            imported = os.path.join(tmpdir, "library", "album")
+            os.makedirs(album)
+            os.makedirs(imported)
+            with open(os.path.join(album, "01 - Track.mp3"), "wb") as f:
+                f.write(b"not real audio")
+            action_path = os.path.join(tmpdir, "action.json")
+            self._write_payload(self._payload_for_album(album), action_path)
+
+            beets = FakeBeetsDB()
+            beets.set_album_exists("mbid-123", False)
+            beets.set_album_ids_for_release("mbid-123", [77])
+            beets.set_album_info("mbid-123", AlbumInfo(
+                album_id=77,
+                track_count=1,
+                min_bitrate_kbps=245,
+                is_cbr=False,
+                album_path=imported,
+                avg_bitrate_kbps=252,
+                median_bitrate_kbps=250,
+                format="MP3",
+            ))
+            beets.set_item_paths("mbid-123", [])
+
+            replaced = [DuplicateRemoveCandidate(
+                beets_album_id=3902,
+                mb_albumid="mbid-123",
+                album_path="/library/Artist/2007 - Album",
+                item_count=19,
+            )]
+            stdout = io.StringIO()
+            argv = [
+                "import_one.py",
+                album,
+                "mbid-123",
+                "--quality-evidence-action-file",
+                action_path,
+            ]
+            with patch.object(sys, "argv", argv), \
+                 patch("sys.stdout", stdout), \
+                 patch("harness.import_one.BeetsDB", return_value=beets), \
+                 patch("harness.import_one.run_import",
+                       return_value=import_one.RunImportOutcome(
+                           0, [], replaced_albums=replaced)), \
+                 patch("harness.import_one.fix_library_modes"), \
+                 self.assertRaises(SystemExit) as cm:
+                import_one.main()
+
+            self.assertEqual(cm.exception.code, 0)
+            sentinel = stdout.getvalue().strip().splitlines()[-1]
+            self.assertTrue(sentinel.startswith("__IMPORT_RESULT__"))
+            result = json.loads(sentinel.removeprefix("__IMPORT_RESULT__"))
+            self.assertEqual(result["decision"], "import")
+            self.assertEqual(
+                result["postflight"]["replaced_albums"],
+                [{
+                    "beets_album_id": 3902,
+                    "mb_albumid": "mbid-123",
+                    "discogs_albumid": "",
+                    "album_path": "/library/Artist/2007 - Album",
+                    "item_count": 19,
+                    "albumartist": "",
+                    "album": "",
+                }])
+
     def test_evidence_action_rejects_downgrade_even_when_final_status_imported(self):
         from harness import import_one
 

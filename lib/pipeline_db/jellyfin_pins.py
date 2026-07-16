@@ -26,13 +26,16 @@ class _JellyfinPinsMixin(_PipelineDBBase):
         *,
         imported_path: str,
         original_date_created: str,
-        album_item_id: str,
+        album_item_id: str | None,
         children_item_ids: list[str],
         request_id: int | None,
     ) -> int:
         """Record a pending pin capturing an album's pre-upgrade
         maximum Audio ``DateCreated`` plus the item-id snapshot the
-        reconciler compares against. Returns the new pin id.
+        reconciler compares against. ``album_item_id=None`` marks a FLOOR
+        pin (migration 053): no pre-upgrade item was findable, so the
+        date is the pipeline's own floor and any album that appears at
+        the path counts as the landed rescan. Returns the new pin id.
         """
         cur = self._execute(
             """

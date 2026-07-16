@@ -3121,6 +3121,29 @@ class TestFakeSupersedeRequestMbid(unittest.TestCase):
         db = self._seed_old()
         self.assertIsNone(db.get_request_by_replaces_request_id(42))
 
+    def test_get_oldest_request_chain_created_at_walks_the_chain(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=10, status="replaced",
+            created_at=datetime(2026, 2, 1, tzinfo=timezone.utc)))
+        db.seed_request(make_request_row(
+            id=11, status="replaced", replaces_request_id=10,
+            created_at=datetime(2026, 4, 1, tzinfo=timezone.utc)))
+        db.seed_request(make_request_row(
+            id=12, replaces_request_id=11,
+            created_at=datetime(2026, 6, 1, tzinfo=timezone.utc)))
+        self.assertEqual(
+            db.get_oldest_request_chain_created_at(12),
+            datetime(2026, 2, 1, tzinfo=timezone.utc))
+        # A chain head returns its own created_at.
+        self.assertEqual(
+            db.get_oldest_request_chain_created_at(10),
+            datetime(2026, 2, 1, tzinfo=timezone.utc))
+
+    def test_get_oldest_request_chain_created_at_unknown_id_is_none(self):
+        db = FakePipelineDB()
+        self.assertIsNone(db.get_oldest_request_chain_created_at(999))
+
     def test_denylist_isolation_old_keeps_new_empty(self):
         """A supersede must not copy denylist entries from the old
         request onto the new row — the new request starts fresh
