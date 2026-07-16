@@ -160,7 +160,9 @@ def _date_newer(a: str, b: str) -> bool:
     try:
         return (datetime.fromisoformat(a.replace("Z", "+00:00"))
                 > datetime.fromisoformat(b.replace("Z", "+00:00")))
-    except ValueError:
+    except (ValueError, TypeError):
+        # ValueError: unparseable text (e.g. ""). TypeError: one side parsed
+        # naive (no offset) — comparing would raise and strand the pin.
         return a > b
 
 
