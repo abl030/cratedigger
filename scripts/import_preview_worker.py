@@ -30,6 +30,7 @@ from lib.import_preview import (
     load_current_evidence_for_preview,
     load_persisted_existing_spectral,
     measure_and_persist_candidate_evidence,
+    persist_exact_current_spectral_from_attempt,
     preserve_existing_source_spectral,
 )
 from lib.import_evidence import (
@@ -446,6 +447,7 @@ def process_claimed_preview_job(
         persisted_existing = SpectralAnalysisDetail(attempted=False)
         preserve_have_source = False
         mb_release_id = ""
+        current_evidence = None
         if job.request_id is not None:
             try:
                 req = db.get_request(job.request_id) or {}
@@ -497,7 +499,7 @@ def process_claimed_preview_job(
                 audit_resolver = lambda _release_id: failed_lookup
             else:
                 audit_resolver = existing_spectral_resolver_for_config(audit_cfg)
-        audit = collect_release_attempt_spectral_audit(
+        audit, have_lookup = collect_release_attempt_spectral_audit(
             front_gate_source,
             mb_release_id,
             existing_spectral_evidence=persisted_existing,
@@ -506,7 +508,32 @@ def process_claimed_preview_job(
                 spectral_detail_analyzer or analyze_spectral_audit_path
             ),
             existing_resolver=audit_resolver,
-        )[0]
+        )
+        # The reuse fast path skips measurement but must still make its
+        # HAVE scan durable BEFORE the importer decides — an audit-only
+        # scan left the decision spectrally blind (download_log 37206).
+        # The persist helper's own guards keep this once-only, exact-path,
+        # exact-snapshot; failures are fail-soft like the audit itself.
+        if (
+            job.request_id is not None
+            and current_evidence is not None
+            and not preserve_have_source
+            and have_lookup.path is not None
+        ):
+            try:
+                persist_exact_current_spectral_from_attempt(
+                    db,
+                    request_id=job.request_id,
+                    current_evidence=current_evidence,
+                    measured_existing=audit.existing,
+                    measured_existing_path=have_lookup.path,
+                )
+            except Exception:
+                logger.exception(
+                    "Unable to persist reused-path HAVE spectral for "
+                    "request %s",
+                    job.request_id,
+                )
         reused_payload = _reused_evidence_preview_payload(
             job,
             front_gate_result.evidence,

@@ -377,6 +377,27 @@ bursts never balloon the loop; complete rows cost nothing. Over time
 the failed-download cohort's evidence converges without any download
 succeeding.
 
+**A blank `source_path` is policy-incomplete.** Every enrichment
+helper verifies the scanned path against the row's recorded
+`source_path`, so a row without one (legacy 2026-05 library backfills
+wrote `source_path=''`) could never be completed — and an incomplete
+HAVE side silently disables all three spectral protections in the
+import comparison (download_log 37206: a ~96k transcode replaced a
+better copy as a "better" avg-bitrate tiebreak). `policy_incomplete_reasons`
+therefore rejects blank paths; the action loader
+(`ensure_current_evidence_for_action`) and the preview loader
+(`load_current_evidence_for_preview`) rebuild such rows from beets.
+When the on-disk files are unchanged (the legacy-backfill case) the
+rebuilt row shares the `(mb_release_id, snapshot_fingerprint)` content
+address, so the upsert repairs `source_path` in place — same row id,
+FK untouched; if the files have changed since capture, backfill writes
+a fresh row and repoints the FK. Either way enrichment can then
+complete the surviving row. The candidate-reuse preview fast path also
+persists its attempt-time HAVE scan through
+`persist_exact_current_spectral_from_attempt` before marking the job
+importable, so a reused-evidence force import decides against the same
+completed HAVE the full measurement path would see.
+
 **Search narrowing companion.** When `lossless_source_locked` fires —
 in the importer (`lib/dispatch/core.py`) or wrong-match cleanup
 triage (`lib/wrong_match_cleanup_service.py`) — the request's

@@ -25,6 +25,7 @@ from lib.measurement import LocalFileInspection, PreimportMeasurement
 from lib.quality import (
     AudioQualityMeasurement,
     ImportResult,
+    QualityRankConfig,
     SpectralAnalysisDetail,
     SpectralDetail,
     TargetQualityContract,
@@ -406,6 +407,76 @@ class TestImportPreviewPath(unittest.TestCase):
         assert stored is not None and stored.id is not None
         db.set_request_current_evidence(42, stored.id)
         return stored
+
+    def test_preview_loader_rebuilds_blank_source_path_current_evidence(self):
+        """A blank-path HAVE row must be rebuilt, not reused authoritatively.
+
+        download_log 37206 (French Quarter): the linked current evidence was
+        a legacy backfill with ``source_path=''``; every enrichment guard
+        refused it, so preview kept handing the importer a spectrally blind
+        HAVE side. The preview loader must rebuild such rows from beets so
+        the same preview's enrichment can complete them.
+        """
+        from lib.beets_db import AlbumInfo
+        from lib.import_preview import load_current_evidence_for_preview
+        from tests.fakes import FakeBeetsDB
+
+        db = self._db()
+        source = self._source_dir()
+        try:
+            evidence = make_album_quality_evidence(
+                mb_release_id="mbid-42",
+                source_path="",
+                files=snapshot_audio_files(source),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=186,
+                    avg_bitrate_kbps=194,
+                    median_bitrate_kbps=194,
+                    format="MP3",
+                    spectral_grade=None,
+                    spectral_bitrate_kbps=None,
+                ),
+            )
+            db.upsert_album_quality_evidence(evidence)
+            stored = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            db.set_request_current_evidence(42, stored.id)
+
+            fake_beets = FakeBeetsDB()
+            fake_beets.set_album_info("mbid-42", AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=186,
+                avg_bitrate_kbps=194,
+                median_bitrate_kbps=194,
+                is_cbr=False,
+                album_path=source,
+                format="MP3",
+            ))
+            with patch("lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets):
+                current = load_current_evidence_for_preview(
+                    db,
+                    request_id=42,
+                    mb_release_id="mbid-42",
+                    quality_ranks=QualityRankConfig.defaults(),
+                    beets_library_root="",
+                    preloaded_evidence=stored,
+                    preloaded_authoritative=True,
+                )
+
+            assert current is not None
+            self.assertEqual(current.source_path, source)
+            linked_id = db.get_request_current_evidence_id(42)
+            self.assertEqual(linked_id, stored.id)
+            linked = db.load_album_quality_evidence_by_id(linked_id)
+            assert linked is not None
+            self.assertEqual(linked.source_path, source)
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
 
     def test_attempt_scan_persists_qigong_current_spectral_snapshot(self):
         """Qigong: the exact installed HAVE scan becomes durable evidence."""

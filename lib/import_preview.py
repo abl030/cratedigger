@@ -661,23 +661,36 @@ def load_current_evidence_for_preview(
     """Load/backfill HAVE and perform preview-owned neutral enrichment."""
 
     current = preloaded_evidence
-    if current is None and not preloaded_authoritative:
+    should_load = current is None and not preloaded_authoritative
+    # An authoritative linked row that is policy-incomplete (canonical case:
+    # a legacy backfill with a blank ``source_path``) can never be enriched
+    # in place — rebuild it from beets so this same preview's enrichment can
+    # complete it before the importer decides.
+    should_rebuild = (
+        current is not None and bool(current.policy_incomplete_reasons())
+    )
+    if should_load or should_rebuild:
         try:
             load_result = load_or_backfill_current_evidence(
                 db,
                 request_id=request_id,
                 mb_release_id=mb_release_id,
                 quality_ranks=quality_ranks,
+                preloaded_evidence=current,
+                preloaded=should_rebuild,
                 beets_library_root=beets_library_root,
             )
-            current = load_result.evidence
         except Exception:
             logger.warning(
                 "Unable to load/backfill preview HAVE evidence for request %s",
                 request_id,
                 exc_info=True,
             )
-            return None
+            if should_load:
+                return None
+            load_result = None
+        if load_result is not None and load_result.evidence is not None:
+            current = load_result.evidence
 
     # Backfill returns its pre-upsert value; reload through the exact request
     # FK so the public enrichment helper always receives the surviving id.

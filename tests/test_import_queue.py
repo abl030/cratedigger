@@ -2296,6 +2296,161 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         self.assertEqual(import_result.spectral.existing.grade, "suspect")
         self.assertEqual(import_result.spectral.existing.bitrate_kbps, 128)
 
+    def test_reused_evidence_persists_missing_have_spectral(self):
+        """Front-gate reuse must make its HAVE scan durable pre-decision.
+
+        download_log 37206 (French Quarter): the reuse fast path scanned
+        the installed album for the audit payload but never persisted the
+        result, so the importer's decision ran with a spectrally blind
+        HAVE side and called a ~96k transcode an upgrade.
+        """
+        from scripts import import_preview_worker
+        from lib.measurement import ExistingSpectralAuditLookup
+        from lib.quality import SpectralAnalysisDetail
+
+        with tempfile.TemporaryDirectory() as source, \
+             tempfile.TemporaryDirectory() as existing:
+            for root in (source, existing):
+                with open(os.path.join(root, "01.mp3"), "wb") as handle:
+                    handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=42, mb_release_id="mbid-42"))
+            _seed_current_for_request(
+                db,
+                42,
+                mb_release_id="mbid-42",
+                source_path=existing,
+                files=snapshot_audio_files(existing),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=320,
+                    avg_bitrate_kbps=320,
+                    median_bitrate_kbps=320,
+                    format="MP3",
+                    is_cbr=True,
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="MP3",
+            )
+            download_log_id = db.log_download(42, outcome="rejected")
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+            self._seed_evidence_for_download_log(db, download_log_id, source)
+
+            def analyze(path: str) -> SpectralAnalysisDetail:
+                return SpectralAnalysisDetail(
+                    attempted=True,
+                    grade="suspect" if path == existing else "genuine",
+                    bitrate_kbps=128 if path == existing else None,
+                )
+
+            with patch(
+                "scripts.import_preview_worker.read_runtime_config",
+                return_value=CratediggerConfig(audio_check_mode="off"),
+            ):
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                    spectral_detail_analyzer=analyze,
+                    existing_spectral_resolver=lambda _mbid: (
+                        ExistingSpectralAuditLookup(path=existing)
+                    ),
+                )
+
+            linked_id = db.get_request_current_evidence_id(42)
+            linked = db.load_album_quality_evidence_by_id(linked_id)
+
+        assert updated is not None
+        self.assertEqual(updated.preview_status, "evidence_ready")
+        assert linked is not None
+        self.assertEqual(linked.measurement.spectral_grade, "suspect")
+        self.assertEqual(linked.measurement.spectral_bitrate_kbps, 128)
+
+    def test_reused_evidence_never_overwrites_present_have_spectral(self):
+        """A fresh audit scan must not clobber persisted HAVE provenance."""
+        from scripts import import_preview_worker
+        from lib.measurement import ExistingSpectralAuditLookup
+        from lib.quality import SpectralAnalysisDetail
+
+        with tempfile.TemporaryDirectory() as source, \
+             tempfile.TemporaryDirectory() as existing:
+            for root in (source, existing):
+                with open(os.path.join(root, "01.mp3"), "wb") as handle:
+                    handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=42, mb_release_id="mbid-42"))
+            _seed_current_for_request(
+                db,
+                42,
+                mb_release_id="mbid-42",
+                source_path=existing,
+                files=snapshot_audio_files(existing),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    avg_bitrate_kbps=256,
+                    median_bitrate_kbps=252,
+                    format="MP3",
+                    spectral_grade="genuine",
+                    spectral_bitrate_kbps=None,
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="MP3",
+            )
+            download_log_id = db.log_download(42, outcome="rejected")
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+            self._seed_evidence_for_download_log(db, download_log_id, source)
+
+            def analyze(path: str) -> SpectralAnalysisDetail:
+                return SpectralAnalysisDetail(
+                    attempted=True,
+                    grade="suspect" if path == existing else "genuine",
+                    bitrate_kbps=128 if path == existing else None,
+                )
+
+            with patch(
+                "scripts.import_preview_worker.read_runtime_config",
+                return_value=CratediggerConfig(audio_check_mode="off"),
+            ):
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                    spectral_detail_analyzer=analyze,
+                    existing_spectral_resolver=lambda _mbid: (
+                        ExistingSpectralAuditLookup(path=existing)
+                    ),
+                )
+
+            linked_id = db.get_request_current_evidence_id(42)
+            linked = db.load_album_quality_evidence_by_id(linked_id)
+
+        assert updated is not None
+        self.assertEqual(updated.preview_status, "evidence_ready")
+        assert linked is not None
+        self.assertEqual(linked.measurement.spectral_grade, "genuine")
+        self.assertIsNone(linked.measurement.spectral_bitrate_kbps)
+
     def test_have_lookup_failure_still_analyzes_candidate(self):
         """A DB failure on HAVE provenance must not suppress the WANT scan."""
         from scripts import import_preview_worker

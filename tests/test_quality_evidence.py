@@ -22,6 +22,7 @@ from lib.quality import (
     ImportResult,
     V0ProbeEvidence,
     VerifiedLosslessProof,
+    full_pipeline_decision_from_evidence,
 )
 from lib.quality_evidence import (
     audio_snapshot_matches,
@@ -416,6 +417,43 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         self.assertFalse(result.available)
         self.assertEqual(result.status, "incomplete")
         self.assertIn("duplicate snapshot relative_path", result.reason or "")
+
+
+class TestBlankSourcePathPolicy(unittest.TestCase):
+    """A blank ``source_path`` is action-incomplete (download_log 37206).
+
+    A row without a recorded path can never be re-verified against disk
+    nor enriched with HAVE spectral — every persist guard compares against
+    ``source_path``. Treating it as complete let the French Quarter import
+    decide spectrally blind forever.
+    """
+
+    def test_policy_incomplete_reasons_flags_blank_source_path(self):
+        for desc, path in (("empty", ""), ("whitespace", "   ")):
+            with self.subTest(desc=desc):
+                evidence = make_album_quality_evidence(source_path=path)
+                self.assertTrue(
+                    any(
+                        "source_path" in reason
+                        for reason in evidence.policy_incomplete_reasons()
+                    ),
+                    f"{desc} source_path must be an incomplete reason",
+                )
+
+    def test_policy_incomplete_reasons_accepts_real_source_path(self):
+        evidence = make_album_quality_evidence(source_path="/library/album")
+        self.assertEqual(evidence.policy_incomplete_reasons(), [])
+
+    def test_decider_refuses_blank_source_path_candidate(self):
+        blank = make_album_quality_evidence(source_path="")
+        with self.assertRaises(ValueError):
+            full_pipeline_decision_from_evidence(blank, None)
+
+    def test_decider_refuses_blank_source_path_current(self):
+        complete = make_album_quality_evidence(source_path="/library/album")
+        blank = make_album_quality_evidence(source_path="")
+        with self.assertRaises(ValueError):
+            full_pipeline_decision_from_evidence(complete, blank)
 
 
 class TestAudioSnapshotMatches(unittest.TestCase):

@@ -390,6 +390,14 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
         """Return reasons this row is not ready for action reducers."""
 
         reasons = self.storage_validation_errors()
+        if not self.source_path.strip():
+            # A row without a recorded path can never be re-verified against
+            # disk nor completed by HAVE enrichment (every persist guard
+            # compares the scanned path against ``source_path``), so it must
+            # be rebuilt rather than used as decision authority
+            # (download_log 37206: a blank-path legacy backfill kept the
+            # French Quarter import spectrally blind forever).
+            reasons.append("source_path is required")
         if self.measurement.format is None:
             reasons.append("measurement.format is required")
         if (
