@@ -178,6 +178,12 @@ class PostflightInfo(msgspec.Struct):
     disambiguation_failure: Optional[DisambiguationFailure] = None
     moved_siblings: list[MovedSibling] = []
     duplicate_remove_guard: Optional[DuplicateRemoveGuardInfo] = None
+    # Beets albums the dup-guard ALLOWED beets to remove during this import —
+    # the replaced pre-upgrade copies. Their ``album_path``s are where the
+    # album lived before a path-changing upgrade, which is what the Jellyfin
+    # pin capture needs to find the pre-upgrade items (Jellyfin item identity
+    # is a hash of the path). Empty for genuinely-new imports.
+    replaced_albums: list[DuplicateRemoveCandidate] = []
 
 
 class QualityEvidenceActionProvenance(msgspec.Struct, frozen=True):

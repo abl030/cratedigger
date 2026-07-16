@@ -19,6 +19,7 @@ from lib.jellyfin_pin_service import (
     reconcile_jellyfin_date_created_pins,
 )
 from tests.fakes import FakePipelineDB
+from tests.helpers import make_request_row
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
 ORIGINAL = "2026-04-26T18:31:04.4425337Z"
@@ -165,8 +166,144 @@ class TestCapture(unittest.TestCase):
         self.assertEqual(res.outcome, "error")
 
 
+class TestCapturePathChangedUpgrade(unittest.TestCase):
+    """A path-changing upgrade (the 2026-07-16 Arcade Fire incident): the
+    pre-upgrade Jellyfin items live only at the replaced beets albums' old
+    paths, or nowhere findable at all."""
+
+    OLD = "Arcade Fire/2007 - B-Sides & Rarities"
+    NEW = "Arcade Fire/0000 - B-Sides & Rarities"
+
+    def test_capture_falls_back_to_replaced_album_old_path(self):
+        db = FakePipelineDB()
+        res = capture_jellyfin_date_created_pin(
+            _cfg(), db, self.NEW, 8504,
+            replaced_album_paths=[self.OLD],
+            find_fn=lambda cfg, path: _album() if path == self.OLD else None,
+            children_fn=lambda cfg, iid: _children(
+                ("tr-1", "2026-01-01T00:00:00Z")))
+        self.assertEqual(res.outcome, "captured")
+        pin = db.jellyfin_date_created_pins[0]
+        # The pin joins on the NEW path — that's where the reconciler must
+        # look for the post-rescan items — while the snapshot holds the OLD
+        # item's identity and date.
+        self.assertEqual(pin["imported_path"], self.NEW)
+        self.assertEqual(pin["album_item_id"], "alb-1")
+        self.assertEqual(pin["children_item_ids"], ["tr-1"])
+        self.assertEqual(pin["original_date_created"], "2026-01-01T00:00:00Z")
+
+    def test_capture_prefers_the_new_path_when_it_resolves(self):
+        # Same-path upgrade with replaced albums listed: the new-path lookup
+        # already finds the pre-upgrade item; old paths are never consulted.
+        db = FakePipelineDB()
+        calls: list[str] = []
+
+        def find(cfg, path):
+            calls.append(path)
+            return _album()
+        res = capture_jellyfin_date_created_pin(
+            _cfg(), db, "A/B", 1, replaced_album_paths=["A/OLD"],
+            find_fn=find, children_fn=lambda cfg, iid: [])
+        self.assertEqual(res.outcome, "captured")
+        self.assertEqual(calls, ["A/B"])
+
+    def test_floor_pin_when_upgrade_proven_but_nothing_findable(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=8504,
+            created_at=datetime(2026, 6, 4, 4, 45, 50, tzinfo=timezone.utc)))
+        res = capture_jellyfin_date_created_pin(
+            _cfg(), db, self.NEW, 8504,
+            replaced_album_paths=[self.OLD],
+            find_fn=lambda cfg, path: None,
+            children_fn=lambda cfg, iid: self.fail(
+                "no album found — children must not be fetched"))
+        self.assertEqual(res.outcome, "floor_captured")
+        pin = db.jellyfin_date_created_pins[0]
+        self.assertEqual(pin["imported_path"], self.NEW)
+        self.assertIsNone(pin["album_item_id"])
+        self.assertEqual(pin["children_item_ids"], [])
+        self.assertEqual(pin["original_date_created"], "2026-06-04T04:45:50Z")
+        self.assertEqual(pin["request_id"], 8504)
+
+    def test_floor_uses_oldest_created_at_across_replace_chain(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=10, status="replaced",
+            created_at=datetime(2026, 2, 1, tzinfo=timezone.utc)))
+        db.seed_request(make_request_row(
+            id=11, replaces_request_id=10,
+            created_at=datetime(2026, 6, 1, tzinfo=timezone.utc)))
+        res = capture_jellyfin_date_created_pin(
+            _cfg(), db, "New/Path", 11,
+            replaced_album_paths=["Old/Path"],
+            find_fn=lambda cfg, path: None,
+            children_fn=lambda cfg, iid: [])
+        self.assertEqual(res.outcome, "floor_captured")
+        self.assertEqual(
+            db.jellyfin_date_created_pins[0]["original_date_created"],
+            "2026-02-01T00:00:00Z")
+
+    def test_floor_prefers_an_older_plex_history(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, created_at=datetime(2026, 6, 4, tzinfo=timezone.utc)))
+        historical = int(datetime(2026, 4, 1, tzinfo=timezone.utc).timestamp())
+        res = capture_jellyfin_date_created_pin(
+            _cfg(), db, "New/Path", 1,
+            historical_added_at=historical,
+            replaced_album_paths=["Old/Path"],
+            find_fn=lambda cfg, path: None,
+            children_fn=lambda cfg, iid: [])
+        self.assertEqual(res.outcome, "floor_captured")
+        self.assertEqual(
+            db.jellyfin_date_created_pins[0]["original_date_created"],
+            "2026-04-01T00:00:00Z")
+
+    def test_floor_ignores_a_newer_plex_history(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, created_at=datetime(2026, 6, 4, tzinfo=timezone.utc)))
+        historical = int(datetime(2026, 7, 1, tzinfo=timezone.utc).timestamp())
+        res = capture_jellyfin_date_created_pin(
+            _cfg(), db, "New/Path", 1,
+            historical_added_at=historical,
+            replaced_album_paths=["Old/Path"],
+            find_fn=lambda cfg, path: None,
+            children_fn=lambda cfg, iid: [])
+        self.assertEqual(
+            db.jellyfin_date_created_pins[0]["original_date_created"],
+            "2026-06-04T00:00:00Z")
+
+    def test_no_floor_source_writes_no_pin(self):
+        # Upgrade proven but request unknown and no Plex history: there is
+        # no date to pin, so nothing is written (logged, best-effort).
+        db = FakePipelineDB()
+        res = capture_jellyfin_date_created_pin(
+            _cfg(), db, "New/Path", None,
+            replaced_album_paths=["Old/Path"],
+            find_fn=lambda cfg, path: None,
+            children_fn=lambda cfg, iid: [])
+        self.assertEqual(res.outcome, "no_album")
+        self.assertEqual(db.jellyfin_date_created_pins, [])
+
+    def test_floor_db_failure_is_error(self):
+        class FailingDB(FakePipelineDB):
+            def get_oldest_request_chain_created_at(self, request_id):
+                raise RuntimeError("db down")
+        db = FailingDB()
+        res = capture_jellyfin_date_created_pin(
+            _cfg(), db, "New/Path", 1,
+            replaced_album_paths=["Old/Path"],
+            find_fn=lambda cfg, path: None,
+            children_fn=lambda cfg, iid: [])
+        self.assertEqual(res.outcome, "error")
+        self.assertEqual(db.jellyfin_date_created_pins, [])
+
+
 class TestReconcile(unittest.TestCase):
-    def _seed(self, db, *, path="A/B", original=ORIGINAL, album_item_id="alb-1",
+    def _seed(self, db, *, path="A/B", original=ORIGINAL,
+              album_item_id: str | None = "alb-1",
               children=("tr-1", "tr-2"), captured_at=None):
         pin_id = db.add_jellyfin_date_created_pin(
             imported_path=path, original_date_created=original,
@@ -253,6 +390,45 @@ class TestReconcile(unittest.TestCase):
         self.assertEqual(set_calls, [("new-1", ORIGINAL), ("new-2", ORIGINAL)])
         self.assertEqual(self._pin(db, pin_id)["status"], "done")
 
+    def test_subsecond_newer_child_lands_despite_mixed_iso_formats(self):
+        """A seconds-only original ("…44Z", floor/historical format) vs
+        Jellyfin's 7-digit fraction ("…44.5000000Z"): naive string
+        comparison sorts '.' before 'Z' and would miss the newer date —
+        the comparison must be chronological."""
+        db = FakePipelineDB()
+        original = "2026-07-15T21:46:44Z"
+        subsecond_newer = "2026-07-15T21:46:44.5000000Z"
+        pin_id = self._seed(db, original=original, children=("tr-1",))
+        set_calls = []
+        res = self._reconcile(
+            db,
+            find_fn=lambda cfg, path: _album(
+                item_id="alb-1", date_created=original),
+            children_fn=lambda cfg, iid: _children(
+                ("tr-1", subsecond_newer)),
+            set_fn=lambda cfg, iid, val: set_calls.append((iid, val)) or True)
+        self.assertEqual(res.pinned, 1)
+        self.assertEqual(set_calls, [("tr-1", original)])
+        self.assertEqual(self._pin(db, pin_id)["status"], "done")
+
+    def test_same_second_mixed_formats_do_not_bump(self):
+        # Equal to the second across formats is NOT newer — no landing
+        # signal, no write.
+        db = FakePipelineDB()
+        original = "2026-07-15T21:46:44Z"
+        same_second = "2026-07-15T21:46:44.0000000Z"
+        pin_id = self._seed(db, original=original, children=("tr-1",))
+        set_calls = []
+        res = self._reconcile(
+            db,
+            find_fn=lambda cfg, path: _album(
+                item_id="alb-1", date_created=same_second),
+            children_fn=lambda cfg, iid: _children(("tr-1", same_second)),
+            set_fn=lambda cfg, iid, val: set_calls.append((iid, val)) or True)
+        self.assertEqual(res.waiting, 1)
+        self.assertEqual(set_calls, [])
+        self.assertEqual(self._pin(db, pin_id)["status"], "pending")
+
     def test_same_ids_with_newer_dates_are_a_landed_upgrade(self):
         """Jellyfin restamps changed same-path Audio rows without changing ids."""
         db = FakePipelineDB()
@@ -319,15 +495,66 @@ class TestReconcile(unittest.TestCase):
         self.assertEqual(res.errors, 1)
         self.assertEqual(self._pin(db, pin_id)["status"], "pending")
 
-    def test_album_gone_is_skipped(self):
+    def test_album_absent_waits(self):
+        # Nothing at the pinned path yet: after a path-changing upgrade the
+        # new folder only exists in Jellyfin once the rescan lands, so
+        # absence is a wait signal — closing now would strand the pin.
         db = FakePipelineDB()
         pin_id = self._seed(db)
         res = self._reconcile(
             db, find_fn=lambda cfg, path: None,
             children_fn=lambda cfg, iid: [],
             set_fn=lambda *a: True)
+        self.assertEqual(res.waiting, 1)
+        self.assertEqual(self._pin(db, pin_id)["status"], "pending")
+
+    def test_album_absent_past_ttl_is_skipped(self):
+        db = FakePipelineDB()
+        pin_id = self._seed(db, captured_at=NOW - timedelta(hours=49))
+        res = self._reconcile(
+            db, ttl_hours=48, find_fn=lambda cfg, path: None,
+            children_fn=lambda cfg, iid: [],
+            set_fn=lambda *a: True)
         self.assertEqual(res.skipped, 1)
         self.assertEqual(self._pin(db, pin_id)["status"], "skipped")
+
+    # --- Floor pins (path-changing upgrade with no findable pre-upgrade
+    #     item): a None snapshot means ANY album at the path is the landed
+    #     rescan ---
+
+    def test_floor_pin_lands_when_album_with_children_appears(self):
+        db = FakePipelineDB()
+        floor = "2026-06-04T04:45:50Z"
+        pin_id = self._seed(
+            db, original=floor, album_item_id=None, children=())
+        set_calls = []
+        res = self._reconcile(
+            db,
+            find_fn=lambda cfg, path: _album(
+                item_id="alb-new", date_created=BUMPED),
+            children_fn=lambda cfg, iid: _children(
+                ("new-1", BUMPED), ("new-2", "2026-01-01T00:00:00Z")),
+            set_fn=lambda cfg, iid, val: set_calls.append((iid, val)) or True)
+        self.assertEqual(res.pinned, 1)
+        # Only items NEWER than the floor are clamped; new-2 predates it.
+        self.assertEqual(set_calls, [("alb-new", floor), ("new-1", floor)])
+        self.assertEqual(self._pin(db, pin_id)["status"], "done")
+
+    def test_floor_pin_waits_in_the_mid_scan_zero_children_window(self):
+        # The album row exists but its Audio rows aren't inserted yet —
+        # writing/closing now would miss the children.
+        db = FakePipelineDB()
+        pin_id = self._seed(db, album_item_id=None, children=())
+        set_calls = []
+        res = self._reconcile(
+            db,
+            find_fn=lambda cfg, path: _album(
+                item_id="alb-new", date_created=BUMPED),
+            children_fn=lambda cfg, iid: [],
+            set_fn=lambda cfg, iid, val: set_calls.append((iid, val)) or True)
+        self.assertEqual(res.waiting, 1)
+        self.assertEqual(set_calls, [])
+        self.assertEqual(self._pin(db, pin_id)["status"], "pending")
 
     def test_find_exception_leaves_pin_pending(self):
         db = FakePipelineDB()

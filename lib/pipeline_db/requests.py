@@ -173,6 +173,34 @@ class _RequestsMixin(_PipelineDBBase):
         return dict(row) if row else None
 
 
+    def get_oldest_request_chain_created_at(
+        self, request_id: int
+    ) -> datetime | None:
+        """The oldest ``created_at`` across the request's replace chain,
+        walking ``replaces_request_id`` back through every superseded
+        ancestor. This is the earliest moment the pipeline knew of the
+        release — the Jellyfin pin capture's floor when no pre-upgrade
+        Jellyfin item is findable (a path-changing upgrade whose old item
+        is already gone). Returns None for an unknown request id.
+        """
+        cur = self._execute(
+            """
+            WITH RECURSIVE chain AS (
+                SELECT id, replaces_request_id, created_at
+                FROM album_requests WHERE id = %s
+                UNION ALL
+                SELECT ar.id, ar.replaces_request_id, ar.created_at
+                FROM album_requests ar
+                JOIN chain c ON ar.id = c.replaces_request_id
+            )
+            SELECT MIN(created_at) AS oldest FROM chain
+            """,
+            (int(request_id),),
+        )
+        row = cur.fetchone()
+        return row["oldest"] if row else None
+
+
     def list_requests_in_release_group(
         self,
         rg_id: str,

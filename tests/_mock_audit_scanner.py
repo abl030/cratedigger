@@ -119,6 +119,9 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^web\.server\.(mb_api|discogs_api|_real_beets_db|check_beets_library|check_pipeline|get_library_artist|_beets_db|mb)"),
     # Notifier helpers — fire-and-forget, no return value to mock meaningfully
     re.compile(r"lib\.util\.trigger_(plex|jellyfin)_scan$"),
+    # Thin urllib GET wrapper (documented "Network leaf seam") — patched so
+    # dispatch slices exercise the REAL jellyfin find/children code paths.
+    re.compile(r"lib\.util\._jellyfin_get_json$"),
     re.compile(r"lib\.util\.(sp|urllib|os|shutil)\."),
     re.compile(r"lib\.util\.repair_mp3_headers$"),
     re.compile(r"\.trigger_(plex|jellyfin)_scan$"),

@@ -422,6 +422,28 @@ class TestJellyfinDateCreatedPinsRoundTrip(unittest.TestCase):
         self.assertEqual(row["children_item_ids"], [])
         self.assertIsNone(row["request_id"])
 
+    def test_floor_pin_null_album_item_id_round_trips(self):
+        # Migration 053: a floor pin (path-changing upgrade with no findable
+        # pre-upgrade item) has no item-id snapshot at all — NULL must
+        # round-trip and the pin must surface as pending.
+        db = make_db()
+        pin_id = db.add_jellyfin_date_created_pin(
+            imported_path="Arcade Fire/0000 - B-Sides & Rarities",
+            original_date_created="2026-06-04T04:45:50Z",
+            album_item_id=None, children_item_ids=[], request_id=8504)
+        cur = db._execute(
+            "SELECT album_item_id, children_item_ids "
+            "FROM jellyfin_date_created_pins WHERE id = %s", (pin_id,))
+        row = cur.fetchone()
+        assert row is not None
+        self.assertIsNone(row["album_item_id"])
+        self.assertEqual(row["children_item_ids"], [])
+        pending = db.get_pending_jellyfin_date_created_pins(
+            captured_before=datetime.now(timezone.utc) + timedelta(days=1))
+        match = [r for r in pending if r["id"] == pin_id]
+        self.assertEqual(len(match), 1)
+        self.assertIsNone(match[0]["album_item_id"])
+
     def test_mark_pin_round_trips_status_and_excludes_from_pending(self):
         db = make_db()
         pin_id = db.add_jellyfin_date_created_pin(
@@ -486,6 +508,29 @@ class TestJellyfinDateCreatedPinsRoundTrip(unittest.TestCase):
             "jellyfin_date_created_pins_status_check",
             {row["conname"] for row in cur.fetchall()},
         )
+
+    def test_get_oldest_request_chain_created_at_walks_the_chain(self):
+        # The Jellyfin floor pin's date source: the recursive walk over
+        # replaces_request_id must find the OLDEST created_at, and an
+        # unknown id must return None (not crash the capture).
+        db = make_db()
+        old_id = db.add_request(
+            artist_name="Arcade Fire", album_title="B-Sides & Rarities",
+            source="request", mb_release_id="mb-chain-old", status="replaced")
+        new_id = db.add_request(
+            artist_name="Arcade Fire", album_title="B-Sides & Rarities",
+            source="request", mb_release_id="mb-chain-new", status="wanted")
+        db._execute(
+            "UPDATE album_requests SET created_at = %s WHERE id = %s",
+            (datetime(2026, 2, 1, tzinfo=timezone.utc), old_id))
+        db._execute(
+            "UPDATE album_requests "
+            "SET created_at = %s, replaces_request_id = %s WHERE id = %s",
+            (datetime(2026, 6, 1, tzinfo=timezone.utc), old_id, new_id))
+        self.assertEqual(
+            db.get_oldest_request_chain_created_at(new_id),
+            datetime(2026, 2, 1, tzinfo=timezone.utc))
+        self.assertIsNone(db.get_oldest_request_chain_created_at(999999))
 
     def test_pending_getter_respects_captured_before_cutoff(self):
         db = make_db()

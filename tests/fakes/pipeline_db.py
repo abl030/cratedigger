@@ -560,7 +560,7 @@ class FakePipelineDB:
         *,
         imported_path: str,
         original_date_created: str,
-        album_item_id: str,
+        album_item_id: str | None,
         children_item_ids: list[str],
         request_id: int | None,
     ) -> int:
@@ -3288,6 +3288,28 @@ class FakePipelineDB:
             if row.get("replaces_request_id") == replaced_id:
                 return copy.deepcopy(row)
         return None
+
+    def get_oldest_request_chain_created_at(
+        self, request_id: int
+    ) -> datetime | None:
+        """Oldest ``created_at`` across the replace chain, walking
+        ``replaces_request_id`` back through superseded ancestors —
+        mirrors the recursive CTE in ``_RequestsMixin``."""
+        oldest: datetime | None = None
+        seen: set[int] = set()
+        cursor: int | None = request_id
+        while cursor is not None and cursor not in seen:
+            seen.add(cursor)
+            row = self._requests.get(cursor)
+            if row is None:
+                break
+            created = row.get("created_at")
+            if created is not None:
+                created = _as_datetime(created)
+                if oldest is None or created < oldest:
+                    oldest = created
+            cursor = row.get("replaces_request_id")
+        return oldest
 
     def list_requests_in_release_group(
         self,

@@ -31,7 +31,7 @@ import sys
 import shutil
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from typing import NoReturn
 
 import msgspec
@@ -252,6 +252,13 @@ class RunImportOutcome:
     beets_lines: list[str]
     duplicate_remove_guard: DuplicateRemoveGuardInfo | None = None
     beets_owned_replacement: bool = False
+    # Duplicates the guard ALLOWED beets to remove — the replaced pre-upgrade
+    # copies, with their old library paths. Copied onto
+    # ``ImportResult.postflight.replaced_albums`` at every call site so the
+    # Jellyfin pin capture can locate the pre-upgrade items after a
+    # path-changing upgrade.
+    replaced_albums: list[DuplicateRemoveCandidate] = dataclass_field(
+        default_factory=list)
 
 
 def preflight_decision(already_in_beets: bool, path_exists: bool) -> StageResult:
@@ -938,6 +945,7 @@ def run_import(path, mb_release_id):
 
     applied = False
     beets_owned_replacement = False
+    replaced_albums: list[DuplicateRemoveCandidate] = []
     timeout = HARNESS_TIMEOUT
 
     try:
@@ -947,7 +955,7 @@ def run_import(path, mb_release_id):
                 print(f"  [TIMEOUT] No output for {timeout}s", file=sys.stderr)
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                 proc.wait()
-                return RunImportOutcome(2, [])
+                return RunImportOutcome(2, [], replaced_albums=replaced_albums)
 
             line = proc.stdout.readline()
             if not line:
@@ -993,11 +1001,13 @@ def run_import(path, mb_release_id):
                         DUPLICATE_REMOVE_GUARD_EXIT_CODE,
                         [],
                         duplicate_remove_guard=failure,
+                        replaced_albums=replaced_albums,
                     )
 
                 proc.stdin.write(json.dumps({"action": "remove"}) + "\n")
                 proc.stdin.flush()
                 beets_owned_replacement = True
+                replaced_albums.extend(candidates)
                 candidate = candidates[0]
                 print(
                     f"  [DUP-GUARD] Allowing beets remove for "
@@ -1020,7 +1030,8 @@ def run_import(path, mb_release_id):
                           file=sys.stderr)
                     if proc.poll() is None:
                         proc.wait()
-                    return RunImportOutcome(4, [])
+                    return RunImportOutcome(
+                        4, [], replaced_albums=replaced_albums)
 
                 cand = candidates[matched_idx]
                 dist = cand.get("distance", 1.0)
@@ -1031,7 +1042,8 @@ def run_import(path, mb_release_id):
                     print(f"  [REJECT] distance={dist:.4f} > {MAX_DISTANCE}", file=sys.stderr)
                     if proc.poll() is None:
                         proc.wait()
-                    return RunImportOutcome(2, [])
+                    return RunImportOutcome(
+                        2, [], replaced_albums=replaced_albums)
 
                 proc.stdin.write(json.dumps({"action": "apply", "candidate_index": matched_idx}) + "\n")
                 proc.stdin.flush()
@@ -1057,12 +1069,14 @@ def run_import(path, mb_release_id):
             2,
             beets_lines,
             beets_owned_replacement=beets_owned_replacement,
+            replaced_albums=replaced_albums,
         )
 
     return RunImportOutcome(
         0 if applied else 2,
         beets_lines,
         beets_owned_replacement=beets_owned_replacement,
+        replaced_albums=replaced_albums,
     )
 
 
@@ -1410,6 +1424,7 @@ def _run_quality_evidence_authorized_import(
     rc = import_outcome.exit_code
     beets_lines = import_outcome.beets_lines
     r.beets_log = beets_lines
+    r.postflight.replaced_albums = import_outcome.replaced_albums
 
     if rc != 0:
         r.exit_code = rc
@@ -1474,7 +1489,8 @@ def _run_quality_evidence_authorized_import(
     )
     r.postflight = PostflightInfo(beets_id=pf_info.album_id,
                                   track_count=pf_info.track_count,
-                                  imported_path=pf_info.album_path)
+                                  imported_path=pf_info.album_path,
+                                  replaced_albums=import_outcome.replaced_albums)
     album_path = pf_info.album_path
     _log(f"[POST-FLIGHT OK] mbid={mbid}, beets_id={pf_info.album_id}, "
          f"tracks={pf_info.track_count}, path={album_path}")
@@ -2111,6 +2127,7 @@ def main():
     rc = import_outcome.exit_code
     beets_lines = import_outcome.beets_lines
     r.beets_log = beets_lines
+    r.postflight.replaced_albums = import_outcome.replaced_albums
 
     if rc != 0:
         r.exit_code = rc
@@ -2178,7 +2195,8 @@ def main():
     )
     r.postflight = PostflightInfo(beets_id=pf_info.album_id,
                                    track_count=pf_info.track_count,
-                                   imported_path=pf_info.album_path)
+                                   imported_path=pf_info.album_path,
+                                   replaced_albums=import_outcome.replaced_albums)
     album_path = pf_info.album_path
     _log(f"[POST-FLIGHT OK] mbid={mbid}, beets_id={pf_info.album_id}, "
          f"tracks={pf_info.track_count}, path={album_path}")

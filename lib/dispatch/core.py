@@ -872,6 +872,15 @@ def dispatch_import_core(
                             ir.postflight.imported_path,
                             request_id,
                             historical_added_at=plex_original_added_at,
+                            # After a path-changing upgrade the pre-upgrade
+                            # Jellyfin items live only at the replaced beets
+                            # albums' old paths (item identity is a path
+                            # hash) — capture falls back to them.
+                            replaced_album_paths=[
+                                c.album_path
+                                for c in ir.postflight.replaced_albums
+                                if c.album_path
+                            ],
                         )
                     except Exception:
                         logger.exception(

@@ -359,6 +359,54 @@ class TestImportResultConstruction(unittest.TestCase):
                 r = ImportResult.from_dict(d)
                 self.assertEqual(r.postflight.moved_siblings, [])
 
+    def test_replaced_albums_roundtrip(self):
+        # The dup-guard's ALLOWED removals — the replaced pre-upgrade copies
+        # whose old paths the Jellyfin pin capture needs after a
+        # path-changing upgrade.
+        r = ImportResult(
+            decision="import",
+            postflight=PostflightInfo(
+                beets_id=19557,
+                imported_path="Arcade Fire/0000 - B-Sides & Rarities",
+                replaced_albums=[
+                    DuplicateRemoveCandidate(
+                        beets_album_id=3902,
+                        mb_albumid="ef07c10e-7ca4-420b-84fb-617612945e2e",
+                        album_path=("/mnt/virtio/Music/Beets/Arcade Fire/"
+                                    "2007 - B-Sides & Rarities"),
+                        item_count=19,
+                    ),
+                ],
+            ),
+        )
+        r2 = ImportResult.from_json(r.to_json())
+        self.assertEqual(len(r2.postflight.replaced_albums), 1)
+        replaced = r2.postflight.replaced_albums[0]
+        self.assertEqual(replaced.beets_album_id, 3902)
+        self.assertEqual(
+            replaced.album_path,
+            "/mnt/virtio/Music/Beets/Arcade Fire/2007 - B-Sides & Rarities")
+
+    def test_replaced_albums_default_empty_for_old_rows(self):
+        # Pre-053 download_log JSONB rows have no replaced_albums key.
+        r = ImportResult.from_dict(
+            {"version": 3, "postflight": {"beets_id": 1}})
+        self.assertEqual(r.postflight.replaced_albums, [])
+
+    def test_replaced_albums_wrong_type_rejected_at_the_boundary(self):
+        with self.assertRaises(msgspec.ValidationError):
+            ImportResult.from_dict({
+                "version": 3,
+                "postflight": {
+                    "replaced_albums": [{"album_path": 123}],
+                },
+            })
+        with self.assertRaises(msgspec.ValidationError):
+            ImportResult.from_dict({
+                "version": 3,
+                "postflight": {"replaced_albums": "not-a-list"},
+            })
+
     def test_v3_rows_do_not_receive_legacy_shape_repairs(self):
         with self.assertRaises(msgspec.ValidationError):
             ImportResult.from_dict({"version": 3, "postflight": "malformed"})

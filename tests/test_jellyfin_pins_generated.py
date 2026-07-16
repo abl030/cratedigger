@@ -11,17 +11,26 @@ entry points over ``FakePipelineDB`` with the Jellyfin client seams injected:
    value other than the pin's captured ``original_date_created`` into
    Jellyfin, whatever the live state does.
 2. **P2 (never finalize before the rescan lands)** — the pin stays pending
-   until an item id changes or an Audio ``DateCreated`` becomes newer than
-   the captured album maximum. The date branch is load-bearing because
-   Jellyfin can restamp a same-path Audio row without changing its id.
+   until an item id changes (a None snapshot — a floor pin — matches any
+   album) or an Audio ``DateCreated`` becomes newer than the captured album
+   maximum. The date branch is load-bearing because Jellyfin can restamp a
+   same-path Audio row without changing its id. An ABSENT album is a wait
+   signal, not a terminal one: after a path-changing upgrade the pinned
+   (new) path only exists in Jellyfin once the rescan lands.
 3. **P3 (terminal-state correctness)** — done ⟹ the rescan landed, every
    drifted item (album + audio children) was written, and no write failed;
-   skipped ⟺ the album is no longer locatable; a failed write or an
+   skipped ⟺ the album was still absent at TTL; a failed write or an
    erroring client always leaves the pin pending.
 4. **P4 (capture snapshot fidelity)** — a capture persists the earlier of
    Jellyfin's maximum Audio ``DateCreated`` and Plex's preserved historical
    ``addedAt``, plus the item ids, path, and request id; a genuinely new album
    persists nothing.
+5. **P5 (an upgrade is never left unpinned)** — when replaced beets albums
+   prove the import was an upgrade, capture writes a pin whenever ANY date
+   source exists: a pre-upgrade item at the new path, one at a replaced old
+   path, or the pipeline floor (min of Plex history and the oldest
+   ``created_at`` across the request's replace chain) — and the pinned value
+   is the correct composition for that source.
 
 The deterministic pins for these same invariants live in
 tests/test_jellyfin_pin_service.py.
@@ -46,11 +55,13 @@ from hypothesis import strategies as st
 
 from lib.config import CratediggerConfig
 from lib.jellyfin_pin_service import (
+    CaptureResult,
     capture_jellyfin_date_created_pin,
     reconcile_jellyfin_date_created_pins,
 )
 from lib.util import JellyfinAlbumRef, JellyfinItemRef
 from tests.fakes import FakePipelineDB
+from tests.helpers import make_request_row
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
 GRACE_SECONDS = 180
@@ -81,6 +92,10 @@ class World:
     live_album_date: str
     live_children: list[tuple[str, str]]   # (item_id, date)
     set_fail_ids: set[str]
+    # A floor pin (path-changing upgrade, no pre-upgrade item findable at
+    # capture): the snapshot album id is NULL and any live album counts as
+    # the landed rescan.
+    snapshot_album_is_none: bool = False
 
     @property
     def live_album_id(self) -> str:
@@ -88,15 +103,15 @@ class World:
 
     @property
     def landed(self) -> bool:
-        return (self.live_album_recreated
+        return (self.snapshot_album_is_none
+                or self.live_album_recreated
                 or {i for i, _ in self.live_children} != set(self.snapshot_children)
                 or any(date > self.original for _, date in self.live_children))
 
     @property
     def settled(self) -> bool:
         """Landed AND not in the mid-scan zero-children window."""
-        return self.landed and (bool(self.live_children)
-                                or not self.snapshot_children)
+        return self.landed and bool(self.live_children)
 
     @property
     def past_grace(self) -> bool:
@@ -135,6 +150,7 @@ worlds = st.builds(
         st.tuples(st.sampled_from(_CHILD_POOL), st.sampled_from(_DATES)),
         unique_by=lambda t: t[0], max_size=4),
     set_fail_ids=st.sets(st.sampled_from(_CHILD_POOL + ["alb-same", "alb-new"])),
+    snapshot_album_is_none=st.booleans(),
 )
 
 
@@ -142,7 +158,8 @@ def _run_reconcile(world: World) -> RunResult:
     db = FakePipelineDB()
     pin_id = db.add_jellyfin_date_created_pin(
         imported_path="A/B", original_date_created=world.original,
-        album_item_id="alb-same", children_item_ids=list(world.snapshot_children),
+        album_item_id=(None if world.snapshot_album_is_none else "alb-same"),
+        children_item_ids=list(world.snapshot_children),
         request_id=1)
     db.jellyfin_date_created_pins[-1]["captured_at"] = (
         NOW - timedelta(minutes=world.age_minutes))
@@ -189,12 +206,20 @@ def assert_only_original_written(res: RunResult) -> None:
 
 def assert_unsettled_never_finalized(res: RunResult) -> None:
     """P2: rescan not observably settled ⇒ zero writes, pending-until-TTL /
-    expired-after. Covers unchanged ids with no newer dates and the mid-scan
-    zero-children window."""
+    terminal-after. Covers unchanged ids with no newer dates, the mid-scan
+    zero-children window, and the absent album (the pinned path may not
+    exist in Jellyfin until the rescan lands)."""
     w = res.world
     if not w.past_grace:
         assert res.set_calls == [], "pin inside grace window must be untouched"
         assert res.status == "pending"
+        return
+    if w.find_outcome == "absent":
+        assert res.set_calls == [], "absent album ⇒ nothing to write to"
+        expected = "skipped" if w.past_ttl else "pending"
+        assert res.status == expected, (
+            f"absent album must wait then skip at TTL: expected {expected}, "
+            f"got {res.status}")
         return
     if w.find_outcome != "present" or w.children_raises or w.settled:
         return
@@ -212,9 +237,11 @@ def assert_terminal_state_correct(res: RunResult) -> None:
     if not w.past_grace:
         return
     if w.find_outcome == "absent":
-        assert res.status == "skipped", "album gone must mark the pin skipped"
+        expected = "skipped" if w.past_ttl else "pending"
+        assert res.status == expected, (
+            "absent album must wait (pending), closing as skipped only at TTL")
         return
-    assert res.status != "skipped", "skipped is reserved for album-gone"
+    assert res.status != "skipped", "skipped is reserved for absent-at-TTL"
     if res.status == "done":
         assert w.find_outcome == "present" and not w.children_raises
         assert w.settled, "done before the rescan observably settled"
@@ -296,6 +323,111 @@ class TestCaptureProperty(unittest.TestCase):
         self.assertEqual(pin["status"], "pending")
 
 
+@dataclass
+class CaptureWorld:
+    """One generated upgrade-capture scenario: where (if anywhere) the
+    pre-upgrade item is findable, and which floor sources exist."""
+    album_at_new: bool
+    album_at_old: bool
+    has_replaced: bool
+    chain_created: str | None      # oldest replace-chain created_at, or None
+    historical: str | None         # Plex preserved addedAt, or None
+    album_date: str
+    children: list[tuple[str, str]]
+
+
+capture_worlds = st.builds(
+    CaptureWorld,
+    album_at_new=st.booleans(),
+    album_at_old=st.booleans(),
+    has_replaced=st.booleans(),
+    chain_created=st.one_of(st.none(), st.sampled_from(_DATES)),
+    historical=st.one_of(st.none(), st.sampled_from(_DATES)),
+    album_date=st.sampled_from(_DATES),
+    children=st.lists(
+        st.tuples(st.sampled_from(_CHILD_POOL), st.sampled_from(_DATES)),
+        unique_by=lambda t: t[0], max_size=4),
+)
+
+
+def _iso_epoch(iso: str) -> int:
+    return int(datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp())
+
+
+def _run_capture_fallback(
+        w: CaptureWorld) -> tuple[FakePipelineDB, CaptureResult]:
+    db = FakePipelineDB()
+    if w.chain_created is not None:
+        db.seed_request(make_request_row(
+            id=42,
+            created_at=datetime.fromisoformat(
+                w.chain_created.replace("Z", "+00:00"))))
+
+    def find_fn(cfg, path):
+        if path == "New/Path" and w.album_at_new:
+            return JellyfinAlbumRef(item_id="alb-live",
+                                    date_created=w.album_date)
+        if path == "Old/Path" and w.album_at_old:
+            return JellyfinAlbumRef(item_id="alb-old",
+                                    date_created=w.album_date)
+        return None
+
+    res = capture_jellyfin_date_created_pin(
+        _cfg(), db, "New/Path", 42,
+        historical_added_at=(
+            _iso_epoch(w.historical) if w.historical is not None else None),
+        replaced_album_paths=(["Old/Path"] if w.has_replaced else []),
+        find_fn=find_fn,
+        children_fn=lambda cfg, iid: [
+            JellyfinItemRef(item_id=i, date_created=d)
+            for i, d in w.children])
+    return db, res
+
+
+def assert_capture_fallback_correct(
+        w: CaptureWorld, db: FakePipelineDB, res: CaptureResult) -> None:
+    """P5: replaced albums ⇒ a pin whenever any date source exists, with the
+    correct value for the source that won. (_DATES share one ISO shape, so
+    string min/max is chronological.)"""
+    found = w.album_at_new or (w.has_replaced and w.album_at_old)
+    if found:
+        assert res.outcome == "captured", (
+            f"pre-upgrade item findable but outcome={res.outcome}")
+        pin = db.jellyfin_date_created_pins[0]
+        expected = max((d for _, d in w.children), default=w.album_date)
+        if w.historical is not None:
+            expected = min(expected, w.historical)
+        assert pin["original_date_created"] == expected
+        assert pin["album_item_id"] == (
+            "alb-live" if w.album_at_new else "alb-old")
+        assert pin["imported_path"] == "New/Path", (
+            "the pin must join on the NEW path — that's where the "
+            "reconciler finds the post-rescan items")
+        return
+    floor_sources = [d for d in (w.historical, w.chain_created)
+                     if d is not None]
+    if w.has_replaced and floor_sources:
+        assert res.outcome == "floor_captured", (
+            f"upgrade proven with a floor source but outcome={res.outcome} "
+            "— the upgrade would surface as newly added")
+        pin = db.jellyfin_date_created_pins[0]
+        assert pin["album_item_id"] is None
+        assert pin["children_item_ids"] == []
+        assert pin["original_date_created"] == min(floor_sources)
+        assert pin["imported_path"] == "New/Path"
+        return
+    assert res.outcome == "no_album"
+    assert db.jellyfin_date_created_pins == []
+
+
+class TestCaptureFallbackProperty(unittest.TestCase):
+    @given(capture_worlds)
+    def test_upgrades_always_pin_with_best_available_date(
+            self, w: CaptureWorld):
+        db, res = _run_capture_fallback(w)
+        assert_capture_fallback_correct(w, db, res)
+
+
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     """Known-bad self-tests: prove the harness detects what it claims to."""
 
@@ -353,6 +485,55 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         res = RunResult(world=self._world(), status="skipped", set_calls=[])
         with self.assertRaises(AssertionError):
             assert_terminal_state_correct(res)
+
+    def test_checkers_trip_on_premature_skip_of_absent_album(self):
+        # The pre-fix behavior (absent ⇒ instant skip): after a path-changing
+        # upgrade the pinned path is empty until the rescan lands, so an
+        # early skip strands the pin. Both P2 and P3 must catch a revert.
+        res = RunResult(world=self._world(find_outcome="absent"),
+                        status="skipped", set_calls=[])
+        with self.assertRaises(AssertionError):
+            assert_unsettled_never_finalized(res)
+        with self.assertRaises(AssertionError):
+            assert_terminal_state_correct(res)
+
+    def test_unsettled_checker_trips_on_floor_pin_closed_before_children(self):
+        # Floor pin landed on the album row alone (zero children yet): the
+        # mid-scan window. Closing now leaves the children unclamped.
+        res = RunResult(
+            world=self._world(snapshot_album_is_none=True,
+                              snapshot_children=[], live_children=[]),
+            status="done", set_calls=[])
+        with self.assertRaises(AssertionError):
+            assert_unsettled_never_finalized(res)
+
+    def test_capture_fallback_checker_trips_on_missing_floor_pin(self):
+        # An upgrade with a derivable floor whose capture wrote nothing —
+        # exactly the 2026-07-16 incident shape.
+        w = CaptureWorld(
+            album_at_new=False, album_at_old=False, has_replaced=True,
+            chain_created="2026-01-01T00:00:00Z", historical=None,
+            album_date="2026-01-01T00:00:00Z", children=[])
+        with self.assertRaises(AssertionError):
+            assert_capture_fallback_correct(
+                w, FakePipelineDB(), CaptureResult("no_album"))
+
+    def test_capture_fallback_checker_trips_on_wrong_floor_value(self):
+        w = CaptureWorld(
+            album_at_new=False, album_at_old=False, has_replaced=True,
+            chain_created="2025-01-01T00:00:00Z",
+            historical="2026-01-01T00:00:00Z",
+            album_date="2026-01-01T00:00:00Z", children=[])
+        db = FakePipelineDB()
+        # Planted violation: pinned the NEWER source, not the min.
+        db.add_jellyfin_date_created_pin(
+            imported_path="New/Path",
+            original_date_created="2026-01-01T00:00:00Z",
+            album_item_id=None, children_item_ids=[], request_id=42)
+        with self.assertRaises(AssertionError):
+            assert_capture_fallback_correct(
+                w, db, CaptureResult("floor_captured", 1,
+                                     "2026-01-01T00:00:00Z"))
 
 
 if __name__ == "__main__":
