@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from hypothesis import example, given, strategies as st
 import msgspec
@@ -14,6 +15,8 @@ from lib.measurement import PreimportMeasurement
 from lib.import_preview import (
     EnrichmentPlan,
     enrich_current_v0_research_for_preview,
+    enrich_incomplete_current_evidence_for_request,
+    prepare_current_evidence_for_failure,
     persist_exact_current_spectral_from_attempt,
     plan_current_evidence_enrichment,
 )
@@ -119,6 +122,23 @@ def assert_enrichment_plan_never_remeasures(evidence, plan) -> None:
         )
 
 
+def assert_failure_enrichment_matches_library_membership(
+    *,
+    album_present: bool,
+    current_evidence_id: int | None,
+    outcome: str,
+) -> None:
+    """An installed exact release must acquire a linked HAVE snapshot."""
+    if album_present and current_evidence_id is None:
+        raise AssertionError("installed release remained without linked HAVE")
+    if album_present and outcome == "no_current_evidence":
+        raise AssertionError("installed release was classified as absent HAVE")
+    if not album_present and current_evidence_id is not None:
+        raise AssertionError("absent release fabricated a HAVE snapshot")
+    if not album_present and outcome != "no_current_evidence":
+        raise AssertionError("absent release did not retain no-HAVE outcome")
+
+
 class TestQualityLineagePins(unittest.TestCase):
     def test_research_once_checker_rejects_repeated_unmarked_probe(self):
         with self.assertRaisesRegex(AssertionError, "exactly one"):
@@ -139,6 +159,14 @@ class TestQualityLineagePins(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "V0"):
             assert_enrichment_plan_never_remeasures(
                 attempted, EnrichmentPlan(spectral=False, v0=True),
+            )
+
+    def test_failure_enrichment_checker_rejects_unlinked_installed_release(self):
+        with self.assertRaisesRegex(AssertionError, "without linked HAVE"):
+            assert_failure_enrichment_matches_library_membership(
+                album_present=True,
+                current_evidence_id=None,
+                outcome="no_current_evidence",
             )
 
     def test_enrichment_plan_pin_complete_row_plans_nothing(self):
@@ -195,6 +223,71 @@ class TestQualityLineagePins(unittest.TestCase):
             grade is None and spectral_bitrate is None,
         )
         self.assertEqual(plan.v0, not v0_present and not v0_attempted)
+
+    @given(
+        album_present=st.booleans(),
+        minimum=st.integers(min_value=32, max_value=320),
+        average=st.integers(min_value=32, max_value=320),
+        median=st.integers(min_value=32, max_value=320),
+    )
+    @example(album_present=True, minimum=183, average=190, median=191)
+    def test_generated_failed_download_links_have_when_release_is_installed(
+        self,
+        album_present: bool,
+        minimum: int,
+        average: int,
+        median: int,
+    ) -> None:
+        from lib.beets_db import AlbumInfo
+        from tests.fakes import FakeBeetsDB
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-42",
+            status="wanted",
+        ))
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"generated current-library bytes")
+            fake_beets = FakeBeetsDB()
+            if album_present:
+                fake_beets.set_album_info("mbid-42", AlbumInfo(
+                    album_id=1,
+                    track_count=1,
+                    min_bitrate_kbps=minimum,
+                    avg_bitrate_kbps=average,
+                    median_bitrate_kbps=median,
+                    is_cbr=False,
+                    album_path=source,
+                    format="MP3",
+                ))
+            with patch("lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets):
+                prepared = prepare_current_evidence_for_failure(
+                    db,
+                    request_id=42,
+                    mb_release_id="mbid-42",
+                    quality_ranks=QualityRankConfig.defaults(),
+                    beets_library_root=source,
+                )
+                outcome = prepared
+                if prepared == "ready":
+                    outcome = enrich_incomplete_current_evidence_for_request(
+                        db,
+                        request_id=42,
+                        spectral_analyzer=lambda _path: SpectralAnalysisDetail(
+                            attempted=True,
+                            grade="genuine",
+                            bitrate_kbps=96,
+                        ),
+                        probe_fn=lambda _path: None,
+                    )
+
+        assert_failure_enrichment_matches_library_membership(
+            album_present=album_present,
+            current_evidence_id=db.get_request_current_evidence_id(42),
+            outcome=outcome,
+        )
 
     @given(
         projected_format=st.sampled_from(("OPUS 128", "MP3 V0", "FLAC")),

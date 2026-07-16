@@ -15,6 +15,7 @@ from lib.import_preview import (
     compose_attempt_spectral_audit,
     enrich_current_v0_research_for_preview,
     enrich_incomplete_current_evidence_for_request,
+    prepare_current_evidence_for_failure,
     persist_exact_current_spectral_from_attempt,
     load_persisted_existing_spectral,
     measure_and_persist_candidate_evidence,
@@ -1683,6 +1684,14 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
             attempted=True, grade="genuine", bitrate_kbps=96,
         )
 
+    def _enrich(self, db, analyzer, probe):
+        return enrich_incomplete_current_evidence_for_request(
+            db,
+            request_id=42,
+            spectral_analyzer=analyzer,
+            probe_fn=probe,
+        )
+
     def test_complete_row_skips_all_measurement(self):
         db = self._db()
         source = self._source_dir()
@@ -1690,13 +1699,41 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
         analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
         probe, probe_calls = self._probe_recorder()
 
-        outcome = enrich_incomplete_current_evidence_for_request(
-            db, request_id=42, spectral_analyzer=analyzer, probe_fn=probe,
-        )
+        outcome = self._enrich(db, analyzer, probe)
 
         self.assertEqual(outcome, "complete")
         self.assertEqual(spectral_calls, [])
         self.assertEqual(probe_calls, [])
+
+    def test_preparation_preserves_an_existing_complete_current_row(self):
+        db = self._db()
+        source = self._source_dir()
+        before = self._seed_current(
+            db,
+            source,
+            spectral_present=True,
+            v0_attempted=True,
+        )
+
+        with patch(
+            "lib.beets_db.BeetsDB",
+            side_effect=AssertionError("complete HAVE must not open Beets"),
+        ):
+            outcome = prepare_current_evidence_for_failure(
+                db,
+                request_id=42,
+                mb_release_id="mbid-42",
+                quality_ranks=QualityRankConfig.defaults(),
+                beets_library_root=source,
+            )
+
+        current_id = db.get_request_current_evidence_id(42)
+        self.assertEqual(outcome, "ready")
+        self.assertEqual(current_id, before.id)
+        self.assertEqual(
+            db.load_album_quality_evidence_by_id(current_id),
+            before,
+        )
 
     def test_fills_both_missing_pieces(self):
         db = self._db()
@@ -1706,9 +1743,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
         analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
         probe, probe_calls = self._probe_recorder()
 
-        outcome = enrich_incomplete_current_evidence_for_request(
-            db, request_id=42, spectral_analyzer=analyzer, probe_fn=probe,
-        )
+        outcome = self._enrich(db, analyzer, probe)
 
         self.assertEqual(outcome, "enriched")
         self.assertEqual(spectral_calls, [source])
@@ -1728,9 +1763,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
         analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
         probe, probe_calls = self._probe_recorder()
 
-        outcome = enrich_incomplete_current_evidence_for_request(
-            db, request_id=42, spectral_analyzer=analyzer, probe_fn=probe,
-        )
+        outcome = self._enrich(db, analyzer, probe)
 
         self.assertEqual(outcome, "enriched")
         self.assertEqual(spectral_calls, [])
@@ -1745,9 +1778,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
         analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
         probe, probe_calls = self._probe_recorder()
 
-        outcome = enrich_incomplete_current_evidence_for_request(
-            db, request_id=42, spectral_analyzer=analyzer, probe_fn=probe,
-        )
+        outcome = self._enrich(db, analyzer, probe)
 
         self.assertEqual(outcome, "enriched")
         self.assertEqual(spectral_calls, [source])
@@ -1762,9 +1793,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
         analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
         probe, probe_calls = self._probe_recorder()
 
-        outcome = enrich_incomplete_current_evidence_for_request(
-            db, request_id=42, spectral_analyzer=analyzer, probe_fn=probe,
-        )
+        outcome = self._enrich(db, analyzer, probe)
 
         self.assertEqual(outcome, "stale")
         self.assertEqual(spectral_calls, [])
@@ -1775,13 +1804,96 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
         analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
         probe, probe_calls = self._probe_recorder()
 
-        outcome = enrich_incomplete_current_evidence_for_request(
-            db, request_id=42, spectral_analyzer=analyzer, probe_fn=probe,
-        )
+        outcome = self._enrich(db, analyzer, probe)
 
         self.assertEqual(outcome, "no_current_evidence")
         self.assertEqual(spectral_calls, [])
         self.assertEqual(probe_calls, [])
+
+    def test_failed_backfill_is_not_classified_as_absent_library_copy(self):
+        db = self._db()
+
+        outcome = prepare_current_evidence_for_failure(
+            db,
+            request_id=42,
+            mb_release_id="mbid-42",
+            quality_ranks=QualityRankConfig.defaults(),
+            beets_library_root="",
+            load_fn=lambda *_args, **_kwargs: EvidenceBuildResult(
+                None,
+                "failed",
+                "beets library unreadable",
+            ),
+        )
+
+        self.assertEqual(outcome, "failed")
+
+    def test_backfill_exception_is_not_classified_as_absent_library_copy(self):
+        db = self._db()
+
+        def broken_loader(*_args, **_kwargs):
+            raise RuntimeError("beets adapter crashed")
+
+        outcome = prepare_current_evidence_for_failure(
+            db,
+            request_id=42,
+            mb_release_id="mbid-42",
+            quality_ranks=QualityRankConfig.defaults(),
+            beets_library_root="",
+            load_fn=broken_loader,
+        )
+
+        self.assertEqual(outcome, "failed")
+
+    def test_failed_download_backfills_unlinked_seabear_have(self):
+        """We Built a Fire: an installed album cannot stay HAVE-less."""
+        from lib.beets_db import AlbumInfo
+        from tests.fakes import FakeBeetsDB
+
+        db = self._db()
+        source = self._source_dir()
+        fake_beets = FakeBeetsDB()
+        fake_beets.set_album_info("mbid-42", AlbumInfo(
+            album_id=1,
+            track_count=17,
+            min_bitrate_kbps=183,
+            avg_bitrate_kbps=190,
+            median_bitrate_kbps=191,
+            is_cbr=False,
+            album_path=source,
+            format="MP3",
+        ))
+        analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
+        probe, probe_calls = self._probe_recorder()
+
+        with patch("lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets):
+            prepared = prepare_current_evidence_for_failure(
+                db,
+                request_id=42,
+                mb_release_id="mbid-42",
+                quality_ranks=QualityRankConfig.defaults(),
+                beets_library_root=source,
+            )
+            outcome = enrich_incomplete_current_evidence_for_request(
+                db,
+                request_id=42,
+                spectral_analyzer=analyzer,
+                probe_fn=probe,
+            )
+
+        self.assertEqual(prepared, "ready")
+        self.assertEqual(outcome, "enriched")
+        self.assertEqual(spectral_calls, [source])
+        self.assertEqual(probe_calls, [source])
+        evidence_id = db.get_request_current_evidence_id(42)
+        self.assertIsNotNone(evidence_id)
+        persisted = db.load_album_quality_evidence_by_id(evidence_id)
+        assert persisted is not None
+        self.assertEqual(persisted.measurement.format, "MP3")
+        self.assertEqual(persisted.measurement.avg_bitrate_kbps, 190)
+        self.assertEqual(persisted.measurement.spectral_grade, "genuine")
+        assert persisted.v0_metric is not None
+        self.assertEqual(persisted.v0_metric.avg_bitrate_kbps, 259)
 
     def test_failed_spectral_scan_reports_partial(self):
         db = self._db()
@@ -1795,9 +1907,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
         )
         probe, probe_calls = self._probe_recorder()
 
-        outcome = enrich_incomplete_current_evidence_for_request(
-            db, request_id=42, spectral_analyzer=analyzer, probe_fn=probe,
-        )
+        outcome = self._enrich(db, analyzer, probe)
 
         self.assertEqual(outcome, "partial")
         self.assertEqual(spectral_calls, [source])

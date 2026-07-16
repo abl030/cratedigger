@@ -319,13 +319,57 @@ def _enrich_timeout_reason(reason: str, files: list[DownloadFile]) -> str:
     return reason
 
 
+def _prepare_have_evidence_before_failure_log(
+    request_id: int,
+    mb_release_id: str,
+    ctx: CratediggerContext,
+    *,
+    prepare_fn: Callable[..., str] | None = None,
+) -> str:
+    """Prepare canonical HAVE before the failure row establishes history."""
+    if ctx.evidence_enrichment_budget <= 0:
+        return "budget_exhausted"
+    try:
+        if prepare_fn is None:
+            from lib.import_preview import prepare_current_evidence_for_failure
+            prepare_fn = prepare_current_evidence_for_failure
+        db = ctx.pipeline_db_source._get_db()
+        outcome = prepare_fn(
+            db,
+            request_id=request_id,
+            mb_release_id=mb_release_id,
+            quality_ranks=ctx.cfg.quality_ranks,
+            beets_library_root=ctx.cfg.beets_directory,
+        )
+    except Exception:
+        outcome = "failed"
+        logger.warning(
+            "HAVE evidence preparation crashed for request %s",
+            request_id,
+            exc_info=True,
+        )
+    if outcome == "failed":
+        ctx.evidence_enrichment_budget -= 1
+        logger.warning("HAVE evidence preparation failed for request %s", request_id)
+    elif outcome not in ("ready", "no_current_evidence"):
+        ctx.evidence_enrichment_budget -= 1
+        logger.warning(
+            "HAVE evidence preparation returned %r for request %s",
+            outcome,
+            request_id,
+        )
+        return "failed"
+    return outcome
+
+
 def _enrich_have_evidence_after_failure(
     request_id: int,
     ctx: CratediggerContext,
     *,
+    prepared_outcome: str,
     enrich_fn: Callable[..., str] | None = None,
 ) -> None:
-    """Fill missing HAVE evidence at a download-failure point.
+    """Fill missing HAVE evidence after failure bookkeeping completes.
 
     A failed download never reaches preview — the only other place HAVE
     spectral/V0 evidence gets completed — but the request's on-disk copy is
@@ -333,7 +377,7 @@ def _enrich_have_evidence_after_failure(
     balloon the loop; a complete row costs nothing and is not budgeted.
     Never lets an enrichment error disturb failure bookkeeping.
     """
-    if ctx.evidence_enrichment_budget <= 0:
+    if prepared_outcome != "ready" or ctx.evidence_enrichment_budget <= 0:
         return
     try:
         if enrich_fn is None:
@@ -342,7 +386,10 @@ def _enrich_have_evidence_after_failure(
             )
             enrich_fn = enrich_incomplete_current_evidence_for_request
         db = ctx.pipeline_db_source._get_db()
-        outcome = enrich_fn(db, request_id=request_id)
+        outcome = enrich_fn(
+            db,
+            request_id=request_id,
+        )
     except Exception:
         ctx.evidence_enrichment_budget -= 1
         logger.warning(
@@ -366,6 +413,7 @@ def _timeout_album(
     reason: str,
     ctx: CratediggerContext,
     *,
+    prepare_fn: Callable[..., str] | None = None,
     enrich_fn: Callable[..., str] | None = None,
 ) -> None:
     """Handle download timeout: cancel, log, reset to wanted."""
@@ -383,6 +431,16 @@ def _timeout_album(
                 f"({completed}/{total} files done, reason={reason})")
 
     db = ctx.pipeline_db_source._get_db()
+    # Capture/backfill HAVE before creating the audit row so Recents can
+    # distinguish this unchanged pre-import library snapshot from a later
+    # successful mutation. The helper is fail-soft; failure bookkeeping
+    # still proceeds unchanged.
+    prepared_outcome = _prepare_have_evidence_before_failure_log(
+        request_id,
+        entry.mb_release_id,
+        ctx,
+        prepare_fn=prepare_fn,
+    )
     db.log_download(
         request_id=request_id,
         soulseek_username=dl_info.username,
@@ -402,7 +460,12 @@ def _timeout_album(
             attempt_type="download",
         ),
     ))
-    _enrich_have_evidence_after_failure(request_id, ctx, enrich_fn=enrich_fn)
+    _enrich_have_evidence_after_failure(
+        request_id,
+        ctx,
+        prepared_outcome=prepared_outcome,
+        enrich_fn=enrich_fn,
+    )
 
 
 def _persist_updated_download_state(
@@ -773,6 +836,11 @@ def _enqueue_completed_processing(
                 detail,
             )
             dl_info = _build_download_info(entry)
+            prepared_outcome = _prepare_have_evidence_before_failure_log(
+                request_id,
+                entry.mb_release_id,
+                ctx,
+            )
             db.log_download(
                 request_id=request_id,
                 soulseek_username=dl_info.username,
@@ -788,7 +856,11 @@ def _enqueue_completed_processing(
                     attempt_type="download",
                 ),
             ))
-            _enrich_have_evidence_after_failure(request_id, ctx)
+            _enrich_have_evidence_after_failure(
+                request_id,
+                ctx,
+                prepared_outcome=prepared_outcome,
+            )
             return None
         logger.warning(
             "Completed download for request %s could not be materialized "

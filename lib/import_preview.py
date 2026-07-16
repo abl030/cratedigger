@@ -580,6 +580,70 @@ def plan_current_evidence_enrichment(
     )
 
 
+def prepare_current_evidence_for_failure(
+    db: ImportPreviewDB,
+    *,
+    request_id: int,
+    mb_release_id: str,
+    quality_ranks: QualityRankConfig,
+    beets_library_root: str,
+    load_fn: Callable[..., EvidenceBuildResult] = load_or_backfill_current_evidence,
+) -> str:
+    """Load or backfill the canonical HAVE snapshot before failure logging.
+
+    Returns ``ready`` only when the request FK resolves to the surviving
+    evidence row, ``no_current_evidence`` only when Beets authoritatively says
+    the exact release is absent, and ``failed`` for adapter, snapshot, or
+    persistence failures.
+    """
+    try:
+        result = load_fn(
+            db,
+            request_id=request_id,
+            mb_release_id=mb_release_id,
+            quality_ranks=quality_ranks,
+            beets_library_root=beets_library_root,
+        )
+    except Exception:
+        logger.warning(
+            "Could not load/backfill current evidence for request %s",
+            request_id,
+            exc_info=True,
+        )
+        return "failed"
+    if result.status == "empty_current":
+        return "no_current_evidence"
+    if result.status != "ready" or result.evidence is None:
+        logger.warning(
+            "Could not prepare current evidence for request %s: %s%s",
+            request_id,
+            result.status,
+            f" ({result.reason})" if result.reason else "",
+        )
+        return "failed"
+    try:
+        current_id = db.get_request_current_evidence_id(request_id)
+        evidence = (
+            db.load_album_quality_evidence_by_id(current_id)
+            if current_id is not None
+            else None
+        )
+    except Exception:
+        logger.warning(
+            "Could not resolve prepared current evidence for request %s",
+            request_id,
+            exc_info=True,
+        )
+        return "failed"
+    if evidence is None or evidence.id is None:
+        logger.warning(
+            "Prepared current evidence was not linked for request %s",
+            request_id,
+        )
+        return "failed"
+    return "ready"
+
+
 def enrich_incomplete_current_evidence_for_request(
     db: ImportPreviewDB,
     *,
@@ -591,10 +655,9 @@ def enrich_incomplete_current_evidence_for_request(
 ) -> str:
     """Opportunistically complete a request's HAVE evidence in place.
 
-    Driven from the download-failure path: a failed download never reaches
-    preview, but the on-disk copy is right there — measure it now instead of
-    waiting for a download that may never succeed. Both writes go through
-    the preview-owned helpers, so the once-only, exact-snapshot, and
+    Driven from the download-failure path after its canonical HAVE snapshot
+    has been prepared and failure bookkeeping has completed. Both writes go
+    through the preview-owned helpers, so the once-only, exact-snapshot, and
     never-overwrite guards hold unchanged.
 
     Returns "no_current_evidence" (nothing linked), "stale" (files changed
