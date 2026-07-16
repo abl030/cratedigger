@@ -8,7 +8,7 @@ from typing import Literal, cast
 import msgspec
 from hypothesis import example, given, strategies as st
 
-import tests._hypothesis_profiles  # noqa: F401 - registers suite/push/fuzz
+import tests._hypothesis_profiles  # noqa: F401 - registers suite/fuzz
 from lib.artist_catalogue import ArtistCataloguePair, ArtistCatalogueRow
 from lib.artist_compare import (
     CompareBuckets,

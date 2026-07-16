@@ -244,7 +244,7 @@ None. Origin lists no deferred items; all four scope items land in this PR.
 Per-unit scenarios above. Cross-cutting verification:
 
 - Full suite via `nix-shell --run "bash scripts/run_tests.sh"` — green.
-- `pyright lib/import_evidence.py lib/import_dispatch.py lib/wrong_match_cleanup_service.py` — 0 errors.
+- `nix-shell --run "pyright --threads 4 lib/import_evidence.py lib/import_dispatch.py lib/wrong_match_cleanup_service.py"` — 0 errors.
 - Manual smoke on doc1: query the Parts & Labor row via `pipeline-cli show 2762`, run a cleanup pass against a tiny subset (or unit-test the exact scenario), confirm classification matches force-import.
 
 ---

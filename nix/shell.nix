@@ -60,7 +60,8 @@ pkgs.mkShell {
     echo "cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v" >&2
 
     # Pin the IDE's pyright to THIS interpreter so in-editor diagnostics match
-    # ``nix-shell --run pyright`` (pyrightconfig.json points venvPath/venv here).
+    # ``nix-shell --run "pyright --threads 4"`` (pyrightconfig.json points
+    # venvPath/venv here).
     # Without it, the editor's pyright falls back to the system python3 — which
     # lacks psycopg2/msgspec/pydantic/beets/... — and floods the file with
     # spurious reportMissingImports. Refreshed every shell entry (the store path

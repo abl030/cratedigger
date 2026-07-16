@@ -7,7 +7,7 @@ set -e
 JS_STAGED=$(git diff --cached --name-only --diff-filter=ACMR -- "*.js" "*.mjs" | head -30)
 if [ -n "$JS_STAGED" ]; then
     echo "pre-commit: node --check on $(echo "$JS_STAGED" | wc -l) staged JS files..."
-    echo "$JS_STAGED" | while read f; do node --check "$f" || exit 1; done
+    echo "$JS_STAGED" | while read -r f; do node --check "$f" || exit 1; done
     echo "pre-commit: JS syntax OK"
 fi
 
@@ -19,5 +19,5 @@ fi
 
 FILES=$(echo "$STAGED" | tr '\n' ' ')
 echo "pre-commit: pyright on $(echo "$STAGED" | wc -l) staged Python files..."
-nix-shell --run "pyright $FILES"
+nix-shell --run "pyright --threads 4 $FILES"
 echo "pre-commit: pyright OK"

@@ -530,7 +530,7 @@ This path is *not dead* — it's the fallback `_process_finalized_download` fall
 
 **Test scenarios:** None new — this unit is a deletion with no behavior change. The post-deletion check is the equivalence proof (tests that previously covered the shim now cover the same behavior through the direct-call shape exercised in U6/U7).
 
-**Verification:** `grep -rn 'run_preimport_gates' lib/ scripts/` returns zero matches. `pyright lib/preimport.py` clean. Suite green.
+**Verification:** `grep -rn 'run_preimport_gates' lib/ scripts/` returns zero matches. `nix-shell --run "pyright --threads 4 lib/preimport.py"` clean. Suite green.
 
 ---
 

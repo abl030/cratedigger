@@ -17,10 +17,15 @@ private locked-sibling trigger key.
 
 ## Steps
 
-1. Commit and push cratedigger (GitHub, unchanged):
+1. If the cratedigger revision is not already pushed, commit the final reviewed
+tree, run the `check` skill once on that commit, then push it to GitHub. If the
+revision was already pushed unchanged, do not replay the final validation:
 ```bash
 set -euo pipefail
-git add <files> && git commit -m "<message>" && git push
+git add <files>
+git commit -m "<message>"
+# Run the check skill here when this is the first push of the revision.
+git push
 ```
 
 2. From the pushed Cratedigger checkout, invoke the checked Bash entrypoint
@@ -200,7 +205,12 @@ ssh doc2 'systemctl cat cratedigger.service'
 ssh doc2 'grep "<rendered setting>" /var/lib/cratedigger/config.ini'
 ```
 
-7. After live verification + tag of a non-trivial series: run the **post-ship reflection** (`.claude/rules/deploy.md` § "Post-ship reflection") — mine your own session context for the debt this work surfaced (deferred review findings, things fixed twice, duplication the series introduced, audits that could catch review findings for free), de-dupe against open issues, and file ONE covering issue (pattern: #573, #590) or state that nothing clears the bar.
+7. After live verification of a non-trivial series, run the **post-ship
+reflection** (`.claude/rules/deploy.md` § "Post-ship reflection") — mine your
+own session context for the debt this work surfaced (deferred review findings,
+things fixed twice, duplication the series introduced, audits that could catch
+review findings for free), de-dupe against open issues, and file ONE covering
+issue (pattern: #573, #590) or state that nothing clears the bar.
 
 ## Database migrations
 

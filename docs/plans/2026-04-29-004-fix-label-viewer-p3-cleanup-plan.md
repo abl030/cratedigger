@@ -248,7 +248,7 @@ None used — all changes are internal hardening.
 
 **Verification:**
 - `nix-shell --run "bash scripts/run_tests.sh"` passes.
-- `nix-shell --run "pyright web/routes/_overlay.py web/routes/labels.py web/routes/browse.py"` clean.
+- `nix-shell --run "pyright --threads 4 web/routes/_overlay.py web/routes/labels.py web/routes/browse.py"` clean.
 
 ---
 

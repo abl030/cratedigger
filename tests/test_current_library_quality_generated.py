@@ -9,7 +9,7 @@ import unittest
 
 from hypothesis import given, strategies as st
 
-import tests._hypothesis_profiles  # noqa: F401 - registers suite/push/fuzz
+import tests._hypothesis_profiles  # noqa: F401 - registers suite/fuzz
 from lib.banding import (
     band_from_detail,
     compute_library_rank,

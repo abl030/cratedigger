@@ -1,17 +1,13 @@
 """Hypothesis profile selection for generated tests (issue #548).
 
-Importing this module registers three profiles and loads the one selected
+Importing this module registers two profiles and loads the one selected
 by ``CRATEDIGGER_HYPOTHESIS_PROFILE``:
 
 * ``suite`` (default) — deterministic tier. ``derandomize=True`` makes
   generation a fixed pseudo-random sweep, ``database=None`` keeps results
   independent of local ``.hypothesis/`` state, so every ``run_tests.sh``
-  run behaves identically on every machine. This is the tier that gates
-  merges.
-* ``push`` — quick randomized burst the pre-push hook runs on every
-  ``git push`` (scripts/pre-push). Fresh entropy per push accumulates
-  exploration over time; the local example database makes any push-found
-  failure replay first in dev. Sized to seconds, not minutes.
+  run behaves identically on every machine. This is the tier used by the
+  final local suite.
 * ``fuzz`` — deep randomized burst for local exploration when quality
   policy changes. Fresh entropy per run plus the local Hypothesis example
   database (``.hypothesis/``, gitignored), so failures found in one burst
@@ -21,7 +17,7 @@ by ``CRATEDIGGER_HYPOTHESIS_PROFILE``:
 Deadlines are disabled in every tier: wall-clock-per-example limits flake
 under load and none of the generated tests do I/O worth bounding.
 
-Promotion policy: a failure found by the push/fuzz tiers is shrunk by
+Promotion policy: a failure found by the fuzz tier is shrunk by
 Hypothesis to a minimal world — commit that world as a named
 ``@example(...)`` pin or as a scenario in the album test set. Never check
 in opaque artifacts. See docs/generated-testing.md.
@@ -37,13 +33,6 @@ settings.register_profile(
     max_examples=150,
     database=None,
     deadline=None,
-)
-settings.register_profile(
-    "push",
-    max_examples=2_000,
-    deadline=None,
-    print_blob=True,
-    suppress_health_check=[HealthCheck.too_slow],
 )
 settings.register_profile(
     "fuzz",

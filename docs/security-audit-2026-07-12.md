@@ -475,15 +475,16 @@ reports 0.0.1 even though the pinned Nix derivation/source is fixed 6.0.2.
 yt-dlp and ffmpeg still deserve particular attention because both parse
 attacker-controlled input/streams.
 
-Separately, CI runs only GitGuardian; the suite, pyright, dead-code and flake
-checks are enforced by the local pre-push hook rather than CI, so a green PR
-check is not a green suite.
+Separately, CI runs only GitGuardian, so a green PR check is not a green suite.
+The repository's agent instructions require focused checks during development,
+then whole-repo threaded Pyright and one full-suite run on the final committed
+tree before its first branch push.
 
 - **Remediation:** update the flake and re-run the real-beets/full-suite gates;
   confirm urllib3 >= 2.7.0, idna >= 3.15, lxml >= 6.1.0, msgpack >= 1.2.1,
   soupsieve >= 2.8.4, and Flask >= 3.1.3 in the realized closure. Keep a regular
-  update cadence for yt-dlp/ffmpeg advisories; optionally add the suite to CI so
-  the gate does not depend solely on the local hook.
+  update cadence for yt-dlp/ffmpeg advisories; keep the final local validation
+  explicit because CI deliberately does not duplicate it.
 
 ### CD-SEC-13 — Plex XML parsed with stdlib ElementTree (Info)
 

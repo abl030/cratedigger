@@ -16,12 +16,14 @@
 - Always derive the active cratedigger wrapper from `systemctl show cratedigger.service --property=ExecStart --value`, extract its exact `*-source` path from the wrapper, and verify the unique source string there; never glob historical store generations, which can produce a false positive. For module changes, inspect `systemctl cat cratedigger.service` and the rendered `/var/lib/cratedigger/config.ini`.
 - Before deploying changes to `nix/module.nix`, run the VM check: `nix build .#checks.x86_64-linux.moduleVm`.
 - **Every `nix flake update` in cratedigger must re-run the real-beets drift gate** (`tests/test_harness_beets2_contract.py` inside the re-pinned shell, plus the full suite): since tier-2 packaging, the flake.lock — not the consumer's nixpkgs — decides the beets version production runs. A lock bump is a beets upgrade until proven otherwise.
-- After live verification of a deploy-worthy state, tag it `vYYYY.MM.DD` (suffix `-N` for same-day). The pre-push hook (`scripts/pre-push`, runs the generated-test fuzz burst then `nix flake check`) gates every push; the tag records the verified state.
+- Before the first cratedigger branch push, the agent runs whole-repo threaded
+  Pyright and the full suite once on the final committed tree. Do not replay
+  those gates during deploy when the pushed revision is unchanged.
 - Use the `/deploy` command for the full sequence.
 
-## Post-ship reflection (after tag, before ending the session)
+## Post-ship reflection (after live verification, before ending the session)
 
-The end of a shipped series is the only moment its debt is cheap to see — the session context still holds what reviews caught by hand, what got fixed twice, and what scar tissue the work itself introduced. Once the session ends, that knowledge is gone and the next reviewer pays for it again. So, after tagging a non-trivial series (skip for typo-level deploys):
+The end of a shipped series is the only moment its debt is cheap to see — the session context still holds what reviews caught by hand, what got fixed twice, and what scar tissue the work itself introduced. Once the session ends, that knowledge is gone and the next reviewer pays for it again. So, after live verification of a non-trivial series (skip for typo-level deploys):
 
 1. **Reflect in your own context**, mining: review findings that were deferred as non-blocking; anything you fixed more than once or in more than one place; duplication or boilerplate the series itself added; "would a structural audit have caught this for free?"; process failures worth encoding as rules.
 2. **Rank by value-for-effort, then de-dupe against open issues** (`gh issue list` — read the bodies of the open refactor issues, not just titles). De-dupe is mandatory; a duplicate covering issue is worse than none.

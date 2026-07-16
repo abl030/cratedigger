@@ -294,7 +294,7 @@ GET /api/pipeline/<id>/search-plan/history?limit=50&before_id=12345
 - *Route audit.* Adding the route without classifying it in `CLASSIFIED_ROUTES` fails `test_all_web_routes_are_classified_for_contract_coverage` — the audit stays green only after registry update.
 
 **Verification:**
-- `nix-shell --run "bash scripts/run_tests.sh"` passes; `pyright lib/pipeline_db.py lib/search_plan_service.py web/routes/pipeline.py scripts/pipeline_cli.py` reports 0 errors.
+- `nix-shell --run "bash scripts/run_tests.sh"` passes; `nix-shell --run "pyright --threads 4 lib/pipeline_db.py lib/search_plan_service.py web/routes/pipeline.py scripts/pipeline_cli.py"` reports 0 errors.
 - After deploy: `ssh doc2 'curl -s http://localhost:5300/api/pipeline/2566/search-plan/history?limit=3 | jq .'` returns 3 rows + a `next_before_id` value; `ssh doc2 'pipeline-cli search-plan history 2566 --limit 5'` prints rows with the correct `next_before_id` hint.
 
 ---
