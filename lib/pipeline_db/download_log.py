@@ -13,7 +13,7 @@ from lib.pipeline_db._shared import (
 
 # Canonical ``download_log.outcome`` taxonomy — the Python mirror of the
 # ``download_log_outcome_check`` CHECK constraint (latest definition:
-# migrations/042). Two sync points only: this Literal and the migration
+# migrations/054). Two sync points only: this Literal and the migration
 # SQL; ``tests/test_migrator.py`` pins them together. Writers get pyright
 # enforcement at the call site instead of a CheckViolation in production
 # (the failure mode that shipped twice on 2026-07-02: 'error' from the
@@ -21,7 +21,7 @@ from lib.pipeline_db._shared import (
 DownloadLogOutcome = Literal[
     "success", "rejected", "failed", "timeout",
     "force_import", "manual_import", "curator_ban",
-    "measurement_failed", "user_offline",
+    "measurement_failed", "user_offline", "have_analysis_error",
     "youtube_running", "youtube_success", "youtube_failed",
 ]
 DOWNLOAD_LOG_OUTCOMES: frozenset[str] = frozenset(get_args(DownloadLogOutcome))

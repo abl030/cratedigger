@@ -3164,6 +3164,50 @@ class TestActiveYoutubeImportRequestSchema(unittest.TestCase):
             self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
 
 
+@requires_postgres
+class TestDownloadLogHaveAnalysisErrorMigration(unittest.TestCase):
+    """Migration 054 admits the non-quality HAVE analysis failure outcome."""
+
+    def test_records_migration_and_accepts_have_analysis_error(self):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT version FROM schema_migrations WHERE version = 54"
+                )
+                self.assertEqual(cur.fetchall(), [(54,)])
+                cur.execute("""
+                    INSERT INTO album_requests (
+                        mb_release_id, artist_name, album_title, source
+                    )
+                    VALUES (
+                        'mig054-have-analysis-error-mbid', 'A', 'B', 'request'
+                    )
+                    RETURNING id
+                """)
+                request_row = cur.fetchone()
+                assert request_row is not None
+                request_id = request_row[0]
+                try:
+                    cur.execute("""
+                        INSERT INTO download_log (request_id, outcome)
+                        VALUES (%s, 'have_analysis_error')
+                    """, (request_id,))
+                    cur.execute(
+                        "SELECT outcome FROM download_log WHERE request_id = %s",
+                        (request_id,),
+                    )
+                    self.assertEqual(cur.fetchall(), [("have_analysis_error",)])
+                finally:
+                    cur.execute(
+                        "DELETE FROM album_requests WHERE id = %s",
+                        (request_id,),
+                    )
+        finally:
+            conn.close()
+
+
 class TestDownloadLogOutcomeTaxonomySync(unittest.TestCase):
     """Pin lib.pipeline_db.DOWNLOAD_LOG_OUTCOMES to the migration SQL.
 
@@ -3263,7 +3307,7 @@ class TestPinStatusDomainMigration(unittest.TestCase):
         dsn = _create_fresh_database(name)
         try:
             applied = apply_migrations(dsn, DEFAULT_MIGRATIONS_DIR)
-            self.assertEqual(applied[-1].version, 53)
+            self.assertEqual(applied[-1].version, 54)
             self.assertEqual(
                 self._query(
                     dsn,
