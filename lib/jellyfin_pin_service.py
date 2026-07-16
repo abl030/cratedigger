@@ -149,6 +149,21 @@ def _jellyfin_pin_enabled(cfg: "CratediggerConfig") -> bool:
     return bool(cfg.jellyfin_url and cfg.resolved_jellyfin_token())
 
 
+def _date_newer(a: str, b: str) -> bool:
+    """True when ISO date ``a`` is strictly newer than ``b``.
+
+    Jellyfin emits 7-digit fractions ("…44.0000000Z") while floor /
+    historical-clamped originals are seconds-only ("…44Z"). A naive string
+    comparison mis-orders same-second values ('.' sorts before 'Z'), so
+    compare parsed datetimes; fall back to the string compare only if a
+    side doesn't parse (arbitrary text stored verbatim)."""
+    try:
+        return (datetime.fromisoformat(a.replace("Z", "+00:00"))
+                > datetime.fromisoformat(b.replace("Z", "+00:00")))
+    except ValueError:
+        return a > b
+
+
 def _floor_original_date(
     db: "PipelineDB | _PinDBProto",
     request_id: int | None,
@@ -349,7 +364,8 @@ def reconcile_jellyfin_date_created_pins(
                 or {c.item_id for c in children} != snapshot_children
             )
             date_bumped = any(
-                child.date_created > original for child in children
+                _date_newer(child.date_created, original)
+                for child in children
             )
             landed = ids_changed or date_bumped
             # A landed rescan showing ZERO audio children is the mid-scan
@@ -374,7 +390,7 @@ def reconcile_jellyfin_date_created_pins(
             targets += [(c.item_id, c.date_created) for c in children]
             writes = failures = 0
             for item_id, current in targets:
-                if current <= original:
+                if not _date_newer(current, original):
                     continue
                 if set_fn(cfg, item_id, original):
                     writes += 1

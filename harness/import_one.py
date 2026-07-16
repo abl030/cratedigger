@@ -1030,7 +1030,8 @@ def run_import(path, mb_release_id):
                           file=sys.stderr)
                     if proc.poll() is None:
                         proc.wait()
-                    return RunImportOutcome(4, [])
+                    return RunImportOutcome(
+                        4, [], replaced_albums=replaced_albums)
 
                 cand = candidates[matched_idx]
                 dist = cand.get("distance", 1.0)
@@ -1041,7 +1042,8 @@ def run_import(path, mb_release_id):
                     print(f"  [REJECT] distance={dist:.4f} > {MAX_DISTANCE}", file=sys.stderr)
                     if proc.poll() is None:
                         proc.wait()
-                    return RunImportOutcome(2, [])
+                    return RunImportOutcome(
+                        2, [], replaced_albums=replaced_albums)
 
                 proc.stdin.write(json.dumps({"action": "apply", "candidate_index": matched_idx}) + "\n")
                 proc.stdin.flush()

@@ -390,6 +390,45 @@ class TestReconcile(unittest.TestCase):
         self.assertEqual(set_calls, [("new-1", ORIGINAL), ("new-2", ORIGINAL)])
         self.assertEqual(self._pin(db, pin_id)["status"], "done")
 
+    def test_subsecond_newer_child_lands_despite_mixed_iso_formats(self):
+        """A seconds-only original ("…44Z", floor/historical format) vs
+        Jellyfin's 7-digit fraction ("…44.5000000Z"): naive string
+        comparison sorts '.' before 'Z' and would miss the newer date —
+        the comparison must be chronological."""
+        db = FakePipelineDB()
+        original = "2026-07-15T21:46:44Z"
+        subsecond_newer = "2026-07-15T21:46:44.5000000Z"
+        pin_id = self._seed(db, original=original, children=("tr-1",))
+        set_calls = []
+        res = self._reconcile(
+            db,
+            find_fn=lambda cfg, path: _album(
+                item_id="alb-1", date_created=original),
+            children_fn=lambda cfg, iid: _children(
+                ("tr-1", subsecond_newer)),
+            set_fn=lambda cfg, iid, val: set_calls.append((iid, val)) or True)
+        self.assertEqual(res.pinned, 1)
+        self.assertEqual(set_calls, [("tr-1", original)])
+        self.assertEqual(self._pin(db, pin_id)["status"], "done")
+
+    def test_same_second_mixed_formats_do_not_bump(self):
+        # Equal to the second across formats is NOT newer — no landing
+        # signal, no write.
+        db = FakePipelineDB()
+        original = "2026-07-15T21:46:44Z"
+        same_second = "2026-07-15T21:46:44.0000000Z"
+        pin_id = self._seed(db, original=original, children=("tr-1",))
+        set_calls = []
+        res = self._reconcile(
+            db,
+            find_fn=lambda cfg, path: _album(
+                item_id="alb-1", date_created=same_second),
+            children_fn=lambda cfg, iid: _children(("tr-1", same_second)),
+            set_fn=lambda cfg, iid, val: set_calls.append((iid, val)) or True)
+        self.assertEqual(res.waiting, 1)
+        self.assertEqual(set_calls, [])
+        self.assertEqual(self._pin(db, pin_id)["status"], "pending")
+
     def test_same_ids_with_newer_dates_are_a_landed_upgrade(self):
         """Jellyfin restamps changed same-path Audio rows without changing ids."""
         db = FakePipelineDB()
