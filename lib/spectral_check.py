@@ -260,7 +260,7 @@ def _ffmpeg_to_wav(src, dst, trim_seconds=30):
     cmd = [
         "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
         "-analyzeduration", "5M", "-probesize", "5M",
-        "-i", _safe_path(src),
+        "-i", _safe_path(src), "-map", "0:a",
     ]
     if trim_seconds:
         cmd.extend(["-t", str(trim_seconds)])

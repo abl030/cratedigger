@@ -140,7 +140,8 @@ def probe_files_as_v0(
             try:
                 result = subprocess.run(
                     [
-                        "ffmpeg", "-i", src_path, "-ac", "2", "-c:a",
+                        "ffmpeg", "-i", src_path, "-map", "0:a",
+                        "-ac", "2", "-c:a",
                         V0_CODEC, *V0_CODEC_ARGS, *V0_METADATA_ARGS,
                         "-y", out_path,
                     ],
