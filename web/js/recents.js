@@ -78,6 +78,16 @@ export function renderRecentsItems(items, matchRates = null) {
         || (Array.isArray(item.wrong_match_triage_stage_chain)
           ? item.wrong_match_triage_stage_chain.join(' · ')
           : '');
+      const isHaveAnalysisError = item.outcome === 'have_analysis_error';
+      const failureCategory = item.failure_category
+        ? String(item.failure_category).replace(/_/g, ' ')
+        : 'unknown analyser failure';
+      const haveAnalysisDetails = isHaveAnalysisError
+        ? `<div class="p-meta"><span>failure ${esc(failureCategory)}</span></div>
+          <div class="p-meta"><span>HAVE ${esc(item.installed_path || 'unknown path')}</span></div>
+          <div class="p-meta"><span>candidate ${esc(item.candidate_reference || 'unknown reference')}</span></div>
+          <div class="p-meta"><span>${esc(item.analysis_error || 'No analyser detail recorded')}</span></div>`
+        : '';
 
       // Issue #130: a `disambiguation_failure` chip surfaces post-import
       // `beet move` errors that leave the album in beets at a stale path.
@@ -91,7 +101,8 @@ export function renderRecentsItems(items, matchRates = null) {
       const triageLabel = triageSummary && !String(badge).startsWith('Triaged')
         ? `<span class="recents-triage-label" title="${esc(triageDetail)}">${esc(triageLabelText(triageSummary))}</span>`
         : '';
-      const badgeTitle = triageDetail ? ` title="${esc(triageDetail)}"` : '';
+      const badgeDetail = triageDetail || (isHaveAnalysisError ? item.analysis_error : '');
+      const badgeTitle = badgeDetail ? ` title="${esc(badgeDetail)}"` : '';
 
       // Search-plan inspector button — Recents rows always render the
       // button. Use the request_id (the album_requests.id) since the
@@ -112,6 +123,7 @@ export function renderRecentsItems(items, matchRates = null) {
             </div>
             <div class="p-row-actions">${spBtn}<span style="font-size:0.75em;color:#666;">${time}</span></div>
           </div>
+          ${haveAnalysisDetails}
           ${evidence ? `<div class="p-meta">${evidence}</div>` : ''}
           <div class="p-meta">
             ${triageLabel}

@@ -4243,7 +4243,8 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
                 median_bitrate_kbps=899,
                 format="flac",
                 spectral_grade="genuine",
-                verified_lossless=True,
+                spectral_subject="source",
+                spectral_provenance="measured",
             ),
             files=[
                 AlbumQualityEvidenceFile(
@@ -4272,12 +4273,11 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
                 min_bitrate_kbps=165,
                 avg_bitrate_kbps=228,
                 median_bitrate_kbps=225,
-                source_lineage="lossless_container_source",
-                source_provenance="transcoded from verified FLAC candidate",
-                proof_provenance="spectral genuine plus V0 probe",
+                subject="source",
+                provenance="measured",
             ),
             verified_lossless_proof=VerifiedLosslessProof(
-                proof_origin="import",
+                provenance="measured",
                 source="lossless candidate",
                 classifier="spectral+v0",
                 detail="genuine spectral result",
@@ -4291,12 +4291,19 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         )
 
         assert loaded is not None
+        self.assertEqual(
+            loaded,
+            msgspec.structs.replace(
+                evidence.sorted_for_storage(),
+                id=loaded.id,
+            ),
+        )
         self.assertEqual(loaded.measurement.format, "flac")
         self.assertTrue(loaded.on_disk_v0_research_attempted)
-        self.assertTrue(loaded.measurement.verified_lossless)
+        self.assertIsNotNone(loaded.verified_lossless_proof)
         self.assertEqual(loaded.target_format, "lossless")
         self.assertFalse(loaded.target_is_cbr)
-        self.assertEqual(loaded.lineage_version, 3)
+        self.assertEqual(loaded.lineage_version, 4)
         self.assertIsNotNone(loaded.verified_lossless_proof)
         # Files round-trip sorted-for-storage.
         self.assertEqual(
@@ -4426,9 +4433,8 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
             min_bitrate_kbps=201,
             avg_bitrate_kbps=259,
             median_bitrate_kbps=255,
-            source_lineage="on_disk_research",
-            source_provenance="installed album ffmpeg V0",
-            proof_provenance="exact content snapshot",
+            subject="installed",
+            provenance="measured",
         )
         evidence = self._seed(
             mb_release_id="preserve-v0-tuple",
@@ -4443,7 +4449,8 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
             self.db.upsert_album_quality_evidence(msgspec.structs.replace(
                 evidence,
                 v0_metric=AlbumQualityV0Metric(
-                    source_lineage="on_disk_research",
+                    subject="installed",
+                    provenance="measured",
                 ),
             ))
 
@@ -4465,8 +4472,9 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         self.assertEqual(stored.storage_format, "mp3")
 
         replacement = AlbumQualityV0Metric(
+            provenance="measured",
             avg_bitrate_kbps=261,
-            source_lineage="native_lossy_research",
+            subject="installed",
         )
         self.db.upsert_album_quality_evidence(msgspec.structs.replace(
             evidence,
@@ -4480,6 +4488,79 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         assert replaced is not None
         self.assertEqual(replaced.v0_metric, replacement)
         self.assertTrue(replaced.on_disk_v0_research_attempted)
+
+    def test_v3_to_v4_conflict_clears_omitted_legacy_facts(self):
+        evidence = self._seed(
+            mb_release_id="v3-v4-clear-legacy",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=252,
+                format="MP3",
+            ),
+        )
+        self.db._execute(
+            """
+            INSERT INTO album_quality_evidence (
+                mb_release_id, snapshot_fingerprint, source_path,
+                measured_at, format, lineage_version,
+                spectral_grade, spectral_bitrate_kbps,
+                spectral_subject, spectral_provenance,
+                v0_avg_bitrate_kbps, v0_subject, v0_provenance
+            )
+            VALUES (
+                %s, %s, %s, NOW(), 'MP3', 3,
+                'genuine', 192,
+                'unknown-live-subject', 'unknown-live-provenance',
+                245, 'unknown-live-subject', 'unknown-live-provenance'
+            )
+            """,
+            (
+                evidence.mb_release_id,
+                evidence.snapshot_fingerprint,
+                evidence.source_path,
+            ),
+        )
+
+        self.db.upsert_album_quality_evidence(evidence)
+
+        cur = self.db._execute(
+            """
+            SELECT lineage_version,
+                   spectral_grade, spectral_bitrate_kbps,
+                   spectral_subject, spectral_provenance,
+                   v0_min_bitrate_kbps, v0_avg_bitrate_kbps,
+                   v0_median_bitrate_kbps, v0_subject, v0_provenance
+            FROM album_quality_evidence
+            WHERE mb_release_id = %s AND snapshot_fingerprint = %s
+            """,
+            (evidence.mb_release_id, evidence.snapshot_fingerprint),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        self.assertEqual(row["lineage_version"], 4)
+        self.assertTrue(all(
+            row[column] is None
+            for column in (
+                "spectral_grade",
+                "spectral_bitrate_kbps",
+                "spectral_subject",
+                "spectral_provenance",
+                "v0_min_bitrate_kbps",
+                "v0_avg_bitrate_kbps",
+                "v0_median_bitrate_kbps",
+                "v0_subject",
+                "v0_provenance",
+            )
+        ))
+
+        loaded = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert loaded is not None
+        self.assertIsNone(loaded.measurement.spectral_grade)
+        self.assertIsNone(loaded.v0_metric)
 
     def test_duplicate_content_address_upsert_replaces_snapshot_rows(self):
         from lib.quality import AlbumQualityEvidenceFile
@@ -6028,7 +6109,8 @@ class TestGetWrongMatches(unittest.TestCase):
                 format="FLAC",
                 spectral_grade="genuine",
                 spectral_bitrate_kbps=21,
-                verified_lossless=True,
+                spectral_subject="source",
+                spectral_provenance="measured",
             ),
             files=[
                 AlbumQualityEvidenceFile(
@@ -6048,12 +6130,11 @@ class TestGetWrongMatches(unittest.TestCase):
                 min_bitrate_kbps=220,
                 avg_bitrate_kbps=265,
                 median_bitrate_kbps=260,
-                source_lineage="lossless_source",
-                source_provenance="real wire shape",
-                proof_provenance="real wire shape",
+                subject="source",
+                provenance="measured",
             ),
             verified_lossless_proof=VerifiedLosslessProof(
-                proof_origin="import",
+                provenance="measured",
                 source="real wire shape",
                 classifier="spectral+v0",
                 detail=None,
@@ -6144,9 +6225,8 @@ class TestGetWrongMatches(unittest.TestCase):
                 min_bitrate_kbps=200,
                 avg_bitrate_kbps=245,
                 median_bitrate_kbps=240,
-                source_lineage="lossless_source",
-                source_provenance="real wire shape",
-                proof_provenance="real wire shape",
+                subject="source",
+                provenance="measured",
             ),
         )
         self.db.upsert_album_quality_evidence(evidence)
@@ -6211,10 +6291,11 @@ class TestGetWrongMatches(unittest.TestCase):
             ),
             storage_format="OPUS 128",
             v0_metric=AlbumQualityV0Metric(
+                provenance="measured",
                 min_bitrate_kbps=201,
                 avg_bitrate_kbps=259,
                 median_bitrate_kbps=255,
-                source_lineage="on_disk_research",
+                subject="installed",
             ),
         )
         self.db.upsert_album_quality_evidence(evidence)

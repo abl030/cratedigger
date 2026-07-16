@@ -254,17 +254,24 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                     avg_bitrate if avg_bitrate is not None else min_bitrate
                 ),
                 format=storage_format,
-                verified_lossless=verified_lossless,
                 spectral_grade=spectral_grade,
                 spectral_bitrate_kbps=spectral_bitrate,
+                spectral_subject=("source" if spectral_grade is not None else None),
+                spectral_provenance=(
+                    "measured" if spectral_grade is not None else None
+                ),
             ),
             verified_lossless_proof=VerifiedLosslessProof(
-                proof_origin="test", source="seeded",
+                provenance="measured", source="seeded",
                 classifier="contract-test",
             ) if verified_lossless else None,
             v0_metric=AlbumQualityV0Metric(
                 avg_bitrate_kbps=v0_probe_avg_bitrate,
-                source_lineage=v0_probe_kind,
+                subject=(
+                    "source"
+                    if v0_probe_kind in ("lossless_source", "lossless_source_v0")
+                    else "installed"
+                ),
             ) if (v0_probe_kind or v0_probe_avg_bitrate) else None,
         )
         self.db.upsert_album_quality_evidence(evidence)

@@ -11,6 +11,7 @@ import json
 
 import msgspec
 
+from lib.import_evidence import HaveAnalysisFailure
 from lib.quality import ImportResult
 
 from scripts.pipeline_cli._format import _fmt_br, _fmt_measurement
@@ -80,6 +81,36 @@ def _render_import_result(ir_raw):
     elif pf.get("disambiguated") is True:
         lines.append(f"      disambig:  ok")
 
+    return lines
+
+
+def _render_have_analysis_failure(row: dict[str, object]) -> list[str]:
+    """Render the typed installed-HAVE environment-failure payload."""
+
+    if row.get("outcome") != "have_analysis_error":
+        return []
+    raw = row.get("validation_result")
+    try:
+        if isinstance(raw, dict):
+            failure = msgspec.convert(raw, type=HaveAnalysisFailure)
+        elif isinstance(raw, (str, bytes)):
+            failure = msgspec.json.decode(raw, type=HaveAnalysisFailure)
+        else:
+            return []
+    except (TypeError, ValueError, msgspec.ValidationError):
+        return []
+
+    lines = [
+        f"      log_id:            {row.get('id', '?')}",
+        f"      failure_category:  {failure.failure_category}",
+        f"      analysis_error:    {failure.error}",
+    ]
+    if failure.installed_path:
+        lines.append(f"      installed_path:     {failure.installed_path}")
+    if failure.candidate_reference:
+        lines.append(
+            f"      candidate_reference: {failure.candidate_reference}"
+        )
     return lines
 
 
@@ -303,6 +334,8 @@ def cmd_show(db, args):
         for h in history:
             print(_render_download_history_header(h))
             for line in _render_youtube_metadata(h):
+                print(line)
+            for line in _render_have_analysis_failure(h):
                 print(line)
             for line in _render_import_result(h.get("import_result")):
                 print(line)

@@ -9,13 +9,13 @@ columns as mutation authority.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import msgspec
 
 from lib.quality import (
     LOSSLESS_CODECS,
-    V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
+    EVIDENCE_SUBJECT_SOURCE,
     AlbumQualityEvidence,
     QualityRankConfig,
 )
@@ -56,6 +56,8 @@ __all__ = [
     "ActionEvidenceProvenance",
     "CandidateEvidenceActionResult",
     "CurrentEvidenceActionResult",
+    "HaveAnalysisFailure",
+    "classify_have_analysis_failure",
     "ensure_candidate_evidence_for_action",
     "ensure_current_evidence_for_action",
     "load_current_evidence_for_action",
@@ -69,7 +71,52 @@ class ActionEvidenceProvenance(msgspec.Struct, frozen=True):
     current_status: str | None = None
     snapshot_guard: str = SNAPSHOT_GUARD_NOT_CHECKED
     fallback_reason: str | None = None
+    installed_path: str | None = None
     fail_closed: bool = False
+
+
+HaveAnalysisFailureCategory = Literal[
+    "permission_denied",
+    "path_missing",
+    "no_audio_files",
+    "snapshot_changed",
+    "analyser_failure",
+]
+
+
+class HaveAnalysisFailure(msgspec.Struct, frozen=True):
+    """Typed audit payload for a failed installed-HAVE analysis."""
+
+    failure_category: HaveAnalysisFailureCategory
+    error: str
+    installed_path: str | None = None
+    candidate_reference: str | None = None
+
+
+def classify_have_analysis_failure(
+    error: str,
+    *,
+    snapshot_guard: str | None = None,
+) -> HaveAnalysisFailureCategory:
+    """Map raw evidence-acquisition diagnostics to the operator taxonomy."""
+
+    normalized = error.casefold()
+    if snapshot_guard == SNAPSHOT_GUARD_STALE or "snapshot" in normalized:
+        return "snapshot_changed"
+    if any(token in normalized for token in (
+        "no audio", "empty_fileset", "empty current", "zero audio",
+    )):
+        return "no_audio_files"
+    if any(token in normalized for token in (
+        "permission denied", "permissionerror", "eacces",
+    )):
+        return "permission_denied"
+    if any(token in normalized for token in (
+        "no such file", "filenotfounderror", "path not found",
+        "source vanished", "missing path",
+    )):
+        return "path_missing"
+    return "analyser_failure"
 
 
 class CandidateEvidenceActionResult(msgspec.Struct, frozen=True):
@@ -139,7 +186,6 @@ def ensure_current_evidence_for_action(
 ) -> CurrentEvidenceActionResult:
     """Load or backfill current Beets evidence with action provenance."""
 
-    request_row = db.get_request(request_id)
     existing_id = db.get_request_current_evidence_id(request_id)
     existing = (
         db.load_album_quality_evidence_by_id(existing_id)
@@ -151,11 +197,9 @@ def ensure_current_evidence_for_action(
     if existing is not None:
         existing_requires_lossless_source_v0 = _requires_lossless_source_v0_metric(
             existing,
-            request_row,
         )
         errors = _current_action_incomplete_reasons(
             existing,
-            request_row,
             require_lossless_source_v0=existing_requires_lossless_source_v0,
         )
         snapshot_matches = (
@@ -185,8 +229,6 @@ def ensure_current_evidence_for_action(
         if (
             existing_requires_lossless_source_v0
             and not _has_lossless_source_v0_metric(existing)
-            and not existing_snapshot_stale
-            and not _request_has_current_lossless_source_v0(request_row)
         ):
             return CurrentEvidenceActionResult(
                 evidence=None,
@@ -198,6 +240,10 @@ def ensure_current_evidence_for_action(
                         else SNAPSHOT_GUARD_NOT_CHECKED
                     ),
                     fallback_reason=fallback_reason,
+                    installed_path=(
+                        current_album_path
+                        or (existing.source_path if existing is not None else None)
+                    ),
                     fail_closed=True,
                 ),
             )
@@ -241,36 +287,67 @@ def ensure_current_evidence_for_action(
                     else SNAPSHOT_GUARD_NOT_CHECKED
                 ),
                 fallback_reason=f"{type(exc).__name__}: {exc}",
+                installed_path=(
+                    current_album_path
+                    or (existing.source_path if existing is not None else None)
+                ),
                 fail_closed=True,
             ),
         )
 
-    if backfilled.evidence is not None:
-        backfilled_errors = _current_action_incomplete_reasons(
-            backfilled.evidence,
-            request_row,
-            require_lossless_source_v0=(
-                existing_requires_lossless_source_v0
-                and not existing_snapshot_stale
-            ),
-        )
-        if backfilled_errors:
+    if backfilled.evidence is not None and backfilled.status == "ready":
+        authoritative = backfilled.evidence
+        try:
+            linked_id = db.get_request_current_evidence_id(request_id)
+            linked = (
+                db.load_album_quality_evidence_by_id(linked_id)
+                if linked_id is not None
+                else None
+            )
+        except Exception as exc:
+            linked = None
+            link_error = f"{type(exc).__name__}: {exc}"
+        else:
+            link_error = None
+        if (
+            linked is None
+            or linked.id is None
+            or linked.mb_release_id != backfilled.evidence.mb_release_id
+            or linked.snapshot_fingerprint
+                != backfilled.evidence.snapshot_fingerprint
+        ):
             backfilled = EvidenceBuildResult(
                 None,
                 "incomplete",
-                "; ".join(backfilled_errors),
+                link_error or "backfilled evidence is not the exact linked snapshot",
             )
         else:
-            if backfill_builder is not None:
-                db.upsert_album_quality_evidence(backfilled.evidence)
-            return CurrentEvidenceActionResult(
-                evidence=backfilled.evidence,
-                provenance=ActionEvidenceProvenance(
-                    current_status=CURRENT_STATUS_BACKFILLED,
-                    snapshot_guard=SNAPSHOT_GUARD_MATCHED,
-                    fallback_reason=fallback_reason,
+            authoritative = linked
+            backfilled_errors = _current_action_incomplete_reasons(
+                authoritative,
+                require_lossless_source_v0=(
+                    existing_requires_lossless_source_v0
                 ),
             )
+            if existing_snapshot_stale:
+                backfilled_errors.extend(
+                    _current_action_missing_enrichment_reasons(authoritative)
+                )
+            if backfilled_errors:
+                backfilled = EvidenceBuildResult(
+                    None,
+                    "incomplete",
+                    "; ".join(backfilled_errors),
+                )
+            else:
+                return CurrentEvidenceActionResult(
+                    evidence=authoritative,
+                    provenance=ActionEvidenceProvenance(
+                        current_status=CURRENT_STATUS_BACKFILLED,
+                        snapshot_guard=SNAPSHOT_GUARD_MATCHED,
+                        fallback_reason=fallback_reason,
+                    ),
+                )
 
     return CurrentEvidenceActionResult(
         evidence=None,
@@ -282,6 +359,10 @@ def ensure_current_evidence_for_action(
                 else SNAPSHOT_GUARD_NOT_CHECKED
             ),
             fallback_reason=backfilled.reason or fallback_reason,
+            installed_path=(
+                current_album_path
+                or (existing.source_path if existing is not None else None)
+            ),
             fail_closed=True,
         ),
     )
@@ -289,16 +370,12 @@ def ensure_current_evidence_for_action(
 
 def _current_action_incomplete_reasons(
     evidence: AlbumQualityEvidence,
-    request_row: dict[str, Any] | None,
     *,
     require_lossless_source_v0: bool = False,
 ) -> list[str]:
     reasons = current_evidence_rebuild_reasons(evidence)
     if (
-        (require_lossless_source_v0 or _requires_lossless_source_v0_metric(
-            evidence,
-            request_row,
-        ))
+        (require_lossless_source_v0 or _requires_lossless_source_v0_metric(evidence))
         and not _has_lossless_source_v0_metric(evidence)
     ):
         reasons.append(
@@ -307,36 +384,38 @@ def _current_action_incomplete_reasons(
     return reasons
 
 
+def _current_action_missing_enrichment_reasons(
+    evidence: AlbumQualityEvidence,
+) -> list[str]:
+    """Require neutral installed facts before a newly changed snapshot acts."""
+
+    reasons: list[str] = []
+    measurement = evidence.measurement
+    if (
+        measurement.spectral_grade is None
+        and measurement.spectral_bitrate_kbps is None
+    ):
+        reasons.append("exact current snapshot still needs installed spectral enrichment")
+    if (
+        evidence.v0_metric is None
+        and not evidence.on_disk_v0_research_attempted
+    ):
+        reasons.append("exact current snapshot still needs installed V0 enrichment")
+    return reasons
+
+
 def _requires_lossless_source_v0_metric(
     evidence: AlbumQualityEvidence,
-    request_row: dict[str, Any] | None,
 ) -> bool:
-    if _request_has_current_lossless_source_v0(request_row):
-        return True
     converted_from = (evidence.measurement.was_converted_from or "").lower()
     return converted_from in LOSSLESS_CODECS
-
-
-def _request_has_current_lossless_source_v0(
-    request_row: dict[str, Any] | None,
-) -> bool:
-    if request_row is None:
-        return False
-    return any(
-        request_row.get(field) is not None
-        for field in (
-            "current_lossless_source_v0_probe_min_bitrate",
-            "current_lossless_source_v0_probe_avg_bitrate",
-            "current_lossless_source_v0_probe_median_bitrate",
-        )
-    )
 
 
 def _has_lossless_source_v0_metric(evidence: AlbumQualityEvidence) -> bool:
     metric = evidence.v0_metric
     return (
         metric is not None
-        and metric.source_lineage == V0_SOURCE_LINEAGE_LOSSLESS_SOURCE
+        and metric.subject == EVIDENCE_SUBJECT_SOURCE
         and metric.avg_bitrate_kbps is not None
     )
 
@@ -394,7 +473,7 @@ def _candidate_action_status(status: str) -> str:
 
 
 def _current_action_status(status: str) -> str:
-    if status in {"missing", "empty_current", "empty_fileset"}:
+    if status in {"missing", "empty_current"}:
         return CURRENT_STATUS_MISSING
     return CURRENT_STATUS_FAILED
 

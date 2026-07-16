@@ -41,7 +41,8 @@ def _verified_lossless_evidence(**overrides):
         is_cbr=False,
         spectral_grade="genuine",
         spectral_bitrate_kbps=None,
-        verified_lossless=True,
+        spectral_subject="source",
+        spectral_provenance="measured",
         was_converted_from="flac",
     )
     files = [
@@ -74,10 +75,10 @@ def _verified_lossless_evidence(**overrides):
             min_bitrate_kbps=950,
             avg_bitrate_kbps=1000,
             median_bitrate_kbps=970,
-            source_lineage="lossless_source",
+            subject="source",
         ),
         verified_lossless_proof=VerifiedLosslessProof(
-            proof_origin="import",
+            provenance="measured",
             source="flac",
             classifier="spectral",
             detail="genuine cliff",
@@ -98,7 +99,7 @@ class TestShouldWriteSidecar(unittest.TestCase):
         self.assertTrue(should_write_sidecar(_verified_lossless_evidence()))
 
     def test_non_verified_lossless_evidence_does_not(self):
-        # Default builder measurement has verified_lossless=False.
+        # Default builder evidence has no verified-lossless proof.
         self.assertFalse(should_write_sidecar(make_album_quality_evidence()))
 
 
@@ -139,7 +140,7 @@ class TestBuildSidecar(unittest.TestCase):
     def test_proof_block(self):
         self.assertIsNotNone(self.sidecar.proof)
         assert self.sidecar.proof is not None
-        self.assertEqual(self.sidecar.proof.proof_origin, "import")
+        self.assertEqual(self.sidecar.proof.provenance, "measured")
         self.assertEqual(self.sidecar.proof.source, "flac")
         self.assertEqual(self.sidecar.proof.classifier, "spectral")
         self.assertEqual(self.sidecar.proof.detail, "genuine cliff")
@@ -148,7 +149,8 @@ class TestBuildSidecar(unittest.TestCase):
         self.assertIsNotNone(self.sidecar.v0_metric)
         assert self.sidecar.v0_metric is not None
         self.assertEqual(self.sidecar.v0_metric.avg_bitrate_kbps, 1000)
-        self.assertEqual(self.sidecar.v0_metric.source_lineage, "lossless_source")
+        self.assertEqual(self.sidecar.v0_metric.subject, "source")
+        self.assertEqual(self.sidecar.v0_metric.provenance, "measured")
 
     def test_tracks_block(self):
         self.assertEqual(len(self.sidecar.tracks), 2)
@@ -183,6 +185,21 @@ class TestSidecarWireBoundary(unittest.TestCase):
         encoded = msgspec.json.encode(sidecar)
         decoded = msgspec.json.decode(encoded, type=AlbumSidecar)
         self.assertEqual(decoded, sidecar)
+
+    def test_v2_wire_keys_do_not_reinterpret_v1_vocabulary(self):
+        sidecar = build_sidecar(
+            _verified_lossless_evidence(),
+            source_username="peer",
+            generated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        )
+        payload = msgspec.to_builtins(sidecar)
+
+        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["proof"]["provenance"], "measured")
+        self.assertNotIn("proof_origin", payload["proof"])
+        self.assertEqual(payload["v0_metric"]["subject"], "source")
+        self.assertEqual(payload["v0_metric"]["provenance"], "measured")
+        self.assertNotIn("source_lineage", payload["v0_metric"])
 
     def test_filename_constant_is_visible_not_dotfile(self):
         # Must be browsable on slskd shares by other Cratediggers.

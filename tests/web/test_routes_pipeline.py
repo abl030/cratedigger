@@ -22,7 +22,7 @@ import unittest
 from unittest.mock import patch
 
 import msgspec
-from web.classify import ClassifiedEntry
+from web.classify import ClassifiedEntry, LogEntry, classify_log_entry
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -171,6 +171,97 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
             },
             "pipeline log counts",
         )
+
+    def test_have_analysis_error_contract_and_copy(self):
+        """AE3: environment failures stay diagnostic and retryable."""
+        installed_path = "/mnt/virtio/Music/Beets/Low/Things We Lost"
+        candidate_reference = "/mnt/virtio/Music/Incoming/auto-import/101"
+        raw_error = "PermissionError: [Errno 13] Permission denied"
+        failure = {
+            "failure_category": "permission_denied",
+            "error": raw_error,
+            "installed_path": installed_path,
+            "candidate_reference": candidate_reference,
+        }
+        log_id = self.db.log_download(
+            101,
+            outcome="have_analysis_error",
+            beets_scenario="have_analysis_error",
+            soulseek_username="archive-peer",
+            download_path=installed_path,
+            staged_path=candidate_reference,
+            error_message=raw_error,
+            validation_result=failure,
+        )
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        _assert_required_fields(
+            self,
+            item,
+            {
+                "download_path", "staged_path", "failure_category",
+                "analysis_error", "installed_path", "candidate_reference",
+            },
+            "HAVE analysis error Recents row",
+        )
+        self.assertEqual(item["badge"], "Environment failure")
+        self.assertEqual(item["badge_class"], "badge-warn")
+        self.assertEqual(item["border_color"], "#a86f20")
+        self.assertEqual(item["failure_category"], "permission_denied")
+        self.assertEqual(item["analysis_error"], raw_error)
+        self.assertEqual(item["installed_path"], installed_path)
+        self.assertEqual(item["candidate_reference"], candidate_reference)
+        self.assertEqual(item["request_status"], "wanted")
+        self.assertIn("remains wanted", item["summary"])
+        self.assertIn("future download will retry normally", item["summary"])
+
+        detail_status, detail = self._get("/api/pipeline/101")
+        self.assertEqual(detail_status, 200)
+        history_item = next(
+            row for row in detail["history"] if row["id"] == log_id
+        )
+        self.assertEqual(history_item["failure_category"], "permission_denied")
+        self.assertEqual(history_item["installed_path"], installed_path)
+        self.assertEqual(history_item["candidate_reference"], candidate_reference)
+
+    def test_have_analysis_error_classification_survives_malformed_payload(self):
+        entry = LogEntry.from_row({
+            "outcome": "have_analysis_error",
+            "download_path": "/library/current",
+            "staged_path": "/incoming/candidate",
+            "error_message": "analyser exited 9",
+            "validation_result": "{malformed",
+        })
+
+        classified = classify_log_entry(entry)
+
+        self.assertEqual(classified.badge, "Environment failure")
+        self.assertEqual(classified.badge_class, "badge-warn")
+        self.assertEqual(classified.border_color, "#a86f20")
+        self.assertIsNone(classified.failure_category)
+        self.assertEqual(classified.analysis_error, "analyser exited 9")
+        self.assertEqual(classified.installed_path, "/library/current")
+        self.assertEqual(classified.candidate_reference, "/incoming/candidate")
+        self.assertIn("remains wanted", classified.verdict)
+
+    def test_have_analysis_branch_does_not_change_existing_outcomes(self):
+        expected = {
+            "rejected": ("Rejected", "badge-rejected", "#a33"),
+            "timeout": ("Failed", "badge-failed", "#a33"),
+            "failed": ("Failed", "badge-failed", "#a33"),
+            "force_import": ("Force imported", "badge-force", "#46a"),
+        }
+        for outcome, display in expected.items():
+            with self.subTest(outcome=outcome):
+                classified = classify_log_entry(LogEntry(outcome=outcome))
+                self.assertEqual(
+                    (classified.badge, classified.badge_class,
+                     classified.border_color),
+                    display,
+                )
 
     def test_pipeline_log_beets_never_backfills_attempt_have(self):
         import web.server as srv
@@ -338,7 +429,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
                 min_bitrate_kbps=246,
                 avg_bitrate_kbps=258,
                 median_bitrate_kbps=257,
-                source_lineage="lossless_source",
+                subject="source",
             ),
             codec="opus",
             container="opus",
@@ -408,7 +499,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(item["existing_median_bitrate"], 122)
         self.assertEqual(item["existing_spectral_grade"], "likely_transcode")
         self.assertEqual(item["existing_spectral_bitrate"], 96)
-        self.assertEqual(item["existing_v0_probe_kind"], "lossless_source")
+        self.assertEqual(item["existing_v0_probe_kind"], "source")
         self.assertEqual(item["existing_v0_probe_min_bitrate"], 246)
         self.assertEqual(item["existing_v0_probe_avg_bitrate"], 258)
         self.assertEqual(item["materialized_format"], "Opus")
@@ -451,7 +542,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
                 min_bitrate_kbps=193,
                 avg_bitrate_kbps=256,
                 median_bitrate_kbps=258,
-                source_lineage="lossless_source",
+                subject="source",
             ),
             codec="opus",
             container="opus",
@@ -486,7 +577,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(item["existing_median_bitrate"], 128)
         self.assertEqual(item["existing_spectral_grade"], "suspect")
         self.assertEqual(item["existing_spectral_bitrate"], 96)
-        self.assertEqual(item["existing_v0_probe_kind"], "lossless_source")
+        self.assertEqual(item["existing_v0_probe_kind"], "source")
         self.assertEqual(item["existing_v0_probe_min_bitrate"], 193)
         self.assertEqual(item["existing_v0_probe_avg_bitrate"], 256)
 
@@ -540,7 +631,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
                 min_bitrate_kbps=245,
                 avg_bitrate_kbps=268,
                 median_bitrate_kbps=268,
-                source_lineage="on_disk_research",
+                subject="installed",
             ),
             lineage_version=1,
         )
@@ -574,7 +665,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(item["existing_spectral_grade"], "genuine")
         self.assertEqual(item["existing_spectral_bitrate"], 96)
         self.assertEqual(
-            item["existing_v0_probe_kind"], "on_disk_research"
+            item["existing_v0_probe_kind"], "installed"
         )
         self.assertEqual(item["existing_v0_probe_min_bitrate"], 245)
         self.assertEqual(item["existing_v0_probe_avg_bitrate"], 268)
@@ -633,6 +724,8 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
                     format="MP3",
                     spectral_grade="likely_transcode",
                     spectral_bitrate_kbps=160,
+                    spectral_subject="installed",
+                    spectral_provenance="measured",
                 ),
                 materialized_measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=99,
@@ -724,7 +817,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
                 min_bitrate_kbps=201,
                 avg_bitrate_kbps=259,
                 median_bitrate_kbps=255,
-                source_lineage="native_lossy_research",
+                subject="installed",
             ),
         )
         self.db.upsert_album_quality_evidence(evidence)

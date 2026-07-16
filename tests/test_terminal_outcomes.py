@@ -15,6 +15,7 @@ from lib.terminal_outcomes import (
     ImportJobTerminal,
     ImportTerminalOutcome,
     PreviewTerminalOutcome,
+    TerminalCooldown,
     TerminalDenylist,
     TerminalDownloadAudit,
 )
@@ -317,6 +318,55 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             seed=_seed_running_import,
             command_factory=command,
             expected_boundaries=expected,
+            persist_method="persist_import_terminal_outcome",
+        )
+
+    def test_cooldown_only_analysis_abort_is_all_or_none(self):
+        def seed() -> tuple[PipelineDB, int, int]:
+            db, request_id, job_id = _seed_running_import()
+            for _ in range(4):
+                db.log_download(
+                    request_id,
+                    soulseek_username="analysis-peer",
+                    outcome="failed",
+                )
+            return db, request_id, job_id
+
+        def command(request_id: int, job_id: int) -> ImportTerminalOutcome:
+            return ImportTerminalOutcome(
+                request_id=request_id,
+                import_job_id=job_id,
+                initial_transition=transitions.RequestTransition.to_wanted(
+                    attempt_type="validation",
+                ),
+                audit=TerminalDownloadAudit(
+                    outcome="have_analysis_error",
+                    soulseek_username="analysis-peer",
+                    beets_scenario="have_analysis_error",
+                    validation_result=(
+                        '{"failure_category":"analyser_failure",'
+                        '"error":"ffmpeg crashed"}'
+                    ),
+                ),
+                cooldowns=(TerminalCooldown("analysis-peer"),),
+                job=ImportJobTerminal(
+                    status="failed",
+                    result={"success": False},
+                    message="analysis failed",
+                    error="analysis failed",
+                ),
+            )
+
+        self._assert_rolls_back_at_every_boundary(
+            seed=seed,
+            command_factory=command,
+            expected_boundaries=(
+                "request.wanted",
+                "request.attempt.validation",
+                "download_log",
+                "cooldown",
+                "import_job.failed",
+            ),
             persist_method="persist_import_terminal_outcome",
         )
 
@@ -730,6 +780,82 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         self.assertEqual(fake.write_boundaries, expected)
         self.assertIn("parity-peer", real.get_cooled_down_users())
         self.assertIn("parity-peer", fake.user_cooldowns)
+
+    def test_cooldown_only_command_matches_real_without_denylist(self):
+        real, request_id, job_id = _seed_running_import()
+        self.addCleanup(real.close)
+        for _ in range(4):
+            real.log_download(
+                request_id,
+                soulseek_username="analysis-peer",
+                outcome="failed",
+            )
+
+        fake = FakePipelineDB()
+        fake.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": []},
+        ))
+        fake_job = fake.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=42,
+            payload={},
+        )
+        fake.mark_import_job_preview_importable(fake_job.id, preview_result={})
+        fake_claimed = fake.claim_next_import_job(worker_id="analysis-parity")
+        assert fake_claimed is not None
+        for _ in range(4):
+            fake.log_download(
+                42,
+                soulseek_username="analysis-peer",
+                outcome="failed",
+            )
+        fake.set_cooldown_result(True)
+
+        def command(owner: int, owned_job: int) -> ImportTerminalOutcome:
+            return ImportTerminalOutcome(
+                request_id=owner,
+                import_job_id=owned_job,
+                initial_transition=transitions.RequestTransition.to_wanted(
+                    attempt_type="validation",
+                ),
+                audit=TerminalDownloadAudit(
+                    outcome="have_analysis_error",
+                    soulseek_username="analysis-peer",
+                    beets_scenario="have_analysis_error",
+                    validation_result=(
+                        '{"failure_category":"analyser_failure",'
+                        '"error":"ffmpeg crashed"}'
+                    ),
+                ),
+                cooldowns=(TerminalCooldown("analysis-peer"),),
+                job=ImportJobTerminal(
+                    status="failed",
+                    error="analysis failed",
+                    result={"success": False},
+                    message="analysis failed",
+                ),
+            )
+
+        real_result = real.persist_import_terminal_outcome(
+            command(request_id, job_id)
+        )
+        fake_result = fake.persist_import_terminal_outcome(
+            command(42, fake_claimed.id)
+        )
+
+        real_row = real.get_request(request_id)
+        assert real_row is not None
+        self.assertEqual(real_row["status"], fake.request(42)["status"])
+        self.assertEqual(real_row["validation_attempts"], 1)
+        self.assertEqual(fake.request(42)["validation_attempts"], 1)
+        self.assertEqual(real_result.cooled_down_users, frozenset({"analysis-peer"}))
+        self.assertEqual(fake_result.cooled_down_users, frozenset({"analysis-peer"}))
+        self.assertEqual(real.get_denylisted_users(request_id), [])
+        self.assertEqual(fake.get_denylisted_users(42), [])
+        self.assertIn("analysis-peer", real.get_cooled_down_users())
+        self.assertIn("analysis-peer", fake.get_cooled_down_users())
 
 
 if __name__ == "__main__":

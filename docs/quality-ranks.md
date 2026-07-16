@@ -25,10 +25,10 @@ band (`QualityRank`) and comparing bands first, bitrates second.
 
 ```
 LOSSLESS     100   FLAC, ALAC, WAV
-TRANSPARENT   60   MP3 V0, MP3 CBR 320, Opus 128+, AAC 192+
-EXCELLENT     50   MP3 V1-V2, MP3 CBR 256, Opus 96, AAC 144+
-GOOD          40   MP3 V3-V4, MP3 CBR 192, Opus 64, AAC 112+
-ACCEPTABLE    30   MP3 V5-V9, MP3 CBR 128, Opus 48, AAC 80+
+TRANSPARENT   60   MP3 V0, MP3 CBR 320, Opus 112+, AAC 192+, Vorbis 192+, WMA 320
+EXCELLENT     50   MP3 V1-V2, MP3 CBR 256, Opus 88+, AAC 144+, Vorbis 160+, WMA 256+
+GOOD          40   MP3 V3-V4, MP3 CBR 192, Opus 64+, AAC 112+, Vorbis 112+, WMA 192+
+ACCEPTABLE    30   MP3 V5-V9, MP3 CBR 128, Opus 48+, AAC 80+, Vorbis 96+, WMA 128+
 POOR          20   below acceptable floor
 UNKNOWN        0   not enough info to classify
 ```
@@ -46,12 +46,14 @@ through six steps, in order:
 3. Explicit VBR label (`"mp3 v0"`, `"mp3 v2"`, ...) → index into
    `cfg.mp3_vbr_levels` (10-tuple indexed by V0..V9). VBR labels are
    self-certifying — the bitrate is irrelevant because V0 is V0.
-4. Explicit bitrate label (`"opus 128"`, `"mp3 320"`, `"aac 192"`) → classify
+4. Explicit bitrate label (`"opus 128"`, `"mp3 320"`, `"aac 192"`,
+   `"vorbis 192"`, `"wma 320"`) → classify
    the declared numeric bitrate against the matching codec's `CodecRankBands`.
    The label is a contract; the actual measured bitrate is ignored.
-5. Bare codec name (`"MP3"`, `"Opus"`, `"AAC"` from beets `items.format`) →
-   classify the measured `bitrate_kbps` against the band table. `"MP3"`
-   with `is_cbr=True` uses `cfg.mp3_cbr`, otherwise `cfg.mp3_vbr`.
+5. Bare codec name (`"MP3"`, `"Opus"`, `"AAC"`, `"Vorbis"`, `"WMA"` from
+   beets `items.format`) → classify the measured `bitrate_kbps` against the
+   band table. `"MP3"` with `is_cbr=True` uses `cfg.mp3_cbr`, otherwise
+   `cfg.mp3_vbr`. Vorbis and WMA each use one table regardless of `is_cbr`.
 6. Unknown codec → `UNKNOWN`.
 
 The **label path** (step 3-4) is what makes lo-fi V0 imports work without the
@@ -65,7 +67,7 @@ Primary key is the rank. Within the same rank:
 
 - **LOSSLESS always equivalent** — FLAC bitrate variance (800-1100) has no
   quality meaning.
-- **Different codec families** (Opus vs MP3 vs AAC vs FLAC) → **equivalent**.
+- **Different codec families** (Opus vs MP3 vs AAC vs Vorbis vs WMA vs FLAC) → **equivalent**.
   This is the core cross-codec parity fix.
 - **Same codec family, either side carries an explicit label** → equivalent.
   A V0 label and a "mp3 320" label at the same rank are both contracts.
@@ -200,10 +202,10 @@ so bare-codec MP3 VBR measurements from beets keep behaving as they did
 before the rank model. 245 adds a "V0 target" band above. The V0/V2/V4/etc.
 mapping via `mp3_vbr_levels` handles labeled conversions separately.
 
-`QUALITY_MIN_BITRATE_KBPS` is now defaults-only — gate behavior is driven
-by `cfg.quality_ranks.gate_min_rank`, and every numeric threshold (including
-this 210) lives in `QualityRankConfig` and can be retuned in the
-`[Quality Ranks]` section of `config.ini`.
+`QUALITY_MIN_BITRATE_KBPS` is now defaults-only. Every numeric classification
+threshold (including this 210) lives in `QualityRankConfig` and can be retuned
+in the `[Quality Ranks]` section of `config.ini`. Ranks govern relative
+replacement and search narrowing; they are not an acceptance floor.
 
 ### MP3 CBR
 
@@ -230,6 +232,38 @@ clamp it down further.
 Hydrogenaudio consensus places the "not worth going higher for music" ceiling
 for AAC at 192.
 
+### Vorbis (quality-based VBR)
+
+| Band | Threshold (kbps) |
+|------|------------------|
+| transparent | 192 |
+| excellent | 160 |
+| good | 112 |
+| acceptable | 96 |
+
+These conservative album-average thresholds approximate the reference
+encoder's q2/q3/q5/q6 regions. Vorbis uses one table: the unreliable generic
+`is_cbr` inference never selects a second table. Ogg remains a container and
+search selector, not a rank family; an Opus stream inside Ogg is still `opus`,
+while a true Vorbis stream is `vorbis`.
+
+### WMA
+
+| Band | Threshold (kbps) |
+|------|------------------|
+| transparent | 320 |
+| excellent | 256 |
+| good | 192 |
+| acceptable | 128 |
+
+WMA uses one conservative table mirroring MP3 CBR. It does not branch on
+`is_cbr`.
+
+Band rank and spectral authority are separate. A Vorbis or WMA measurement at
+or above the transparent threshold does not become spectrally genuine: a
+`suspect` or `likely_transcode` grade cannot authorize lossless-only search
+narrowing merely because the container bitrate is high.
+
 ## The verified-lossless guardrail
 
 `import_quality_decision()` used to blanket-bypass on `verified_lossless=True`.
@@ -239,9 +273,11 @@ It now tier-gates the bypass:
 - `verified_lossless=True` + verdict `"worse"` → **downgrade** (blocked).
 
 This prevents a deliberately-too-low `verified_lossless_target` (Opus 64,
-Opus 48) from replacing a good existing album. The cratedigger process also logs
-a warning at startup when `verified_lossless_target` classifies below
-`gate_min_rank`, so operators see the contradiction before it bites.
+Opus 48) from replacing a good existing album. The cratedigger process also
+logs a warning at startup when `verified_lossless_target` classifies below the
+canonical TRANSPARENT rank: a first acquisition bearing verified-lossless
+proof completes terminally, so an under-quality target would stop further
+automatic searching.
 
 ## Tuning via config.ini
 
@@ -252,7 +288,6 @@ else stays at defaults).
 ```ini
 [Quality Ranks]
 bitrate_metric = avg
-gate_min_rank = excellent
 within_rank_tolerance_kbps = 5
 
 opus.transparent = 112
@@ -275,11 +310,21 @@ aac.excellent = 144
 aac.good = 112
 aac.acceptable = 80
 
+vorbis.transparent = 192
+vorbis.excellent = 160
+vorbis.good = 112
+vorbis.acceptable = 96
+
+wma.transparent = 320
+wma.excellent = 256
+wma.good = 192
+wma.acceptable = 128
+
 # Collection fields (issue #65). All three are CSV. Defaults are sensible —
 # you almost certainly do not need to set these.
 mp3_vbr_levels = TRANSPARENT,EXCELLENT,EXCELLENT,GOOD,GOOD,ACCEPTABLE,ACCEPTABLE,ACCEPTABLE,ACCEPTABLE,ACCEPTABLE
 lossless_codecs = flac,lossless,alac,wav
-mixed_format_precedence = mp3,aac,opus,flac
+mixed_format_precedence = wma,mp3,vorbis,aac,opus,flac
 ```
 
 ### Collection fields (mp3_vbr_levels / lossless_codecs / mixed_format_precedence)
@@ -302,8 +347,8 @@ issue #65 wires them through the INI parser.
 - **`mixed_format_precedence`** — comma-separated **ordered** tuple. When an
   album has tracks in multiple codecs (rare — usually a manually merged
   album), `_reduce_album_format()` walks this list in order and picks the
-  first codec that appears on disk. The default `mp3, aac, opus, flac` is
-  worst-first, so a mixed FLAC+MP3 album classifies as MP3 (the
+  first codec that appears on disk. The default `wma, mp3, vorbis, aac, opus,
+  flac` is worst-first, so a mixed FLAC+MP3 album classifies as MP3 (the
   conservative choice). Reorder if you want a different "canonical codec"
   policy.
 
@@ -364,7 +409,6 @@ All options live under `services.cratedigger.qualityRanks.*` and are declared by
 
 | Option | Type | Default | Meaning |
 |---|---|---|---|
-| `gateMinRank` | enum (`unknown`, `poor`, `acceptable`, `good`, `excellent`, `transparent`, `lossless`) | `"excellent"` | Minimum rank an imported album must reach before the quality gate accepts it. Below this → re-queue for upgrade. Raise to tighten (reject more albums); lower to accept lower-quality sources. |
 | `bitrateMetric` | enum (`min`, `avg`, `median`) | `"avg"` | Which per-album bitrate statistic feeds rank classification. `avg` is robust to VBR per-track variance. `median` is outlier-resistant -- prefer when albums commonly have quiet intros/hidden tracks/skits that skew `avg`. `min` is legacy and penalizes legitimately-encoded lo-fi VBR. See `docs/quality-ranks.md` "When to prefer median". |
 | `withinRankToleranceKbps` | int | `5` | Same-rank equivalence window in kbps. Two bare-codec measurements in the same rank tier within this tolerance are "equivalent"; outside it, one is "better"/"worse". |
 
@@ -373,9 +417,11 @@ All options live under `services.cratedigger.qualityRanks.*` and are declared by
 | Codec | transparent | excellent | good | acceptable | Notes |
 |---|---|---|---|---|---|
 | `bands.opus`   | 112 | 88  | 64  | 48  | Unconstrained Opus VBR averages 120-135 kbps typical / 95-150 kbps per track. 112 leaves headroom for sparse material; 88 matches Opus 96 hydrogenaudio quality. |
-| `bands.mp3Vbr` | 245 | 210 | 170 | 130 | `excellent=210` preserves the legacy `QUALITY_MIN_BITRATE_KBPS=210` gate threshold. V0 typically averages 220-260; V2 ~190 → `good=170`. **`excellent` also feeds `transcode_detection()` as the spectral-fallback threshold** (#66) so lowering it implicitly lowers what counts as "credible V0" when spectral is unavailable. |
+| `bands.mp3Vbr` | 245 | 210 | 170 | 130 | V0 typically averages 220-260; V2 ~190 → `good=170`. Spectral evidence is authoritative; these bitrate bands classify measured quality but never substitute for a missing or failed spectral analysis. |
 | `bands.mp3Cbr` | 320 | 256 | 192 | 128 | Unverifiable CBR is only `transparent` at 320 because we can't prove a CBR file came from lossless source. Below that → requeue for a FLAC source to re-verify. |
 | `bands.aac`    | 192 | 144 | 112 | 80  | Hydrogenaudio consensus places the "no meaningful quality gain above here" ceiling for music at 192 kbps. |
+| `bands.vorbis` | 192 | 160 | 112 | 96  | Conservative q2/q3/q5/q6-region approximation. One table; `is_cbr` does not change routing. |
+| `bands.wma`    | 320 | 256 | 192 | 128 | Conservative WMA Standard table mirroring MP3 CBR. One table; `is_cbr` does not change routing. |
 
 Leaving every option at its default produces exactly `QualityRankConfig.defaults()` -- the defaults above are the shipping values.
 
@@ -397,9 +443,9 @@ Three fields are part of the rank model but are NOT surfaced as Nix options beca
 
 - **`mixed_format_precedence`** -- ordered tuple used by `_reduce_album_format()` when an album on disk has tracks in multiple codecs (rare -- usually a manually-merged album). Walked in order; the first codec that appears on the album becomes the album's canonical codec for rank classification. Order matters.
 
-  **Default**: `("mp3", "aac", "opus", "flac")` -- worst codec wins, so a mixed FLAC+MP3 album classifies as MP3 (conservative).
+  **Default**: `("wma", "mp3", "vorbis", "aac", "opus", "flac")` -- worst codec wins, so a mixed FLAC+MP3 album classifies as MP3 (conservative).
 
-  **When to retune**: reverse to `("flac", "opus", "aac", "mp3")` if you'd rather have mixed-format albums classified by the *best* codec on disk (less conservative -- you'll accept more as "good enough"). The default is the conservative choice for a curated library.
+  **When to retune**: reverse to `("flac", "opus", "aac", "vorbis", "mp3", "wma")` if you'd rather have mixed-format albums classified by the *best* codec on disk (less conservative -- you'll accept more as "good enough"). The default is the conservative choice for a curated library.
 
 ### How to tune and deploy
 
@@ -425,6 +471,6 @@ ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --ref
 
 1. **Read the generated file** -- `ssh doc2 'sudo cat /var/lib/cratedigger/config.ini | grep -A 30 "\[Quality Ranks\]"'`. The section should show the exact values from your Nix edit.
 
-2. **Check the runtime picks them up** -- `ssh doc2 'pipeline-cli quality <any_request_id>'`. The output prints the active `gate_min_rank`, `bitrate_metric`, and thresholds the simulator is using. Mismatch means Cratedigger hasn't restarted since the rebuild (it's a 5-min timer) -- wait a cycle or `sudo systemctl start cratedigger --no-block`.
+2. **Check the runtime picks them up** -- `ssh doc2 'pipeline-cli quality <any_request_id>'`. The output prints the active `bitrate_metric` and simulates decisions with the configured codec thresholds. Mismatch means Cratedigger hasn't restarted since the rebuild (it's a 5-min timer) -- wait a cycle or `sudo systemctl start cratedigger --no-block`.
 
 3. **Simulate against the live config** -- `ssh doc2 'pipeline-cli import-preview --values --values-json '"'"'{"is_flac": false, "min_bitrate": 200, "is_cbr": false}'"'"''`. The preview path loads the same runtime rank config the importer uses, so the verdict reflects your tuning (the web Decisions tab that used to render these values was removed in #575).

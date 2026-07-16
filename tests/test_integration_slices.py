@@ -40,8 +40,10 @@ from tests.fakes import (
     RecordingProcessAlbum,
 )
 from tests.helpers import (
+    RecordingQualityGate,
     make_album_quality_evidence,
     make_ctx_with_fake_db,
+    make_download_file,
     make_import_result,
     make_request_row,
     patch_dispatch_externals,
@@ -49,6 +51,16 @@ from tests.helpers import (
 
 
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
+
+
+def _preview_worker_config() -> CratediggerConfig:
+    ini = configparser.ConfigParser()
+    ini["Beets Validation"] = {
+        "harness_path": _HARNESS,
+        "audio_check": "off",
+    }
+    ini["Pipeline DB"] = {"enabled": "true"}
+    return CratediggerConfig.from_ini(ini)
 
 
 # Migration 021 helpers — seed evidence and wire the FK chain that
@@ -494,9 +506,11 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
     """
 
     def _run_dispatch(self, ir, beets_info, request_overrides=None, cfg=None,
-                      distance: "float | None" = 0.05):
+                      distance: "float | None" = 0.05, *, force=False,
+                      scenario="strong_match", quality_gate_fn=None):
         """Dispatch an import and return the FakePipelineDB state."""
-        from lib.dispatch import dispatch_import_core
+        from lib.dispatch import _check_quality_gate_core, dispatch_import_core
+        from lib.dispatch.types import EvidenceImportGate
 
         db = FakePipelineDB()
         request_overrides = {
@@ -517,9 +531,45 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         stdout = _make_stdout(ir)
 
         tmpdir = tempfile.mkdtemp()
+        original_album_path = beets_info.album_path
         try:
+            # The post-U11 gate reads only linked current evidence.  Exercise
+            # the real post-import refresh by giving the mocked Beets row an
+            # actual installed snapshot instead of the historical
+            # non-existent ``/Beets/Test`` placeholder.
+            beets_info.album_path = tmpdir
+            with open(
+                os.path.join(tmpdir, "01 - Track.mp3"),
+                "wb",
+            ) as installed:
+                installed.write(b"installed audio")
+            source = ir.source_measurement
+            candidate = make_album_quality_evidence(
+                mb_release_id="mbid-123",
+                source_path=tmpdir,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=beets_info.min_bitrate_kbps,
+                    avg_bitrate_kbps=beets_info.avg_bitrate_kbps,
+                    median_bitrate_kbps=beets_info.median_bitrate_kbps,
+                    format=beets_info.format,
+                    is_cbr=beets_info.is_cbr,
+                    spectral_grade=(source.spectral_grade if source else None),
+                    spectral_bitrate_kbps=(
+                        source.spectral_bitrate_kbps if source else None
+                    ),
+                    spectral_subject=(source.spectral_subject if source else None),
+                    spectral_provenance=(
+                        source.spectral_provenance if source else None
+                    ),
+                ),
+                verified_lossless_proof=ir.verified_lossless_proof,
+            )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
+                 patch(
+                     "lib.dispatch.core._load_evidence_import_gate",
+                     return_value=EvidenceImportGate(candidate=candidate),
+                 ):
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=stdout, stderr="")
                 dispatch_import_core(
@@ -530,17 +580,50 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
                     beets_harness_path=_HARNESS,
                     db=db,  # type: ignore[arg-type]
                     dl_info=dl_info,
+                    force=force,
                     distance=distance,
-                    scenario="strong_match",
+                    scenario=scenario,
                     files=[MagicMock(username="user1",
                                      filename="01 - Track.mp3")],
                     cfg=cfg,
+                    quality_gate_fn=(
+                        quality_gate_fn
+                        if quality_gate_fn is not None
+                        else _check_quality_gate_core
+                    ),
                 )
         finally:
+            beets_info.album_path = original_album_path
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
 
         return db
+
+    def test_force_and_manual_imports_skip_automatic_search_policy(self):
+        """Explicit operator imports remain imported and never invoke U5."""
+        ir = make_import_result(decision="import", new_min_bitrate=180)
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=180,
+            avg_bitrate_kbps=180, format="MP3", is_cbr=False,
+            album_path="/Beets/Test")
+
+        for force, scenario in (
+            (True, "force_import"),
+            (False, "manual_import"),
+        ):
+            with self.subTest(scenario=scenario):
+                gate = MagicMock(
+                    side_effect=AssertionError(
+                        "operator import invoked automatic quality gate"))
+                db = self._run_dispatch(
+                    ir,
+                    beets_info,
+                    force=force,
+                    scenario=scenario,
+                    quality_gate_fn=gate,
+                )
+                gate.assert_not_called()
+                self.assertEqual(db.request(42)["status"], "imported")
 
     def test_import_with_unmeasured_distance_records_null(self):
         """#550 defect #4: dispatch with distance=None (the production
@@ -562,15 +645,19 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
             request_overrides={"beets_distance": 0.31})
 
         row = db.request(42)
-        self.assertEqual(row["status"], "imported")
+        # Distance is audit metadata, not proof.  Candidate/source spectral
+        # evidence cannot narrow search until the installed snapshot is
+        # measured, so the retained copy keeps the full search surface open.
+        self.assertEqual(row["status"], "wanted")
+        self.assertIsNone(row["search_filetype_override"])
         self.assertIsNone(
             row["beets_distance"],
             "an unmeasured (None) dispatch distance must persist as NULL "
             "on the request row, not a fabricated number")
         db.assert_log(self, 0, outcome="success", beets_distance=None)
 
-    def test_import_quality_accept(self):
-        """VBR 245kbps → quality gate accepts → imported, override cleared."""
+    def test_unverified_transparent_import_keeps_full_tier_search(self):
+        """Source evidence cannot narrow before the installed copy is scanned."""
         ir = make_import_result(decision="import", new_min_bitrate=245)
         beets_info = AlbumInfo(
             album_id=1, track_count=10, min_bitrate_kbps=245,
@@ -580,9 +667,10 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         db = self._run_dispatch(ir, beets_info)
 
         row = db.request(42)
-        self.assertEqual(row["status"], "imported")
+        self.assertEqual(row["status"], "wanted")
         self.assertIsNone(row["search_filetype_override"])
         self.assertEqual(row["min_bitrate"], 245)
+        self.assertEqual(len(db.denylist), 1)
         self.assertEqual(len(db.download_logs), 1)
         db.assert_log(self, 0, outcome="success", request_id=42)
 
@@ -616,8 +704,8 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
             "destination from ImportResult.postflight, not dispatch's "
             "source path (the /tmp staging/failed_imports dir)")
 
-    def test_import_quality_requeue_upgrade(self):
-        """VBR 180kbps → quality gate requeues for upgrade → wanted, denylist."""
+    def test_unverified_subtransparent_import_keeps_full_tier_search(self):
+        """VBR 180 is retained but stays wanted on the full search surface."""
         ir = make_import_result(decision="import", new_min_bitrate=180)
         beets_info = AlbumInfo(
             album_id=1, track_count=10, min_bitrate_kbps=180,
@@ -628,15 +716,15 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
 
         row = db.request(42)
         self.assertEqual(row["status"], "wanted")
-        self.assertEqual(row["search_filetype_override"], QUALITY_UPGRADE_TIERS)
+        self.assertIsNone(row["search_filetype_override"])
         self.assertEqual(row["min_bitrate"], 180)
         # Source denylisted for low quality
         self.assertEqual(len(db.denylist), 1)
         self.assertEqual(db.denylist[0].username, "user1")
         self.assertIn("quality gate", db.denylist[0].reason or "")
 
-    def test_import_quality_requeue_lossless(self):
-        """CBR 320 → quality gate requeues for lossless → wanted, lossless override."""
+    def test_import_without_installed_spectral_requeues_full_tiers(self):
+        """CBR 320 source facts do not establish installed-HAVE authority."""
         ir = make_import_result(decision="import", new_min_bitrate=320)
         beets_info = AlbumInfo(
             album_id=1, track_count=10, min_bitrate_kbps=320,
@@ -647,11 +735,32 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
 
         row = db.request(42)
         self.assertEqual(row["status"], "wanted")
-        self.assertEqual(row["search_filetype_override"], QUALITY_LOSSLESS)
+        self.assertIsNone(row["search_filetype_override"])
+
+    def test_dispatch_gives_quality_gate_the_exact_refreshed_evidence_id(self):
+        ir = make_import_result(decision="import", new_min_bitrate=245)
+        beets_info = AlbumInfo(
+            album_id=1,
+            track_count=10,
+            min_bitrate_kbps=245,
+            avg_bitrate_kbps=245,
+            format="MP3",
+            is_cbr=False,
+            album_path="/Beets/Test",
+        )
+        gate = RecordingQualityGate()
+
+        db = self._run_dispatch(ir, beets_info, quality_gate_fn=gate)
+
+        gate.assert_called_once()
+        self.assertEqual(
+            gate.calls[0]["expected_current_evidence_id"],
+            db.get_request_current_evidence_id(42),
+        )
 
 
-    def test_transcode_upgrade_requeues_with_denylist(self):
-        """Transcode upgrade → mark_done + requeue to upgrade tiers + denylist."""
+    def test_transcode_upgrade_requeues_full_tiers_with_denylist(self):
+        """A retained transcode remains wanted on full tiers and is denylisted."""
         ir = make_import_result(decision="transcode_upgrade", new_min_bitrate=227)
         beets_info = AlbumInfo(
             album_id=1, track_count=10, min_bitrate_kbps=227,
@@ -663,7 +772,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         row = db.request(42)
         # Transcode upgrade requeues directly (no quality gate)
         self.assertEqual(row["status"], "wanted")
-        self.assertEqual(row["search_filetype_override"], QUALITY_UPGRADE_TIERS)
+        self.assertIsNone(row["search_filetype_override"])
         # Transcode source denylisted
         self.assertTrue(len(db.denylist) >= 1)
         db.assert_log(self, 0, outcome="success")
@@ -684,54 +793,22 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         self.assertTrue(len(db.denylist) >= 1)
         db.assert_log(self, 0, outcome="rejected")
 
-    def test_custom_gate_min_rank_accepts_lower(self):
-        """Custom gate_min_rank=GOOD must flip requeue → accept end-to-end.
+    # The custom gate-floor integration slice was retired with issue #711.
+    # The generated unverified-lossy property in test_quality_generated now
+    # owns the stronger replacement guarantee across every lossy bitrate.
 
-        Locks the runtime config threading: cfg.quality_ranks → dispatch
-        → _check_quality_gate_core → quality_gate_decision. If any hop
-        drops cfg, this test fails because the gate falls back to
-        default EXCELLENT and 180kbps still requeues.
-        """
-        from lib.quality import QualityRank, QualityRankConfig
-
-        ir = make_import_result(decision="import", new_min_bitrate=180)
-        beets_info = AlbumInfo(
-            album_id=1, track_count=10, min_bitrate_kbps=180,
-            avg_bitrate_kbps=180, format="MP3",
-            is_cbr=False, album_path="/Beets/Test")
-
-        custom_cfg = CratediggerConfig(
-            beets_harness_path=_HARNESS,
-            pipeline_db_enabled=True,
-            quality_ranks=QualityRankConfig(gate_min_rank=QualityRank.GOOD),
-        )
-
-        db = self._run_dispatch(ir, beets_info, cfg=custom_cfg)
-
-        row = db.request(42)
-        # Under default gate_min_rank=EXCELLENT, 180 MP3 VBR = GOOD → requeue.
-        # Under the custom cfg (gate_min_rank=GOOD), 180 passes.
-        self.assertEqual(
-            row["status"], "imported",
-            "cfg.quality_ranks.gate_min_rank=GOOD must thread through "
-            "dispatch_import_core → _check_quality_gate_core → "
-            "quality_gate_decision. If cfg is dropped at any hop, "
-            "180kbps falls back to the default EXCELLENT gate and requeues.")
-        self.assertIsNone(row["search_filetype_override"])
-
-    def test_median_metric_accepts_outlier_album_end_to_end(self):
-        """MEDIAN policy must thread through dispatch → quality gate (#64).
+    def test_source_metric_cannot_narrow_without_installed_spectral(self):
+        """MEDIAN policy cannot turn source-subject facts into HAVE authority.
 
         Album has tracks {60, 60, 245, 245, 245} — three V0 tracks plus two
         very-quiet intros. Under MIN the album is POOR (60), under AVG it's
         GOOD (171), and only under MEDIAN does it reach TRANSPARENT (245)
-        and pass the default EXCELLENT gate.
+        and meet the canonical TRANSPARENT narrowing boundary.
 
-        If load_quality_gate_state (lib/dispatch/) drops the
-        median field when constructing the AudioQualityMeasurement, or if
-        the rank cfg fails to thread through, this test fails because the
-        gate falls back to AVG=171 (GOOD < EXCELLENT) and requeues. This
-        is the only end-to-end coverage for the issue #64 dispatch path.
+        The median still threads through dispatch, but issue #711 requires an
+        installed-subject spectral result before any narrowing decision.  A
+        carried source measurement therefore remains on full tiers even when
+        its median meets the transparent threshold.
         """
         from lib.quality import QualityRankConfig, RankBitrateMetric
 
@@ -754,11 +831,9 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
 
         row = db.request(42)
         self.assertEqual(
-            row["status"], "imported",
-            "MEDIAN policy must thread through dispatch_import_core → "
-            "load_quality_gate_state → measurement_rank. If any hop drops "
-            "median_bitrate_kbps from the AudioQualityMeasurement, the "
-            "gate falls back to avg=171 (GOOD < EXCELLENT) and requeues.")
+            row["status"], "wanted",
+            "automatic source evidence must retain the imported copy while "
+            "waiting for an installed-subject measurement")
         self.assertIsNone(row["search_filetype_override"])
 
     def test_default_avg_metric_requeues_same_outlier_album(self):
@@ -782,7 +857,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
             row["status"], "wanted",
             "Default AVG policy on the same outlier album must requeue — "
             "if this fails, the MEDIAN slice's pass is meaningless.")
-        self.assertEqual(row["search_filetype_override"], QUALITY_UPGRADE_TIERS)
+        self.assertIsNone(row["search_filetype_override"])
 
     def test_native_vbr_import_clears_stale_final_format(self):
         """A later plain MP3 import must clear an old target-format label.
@@ -806,7 +881,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
 
         row = db.request(42)
         self.assertEqual(
-            row["status"], "imported",
+            row["status"], "wanted",
             "stale final_format labels must be cleared so the quality gate "
             "uses the new beets codec metadata")
         self.assertIsNone(row["search_filetype_override"])
@@ -835,7 +910,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
             row["status"], "wanted",
             "stale verified_lossless=True must be cleared so native CBR "
             "imports still requeue for lossless verification")
-        self.assertEqual(row["search_filetype_override"], QUALITY_LOSSLESS)
+        self.assertIsNone(row["search_filetype_override"])
         self.assertFalse(row["verified_lossless"])
 
 
@@ -845,11 +920,29 @@ class TestQualityGateVerifiedLosslessBypass(unittest.TestCase):
     def test_verified_lossless_low_bitrate_accepts(self):
         """207kbps V0 from verified FLAC → accepted via final_format='mp3 v0'."""
         from lib.dispatch import _check_quality_gate_core
+        from lib.quality import VerifiedLosslessProof
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42, status="imported", verified_lossless=True,
             final_format="mp3 v0"))
+        _seed_current_for_request(
+            db,
+            42,
+            mb_release_id="mbid-123",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=207,
+                avg_bitrate_kbps=207,
+                median_bitrate_kbps=207,
+                format="MP3",
+                is_cbr=False,
+            ),
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="carried",
+                source="flac",
+                classifier="spectral_verified_lossless",
+            ),
+        )
 
         beets_info = AlbumInfo(
             album_id=1, track_count=10, min_bitrate_kbps=207,
@@ -870,13 +963,52 @@ class TestQualityGateVerifiedLosslessBypass(unittest.TestCase):
         self.assertEqual(row["min_bitrate"], 207)
         self.assertEqual(len(db.denylist), 0)
 
+    def test_unavailable_refresh_sentinel_cannot_consume_old_proof(self):
+        from lib.dispatch import _check_quality_gate_core
+        from lib.quality import VerifiedLosslessProof
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="imported"))
+        old = _seed_current_for_request(
+            db,
+            42,
+            mb_release_id="mbid-123",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=207,
+                avg_bitrate_kbps=207,
+                median_bitrate_kbps=207,
+                format="MP3",
+                is_cbr=False,
+            ),
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="carried",
+                source="flac",
+                classifier="spectral_verified_lossless",
+            ),
+        )
+        assert old.id is not None
+
+        _check_quality_gate_core(
+            mb_id="mbid-123",
+            label="Old proof must not win",
+            request_id=42,
+            files=[make_download_file(username="user1")],
+            db=db,  # type: ignore[arg-type]
+            expected_current_evidence_id=0,
+        )
+
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertIsNone(row["search_filetype_override"])
+        self.assertEqual(len(db.denylist), 1)
+
 
 class TestQualityGateSpectralOverride(unittest.TestCase):
     """Integration slice: quality gate uses spectral bitrate when it's lower
     than beets container bitrate."""
 
-    def test_suspect_spectral_triggers_requeue(self):
-        """Container 320kbps but spectral says 128kbps → requeue for upgrade."""
+    def test_suspect_spectral_keeps_full_tier_search(self):
+        """Container 320 with suspect 128 evidence cannot narrow or terminate."""
         from lib.dispatch import _check_quality_gate_core
 
         db = FakePipelineDB()
@@ -902,9 +1034,9 @@ class TestQualityGateSpectralOverride(unittest.TestCase):
 
         row = db.request(42)
         self.assertEqual(row["status"], "wanted")
-        self.assertEqual(row["search_filetype_override"], QUALITY_UPGRADE_TIERS)
+        self.assertIsNone(row["search_filetype_override"])
         self.assertEqual(len(db.denylist), 1)
-        self.assertIn("spectral", db.denylist[0].reason or "")
+        self.assertIn("full-tier search", db.denylist[0].reason or "")
 
 
 class TestSpectralPropagationSlice(unittest.TestCase):
@@ -2166,7 +2298,7 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
             postflight=PostflightInfo(),
         )
 
-    def test_step1_brandlos_imports_transcode_over_genuine_on_avg_gain(self):
+    def test_step1_brandlos_imports_transcode_but_keeps_full_tier_search(self):
         """Step 1 of the chain. Spectral grade regresses genuine → likely_transcode
         and min drops 128 → 119, yet avg rises 172 → 179 so ``import_quality_decision``
         returns ``import``. This is the call that surprised the operator in
@@ -2175,13 +2307,15 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
         """
         new = AudioQualityMeasurement(
             min_bitrate_kbps=119, avg_bitrate_kbps=179, median_bitrate_kbps=181,
-            format="MP3", is_cbr=False, verified_lossless=False,
+            format="MP3", is_cbr=False,
             spectral_grade="likely_transcode", spectral_bitrate_kbps=160,
+            spectral_subject="source", spectral_provenance="measured",
         )
         existing = AudioQualityMeasurement(
             min_bitrate_kbps=128, avg_bitrate_kbps=172, median_bitrate_kbps=192,
-            format="MP3", is_cbr=False, verified_lossless=False,
+            format="MP3", is_cbr=False,
             spectral_grade="genuine", spectral_bitrate_kbps=128,
+            spectral_subject="installed", spectral_provenance="measured",
         )
 
         # Pin the decision logic directly. dispatch_import_core trusts the
@@ -2233,40 +2367,40 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
             "check whether someone added a 'spectral regression blocks "
             "import' rule.")
         db.assert_log(self, 0, outcome="success")
-        # The gate THEN runs on the new on-disk state (avg=179 < 210) and
-        # requeues. Status transitions imported → wanted in a single
-        # dispatch — the two-hop chain in production is built out of these
-        # single-dispatch cycles back to back.
+        # The gate THEN runs on the new unverified on-disk state and keeps
+        # searching. Status transitions imported → wanted in a single
+        # dispatch — but the retired upgrade-tier override must not constrain
+        # the next cycle.
         self.assertEqual(
             row["status"], "wanted",
-            "After the successful import, the gate must requeue for an "
-            "upgrade (avg=179 < EXCELLENT=210). This requeue is what "
-            "chained Ceezles in step 2.")
-        self.assertEqual(
-            row["search_filetype_override"], QUALITY_UPGRADE_TIERS,
-            "Requeue must set the upgrade override so the next search "
-            "prefers higher-quality tiers.")
+            "After the successful import, missing proof must keep the request "
+            "searching.")
+        self.assertIsNone(
+            row["search_filetype_override"],
+            "A transcode/provisional retained copy stays on the full search "
+            "surface; QUALITY_UPGRADE_TIERS is retired.")
 
-    def test_step2_ceezles_crosses_excellent_threshold_on_avg(self):
+    def test_step2_ceezles_cannot_terminate_on_bitrate_rank(self):
         """Step 2 of the chain. Previous state is what step 1 left on disk
         (likely_transcode 119k / 179k avg). New download is a higher-bitrate
         transcode (likely_transcode 162k / 225k avg, spectral ~192k).
 
-        Despite the file being a confirmed transcode, avg=225 crosses
-        EXCELLENT (≥210) so the quality gate accepts. This pins two things:
+        Despite avg=225 crossing the old EXCELLENT floor, the copy has no
+        verified-lossless proof and cannot terminate. This pins two things:
          - AVG is what determines rank, not MIN (162 < 210 would requeue).
-         - Verified-lossless provenance is not required for DONE — the rank
-           itself is the gate.
+         - Bitrate rank is search-policy evidence, never a terminal boundary.
         """
         new = AudioQualityMeasurement(
             min_bitrate_kbps=162, avg_bitrate_kbps=225, median_bitrate_kbps=226,
-            format="MP3", is_cbr=False, verified_lossless=False,
+            format="MP3", is_cbr=False,
             spectral_grade="likely_transcode", spectral_bitrate_kbps=192,
+            spectral_subject="source", spectral_provenance="measured",
         )
         existing = AudioQualityMeasurement(
             min_bitrate_kbps=119, avg_bitrate_kbps=179, median_bitrate_kbps=181,
-            format="MP3", is_cbr=False, verified_lossless=False,
+            format="MP3", is_cbr=False,
             spectral_grade="likely_transcode", spectral_bitrate_kbps=160,
+            spectral_subject="installed", spectral_provenance="measured",
         )
 
         # Direct assertion on the decision function — see rationale on the
@@ -2300,20 +2434,18 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
 
         row = db.request(42)
         self.assertEqual(
-            row["status"], "imported",
-            "avg=225 reaches EXCELLENT rank (≥210). If this flips to "
-            "'wanted', someone probably tightened the gate threshold or "
-            "switched the default metric to MIN — min=162 would requeue.")
+            row["status"], "wanted",
+            "An unverified lossy copy must remain wanted at every bitrate.")
         self.assertEqual(row["min_bitrate"], 162)
-        self.assertEqual(row["prev_min_bitrate"], 119)
+        # The post-import wanted transition rolls the just-imported bitrate
+        # into prev_min_bitrate; the direct decision pin above owns the
+        # pre-import delta.
         self.assertIsNone(
             row["search_filetype_override"],
-            "gate accept clears the upgrade override. If this is still "
-            "QUALITY_UPGRADE_TIERS the gate requeued despite reaching "
-            "EXCELLENT — check rank_cfg.gate_min_rank and the avg/min "
-            "metric policy.")
-        # verified_lossless stays False — we reached DONE via bitrate rank,
-        # not via a FLAC → V0 verification path.
+            "A likely-transcode copy stays on full tiers; the old upgrade "
+            "override must be cleared.")
+        self.assertGreaterEqual(len(db.denylist), 1)
+        # verified_lossless stays False, which is exactly why DONE is barred.
         self.assertFalse(row["verified_lossless"])
 
 
@@ -2520,8 +2652,9 @@ class TestReleaseLockContention(unittest.TestCase):
         self.assertIn("Another import is already in progress",
                       outcome.message)
 
-    def test_happy_path_acquires_lock_keyed_on_mbid_and_runs_import(self):
+    def test_happy_path_acquires_lock_and_retains_unverified_import(self):
         from lib.dispatch import dispatch_import_core
+        from lib.dispatch.types import EvidenceImportGate
         from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
                                      release_id_to_lock_key)
 
@@ -2535,9 +2668,41 @@ class TestReleaseLockContention(unittest.TestCase):
         dl_info = DownloadInfo(username="user1")
 
         tmpdir = tempfile.mkdtemp()
+        original_album_path = beets_info.album_path
         try:
+            beets_info.album_path = tmpdir
+            with open(
+                os.path.join(tmpdir, "01 - Track.mp3"),
+                "wb",
+            ) as installed:
+                installed.write(b"installed audio")
+            source = ir.source_measurement
+            candidate = make_album_quality_evidence(
+                mb_release_id=self.MBID,
+                source_path=tmpdir,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=beets_info.min_bitrate_kbps,
+                    avg_bitrate_kbps=beets_info.avg_bitrate_kbps,
+                    median_bitrate_kbps=beets_info.median_bitrate_kbps,
+                    format=beets_info.format,
+                    is_cbr=beets_info.is_cbr,
+                    spectral_grade=(source.spectral_grade if source else None),
+                    spectral_bitrate_kbps=(
+                        source.spectral_bitrate_kbps if source else None
+                    ),
+                    spectral_subject=(source.spectral_subject if source else None),
+                    spectral_provenance=(
+                        source.spectral_provenance if source else None
+                    ),
+                ),
+                verified_lossless_proof=ir.verified_lossless_proof,
+            )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
+                 patch(
+                     "lib.dispatch.core._load_evidence_import_gate",
+                     return_value=EvidenceImportGate(candidate=candidate),
+                 ):
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=_make_stdout(ir), stderr="")
                 dispatch_import_core(
@@ -2555,13 +2720,16 @@ class TestReleaseLockContention(unittest.TestCase):
                     cfg=self._make_cfg(),
                 )
         finally:
+            beets_info.album_path = original_album_path
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
 
         # Subprocess ran exactly once.
         ext.run.assert_called_once()
-        # Import succeeded; domain state reflects that.
-        self.assertEqual(db.request(42)["status"], "imported")
+        # Import succeeded, but source-subject evidence cannot narrow until
+        # the installed snapshot has its own spectral measurement.
+        self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertIsNone(db.request(42)["search_filetype_override"])
         # Lock was taken on the RELEASE namespace with the hashed MBID
         # as key — NOT the request_id. Confirms keying is on the
         # release, which is the only way to serialise two different
@@ -6535,6 +6703,12 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
                 format="MP3",
                 spectral_grade=spectral_grade,
                 spectral_bitrate_kbps=spectral_bitrate_kbps,
+                spectral_subject=(
+                    "source" if spectral_grade is not None else None
+                ),
+                spectral_provenance=(
+                    "measured" if spectral_grade is not None else None
+                ),
             ),
             measured_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
             files=files,
@@ -6582,6 +6756,12 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
                 format="MP3",
                 spectral_grade=spectral_grade,
                 spectral_bitrate_kbps=spectral_bitrate_kbps,
+                spectral_subject=(
+                    "installed" if spectral_grade is not None else None
+                ),
+                spectral_provenance=(
+                    "measured" if spectral_grade is not None else None
+                ),
             ),
             codec="mp3",
             container="mp3",
@@ -7204,11 +7384,184 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 format="MP3",
                 spectral_grade=spectral_grade,
                 spectral_bitrate_kbps=spectral_bitrate_kbps,
+                spectral_subject=(
+                    "installed" if spectral_grade is not None else None
+                ),
+                spectral_provenance=(
+                    "measured" if spectral_grade is not None else None
+                ),
             ),
             codec="mp3",
             container="mp3",
             storage_format="MP3",
         )
+
+    def test_flac_preview_persists_one_affirmative_spectral_scan(self):
+        """Lossless preview measures once and carries that grade into harness."""
+        from harness.import_one import _preview_spectral_audit_from_action_file
+        from lib.dispatch.types import ImportOneRun
+        from lib.import_preview import measure_and_persist_candidate_evidence
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.flac"), "wb") as handle:
+                handle.write(b"lossless-audio")
+            claimed, download_log_id = self._seed_force_job(
+                db,
+                request_id=40,
+                source_path=source,
+            )
+
+            analyzer_calls: list[str] = []
+
+            def analyze(path: str, trim_seconds: int = 30):
+                del trim_seconds
+                analyzer_calls.append(path)
+                return SimpleNamespace(
+                    grade="genuine",
+                    estimated_bitrate_kbps=None,
+                    suspect_pct=0.0,
+                    tracks=[],
+                )
+
+            def run_import(**kwargs: Any) -> ImportOneRun:
+                action_file = kwargs.get("quality_evidence_action_file")
+                self.assertIsInstance(action_file, str)
+                audit = _preview_spectral_audit_from_action_file(action_file)
+                assert audit is not None and audit.candidate is not None
+                self.assertEqual(audit.candidate.grade, "genuine")
+                result = ImportResult(
+                    decision="import",
+                    source_measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=900,
+                        avg_bitrate_kbps=900,
+                        median_bitrate_kbps=900,
+                        format="FLAC",
+                        spectral_grade=audit.candidate.grade,
+                        spectral_bitrate_kbps=audit.candidate.bitrate_kbps,
+                        spectral_subject="source",
+                        spectral_provenance="measured",
+                    ),
+                    spectral=audit,
+                )
+                return ImportOneRun(
+                    command=("import_one",),
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                    import_result=result,
+                )
+
+            def preview(db_arg: Any, _job: Any):
+                return measure_and_persist_candidate_evidence(
+                    db_arg,
+                    request_id=40,
+                    path=source,
+                    force=True,
+                    download_log_id=download_log_id,
+                    import_job_id=claimed.id,
+                    run_import_fn=run_import,
+                )
+
+            with (
+                patch("lib.measurement.spectral_analyze", side_effect=analyze),
+                patch("lib.beets_db.BeetsDB", _mock_beets_db(None)),
+                patch(
+                    "lib.config.read_runtime_config",
+                    return_value=_preview_worker_config(),
+                ),
+            ):
+                updated = import_preview_worker.process_claimed_preview_job(
+                    cast(Any, db),
+                    claimed,
+                    preview_fn=preview,
+                )
+
+            self.assertEqual(len(analyzer_calls), 1)
+            assert updated is not None
+            self.assertEqual(updated.preview_status, "evidence_ready")
+            evidence_id = db.get_download_log_candidate_evidence_id(
+                download_log_id
+            )
+            self.assertIsNotNone(evidence_id)
+            persisted = db.load_album_quality_evidence_by_id(evidence_id)
+            assert persisted is not None
+            self.assertEqual(persisted.measurement.spectral_grade, "genuine")
+
+    def test_flac_preview_spectral_error_self_heals_to_wanted(self):
+        """A failed lossless scan aborts before harness and remains wanted."""
+        from lib.import_preview import measure_and_persist_candidate_evidence
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.flac"), "wb") as handle:
+                handle.write(b"lossless-audio")
+            claimed, download_log_id = self._seed_force_job(
+                db,
+                request_id=41,
+                source_path=source,
+            )
+            analyzer_calls: list[str] = []
+            harness_called = False
+
+            def analyze(path: str, trim_seconds: int = 30):
+                del trim_seconds
+                analyzer_calls.append(path)
+                raise RuntimeError("sox decoder unavailable")
+
+            def run_import(**_kwargs: Any):
+                nonlocal harness_called
+                harness_called = True
+                raise AssertionError("harness must not run after spectral failure")
+
+            def preview(db_arg: Any, _job: Any):
+                return measure_and_persist_candidate_evidence(
+                    db_arg,
+                    request_id=41,
+                    path=source,
+                    force=True,
+                    download_log_id=download_log_id,
+                    import_job_id=claimed.id,
+                    run_import_fn=run_import,
+                )
+
+            with (
+                patch("lib.measurement.spectral_analyze", side_effect=analyze),
+                patch("lib.beets_db.BeetsDB", _mock_beets_db(None)),
+                patch(
+                    "lib.config.read_runtime_config",
+                    return_value=_preview_worker_config(),
+                ),
+            ):
+                updated = import_preview_worker.process_claimed_preview_job(
+                    cast(Any, db),
+                    claimed,
+                    preview_fn=preview,
+                )
+
+            self.assertEqual(len(analyzer_calls), 1)
+            self.assertFalse(harness_called)
+            assert updated is not None
+            self.assertEqual(updated.preview_status, "measurement_failed")
+            self.assertEqual(updated.status, "failed")
+            self.assertEqual(db.request(41)["status"], "wanted")
+            failures = [
+                log for log in db.download_logs
+                if log.outcome == "measurement_failed"
+            ]
+            self.assertEqual(len(failures), 1)
+            self.assertEqual(failures[0].beets_scenario, "measurement_failed")
+            import json as _json
+            failure_payload = _json.loads(failures[0].validation_result)
+            self.assertEqual(failure_payload["reason"], "measurement_crashed")
+            self.assertIn("sox decoder unavailable", failure_payload["detail"])
+            assert updated.preview_result is not None
+            self.assertEqual(
+                updated.preview_result["decision"],
+                "spectral_analysis_failed",
+            )
 
     def test_boc_geogaddi_suspect_96k_persists_evidence_and_importer_rejects(self):
         """Production BoC bug: suspect 96kbps MP3 download vs existing 192kbps.
@@ -7273,6 +7626,8 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     is_cbr=True,
                     spectral_grade="suspect",
                     spectral_bitrate_kbps=96,
+                    spectral_subject="source",
+                    spectral_provenance="measured",
                 ),
             )
 
@@ -7339,15 +7694,17 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 )
 
             self.assertFalse(result.success)
-            # The full pipeline returns ``downgrade`` for this codec-rank
-            # comparison (MP3 96 vs MP3 192); the importer rejects via the
-            # evidence pipeline rather than reinventing the comparison.
-            self.assertIn("downgrade", result.message or "")
+            # The attempt-local HAVE audit is authoritative over the older
+            # linked row.  Its absent result fails closed before any quality
+            # comparison can consume stale installed evidence.
+            self.assertEqual(result.code, "have_analysis_error")
+            self.assertIn("Installed HAVE analysis failed", result.message or "")
             # Beets NEVER ran.
             self.assertEqual(ext.run.call_count, 0)
-            # download_log rejection scenario reflects the actual decision.
+            # The non-quality failure is explicit in the audit trail.
             outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
-            self.assertIn(("rejected", "downgrade"), outcomes)
+            self.assertIn(("have_analysis_error", "have_analysis_error"), outcomes)
+            self.assertEqual(db.request(42)["status"], "wanted")
 
     def test_clean_upgrade_persists_evidence_and_importer_accepts(self):
         """Happy path: suspect spectral but a clear bitrate upgrade.
@@ -7394,6 +7751,8 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     is_cbr=False,
                     spectral_grade="suspect",
                     spectral_bitrate_kbps=256,
+                    spectral_subject="source",
+                    spectral_provenance="measured",
                 ),
             )
 
@@ -7518,11 +7877,12 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 )
 
             self.assertFalse(result.success)
-            self.assertIn("audio_corrupt", result.message or "")
+            self.assertEqual(result.code, "have_analysis_error")
+            self.assertIn("Installed HAVE analysis failed", result.message or "")
             self.assertEqual(ext.run.call_count, 0)
             self.assertEqual(db.request(44)["status"], "wanted")
             outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
-            self.assertIn(("rejected", "audio_corrupt"), outcomes)
+            self.assertIn(("have_analysis_error", "have_analysis_error"), outcomes)
 
 
 class TestWrongMatchCleanupFKChainAvoidsRemeasurement(unittest.TestCase):
@@ -7581,6 +7941,8 @@ class TestWrongMatchCleanupFKChainAvoidsRemeasurement(unittest.TestCase):
                 median_bitrate_kbps=252,
                 format="MP3",
                 spectral_grade="genuine",
+                spectral_subject="source",
+                spectral_provenance="measured",
             ),
             measured_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
             files=files,
@@ -7703,6 +8065,8 @@ class TestWrongMatchStaleEvidenceRefreshSlice(unittest.TestCase):
                     median_bitrate_kbps=252,
                     format="MP3",
                     spectral_grade="genuine",
+                    spectral_subject="source",
+                    spectral_provenance="measured",
                 ),
                 measured_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
                 files=stale_files,
@@ -7811,9 +8175,8 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
             min_bitrate_kbps=184,
             avg_bitrate_kbps=215,
             median_bitrate_kbps=210,
-            source_lineage="lossless_source",
-            source_provenance="lossless_source",
-            proof_provenance="lossless-source probe",
+            subject="source",
+            provenance="measured",
         )
         measurement = AudioQualityMeasurement(
             min_bitrate_kbps=820,
@@ -7823,7 +8186,8 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
             is_cbr=False,
             spectral_grade="likely_transcode",
             spectral_bitrate_kbps=128,
-            verified_lossless=False,
+            spectral_subject="source",
+            spectral_provenance="measured",
         )
         return AlbumQualityEvidence(
             mb_release_id=mb_release_id,
@@ -8014,8 +8378,8 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
             )
             assert library_evidence.v0_metric is not None
             self.assertEqual(
-                library_evidence.v0_metric.source_lineage,
-                "lossless_source",
+                library_evidence.v0_metric.subject,
+                "source",
             )
 
             # Seed the duplicate-source wrong-match row + its candidate
@@ -8349,7 +8713,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
 
             candidate_files = snapshot_audio_files(source_dir)
             proof = VerifiedLosslessProof(
-                proof_origin="import_result",
+                provenance="measured",
                 source="flac",
                 classifier="spectral_verified_lossless",
                 detail="genuine",
@@ -8358,9 +8722,8 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 min_bitrate_kbps=240,
                 avg_bitrate_kbps=255,
                 median_bitrate_kbps=250,
-                source_lineage="lossless_source",
-                source_provenance="lossless_source",
-                proof_provenance="lossless-source probe",
+                subject="source",
+                provenance="measured",
             )
             candidate_measurement = AudioQualityMeasurement(
                 min_bitrate_kbps=820,
@@ -8370,7 +8733,8 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 is_cbr=False,
                 spectral_grade="genuine",
                 spectral_bitrate_kbps=850,
-                verified_lossless=True,
+                spectral_subject="source",
+                spectral_provenance="measured",
             )
             from lib.quality import AlbumQualityEvidence
             from datetime import datetime, timezone
@@ -8415,7 +8779,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 format="flac",
             )
             with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
-                _refresh_current_evidence_after_import(
+                refresh = _refresh_current_evidence_after_import(
                     db,  # type: ignore[arg-type]
                     request_id=42,
                     mb_release_id="mbid-r1",
@@ -8435,13 +8799,16 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             )
             new_evidence = db.load_album_quality_evidence_by_id(new_evidence_id)
             assert new_evidence is not None
+            self.assertEqual(refresh.status, "ready")
+            self.assertIsNotNone(refresh.evidence)
+            assert refresh.evidence is not None
+            self.assertEqual(refresh.evidence.id, new_evidence_id)
 
             # Renamed-only: spectral grade + V0 lineage + verified-lossless
             # all propagate. Bitrate/format refresh from album_info (same
             # values — dual-check passes).
             self.assertEqual(new_evidence.measurement.spectral_grade, "genuine")
             self.assertEqual(new_evidence.measurement.spectral_bitrate_kbps, 850)
-            self.assertTrue(new_evidence.measurement.verified_lossless)
             self.assertEqual(new_evidence.measurement.format, "flac")
             self.assertEqual(new_evidence.measurement.min_bitrate_kbps, 820)
             self.assertIsNotNone(new_evidence.verified_lossless_proof)
@@ -8453,7 +8820,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             self.assertIsNotNone(new_evidence.v0_metric)
             assert new_evidence.v0_metric is not None
             self.assertEqual(new_evidence.v0_metric.avg_bitrate_kbps, 255)
-            self.assertEqual(new_evidence.v0_metric.source_lineage, "lossless_source")
+            self.assertEqual(new_evidence.v0_metric.subject, "source")
             self.assertFalse(new_evidence.audio_corrupt)
             self.assertEqual(new_evidence.codec, "flac")
 
@@ -8499,7 +8866,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             from lib.quality_evidence import snapshot_audio_files
             candidate_files = snapshot_audio_files(source_dir)
             proof = VerifiedLosslessProof(
-                proof_origin="import_result",
+                provenance="measured",
                 source="flac",
                 classifier="spectral_verified_lossless",
                 detail="genuine",
@@ -8508,8 +8875,8 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 min_bitrate_kbps=240,
                 avg_bitrate_kbps=255,
                 median_bitrate_kbps=250,
-                source_lineage="lossless_source",
-                source_provenance="lossless_source",
+                subject="source",
+                provenance="measured",
             )
             candidate_measurement = AudioQualityMeasurement(
                 min_bitrate_kbps=820,
@@ -8519,7 +8886,8 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 is_cbr=False,
                 spectral_grade="genuine",
                 spectral_bitrate_kbps=850,
-                verified_lossless=True,
+                spectral_subject="source",
+                spectral_provenance="measured",
                 was_converted_from="flac",
             )
             from lib.quality import AlbumQualityEvidence
@@ -8582,26 +8950,29 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             new_evidence = db.load_album_quality_evidence_by_id(new_evidence_id)
             assert new_evidence is not None
 
-            # Transcoded: spectral + V0 lineage + bad-hash propagate from
-            # the candidate. These fields describe the upstream source
-            # audio at import time; they remain accurate even after the
-            # source is transcoded to a different codec.
+            # Source-marked facts cross the fingerprint as carried. A bad
+            # audio hash is snapshot-local and never crosses fingerprints.
             self.assertEqual(new_evidence.measurement.spectral_grade, "genuine")
             self.assertEqual(new_evidence.measurement.spectral_bitrate_kbps, 850)
-            self.assertEqual(new_evidence.v0_metric, v0_metric)
-            self.assertEqual(new_evidence.matched_bad_audio_hash_id, 99)
-            self.assertEqual(
-                new_evidence.matched_bad_audio_hash_path,
-                "/some/known/bad.flac",
-            )
+            self.assertEqual(new_evidence.measurement.spectral_subject, "source")
+            self.assertEqual(new_evidence.measurement.spectral_provenance, "carried")
+            assert new_evidence.v0_metric is not None
+            self.assertEqual(new_evidence.v0_metric.avg_bitrate_kbps, 255)
+            self.assertEqual(new_evidence.v0_metric.subject, "source")
+            self.assertEqual(new_evidence.v0_metric.provenance, "carried")
+            self.assertIsNone(new_evidence.matched_bad_audio_hash_id)
+            self.assertIsNone(new_evidence.matched_bad_audio_hash_path)
 
             # But verified-lossless proof carries forward.
-            self.assertTrue(new_evidence.measurement.verified_lossless)
             self.assertIsNotNone(new_evidence.verified_lossless_proof)
             assert new_evidence.verified_lossless_proof is not None
             self.assertEqual(
                 new_evidence.verified_lossless_proof.classifier,
                 "spectral_verified_lossless",
+            )
+            self.assertEqual(
+                new_evidence.verified_lossless_proof.provenance,
+                "carried",
             )
 
             # Bitrate / format reflect the V0 output from album_info.
@@ -8655,8 +9026,8 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 min_bitrate_kbps=192,
                 avg_bitrate_kbps=253,
                 median_bitrate_kbps=250,
-                source_lineage="lossless_source",
-                source_provenance="lossless_source",
+                subject="source",
+                provenance="measured",
             )
             candidate_measurement = AudioQualityMeasurement(
                 min_bitrate_kbps=192,
@@ -8666,7 +9037,8 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 is_cbr=False,
                 spectral_grade="likely_transcode",
                 spectral_bitrate_kbps=96,
-                verified_lossless=False,
+                spectral_subject="source",
+                spectral_provenance="measured",
             )
             from lib.quality import AlbumQualityEvidence
             from datetime import datetime, timezone
@@ -8732,20 +9104,25 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             # describe the upstream lossless source and MUST survive the
             # transcode to Opus, so the next candidate compares against the
             # 253 anchor instead of importing for free.
-            self.assertEqual(
-                new_evidence.v0_metric, v0_metric,
-                "ALAC-m4a V0 probe lineage was stripped — anchor lost",
-            )
+            assert new_evidence.v0_metric is not None
+            self.assertEqual(new_evidence.v0_metric.avg_bitrate_kbps, 253)
+            self.assertEqual(new_evidence.v0_metric.subject, "source")
+            self.assertEqual(new_evidence.v0_metric.provenance, "carried")
             self.assertEqual(
                 new_evidence.measurement.spectral_grade, "likely_transcode")
             self.assertEqual(new_evidence.measurement.spectral_bitrate_kbps, 96)
+            self.assertEqual(new_evidence.measurement.spectral_subject, "source")
+            self.assertEqual(
+                new_evidence.measurement.spectral_provenance,
+                "carried",
+            )
 
             # Bitrate / format still reflect the Opus output from album_info.
             self.assertEqual(new_evidence.measurement.format, "Opus")
             self.assertEqual(new_evidence.codec, "opus")
 
-    def test_transcoded_aac_m4a_to_opus_strips_source_evidence(self):
-        """AAC-in-m4a source → Opus library: source-side evidence is STRIPPED.
+    def test_transcoded_aac_m4a_to_opus_carries_marked_source_spectral(self):
+        """AAC-in-m4a carries only facts explicitly marked source.
 
         Negative sibling of
         ``test_transcoded_alac_m4a_to_opus_propagates_source_evidence``. Both
@@ -8777,8 +9154,8 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 min_bitrate_kbps=210,
                 avg_bitrate_kbps=240,
                 median_bitrate_kbps=235,
-                source_lineage="native_lossy_research",
-                source_provenance="native_lossy_research",
+                subject="installed",
+                provenance="measured",
             )
             candidate_measurement = AudioQualityMeasurement(
                 min_bitrate_kbps=256,
@@ -8788,7 +9165,8 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 is_cbr=False,
                 spectral_grade="genuine",
                 spectral_bitrate_kbps=256,
-                verified_lossless=False,
+                spectral_subject="source",
+                spectral_provenance="measured",
                 was_converted_from=None,
             )
             from lib.quality import AlbumQualityEvidence
@@ -8850,18 +9228,23 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             new_evidence = db.load_album_quality_evidence_by_id(new_evidence_id)
             assert new_evidence is not None
 
-            # Lossy m4a source: every source-side field stripped onto NULL.
+            # Installed/native V0 research drops; the source spectral fact
+            # carries across the changed fingerprint.
             self.assertIsNone(new_evidence.v0_metric)
-            self.assertIsNone(new_evidence.measurement.spectral_grade)
-            self.assertIsNone(new_evidence.measurement.spectral_bitrate_kbps)
+            self.assertEqual(new_evidence.measurement.spectral_grade, "genuine")
+            self.assertEqual(new_evidence.measurement.spectral_bitrate_kbps, 256)
+            self.assertEqual(new_evidence.measurement.spectral_subject, "source")
+            self.assertEqual(
+                new_evidence.measurement.spectral_provenance,
+                "carried",
+            )
             self.assertIsNone(new_evidence.matched_bad_audio_hash_id)
             self.assertIsNone(new_evidence.matched_bad_audio_hash_path)
             self.assertEqual(new_evidence.measurement.format, "Opus")
             self.assertEqual(new_evidence.codec, "opus")
 
-    def test_transcoded_mp3_to_opus_strips_source_evidence(self):
-        """AE5: non-lossless-source transcoded import does NOT propagate
-        source-side evidence.
+    def test_transcoded_mp3_to_opus_carries_marked_source_spectral(self):
+        """AE5: propagation follows subject markers, not source codec.
 
         MP3 source → Opus library: the candidate's spectral_grade /
         spectral_bitrate / v0_metric / matched_bad_audio_hash_* must NOT
@@ -8896,8 +9279,8 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 min_bitrate_kbps=180,
                 avg_bitrate_kbps=210,
                 median_bitrate_kbps=205,
-                source_lineage="native_lossy_research",
-                source_provenance="native_lossy_research",
+                subject="installed",
+                provenance="measured",
             )
             candidate_measurement = AudioQualityMeasurement(
                 min_bitrate_kbps=192,
@@ -8907,7 +9290,8 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 is_cbr=True,
                 spectral_grade="genuine",
                 spectral_bitrate_kbps=192,
-                verified_lossless=False,
+                spectral_subject="source",
+                spectral_provenance="measured",
                 was_converted_from="mp3",
             )
             from lib.quality import AlbumQualityEvidence
@@ -8969,12 +9353,15 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             new_evidence = db.load_album_quality_evidence_by_id(new_evidence_id)
             assert new_evidence is not None
 
-            # Non-lossless-source transcode: source-side fields are
-            # stripped onto NULL. The MP3 source's spectral grade and
-            # bad-hash match describe audio that has no comparable role
-            # in future candidate comparisons.
-            self.assertIsNone(new_evidence.measurement.spectral_grade)
-            self.assertIsNone(new_evidence.measurement.spectral_bitrate_kbps)
+            # Source spectral carries; installed V0 and snapshot-local bad
+            # hash facts do not cross the new content fingerprint.
+            self.assertEqual(new_evidence.measurement.spectral_grade, "genuine")
+            self.assertEqual(new_evidence.measurement.spectral_bitrate_kbps, 192)
+            self.assertEqual(new_evidence.measurement.spectral_subject, "source")
+            self.assertEqual(
+                new_evidence.measurement.spectral_provenance,
+                "carried",
+            )
             self.assertIsNone(new_evidence.v0_metric)
             self.assertIsNone(new_evidence.matched_bad_audio_hash_id)
             self.assertIsNone(new_evidence.matched_bad_audio_hash_path)
@@ -9043,6 +9430,8 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                     is_cbr=False,
                     spectral_grade="likely_transcode",
                     spectral_bitrate_kbps=128,
+                    spectral_subject="source",
+                    spectral_provenance="measured",
                     was_converted_from="flac",
                 ),
                 measured_at=datetime(2026, 5, 17, 14, 0, 0, tzinfo=timezone.utc),
@@ -9056,8 +9445,8 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                     min_bitrate_kbps=184,
                     avg_bitrate_kbps=215,
                     median_bitrate_kbps=210,
-                    source_lineage="lossless_source",
-                    source_provenance="lossless_source",
+                    subject="source",
+                    provenance="measured",
                 ),
                 verified_lossless_proof=None,
                 audio_corrupt=False,
@@ -9132,7 +9521,8 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                     is_cbr=False,
                     spectral_grade="genuine",
                     spectral_bitrate_kbps=940,
-                    verified_lossless=True,
+                    spectral_subject="source",
+                    spectral_provenance="measured",
                     was_converted_from="flac",
                 ),
                 measured_at=datetime(2026, 5, 17, 15, 0, 0, tzinfo=timezone.utc),
@@ -9146,11 +9536,11 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                     min_bitrate_kbps=880,
                     avg_bitrate_kbps=900,
                     median_bitrate_kbps=895,
-                    source_lineage="lossless_source",
-                    source_provenance="lossless_source",
+                    subject="source",
+                    provenance="measured",
                 ),
                 verified_lossless_proof=VerifiedLosslessProof(
-                    proof_origin="import_result",
+                    provenance="measured",
                     source="flac",
                     classifier="spectral_verified_lossless",
                     detail="genuine",
@@ -9204,9 +9594,8 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 "the new candidate's value.",
             )
             self.assertEqual(
-                second_evidence.v0_metric.source_lineage, "lossless_source",
+                second_evidence.v0_metric.subject, "source",
             )
-            self.assertTrue(second_evidence.measurement.verified_lossless)
             self.assertIsNotNone(second_evidence.verified_lossless_proof)
 
     def test_source_candidate_none_falls_back_to_legacy_backfill(self):

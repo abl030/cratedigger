@@ -822,7 +822,6 @@ OPTIONS_WITHOUT_DESCRIPTION_OK: frozenset[str] = frozenset({
     "downloadSettings.downloadFiltering",         # TODO: document
     "downloadSettings.useExtensionWhitelist",     # TODO: document
     "downloadSettings.extensionsWhitelist",       # TODO: document
-    "qualityRanks.gateMinRank",                   # TODO: document
     "qualityRanks.bitrateMetric",                 # TODO: document
     "qualityRanks.withinRankToleranceKbps",       # TODO: document
     "logging.level",                              # TODO: document

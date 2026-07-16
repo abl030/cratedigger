@@ -36,6 +36,7 @@ Two tiers, selected by ``CRATEDIGGER_HYPOTHESIS_PROFILE`` (see
 Full usage guide: docs/generated-testing.md.
 """
 
+import configparser
 import os
 import json
 import shutil
@@ -64,6 +65,7 @@ from lib.quality import (
 )
 from tests.fakes import DownloadLogRow, FakePipelineDB
 from tests.helpers import (
+    make_album_quality_evidence,
     make_download_file,
     make_grab_list_entry,
     make_import_result,
@@ -74,6 +76,9 @@ from tests.helpers import (
 
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
 _GRADES = ("genuine", "marginal", "suspect", "likely_transcode")
+_CALLER_CONTROLLED_QUALITY_REJECTS = tuple(sorted(
+    QUALITY_DECISION_REJECT_STAGE_DECISIONS - {"verified_lossless_locked"}
+))
 
 # Every decision string the legacy (subprocess-return) dispatch path can
 # see in production, PLUS the five folder/audio-integrity fact names —
@@ -89,6 +94,11 @@ _KNOWN_DECISIONS = tuple(sorted(
     | {"spectral_reject", "duplicate_remove_guard_failed",
        "totally_unmapped_decision"}
 ))
+_AUTOMATIC_RETAINED_ACTIONS = {
+    "provisional_lossless_upgrade": ("wanted", "lossless", True),
+    "transcode_upgrade": ("wanted", None, True),
+    "transcode_first": ("wanted", None, True),
+}
 _REJECTION_WRITERS = (
     "atomic_abandon",
     "database_source",
@@ -96,6 +106,21 @@ _REJECTION_WRITERS = (
     "dispatch_rejection",
     "request_auto_import",
 )
+
+_HAVE_ANALYSIS_FAILURES = (
+    "PermissionError: [Errno 13] Permission denied",
+    "FileNotFoundError: no such file",
+    "no audio files found under installed album",
+    "snapshot changed during analysis",
+    "RuntimeError: analyser crashed",
+)
+
+
+def _full_dispatch_config() -> CratediggerConfig:
+    ini = configparser.RawConfigParser()
+    ini["Beets Validation"] = {"harness_path": _HARNESS}
+    ini["Pipeline DB"] = {"enabled": "true"}
+    return CratediggerConfig.from_ini(ini)
 
 
 def _bitrates(min_value: int = 1, max_value: int = 3000) -> st.SearchStrategy[int]:
@@ -434,6 +459,107 @@ def _run_rejection_writer(
     raise AssertionError(f"unknown rejection writer {writer!r}")
 
 
+def _run_have_analysis_abort(
+    *,
+    mode: str,
+    raw_error: str,
+    search_override: str | None,
+    username: str | None,
+) -> FakePipelineDB:
+    """Drive the real current-evidence gate through its terminal DB bundle."""
+
+    from lib.dispatch import dispatch_import_core
+    from lib.import_evidence import (
+        ActionEvidenceProvenance,
+        CandidateEvidenceActionResult,
+        CurrentEvidenceActionResult,
+    )
+    from lib.import_queue import (
+        IMPORT_JOB_AUTOMATION,
+        IMPORT_JOB_FORCE,
+        IMPORT_JOB_MANUAL,
+    )
+    from lib.terminal_outcomes import ImportJobTerminal
+
+    db = FakePipelineDB()
+    db.seed_request(make_request_row(
+        id=42,
+        status="downloading",
+        search_filetype_override=search_override,
+        active_download_state={"files": [], "filetype": "flac"},
+    ))
+    candidate = make_album_quality_evidence(
+        mb_release_id="generated-have-analysis-mbid",
+        source_path="/tmp/generated-candidate",
+    )
+    candidate_result = CandidateEvidenceActionResult(
+        evidence=candidate,
+        provenance=ActionEvidenceProvenance(
+            candidate_status="reused",
+            snapshot_guard="matched",
+        ),
+    )
+    current_result = CurrentEvidenceActionResult(
+        evidence=None,
+        provenance=ActionEvidenceProvenance(
+            current_status="failed",
+            snapshot_guard="failed",
+            fallback_reason=raw_error,
+            installed_path="/library/Generated Artist/Generated Album",
+            fail_closed=True,
+        ),
+    )
+    job_type = {
+        "auto": IMPORT_JOB_AUTOMATION,
+        "force": IMPORT_JOB_FORCE,
+        "manual": IMPORT_JOB_MANUAL,
+    }[mode]
+    scenario = {
+        "auto": "strong_match",
+        "force": "force_import",
+        "manual": "manual_import",
+    }[mode]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        payload = {} if mode == "auto" else {"failed_path": tmpdir}
+        job = db.enqueue_import_job(
+            job_type,
+            request_id=42,
+            payload=payload,
+        )
+        with patch_dispatch_externals(), patch(
+            "lib.dispatch.evidence_gate.load_current_evidence_for_action",
+            return_value=current_result,
+        ):
+            outcome = dispatch_import_core(
+                path=tmpdir,
+                mb_release_id="generated-have-analysis-mbid",
+                request_id=42,
+                label="Generated Artist - Generated Album",
+                force=mode == "force",
+                beets_harness_path=_HARNESS,
+                db=db,  # type: ignore[arg-type]
+                dl_info=DownloadInfo(filetype="flac", username=username),
+                scenario=scenario,
+                cfg=_full_dispatch_config(),
+                requeue_on_failure=mode == "auto",
+                candidate_import_job_id=job.id,
+                prevalidated_candidate_result=candidate_result,
+                quality_gate_fn=noop_quality_gate,
+            )
+    if outcome.terminal_outcome is None:
+        raise AssertionError("HAVE-analysis abort did not build a terminal outcome")
+    db.persist_import_terminal_outcome(outcome.terminal_outcome.with_job(
+        ImportJobTerminal(
+            status="failed",
+            error=outcome.message,
+            result={"success": False},
+            message=outcome.message,
+        )
+    ))
+    return db
+
+
 # ===========================================================================
 # Invariant checkers — module functions so the known-bad self-tests below
 # can prove each one trips on a violating outcome.
@@ -489,12 +615,27 @@ def assert_dispatch_outcome_matches_routing(
             raise AssertionError(
                 f"decision={world.decision!r} mark_done=True but "
                 "result.success=False")
-        expected_status = "wanted" if action.requeue else "imported"
+        expected_status, expected_override, expected_denylist = (
+            _AUTOMATIC_RETAINED_ACTIONS.get(
+                world.decision,
+                ("imported", None, False),
+            )
+        )
         if status != expected_status:
             raise AssertionError(
                 f"decision={world.decision!r} mark_done=True left "
-                f"status={status!r}, want {expected_status!r} "
-                f"(action.requeue={action.requeue})")
+                f"status={status!r}, want {expected_status!r}")
+        actual_override = db.request(42)["search_filetype_override"]
+        if actual_override != expected_override:
+            raise AssertionError(
+                f"decision={world.decision!r} mark_done=True left override="
+                f"{actual_override!r}, want {expected_override!r}"
+            )
+        if bool(db.denylist) != expected_denylist:
+            raise AssertionError(
+                f"decision={world.decision!r} mark_done=True denylist="
+                f"{bool(db.denylist)!r}, want {expected_denylist!r}"
+            )
     elif action.record_rejection:
         if log.outcome != "rejected":
             raise AssertionError(
@@ -592,6 +733,53 @@ def assert_quality_side_reject_honors_caller_flag(
             f"{status!r}, want {expected!r}")
 
 
+def assert_verified_lossless_lock_preserves_imported(db: FakePipelineDB) -> None:
+    """The non-punitive proof lock closes acquisition without source blame."""
+    row = db.request(42)
+    if row["status"] != "imported":
+        raise AssertionError(
+            f"verified lossless lock left status={row['status']!r}, "
+            "want 'imported'"
+        )
+    if row["search_filetype_override"] is not None:
+        raise AssertionError("verified lossless lock narrowed search policy")
+    if db.denylist:
+        raise AssertionError("verified lossless lock denylisted the source")
+
+
+def assert_have_analysis_abort_is_non_quality(
+    db: FakePipelineDB,
+    *,
+    expected_search_override: str | None,
+) -> None:
+    """#711 invariant: analysis failure self-heals without quality policy."""
+
+    assert_download_log_row_created(db)
+    row = db.request(42)
+    if row["status"] != "wanted":
+        raise AssertionError(
+            f"HAVE-analysis abort left status={row['status']!r}, want 'wanted'"
+        )
+    if row["search_filetype_override"] != expected_search_override:
+        raise AssertionError(
+            "HAVE-analysis abort changed search_filetype_override from "
+            f"{expected_search_override!r} to "
+            f"{row['search_filetype_override']!r}"
+        )
+    if db.denylist:
+        raise AssertionError(
+            f"HAVE-analysis abort wrote quality denylist entries: {db.denylist!r}"
+        )
+    if db.download_logs[-1].outcome != "have_analysis_error":
+        raise AssertionError(
+            "HAVE-analysis abort did not persist outcome='have_analysis_error'"
+        )
+    if row["validation_attempts"] != 1 or row["next_retry_after"] is None:
+        raise AssertionError(
+            "HAVE-analysis abort missed ordinary validation backoff bookkeeping"
+        )
+
+
 # ===========================================================================
 # Properties
 # ===========================================================================
@@ -629,7 +817,7 @@ class TestGeneratedEvidenceRejectSelfHeal(unittest.TestCase):
         assert_download_log_row_created(db)
         assert_preimport_fact_always_self_heals(decision, db)
 
-    @given(decision=st.sampled_from(sorted(QUALITY_DECISION_REJECT_STAGE_DECISIONS)),
+    @given(decision=st.sampled_from(_CALLER_CONTROLLED_QUALITY_REJECTS),
            requeue_on_failure=st.booleans(),
            new_min_bitrate=_bitrates())
     def test_quality_side_rejects_honor_caller_flag(
@@ -640,6 +828,17 @@ class TestGeneratedEvidenceRejectSelfHeal(unittest.TestCase):
         assert_download_log_row_created(db)
         assert_quality_side_reject_honors_caller_flag(
             decision, requeue_on_failure, db)
+
+    @given(requeue_on_failure=st.booleans(), new_min_bitrate=_bitrates())
+    def test_verified_lossless_lock_always_preserves_imported(
+            self, requeue_on_failure, new_min_bitrate):
+        db = _reject_via_evidence_decision(
+            decision="verified_lossless_locked",
+            requeue_on_failure=requeue_on_failure,
+            new_min_bitrate=new_min_bitrate,
+        )
+        assert_download_log_row_created(db)
+        assert_verified_lossless_lock_preserves_imported(db)
 
 
 class TestGeneratedDistanceNeverFabricated(unittest.TestCase):
@@ -679,6 +878,7 @@ class TestGeneratedEveryRejectionWriterProjection(unittest.TestCase):
             real_filesystem=True,
         )
         assert_validation_projection_matches_payload(db)
+
 
     def test_every_rejection_writer_preserves_explicit_nulls(self):
         for writer in _REJECTION_WRITERS:
@@ -732,6 +932,34 @@ class TestGeneratedEveryRejectionWriterProjection(unittest.TestCase):
         assert_validation_projection_matches_payload(db)
 
 
+class TestGeneratedHaveAnalysisAbortLifecycle(unittest.TestCase):
+    """The non-quality abort invariant across auto/force/manual lifecycles."""
+
+    @given(
+        mode=st.sampled_from(("auto", "force", "manual")),
+        raw_error=st.sampled_from(_HAVE_ANALYSIS_FAILURES),
+        search_override=st.sampled_from((None, "lossless", "lossless,mp3 v0")),
+        username=st.sampled_from((None, "user1", "user2")),
+    )
+    def test_abort_always_wanted_never_denylisted_or_narrowed(
+        self,
+        mode,
+        raw_error,
+        search_override,
+        username,
+    ):
+        db = _run_have_analysis_abort(
+            mode=mode,
+            raw_error=raw_error,
+            search_override=search_override,
+            username=username,
+        )
+        assert_have_analysis_abort_is_non_quality(
+            db,
+            expected_search_override=search_override,
+        )
+
+
 # ===========================================================================
 # Harness self-tests (RED/GREEN of the fuzzer itself) — each invariant
 # checker must trip on a planted violation, and a planted-bad router must
@@ -745,6 +973,16 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         db = FakePipelineDB()
         with self.assertRaises(AssertionError):
             assert_download_log_row_created(db)
+
+    def test_verified_lossless_lock_checker_trips_on_reopened_request(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="wanted",
+            search_filetype_override="lossless",
+        ))
+        with self.assertRaises(AssertionError):
+            assert_verified_lossless_lock_preserves_imported(db)
 
     def test_log_row_checker_trips_on_blank_outcome(self):
         db = FakePipelineDB()
@@ -760,7 +998,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
         db.log_download(request_id=42, outcome="success")
-        # Planted bug: an "import" decision (mark_done=True, requeue=False)
+        # Planted bug: an ordinary "import" decision
         # that never actually flipped the request to 'imported'.
         world = DispatchWorld(
             mode="decision", decision="import", new_min_bitrate=245,
@@ -799,6 +1037,25 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_quality_side_reject_honors_caller_flag(
                 "downgrade", False, db)
+
+    def test_have_analysis_checker_trips_on_quality_consequences(self):
+        from tests.fakes import DenylistEntry
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="wanted",
+            validation_attempts=1,
+            next_retry_after="planted-backoff",
+            search_filetype_override="lossless",
+        ))
+        db.log_download(request_id=42, outcome="have_analysis_error")
+        db.denylist.append(DenylistEntry(42, "bad-user", "planted mutant"))
+        with self.assertRaises(AssertionError):
+            assert_have_analysis_abort_is_non_quality(
+                db,
+                expected_search_override=None,
+            )
 
     def test_distance_checker_trips_when_null_gets_fabricated_as_zero(self):
         db = FakePipelineDB()

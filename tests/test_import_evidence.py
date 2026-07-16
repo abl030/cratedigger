@@ -90,7 +90,6 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
                 is_cbr=False,
                 spectral_grade=None,
                 spectral_bitrate_kbps=None,
-                verified_lossless=False,
                 was_converted_from="flac",
             ),
             v0_metric=None,
@@ -204,7 +203,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         self.assertEqual(result.provenance.current_status, "backfilled")
         self.assertIn("lineage_version", result.provenance.fallback_reason or "")
         assert result.evidence is not None
-        self.assertEqual(result.evidence.lineage_version, 3)
+        self.assertEqual(result.evidence.lineage_version, 4)
         self.assertEqual(result.evidence.measurement.format, "AAC")
         self.assertEqual(result.evidence.measurement.avg_bitrate_kbps, 256)
         self.assertEqual(
@@ -212,7 +211,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             persisted.id,
         )
 
-    def test_v1_lossless_transcode_rebuild_preserves_source_v0_metric(self):
+    def test_v1_lossless_transcode_rebuild_preserves_only_source_v0_metric(self):
         self.db.update_request_fields(
             42,
             current_spectral_grade="genuine",
@@ -239,7 +238,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
                 min_bitrate_kbps=189,
                 avg_bitrate_kbps=195,
                 median_bitrate_kbps=195,
-                source_lineage="lossless_source",
+                subject="source",
             ),
         )
         self.db.upsert_album_quality_evidence(evidence)
@@ -269,16 +268,16 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
 
         self.assertTrue(result.available)
         assert result.evidence is not None
-        self.assertEqual(result.evidence.lineage_version, 3)
-        self.assertEqual(
-            result.evidence.measurement.spectral_grade,
-            "likely_transcode",
-        )
-        self.assertEqual(result.evidence.measurement.spectral_bitrate_kbps, 96)
+        self.assertEqual(result.evidence.lineage_version, 4)
+        # A v1 spectral result has no subject metadata, so it cannot be
+        # promoted as installed-HAVE authority during the rebuild.  The
+        # explicitly source-subject V0 metric remains safe to carry.
+        self.assertIsNone(result.evidence.measurement.spectral_grade)
+        self.assertIsNone(result.evidence.measurement.spectral_bitrate_kbps)
         assert result.evidence.v0_metric is not None
         self.assertEqual(
-            result.evidence.v0_metric.source_lineage,
-            "lossless_source",
+            result.evidence.v0_metric.subject,
+            "source",
         )
         self.assertEqual(result.evidence.v0_metric.avg_bitrate_kbps, 195)
 
@@ -307,8 +306,8 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         loaded = self.db.load_album_quality_evidence_by_id(evidence_id)
         self.assertIsNotNone(loaded)
 
-    def test_stale_current_evidence_backfills_from_album_info(self):
-        self._persist_current()
+    def test_stale_a_backfills_b_but_waits_for_exact_b_enrichment(self):
+        stale_id = self._persist_current()
         with open(os.path.join(self.root, "01 - Track.mp3"), "ab") as handle:
             handle.write(b" changed")
 
@@ -329,16 +328,52 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             ),
         )
 
-        self.assertTrue(result.available)
-        self.assertEqual(result.provenance.current_status, "backfilled")
-        self.assertEqual(
-            result.provenance.fallback_reason,
-            "current album files changed since evidence capture",
-        )
-        assert result.evidence is not None
-        self.assertEqual(result.evidence.measurement.min_bitrate_kbps, 230)
+        self.assertFalse(result.available)
+        self.assertEqual(result.provenance.current_status, "failed")
+        self.assertEqual(result.provenance.snapshot_guard, "stale")
+        self.assertIn("spectral", result.provenance.fallback_reason or "")
+        self.assertIn("V0", result.provenance.fallback_reason or "")
+        linked_id = self.db.get_request_current_evidence_id(42)
+        self.assertIsNotNone(linked_id)
+        self.assertNotEqual(linked_id, stale_id)
+        linked = self.db.load_album_quality_evidence_by_id(linked_id)
+        assert linked is not None
+        self.assertEqual(linked.measurement.min_bitrate_kbps, 230)
+        assert linked.id is not None
+        self.assertTrue(self.db.persist_current_spectral_measurement(
+            request_id=42,
+            expected_evidence_id=linked.id,
+            expected_snapshot_fingerprint=linked.snapshot_fingerprint,
+            grade="genuine",
+            bitrate_kbps=230,
+        ))
+        self.assertTrue(self.db.claim_current_v0_research_attempt(
+            request_id=42,
+            expected_evidence_id=linked.id,
+            expected_snapshot_fingerprint=linked.snapshot_fingerprint,
+        ))
 
-    def test_lossless_transcode_current_evidence_missing_v0_backfills(self):
+        completed = ensure_current_evidence_for_action(
+            self.db,
+            request_id=42,
+            mb_release_id="release-1",
+            current_album_path=self.root,
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=230,
+                avg_bitrate_kbps=240,
+                median_bitrate_kbps=235,
+                is_cbr=False,
+                album_path=self.root,
+                format="MP3",
+            ),
+        )
+        self.assertTrue(completed.available)
+        assert completed.evidence is not None
+        self.assertEqual(completed.evidence.id, linked.id)
+
+    def test_request_v0_scalar_cannot_rescue_missing_linked_anchor(self):
         self.db.update_request_fields(
             42,
             current_spectral_grade="likely_transcode",
@@ -366,15 +401,13 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             ),
         )
 
-        self.assertTrue(result.available)
-        self.assertEqual(result.provenance.current_status, "backfilled")
+        self.assertFalse(result.available)
+        self.assertEqual(result.provenance.current_status, "failed")
         self.assertIn(
             "lossless-source V0 metric is required",
             result.provenance.fallback_reason or "",
         )
-        assert result.evidence is not None
-        assert result.evidence.v0_metric is not None
-        self.assertEqual(result.evidence.v0_metric.avg_bitrate_kbps, 195)
+        self.assertIsNone(result.evidence)
 
     def test_lossless_transcode_current_evidence_missing_v0_fails_closed(self):
         stale_evidence_id = self._persist_lossless_transcode_current_without_v0()

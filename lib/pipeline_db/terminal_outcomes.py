@@ -15,6 +15,7 @@ from lib.quality import CooldownConfig, should_cooldown
 from lib.terminal_outcomes import (
     ImportTerminalOutcome,
     PreviewTerminalOutcome,
+    TerminalCooldown,
     TerminalDenylist,
     TerminalDownloadAudit,
     TerminalOutcomeResult,
@@ -428,6 +429,18 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
             boundary("denylist")
         if not entry.apply_cooldown:
             return False
+        return self._persist_terminal_cooldown(
+            TerminalCooldown(entry.username),
+            boundary,
+        )
+
+    def _persist_terminal_cooldown(
+        self,
+        entry: TerminalCooldown,
+        boundary: Callable[[str], None],
+    ) -> bool:
+        """Evaluate one username's global outcome streak without denylisting."""
+
         cfg = CooldownConfig()
         recent = self._execute(
             """
@@ -541,6 +554,9 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                     entry,
                     boundary,
                 ):
+                    cooled.add(entry.username)
+            for entry in command.cooldowns:
+                if self._persist_terminal_cooldown(entry, boundary):
                     cooled.add(entry.username)
             job = self._persist_terminal_import_job(command, boundary)
             self.conn.commit()

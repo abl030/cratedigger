@@ -16,12 +16,13 @@ from lib.quality.evidence_types import (
     AlbumQualityEvidence,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
+    EVIDENCE_PROVENANCE_MEASURED,
     QualityComparisonBasis,
     SPECTRAL_TRANSCODE_GRADES,
     TargetQualityContract,
     V0ProbeEvidence,
     V0_PROBE_LOSSLESS_SOURCE,
-    V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
+    EVIDENCE_SUBJECT_SOURCE,
     _NONCOMPARABLE_NEUTRAL_V0_PROBE_KIND,
 )
 from lib.quality.ranks import QualityRankConfig
@@ -35,6 +36,7 @@ from lib.quality.gates import (
 )
 from lib.quality.decisions import (
     DECISION_LOSSLESS_SOURCE_LOCKED,
+    DECISION_VERIFIED_LOSSLESS_LOCKED,
     MeasuredImportDecisionInput,
     ProvisionalLosslessDecisionInput,
     ProvisionalLosslessDecisionResult,
@@ -43,6 +45,7 @@ from lib.quality.decisions import (
     determine_verified_lossless,
     measured_import_decision,
     provisional_lossless_decision,
+    post_import_search_action,
     quality_gate_decision,
     spectral_import_decision,
     transcode_detection,
@@ -82,7 +85,7 @@ def full_pipeline_decision(
     post_conversion_min_bitrate=None,
     converted_count=0,
     # Pipeline state
-    verified_lossless=False,
+    candidate_verified_lossless_proof=False,
     # Verified lossless target format (e.g. "opus 128", "mp3 v2")
     verified_lossless_target=None,
     # Target format (user intent — "flac" skips conversion)
@@ -105,6 +108,7 @@ def full_pipeline_decision(
     existing_v0_probe_kind: str | None = None,
     candidate_v0_probe_kind: str | None = None,
     supported_lossless_source: bool | None = None,
+    current_verified_lossless_proof: bool = False,
 ):
     """Run the full decision chain and return the final outcome.
 
@@ -155,7 +159,7 @@ def full_pipeline_decision(
         "denylisted": False,
         "keep_searching": False,
         "target_final_format": None,
-        "verified_lossless": bool(verified_lossless),
+        "verified_lossless": bool(candidate_verified_lossless_proof),
         # The QualityComparisonBasis from measured_import_decision, as plain
         # builtins (msgspec.to_builtins) — this dict rides json.dumps'd API
         # responses and preview JSONB, so it must stay JSON-plain. None when
@@ -164,6 +168,15 @@ def full_pipeline_decision(
         # ImportResult convert back with msgspec.convert at their boundary.
         "comparison_basis": None,
     }
+
+    # A proof-bearing installed HAVE is the automatic acquisition ceiling.
+    # This guard deliberately precedes every candidate-derived reject,
+    # including folder/audio-integrity and spectral exits. Operator-authorized
+    # force/manual paths bypass it.
+    if import_mode == "auto" and current_verified_lossless_proof:
+        result["stage2_import"] = DECISION_VERIFIED_LOSSLESS_LOCKED
+        result["final_status"] = "imported"
+        return result
 
     # --- Preimport gates (issue #91) ---
     # Ordering mirrors the live flow: lib.dispatch.dispatch_import_from_db
@@ -307,7 +320,14 @@ def full_pipeline_decision(
             min_bitrate_kbps=min_bitrate,
             format=stage2_new_format,
             spectral_grade=spectral_grade,
-            spectral_bitrate_kbps=spectral_bitrate)
+            spectral_bitrate_kbps=spectral_bitrate,
+            spectral_subject=(
+                EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
+            ),
+            spectral_provenance=(
+                EVIDENCE_PROVENANCE_MEASURED
+                if spectral_grade is not None else None
+            ))
         if v0_verified_override:
             provisional = ProvisionalLosslessDecisionResult()
         else:
@@ -334,14 +354,21 @@ def full_pipeline_decision(
                 result["denylisted"] = True
                 result["keep_searching"] = True
                 return result
+            search_action = post_import_search_action(provisional.decision)
             result["imported"] = True
-            result["denylisted"] = True
-            result["keep_searching"] = True
-            result["final_status"] = "wanted"
+            result["denylisted"] = search_action.denylist
+            result["keep_searching"] = search_action.status == "wanted"
+            result["final_status"] = search_action.status
             result["target_final_format"] = stage2_new_format
             return result
         measured = measured_import_decision(
-            MeasuredImportDecisionInput(new_m, existing_m), cfg=cfg)
+            MeasuredImportDecisionInput(
+                new_m,
+                existing_m,
+                verified_lossless_proof=will_be_verified,
+            ),
+            cfg=cfg,
+        )
         result["stage2_import"] = measured.decision
         result["comparison_basis"] = (
             msgspec.to_builtins(measured.comparison_basis)
@@ -357,7 +384,7 @@ def full_pipeline_decision(
         # through determine_verified_lossless so the V0-avg trust override is
         # consulted and the simulator stays in lockstep with import_one.py.
         if will_be_verified:
-            verified_lossless = True
+            candidate_verified_lossless_proof = True
             result["verified_lossless"] = True
 
         gate_bitrate = min_bitrate
@@ -368,8 +395,7 @@ def full_pipeline_decision(
     elif is_flac:
         # FLAC path: convert first, then decide
         is_transcode = transcode_detection(
-            converted_count, post_conversion_min_bitrate,
-            spectral_grade=spectral_grade, cfg=cfg)
+            converted_count, spectral_grade=spectral_grade)
         candidate_probe_min = (
             candidate_v0_probe_min
             if candidate_v0_probe_min is not None
@@ -406,9 +432,15 @@ def full_pipeline_decision(
         new_m = AudioQualityMeasurement(
             min_bitrate_kbps=min_bitrate,
             format=new_format or "flac",
-            verified_lossless=will_be_verified,
             spectral_grade=spectral_grade,
-            spectral_bitrate_kbps=spectral_bitrate)
+            spectral_bitrate_kbps=spectral_bitrate,
+            spectral_subject=(
+                EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
+            ),
+            spectral_provenance=(
+                EVIDENCE_PROVENANCE_MEASURED
+                if spectral_grade is not None else None
+            ))
         # The audit target names only an output policy that would actually be
         # materialized. The temporary V0 comparison proxy and a rejected
         # transcode are not final targets.
@@ -448,10 +480,11 @@ def full_pipeline_decision(
                 result["denylisted"] = True
                 result["keep_searching"] = True
                 return result
+            search_action = post_import_search_action(provisional.decision)
             result["imported"] = True
-            result["denylisted"] = True
-            result["keep_searching"] = True
-            result["final_status"] = "wanted"
+            result["denylisted"] = search_action.denylist
+            result["keep_searching"] = search_action.status == "wanted"
+            result["final_status"] = search_action.status
             if verified_lossless_target:
                 result["target_final_format"] = verified_lossless_target
             return result
@@ -485,6 +518,7 @@ def full_pipeline_decision(
                     or post_conversion_min_bitrate is not None
                     else None
                 ),
+                will_be_verified,
             ),
             cfg=cfg,
         )
@@ -515,13 +549,13 @@ def full_pipeline_decision(
         # Hicks shape — spectral=suspect on spoken-word with high V0
         # evidence) flips False→True consistently with import_one.py.
         if will_be_verified:
-            verified_lossless = True
+            candidate_verified_lossless_proof = True
             result["verified_lossless"] = True
 
         # Target format conversion: if verified lossless + target configured,
         # use the target label for the quality gate (e.g. "opus 128") so the
         # rank model classifies against the actual on-disk contract.
-        if verified_lossless and verified_lossless_target:
+        if candidate_verified_lossless_proof and verified_lossless_target:
             result["target_final_format"] = verified_lossless_target
             gate_format = verified_lossless_target
         else:
@@ -544,9 +578,10 @@ def full_pipeline_decision(
         gate_avg_bitrate = gate_bitrate
         gate_cbr = False  # V0 conversion always produces VBR
     else:
-        # MP3 path: import directly. No format label for native MP3 downloads
-        # unless the caller provided one — the rank model falls back to the
-        # bare-codec bitrate classification via `new_format=None`.
+        # Native lossy path: import directly. The caller must supply the codec
+        # label measured from the actual audio. An absent/unmapped label stays
+        # UNKNOWN; it must never be relabelled as MP3 from bitrate or container
+        # shape.
         #
         # Use the caller-supplied avg_bitrate when present (falls back to
         # min_bitrate otherwise). Under the default cfg.bitrate_metric=AVG
@@ -555,7 +590,6 @@ def full_pipeline_decision(
         # the wrong tier.
         stage2_new_format = comparison_format_hint(
             explicit_format=new_format,
-            native_codec_family="MP3",
         )
         # No fabricated fallbacks: when the caller measured no avg, the
         # basis metric falls back to (and honestly says) "min". Median is
@@ -566,7 +600,14 @@ def full_pipeline_decision(
             format=stage2_new_format,
             is_cbr=is_cbr,
             spectral_grade=spectral_grade,
-            spectral_bitrate_kbps=spectral_bitrate)
+            spectral_bitrate_kbps=spectral_bitrate,
+            spectral_subject=(
+                EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
+            ),
+            spectral_provenance=(
+                EVIDENCE_PROVENANCE_MEASURED
+                if spectral_grade is not None else None
+            ))
         # Lossless-source lock: a recorded existing lossless-source V0 probe
         # is the truth-of-source anchor. Lossy candidates have no comparable
         # measurement and are rejected before measured_import_decision can
@@ -590,7 +631,13 @@ def full_pipeline_decision(
             result["keep_searching"] = True
             return result
         measured = measured_import_decision(
-            MeasuredImportDecisionInput(new_m, existing_m), cfg=cfg)
+            MeasuredImportDecisionInput(
+                new_m,
+                existing_m,
+                verified_lossless_proof=candidate_verified_lossless_proof,
+            ),
+            cfg=cfg,
+        )
         result["stage2_import"] = measured.decision
         result["comparison_basis"] = (
             msgspec.to_builtins(measured.comparison_basis)
@@ -630,22 +677,25 @@ def full_pipeline_decision(
         median_bitrate_kbps=gate_avg_bitrate,
         format=gate_measurement_format,
         is_cbr=gate_cbr,
-        verified_lossless=verified_lossless,
         spectral_grade=spectral_grade,
-        spectral_bitrate_kbps=gate_spectral_bitrate)
+        spectral_bitrate_kbps=gate_spectral_bitrate,
+        spectral_subject=(
+            EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
+        ),
+        spectral_provenance=(
+            EVIDENCE_PROVENANCE_MEASURED
+            if spectral_grade is not None else None
+        ))
     result["stage3_quality_gate"] = quality_gate_decision(
-        gate_m, cfg=cfg, target_contract=gate_contract
+        gate_m,
+        cfg=cfg,
+        target_contract=gate_contract,
+        verified_lossless_proof=candidate_verified_lossless_proof,
     )
-
-    if result["stage3_quality_gate"] == "accept":
-        result["final_status"] = "imported"
-    elif result["stage3_quality_gate"] == "requeue_upgrade":
-        result["final_status"] = "wanted"
-        result["denylisted"] = True
-        result["keep_searching"] = True
-    elif result["stage3_quality_gate"] == "requeue_lossless":
-        result["final_status"] = "wanted"
-        result["keep_searching"] = True
+    search_action = post_import_search_action(result["stage3_quality_gate"])
+    result["final_status"] = search_action.status
+    result["denylisted"] = search_action.denylist
+    result["keep_searching"] = search_action.status == "wanted"
 
     return result
 
@@ -758,6 +808,7 @@ QUALITY_DECISION_REJECT_STAGE_DECISIONS: frozenset[str] = frozenset({
     "suspect_lossless_downgrade",
     "suspect_lossless_probe_missing",
     "lossless_source_locked",
+    "verified_lossless_locked",
 })
 QUALITY_DECISION_REQUEUE_DECISIONS: frozenset[str] = frozenset({
     "requeue_upgrade",
@@ -854,12 +905,12 @@ def _lossless_source_from_evidence(evidence: AlbumQualityEvidence) -> bool:
     metric = evidence.v0_metric
     if (
         metric is not None
-        and metric.source_lineage == V0_SOURCE_LINEAGE_LOSSLESS_SOURCE
+        and metric.subject == EVIDENCE_SUBJECT_SOURCE
     ):
         return True
 
     measurement = evidence.measurement
-    if measurement.verified_lossless and evidence.verified_lossless_proof is not None:
+    if evidence.verified_lossless_proof is not None:
         return True
     candidates = (
         measurement.was_converted_from,
@@ -887,7 +938,7 @@ def _policy_v0_probe_from_metric(
         return None
     kind = (
         V0_PROBE_LOSSLESS_SOURCE
-        if metric.source_lineage == V0_SOURCE_LINEAGE_LOSSLESS_SOURCE
+        if metric.subject == EVIDENCE_SUBJECT_SOURCE
         else _NONCOMPARABLE_NEUTRAL_V0_PROBE_KIND
     )
     return V0ProbeEvidence(
@@ -1016,6 +1067,33 @@ def full_pipeline_decision_from_evidence(
     _require_evidence_ready("candidate", candidate)
     if current is not None:
         _require_evidence_ready("current", current)
+
+    # Current proof outranks every automatic candidate fact. In particular,
+    # a corrupt, nested, empty, mixed, or known-bad candidate cannot reopen a
+    # release that is already at the terminal archival ceiling.
+    if (
+        facts.import_mode == "auto"
+        and current is not None
+        and current.verified_lossless_proof is not None
+    ):
+        return {
+            "preimport_audio": None,
+            "preimport_nested": None,
+            "preimport_bad_hash": None,
+            "preimport_empty_fileset": None,
+            "preimport_mixed_source": None,
+            "stage0_spectral_gate": None,
+            "stage1_spectral": None,
+            "stage2_import": DECISION_VERIFIED_LOSSLESS_LOCKED,
+            "stage3_quality_gate": None,
+            "final_status": "imported",
+            "imported": False,
+            "denylisted": False,
+            "keep_searching": False,
+            "target_final_format": None,
+            "verified_lossless": candidate.verified_lossless_proof is not None,
+            "comparison_basis": None,
+        }
 
     # --- U11 folder/audio-integrity early-exit rejects ---
     # The four facts live directly on the persisted ``AlbumQualityEvidence``
@@ -1179,7 +1257,9 @@ def full_pipeline_decision_from_evidence(
         post_conversion_min_bitrate=post_conversion_min,
         post_conversion_is_cbr=post_conversion_is_cbr,
         converted_count=converted_count,
-        verified_lossless=candidate_measurement.verified_lossless,
+        candidate_verified_lossless_proof=(
+            candidate.verified_lossless_proof is not None
+        ),
         verified_lossless_target=facts.verified_lossless_target,
         target_format=target_format,
         new_format=_new_format_hint_from_evidence(
@@ -1214,4 +1294,8 @@ def full_pipeline_decision_from_evidence(
             candidate_probe.kind if candidate_probe is not None else None
         ),
         supported_lossless_source=supported_lossless_source,
+        current_verified_lossless_proof=(
+            current is not None
+            and current.verified_lossless_proof is not None
+        ),
     )

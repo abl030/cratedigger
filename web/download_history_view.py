@@ -36,6 +36,8 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     beets_detail: str | None
     soulseek_username: str | None
     error_message: str | None
+    download_path: str | None
+    staged_path: str | None
     import_result: str | dict[str, object] | None
     validation_result: str | dict[str, object] | None
     filetype: str | None
@@ -48,6 +50,10 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     downloaded_label: str
     verdict: str
     summary: str
+    failure_category: str | None
+    analysis_error: str | None
+    installed_path: str | None
+    candidate_reference: str | None
     # Persisted QualityComparisonBasis as a plain dict (null on rows
     # predating the field) — the detail grid's "Compared" row.
     comparison_basis: dict[str, object] | None

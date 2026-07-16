@@ -242,39 +242,46 @@ DOWNLOAD_SCENARIOS = [
                      candidate_v0_probe_avg=276, candidate_v0_probe_min=237),
     # MP3 VBR (avg_bitrate drives the preimport spectral gate — issue #93)
     DownloadScenario("mp3_v0_240", False, 240, False,
-                     is_vbr=True, avg_bitrate=245),
+                     is_vbr=True, avg_bitrate=245, new_format="MP3"),
     DownloadScenario("mp3_v0_low_205", False, 205, False,
-                     is_vbr=True, avg_bitrate=205),
+                     is_vbr=True, avg_bitrate=205, new_format="MP3"),
     DownloadScenario("mp3_v2_190", False, 190, False,
-                     is_vbr=True, avg_bitrate=190),
+                     is_vbr=True, avg_bitrate=190, new_format="MP3"),
     # VBR transcode masquerading as V0 (Go! Team shape from issue #93).
     # Low avg + likely_transcode spectral → stage 0 gates, stage 1 rejects.
     DownloadScenario("vbr_transcode_go_team_shape", False, 126, False,
                      is_vbr=True, avg_bitrate=182,
                      spectral_grade="likely_transcode",
-                     spectral_bitrate=96),
+                     spectral_bitrate=96, new_format="MP3"),
     # CBR no spectral
-    DownloadScenario("cbr_320_no_spectral", False, 320, True),
-    DownloadScenario("cbr_256_no_spectral", False, 256, True),
-    DownloadScenario("cbr_192_no_spectral", False, 192, True),
-    DownloadScenario("cbr_152_no_spectral", False, 152, True),
+    DownloadScenario("cbr_320_no_spectral", False, 320, True,
+                     new_format="MP3"),
+    DownloadScenario("cbr_256_no_spectral", False, 256, True,
+                     new_format="MP3"),
+    DownloadScenario("cbr_192_no_spectral", False, 192, True,
+                     new_format="MP3"),
+    DownloadScenario("cbr_152_no_spectral", False, 152, True,
+                     new_format="MP3"),
     # CBR 152 with transcode spectral — the shape every Soulseek source for
     # Unter Null - The Failure Epiphany delivered on 2026-04-21 (drasslok23,
     # shutupman2, synthetic, DrinkMoxie). All 152 kbps CBR, all with a
     # cliff at ~96 kbps.
     DownloadScenario("cbr_152_likely_transcode_96", False, 152, True,
-                     spectral_grade="likely_transcode", spectral_bitrate=96),
+                     spectral_grade="likely_transcode", spectral_bitrate=96,
+                     new_format="MP3"),
     # CBR with spectral
     DownloadScenario("cbr_320_genuine", False, 320, True,
-                     spectral_grade="genuine"),
+                     spectral_grade="genuine", new_format="MP3"),
     DownloadScenario("cbr_320_suspect_128", False, 320, True,
-                     spectral_grade="suspect", spectral_bitrate=128),
+                     spectral_grade="suspect", spectral_bitrate=128,
+                     new_format="MP3"),
     DownloadScenario("cbr_320_suspect_192", False, 320, True,
-                     spectral_grade="suspect", spectral_bitrate=192),
+                     spectral_grade="suspect", spectral_bitrate=192,
+                     new_format="MP3"),
     DownloadScenario("cbr_256_genuine", False, 256, True,
-                     spectral_grade="genuine"),
+                     spectral_grade="genuine", new_format="MP3"),
     DownloadScenario("cbr_192_genuine", False, 192, True,
-                     spectral_grade="genuine"),
+                     spectral_grade="genuine", new_format="MP3"),
     # Brian Eno - Generative Music I (download_log 3291, 2026-04-12). Mixed
     # bitrate MP3 album: min=128 (one track), avg=290, median=320 — most
     # tracks are 320 CBR, one is a 128 outlier, so the set-of-bitrates
@@ -287,7 +294,8 @@ DOWNLOAD_SCENARIOS = [
                      avg_bitrate=290,
                      is_vbr=True,
                      spectral_grade="genuine",
-                     spectral_bitrate=96),
+                     spectral_bitrate=96,
+                     new_format="MP3"),
 ]
 
 DL_MAP = {s.name: s for s in DOWNLOAD_SCENARIOS}
@@ -297,8 +305,14 @@ DL_MAP = {s.name: s for s in DOWNLOAD_SCENARIOS}
 # Simulator helper (mirrors CLI logic from pipeline_cli.py cmd_quality)
 # ============================================================================
 
-def simulate(album: AlbumState, download: DownloadScenario,
-             verified_lossless_target: str | None = None) -> SimResult:
+def simulate(
+    album: AlbumState,
+    download: DownloadScenario,
+    verified_lossless_target: str | None = None,
+    *,
+    current_verified_lossless_proof: bool | None = None,
+    import_mode: str = "auto",
+) -> SimResult:
     """Run full_pipeline_decision + rejection backfill."""
     # Derive existing state params (same logic as cmd_quality)
     existing_spectral_bitrate = album.spectral_bitrate
@@ -320,9 +334,15 @@ def simulate(album: AlbumState, download: DownloadScenario,
         override_min_bitrate=override,
         existing_format=_derive_album_format(album),
         existing_is_cbr=album.is_cbr,
-        verified_lossless=album.verified_lossless,
+        candidate_verified_lossless_proof=False,
+        current_verified_lossless_proof=(
+            album.verified_lossless
+            if current_verified_lossless_proof is None
+            else current_verified_lossless_proof
+        ),
         verified_lossless_target=verified_lossless_target,
         target_format=album.target_format,
+        import_mode=import_mode,
         existing_v0_probe_avg=album.existing_v0_probe_avg,
         **download.dl_params(),
     )
@@ -348,7 +368,6 @@ def simulate(album: AlbumState, download: DownloadScenario,
             is_cbr=album.is_cbr,
             spectral_grade=album.spectral_grade,
             spectral_bitrate_kbps=album.spectral_bitrate,
-            verified_lossless=album.verified_lossless,
         ),
         spectral_evidence_source="attempt_have_audit",
         have_spectral_audit=SpectralAnalysisDetail(
@@ -364,13 +383,15 @@ def simulate(album: AlbumState, download: DownloadScenario,
         else None
     )
 
-    # Model search_filetype_override after the full cycle.
-    # This mirrors _check_quality_gate_core() in lib/dispatch/quality_gate.py:
-    # - accept → search_filetype_override=None (clears transient override)
-    # - requeue_upgrade → search_filetype_override=upgrade tiers
-    # - requeue_lossless → search_filetype_override="lossless"
-    # - rejection (not imported) → preserve existing override
-    # target_format (persistent user intent) is NEVER touched by the pipeline.
+    # Independent expectation table for the production post-import mapping.
+    # Deliberately do not call post_import_search_action() here: this mirror
+    # must catch status / override / denylist drift in every consumer.
+    expected_actions = {
+        "accept": ("imported", None, False),
+        "requeue_upgrade": ("wanted", None, True),
+        "requeue_lossless": ("wanted", "lossless", True),
+        "provisional_lossless_upgrade": ("wanted", "lossless", True),
+    }
     gate = result["stage3_quality_gate"]
     if not result["imported"]:
         # Rejection: override stays (or backfill sets it)
@@ -379,12 +400,26 @@ def simulate(album: AlbumState, download: DownloadScenario,
             if rejection_override is not None
             else album.search_filetype_override
         )
-    elif gate == "accept":
-        override_after = None  # production clears search_filetype_override on accept
-    elif gate == "requeue_upgrade":
-        override_after = QUALITY_UPGRADE_TIERS
-    elif gate == "requeue_lossless":
-        override_after = "lossless"
+    elif gate in expected_actions:
+        expected_status, override_after, expected_denylist = expected_actions[gate]
+        if result["final_status"] != expected_status:
+            raise AssertionError(
+                f"post-import status drift for {gate}: "
+                f"{result['final_status']!r} != {expected_status!r}"
+            )
+        if result["denylisted"] != expected_denylist:
+            raise AssertionError(
+                f"post-import denylist drift for {gate}: "
+                f"{result['denylisted']!r} != {expected_denylist!r}"
+            )
+    elif result["stage2_import"] == "provisional_lossless_upgrade":
+        expected_status, override_after, expected_denylist = expected_actions[
+            "provisional_lossless_upgrade"
+        ]
+        if result["final_status"] != expected_status:
+            raise AssertionError("provisional import status mapping drifted")
+        if result["denylisted"] != expected_denylist:
+            raise AssertionError("provisional import denylist mapping drifted")
     else:
         override_after = album.search_filetype_override
 
@@ -488,7 +523,7 @@ class TestSimulatorInvariants(unittest.TestCase):
                     self.assertIsNone(r.backfill_override)
 
     def test_denylist_requires_cause(self):
-        """Denylisting only from: spectral reject, transcode, or requeue_upgrade."""
+        """Denylisting only from a rejected or retained nonterminal source."""
         for album in ALBUM_STATES:
             for dl in DOWNLOAD_SCENARIOS:
                 with self.subTest(album=album.name, dl=dl.name):
@@ -503,7 +538,9 @@ class TestSimulatorInvariants(unittest.TestCase):
                                                 "suspect_lossless_downgrade",
                                                 "suspect_lossless_probe_missing",
                                                 "lossless_source_locked"),
-                            r.stage3_quality_gate == "requeue_upgrade",
+                            r.stage3_quality_gate in (
+                                "requeue_upgrade", "requeue_lossless"
+                            ),
                         )
                         self.assertTrue(any(causes),
                                         f"Denylisted without valid cause: {r}")
@@ -874,6 +911,7 @@ class TestNamedRegressions(unittest.TestCase):
         self.assertTrue(r.imported)
         self.assertIn(r.stage2_import, ("import", "transcode_upgrade"))
 
+
     def test_unter_null_failure_epiphany_vbr_real_upgrade(self):
         """VBR existing (1749 shape) + genuine V0 upgrade still imports.
 
@@ -1000,7 +1038,7 @@ class TestNamedRegressions(unittest.TestCase):
     def test_deloris_flac_on_disk_beats_existing_v0(self):
         """FLAC at ~900kbps on disk beats existing V0 at 245kbps."""
         album = AlbumState("v0_wants_flac", 245, False,
-                           "genuine", None, True, None, target_format="flac")
+                           "genuine", None, False, None, target_format="flac")
         dl = DL_MAP["flac_genuine_raw"]
         r = simulate(album, dl)
 
@@ -1008,15 +1046,15 @@ class TestNamedRegressions(unittest.TestCase):
         self.assertEqual(r.stage2_import, "import")
         self.assertEqual(r.stage3_quality_gate, "accept")
 
-    def test_deloris_flac_vs_flac_same_bitrate_downgrades(self):
-        """FLAC on disk vs same FLAC → downgrade (not an upgrade)."""
+    def test_deloris_proof_bearing_flac_locks_automatic_candidate(self):
+        """A proof-bearing FLAC HAVE is the automatic acquisition ceiling."""
         album = AlbumState("flac_on_disk", 900, False,
                            "genuine", None, True, None, target_format="flac")
         dl = DL_MAP["flac_genuine_raw"]
-        r = simulate(album, dl)
+        r = simulate(album, dl, current_verified_lossless_proof=True)
 
         self.assertFalse(r.imported)
-        self.assertEqual(r.stage2_import, "downgrade")
+        self.assertEqual(r.stage2_import, "verified_lossless_locked")
 
     def test_upgrade_button_unanalysed_album(self):
         """Candidate-only genuine evidence keeps search tiers open.
@@ -1052,7 +1090,7 @@ class TestNamedRegressions(unittest.TestCase):
             AudioQualityMeasurement, compare_quality, QualityRankConfig)
         cfg = QualityRankConfig.defaults()
         opus_128 = AudioQualityMeasurement(
-            format="opus 128", avg_bitrate_kbps=130, verified_lossless=True)
+            format="opus 128", avg_bitrate_kbps=130)
         mp3_v0 = AudioQualityMeasurement(
             format="mp3 v0", avg_bitrate_kbps=245)
         # compare_quality uses label-based rank → both TRANSPARENT
@@ -1060,7 +1098,14 @@ class TestNamedRegressions(unittest.TestCase):
         # import_quality_decision honors the verified_lossless preference
         from lib.quality import import_quality_decision
         self.assertEqual(
-            import_quality_decision(opus_128, mp3_v0, cfg=cfg).decision, "import")
+            import_quality_decision(
+                opus_128,
+                mp3_v0,
+                cfg=cfg,
+                verified_lossless_proof=True,
+            ).decision,
+            "import",
+        )
 
     def test_opus_64_cannot_replace_mp3_v0(self):
         """Too-low verified_lossless target Opus 64 is blocked by rank floor.
@@ -1075,11 +1120,18 @@ class TestNamedRegressions(unittest.TestCase):
             QualityRankConfig)
         cfg = QualityRankConfig.defaults()
         opus_64 = AudioQualityMeasurement(
-            format="opus 64", avg_bitrate_kbps=64, verified_lossless=True)
+            format="opus 64", avg_bitrate_kbps=64)
         mp3_v0 = AudioQualityMeasurement(
             format="mp3 v0", avg_bitrate_kbps=245)
         self.assertEqual(
-            import_quality_decision(opus_64, mp3_v0, cfg=cfg).decision, "downgrade")
+            import_quality_decision(
+                opus_64,
+                mp3_v0,
+                cfg=cfg,
+                verified_lossless_proof=True,
+            ).decision,
+            "downgrade",
+        )
 
     def test_flac_to_opus_128_replaces_cbr_320(self):
         """Verified Opus 128 replaces unverified CBR 320 (codec parity)."""
@@ -1088,11 +1140,18 @@ class TestNamedRegressions(unittest.TestCase):
             QualityRankConfig)
         cfg = QualityRankConfig.defaults()
         opus_128 = AudioQualityMeasurement(
-            format="opus 128", avg_bitrate_kbps=130, verified_lossless=True)
+            format="opus 128", avg_bitrate_kbps=130)
         cbr_320 = AudioQualityMeasurement(
             format="mp3 320", avg_bitrate_kbps=320, is_cbr=True)
         self.assertEqual(
-            import_quality_decision(opus_128, cbr_320, cfg=cfg).decision, "import")
+            import_quality_decision(
+                opus_128,
+                cbr_320,
+                cfg=cfg,
+                verified_lossless_proof=True,
+            ).decision,
+            "import",
+        )
 
     def test_lofi_v0_still_imports(self):
         """Lo-fi V0 (207kbps) imports under the rank model via the label.
@@ -1106,27 +1165,135 @@ class TestNamedRegressions(unittest.TestCase):
             AudioQualityMeasurement, quality_gate_decision, QualityRankConfig)
         cfg = QualityRankConfig.defaults()
         current = AudioQualityMeasurement(
-            format="mp3 v0", min_bitrate_kbps=207, avg_bitrate_kbps=207,
-            verified_lossless=True)
-        self.assertEqual(quality_gate_decision(current, cfg=cfg), "accept")
-
-    def test_gate_min_rank_good_accepts_lower_cfg(self):
-        """Custom cfg.gate_min_rank=GOOD lets 180kbps VBR pass the gate.
-
-        Locks the runtime-config threading through the gate. Under default
-        EXCELLENT the same measurement requeues; under GOOD it accepts.
-        """
-        from lib.quality import (
-            AudioQualityMeasurement, quality_gate_decision,
-            QualityRank, QualityRankConfig)
-        default_cfg = QualityRankConfig.defaults()
-        lenient_cfg = QualityRankConfig(gate_min_rank=QualityRank.GOOD)
-        current = AudioQualityMeasurement(
-            format="MP3", min_bitrate_kbps=180, avg_bitrate_kbps=180)
+            format="mp3 v0", min_bitrate_kbps=207, avg_bitrate_kbps=207)
         self.assertEqual(
-            quality_gate_decision(current, cfg=default_cfg), "requeue_upgrade")
-        self.assertEqual(
-            quality_gate_decision(current, cfg=lenient_cfg), "accept")
+            quality_gate_decision(
+                current,
+                cfg=cfg,
+                verified_lossless_proof=True,
+            ),
+            "accept",
+        )
+
+class TestUnknownCodecFullPath(unittest.TestCase):
+    """Unmapped decodable codecs stay ordered at UNKNOWN end to end."""
+
+    @staticmethod
+    def _download(
+        format_label: str | None,
+        *,
+        bitrate: int = 200,
+        spectral_grade: str | None = None,
+    ) -> DownloadScenario:
+        return DownloadScenario(
+            "unmapped_codec_candidate",
+            is_flac=False,
+            min_bitrate=bitrate,
+            is_cbr=False,
+            is_vbr=True,
+            avg_bitrate=bitrate,
+            spectral_grade=spectral_grade,
+            new_format=format_label,
+        )
+
+    def test_unlabelled_native_candidate_does_not_invent_mp3_rank(self):
+        album = AlbumState(
+            "known_mp3_have",
+            min_bitrate=128,
+            is_cbr=True,
+            spectral_grade=None,
+            spectral_bitrate=None,
+            verified_lossless=False,
+            search_filetype_override=None,
+            existing_format="MP3",
+            avg_bitrate=128,
+        )
+
+        result = simulate(album, self._download(None, bitrate=320))
+
+        self.assertFalse(result.imported)
+        self.assertEqual(result.stage2_import, "downgrade")
+        assert result.comparison_basis is not None
+        self.assertEqual(result.comparison_basis["new_rank"], "unknown")
+
+    def test_parts_and_labor_a_great_divide_vorbis_192(self):
+        """Live request 2593: the Ogg container carries actual Vorbis audio."""
+        album = AlbumState(
+            "parts_and_labor_prior_mp3",
+            min_bitrate=128,
+            is_cbr=True,
+            spectral_grade=None,
+            spectral_bitrate=None,
+            verified_lossless=False,
+            search_filetype_override=None,
+            existing_format="MP3",
+            avg_bitrate=128,
+        )
+
+        result = simulate(
+            album,
+            self._download("vorbis", bitrate=192, spectral_grade="genuine"),
+        )
+
+        self.assertEqual(result.stage2_import, "import")
+        assert result.comparison_basis is not None
+        self.assertEqual(result.comparison_basis["new_format"], "vorbis")
+        self.assertEqual(result.comparison_basis["new_rank"], "transparent")
+
+    def test_unknown_codec_quality_ordering(self):
+        known_have = AlbumState(
+            "known_have",
+            min_bitrate=128,
+            is_cbr=True,
+            spectral_grade=None,
+            spectral_bitrate=None,
+            verified_lossless=False,
+            search_filetype_override=None,
+            existing_format="MP3",
+            avg_bitrate=128,
+        )
+        unknown_have = AlbumState(
+            "unknown_have",
+            min_bitrate=200,
+            is_cbr=False,
+            spectral_grade=None,
+            spectral_bitrate=None,
+            verified_lossless=False,
+            search_filetype_override=None,
+            existing_format="Musepack",
+            avg_bitrate=200,
+        )
+
+        unknown_over_known = simulate(
+            known_have, self._download("Musepack", bitrate=320)
+        )
+        known_over_unknown = simulate(
+            unknown_have, self._download("MP3", bitrate=128)
+        )
+        unknown_over_unknown = simulate(
+            unknown_have, self._download("Musepack", bitrate=320)
+        )
+
+        self.assertFalse(unknown_over_known.imported)
+        self.assertEqual(unknown_over_known.stage2_import, "downgrade")
+        self.assertTrue(known_over_unknown.imported)
+        self.assertEqual(known_over_unknown.stage2_import, "import")
+        self.assertFalse(unknown_over_unknown.imported)
+        self.assertEqual(unknown_over_unknown.stage2_import, "downgrade")
+        self.assertTrue(unknown_over_unknown.keep_searching)
+
+    def test_musepack_first_copy_imports_unknown_and_stays_on_full_tiers(self):
+        """AE4: an exact-release Musepack first copy remains searchable."""
+        result = simulate(
+            ALBUM_MAP["fresh_request"],
+            self._download("Musepack", bitrate=200),
+        )
+
+        self.assertTrue(result.imported)
+        self.assertEqual(result.stage2_import, "import")
+        self.assertEqual(result.final_status, "wanted")
+        self.assertTrue(result.keep_searching)
+        self.assertIsNone(result.search_filetype_override_after)
 
 
 # ============================================================================
@@ -1186,10 +1353,11 @@ class TestFreshRequestOutcomes(unittest.TestCase):
     def test_mp3_v0_240(self):
         r = self._sim("mp3_v0_240")
         self.assertTrue(r.imported)
-        self.assertFalse(r.denylisted)
-        self.assertFalse(r.keep_searching)
-        self.assertEqual(r.final_status, "imported")
-        self.assertEqual(r.stage3_quality_gate, "accept")
+        self.assertTrue(r.denylisted)
+        self.assertTrue(r.keep_searching)
+        self.assertEqual(r.final_status, "wanted")
+        self.assertEqual(r.stage3_quality_gate, "requeue_upgrade")
+        self.assertIsNone(r.search_filetype_override_after)
 
     def test_mp3_v0_low_205(self):
         r = self._sim("mp3_v0_low_205")
@@ -1212,18 +1380,20 @@ class TestFreshRequestOutcomes(unittest.TestCase):
     def test_cbr_320_no_spectral(self):
         r = self._sim("cbr_320_no_spectral")
         self.assertTrue(r.imported)
-        self.assertFalse(r.denylisted)
+        self.assertTrue(r.denylisted)
         self.assertTrue(r.keep_searching)
         self.assertEqual(r.final_status, "wanted")
-        self.assertEqual(r.stage3_quality_gate, "requeue_lossless")
+        self.assertEqual(r.stage3_quality_gate, "requeue_upgrade")
+        self.assertIsNone(r.search_filetype_override_after)
 
     def test_cbr_256_no_spectral(self):
         r = self._sim("cbr_256_no_spectral")
         self.assertTrue(r.imported)
-        self.assertFalse(r.denylisted)
+        self.assertTrue(r.denylisted)
         self.assertTrue(r.keep_searching)
         self.assertEqual(r.final_status, "wanted")
-        self.assertEqual(r.stage3_quality_gate, "requeue_lossless")
+        self.assertEqual(r.stage3_quality_gate, "requeue_upgrade")
+        self.assertIsNone(r.search_filetype_override_after)
 
     def test_cbr_192_no_spectral(self):
         r = self._sim("cbr_192_no_spectral")
@@ -1235,13 +1405,14 @@ class TestFreshRequestOutcomes(unittest.TestCase):
 
     # --- CBR with spectral ---
 
-    def test_cbr_320_genuine(self):
+    def test_cbr_320_candidate_genuine_stays_on_full_tiers(self):
         r = self._sim("cbr_320_genuine")
         self.assertTrue(r.imported)
-        self.assertFalse(r.denylisted)
+        self.assertTrue(r.denylisted)
         self.assertTrue(r.keep_searching)
         self.assertEqual(r.final_status, "wanted")
-        self.assertEqual(r.stage3_quality_gate, "requeue_lossless")
+        self.assertEqual(r.stage3_quality_gate, "requeue_upgrade")
+        self.assertIsNone(r.search_filetype_override_after)
 
     def test_cbr_320_suspect_128(self):
         r = self._sim("cbr_320_suspect_128")
@@ -1262,10 +1433,11 @@ class TestFreshRequestOutcomes(unittest.TestCase):
     def test_cbr_256_genuine(self):
         r = self._sim("cbr_256_genuine")
         self.assertTrue(r.imported)
-        self.assertFalse(r.denylisted)
+        self.assertTrue(r.denylisted)
         self.assertTrue(r.keep_searching)
         self.assertEqual(r.final_status, "wanted")
-        self.assertEqual(r.stage3_quality_gate, "requeue_lossless")
+        self.assertEqual(r.stage3_quality_gate, "requeue_upgrade")
+        self.assertIsNone(r.search_filetype_override_after)
 
     def test_cbr_192_genuine(self):
         r = self._sim("cbr_192_genuine")
@@ -1337,17 +1509,28 @@ class TestCBR320NoSpectralMatrix(unittest.TestCase):
 class TestVerifiedLosslessMatrix(unittest.TestCase):
     """Verified lossless albums: quality gate accepted, most downloads downgrade."""
 
-    def _sim(self, album_name, dl_name):
-        return simulate(ALBUM_MAP[album_name], DL_MAP[dl_name])
+    def _sim(self, album_name, dl_name, *, current_proof=False, import_mode="auto"):
+        return simulate(
+            ALBUM_MAP[album_name],
+            DL_MAP[dl_name],
+            current_verified_lossless_proof=current_proof,
+            import_mode=import_mode,
+        )
 
     def test_genuine_flac_reimports_verified(self):
-        """Genuine FLAC always imports over verified lossless (re-verified)."""
+        """Automatic genuine FLAC cannot replace a proof-bearing HAVE."""
         for album_name in ("verified_lossless_v0", "verified_lossless_lofi"):
             with self.subTest(album=album_name):
-                r = self._sim(album_name, "flac_genuine_high")
-                self.assertTrue(r.imported)
+                r = self._sim(
+                    album_name,
+                    "flac_genuine_high",
+                    current_proof=True,
+                )
+                self.assertFalse(r.imported)
+                self.assertEqual(r.stage2_import, "verified_lossless_locked")
                 self.assertEqual(r.final_status, "imported")
                 self.assertFalse(r.keep_searching)
+                self.assertFalse(r.denylisted)
 
     def test_mp3_lower_than_existing_downgrades(self):
         """MP3 V2 190 < 245 existing -> downgrade, no backfill."""
@@ -1357,10 +1540,28 @@ class TestVerifiedLosslessMatrix(unittest.TestCase):
         self.assertIsNone(r.backfill_override)
 
     def test_mp3_higher_than_lofi_imports(self):
-        """MP3 V0 240 > 207 existing -> import, accepted."""
-        r = self._sim("verified_lossless_lofi", "mp3_v0_240")
+        """A higher-bitrate MP3 cannot replace a proof-bearing lo-fi HAVE."""
+        r = self._sim(
+            "verified_lossless_lofi",
+            "mp3_v0_240",
+            current_proof=True,
+        )
+        self.assertFalse(r.imported)
+        self.assertEqual(r.stage2_import, "verified_lossless_locked")
+        self.assertEqual(r.final_status, "imported")
+        self.assertFalse(r.keep_searching)
+        self.assertFalse(r.denylisted)
+
+    def test_force_import_bypasses_verified_lossless_lock(self):
+        """Operator authority may replace a proof-bearing HAVE unchanged."""
+        r = self._sim(
+            "verified_lossless_lofi",
+            "mp3_v0_240",
+            current_proof=True,
+            import_mode="force",
+        )
         self.assertTrue(r.imported)
-        self.assertEqual(r.stage3_quality_gate, "accept")
+        self.assertNotEqual(r.stage2_import, "verified_lossless_locked")
 
 
 # ============================================================================

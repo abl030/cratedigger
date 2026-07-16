@@ -1,6 +1,6 @@
 """Post-import quality gate.
 
-Loads the on-disk measurement for a just-imported album and runs
+Loads the linked installed-copy measurement for a just-imported album and runs
 ``quality_gate_decision`` to accept / requeue-for-upgrade / requeue-for-
 lossless. ``finalize_request`` is the module-local DI seam.
 """
@@ -11,14 +11,16 @@ import logging
 from dataclasses import dataclass
 from typing import Sequence, TYPE_CHECKING
 
+import msgspec
+
 from lib import transitions
 
 # Module-level DI seam for ``transitions.finalize_request``.
 finalize_request = transitions.finalize_request
 
-from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,
-                         compute_effective_override_bitrate, extract_usernames,
+from lib.quality import (compute_effective_override_bitrate, extract_usernames,
                          quality_gate_decision)
+from lib.quality.decisions import post_import_search_action
 
 from lib.dispatch.types import QualityGateState
 from lib.terminal_outcomes import TerminalDenylist
@@ -30,6 +32,38 @@ class QualityGatePlan:
 
     transition: transitions.RequestTransition
     denylists: tuple[TerminalDenylist, ...] = ()
+
+
+def _evidence_unavailable_plan(
+    files: Sequence[object],
+) -> QualityGatePlan:
+    """Keep acquisition open when installed-copy evidence is unavailable.
+
+    Missing or failed linked evidence cannot prove either transparent quality
+    or verified-lossless lineage.  The conservative action is therefore a
+    full-tier retry.  The imported copy remains on disk; only the request is
+    reopened, and the winning peer is denied so the next cycle does not select
+    the same unassessable source again.
+    """
+
+    reason = (
+        "quality gate: linked current evidence unavailable; "
+        "continuing full-tier search"
+    )
+    action = post_import_search_action("requeue_upgrade")
+    return QualityGatePlan(
+        transition=transitions.RequestTransition.to_wanted(
+            from_status="imported",
+            search_filetype_override=action.search_filetype_override,
+        ),
+        denylists=tuple(
+            TerminalDenylist(username, reason)
+            for username in (
+                sorted(extract_usernames(files)) if action.denylist else ()
+            )
+        ),
+    )
+
 
 if TYPE_CHECKING:
     from lib.pipeline_db import PipelineDB
@@ -43,82 +77,74 @@ def load_quality_gate_state(
     request_id: int,
     db: "PipelineDB",
     mb_id: str | None = None,
-    quality_ranks: "QualityRankConfig | None" = None,
-    request_fields: dict[str, object] | None = None,
+    expected_current_evidence_id: int | None = None,
 ) -> QualityGateState | None:
-    """Load the current on-disk measurement for quality-gate evaluation.
+    """Load quality-gate facts exclusively from linked current evidence."""
+    from lib.quality_evidence import current_evidence_rebuild_reasons
+    from lib.release_identity import normalize_release_id
 
-    Shared adapter for all post-import quality-gate callers. This is the
-    single place that combines:
-    - Beets on-disk metadata (min/avg/format/is_cbr)
-    - request-row overrides (`final_format`, `verified_lossless`)
-    - grade-aware spectral override logic
-    """
-    from lib.beets_db import BeetsDB
-    from lib.quality import (
-        AudioQualityMeasurement,
-        QualityRankConfig,
-        TargetQualityContract,
-    )
-
-    if quality_ranks is None:
-        quality_ranks = QualityRankConfig.defaults()
-
-    req = None
-    try:
-        req = db.get_request(request_id)
-    except Exception:
-        logger.debug("QUALITY GATE: DB lookup failed for request row")
-    if req is not None and request_fields:
-        req = {**req, **request_fields}
-
-    resolved_mb_id = mb_id or (str(req["mb_release_id"]) if req and req.get("mb_release_id") else None)
+    resolved_mb_id = mb_id
+    if not resolved_mb_id:
+        try:
+            req = db.get_request(request_id)
+        except Exception:
+            logger.debug("QUALITY GATE: DB lookup failed for request row")
+            req = None
+        resolved_mb_id = (
+            str(req["mb_release_id"])
+            if req and req.get("mb_release_id")
+            else None
+        )
     if not resolved_mb_id:
         return None
 
-    with BeetsDB() as beets:
-        info = beets.get_album_info(resolved_mb_id, quality_ranks)
-    if not info:
+    evidence_id = db.get_request_current_evidence_id(request_id)
+    if (
+        expected_current_evidence_id is not None
+        and evidence_id != expected_current_evidence_id
+    ):
+        return None
+    current_evidence = (
+        db.load_album_quality_evidence_by_id(evidence_id)
+        if evidence_id is not None
+        else None
+    )
+    if (
+        current_evidence is None
+        or normalize_release_id(current_evidence.mb_release_id)
+        != normalize_release_id(resolved_mb_id)
+        or current_evidence_rebuild_reasons(current_evidence)
+    ):
         return None
 
-    min_br_kbps = info.min_bitrate_kbps
-    spectral_grade = req.get("current_spectral_grade") if req else None
-    raw_br = req.get("current_spectral_bitrate") if req else None
-    raw_br_int = raw_br if isinstance(raw_br, int) else None
+    linked_measurement = current_evidence.measurement
+    min_br_kbps = linked_measurement.min_bitrate_kbps
+    if min_br_kbps is None:
+        return None
+    spectral_grade = linked_measurement.spectral_grade
+    raw_br_int = linked_measurement.spectral_bitrate_kbps
     spectral_br: int | None = None
     effective = compute_effective_override_bitrate(
         min_br_kbps, raw_br_int, spectral_grade)
     if effective is not None and effective < min_br_kbps:
         spectral_br = raw_br_int
 
-    album_format = info.format
-    target_contract = None
-    verified_lossless = bool(req.get("verified_lossless")) if req else False
-    if req and req.get("final_format"):
-        target_contract = TargetQualityContract.from_projection(
-            str(req["final_format"]),
-            # Bare MP3 is not self-describing. At the post-import gate the
-            # materialized album is the available confirmation of the
-            # projection mode; keep it on the contract instead of borrowing
-            # it implicitly inside rank classification.
-            projected_is_cbr=info.is_cbr,
-        )
-
-    current = AudioQualityMeasurement(
-        min_bitrate_kbps=min_br_kbps,
-        avg_bitrate_kbps=info.avg_bitrate_kbps,
-        median_bitrate_kbps=info.median_bitrate_kbps,
-        format=album_format,
-        is_cbr=info.is_cbr,
-        verified_lossless=verified_lossless,
+    current = msgspec.structs.replace(
+        linked_measurement,
         spectral_bitrate_kbps=spectral_br,
     )
+    source_v0_avg = None
+    if (
+        current_evidence.v0_metric is not None
+        and current_evidence.v0_metric.subject == "source"
+    ):
+        source_v0_avg = current_evidence.v0_metric.avg_bitrate_kbps
     return QualityGateState(
         measurement=current,
-        min_bitrate_kbps=min_br_kbps,
-        spectral_bitrate_kbps=spectral_br,
-        spectral_grade=spectral_grade,
-        target_contract=target_contract,
+        verified_lossless_proof=(
+            current_evidence.verified_lossless_proof is not None
+        ),
+        source_v0_avg_bitrate_kbps=source_v0_avg,
     )
 
 
@@ -129,117 +155,101 @@ def _check_quality_gate_core(
     files: Sequence[object],
     db: "PipelineDB",
     quality_ranks: "QualityRankConfig | None" = None,
+    expected_current_evidence_id: int | None = None,
     apply: bool = True,
-    request_fields: dict[str, object] | None = None,
 ) -> QualityGatePlan | None:
-    """Post-import quality gate — standalone version taking plain params + PipelineDB.
-
-    Reads beets DB for on-disk quality, runs quality_gate_decision, dispatches
-    requeue/accept. Used by both auto-import (via wrapper) and core dispatch.
-
-    ``quality_ranks`` is used by ``BeetsDB.get_album_info()`` to reduce
-    mixed-format albums via ``cfg.mixed_format_precedence``. Defaults to
-    ``QualityRankConfig.defaults()`` so existing tests and callers that
-    don't care about mixed-format reduction still work. Commit 5 will thread
-    the real runtime config through from dispatch_import_core().
-    """
-    from lib.quality import QualityRankConfig, gate_rank
+    """Apply the post-import policy to linked current evidence."""
+    from lib.quality import QualityRankConfig
 
     if quality_ranks is None:
         quality_ranks = QualityRankConfig.defaults()
 
     if not mb_id:
         return
+    plan: QualityGatePlan
     try:
         state = load_quality_gate_state(
             request_id=request_id,
             db=db,
             mb_id=mb_id,
-            quality_ranks=quality_ranks,
-            request_fields=request_fields,
+            expected_current_evidence_id=expected_current_evidence_id,
         )
         if not state:
-            return
-        current = state.measurement
-        min_br_kbps = state.min_bitrate_kbps
-        spectral_br = state.spectral_bitrate_kbps
-        spectral_grade = state.spectral_grade
-        if spectral_br is not None:
-            logger.info(f"QUALITY GATE: using current_spectral={spectral_br}kbps "
-                        f"(lower than beets min_bitrate={min_br_kbps}kbps, "
-                        f"grade={spectral_grade})")
-        decision = quality_gate_decision(
-            current,
-            cfg=quality_ranks,
-            target_contract=state.target_contract,
-        )
-
-        spectral_note = f" (spectral={spectral_br}kbps)" if spectral_br else ""
-
-        if decision == "requeue_upgrade":
-            upgrade_override = QUALITY_UPGRADE_TIERS
-            transition = transitions.RequestTransition.to_wanted(
-                from_status="imported",
-                search_filetype_override=upgrade_override,
-                min_bitrate=min_br_kbps,
+            plan = _evidence_unavailable_plan(files)
+            logger.warning(
+                "QUALITY GATE: %s linked current evidence unavailable; "
+                "reopening full-tier search",
+                label,
             )
-            usernames = extract_usernames(files)
-            gate_br = compute_effective_override_bitrate(
-                min_br_kbps, spectral_br, spectral_grade) or min_br_kbps
-            actual_rank = gate_rank(
+        else:
+            current = state.measurement
+            min_br_kbps = current.min_bitrate_kbps
+            assert min_br_kbps is not None
+            spectral_br = current.spectral_bitrate_kbps
+            spectral_grade = current.spectral_grade
+            if spectral_br is not None:
+                logger.info(f"QUALITY GATE: using current_spectral={spectral_br}kbps "
+                            f"(lower than linked min_bitrate={min_br_kbps}kbps, "
+                            f"grade={spectral_grade})")
+            decision = quality_gate_decision(
                 current,
-                quality_ranks,
-                target_contract=state.target_contract,
+                cfg=quality_ranks,
+                verified_lossless_proof=state.verified_lossless_proof,
             )
-            gate_min = quality_ranks.gate_min_rank
-            br_note = (f"spectral {spectral_br}kbps (beets {min_br_kbps}kbps)"
-                       if spectral_br and spectral_br < min_br_kbps
-                       else f"{min_br_kbps}kbps")
-            reason = (f"quality gate: rank {actual_rank.name} < {gate_min.name} "
-                      f"({br_note})")
-            denylists = tuple(
-                TerminalDenylist(username, reason)
-                for username in sorted(usernames)
-            )
-            logger.info(
-                f"QUALITY GATE: {label} "
-                f"rank={actual_rank.name} < {gate_min.name} "
-                f"(gate_bitrate={gate_br}kbps{spectral_note}), "
-                f"queued for upgrade, denylisted {usernames} "
-                f"(searching {upgrade_override})")
-        elif decision == "requeue_lossless":
-            lossless_override = QUALITY_LOSSLESS
-            transition = transitions.RequestTransition.to_wanted(
-                from_status="imported",
-                search_filetype_override=lossless_override,
-                min_bitrate=min_br_kbps,
-            )
-            denylists = ()
-            logger.info(
-                f"QUALITY GATE: {label} "
-                f"min_bitrate={min_br_kbps}kbps CBR, not verified lossless — "
-                f"searching for lossless to verify")
-        else:  # accept
-            transition = transitions.RequestTransition.to_imported(
-                from_status="imported",
-                min_bitrate=min_br_kbps,
-                search_filetype_override=None,  # done searching
-            )
-            denylists = ()
-            if current.verified_lossless:
-                logger.info(f"QUALITY GATE: {label} min_bitrate={min_br_kbps}kbps — quality OK")
-            else:
-                logger.info(f"QUALITY GATE: {label} min_bitrate={min_br_kbps}kbps VBR — quality OK")
-        plan = QualityGatePlan(transition=transition, denylists=denylists)
-        if apply:
-            transitions.require_transition_applied(finalize_request(
-                db,
-                request_id,
-                plan.transition,
-            ))
-            for entry in plan.denylists:
-                db.add_denylist(request_id, entry.username, entry.reason)
-        return plan
+            action = post_import_search_action(decision)
+
+            spectral_note = f" (spectral={spectral_br}kbps)" if spectral_br else ""
+
+            if action.status == "wanted":
+                transition = transitions.RequestTransition.to_wanted(
+                    from_status="imported",
+                    search_filetype_override=action.search_filetype_override,
+                    min_bitrate=min_br_kbps,
+                )
+                usernames = extract_usernames(files) if action.denylist else set()
+                reason = (
+                    "quality gate: transparent installed copy independently "
+                    "verified genuine; continuing lossless-only search"
+                    if decision == "requeue_lossless"
+                    else "quality gate: no verified-lossless proof; continuing full-tier search"
+                )
+                denylists = tuple(
+                    TerminalDenylist(username, reason)
+                    for username in sorted(usernames)
+                )
+                logger.info(
+                    f"QUALITY GATE: {label} "
+                    f"min_bitrate={min_br_kbps}kbps{spectral_note}, "
+                    f"decision={decision}, denylisted {usernames}, "
+                    f"search_override={action.search_filetype_override!r}")
+            else:  # verified-lossless proof accepts terminally
+                transition = transitions.RequestTransition.to_imported(
+                    from_status="imported",
+                    min_bitrate=min_br_kbps,
+                    search_filetype_override=action.search_filetype_override,
+                )
+                denylists = ()
+                logger.info(
+                    f"QUALITY GATE: {label} min_bitrate={min_br_kbps}kbps "
+                    "— verified-lossless proof accepts"
+                )
+            plan = QualityGatePlan(transition=transition, denylists=denylists)
     except Exception:
-        logger.exception("QUALITY GATE: failed to check quality")
-        return None
+        logger.exception(
+            "QUALITY GATE: failed to load or decide linked quality; "
+            "reopening full-tier search"
+        )
+        plan = _evidence_unavailable_plan(files)
+
+    # Apply outside the evidence/decision try block.  A transition failure is
+    # not an evidence failure and must propagate to dispatch instead of being
+    # swallowed and leaving the request terminally imported.
+    if apply:
+        transitions.require_transition_applied(finalize_request(
+            db,
+            request_id,
+            plan.transition,
+        ))
+        for entry in plan.denylists:
+            db.add_denylist(request_id, entry.username, entry.reason)
+    return plan

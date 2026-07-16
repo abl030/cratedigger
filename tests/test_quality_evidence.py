@@ -14,9 +14,12 @@ import tempfile
 import unittest
 from typing import TYPE_CHECKING
 
+import msgspec
+
 from lib.beets_db import AlbumInfo
 from lib.measurement import PreimportMeasurement
 from lib.quality import (
+    AlbumQualityV0Metric,
     AlbumQualityEvidenceFile,
     AudioQualityMeasurement,
     ImportResult,
@@ -27,6 +30,7 @@ from lib.quality import (
 from lib.quality_evidence import (
     audio_snapshot_matches,
     backfill_current_evidence_from_album_info,
+    evidence_from_album_info,
     evidence_from_import_result,
     evidence_from_measurement,
     snapshot_audio_files,
@@ -45,6 +49,38 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
 
     def tearDown(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_legacy_v0_subject_is_rejected_at_strict_wire_boundary(self):
+        with self.assertRaises(msgspec.ValidationError):
+            msgspec.convert(
+                {
+                    "subject": "lossless_source",
+                    "provenance": "measured",
+                    "avg_bitrate_kbps": 245,
+                },
+                type=AlbumQualityV0Metric,
+                strict=True,
+            )
+
+    def test_installed_carried_facts_are_invalid_v4_evidence(self):
+        evidence = make_album_quality_evidence(
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245,
+                format="MP3",
+                spectral_grade="genuine",
+                spectral_subject="installed",
+                spectral_provenance="carried",
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                subject="installed",
+                provenance="carried",
+                avg_bitrate_kbps=245,
+            ),
+        )
+
+        errors = evidence.storage_validation_errors()
+        self.assertIn("installed spectral evidence cannot be carried", errors)
+        self.assertIn("installed v0 evidence cannot be carried", errors)
 
     def test_import_result_builds_neutral_candidate_evidence(self):
         result = evidence_from_import_result(
@@ -74,7 +110,7 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         self.assertEqual(result.evidence.mb_release_id, "mb-candidate-1")
         self.assertTrue(result.evidence.snapshot_fingerprint)
         assert result.evidence.v0_metric is not None
-        self.assertEqual(result.evidence.v0_metric.source_lineage, "lossless_source")
+        self.assertEqual(result.evidence.v0_metric.subject, "source")
 
     def test_non_lossless_candidate_keeps_source_and_research_probe_separate(self):
         result = evidence_from_import_result(
@@ -103,8 +139,8 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
             "The actual research probe must persist in typed v0 evidence."
         )
         self.assertEqual(
-            result.evidence.v0_metric.source_lineage,
-            "native_lossy_research",
+            result.evidence.v0_metric.subject,
+            "installed",
         )
         self.assertEqual(result.evidence.measurement.format, "Opus")
         self.assertEqual(result.evidence.measurement.min_bitrate_kbps, 237)
@@ -152,7 +188,7 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         self.assertIsNone(result.evidence.target_format)
         self.assertIsNone(result.evidence.target_is_cbr)
 
-    def test_current_backfill_seeds_legacy_verified_lossless_proof_once(self):
+    def test_current_backfill_does_not_seed_request_scalar_proof(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, verified_lossless=True))
         result = backfill_current_evidence_from_album_info(
@@ -176,19 +212,14 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         self.assertIsNotNone(evidence_id)
         loaded = db.load_album_quality_evidence_by_id(evidence_id)
         assert loaded is not None
-        self.assertTrue(loaded.measurement.verified_lossless)
-        assert loaded.verified_lossless_proof is not None
-        self.assertEqual(
-            loaded.verified_lossless_proof.proof_origin,
-            "legacy_request_seed",
-        )
+        self.assertIsNone(loaded.verified_lossless_proof)
         self.assertEqual(loaded.mb_release_id, "mb-current-1")
 
     def test_current_backfill_uses_final_beets_facts_with_carried_source_proof(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, verified_lossless=False))
         proof = VerifiedLosslessProof(
-            proof_origin="import_result",
+            provenance="measured",
             source="flac",
             classifier="spectral_verified_lossless",
             detail="genuine",
@@ -217,8 +248,8 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         assert loaded is not None
         self.assertEqual(loaded.measurement.format, "Opus")
         self.assertEqual(loaded.measurement.min_bitrate_kbps, 121)
-        self.assertTrue(loaded.measurement.verified_lossless)
-        self.assertEqual(loaded.verified_lossless_proof, proof)
+        assert loaded.verified_lossless_proof is not None
+        self.assertEqual(loaded.verified_lossless_proof.provenance, "carried")
 
     def test_current_backfill_cannot_relink_replaced_request(self):
         db = FakePipelineDB()
@@ -252,7 +283,7 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, verified_lossless=False))
         proof = VerifiedLosslessProof(
-            proof_origin="candidate_import",
+            provenance="measured",
             source="flac",
             classifier="spectral_verified_lossless",
             detail="genuine",
@@ -264,7 +295,6 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
                 avg_bitrate_kbps=128,
                 median_bitrate_kbps=127,
                 format="Opus",
-                verified_lossless=True,
             ),
             verified_lossless_proof=proof,
             storage_format="Opus",
@@ -299,14 +329,14 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         loaded = db.load_album_quality_evidence_by_id(evidence_id)
         assert loaded is not None
         self.assertEqual(loaded.measurement.min_bitrate_kbps, 112)
-        self.assertTrue(loaded.measurement.verified_lossless)
-        self.assertEqual(loaded.verified_lossless_proof, proof)
+        assert loaded.verified_lossless_proof is not None
+        self.assertEqual(loaded.verified_lossless_proof.provenance, "carried")
 
     def test_post_import_lossy_backfill_clears_existing_true_source_proof(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, verified_lossless=False))
         proof = VerifiedLosslessProof(
-            proof_origin="candidate_import",
+            provenance="measured",
             source="flac",
             classifier="spectral_verified_lossless",
             detail="genuine",
@@ -318,7 +348,6 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
                 avg_bitrate_kbps=128,
                 median_bitrate_kbps=127,
                 format="Opus",
-                verified_lossless=True,
             ),
             verified_lossless_proof=proof,
             storage_format="Opus",
@@ -353,10 +382,9 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         evidence_id = db.get_request_current_evidence_id(42)
         loaded = db.load_album_quality_evidence_by_id(evidence_id)
         assert loaded is not None
-        self.assertFalse(loaded.measurement.verified_lossless)
         self.assertIsNone(loaded.verified_lossless_proof)
 
-    def test_current_backfill_seeds_spectral_and_neutral_v0_values(self):
+    def test_current_backfill_ignores_all_request_quality_stamps(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42,
@@ -386,11 +414,298 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         evidence_id = db.get_request_current_evidence_id(42)
         loaded = db.load_album_quality_evidence_by_id(evidence_id)
         assert loaded is not None
-        self.assertEqual(loaded.measurement.spectral_grade, "likely_transcode")
-        self.assertEqual(loaded.measurement.spectral_bitrate_kbps, 96)
-        assert loaded.v0_metric is not None
-        self.assertEqual(loaded.v0_metric.source_lineage, "lossless_source")
-        self.assertEqual(loaded.v0_metric.avg_bitrate_kbps, 260)
+        self.assertIsNone(loaded.measurement.spectral_grade)
+        self.assertIsNone(loaded.measurement.spectral_bitrate_kbps)
+        self.assertIsNone(loaded.v0_metric)
+        self.assertIsNone(loaded.verified_lossless_proof)
+
+    def test_evidence_from_album_info_has_no_stamp_derived_facts(self):
+        result = evidence_from_album_info(
+            mb_release_id="mb-current-stampless",
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=2,
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=130,
+                median_bitrate_kbps=129,
+                is_cbr=False,
+                album_path=self.root,
+                format="Opus",
+            ),
+        )
+
+        self.assertTrue(result.available)
+        assert result.evidence is not None
+        self.assertIsNone(result.evidence.measurement.spectral_grade)
+        self.assertIsNone(result.evidence.measurement.spectral_bitrate_kbps)
+        self.assertIsNone(result.evidence.v0_metric)
+        self.assertIsNone(result.evidence.verified_lossless_proof)
+
+    def test_v3_touch_rebuild_carries_same_fingerprint_source_facts(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, verified_lossless=False))
+        proof = VerifiedLosslessProof(
+            provenance="measured",
+            source="flac",
+            classifier="spectral_verified_lossless",
+        )
+        legacy = make_album_quality_evidence(
+            mb_release_id="mb-v3-touch",
+            source_path=self.root,
+            files=snapshot_audio_files(self.root),
+            lineage_version=3,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=121,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=127,
+                format="Opus",
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=None,
+                spectral_subject="source",
+                spectral_provenance="measured",
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                subject="source",
+                provenance="measured",
+                avg_bitrate_kbps=255,
+            ),
+            verified_lossless_proof=proof,
+            storage_format="Opus",
+        )
+        db.upsert_album_quality_evidence(legacy)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=legacy.mb_release_id,
+            snapshot_fingerprint=legacy.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_request_current_evidence(42, persisted.id)
+
+        result = backfill_current_evidence_from_album_info(
+            db,
+            request_id=42,
+            mb_release_id=legacy.mb_release_id,
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=2,
+                min_bitrate_kbps=121,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=127,
+                is_cbr=False,
+                album_path=self.root,
+                format="Opus",
+            ),
+        )
+
+        assert result.evidence is not None
+        self.assertEqual(result.evidence.lineage_version, 4)
+        self.assertEqual(result.evidence.measurement.spectral_subject, "source")
+        self.assertEqual(result.evidence.measurement.spectral_provenance, "carried")
+        assert result.evidence.v0_metric is not None
+        self.assertEqual(result.evidence.v0_metric.subject, "source")
+        self.assertEqual(result.evidence.v0_metric.provenance, "carried")
+        self.assertEqual(
+            result.evidence.verified_lossless_proof,
+            msgspec.structs.replace(proof, provenance="carried"),
+        )
+
+    def test_v3_touch_normalizes_source_facts_with_unknown_provenance(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, verified_lossless=False))
+        legacy = make_album_quality_evidence(
+            mb_release_id="mb-v3-unknown-provenance",
+            source_path=self.root,
+            files=snapshot_audio_files(self.root),
+            lineage_version=3,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=121,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=127,
+                format="Opus",
+                spectral_grade="genuine",
+                spectral_subject="source",
+                spectral_provenance="unknown-live-provenance",  # type: ignore[arg-type]
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                subject="source",
+                provenance="unknown-live-provenance",  # type: ignore[arg-type]
+                avg_bitrate_kbps=255,
+            ),
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="unknown-live-provenance",  # type: ignore[arg-type]
+                source="flac",
+                classifier="spectral_verified_lossless",
+            ),
+            storage_format="Opus",
+        )
+        db.upsert_album_quality_evidence(legacy)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=legacy.mb_release_id,
+            snapshot_fingerprint=legacy.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_request_current_evidence(42, persisted.id)
+
+        result = backfill_current_evidence_from_album_info(
+            db,
+            request_id=42,
+            mb_release_id=legacy.mb_release_id,
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=2,
+                min_bitrate_kbps=121,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=127,
+                is_cbr=False,
+                album_path=self.root,
+                format="Opus",
+            ),
+        )
+
+        self.assertTrue(result.available)
+        assert result.evidence is not None
+        self.assertEqual(result.evidence.lineage_version, 4)
+        self.assertEqual(result.evidence.measurement.spectral_subject, "source")
+        self.assertEqual(result.evidence.measurement.spectral_provenance, "carried")
+        assert result.evidence.v0_metric is not None
+        self.assertEqual(result.evidence.v0_metric.subject, "source")
+        self.assertEqual(result.evidence.v0_metric.provenance, "carried")
+        assert result.evidence.verified_lossless_proof is not None
+        self.assertEqual(
+            result.evidence.verified_lossless_proof.provenance,
+            "carried",
+        )
+
+    def test_v3_touch_drops_ambiguous_and_installed_facts(self):
+        for suffix, subject, provenance in (
+            ("ambiguous", "unknown-live-subject", "unknown-live-provenance"),
+            ("installed", "installed", "measured"),
+        ):
+            with self.subTest(subject=subject):
+                db = FakePipelineDB()
+                db.seed_request(make_request_row(id=42, verified_lossless=False))
+                legacy = make_album_quality_evidence(
+                    mb_release_id=f"mb-v3-drop-{suffix}",
+                    source_path=self.root,
+                    files=snapshot_audio_files(self.root),
+                    lineage_version=3,
+                    measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=121,
+                        avg_bitrate_kbps=128,
+                        median_bitrate_kbps=127,
+                        format="Opus",
+                        spectral_grade="genuine",
+                        spectral_subject=subject,  # type: ignore[arg-type]
+                        spectral_provenance=provenance,  # type: ignore[arg-type]
+                    ),
+                    v0_metric=AlbumQualityV0Metric(
+                        subject=subject,  # type: ignore[arg-type]
+                        provenance=provenance,  # type: ignore[arg-type]
+                        avg_bitrate_kbps=255,
+                    ),
+                    storage_format="Opus",
+                )
+                db.upsert_album_quality_evidence(legacy)
+                persisted = db.find_album_quality_evidence(
+                    mb_release_id=legacy.mb_release_id,
+                    snapshot_fingerprint=legacy.snapshot_fingerprint,
+                )
+                assert persisted is not None and persisted.id is not None
+                db.set_request_current_evidence(42, persisted.id)
+
+                result = backfill_current_evidence_from_album_info(
+                    db,
+                    request_id=42,
+                    mb_release_id=legacy.mb_release_id,
+                    album_info=AlbumInfo(
+                        album_id=1,
+                        track_count=2,
+                        min_bitrate_kbps=121,
+                        avg_bitrate_kbps=128,
+                        median_bitrate_kbps=127,
+                        is_cbr=False,
+                        album_path=self.root,
+                        format="Opus",
+                    ),
+                )
+
+                self.assertTrue(result.available)
+                assert result.evidence is not None
+                self.assertEqual(result.evidence.lineage_version, 4)
+                self.assertIsNone(result.evidence.measurement.spectral_grade)
+                self.assertIsNone(result.evidence.measurement.spectral_subject)
+                self.assertIsNone(result.evidence.measurement.spectral_provenance)
+                self.assertIsNone(result.evidence.v0_metric)
+
+    def test_fingerprint_flip_carries_only_source_facts(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, verified_lossless=False))
+        legacy = make_album_quality_evidence(
+            mb_release_id="mb-fingerprint-flip",
+            source_path=self.root,
+            files=snapshot_audio_files(self.root),
+            lineage_version=3,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=121,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=127,
+                format="Opus",
+                spectral_grade="genuine",
+                spectral_subject="source",
+                spectral_provenance="measured",
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                subject="source",
+                provenance="measured",
+                avg_bitrate_kbps=255,
+            ),
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="measured",
+                source="flac",
+                classifier="spectral_verified_lossless",
+            ),
+            storage_format="Opus",
+        )
+        db.upsert_album_quality_evidence(legacy)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=legacy.mb_release_id,
+            snapshot_fingerprint=legacy.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_request_current_evidence(42, persisted.id)
+        with open(os.path.join(self.root, "01.mp3"), "ab") as handle:
+            handle.write(b" changed")
+
+        result = backfill_current_evidence_from_album_info(
+            db,
+            request_id=42,
+            mb_release_id=legacy.mb_release_id,
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=2,
+                min_bitrate_kbps=191,
+                avg_bitrate_kbps=196,
+                median_bitrate_kbps=195,
+                is_cbr=False,
+                album_path=self.root,
+                format="Opus",
+            ),
+        )
+
+        assert result.evidence is not None
+        self.assertNotEqual(
+            result.evidence.snapshot_fingerprint,
+            legacy.snapshot_fingerprint,
+        )
+        self.assertEqual(result.evidence.measurement.min_bitrate_kbps, 191)
+        self.assertEqual(result.evidence.measurement.spectral_subject, "source")
+        self.assertEqual(result.evidence.measurement.spectral_provenance, "carried")
+        assert result.evidence.v0_metric is not None
+        self.assertEqual(result.evidence.v0_metric.provenance, "carried")
+        assert result.evidence.verified_lossless_proof is not None
+        self.assertEqual(
+            result.evidence.verified_lossless_proof.provenance,
+            "carried",
+        )
 
     def test_duplicate_snapshot_relative_path_is_invalid(self):
         duplicated = AlbumQualityEvidenceFile(

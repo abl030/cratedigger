@@ -29,7 +29,7 @@ Key fields:
   `INDEX (mb_release_id)` for prefix lookups.
 - `measured_at TIMESTAMPTZ` — when this evidence snapshot was measured.
 - `codec`, `container`, `storage_format` — measured source/storage facts.
-  For lineage-v3 rows, `storage_format` is the same bare codec label as
+  For lineage-v3/v4 rows, `storage_format` is the same bare codec label as
   `format`; bitrate/profile labels never live in either field.
 - `target_format` — projected target policy from the typed import contract,
   independent of the measured source. It may be NULL.
@@ -40,13 +40,15 @@ Key fields:
   rows for facts rejected before target policy is consulted leave both
   `target_format` and `target_is_cbr` NULL rather than guessing a mode.
 - `lineage_version SMALLINT` — `1` marks historical rows whose storage/target
-  projection is ambiguous; `3` marks separated source and target facts.
-  Migration 050 marks all pre-existing rows as version 1, then changes the
-  column default to 3 so an omitted future insert cannot silently create
-  legacy evidence. New typed writers also persist version 3 explicitly.
+  projection is ambiguous; `3` marks separated source and target facts; `4`
+  adds the two-axis evidence vocabulary. Migration 055 changes the default to
+  4, and every new typed writer persists version 4 explicitly. Version 1/3
+  rows rebuild on their next policy touch instead of being interpreted as v4.
 - `min_bitrate_kbps`, `avg_bitrate_kbps`, `median_bitrate_kbps`, `format`,
-  `is_cbr`, `spectral_grade`, `spectral_bitrate_kbps`,
-  `was_converted_from` — the wrapped `AudioQualityMeasurement` facts.
+  `is_cbr`, `spectral_grade`, `spectral_bitrate_kbps`, `spectral_subject`,
+  `spectral_provenance`, `was_converted_from` — the wrapped
+  `AudioQualityMeasurement` facts. The measurement has no verified-lossless
+  boolean; an observation about bytes cannot assert acquisition completion.
 - `audio_corrupt BOOLEAN`, `folder_layout TEXT` (`flat` | `nested`),
   `audio_file_count INTEGER`, `filetype_band TEXT`,
   `matched_bad_audio_hash_id`, `matched_bad_audio_hash_path` — the four
@@ -54,13 +56,30 @@ Key fields:
   `full_pipeline_decision_from_evidence` reads as early-exit reject
   branches (U11).
 - `v0_min_bitrate_kbps`, `v0_avg_bitrate_kbps`,
-  `v0_median_bitrate_kbps`, `v0_source_lineage`,
-  `v0_source_provenance`, `v0_proof_provenance` — neutral V0 metric and
-  provenance. Legacy policy-shaped probe kinds are rejected here.
-- `verified_lossless BOOLEAN` plus `verified_lossless_proof_origin`,
+  `v0_median_bitrate_kbps`, `v0_subject`, `v0_provenance` — one neutral V0
+  metric plus its two-axis markers. Legacy policy-shaped probe kinds are
+  rejected here.
+- `verified_lossless BOOLEAN` plus `verified_lossless_provenance`,
   `verified_lossless_source`, `verified_lossless_classifier`,
-  `verified_lossless_detail` — proof provenance is present only when the
-  boolean is true.
+  `verified_lossless_detail` — the proof object is the sole writable owner of
+  verified-lossless. SQL derives the convenience boolean from proof presence,
+  and a CHECK requires the boolean and complete proof tuple to agree.
+
+Every v4 spectral or V0 fact answers the same two questions: `subject` says
+which bytes it describes (`installed` or `source`), and `provenance` says how
+it reached this row (`measured` or `carried`). `installed` + `carried` is
+invalid: installed bytes are re-measured. When a fingerprint changes, proof,
+source-subject spectral, and source-subject V0 acquisition facts may cross to
+the new row with provenance `carried`; installed-subject facts do not. Carry
+decisions use these markers directly and never infer lineage from codec names.
+
+Migration 055 maps the old vocabulary mechanically before v4 rebuilds take
+over: `v0_source_lineage` becomes `v0_subject` (`lossless_source` → `source`,
+research/unknown values → `installed`); `v0_source_provenance` becomes
+`v0_provenance` (probe-kind and measurement-fallback values → `measured`);
+`verified_lossless_proof_origin` becomes `verified_lossless_provenance`
+(`import_result` → `measured`, `legacy_request_seed` → `carried`); and the
+redundant `v0_proof_provenance` column is dropped.
 
 ## `album_quality_evidence_files` — snapshot guard rows
 
@@ -99,18 +118,15 @@ that audit trail.
   forensic `search_log` row (`stale_reason='request_replaced'`), but it cannot
   advance the ancestor cursor or backoff. Search-plan generation, supersession,
   and manual cursor advance reject the replaced ancestor.
-- `search_filetype_override TEXT` — transient CSV filetype list (e.g. `"lossless,mp3 v0,mp3 320"` or just `"lossless"`). Overrides global `allowed_filetypes` for search. Set by quality gate requeue paths and backfill. Cleared on quality gate accept. The `"lossless"` virtual tier matches FLAC, ALAC, and WAV.
+- `search_filetype_override TEXT` — transient CSV filetype list (e.g. `"lossless,mp3 v0,mp3 320"` or just `"lossless"`). Overrides global `allowed_filetypes` for search. The automatic post-import policy writes `"lossless"` only for a transparent, independently genuine installed copy (and for the provisional lossless-source lane); other unverified retained copies return to the full search surface. Only a proof-bearing copy completes acquisition. The `"lossless"` virtual tier matches FLAC, ALAC, and WAV.
 - `target_format TEXT` — persistent user intent for desired format on disk (`"lossless"` or NULL). Set only by user action (CLI/web set-intent toggle). Never cleared by quality gate. When set, keeps lossless on disk (normalizes ALAC/WAV → FLAC) instead of converting to V0/target.
 - `min_bitrate INTEGER` — current min track bitrate in kbps (from beets).
 - `prev_min_bitrate INTEGER` — previous min_bitrate before last upgrade. Shows delta in UI.
-- `verified_lossless BOOLEAN` — True only when imported from a spectral-verified genuine lossless source. Suspect lossless-container imports stay false even when they are accepted provisionally.
+- `verified_lossless BOOLEAN` — historical request stamp written at the import event. Active terminal authority belongs to the complete verified-lossless proof on the linked evidence row. Proof requires affirmative spectral `genuine`/`marginal` evidence, or the explicit V0 trust override after spectral disagreement; absent or errored analysis never verifies. Suspect lossless-container imports stay false when accepted provisionally.
 - `last_download_spectral_grade TEXT` — spectral grade of the most recent download attempt.
 - `last_download_spectral_bitrate INTEGER` — estimated bitrate from the most recent download's spectral analysis.
-- `current_spectral_grade TEXT` — spectral grade of files currently on disk in beets.
-- `current_spectral_bitrate INTEGER` — spectral estimated bitrate of files currently on disk. NULL for genuine files (no cliff). Quality gate uses this for gate_bitrate.
-- `current_lossless_source_v0_probe_min_bitrate INTEGER` — min track bitrate of the current comparable V0 probe produced from an accepted lossless-container source.
-- `current_lossless_source_v0_probe_avg_bitrate INTEGER` — avg track bitrate of the current comparable lossless-source V0 probe. Suspect lossless-source grind-up compares against this value.
-- `current_lossless_source_v0_probe_median_bitrate INTEGER` — median track bitrate of the current comparable lossless-source V0 probe. Stored for audit and future policy, not used by v1 decisions.
+- `current_spectral_grade TEXT`, `current_spectral_bitrate INTEGER` — point-in-time request stamps for history/rendering. Active decisions read the linked evidence row's atomic spectral fact; these scalars never seed or override evidence.
+- `current_lossless_source_v0_probe_min_bitrate INTEGER`, `current_lossless_source_v0_probe_avg_bitrate INTEGER`, `current_lossless_source_v0_probe_median_bitrate INTEGER` — point-in-time request stamps for history/rendering. The comparable source anchor used by policy is the linked evidence row's `v0_metric` with `subject='source'`.
 - `active_download_state JSONB` — persisted download state for async polling (filetype, enqueued_at, per-file username/filename/size). Set by `set_downloading()`, cleared on completion/timeout.
 
 ## `download_log` — quality-tracking fields
@@ -127,7 +143,7 @@ that audit trail.
 - `v0_probe_min_bitrate INTEGER`, `v0_probe_avg_bitrate INTEGER`, `v0_probe_median_bitrate INTEGER` — min/avg/median track bitrates for this attempt's probe.
 - `existing_v0_probe_kind TEXT` — lineage of the comparable probe state used before this attempt, when present.
 - `existing_v0_probe_min_bitrate INTEGER`, `existing_v0_probe_avg_bitrate INTEGER`, `existing_v0_probe_median_bitrate INTEGER` — point-in-time baseline probe values used for history rendering and audit.
-- `outcome TEXT` — CHECK-constrained vocabulary: `success`, `rejected`, `failed`, `timeout`, `force_import`, `manual_import`, `curator_ban`, `measurement_failed`, `youtube_running`, `youtube_success`, `youtube_failed`. Migration 037 widened the constraint to admit the three `youtube_*` outcomes used by the YT rescue ingest worker.
+- `outcome TEXT` — CHECK-constrained vocabulary: `success`, `rejected`, `failed`, `timeout`, `force_import`, `manual_import`, `curator_ban`, `measurement_failed`, `user_offline`, `have_analysis_error`, `youtube_running`, `youtube_success`, `youtube_failed`. `measurement_failed` is a candidate-preview environment failure; `have_analysis_error` is a failed fresh analysis of the installed HAVE. Both leave the request wanted without minting a quality verdict, denylist entry, or narrowing decision.
 - `source TEXT NOT NULL DEFAULT 'slskd'` — sourcing-channel discriminator added by migration 037. CHECK constraint admits `'slskd'` and `'youtube'`. The default backfilled every pre-037 row to `'slskd'` in one ALTER (no separate backfill script per the single-operator no-backfill-script rule). Consumers rendering `download_log` rows (`pipeline-cli show`, web routes' "recent attempts") use this column to distinguish channels.
 - `youtube_metadata JSONB` — YT-specific audit payload added by migration 037. Nullable; populated only for `source='youtube'` rows. Typed at the read seam as `lib.youtube_ingest_service.YoutubeIngestMetadata: msgspec.Struct`. Carries `yt_url`, `browse_id`, `audio_playlist_id`, optional `expected_track_count`, `resolver_mapping_id`, `per_track_video_ids`, and terminal-state fields (`reason`, `stderr_excerpt`, `observed_track_count`).
 - **Partial unique index `one_youtube_running_per_request` ON `download_log (request_id) WHERE source = 'youtube' AND outcome = 'youtube_running'`** — added by migration 037. Enforces idempotency at the DB layer: at most one in-flight YT rescue per `request_id` at any time. Application-level pre-insert checks would race; this index is atomic. Once the row transitions to a terminal `youtube_success` / `youtube_failed`, the index admits the next submission.
@@ -227,7 +243,7 @@ as live queue work.
 
 ## `download_log.import_result` JSONB
 
-`import_one.py` emits an `ImportResult` JSON blob (`__IMPORT_RESULT__` sentinel on stdout). Version 3 contains the downloaded `source_measurement`, the prior `current_measurement`, typed `target_quality_contract`, typed V0 probe evidence, the quality comparison, postflight verification (beets_id, path), the post-import `materialized_measurement`, and an attempt-local `spectral` audit. Source measurements always describe the downloaded bytes; a target such as `opus 128` is policy and V0 min/avg/median remain exclusively under `v0_probe`. `materialized_measurement` describes the bytes Beets actually stored. Historical v1/v2 rows are decoded only by `ImportResult`'s marked legacy projection (`legacy_projection_version`); new v3 rows never infer lineage from equality between values. Every import path (success, downgrade, transcode, provisional, suspect-lossless rejection, error, timeout, crash) logs to download_log.
+`import_one.py` emits an `ImportResult` JSON blob (`__IMPORT_RESULT__` sentinel on stdout). Version 4 contains the downloaded `source_measurement`, the prior `current_measurement`, an optional top-level `verified_lossless_proof`, typed `target_quality_contract`, typed V0 probe evidence, the quality comparison, postflight verification (beets_id, path), the post-import `materialized_measurement`, and an attempt-local `spectral` audit. Measurements describe bytes and cannot carry a verified-lossless boolean; proof presence is the acquisition claim. Source measurements always describe the downloaded bytes; a target such as `opus 128` is policy and V0 min/avg/median remain exclusively under `v0_probe`. `materialized_measurement` describes the bytes Beets actually stored. Historical v1/v2/v3 rows are decoded only by `ImportResult`'s marked legacy projections (`legacy_projection_version`); the v3 projection maps its measurement-level verified-lossless and unmarked spectral facts into explicit v4 proof, subject, and provenance fields. New v4 rows never infer lineage from equality between values. Every import path (success, downgrade, transcode, provisional, suspect-lossless rejection, error, timeout, crash) logs to download_log.
 
 ```sql
 SELECT import_result->>'decision',

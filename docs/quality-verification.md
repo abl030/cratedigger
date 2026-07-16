@@ -6,25 +6,41 @@ prior art.
 
 ## Gold Standard Pipeline
 
-The highest quality standard for the library:
+The highest quality acquisition path for the library:
 
 1. **Download lossless** (FLAC, ALAC, WAV) from Soulseek
 2. **Verify with spectral analysis** — confirm the lossless file is genuinely lossless (not a lossy transcode wrapped in a lossless container)
 3. **Convert to VBR V0** — `ffmpeg -codec:a libmp3lame -q:a 0`
-4. **Import to beets** — the VBR V0 bitrate acts as an ongoing quality fingerprint
+4. **Import to beets** — the VBR V0 probe remains an auditable source fingerprint
 
-Why VBR V0 and not keep FLAC? Because VBR bitrate IS the quality signal. A genuine CD rip converted to V0 produces ~240-260kbps. A transcode produces ~190kbps. CBR 320 would hide this information.
+VBR bitrate is useful evidence, not verification by itself. A genuine CD rip
+converted to V0 commonly produces ~240-260kbps while a lossy transcode commonly
+lands lower, but only an explicit verified-lossless proof completes automatic
+acquisition. That proof requires affirmative spectral evidence, or the narrow
+V0 trust override after spectral analysis ran and disagreed.
 
 ## Current Verification Methods
 
-### 1. VBR V0 Bitrate Check (implemented)
+There is no quality acceptance floor. A structurally usable exact-release copy
+may be retained regardless of codec, bitrate, or rank. Post-import policy then
+has three outcomes: verified-lossless proof completes acquisition; an
+unverified `TRANSPARENT` installed copy with its own `genuine` spectral fact
+stays wanted but narrows to lossless-only; every other unverified copy stays
+wanted on the full search surface.
+
+### 1. VBR V0 source probe (implemented)
 
 After lossless-to-V0 conversion, the resulting bitrate reveals source quality:
 - **Genuine lossless**: ~220-280kbps (varies by musical complexity)
 - **Transcode from ~192kbps**: ~190-210kbps
 - **Transcode from ~128kbps**: ~160-180kbps
 
-Threshold: `cfg.mp3_vbr.excellent` (default 210 kbps), read by `transcode_detection()` in `lib/quality/decisions.py`. The legacy `TRANSCODE_MIN_BITRATE_KBPS = 210` module constant is still exported as the default and used when no cfg is passed; operators who retune `[Quality Ranks] mp3_vbr.excellent` in `config.ini` automatically move both the gate threshold and this fallback (#66).
+The codec rank bands may use these bitrates for relative comparison, but
+`transcode_detection()` has no grade-blind bitrate fallback. Missing or errored
+spectral analysis cannot be converted into a positive quality fact. The one
+verification exception is the fixed V0 trust override: a comparable source
+probe with avg ≥230kbps and min ≥200kbps can override an affirmative
+`suspect`/`likely_transcode` spectral disagreement.
 
 Limitation: This source-probe signal exists only when a lossless-container
 candidate can be converted or temporarily probed. It does not by itself prove
@@ -35,8 +51,8 @@ native MP3 downloads (e.g. 320kbps that was upsampled from 128kbps).
 When a supported lossless-container download (FLAC, ALAC, WAV, or ALAC-in-M4A)
 is spectrally `suspect` or `likely_transcode`, the importer no longer has to
 discard the source outright. It records the MP3 V0 probe produced from that
-source as `lossless_source_v0` evidence and compares the probe average against
-the current comparable lossless-source probe on the request.
+source as `lossless_source_v0` attempt evidence and compares the probe average
+against the current linked evidence row's V0 metric with `subject='source'`.
 
 Policy:
 
@@ -60,10 +76,11 @@ Exception: a comparable `lossless_source_v0` probe at avg ≥230kbps and min
 spectral grade. Those imports are verified lossless and follow the normal
 `imported` path instead of the provisional keep-searching path.
 
-Native lossy and on-disk V0 probes are research evidence only in v1. They are
-stored with non-comparable lineage and do not affect import policy.
+Native lossy and on-disk V0 probes are research evidence only. Active evidence
+stores them as `subject='installed', provenance='measured'`; they are not source
+anchors and do not affect the provisional comparison lane.
 
-### 2. Spectral Band Energy Analysis (research phase)
+### 2. Spectral Band Energy Analysis (historical v1 method)
 
 Uses `sox` bandpass filtering to measure energy ratios in high-frequency bands relative to a 1-4kHz reference band. Genuine high-quality audio has consistent energy across the spectrum. Transcodes show a sharp drop at the original encoding's lowpass cutoff frequency.
 
@@ -184,14 +201,22 @@ The wide-band energy ratio approach (v1) produces too many false positives on lo
 - **GENUINE**: <60% suspect
 - Never auto-reject; flag for review
 
-### Two-tier verification
+### Verification and explicit non-verification lanes
 
 1. **Lossless-container downloads**: Run spectral check pre-conversion. Genuine
    or marginal sources continue through the verified-lossless path. Suspect or
    likely-transcode sources still produce a V0 source probe, but they use the
    provisional lossless-source comparison lane instead of becoming verified.
 2. **MP3 downloads (especially CBR 320)**: Run spectral check post-download. Cliff + high deficit = upsampled garbage.
-3. **Already converted V0 with good bitrate (≥ `cfg.mp3_vbr.excellent`, default 210 kbps)**: Skip spectral check — the V0 conversion already proved source quality.
+3. **High-band native VBR MP3**: The named policy may deliberately skip
+   spectral analysis. This is an explicit non-verification lane: bitrate can
+   drive relative rank, but it cannot mint verified-lossless proof.
+
+If a candidate-side required scan is missing or errors, preview records
+`measurement_failed`; if fresh analysis of an installed HAVE is missing or
+errors, dispatch records `have_analysis_error`. Both are environment failures,
+not quality verdicts: the request returns to ordinary wanted searching with no
+denylist or narrowing consequence. A later attempt measures again from scratch.
 
 ### Tuning results (Mountain Goats library, 65 albums)
 
@@ -203,7 +228,9 @@ At `HF_DEFICIT_SUSPECT=60dB + cliff detection`:
 - **0 false positives** on albums with verified good sources
 - Successfully catches: cliffs at 16kHz (128kbps transcodes), cliffs at 18kHz (192kbps), upsampled CBR 320, terrible pre-pipeline rips
 
-Albums that were downloaded as FLAC, converted to V0 at or above the `cfg.mp3_vbr.excellent` threshold (default 210 kbps), and have no cliff: always pass — confirming the V0 conversion is the primary quality proof.
+Historically, albums downloaded as FLAC and converted to high-bitrate V0 with
+no cliff passed this corpus. That observation informs the V0 override, but
+bitrate alone is not proof in the current policy.
 
 ### What the spectral check catches that V0 conversion doesn't
 
@@ -225,10 +252,10 @@ Albums that were downloaded as FLAC, converted to V0 at or above the `cfg.mp3_vb
 
 ## Edge cases
 
-- **Lo-fi recordings** (Mountain Goats boombox era): genuine V0 from verified FLAC can produce ~207 kbps. The `"mp3 v0"` label classifies as `TRANSPARENT` via `cfg.mp3_vbr_levels[0]` regardless of bitrate, so the gate accepts without needing a `verified_lossless` blanket bypass.
-- **Mixed-source CBR** (e.g. 13 tracks at 320 + 1 track at 192): looks like VBR to `COUNT(DISTINCT bitrate)` but isn't genuine V0. Quality gate ranks against the bare-codec band table — 192 lands in `GOOD` (< default `EXCELLENT`) → re-queues for upgrade.
+- **Lo-fi recordings** (Mountain Goats boombox era): genuine V0 from verified FLAC can produce ~207 kbps. The `"mp3 v0"` label can still classify as `TRANSPARENT`, but rank never completes acquisition. Proof completes it; an unverified transparent installed copy narrows to lossless-only only when its own spectral grade is `genuine`.
+- **Mixed-source CBR** (e.g. 13 tracks at 320 + 1 track at 192): looks like VBR to `COUNT(DISTINCT bitrate)` but is not genuine V0. There is no acceptance floor and no grade-blind CBR narrowing. Unless the installed result is both `TRANSPARENT` and spectrally `genuine`, it remains wanted on the full search surface.
 - **Fake FLACs**: MP3 wrapped in a lossless container. Spectral detects the
-  cliff pre-conversion, and the V0 probe becomes the comparable source-lineage
+  cliff pre-conversion, and the V0 probe becomes comparable source-subject
   evidence. Source denylisted, file imported only as provisional when the probe
   is meaningfully better than the current comparable source probe, and the
   request stays wanted.
@@ -236,10 +263,10 @@ Albums that were downloaded as FLAC, converted to V0 at or above the `cfg.mp3_vb
 
 ## Downgrade prevention
 
-- `--override-min-bitrate` arg: `dispatch_import_core()` passes `min(min_bitrate, current_spectral_bitrate)` from the pipeline DB. When spectral says the existing files are 128 kbps but the container says 320 kbps (fake CBR), the spectral truth is used so genuine upgrades aren't blocked.
-- `mark_done()` respects `verified_lossless_override` from import_one.py instead of re-deriving via `is_verified_lossless()`. When verified lossless, `current_spectral_bitrate` is set to the actual V0 min bitrate (not the spectral cliff estimate, which can miscalibrate on genuine files).
-- Spectral state writes always go through `RequestSpectralStateUpdate` — grade and bitrate are always written together (including explicit NULLs for genuine files with no cliff). This prevents stale spectral data from persisting after an upgrade.
-- `--target-format` flag: when `target_format="lossless"` (or legacy `"flac"`), keeps lossless on disk. ALAC/WAV sources are normalized to FLAC via `FLAC_SPEC`. A temporary V0 probe is still produced when needed for provisional source comparison. Genuine lossless on disk is marked `verified_lossless`; suspect lossless sources stay unverified.
+- `--override-min-bitrate` arg: preview/dispatch derive the comparison floor from linked current evidence or the same attempt's fresh HAVE audit. When spectral says the installed files are 128 kbps but the container says 320 kbps (fake CBR), the spectral truth is used so genuine upgrades are not blocked. Request-row quality stamps never feed this value.
+- `ImportResult.verified_lossless_proof` is the sole acquisition claim. `AudioQualityMeasurement` contains only byte observations; evidence persistence derives its CHECK-tied convenience boolean from proof presence rather than re-deriving verification from a measurement.
+- Spectral request-state writes always go through `RequestSpectralStateUpdate` so the historical grade/bitrate stamps stay atomic. Active decisions use the linked evidence row's spectral fact, not those request scalars.
+- `--target-format` flag: when `target_format="lossless"` (or legacy `"flac"`), keeps lossless on disk. ALAC/WAV sources are normalized to FLAC via `FLAC_SPEC`. A temporary V0 probe is still produced when needed for provisional source comparison. Keeping a lossless container does not itself verify it; the import needs affirmative proof.
 - `--verified-lossless-target` flag: target format after verified lossless, and the configured lossless-source storage target for accepted provisional imports (e.g. "opus 128", "mp3 v2", "aac 128"). Passed from `dispatch_import_core()` when `cfg.verified_lossless_target` is set. When the target has the same `.mp3` extension as V0, V0 files are removed before target conversion.
 - `--force` flag: skips the distance check (`MAX_DISTANCE=999`) for force-importing rejected albums. Used by `pipeline_cli.py force-import` and `POST /api/pipeline/force-import`.
 - Exit codes: 0=imported, 1=conversion failed, 2=beets failed, 3=path not found, 5=downgrade or suspect-lossless rejection, 6=transcode/provisional path (may or may not have imported as an upgrade).
@@ -269,9 +296,11 @@ action file, and the dispatch-synthesized reject `ImportResult`. Re-typing
 back from the dict goes through `comparison_basis_from_decision()` — the one
 converter.
 
-Version 3 import results persist four disjoint facts:
+Version 3 import results persist five disjoint concerns:
 
 - `source_measurement` is measured from the downloaded bytes before mutation;
+- `verified_lossless_proof` is the optional acquisition claim, deliberately
+  separate from every measurement;
 - `v0_probe` is the temporary research/provisional encode;
 - `target_quality_contract` is configured policy used explicitly by comparison
   and gate ranking. It owns the target bitrate mode (`is_cbr`) as well as its
@@ -279,30 +308,30 @@ Version 3 import results persist four disjoint facts:
   bare `MP3` therefore requires an explicit projected or materialized CBR/VBR
   fact, while labels such as `mp3 v0`, `mp3 320`, and `opus 128` remain
   self-describing; and
-- `materialized_measurement` is built
-from the postflight Beets album info after conversion and import. It records the
-actual stored codec plus min/avg/median bitrate. This is deliberately separate
-`comparison_basis` (the policy explanation), and `v0_probe` (a temporary
-research encode). Audit UIs must use the materialized measurement for claims
-about output bytes and must leave historical output unknown when that field is
-absent. V1/v2 rows pass through the explicit legacy projection and carry
-`legacy_projection_version`; only that quarantined reader preserves their
-historically ambiguous `new_measurement` shape.
+- `materialized_measurement` is built from the postflight Beets album info
+  after conversion and import. It records the actual stored codec plus
+  min/avg/median bitrate. This is deliberately separate from
+  `comparison_basis` (the policy explanation), and `v0_probe` (a temporary
+  research encode). Audit UIs must use the materialized measurement for claims
+  about output bytes and must leave historical output unknown when that field
+  is absent. V1/v2 rows pass through the explicit legacy projection and carry
+  `legacy_projection_version`; only that quarantined reader preserves their
+  historically ambiguous `new_measurement` shape.
 
-Every new measured format is a bare codec label (`FLAC`, `MP3`, `Opus`):
+Every new measured format is a bare codec label (`FLAC`, `MP3`, `AAC`, `Opus`,
+`Vorbis`, `WMA`):
 profile/bitrate labels such as `mp3 v0` and `opus 128` belong only to the
 target contract. Source measurements cannot carry `was_converted_from`; that
 field describes materialized output lineage. These rules are enforced at the
 v3 wire decoder/encoder and again before evidence persistence. Active evidence
-rows carry `lineage_version=3`; migration 050 marks older ambiguous rows as
-version 1 instead of guessing their meaning from values. Current-evidence
-loaders treat those v1 rows as rebuild-required. Actual import/action attempts
-remeasure the exact installed Beets album before deciding. Download failures
-first retain a policy-complete v1 row for the audit log, return the request to
-`wanted`, then upgrade that exact content-addressed row to v3 in the bounded
-post-failure enrichment phase. A same-snapshot repair preserves its original
-`measured_at` and neutral research so historical Recents cards remain
-pre-attempt evidence.
+rows carry `lineage_version=4`: spectral and V0 facts add `subject`
+(`installed` | `source`) and `provenance` (`measured` | `carried`), while
+verified-lossless lives only in its proof object. Migration 055 maps old field
+names best-effort; current-evidence loaders treat v1/v3 rows as rebuild-required
+rather than guessing v4 meaning. Actual import/action attempts remeasure the
+exact installed Beets album before deciding. A same-snapshot repair preserves
+its original `measured_at` and atomic neutral facts so historical Recents cards
+remain pre-attempt evidence.
 
 **Motivation (request 6039 / download_log 36608):** a genuine avg 196→288
 rank upgrade (GOOD → TRANSPARENT) rendered as "Upgrade: MP3 V2 to MP3 V2"
@@ -325,15 +354,11 @@ min and labels it `min`. Guarded by the `assert_basis_metrics_truthful` generate
 property (`tests/test_quality_generated.py`) and the request-8781 pins in
 `tests/test_quality_classification.py`.
 
-## TODO
+## Further research
 
-- [ ] Integrate spectral gradient check into pipeline (import_one.py or cratedigger.py)
-- [ ] Add spectral quality score to pipeline DB (new column) and web UI display
-- [ ] Run spectral check on CBR 320 MP3 downloads post-download
-- [ ] Run spectral check on FLACs pre-conversion to catch transcodes early
-- [ ] Skip spectral check for albums that already passed V0 conversion (≥ `cfg.mp3_vbr.excellent`, default 210 kbps)
-- [ ] Test `spectro` pip package as second-opinion validation
-- [ ] Performance: 16 sox calls per track x 30s trim ≈ 8s/track, ~100s per 12-track album
+- [ ] Test `spectro` pip package as second-opinion validation.
+- [ ] Reduce spectral-analysis cost (16 sox calls per track x 30s trim is
+  roughly 8s/track, or ~100s per 12-track album).
 
 
 ## Evidence addressing, propagation, and ownership
@@ -348,23 +373,26 @@ them via `import_jobs.candidate_evidence_id`,
 cross-walk via `request_id` → measure as last resort). Evidence is never
 deleted unless the files actually change.
 
-**Evidence survives the candidate → library transition (lossless-source
-gated).** After a successful import, `propagate_candidate_evidence_to_current`
-(U10) inherits the candidate's measurement payload onto the library
-evidence row. `verified_lossless_proof`, `verified_lossless`, and
-`was_converted_from` propagate in **all** cases. `spectral_grade`,
-`spectral_bitrate_kbps`, `v0_metric`, and `matched_bad_audio_hash_*`
-propagate when the import is renamed-only OR when the candidate source
-codec is lossless (FLAC / ALAC / WAV) — `LOSSLESS_CODECS` in `lib/quality/filetypes.py`
-is the canonical set. Non-lossless transcoded imports (MP3 → Opus etc.)
-strip those fields onto NULL because a lossy source's spectral / V0
-lineage is not meaningfully comparable against future candidates and
-storing it on the library row would mislead triage.
+**Evidence survives the candidate → library transition by explicit markers.**
+After a successful import, `propagate_candidate_evidence_to_current` builds a
+new row from the installed library snapshot. Installed bitrate, format,
+container, file inventory, and other on-disk facts are freshly measured.
+Installed-subject spectral and V0 facts never cross a fingerprint change.
+The ordinary enrichment path remeasures those facts against the installed
+snapshot when policy needs them.
 
-For lossless-source-transcoded library rows, the propagated fields
-describe the upstream source audio at import time, not the on-disk
-file. Wrong-match cleanup triage compares future candidates against
-this evidence to reject same-source duplicates.
+Acquisition facts cannot be re-derived from converted library bytes, so proof,
+source-subject spectral, and source-subject V0 facts carry to the new row with
+`provenance='carried'`. Their `subject='source'` continues to say that they
+describe the upstream acquisition bytes, not the installed derivative.
+Propagation reads those markers directly; codec names and conversion shape are
+never used as a lineage heuristic. Wrong-match cleanup may compare future
+candidates against these explicit source anchors.
+
+The same rule governs every evidence rebuild: proof and source-subject facts
+carry unconditionally with provenance `carried`; installed-subject facts are
+remeasured and can only have provenance `measured`. Proof is conceptually a
+source acquisition fact, so it needs only its provenance marker.
 
 **Missing or incomplete current evidence self-heals at the failure point.** A
 current-evidence row's spectral scan and on-disk V0 research normally
@@ -390,10 +418,11 @@ evidence converges without delaying or bypassing download cleanup.
 **A blank `source_path` is policy-incomplete.** Every enrichment
 helper verifies the scanned path against the row's recorded
 `source_path`, so a row without one (legacy 2026-05 library backfills
-wrote `source_path=''`) could never be completed — and an incomplete
-HAVE side silently disables all three spectral protections in the
-import comparison (download_log 37206: a ~96k transcode replaced a
-better copy as a "better" avg-bitrate tiebreak). `policy_incomplete_reasons`
+wrote `source_path=''`) could never be completed. Before issue #711, that
+incomplete HAVE side silently disabled all three spectral protections in the
+import comparison (download_log 37206: a ~96k transcode replaced a better copy
+as a "better" avg-bitrate tiebreak). Fresh HAVE analysis is now a prerequisite;
+failure aborts the attempt as `have_analysis_error`. `policy_incomplete_reasons`
 therefore rejects blank paths; the action loader
 (`ensure_current_evidence_for_action`) and the preview loader
 (`load_current_evidence_for_preview`) rebuild such rows from beets.
@@ -420,28 +449,27 @@ produces query strategies, and the filetype filter is applied
 downstream in `lib/enqueue.py::effective_search_tiers` from the request's
 override column.
 
-A second lossless-only narrowing applies when a rejected attempt proves that
+A second lossless-only narrowing applies when an attempt proves that
 the exact installed HAVE copy is both **TRANSPARENT** under the canonical
 codec rank bands and spectrally **genuine**. The importer uses the independent
 attempt-local HAVE audit; validation rejects may use only the request's linked,
 complete current-evidence row. Candidate spectral results and the legacy
-request scalar are not substitutes. MP3, AAC, and Opus participate through
-`measurement_rank`; codecs without canonical bands (currently Ogg), merely
-EXCELLENT lossy copies, and missing/failed/suspect/marginal audits fail open and
-do not authorize lossless-only narrowing. Ordinary downgrade convergence still
+request scalar are not substitutes. MP3, AAC, Opus, Vorbis, and WMA participate
+through `measurement_rank`; unknown codec families, merely EXCELLENT lossy
+copies, and missing/failed/suspect/marginal audits fail open and do not
+authorize lossless-only narrowing. Ordinary downgrade convergence still
 removes the exact rejected tier from an existing search ladder. A positive
 result writes only
 `search_filetype_override="lossless"`: `target_format` remains untouched, and
 `search_tiers` disables the catch-all fallback for that override. The normal
 forever cadence continues, now searching only for the remaining meaningful
-upgrade: lossless.
+upgrade: lossless. Every other unverified retained copy stays wanted on the
+full search surface; only verified-lossless proof ends automatic acquisition.
 
-Known wart: library rows imported before this policy landed (2026-05-17)
-have NULL spectral / V0 / bad-hash fields and may have lossy
-`search_filetype_override` values. They keep the old behaviour —
-wrong-match triage cannot reject same-source duplicates against them
-and validation-rejection narrowing cannot use them until complete linked
-current evidence exists. Fresh importer attempts can still narrow from an
-independent completed HAVE audit, and `lossless_source_locked` remains a
-separate narrowing path. Forward-only by design; no bulk backfill. See
+Older library rows may still have NULL spectral / V0 / bad-hash facts. The
+deploy transition materializes historical proof and source anchors that already
+exist in request history, but it never invents missing spectral evidence.
+Wrong-match and narrowing policy wait for a complete linked evidence row;
+fresh attempts remeasure the installed bytes. `lossless_source_locked` remains
+a separate defense-in-depth narrowing path. See
 `docs/brainstorms/2026-05-17-propagate-source-evidence-on-transcode-requirements.md`.

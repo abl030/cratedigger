@@ -1601,8 +1601,8 @@ class TestCmdRepairSpectral(unittest.TestCase):
     """Regression tests for the rank-model repair flow."""
 
     def test_repair_spectral_reloads_full_request_metadata(self):
-        """Lo-fi V0 repair must reload full request metadata, not trust the partial row."""
-        from lib.beets_db import AlbumInfo
+        """Repair selects by audit scalars but decides from linked evidence."""
+        from lib.quality import AudioQualityMeasurement, VerifiedLosslessProof
 
         cfg_fd, cfg_path = tempfile.mkstemp(prefix="quality-ranks-", suffix=".ini")
         os.close(cfg_fd)
@@ -1640,27 +1640,34 @@ class TestCmdRepairSpectral(unittest.TestCase):
                 verified_lossless=True,
                 final_format="mp3 v0",
             ))
-            db.queue_execute_results(candidate_cur, delete_cur)
-
-            beets_info = AlbumInfo(
-                album_id=1,
-                track_count=10,
-                min_bitrate_kbps=207,
-                avg_bitrate_kbps=207,
-                median_bitrate_kbps=207,
-                format="MP3",
-                is_cbr=False,
-                album_path="/Beets/Artist/Album",
+            evidence = make_album_quality_evidence(
+                mb_release_id="mbid-123",
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    avg_bitrate_kbps=245,
+                    median_bitrate_kbps=245,
+                    format="MP3",
+                    is_cbr=False,
+                    spectral_grade="genuine",
+                ),
+                verified_lossless_proof=VerifiedLosslessProof(
+                    provenance="carried",
+                    source="flac",
+                    classifier="spectral_verified_lossless",
+                ),
             )
-            mock_beets = MagicMock()
-            mock_beets.__enter__ = MagicMock(return_value=mock_beets)
-            mock_beets.__exit__ = MagicMock(return_value=False)
-            mock_beets.get_album_info.return_value = beets_info
+            db.upsert_album_quality_evidence(evidence)
+            persisted = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert persisted is not None and persisted.id is not None
+            db.set_request_current_evidence(42, persisted.id)
+            db.queue_execute_results(candidate_cur, delete_cur)
 
             args = MagicMock(dry_run=False)
             stdout = io.StringIO()
             with patch.dict(os.environ, {"CRATEDIGGER_RUNTIME_CONFIG": cfg_path}), \
-                 patch("lib.beets_db.BeetsDB", return_value=mock_beets), \
                  redirect_stdout(stdout):
                 pipeline_cli.cmd_repair_spectral(cast(Any, db), args)
 
@@ -1670,7 +1677,7 @@ class TestCmdRepairSpectral(unittest.TestCase):
             self.assertEqual(len(db.execute_calls), 2)
             repaired = db.request(42)
             self.assertEqual(repaired["status"], "imported")
-            self.assertEqual(repaired["min_bitrate"], 207)
+            self.assertEqual(repaired["min_bitrate"], 245)
             self.assertIsNone(repaired["last_download_spectral_bitrate"])
             self.assertIsNone(repaired["current_spectral_bitrate"])
         finally:
@@ -1697,8 +1704,9 @@ class TestCmdQuality(unittest.TestCase):
         beets_info: Any = ...,
         beets_error: Exception | None = None,
         current_evidence: Any | None = None,
+        auto_link: bool = True,
     ):
-        from lib.quality import QualityRankConfig
+        from lib.quality import AudioQualityMeasurement, QualityRankConfig
 
         db = FakePipelineDB()
         db.seed_request(request_row)
@@ -1718,20 +1726,39 @@ class TestCmdQuality(unittest.TestCase):
                 median_bitrate_kbps=245,
                 format="MP3",
             )
+        if (
+            auto_link
+            and current_evidence is None
+            and beets_info is not None
+            and beets_error is None
+        ):
+            current_evidence = make_album_quality_evidence(
+                mb_release_id=request_row["mb_release_id"],
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=request_row.get("min_bitrate"),
+                    avg_bitrate_kbps=beets_info.avg_bitrate_kbps,
+                    median_bitrate_kbps=beets_info.median_bitrate_kbps,
+                    format=beets_info.format,
+                    is_cbr=beets_info.is_cbr,
+                    spectral_grade=request_row.get("current_spectral_grade"),
+                    spectral_bitrate_kbps=request_row.get(
+                        "current_spectral_bitrate"
+                    ),
+                ),
+            )
+            db.upsert_album_quality_evidence(current_evidence)
+            persisted = db.find_album_quality_evidence(
+                mb_release_id=current_evidence.mb_release_id,
+                snapshot_fingerprint=current_evidence.snapshot_fingerprint,
+            )
+            assert persisted is not None and persisted.id is not None
+            db.set_request_current_evidence(request_row["id"], persisted.id)
 
         stdout = io.StringIO()
-        beets_lookup = patch(
-            "scripts.pipeline_cli.quality._load_beets_album_info",
-            side_effect=beets_error,
-        ) if beets_error is not None else patch(
-            "scripts.pipeline_cli.quality._load_beets_album_info",
-            return_value=beets_info,
-        )
         with patch("scripts.pipeline_cli.quality._load_runtime_rank_config",
                    return_value=QualityRankConfig.defaults()), \
              patch("scripts.pipeline_cli.quality._load_runtime_verified_lossless_target",
                    return_value=runtime_target or ""), \
-             beets_lookup, \
              redirect_stdout(stdout):
             pipeline_cli.cmd_quality(cast(Any, db), MagicMock(id=request_row["id"]))
 
@@ -1758,7 +1785,7 @@ class TestCmdQuality(unittest.TestCase):
         )
 
         self.assertIn("Quality gate:  UNAVAILABLE", output)
-        self.assertIn("materialized MP3 mode unknown", output)
+        self.assertIn("linked current evidence unavailable", output)
         self.assertIn("What would happen if we downloaded", output)
         self.assertNotIn("Quality gate:  DONE", output)
         self.assertNotIn("Quality gate:  NEEDS", output)
@@ -1772,8 +1799,7 @@ class TestCmdQuality(unittest.TestCase):
         )
 
         self.assertIn("Quality gate:  UNAVAILABLE", output)
-        self.assertIn("materialized MP3 mode unknown", output)
-        self.assertIn("Beets lookup: unavailable", output)
+        self.assertIn("linked current evidence unavailable", output)
         self.assertIn("What would happen if we downloaded", output)
         self.assertNotIn("Traceback", output)
         self.assertNotIn("is_cbr=False", output)
@@ -1794,6 +1820,7 @@ class TestCmdQuality(unittest.TestCase):
 
         output = self._run_quality(request_row, runtime_target="opus 128")
 
+        self.assertIn("  Rank config: metric=avg\n", output)
         # Header line confirms the runtime target was read.
         self.assertIn("Verified-lossless output: opus 128", output)
         # Scenario labels weave the same target through `_quality_preview_target_label`.
@@ -1818,8 +1845,8 @@ class TestCmdQuality(unittest.TestCase):
         self.assertIn("Verified-lossless output: flac", output)
         self.assertIn("Genuine FLAC → flac (high bitrate):", output)
 
-    def test_quality_bare_mp3_uses_materialized_album_mode(self):
-        """Live request 4135: bare MP3 CBR 256 must match the real gate."""
+    def test_quality_bare_mp3_cbr_genuine_below_transparent_needs_upgrade(self):
+        """Live request 4135: genuine CBR 256 stays on full tiers."""
         from lib.beets_db import AlbumInfo
 
         request_row = make_request_row(
@@ -1850,12 +1877,12 @@ class TestCmdQuality(unittest.TestCase):
             beets_info=cbr_info,
         )
 
-        self.assertIn("NEEDS LOSSLESS", output)
+        self.assertIn("NEEDS UPGRADE", output)
         self.assertIn("(rank=EXCELLENT)", output)
         self.assertIn("is_cbr=True", output)
 
-    def test_quality_bare_mp3_vbr_control_remains_transparent(self):
-        """Live request 8499 control: bare MP3 VBR keeps VBR policy bands."""
+    def test_quality_bare_mp3_vbr_transparent_needs_lossless_proof(self):
+        """Live request 8499: transparent genuine VBR narrows lossless-only."""
         from lib.beets_db import AlbumInfo
 
         request_row = make_request_row(
@@ -1886,7 +1913,7 @@ class TestCmdQuality(unittest.TestCase):
             beets_info=vbr_info,
         )
 
-        self.assertIn("Quality gate:  DONE", output)
+        self.assertIn("Quality gate:  NEEDS LOSSLESS", output)
         self.assertIn("(rank=TRANSPARENT)", output)
         self.assertIn("is_cbr=False", output)
 
@@ -1980,7 +2007,7 @@ class TestCmdQuality(unittest.TestCase):
             current_evidence=evidence,
         )
 
-        self.assertIn("Quality gate:  UNAVAILABLE", output)
+        self.assertIn("Quality gate:  NEEDS LOSSLESS", output)
         self.assertIn(
             "Backfill:      would set search_filetype_override='lossless'",
             output,
@@ -2068,6 +2095,7 @@ class TestCmdQuality(unittest.TestCase):
             request_row,
             runtime_target=None,
             beets_info=beets_info,
+            auto_link=False,
         )
 
         self.assertIn("Backfill:      won't fire", output)
@@ -2081,7 +2109,7 @@ class TestCmdQuality(unittest.TestCase):
         After the fix, the displayed rank is the post-clamp rank that the
         gate actually used.
         """
-        from lib.quality import QualityRankConfig
+        from lib.quality import AudioQualityMeasurement
 
         request_row = make_request_row(
             id=9,
@@ -2096,32 +2124,29 @@ class TestCmdQuality(unittest.TestCase):
             final_format=None,
         )
 
-        beets_info = SimpleNamespace(
-            is_cbr=False,
-            avg_bitrate_kbps=245,
-            median_bitrate_kbps=245,
-            format="MP3",
+        evidence = make_album_quality_evidence(
+            mb_release_id="mbid-afx",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=213,
+                avg_bitrate_kbps=245,
+                median_bitrate_kbps=245,
+                format="MP3",
+                is_cbr=False,
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=160,
+            ),
         )
-
-        db = FakePipelineDB()
-        db.seed_request(request_row)
-        stdout = io.StringIO()
-        with patch("scripts.pipeline_cli.quality._load_runtime_rank_config",
-                   return_value=QualityRankConfig.defaults()), \
-             patch("scripts.pipeline_cli.quality._load_runtime_verified_lossless_target",
-                   return_value=""), \
-             patch("scripts.pipeline_cli.quality._load_beets_album_info",
-                   return_value=beets_info), \
-             redirect_stdout(stdout):
-            pipeline_cli.cmd_quality(cast(Any, db), MagicMock(id=9))
-
-        output = stdout.getvalue()
+        output = self._run_quality(
+            request_row,
+            runtime_target=None,
+            beets_info=None,
+            current_evidence=evidence,
+        )
         # The gate must say NEEDS UPGRADE (not DONE) — real quality_gate_decision
         # called by cmd_quality classifies the album below EXCELLENT.
         self.assertIn("NEEDS UPGRADE", output)
         # And the displayed rank must agree — post-clamp 160kbps lands ACCEPTABLE.
-        # Use parenthesized form to disambiguate from `gate_min_rank=EXCELLENT`
-        # in the cfg display line.
+        # Use the parenthesized form so this matches the decision rank itself.
         self.assertIn("(rank=ACCEPTABLE)", output)
         self.assertNotIn("(rank=TRANSPARENT)", output)
         self.assertNotIn("(rank=EXCELLENT)", output)
@@ -2144,12 +2169,22 @@ class _ForensicsDB(FakePipelineDB):
     def __init__(self) -> None:
         super().__init__()
         self._stub_search_history: list[dict[str, object]] = []
+        self._stub_download_history: list[dict[str, object]] | None = None
 
     def set_stub_search_history(self, rows: list[dict[str, object]]) -> None:
         self._stub_search_history = list(rows)
 
     def get_search_history(self, request_id: int) -> list[dict[str, object]]:  # type: ignore[override]
         return [row for row in self._stub_search_history
+                if row.get("request_id") == request_id]
+
+    def set_stub_download_history(self, rows: list[dict[str, object]]) -> None:
+        self._stub_download_history = list(rows)
+
+    def get_download_history(self, request_id: int) -> list[dict[str, object]]:  # type: ignore[override]
+        if self._stub_download_history is None:
+            return super().get_download_history(request_id)
+        return [row for row in self._stub_download_history
                 if row.get("request_id") == request_id]
 
 
@@ -2301,6 +2336,35 @@ class TestCmdShowSearchForensics(unittest.TestCase):
         self.assertIn("yt_url:", out)
         self.assertIn("stderr:    line 2", out)
         self.assertNotIn("from None", out)
+
+    def test_show_renders_have_analysis_failure_diagnostics(self):
+        db = _ForensicsDB()
+        db.seed_request(self._row(id=6, manual_reason=None))
+        db.set_stub_download_history([{
+            "id": 711,
+            "request_id": 6,
+            "created_at": "2026-07-16T00:00:00+00:00",
+            "outcome": "have_analysis_error",
+            "source": "slskd",
+            "soulseek_username": "archive-peer",
+            "beets_distance": None,
+            "validation_result": {
+                "failure_category": "permission_denied",
+                "error": "Permission denied while reading installed album",
+                "installed_path": "/music/Artist/Album",
+                "candidate_reference": "/incoming/candidate",
+            },
+            "import_result": None,
+        }])
+
+        out = self._capture(db, 6)
+
+        self.assertIn("have_analysis_error", out)
+        self.assertIn("log_id:            711", out)
+        self.assertIn("failure_category:  permission_denied", out)
+        self.assertIn("analysis_error:    Permission denied", out)
+        self.assertIn("installed_path:     /music/Artist/Album", out)
+        self.assertIn("candidate_reference: /incoming/candidate", out)
 
 
 class TestCmdSearchPlanShow(unittest.TestCase):

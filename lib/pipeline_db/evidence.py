@@ -62,12 +62,13 @@ class _EvidenceMixin(_PipelineDBBase):
                     min_bitrate_kbps,
                     avg_bitrate_kbps, median_bitrate_kbps, format, is_cbr,
                     spectral_grade, spectral_bitrate_kbps,
+                    spectral_subject, spectral_provenance,
                     verified_lossless, was_converted_from,
                     v0_min_bitrate_kbps, v0_avg_bitrate_kbps,
-                    v0_median_bitrate_kbps, v0_source_lineage,
-                    v0_source_provenance, v0_proof_provenance,
+                    v0_median_bitrate_kbps, v0_subject,
+                    v0_provenance,
                     on_disk_v0_research_attempted,
-                    verified_lossless_proof_origin,
+                    verified_lossless_provenance,
                     verified_lossless_source, verified_lossless_classifier,
                     verified_lossless_detail,
                     audio_corrupt, folder_layout, audio_file_count,
@@ -80,8 +81,8 @@ class _EvidenceMixin(_PipelineDBBase):
                     %s, %s, %s, -- measurement time + codec/container
                     %s, %s, %s, %s, -- storage/target + lineage
                     %s, %s, %s, %s, %s, -- bitrate/format/mode
-                    %s, %s, %s, %s, -- spectral/lossless/conversion
-                    %s, %s, %s, %s, %s, %s, -- V0 metric
+                    %s, %s, %s, %s, %s, %s, -- spectral/lossless/conversion
+                    %s, %s, %s, %s, %s, -- V0 metric
                     %s, -- on-disk V0 research attempted
                     %s, %s, %s, %s, -- verified-lossless proof
                     %s, %s, %s, %s, %s, %s, -- preview facts
@@ -104,70 +105,83 @@ class _EvidenceMixin(_PipelineDBBase):
                     is_cbr = EXCLUDED.is_cbr,
                     -- Spectral is one atomic fact. A grade makes an incoming
                     -- pair valid (genuine legitimately has no bitrate); an
-                    -- empty or bitrate-only stale writer preserves the whole
-                    -- stored pair so it cannot erase an attempt-time scan.
+                    -- empty or bitrate-only v4 stale writer preserves the
+                    -- whole stored pair so it cannot erase an attempt-time
+                    -- scan. A legacy row is replaced wholesale during its
+                    -- v4 rebuild, including when the new fact is absent.
                     spectral_grade = CASE WHEN
+                        album_quality_evidence.lineage_version < 4 OR
                         EXCLUDED.spectral_grade IS NOT NULL
                         THEN EXCLUDED.spectral_grade
                         ELSE album_quality_evidence.spectral_grade END,
                     spectral_bitrate_kbps = CASE WHEN
+                        album_quality_evidence.lineage_version < 4 OR
                         EXCLUDED.spectral_grade IS NOT NULL
                         THEN EXCLUDED.spectral_bitrate_kbps
                         ELSE album_quality_evidence.spectral_bitrate_kbps END,
+                    spectral_subject = CASE WHEN
+                        album_quality_evidence.lineage_version < 4 OR
+                        EXCLUDED.spectral_grade IS NOT NULL
+                        THEN EXCLUDED.spectral_subject
+                        ELSE album_quality_evidence.spectral_subject END,
+                    spectral_provenance = CASE WHEN
+                        album_quality_evidence.lineage_version < 4 OR
+                        EXCLUDED.spectral_grade IS NOT NULL
+                        THEN EXCLUDED.spectral_provenance
+                        ELSE album_quality_evidence.spectral_provenance END,
                     verified_lossless = EXCLUDED.verified_lossless,
                     was_converted_from = EXCLUDED.was_converted_from,
                     -- V0 is one atomic fact, not six independently mergeable
                     -- columns. A valid incoming metric has a lineage and at
                     -- least one bitrate; replace the whole tuple in that case.
                     -- An absent or partial incoming tuple preserves the whole
-                    -- stored tuple so stale writers cannot mix or erase it.
+                    -- stored tuple so v4 stale writers cannot mix or erase
+                    -- it. Legacy rows are replaced wholesale during rebuild.
                     v0_min_bitrate_kbps = CASE WHEN
-                        EXCLUDED.v0_source_lineage IS NOT NULL AND
-                        (EXCLUDED.v0_min_bitrate_kbps IS NOT NULL OR
-                         EXCLUDED.v0_avg_bitrate_kbps IS NOT NULL OR
-                         EXCLUDED.v0_median_bitrate_kbps IS NOT NULL)
+                        album_quality_evidence.lineage_version < 4 OR
+                        (EXCLUDED.v0_subject IS NOT NULL AND
+                         (EXCLUDED.v0_min_bitrate_kbps IS NOT NULL OR
+                          EXCLUDED.v0_avg_bitrate_kbps IS NOT NULL OR
+                          EXCLUDED.v0_median_bitrate_kbps IS NOT NULL))
                         THEN EXCLUDED.v0_min_bitrate_kbps
                         ELSE album_quality_evidence.v0_min_bitrate_kbps END,
                     v0_avg_bitrate_kbps = CASE WHEN
-                        EXCLUDED.v0_source_lineage IS NOT NULL AND
-                        (EXCLUDED.v0_min_bitrate_kbps IS NOT NULL OR
-                         EXCLUDED.v0_avg_bitrate_kbps IS NOT NULL OR
-                         EXCLUDED.v0_median_bitrate_kbps IS NOT NULL)
+                        album_quality_evidence.lineage_version < 4 OR
+                        (EXCLUDED.v0_subject IS NOT NULL AND
+                         (EXCLUDED.v0_min_bitrate_kbps IS NOT NULL OR
+                          EXCLUDED.v0_avg_bitrate_kbps IS NOT NULL OR
+                          EXCLUDED.v0_median_bitrate_kbps IS NOT NULL))
                         THEN EXCLUDED.v0_avg_bitrate_kbps
                         ELSE album_quality_evidence.v0_avg_bitrate_kbps END,
                     v0_median_bitrate_kbps = CASE WHEN
-                        EXCLUDED.v0_source_lineage IS NOT NULL AND
-                        (EXCLUDED.v0_min_bitrate_kbps IS NOT NULL OR
-                         EXCLUDED.v0_avg_bitrate_kbps IS NOT NULL OR
-                         EXCLUDED.v0_median_bitrate_kbps IS NOT NULL)
+                        album_quality_evidence.lineage_version < 4 OR
+                        (EXCLUDED.v0_subject IS NOT NULL AND
+                         (EXCLUDED.v0_min_bitrate_kbps IS NOT NULL OR
+                          EXCLUDED.v0_avg_bitrate_kbps IS NOT NULL OR
+                          EXCLUDED.v0_median_bitrate_kbps IS NOT NULL))
                         THEN EXCLUDED.v0_median_bitrate_kbps
                         ELSE album_quality_evidence.v0_median_bitrate_kbps END,
-                    v0_source_lineage = CASE WHEN
-                        EXCLUDED.v0_source_lineage IS NOT NULL AND
-                        (EXCLUDED.v0_min_bitrate_kbps IS NOT NULL OR
-                         EXCLUDED.v0_avg_bitrate_kbps IS NOT NULL OR
-                         EXCLUDED.v0_median_bitrate_kbps IS NOT NULL)
-                        THEN EXCLUDED.v0_source_lineage
-                        ELSE album_quality_evidence.v0_source_lineage END,
-                    v0_source_provenance = CASE WHEN
-                        EXCLUDED.v0_source_lineage IS NOT NULL AND
-                        (EXCLUDED.v0_min_bitrate_kbps IS NOT NULL OR
-                         EXCLUDED.v0_avg_bitrate_kbps IS NOT NULL OR
-                         EXCLUDED.v0_median_bitrate_kbps IS NOT NULL)
-                        THEN EXCLUDED.v0_source_provenance
-                        ELSE album_quality_evidence.v0_source_provenance END,
-                    v0_proof_provenance = CASE WHEN
-                        EXCLUDED.v0_source_lineage IS NOT NULL AND
-                        (EXCLUDED.v0_min_bitrate_kbps IS NOT NULL OR
-                         EXCLUDED.v0_avg_bitrate_kbps IS NOT NULL OR
-                         EXCLUDED.v0_median_bitrate_kbps IS NOT NULL)
-                        THEN EXCLUDED.v0_proof_provenance
-                        ELSE album_quality_evidence.v0_proof_provenance END,
+                    v0_subject = CASE WHEN
+                        album_quality_evidence.lineage_version < 4 OR
+                        (EXCLUDED.v0_subject IS NOT NULL AND
+                         (EXCLUDED.v0_min_bitrate_kbps IS NOT NULL OR
+                          EXCLUDED.v0_avg_bitrate_kbps IS NOT NULL OR
+                          EXCLUDED.v0_median_bitrate_kbps IS NOT NULL))
+                        THEN EXCLUDED.v0_subject
+                        ELSE album_quality_evidence.v0_subject END,
+                    v0_provenance = CASE WHEN
+                        album_quality_evidence.lineage_version < 4 OR
+                        (EXCLUDED.v0_subject IS NOT NULL AND
+                         (EXCLUDED.v0_min_bitrate_kbps IS NOT NULL OR
+                          EXCLUDED.v0_avg_bitrate_kbps IS NOT NULL OR
+                          EXCLUDED.v0_median_bitrate_kbps IS NOT NULL))
+                        THEN EXCLUDED.v0_provenance
+                        ELSE album_quality_evidence.v0_provenance END,
                     on_disk_v0_research_attempted =
                         album_quality_evidence.on_disk_v0_research_attempted
                         OR EXCLUDED.on_disk_v0_research_attempted,
-                    verified_lossless_proof_origin =
-                        EXCLUDED.verified_lossless_proof_origin,
+                    verified_lossless_provenance =
+                        EXCLUDED.verified_lossless_provenance,
                     verified_lossless_source =
                         EXCLUDED.verified_lossless_source,
                     verified_lossless_classifier =
@@ -235,16 +249,17 @@ class _EvidenceMixin(_PipelineDBBase):
                 m.is_cbr,
                 m.spectral_grade,
                 m.spectral_bitrate_kbps,
-                m.verified_lossless,
+                m.spectral_subject,
+                m.spectral_provenance,
+                proof is not None,
                 m.was_converted_from,
                 v0.min_bitrate_kbps if v0 else None,
                 v0.avg_bitrate_kbps if v0 else None,
                 v0.median_bitrate_kbps if v0 else None,
-                v0.source_lineage if v0 else None,
-                v0.source_provenance if v0 else None,
-                v0.proof_provenance if v0 else None,
+                v0.subject if v0 else None,
+                v0.provenance if v0 else None,
                 evidence.on_disk_v0_research_attempted,
-                proof.proof_origin if proof else None,
+                proof.provenance if proof else None,
                 proof.source if proof else None,
                 proof.classifier if proof else None,
                 proof.detail if proof else None,
@@ -346,9 +361,8 @@ class _EvidenceMixin(_PipelineDBBase):
               AND evidence.v0_min_bitrate_kbps IS NULL
               AND evidence.v0_avg_bitrate_kbps IS NULL
               AND evidence.v0_median_bitrate_kbps IS NULL
-              AND evidence.v0_source_lineage IS NULL
-              AND evidence.v0_source_provenance IS NULL
-              AND evidence.v0_proof_provenance IS NULL
+              AND evidence.v0_subject IS NULL
+              AND evidence.v0_provenance IS NULL
             RETURNING evidence.id
             """,
             (
@@ -377,6 +391,8 @@ class _EvidenceMixin(_PipelineDBBase):
             UPDATE album_quality_evidence AS evidence
             SET spectral_grade = %s,
                 spectral_bitrate_kbps = %s,
+                spectral_subject = 'installed',
+                spectral_provenance = 'measured',
                 updated_at = NOW()
             FROM album_requests AS request
             WHERE request.id = %s
@@ -420,9 +436,8 @@ class _EvidenceMixin(_PipelineDBBase):
             SET v0_min_bitrate_kbps = %s,
                 v0_avg_bitrate_kbps = %s,
                 v0_median_bitrate_kbps = %s,
-                v0_source_lineage = %s,
-                v0_source_provenance = %s,
-                v0_proof_provenance = %s,
+                v0_subject = %s,
+                v0_provenance = %s,
                 updated_at = NOW()
             FROM album_requests AS request
             WHERE request.id = %s
@@ -433,18 +448,16 @@ class _EvidenceMixin(_PipelineDBBase):
               AND evidence.v0_min_bitrate_kbps IS NULL
               AND evidence.v0_avg_bitrate_kbps IS NULL
               AND evidence.v0_median_bitrate_kbps IS NULL
-              AND evidence.v0_source_lineage IS NULL
-              AND evidence.v0_source_provenance IS NULL
-              AND evidence.v0_proof_provenance IS NULL
+              AND evidence.v0_subject IS NULL
+              AND evidence.v0_provenance IS NULL
             RETURNING evidence.id
             """,
             (
                 metric.min_bitrate_kbps,
                 metric.avg_bitrate_kbps,
                 metric.median_bitrate_kbps,
-                metric.source_lineage,
-                metric.source_provenance,
-                metric.proof_provenance,
+                metric.subject,
+                metric.provenance,
                 int(request_id),
                 int(expected_evidence_id),
                 expected_snapshot_fingerprint,
@@ -478,9 +491,8 @@ class _EvidenceMixin(_PipelineDBBase):
               AND v0_min_bitrate_kbps IS NULL
               AND v0_avg_bitrate_kbps IS NULL
               AND v0_median_bitrate_kbps IS NULL
-              AND v0_source_lineage IS NULL
-              AND v0_source_provenance IS NULL
-              AND v0_proof_provenance IS NULL
+              AND v0_subject IS NULL
+              AND v0_provenance IS NULL
             RETURNING id
             """,
             (int(expected_evidence_id), expected_snapshot_fingerprint),
@@ -588,20 +600,19 @@ class _EvidenceMixin(_PipelineDBBase):
             row.get("v0_min_bitrate_kbps") is not None
             or row.get("v0_avg_bitrate_kbps") is not None
             or row.get("v0_median_bitrate_kbps") is not None
-            or row.get("v0_source_lineage") is not None
+            or row.get("v0_subject") is not None
         ):
             v0_metric = AlbumQualityV0Metric(
+                subject=row["v0_subject"],
+                provenance=row["v0_provenance"],
                 min_bitrate_kbps=row.get("v0_min_bitrate_kbps"),
                 avg_bitrate_kbps=row.get("v0_avg_bitrate_kbps"),
                 median_bitrate_kbps=row.get("v0_median_bitrate_kbps"),
-                source_lineage=row.get("v0_source_lineage"),
-                source_provenance=row.get("v0_source_provenance"),
-                proof_provenance=row.get("v0_proof_provenance"),
             )
         proof = None
         if row.get("verified_lossless"):
             proof = VerifiedLosslessProof(
-                proof_origin=row["verified_lossless_proof_origin"],
+                provenance=row["verified_lossless_provenance"],
                 source=row["verified_lossless_source"],
                 classifier=row["verified_lossless_classifier"],
                 detail=row.get("verified_lossless_detail"),
@@ -619,7 +630,8 @@ class _EvidenceMixin(_PipelineDBBase):
                 is_cbr=bool(row.get("is_cbr")),
                 spectral_grade=row.get("spectral_grade"),
                 spectral_bitrate_kbps=row.get("spectral_bitrate_kbps"),
-                verified_lossless=bool(row.get("verified_lossless")),
+                spectral_subject=row.get("spectral_subject"),
+                spectral_provenance=row.get("spectral_provenance"),
                 was_converted_from=row.get("was_converted_from"),
             ),
             measured_at=row["measured_at"],

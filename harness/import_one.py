@@ -48,6 +48,7 @@ def _bootstrap_import_paths() -> None:
 _bootstrap_import_paths()
 
 from lib.beets_db import AlbumInfo, BeetsDB
+from lib.measurement import ffprobe_audio_codec_name
 from lib.permissions import fix_library_modes, reset_umask
 from lib.release_identity import ReleaseIdentity
 from lib.util import beets_subprocess_env
@@ -59,10 +60,14 @@ finalize_request = transitions.finalize_request
 from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          AudioQualityMeasurement, DuplicateRemoveCandidate,
                          DuplicateRemoveGuardInfo, ImportResult,
+                         EVIDENCE_PROVENANCE_MEASURED,
+                         EVIDENCE_SUBJECT_SOURCE,
                          PostflightInfo, QualityComparisonBasis,
                          QualityRankConfig,
                          QualityEvidenceActionPayload,
                          QualityEvidenceActionProvenance,
+                         SpectralAnalysisDetail,
+                         SpectralDetail,
                          MeasuredImportDecisionInput,
                          ProvisionalLosslessDecisionInput,
                          ProvisionalLosslessDecisionResult,
@@ -70,6 +75,7 @@ from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          V0_PROBE_LOSSLESS_SOURCE,
                          V0_PROBE_NATIVE_LOSSY_RESEARCH,
                          V0ProbeEvidence,
+                         VerifiedLosslessProof,
                          SPECTRAL_TRANSCODE_GRADES,
                          build_existing_quality_measurement,
                          comparison_basis_from_decision,
@@ -288,6 +294,7 @@ def quality_decision_stage(
     *,
     target_contract: TargetQualityContract | None = None,
     v0_probe: V0ProbeEvidence | None = None,
+    verified_lossless_proof: bool = False,
 ) -> StageResult:
     """Run quality comparison and map to exit codes (pure wrapper).
 
@@ -299,7 +306,12 @@ def quality_decision_stage(
     """
     result = measured_import_decision(
         MeasuredImportDecisionInput(
-            new, existing, is_transcode, target_contract, v0_probe
+            new,
+            existing,
+            is_transcode,
+            target_contract,
+            v0_probe,
+            verified_lossless_proof,
         ),
         cfg=cfg,
     )
@@ -366,9 +378,6 @@ def _materialized_measurement_from_album_info(
         median_bitrate_kbps=album_info.median_bitrate_kbps,
         format=album_info.format or None,
         is_cbr=album_info.is_cbr,
-        verified_lossless=(
-            candidate.verified_lossless if candidate is not None else False
-        ),
         was_converted_from=(
             result.conversion.original_filetype
             if result.conversion.was_converted
@@ -612,61 +621,27 @@ def _get_folder_min_bitrate(folder_path,
 _ALWAYS_LOSSLESS_EXTS = {".flac", ".wav"}
 
 
-def _ffprobe_audio_codec_name(fpath: str) -> str | None:
-    """Return the first audio stream codec name reported by ffprobe."""
-    try:
-        result = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "a:0",
-             "-show_entries", "stream=codec_name", "-of", "json", fpath],
-            capture_output=True, text=True, errors="replace", timeout=10)
-        if result.returncode != 0:
-            return None
-        payload: object = json.loads(result.stdout or "{}")
-    except Exception:
-        return None
-
-    if not isinstance(payload, dict):
-        return None
-    streams = payload.get("streams")
-    if not isinstance(streams, list) or not streams:
-        return None
-    stream = streams[0]
-    if not isinstance(stream, dict):
-        return None
-    codec = stream.get("codec_name")
-    if not isinstance(codec, str):
-        return None
-    return codec.strip().lower() or None
-
-
 def _is_m4a_alac(fpath: str) -> bool:
     """Check if an .m4a file contains ALAC (lossless) via ffprobe."""
-    return _ffprobe_audio_codec_name(fpath) == "alac"
+    return ffprobe_audio_codec_name(fpath) == "alac"
 
 
 def _detect_native_codec_family(folder: str) -> str:
     """Rank-model format label for a native (non-converted) lossy download.
 
     Probes the actual audio files with ffprobe and maps the real codec to the
-    rank model's family label ("opus" / "aac" / "MP3") via
-    ``native_codec_format_label``. Falls back to "MP3" (the historical
-    assumption) when nothing is probeable, so the rank model never sees a None
-    native label.
+    rank model's family label (for example ``"opus"``, ``"vorbis"``, or
+    ``"MP3"``) via ``native_codec_format_label``. A decodable codec without a
+    rank family is labelled ``"UNKNOWN"``; an empty folder returns the
+    explicit ``"NO_AUDIO"`` sentinel. The upstream evidence gate rejects an
+    empty fileset before this helper runs in production.
 
     This is the fix for the Opus-recorded-as-MP3 bug (request 4679): the
     native lossy path hardcoded ``native_codec_family="MP3"`` for every codec,
     so a genuine Opus 124 was scored on the MP3-VBR band table (acceptable
     floor 130) and rejected as a downgrade against an MP3 128. Probing the
-    real codec lets Opus/AAC classify against their own bands.
-
-    Fallback caveat: a codec with no lossy rank band (e.g. Vorbis/OGG) maps to
-    None and the walk falls through to "MP3", which scores it on the MP3 bands
-    — the same mislabel class as the original bug, for an as-yet-unbanded
-    codec. To add a band later, update ``_NATIVE_CODEC_LABELS`` /
-    ``_NATIVE_EXT_LABELS`` in ``lib.quality`` AND ``QualityRankConfig``
-    together. When the fallback fires on a folder that DID contain audio (a
-    probe failure or an unmapped codec, as opposed to an empty folder), a
-    warning is logged so the mislabel is visible in the audit trail.
+    real codec lets Opus/AAC classify against their own bands. An unmapped
+    result remains visible in the audit trail without inventing an MP3 label.
     """
     probed_any_audio = False
     for root, _dirs, filenames in os.walk(folder):
@@ -677,14 +652,15 @@ def _detect_native_codec_family(folder: str) -> str:
             probed_any_audio = True
             fpath = os.path.join(root, fname)
             label = native_codec_format_label(
-                _ffprobe_audio_codec_name(fpath), ext)
+                ffprobe_audio_codec_name(fpath), ext)
             if label is not None:
                 return label
     if probed_any_audio:
         _log(f"[WARN] native codec probe returned no rank-model label for "
-             f"audio in {folder}; falling back to MP3-band scoring (a probe "
-             f"failure or an unbanded codec such as Vorbis)")
-    return "MP3"
+             f"audio in {folder}; ranking as UNKNOWN (a probe failure or an "
+             f"unmapped decodable codec)")
+        return "UNKNOWN"
+    return "NO_AUDIO"
 
 
 def _detect_source_format(folder: str) -> str:
@@ -695,7 +671,7 @@ def _detect_source_format(folder: str) -> str:
             ext = os.path.splitext(fname)[1].lower()
             if ext not in AUDIO_EXTENSIONS:
                 continue
-            codec = _ffprobe_audio_codec_name(os.path.join(root, fname))
+            codec = ffprobe_audio_codec_name(os.path.join(root, fname))
             if codec:
                 return codec.upper()
             return ext.lstrip(".").upper()
@@ -1195,6 +1171,26 @@ def _load_quality_evidence_action_file(
         return msgspec.json.decode(f.read(), type=QualityEvidenceActionPayload)
 
 
+def _preview_spectral_audit_from_action_file(
+    action_file: str | None,
+) -> "SpectralDetail | None":
+    """Reuse the candidate grade already measured by preview."""
+    if not action_file:
+        return None
+    payload = _load_quality_evidence_action_file(action_file)
+    measurement = payload.candidate.measurement
+    if measurement.spectral_grade is None:
+        return None
+    return SpectralDetail(
+        candidate=SpectralAnalysisDetail(
+            attempted=True,
+            grade=measurement.spectral_grade,
+            bitrate_kbps=measurement.spectral_bitrate_kbps,
+        ),
+        existing=SpectralAnalysisDetail(attempted=False),
+    )
+
+
 def _evidence_action_decision_name(
     payload: QualityEvidenceActionPayload,
 ) -> str:
@@ -1540,8 +1536,9 @@ def main():
                              "harness's rank classification matches the caller's "
                              "runtime config. Missing/empty falls back to defaults.")
     parser.add_argument("--quality-evidence-action-file", default=None,
-                        help="Action-time quality evidence payload authorizing "
-                             "mutation without candidate remeasurement.")
+                        help="Quality evidence payload: preview-time candidate "
+                             "measurement for dry runs, or action-time "
+                             "authorization for mutation.")
     parser.add_argument("--existing-v0-probe-min-bitrate", type=int, default=None,
                         help="Current comparable lossless-source V0 probe min bitrate")
     parser.add_argument("--existing-v0-probe-avg-bitrate", type=int, default=None,
@@ -1568,8 +1565,7 @@ def main():
         try:
             _rank_cfg = QualityRankConfig.from_json(args.quality_rank_config)
             _log(f"[CONFIG] quality_rank_config: "
-                 f"metric={_rank_cfg.bitrate_metric.value}, "
-                 f"gate_min_rank={_rank_cfg.gate_min_rank.name}")
+                 f"metric={_rank_cfg.bitrate_metric.value}")
         except (ValueError, KeyError) as exc:
             _log(f"[WARN] --quality-rank-config parse failed ({exc}); "
                  f"falling back to defaults")
@@ -1664,10 +1660,16 @@ def main():
     existing_spectral_bitrate: int | None = None
     stage_start = time.monotonic()
     from lib.measurement import collect_attempt_spectral_audit
-    # The harness owns candidate measurement only. HAVE provenance is attached
-    # by the preview worker from the installed release's persisted source
-    # evidence; the on-disk derivative must never be spectrally re-analyzed.
-    r.spectral = collect_attempt_spectral_audit(work_path, None)
+    # Preview owns candidate measurement when it supplies an evidence payload;
+    # legacy callers still measure here. HAVE provenance is attached by the
+    # preview worker from the installed release's persisted source evidence;
+    # the on-disk derivative must never be spectrally re-analyzed.
+    r.spectral = (
+        _preview_spectral_audit_from_action_file(
+            args.quality_evidence_action_file
+        )
+        if args.dry_run else None
+    ) or collect_attempt_spectral_audit(work_path, None)
     candidate_audit = r.spectral.candidate
     existing_audit = r.spectral.existing
     if candidate_audit is not None:
@@ -1747,15 +1749,13 @@ def main():
             work_path, ext_filter=v0_ext_filter) if converted > 0 else None
         r.conversion.post_conversion_min_bitrate = post_conv_br
         is_transcode = transcode_detection(
-            converted, post_conv_br,
-            spectral_grade=spectral_grade, cfg=_rank_cfg)
+            converted, spectral_grade=spectral_grade)
         r.conversion.is_transcode = is_transcode
         if is_transcode:
-            # Threshold tracks the runtime cfg (issue #66) — log the value
-            # the decision actually used so retuned deployments stay
-            # auditable.
-            _log(f"[TRANSCODE] converted FLAC min bitrate {post_conv_br}kbps "
-                 f"< {_rank_cfg.mp3_vbr.excellent}kbps — source was not lossless")
+            _log(
+                "[TRANSCODE] spectral analysis did not affirm a genuine "
+                f"lossless source (grade={spectral_grade or 'missing'})"
+            )
         if post_conv_br is not None:
             _log(f"  post_conversion_min_bitrate={post_conv_br}")
     else:
@@ -1902,7 +1902,12 @@ def main():
         is_cbr=source_is_cbr,
         spectral_grade=spectral_grade,
         spectral_bitrate_kbps=spectral_bitrate,
-        verified_lossless=will_be_verified_lossless,
+        spectral_subject=(
+            EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
+        ),
+        spectral_provenance=(
+            EVIDENCE_PROVENANCE_MEASURED if spectral_grade is not None else None
+        ),
     )
     target_contract = projected_target_quality_contract(
         new_format_label,
@@ -1917,6 +1922,16 @@ def main():
         existing_spectral_bitrate=existing_spectral_bitrate,
     )
     r.source_measurement = new_m
+    r.verified_lossless_proof = (
+        VerifiedLosslessProof(
+            provenance=EVIDENCE_PROVENANCE_MEASURED,
+            source=args.filetype or "lossless_source",
+            classifier="spectral_verified_lossless",
+            detail=spectral_grade,
+        )
+        if will_be_verified_lossless
+        else None
+    )
     r.current_measurement = existing_m
     r.target_quality_contract = target_contract
 
@@ -1962,6 +1977,7 @@ def main():
             cfg=_rank_cfg,
             target_contract=target_contract,
             v0_probe=r.v0_probe,
+            verified_lossless_proof=r.verified_lossless_proof is not None,
         )
         decision = qd.decision
         r.decision = decision

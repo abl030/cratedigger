@@ -166,6 +166,14 @@ pkgs.testers.nixosTest {
     assert mode == "644", f"config.ini should be 0644, got {mode}"
     machine.succeed("grep -q 'enabled = True' /var/lib/cratedigger/config.ini")  # beets validation ON (stranger posture)
     machine.succeed("grep -q '\\[Quality Ranks\\]' /var/lib/cratedigger/config.ini")
+    machine.succeed("grep -q '^vorbis.transparent = 192$' /var/lib/cratedigger/config.ini")
+    machine.succeed("grep -q '^vorbis.excellent = 160$' /var/lib/cratedigger/config.ini")
+    machine.succeed("grep -q '^vorbis.good = 112$' /var/lib/cratedigger/config.ini")
+    machine.succeed("grep -q '^vorbis.acceptable = 96$' /var/lib/cratedigger/config.ini")
+    machine.succeed("grep -q '^wma.transparent = 320$' /var/lib/cratedigger/config.ini")
+    machine.succeed("grep -q '^wma.excellent = 256$' /var/lib/cratedigger/config.ini")
+    machine.succeed("grep -q '^wma.good = 192$' /var/lib/cratedigger/config.ini")
+    machine.succeed("grep -q '^wma.acceptable = 128$' /var/lib/cratedigger/config.ini")
     # U5 (tier-2): the module renders the beets runtime keys so every
     # beets subprocess resolves the pinned interpreter + rendered config.
     machine.succeed("grep -q 'config_dir = /var/lib/cratedigger/beets' /var/lib/cratedigger/config.ini")

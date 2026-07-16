@@ -39,14 +39,15 @@ def _verified_lossless_measurement() -> AudioQualityMeasurement:
         avg_bitrate_kbps=1000,
         format="flac",
         spectral_grade="genuine",
-        verified_lossless=True,
+        spectral_subject="source",
+        spectral_provenance="measured",
         was_converted_from="flac",
     )
 
 
 def _proof() -> VerifiedLosslessProof:
     return VerifiedLosslessProof(
-        proof_origin="import", source="flac", classifier="spectral"
+        provenance="measured", source="flac", classifier="spectral"
     )
 
 
@@ -123,8 +124,11 @@ class TestWriteSidecarHappyPath(_SidecarServiceCase):
         )
         self.assertTrue(os.path.exists(result.path or ""))
         sidecar = self._read_sidecar()
+        self.assertEqual(sidecar.schema_version, 2)
         self.assertEqual(sidecar.mb_release_id, MBID)
         self.assertTrue(sidecar.verified_lossless)
+        assert sidecar.proof is not None
+        self.assertEqual(sidecar.proof.provenance, "measured")
         self.assertEqual(sidecar.source_username, "archivist42")
         self.assertEqual(len(sidecar.tracks), 2)
 

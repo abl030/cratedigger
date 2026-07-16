@@ -12,13 +12,14 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 import msgspec
 
 from lib.quality import (
-    LOSSLESS_CODECS,
+    EVIDENCE_PROVENANCE_CARRIED,
+    EVIDENCE_PROVENANCE_MEASURED,
+    EVIDENCE_SUBJECT_INSTALLED,
+    EVIDENCE_SUBJECT_SOURCE,
+    EvidenceSubject,
     V0_PROBE_LOSSLESS_SOURCE,
     V0_PROBE_NATIVE_LOSSY_RESEARCH,
     V0_PROBE_ON_DISK_RESEARCH,
-    V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
-    V0_SOURCE_LINEAGE_NATIVE_LOSSY_RESEARCH,
-    V0_SOURCE_LINEAGE_ON_DISK_RESEARCH,
     AlbumQualityEvidence,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
@@ -101,15 +102,11 @@ _AUDIO_EXTENSIONS = {
     ".wma",
 }
 
-_NEUTRAL_V0_LINEAGE = {
-    V0_PROBE_LOSSLESS_SOURCE: V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
-    V0_PROBE_NATIVE_LOSSY_RESEARCH: V0_SOURCE_LINEAGE_NATIVE_LOSSY_RESEARCH,
-    V0_PROBE_ON_DISK_RESEARCH: V0_SOURCE_LINEAGE_ON_DISK_RESEARCH,
+_V0_SUBJECT: dict[str, EvidenceSubject] = {
+    V0_PROBE_LOSSLESS_SOURCE: EVIDENCE_SUBJECT_SOURCE,
+    V0_PROBE_NATIVE_LOSSY_RESEARCH: EVIDENCE_SUBJECT_INSTALLED,
+    V0_PROBE_ON_DISK_RESEARCH: EVIDENCE_SUBJECT_INSTALLED,
 }
-
-
-def _optional_int(value: object | None) -> int | None:
-    return value if isinstance(value, int) else None
 
 
 class SnapshotAudioFilesError(OSError):
@@ -134,9 +131,9 @@ def current_evidence_rebuild_reasons(
 ) -> list[str]:
     """Return reasons a current-library snapshot must be measured again."""
     reasons = evidence.policy_incomplete_reasons()
-    if evidence.lineage_version != 3:
+    if evidence.lineage_version != 4:
         reasons.append(
-            f"lineage_version {evidence.lineage_version} must be rebuilt as 3"
+            f"lineage_version {evidence.lineage_version} must be rebuilt as 4"
         )
     return reasons
 
@@ -326,18 +323,16 @@ def neutral_v0_metric_from_probe(
 
     if probe is None:
         return None
-    lineage = _NEUTRAL_V0_LINEAGE.get(probe.kind, "unknown_v0_source")
+    try:
+        subject = _V0_SUBJECT[probe.kind]
+    except KeyError as exc:
+        raise ValueError(f"unknown V0 probe kind: {probe.kind!r}") from exc
     return AlbumQualityV0Metric(
+        subject=subject,
+        provenance=EVIDENCE_PROVENANCE_MEASURED,
         min_bitrate_kbps=probe.min_bitrate_kbps,
         avg_bitrate_kbps=probe.avg_bitrate_kbps,
         median_bitrate_kbps=probe.median_bitrate_kbps,
-        source_lineage=lineage,
-        source_provenance=probe.kind or None,
-        proof_provenance=(
-            "lossless-source probe"
-            if probe.kind == V0_PROBE_LOSSLESS_SOURCE
-            else None
-        ),
     )
 
 
@@ -358,107 +353,16 @@ def audit_v0_probe_from_metric(
     # download_log.v0_probe_kind CHECK constraint (migration 007) only
     # accepts the three persisted audit kinds. ``neutral_v0_research`` is an
     # in-memory policy marker and must never be written to the DB.
-    kind_by_lineage = {
-        V0_SOURCE_LINEAGE_LOSSLESS_SOURCE: V0_PROBE_LOSSLESS_SOURCE,
-        V0_SOURCE_LINEAGE_NATIVE_LOSSY_RESEARCH:
-            V0_PROBE_NATIVE_LOSSY_RESEARCH,
-        V0_SOURCE_LINEAGE_ON_DISK_RESEARCH: V0_PROBE_ON_DISK_RESEARCH,
-    }
-    kind = kind_by_lineage.get(
-        metric.source_lineage or "",
-        V0_PROBE_NATIVE_LOSSY_RESEARCH,
+    kind = (
+        V0_PROBE_LOSSLESS_SOURCE
+        if metric.subject == EVIDENCE_SUBJECT_SOURCE
+        else V0_PROBE_NATIVE_LOSSY_RESEARCH
     )
     return V0ProbeEvidence(
         kind=kind,
         min_bitrate_kbps=metric.min_bitrate_kbps,
         avg_bitrate_kbps=metric.avg_bitrate_kbps,
         median_bitrate_kbps=metric.median_bitrate_kbps,
-    )
-
-
-def verified_lossless_proof_from_import_result(
-    import_result: ImportResult,
-) -> VerifiedLosslessProof | None:
-    measurement = import_result.source_measurement
-    if measurement is None or not measurement.verified_lossless:
-        return None
-    return VerifiedLosslessProof(
-        proof_origin="import_result",
-        source=(
-            measurement.was_converted_from
-            or import_result.conversion.original_filetype
-            or "lossless_source"
-        ),
-        classifier="spectral_verified_lossless",
-        detail=measurement.spectral_grade,
-    )
-
-
-def legacy_verified_lossless_proof_from_request(
-    request_row: dict[str, Any] | None,
-) -> VerifiedLosslessProof | None:
-    """Seed current proof provenance from the narrow allowed legacy boolean."""
-
-    if not request_row or not request_row.get("verified_lossless"):
-        return None
-    return VerifiedLosslessProof(
-        proof_origin="legacy_request_seed",
-        source="album_requests.verified_lossless",
-        classifier="legacy_verified_lossless",
-        detail="seeded while creating request_current evidence",
-    )
-
-
-def legacy_current_v0_metric_from_request(
-    request_row: dict[str, Any] | None,
-) -> AlbumQualityV0Metric | None:
-    """Seed neutral current V0 evidence from request-row source metrics."""
-
-    if not request_row:
-        return None
-
-    min_bitrate = _optional_int(
-        request_row.get("current_lossless_source_v0_probe_min_bitrate")
-    )
-    avg_bitrate = _optional_int(
-        request_row.get("current_lossless_source_v0_probe_avg_bitrate")
-    )
-    median_bitrate = _optional_int(
-        request_row.get("current_lossless_source_v0_probe_median_bitrate")
-    )
-    if min_bitrate is None and avg_bitrate is None and median_bitrate is None:
-        return None
-    return AlbumQualityV0Metric(
-        min_bitrate_kbps=min_bitrate,
-        avg_bitrate_kbps=avg_bitrate,
-        median_bitrate_kbps=median_bitrate,
-        source_lineage=V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
-        source_provenance="album_requests.current_lossless_source_v0_probe",
-        proof_provenance="legacy_current_v0_probe_seed",
-    )
-
-
-def legacy_current_lossless_v0_probe_from_request(
-    request_row: dict[str, Any] | None,
-) -> V0ProbeEvidence | None:
-    """Build comparable source-probe evidence from legacy request columns."""
-
-    if not request_row:
-        return None
-    avg_bitrate = _optional_int(
-        request_row.get("current_lossless_source_v0_probe_avg_bitrate")
-    )
-    if avg_bitrate is None:
-        return None
-    return V0ProbeEvidence(
-        kind=V0_PROBE_LOSSLESS_SOURCE,
-        min_bitrate_kbps=_optional_int(
-            request_row.get("current_lossless_source_v0_probe_min_bitrate")
-        ),
-        avg_bitrate_kbps=avg_bitrate,
-        median_bitrate_kbps=_optional_int(
-            request_row.get("current_lossless_source_v0_probe_median_bitrate")
-        ),
     )
 
 
@@ -574,7 +478,7 @@ def evidence_from_import_result(
     target_is_cbr = (
         target_contract.is_cbr if target_contract is not None else None
     )
-    proof = verified_lossless_proof_from_import_result(import_result)
+    proof = import_result.verified_lossless_proof
     audio_corrupt = any(not file.decode_ok for file in files)
     if measurement is not None:
         audio_corrupt = audio_corrupt or measurement.audio_corrupt
@@ -606,7 +510,7 @@ def evidence_from_import_result(
         storage_format=audio_measurement.format,
         target_format=target_format,
         target_is_cbr=target_is_cbr,
-        lineage_version=3,
+        lineage_version=4,
         v0_metric=(
             neutral_v0_metric_from_probe(import_result.v0_probe)
         ),
@@ -687,6 +591,16 @@ def evidence_from_measurement(
         spectral_bitrate_kbps=(
             download_spectral.bitrate_kbps if download_spectral is not None else None
         ),
+        spectral_subject=(
+            EVIDENCE_SUBJECT_SOURCE
+            if download_spectral is not None and download_spectral.grade is not None
+            else None
+        ),
+        spectral_provenance=(
+            EVIDENCE_PROVENANCE_MEASURED
+            if download_spectral is not None and download_spectral.grade is not None
+            else None
+        ),
     )
     codec = files[0].codec if files else None
     container = files[0].container if files else None
@@ -705,7 +619,7 @@ def evidence_from_measurement(
         # absent instead of fabricating a bitrate mode.
         target_format=None,
         target_is_cbr=None,
-        lineage_version=3,
+        lineage_version=4,
         v0_metric=None,
         verified_lossless_proof=None,
         audio_corrupt=measurement.audio_corrupt,
@@ -725,11 +639,10 @@ def evidence_from_album_info(
     *,
     mb_release_id: str,
     album_info: Any,
-    request_row: dict[str, Any] | None = None,
     verified_lossless_proof: VerifiedLosslessProof | None = None,
     measured_at: datetime | None = None,
 ) -> EvidenceBuildResult:
-    """Build current evidence from Beets ``AlbumInfo``-shaped data."""
+    """Build current evidence only from Beets facts and explicit proof."""
 
     album_path = getattr(album_info, "album_path", "")
     try:
@@ -738,26 +651,18 @@ def evidence_from_album_info(
         return EvidenceBuildResult(None, "failed", str(exc))
     if not files:
         return EvidenceBuildResult(None, "empty_fileset", "no audio files found")
-    proof = verified_lossless_proof or legacy_verified_lossless_proof_from_request(
-        request_row
-    )
-    verified_lossless = proof is not None
-    spectral_grade = None
-    spectral_bitrate = None
-    if request_row:
-        grade_raw = request_row.get("current_spectral_grade")
-        bitrate_raw = request_row.get("current_spectral_bitrate")
-        spectral_grade = grade_raw if isinstance(grade_raw, str) else None
-        spectral_bitrate = bitrate_raw if isinstance(bitrate_raw, int) else None
+    proof = verified_lossless_proof
+    if proof is not None and proof.provenance == EVIDENCE_PROVENANCE_MEASURED:
+        proof = msgspec.structs.replace(
+            proof,
+            provenance=EVIDENCE_PROVENANCE_CARRIED,
+        )
     measurement = AudioQualityMeasurement(
         min_bitrate_kbps=getattr(album_info, "min_bitrate_kbps", None),
         avg_bitrate_kbps=getattr(album_info, "avg_bitrate_kbps", None),
         median_bitrate_kbps=getattr(album_info, "median_bitrate_kbps", None),
         format=getattr(album_info, "format", None) or None,
         is_cbr=bool(getattr(album_info, "is_cbr", False)),
-        spectral_grade=spectral_grade,
-        spectral_bitrate_kbps=spectral_bitrate,
-        verified_lossless=verified_lossless,
     )
     evidence = AlbumQualityEvidence(
         mb_release_id=mb_release_id,
@@ -769,8 +674,8 @@ def evidence_from_album_info(
         codec=files[0].codec,
         container=files[0].container,
         storage_format=measurement.format,
-        lineage_version=3,
-        v0_metric=legacy_current_v0_metric_from_request(request_row),
+        lineage_version=4,
+        v0_metric=None,
         verified_lossless_proof=proof,
         audio_corrupt=any(not file.decode_ok for file in files),
         folder_layout=derive_folder_layout(files),
@@ -889,12 +794,8 @@ def propagate_candidate_evidence_to_current(
 ) -> EvidenceBuildResult:
     """Build new library-side evidence by propagating candidate measurement payload.
 
-    Post-import propagation path (U10). The candidate evidence row that the
-    importer worked on already paid for expensive measurements (spectral
-    analysis, V0 lineage, bad-audio-hash matches, verified-lossless proof).
-    After the file rename or transcode to the library path, this helper
-    builds the new library-side evidence row without re-measuring — see
-    ``CLAUDE.md`` § "Decision architecture" and the U10 design doc.
+    Post-import propagation path. Acquisition facts carry by their explicit
+    subject marker; installed facts never cross a fingerprint change.
 
     Field policy:
 
@@ -908,24 +809,10 @@ def propagate_candidate_evidence_to_current(
       the library path — for renamed-only this is the same audio as the
       candidate's measurement (a dual-check that catches drift); for
       transcoded imports this describes the V0/Opus output.
-    * **Propagated when renamed-only OR when the source is a lossless
-      codec (FLAC / ALAC / WAV); stripped on non-lossless transcoded
-      imports:** ``spectral_grade``, ``spectral_bitrate_kbps`` (on the
-      inner measurement); ``v0_metric``, ``matched_bad_audio_hash_id``,
-      ``matched_bad_audio_hash_path`` (on the outer evidence row). The
-      gate is lossless-source-only because the source-side spectral / V0
-      lineage is only meaningfully comparable against future candidates
-      when the source audio was lossless to begin with. For non-lossless
-      transcoded imports (MP3 → Opus etc.) the source-side fields
-      describe lossy audio that has no comparable role in subsequent
-      candidate comparisons; storing them on the library row provides
-      no decision value and would mislead future triage.
-    * Propagated in ALL cases: ``verified_lossless`` and
-      ``verified_lossless_proof``. Output ``was_converted_from`` is derived
-      from the candidate source codec for v3 evidence, with the historical
-      measurement field retained only as a legacy fallback. Verified lineage
-      survives transcode by definition; a V0 transcoded from a verified-
-      lossless FLAC is still verified-lossless by lineage.
+    * Source-subject spectral and V0 facts carry with provenance ``carried``.
+    * Installed-subject facts are dropped and measured again on the installed
+      snapshot by the ordinary enrichment path.
+    * Verified-lossless proof carries with provenance ``carried``.
     """
 
     album_path = getattr(album_info, "album_path", "")
@@ -936,9 +823,6 @@ def propagate_candidate_evidence_to_current(
     if not files:
         return EvidenceBuildResult(None, "empty_fileset", "no audio files found")
 
-    # Lossless-source gate: source-side fields propagate when the source
-    # codec is lossless (FLAC/ALAC/WAV) OR when the import is renamed-only
-    # (same codec in / out). Strip otherwise. See `docs/brainstorms/2026-05-17-propagate-source-evidence-on-transcode-requirements.md`.
     source_codec = (candidate_evidence.codec or "").lower() or None
     library_codec_from_files = files[0].codec
     library_codec = (library_codec_from_files or "").lower() or None
@@ -947,38 +831,33 @@ def propagate_candidate_evidence_to_current(
         and library_codec is not None
         and source_codec != library_codec
     )
-    # ``codec`` is labelled by container extension (snapshot_audio_files), so
-    # ``.m4a`` records ``"m4a"`` for BOTH lossless ALAC and lossy AAC — the
-    # container string alone cannot prove the source was lossless. The
-    # authoritative signal is the candidate's V0 probe lineage: the harness
-    # only grinds a ``lossless_source`` probe after ffprobe confirms a
-    # lossless container (ALAC/FLAC/WAV). Trust that lineage so an
-    # ALAC-in-m4a anchor survives the transcode instead of being stripped as
-    # if it were AAC — otherwise the next candidate sees no comparable probe
-    # and imports for free, ratcheting the V0 anchor downward (request 5219,
-    # Fred again.. *Actual Life 3*: 253 ALAC anchor wiped, 239 FLAC imported).
-    source_v0 = candidate_evidence.v0_metric
-    source_has_lossless_v0_lineage = (
-        source_v0 is not None
-        and source_v0.source_lineage == V0_SOURCE_LINEAGE_LOSSLESS_SOURCE
-    )
-    source_is_lossless = (
-        (source_codec in LOSSLESS_CODECS if source_codec else False)
-        or source_has_lossless_v0_lineage
-    )
-    strip_source_fields = is_transcode and not source_is_lossless
-
     candidate_measurement = candidate_evidence.measurement
     measured_source_format = (
         candidate_measurement.format or source_codec or ""
     ).strip().lower()
     output_source_format = (
-        (measured_source_format if is_transcode else None)
-        if candidate_evidence.lineage_version == 3
-        else (
-            candidate_measurement.was_converted_from
-            or (measured_source_format if is_transcode else None)
+        measured_source_format if is_transcode else None
+    )
+    carry_spectral = (
+        candidate_measurement.spectral_grade is not None
+        and candidate_measurement.spectral_subject == EVIDENCE_SUBJECT_SOURCE
+    )
+    carried_v0 = (
+        msgspec.structs.replace(
+            candidate_evidence.v0_metric,
+            provenance=EVIDENCE_PROVENANCE_CARRIED,
         )
+        if candidate_evidence.v0_metric is not None
+        and candidate_evidence.v0_metric.subject == EVIDENCE_SUBJECT_SOURCE
+        else None
+    )
+    carried_proof = (
+        msgspec.structs.replace(
+            candidate_evidence.verified_lossless_proof,
+            provenance=EVIDENCE_PROVENANCE_CARRIED,
+        )
+        if candidate_evidence.verified_lossless_proof is not None
+        else None
     )
     measurement = AudioQualityMeasurement(
         min_bitrate_kbps=getattr(album_info, "min_bitrate_kbps", None),
@@ -987,13 +866,15 @@ def propagate_candidate_evidence_to_current(
         format=getattr(album_info, "format", None) or None,
         is_cbr=bool(getattr(album_info, "is_cbr", False)),
         spectral_grade=(
-            None if strip_source_fields else candidate_measurement.spectral_grade
+            candidate_measurement.spectral_grade if carry_spectral else None
         ),
         spectral_bitrate_kbps=(
-            None if strip_source_fields
-            else candidate_measurement.spectral_bitrate_kbps
+            candidate_measurement.spectral_bitrate_kbps if carry_spectral else None
         ),
-        verified_lossless=candidate_measurement.verified_lossless,
+        spectral_subject=(EVIDENCE_SUBJECT_SOURCE if carry_spectral else None),
+        spectral_provenance=(
+            EVIDENCE_PROVENANCE_CARRIED if carry_spectral else None
+        ),
         was_converted_from=output_source_format,
     )
 
@@ -1011,21 +892,15 @@ def propagate_candidate_evidence_to_current(
         container=library_container_from_files,
         storage_format=measurement.format,
         target_format=None,
-        lineage_version=3,
-        v0_metric=None if strip_source_fields else candidate_evidence.v0_metric,
-        verified_lossless_proof=candidate_evidence.verified_lossless_proof,
+        lineage_version=4,
+        v0_metric=carried_v0,
+        verified_lossless_proof=carried_proof,
         audio_corrupt=any(not file.decode_ok for file in files),
         folder_layout=derive_folder_layout(files),
         audio_file_count=len(files),
         filetype_band=library_filetype_band,
-        matched_bad_audio_hash_id=(
-            None if strip_source_fields
-            else candidate_evidence.matched_bad_audio_hash_id
-        ),
-        matched_bad_audio_hash_path=(
-            None if strip_source_fields
-            else candidate_evidence.matched_bad_audio_hash_path
-        ),
+        matched_bad_audio_hash_id=None,
+        matched_bad_audio_hash_path=None,
     )
     errors = evidence.storage_validation_errors()
     if errors:
@@ -1083,49 +958,75 @@ def backfill_current_evidence_from_album_info(
     if verified_lossless_proof is None and preserve_existing_verified_lossless_proof:
         if (
             existing is not None
-            and existing.measurement.verified_lossless
             and existing.verified_lossless_proof is not None
+            and existing.verified_lossless_proof.source
+            and existing.verified_lossless_proof.classifier
         ):
-            verified_lossless_proof = existing.verified_lossless_proof
+            verified_lossless_proof = msgspec.structs.replace(
+                existing.verified_lossless_proof,
+                provenance=EVIDENCE_PROVENANCE_CARRIED,
+            )
     result = evidence_from_album_info(
         mb_release_id=mb_release_id,
         album_info=album_info,
-        request_row=request_row,
         verified_lossless_proof=verified_lossless_proof,
     )
-    if (
-        result.evidence is not None
-        and existing is not None
-        and existing.snapshot_fingerprint == result.evidence.snapshot_fingerprint
-    ):
-        # A lineage repair remeasures the same immutable content address. Keep
-        # its original capture time so historical failure cards remain
-        # provably pre-attempt, and retain exact-snapshot neutral research that
-        # does not need to be repeated merely because the row became v3.
-        measurement = result.evidence.measurement
+    if result.evidence is not None and existing is not None:
         existing_measurement = existing.measurement
-        if existing_measurement.spectral_grade is not None:
-            # Spectral grade owns the whole atomic fact, including an
-            # explicitly absent bitrate. Never combine request-row scalars
-            # with the exact-snapshot measurement.
+        carry_spectral = (
+            existing_measurement.spectral_grade is not None
+            and existing_measurement.spectral_subject == EVIDENCE_SUBJECT_SOURCE
+        )
+        measurement = result.evidence.measurement
+        if carry_spectral:
             measurement = msgspec.structs.replace(
                 measurement,
                 spectral_grade=existing_measurement.spectral_grade,
-                spectral_bitrate_kbps=(
-                    existing_measurement.spectral_bitrate_kbps
-                ),
+                spectral_bitrate_kbps=existing_measurement.spectral_bitrate_kbps,
+                spectral_subject=EVIDENCE_SUBJECT_SOURCE,
+                spectral_provenance=EVIDENCE_PROVENANCE_CARRIED,
             )
+        existing_v0 = existing.v0_metric
+        carry_v0 = (
+            existing_v0 is not None
+            and existing_v0.subject == EVIDENCE_SUBJECT_SOURCE
+            and any(
+                value is not None
+                for value in (
+                    existing_v0.min_bitrate_kbps,
+                    existing_v0.avg_bitrate_kbps,
+                    existing_v0.median_bitrate_kbps,
+                )
+            )
+        )
+        carried_v0 = None
+        if carry_v0:
+            assert existing_v0 is not None
+            carried_v0 = msgspec.structs.replace(
+                existing_v0,
+                provenance=EVIDENCE_PROVENANCE_CARRIED,
+            )
+        same_snapshot = (
+            existing.snapshot_fingerprint == result.evidence.snapshot_fingerprint
+        )
         result = EvidenceBuildResult(
             msgspec.structs.replace(
                 result.evidence,
                 measurement=measurement,
-                measured_at=existing.measured_at,
-                # V0 is likewise one atomic neutral fact. The persisted
-                # content-addressed metric outranks legacy request scalars.
-                v0_metric=existing.v0_metric or result.evidence.v0_metric,
+                # A same-address v4 repair keeps the historical capture time;
+                # the rebuilt facts still follow the source-only carry rule.
+                measured_at=(
+                    existing.measured_at
+                    if same_snapshot
+                    else result.evidence.measured_at
+                ),
+                # Only source-subject acquisition facts survive a rebuild;
+                # installed and ambiguous facts must be measured again.
+                v0_metric=carried_v0,
                 on_disk_v0_research_attempted=(
-                    result.evidence.on_disk_v0_research_attempted
-                    or existing.on_disk_v0_research_attempted
+                    existing.on_disk_v0_research_attempted
+                    if same_snapshot
+                    else result.evidence.on_disk_v0_research_attempted
                 ),
             ),
             result.status,

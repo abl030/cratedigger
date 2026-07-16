@@ -32,6 +32,7 @@ from lib.import_evidence import (
     CurrentEvidenceActionResult,
 )
 from lib.validation_envelope import decode_validation_envelope
+from lib.wrong_matches import WrongMatchCleanupResult
 from lib.wrong_match_cleanup_service import (
     OUTCOME_DELETE_FAILED,
     OUTCOME_DELETED,
@@ -103,6 +104,8 @@ def _evidence(
             median_bitrate_kbps=252,
             format="MP3",
             spectral_grade="genuine",
+            spectral_subject="source",
+            spectral_provenance="measured",
         ),
         measured_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
         files=files,
@@ -733,6 +736,8 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
                 median_bitrate_kbps=126,
                 format="MP3",
                 spectral_grade="genuine",
+                spectral_subject="source",
+                spectral_provenance="measured",
             ),
         )
         self.db.set_download_log_candidate_evidence(
@@ -747,6 +752,8 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
                 median_bitrate_kbps=252,
                 format="MP3",
                 spectral_grade="genuine",
+                spectral_subject="installed",
+                spectral_provenance="measured",
             ),
         )
         self._set_current_evidence_helper(
@@ -787,13 +794,15 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
                 format="OPUS 128",
                 spectral_grade="likely_transcode",
                 spectral_bitrate_kbps=96,
+                spectral_subject="source",
+                spectral_provenance="measured",
             ),
             storage_format="OPUS 128",
             v0_metric=AlbumQualityV0Metric(
                 min_bitrate_kbps=201,
                 avg_bitrate_kbps=259,
                 median_bitrate_kbps=255,
-                source_lineage="native_lossy_research",
+                subject="installed",
             ),
         )
         self.db.set_download_log_candidate_evidence(
@@ -808,13 +817,15 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
                 format="MP3 V0",
                 spectral_grade="genuine",
                 spectral_bitrate_kbps=160,
+                spectral_subject="installed",
+                spectral_provenance="measured",
             ),
             storage_format="MP3 V0",
             v0_metric=AlbumQualityV0Metric(
                 min_bitrate_kbps=202,
                 avg_bitrate_kbps=260,
                 median_bitrate_kbps=256,
-                source_lineage="on_disk_research",
+                subject="installed",
             ),
         )
         self._set_current_evidence_helper(
@@ -932,7 +943,7 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         current = msgspec.structs.replace(
             _evidence(source, mb_release_id="mbid-1"),
             verified_lossless_proof=VerifiedLosslessProof(
-                proof_origin="library",
+                provenance="measured",
                 source="library_audit",
                 classifier="verified_lossless",
                 detail="parent_lossless_proof",
@@ -1034,8 +1045,8 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
                 min_bitrate_kbps=210,
                 avg_bitrate_kbps=240,
                 median_bitrate_kbps=235,
-                source_lineage="lossless_source",
-                source_provenance="lossless_source",
+                subject="source",
+                provenance="measured",
             ),
         )
         self._set_current_evidence_helper(
@@ -1056,8 +1067,8 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         self.assertEqual(row["status"], "replaced")
         self.assertIsNone(row.get("search_filetype_override"))
 
-    def test_backfilled_verified_lossless_does_not_short_circuit(self) -> None:
-        """Backfill can carry an old verified_lossless_proof against changed files; require loaded-from-disk status."""
+    def test_backfilled_verified_lossless_routes_through_reducer(self) -> None:
+        """Carried proof remains decisive without using the cleanup shortcut."""
         source = _make_source(self.tmp, "backfilled-verified-lossless-source")
         log_id = _log_wrong_match(self.db, 1, source)
         self.db.set_download_log_candidate_evidence(
@@ -1067,7 +1078,7 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         current = msgspec.structs.replace(
             _evidence(source, mb_release_id="mbid-1"),
             verified_lossless_proof=VerifiedLosslessProof(
-                proof_origin="library",
+                provenance="measured",
                 source="library_audit",
                 classifier="verified_lossless",
             ),
@@ -1088,11 +1099,18 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         ) as decider, patch(
             "lib.wrong_match_cleanup_service.cleanup_wrong_match_source",
         ) as cleanup_call:
+            cleanup_call.return_value = WrongMatchCleanupResult(
+                download_log_id=log_id,
+                entry_found=True,
+                request_id=1,
+                deleted_path=source,
+            )
             result = cleanup_wrong_match(self.db, log_id, cfg=_cfg())
 
         self.assertNotEqual(result.outcome, OUTCOME_DELETED_VERIFIED_LOSSLESS_PARENT)
+        self.assertEqual(result.outcome, OUTCOME_DELETED)
         self.assertEqual(decider.call_count, 1)
-        cleanup_call.assert_not_called()
+        cleanup_call.assert_called_once()
         self.assertTrue(os.path.isdir(source))
 
     def test_candidate_missing_bails_before_verified_lossless_check(self) -> None:
@@ -1103,7 +1121,7 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         current = msgspec.structs.replace(
             _evidence(source, mb_release_id="mbid-1"),
             verified_lossless_proof=VerifiedLosslessProof(
-                proof_origin="library",
+                provenance="measured",
                 source="library_audit",
                 classifier="verified_lossless",
             ),

@@ -3647,7 +3647,7 @@ class TestPollActiveDownloads(unittest.TestCase):
                 min_bitrate_kbps=259,
                 avg_bitrate_kbps=267,
                 median_bitrate_kbps=269,
-                source_lineage="native_lossy_research",
+                subject="installed",
             ),
         )
         fake_db.upsert_album_quality_evidence(legacy)
@@ -3688,7 +3688,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(fake_db.request(1)["status"], "wanted")
         current = fake_db.load_album_quality_evidence_by_id(stored.id)
         assert current is not None
-        self.assertEqual(current.lineage_version, 3)
+        self.assertEqual(current.lineage_version, 4)
         self.assertEqual(current.measured_at, stored.measured_at)
         log_row = fake_db.get_log(limit=1)[0]
         self.assertTrue(log_row["_current_evidence_is_pre_attempt"])
@@ -5927,7 +5927,7 @@ class TestComputeRejectionBackfillCfgThreading(unittest.TestCase):
         return _compute_rejection_backfill(album_data, ctx)
 
     def test_custom_transparent_band_fires_backfill(self):
-        """The caller's codec bands, not gate_min_rank, reach the policy."""
+        """The caller's custom transparent codec band reaches the policy."""
         from lib.quality import CodecRankBands, QualityRankConfig, QUALITY_LOSSLESS
 
         custom = QualityRankConfig(
@@ -6817,7 +6817,7 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
         self.assertEqual(log_row["_current_evidence_avg_bitrate"], 190)
 
     def test_timeout_v1_refresh_runs_after_wanted_and_preserves_history(self):
-        """Timeout bookkeeping stays fast while its v3 repair stays historical."""
+        """Timeout bookkeeping stays fast while its v4 repair stays historical."""
         from lib.beets_db import AlbumInfo
         from lib.config import CratediggerConfig
         from lib.download import _timeout_album
@@ -6854,7 +6854,7 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
                 min_bitrate_kbps=259,
                 avg_bitrate_kbps=267,
                 median_bitrate_kbps=269,
-                source_lineage="native_lossy_research",
+                subject="installed",
             ),
         )
         db.upsert_album_quality_evidence(legacy)
@@ -6900,7 +6900,7 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
         self.assertEqual(db.request(42)["status"], "wanted")
         current = db.load_album_quality_evidence_by_id(stored.id)
         assert current is not None
-        self.assertEqual(current.lineage_version, 3)
+        self.assertEqual(current.lineage_version, 4)
         self.assertEqual(current.measured_at, stored.measured_at)
         self.assertEqual(ctx.evidence_enrichment_budget, 1)
         log_row = db.get_log(limit=1)[0]

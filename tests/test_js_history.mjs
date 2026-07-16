@@ -9,7 +9,7 @@ import {
   __test__,
 } from '../web/js/history.js';
 import { readFileSync } from 'node:fs';
-const { formatV0Probe, formatSpectral, withWas } = __test__;
+const { formatV0Probe, formatSpectral, withWas, storageFormatLabel } = __test__;
 
 let passed = 0;
 let failed = 0;
@@ -30,6 +30,20 @@ function assertExcludes(haystack, needle, msg) {
     failed++;
     console.error(`  FAIL: ${msg} - unexpectedly found '${needle}'`);
   }
+}
+
+console.log('storageFormatLabel() preserves native codec names');
+{
+  assertContains(
+    storageFormatLabel({ materialized_format: 'vorbis' }, ''),
+    'Vorbis',
+    'Vorbis is not rendered as the Ogg container or all-caps metadata',
+  );
+  assertContains(
+    storageFormatLabel({ materialized_format: 'wma' }, ''),
+    'WMA',
+    'WMA keeps its native acronym',
+  );
 }
 
 console.log('renderDownloadHistoryItem() shows wrong-match triage audit rows');
@@ -160,6 +174,32 @@ console.log('two-sided spectral failures remain distinct from legacy unmeasured 
     outcome: 'rejected', created_at: '2026-07-12T00:00:00+00:00',
   });
   assertExcludes(legacyHtml, 'analysis failed', 'legacy row stays unmeasured');
+}
+
+console.log('renderDownloadHistoryItem() surfaces HAVE analysis diagnostics');
+{
+  const html = renderDownloadHistoryFixture({
+    outcome: 'have_analysis_error',
+    badge: 'Environment failure',
+    badge_class: 'badge-warn',
+    verdict: 'Installed HAVE analysis failed (permission denied). Request remains wanted; a future download will retry normally.',
+    failure_category: 'permission_denied',
+    analysis_error: 'PermissionError: <denied>',
+    installed_path: '/mnt/Music/Beets/Low/<current>',
+    candidate_reference: '/mnt/Music/Incoming/candidate&next',
+    soulseek_username: 'archive-peer',
+    created_at: '2026-07-16T10:00:00+00:00',
+  });
+  assertContains(html, 'Environment failure', 'environment badge rendered');
+  assertContains(html, 'Failure category', 'failure category label rendered');
+  assertContains(html, 'permission denied', 'failure category humanized');
+  assertContains(html, 'Installed HAVE', 'installed path label rendered');
+  assertContains(html, '/mnt/Music/Beets/Low/&lt;current&gt;', 'installed path escaped');
+  assertContains(html, 'Candidate', 'candidate reference label rendered');
+  assertContains(html, '/mnt/Music/Incoming/candidate&amp;next', 'candidate reference escaped');
+  assertContains(html, 'PermissionError: &lt;denied&gt;', 'analysis error escaped');
+  assertContains(html, 'remains wanted', 'retryable state remains prominent');
+  assertExcludes(html, 'PermissionError: <denied>', 'raw analysis error not rendered');
 }
 
 console.log('legacy existing floor-only Recents labels the missing grade');

@@ -18,9 +18,11 @@ an existing copy of the same quality with no real upgrade. See the
 
 from __future__ import annotations
 
+import json
 import logging
 import os
-from collections.abc import Callable
+import subprocess
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -35,7 +37,6 @@ from lib.audio_hash import AudioHashError, hash_audio_content
 _BAD_HASH_SUPPORTED_EXTS: frozenset[str] = frozenset({"flac", "mp3", "m4a", "aac", "ogg", "opus"})
 from lib.pipeline_db import RequestSpectralStateUpdate
 from lib.quality import (
-    SPECTRAL_TRANSCODE_GRADES,
     SpectralAnalysisDetail,
     SpectralDetail,
     SpectralMeasurement,
@@ -257,10 +258,9 @@ class PreimportMeasurement(msgspec.Struct, frozen=True):
     ``lib.quality.full_pipeline_decision_from_evidence`` consumes them as
     early-exit reject branches (U11).
 
-    Fields map 1:1 onto the new ``AlbumQualityEvidence`` columns added in U1
-    (``audio_corrupt``, ``folder_layout``, ``audio_file_count``,
-    ``filetype_band``, ``matched_bad_audio_hash_*``) so U5/U6 can wire the
-    measurement directly into evidence persistence.
+    Persistable fields map directly onto ``AlbumQualityEvidence``. The
+    attempt-local ``lossless_candidate`` fact additionally lets preview and
+    harness routing reuse the exact classification that selected the scan.
     """
     corrupt_files: list[str] = msgspec.field(default_factory=list)
     audio_corrupt: bool = False
@@ -273,6 +273,7 @@ class PreimportMeasurement(msgspec.Struct, frozen=True):
     folder_layout: Literal["flat", "nested"] = "flat"
     audio_file_count: int = 0
     filetype_band: str = ""
+    lossless_candidate: bool = False
     min_bitrate_kbps: int | None = None
     is_vbr: bool | None = None
     spectral_audit: SpectralDetail = msgspec.field(default_factory=SpectralDetail)
@@ -368,18 +369,102 @@ def inspect_local_files(path: str) -> LocalFileInspection:
     )
 
 
+AudioCodecProbe = Callable[[str], str | None]
+
+
+class AudioCodecProbeError(RuntimeError):
+    """Raised when an ambiguous container's codec cannot be measured."""
+
+
+def ffprobe_audio_codec_name(fpath: str) -> str | None:
+    """Return the first audio stream codec name reported by ffprobe."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-select_streams", "a:0",
+                "-show_entries", "stream=codec_name", "-of", "json", fpath,
+            ],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+        payload: object = json.loads(result.stdout or "{}")
+    except Exception:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+    streams = payload.get("streams")
+    if not isinstance(streams, list) or not streams:
+        return None
+    stream = streams[0]
+    if not isinstance(stream, dict):
+        return None
+    codec = stream.get("codec_name")
+    if not isinstance(codec, str):
+        return None
+    return codec.strip().lower() or None
+
+
+def has_supported_lossless_audio(
+    filetype: str,
+    audio_files: Sequence[Path],
+    *,
+    codec_probe: AudioCodecProbe | None = None,
+) -> bool:
+    """Identify lossless candidates from an already-enumerated file set.
+
+    FLAC, WAV, and ALAC extensions are unambiguous. M4A is only lossless when
+    ffprobe reports an ALAC audio stream; AAC-in-M4A remains a lossy candidate.
+    Accepting the caller's paths keeps directory walking and codec probing at
+    the measurement boundary instead of repeating them in downstream callers.
+    """
+    extensions = {
+        part.strip().lstrip(".")
+        for part in (filetype or "").lower().split(",")
+        if part.strip()
+    }
+    if extensions & {"flac", "wav", "alac"}:
+        return True
+    if "m4a" not in extensions:
+        return False
+    probe = codec_probe or ffprobe_audio_codec_name
+    codecs: list[str] = []
+    for path in sorted(audio_files):
+        if path.suffix.lower() != ".m4a":
+            continue
+        try:
+            codec = probe(str(path))
+        except Exception as exc:
+            raise AudioCodecProbeError(
+                f"M4A codec probe failed for {path}: {type(exc).__name__}: {exc}"
+            ) from exc
+        if codec is None:
+            raise AudioCodecProbeError(
+                f"M4A codec probe returned no codec for {path}"
+            )
+        codecs.append(codec.strip().lower())
+    return any(codec == "alac" for codec in codecs)
+
+
 def _needs_spectral_check(
     filetype: str,
     is_vbr: bool | None,
     *,
+    lossless_candidate: bool,
     avg_bitrate_kbps: int | None = None,
     vbr_threshold_kbps: int | None = None,
 ) -> bool:
     """Decide whether to run spectral analysis as a preimport gate.
 
     Rules:
-      - Non-MP3 (FLAC, ALAC, ...) → skip. FLAC uses a different flow (convert
-        → V0 → compare); other codecs have no cliff-detection calibration.
+      - A caller-classified supported lossless source (FLAC, WAV, ALAC,
+        including ALAC-in-M4A) → always run. Verification requires affirmative
+        preview-time spectral evidence. AAC-in-M4A remains lossy.
+      - Other non-MP3 codecs → skip; they have no calibrated cliff policy.
       - CBR MP3 or unknown VBR (is_vbr is None) → run. CBR is the classic
         transcode-cliff case; unknown VBR is the conservative default
         (issue #39: resumed downloads without slskd metadata).
@@ -387,14 +472,18 @@ def _needs_spectral_check(
         or below ``vbr_threshold_kbps``. Issue #93: a VBR MP3 at avg 182kbps
         (well below genuine V0's ~240-260kbps range) was an obvious transcode
         that the old ``is_vbr``-only gate let through. The threshold comes
-        from ``cfg.quality_ranks.mp3_vbr.excellent`` — the same value
-        ``transcode_detection()`` already uses as its VBR transcode boundary.
+        from ``cfg.quality_ranks.mp3_vbr.excellent``. This is a scan-selection
+        policy only; the later transcode decision consumes the resulting
+        spectral grade, not the bitrate threshold.
 
-    ``avg_bitrate_kbps`` / ``vbr_threshold_kbps`` are keyword-only to keep
-    the call site self-documenting: the VBR branch requires both to skip, so
-    callers pass both or neither.
+    This helper is pure: filesystem enumeration and any M4A codec probe happen
+    once at the measurement boundary and arrive as ``lossless_candidate``.
+    ``avg_bitrate_kbps`` / ``vbr_threshold_kbps`` are keyword-only to keep the
+    VBR scan threshold explicit; both must be known for that branch to skip.
     """
     filetype_lower = (filetype or "").lower()
+    if lossless_candidate:
+        return True
     is_mp3 = "mp3" in filetype_lower and "flac" not in filetype_lower
     if not is_mp3:
         return False
@@ -578,8 +667,8 @@ def measure_preimport_state(
         download_min_bitrate_bps: Caller-supplied container min bitrate (bps).
         download_is_vbr: Caller-supplied VBR hint.
         cfg: Runtime CratediggerConfig.
-        db: Pipeline DB — pass to enable spectral state persistence + bad-hash
-            lookup + persisted-spectral fallback.
+        db: Pipeline DB — pass to enable spectral audit persistence and
+            bad-hash lookup.
         request_id: Required when ``db`` is supplied.
 
     Returns:
@@ -594,6 +683,20 @@ def measure_preimport_state(
     check.
     """
     filetype_band = _filetype_band(download_filetype)
+    # Enumerate candidate audio once. The same stable path set owns file-count
+    # and layout facts, bad-hash lookup, and lossless-container detection. In
+    # particular, M4A codec probes happen here exactly once per necessary file.
+    audio_files_for_count = _iter_audio_files(path)
+    audio_file_count = len(audio_files_for_count)
+    folder_layout: Literal["flat", "nested"] = (
+        "nested"
+        if any(str(audio.parent) != path for audio in audio_files_for_count)
+        else "flat"
+    )
+    lossless_candidate = has_supported_lossless_audio(
+        filetype_band,
+        audio_files_for_count,
+    )
     # This audit is intentionally separate from policy-facing
     # download_spectral/existing_spectral below. Early measurement-only exits
     # populate it here; MP3 policy analysis reuses its own result; normal
@@ -638,9 +741,10 @@ def measure_preimport_state(
             return PreimportMeasurement(
                 corrupt_files=corrupt_files,
                 audio_corrupt=audio_corrupt,
-                folder_layout="flat",
-                audio_file_count=0,
+                folder_layout=folder_layout,
+                audio_file_count=audio_file_count,
                 filetype_band=filetype_band,
+                lossless_candidate=lossless_candidate,
                 min_bitrate_kbps=(
                     download_min_bitrate_bps // 1000
                     if download_min_bitrate_bps
@@ -668,8 +772,7 @@ def measure_preimport_state(
                 exc_info=True)
             any_bad = False
         if any_bad:
-            audio_files = _iter_audio_files(path)
-            match = _check_bad_audio_hashes(audio_files, db)
+            match = _check_bad_audio_hashes(audio_files_for_count, db)
             if match is not None:
                 matched_bad_hash_id = match.bad_hash_id
                 matched_bad_track_path = match.track_path
@@ -692,9 +795,10 @@ def measure_preimport_state(
                     audio_corrupt=False,
                     matched_bad_hash_id=matched_bad_hash_id,
                     matched_bad_track_path=matched_bad_track_path,
-                    folder_layout="flat",
-                    audio_file_count=0,
+                    folder_layout=folder_layout,
+                    audio_file_count=audio_file_count,
                     filetype_band=filetype_band,
+                    lossless_candidate=lossless_candidate,
                     min_bitrate_kbps=(
                         download_min_bitrate_bps // 1000
                         if download_min_bitrate_bps
@@ -725,26 +829,10 @@ def measure_preimport_state(
         # without redoing the bitrate walk.
         inspection = precomputed_inspection
 
-    # Folder layout + file count: walk the filesystem once when not already
-    # known. ``_iter_audio_files`` mirrors the gate's directory walk so
-    # downstream gates and the importer see the same set.
-    if inspection is not None and (
-        inspection.has_nested_audio or inspection.filetype
-    ):
-        audio_files_for_count = _iter_audio_files(path)
-        audio_file_count = len(audio_files_for_count)
-        folder_layout: Literal["flat", "nested"] = (
-            "nested" if inspection.has_nested_audio else "flat")
-    else:
-        audio_files_for_count = _iter_audio_files(path)
-        audio_file_count = len(audio_files_for_count)
-        # Layout: any audio file outside ``path`` (i.e. in a subdirectory) is
-        # nested. Otherwise flat. Cheap derivation from the walk we already did.
-        folder_layout = "flat"
-        for p in audio_files_for_count:
-            if str(p.parent) != path:
-                folder_layout = "nested"
-                break
+    # Prefer the caller's inspection when it already observed nested audio;
+    # otherwise derive layout from the single path enumeration above.
+    if inspection is not None and inspection.has_nested_audio:
+        folder_layout = "nested"
 
     # Min bitrate in kbps for the measurement Struct (bps→kbps, only for
     # values that look like bps).
@@ -754,8 +842,8 @@ def measure_preimport_state(
         min_bitrate_kbps = download_min_bitrate_bps
 
     # --- Spectral gate ---
-    # Threshold: cfg.quality_ranks.mp3_vbr.excellent — same V0 boundary
-    # transcode_detection() uses.
+    # Threshold: cfg.quality_ranks.mp3_vbr.excellent. This controls whether a
+    # VBR MP3 is scanned; it is not itself transcode-decision evidence.
     avg_bitrate_kbps = (avg_bitrate_bps // 1000) if avg_bitrate_bps else None
     download_spectral: SpectralMeasurement | None = None
     existing_spectral: SpectralMeasurement | None = None
@@ -763,6 +851,7 @@ def measure_preimport_state(
 
     if _needs_spectral_check(
         download_filetype, download_is_vbr,
+        lossless_candidate=lossless_candidate,
         avg_bitrate_kbps=avg_bitrate_kbps,
         vbr_threshold_kbps=cfg.quality_ranks.mp3_vbr.excellent,
     ):
@@ -805,31 +894,6 @@ def measure_preimport_state(
         if download_spectral is not None:
             existing_min_bitrate = measured_existing_min
             existing_spectral = measured_existing
-        # --- Fall back to persisted spectral state when BeetsDB couldn't walk ---
-        beets_knows_album = existing_min_bitrate is not None
-        if (download_spectral is not None
-                and beets_knows_album
-                and existing_spectral is None
-                and db is not None and request_id is not None):
-            try:
-                req = db.get_request(request_id)
-                if req:
-                    stored_grade = req.get("current_spectral_grade")
-                    stored_bitrate = req.get("current_spectral_bitrate")
-                    if stored_grade in SPECTRAL_TRANSCODE_GRADES:
-                        stored = SpectralMeasurement.from_parts(
-                            stored_grade, stored_bitrate)
-                        if stored is not None:
-                            existing_spectral = stored
-                            logger.info(
-                                f"SPECTRAL: {label} using persisted "
-                                f"current_spectral (grade={stored.grade}, "
-                                f"bitrate={stored.bitrate_kbps}kbps) — BeetsDB "
-                                "lookup returned no spectral measurement")
-            except Exception:
-                logger.debug("failed to read persisted spectral state",
-                             exc_info=True)
-
     if not (spectral_audit.candidate and spectral_audit.candidate.attempted):
         # Normal harness-bound codecs collect the candidate inside
         # import_one.py before conversion. Fill only HAVE here so the attempt
@@ -850,13 +914,12 @@ def measure_preimport_state(
     # --- Persist spectral state to DB (issue #90 propagation) ---
     # This MUST fire on every measurement where spectral was collected,
     # regardless of whether the downstream decision accepts or rejects. The
-    # next attempt needs accurate ``album_requests.current_spectral_*`` to
-    # make a sound comparison. Persists AFTER the existing_spectral snapshot
+    # request stamps remain accurate for audit and rendering. Persists AFTER
+    # the existing_spectral snapshot
     # used by the decision is taken — propagation can't poison the comparison
     # because the decision runs in ``full_pipeline_decision_from_evidence``
     # on the *persisted* candidate evidence row (or the returned Struct for
-    # legacy callers), neither of which sees the post-propagation
-    # ``album_requests.current_spectral_*``.
+    # legacy callers), neither of which reads the request stamps.
     if download_spectral is not None and db is not None and request_id is not None:
         try:
             _persist_spectral_state(
@@ -882,6 +945,7 @@ def measure_preimport_state(
         folder_layout=folder_layout,
         audio_file_count=audio_file_count,
         filetype_band=filetype_band,
+        lossless_candidate=lossless_candidate,
         min_bitrate_kbps=min_bitrate_kbps,
         is_vbr=download_is_vbr,
         spectral_audit=spectral_audit,

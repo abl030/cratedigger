@@ -30,7 +30,7 @@ from lib.quality import AlbumQualityEvidence
 SIDECAR_FILENAME = "cratedigger.json"
 SIDECAR_GENERATOR = "cratedigger"
 # Bump when the on-disk schema changes shape, so consumers can branch on it.
-SIDECAR_SCHEMA_VERSION = 1
+SIDECAR_SCHEMA_VERSION = 2
 
 
 class SidecarTrack(msgspec.Struct, frozen=True):
@@ -60,18 +60,29 @@ class SidecarQuality(msgspec.Struct, frozen=True):
 
 
 class SidecarV0Metric(msgspec.Struct, frozen=True):
-    """Neutral V0 probe metric (mirror of ``AlbumQualityV0Metric``)."""
+    """Neutral V0 probe metric using the v2 two-axis vocabulary.
 
+    Schema v1 called this marker ``source_lineage``. That historical name is
+    not reinterpreted: sidecars are derived and newly regenerated payloads use
+    the honest ``subject`` field instead.
+    """
+
+    subject: str
+    provenance: str
     min_bitrate_kbps: int | None = None
     avg_bitrate_kbps: int | None = None
     median_bitrate_kbps: int | None = None
-    source_lineage: str | None = None
 
 
 class SidecarProof(msgspec.Struct, frozen=True):
-    """Verified-lossless provenance (mirror of ``VerifiedLosslessProof``)."""
+    """Verified-lossless proof using the v2 provenance vocabulary.
 
-    proof_origin: str
+    Schema v1 called this field ``proof_origin``. New derived payloads expose
+    the proof provenance directly and do not silently change the meaning of a
+    v1 key.
+    """
+
+    provenance: str
     source: str
     classifier: str
     detail: str | None = None
@@ -99,7 +110,7 @@ class AlbumSidecar(msgspec.Struct, frozen=True):
 
 def should_write_sidecar(evidence: AlbumQualityEvidence) -> bool:
     """Gate: only verified-lossless albums get a sidecar (issue #184 scope)."""
-    return bool(evidence.measurement.verified_lossless)
+    return evidence.verified_lossless_proof is not None
 
 
 def build_sidecar(
@@ -142,7 +153,7 @@ def build_sidecar(
     if evidence.verified_lossless_proof is not None:
         p = evidence.verified_lossless_proof
         proof = SidecarProof(
-            proof_origin=p.proof_origin,
+            provenance=p.provenance,
             source=p.source,
             classifier=p.classifier,
             detail=p.detail,
@@ -154,14 +165,15 @@ def build_sidecar(
             min_bitrate_kbps=v.min_bitrate_kbps,
             avg_bitrate_kbps=v.avg_bitrate_kbps,
             median_bitrate_kbps=v.median_bitrate_kbps,
-            source_lineage=v.source_lineage,
+            subject=v.subject,
+            provenance=v.provenance,
         )
     return AlbumSidecar(
         schema_version=SIDECAR_SCHEMA_VERSION,
         generator=generator,
         mb_release_id=evidence.mb_release_id,
         generated_at=generated_at,
-        verified_lossless=bool(m.verified_lossless),
+        verified_lossless=evidence.verified_lossless_proof is not None,
         quality=quality,
         tracks=tracks,
         audio_file_count=evidence.audio_file_count,

@@ -117,7 +117,7 @@ def _populate_dl_info_from_import_result(dl_info: DownloadInfo,
     if new_m:
         dl_info.download_spectral = SpectralMeasurement.from_parts(
             new_m.spectral_grade, new_m.spectral_bitrate_kbps)
-        dl_info.verified_lossless_override = new_m.verified_lossless
+        dl_info.verified_lossless_override = ir.verified_lossless_proof is not None
     if existing_m:
         dl_info.current_spectral = SpectralMeasurement.from_parts(
             existing_m.spectral_grade, existing_m.spectral_bitrate_kbps)

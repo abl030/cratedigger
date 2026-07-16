@@ -115,7 +115,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                        e.lineage_version AS _evidence_lineage_version,
                        e.spectral_grade AS _evidence_spectral_grade,
                        e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
-                       e.v0_source_lineage AS _evidence_v0_probe_kind,
+                       e.v0_subject AS _evidence_v0_probe_kind,
                        e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
                        e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
                        e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
@@ -128,7 +128,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                        current_evidence.median_bitrate_kbps AS _current_evidence_median_bitrate,
                        current_evidence.spectral_grade AS _current_evidence_spectral_grade,
                        current_evidence.spectral_bitrate_kbps AS _current_evidence_spectral_bitrate,
-                       current_evidence.v0_source_lineage AS _current_evidence_v0_probe_kind,
+                       current_evidence.v0_subject AS _current_evidence_v0_probe_kind,
                        current_evidence.v0_min_bitrate_kbps AS _current_evidence_v0_probe_min_bitrate,
                        current_evidence.v0_avg_bitrate_kbps AS _current_evidence_v0_probe_avg_bitrate,
                        current_evidence.v0_median_bitrate_kbps AS _current_evidence_v0_probe_median_bitrate,
@@ -159,7 +159,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                        e.lineage_version AS _evidence_lineage_version,
                        e.spectral_grade AS _evidence_spectral_grade,
                        e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
-                       e.v0_source_lineage AS _evidence_v0_probe_kind,
+                       e.v0_subject AS _evidence_v0_probe_kind,
                        e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
                        e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
                        e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
@@ -172,7 +172,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                        current_evidence.median_bitrate_kbps AS _current_evidence_median_bitrate,
                        current_evidence.spectral_grade AS _current_evidence_spectral_grade,
                        current_evidence.spectral_bitrate_kbps AS _current_evidence_spectral_bitrate,
-                       current_evidence.v0_source_lineage AS _current_evidence_v0_probe_kind,
+                       current_evidence.v0_subject AS _current_evidence_v0_probe_kind,
                        current_evidence.v0_min_bitrate_kbps AS _current_evidence_v0_probe_min_bitrate,
                        current_evidence.v0_avg_bitrate_kbps AS _current_evidence_v0_probe_avg_bitrate,
                        current_evidence.v0_median_bitrate_kbps AS _current_evidence_v0_probe_median_bitrate,
@@ -203,7 +203,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                        e.lineage_version AS _evidence_lineage_version,
                        e.spectral_grade AS _evidence_spectral_grade,
                        e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
-                       e.v0_source_lineage AS _evidence_v0_probe_kind,
+                       e.v0_subject AS _evidence_v0_probe_kind,
                        e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
                        e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
                        e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
@@ -216,7 +216,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                        current_evidence.median_bitrate_kbps AS _current_evidence_median_bitrate,
                        current_evidence.spectral_grade AS _current_evidence_spectral_grade,
                        current_evidence.spectral_bitrate_kbps AS _current_evidence_spectral_bitrate,
-                       current_evidence.v0_source_lineage AS _current_evidence_v0_probe_kind,
+                       current_evidence.v0_subject AS _current_evidence_v0_probe_kind,
                        current_evidence.v0_min_bitrate_kbps AS _current_evidence_v0_probe_min_bitrate,
                        current_evidence.v0_avg_bitrate_kbps AS _current_evidence_v0_probe_avg_bitrate,
                        current_evidence.v0_median_bitrate_kbps AS _current_evidence_v0_probe_median_bitrate,
@@ -502,9 +502,11 @@ class _DownloadLogMixin(_PipelineDBBase):
     # have to translate, or the renderer (history.js::formatV0Probe) won't
     # recognize the value and will fall through to the raw-kind branch.
     _EVIDENCE_LINEAGE_TO_PROBE_KIND = {
-        "lossless_source":       "lossless_source_v0",
+        "source":    "lossless_source_v0",
+        "installed": "native_lossy_research_v0",
+        "lossless_source": "lossless_source_v0",
         "native_lossy_research": "native_lossy_research_v0",
-        "on_disk_research":      "on_disk_research_v0",
+        "on_disk_research": "on_disk_research_v0",
     }
 
     @classmethod
@@ -516,7 +518,8 @@ class _DownloadLogMixin(_PipelineDBBase):
         # than facts about the downloaded source. Only v3 proves those fields
         # source-semantic. Spectral and V0 facts were never target projections,
         # so they remain safe to recover from either lineage.
-        source_semantic = row.pop("_evidence_lineage_version", None) == 3
+        evidence_lineage = row.pop("_evidence_lineage_version", None)
+        source_semantic = evidence_lineage in (3, 4)
         for legacy, overlay, requires_source_semantic in (
             ("source_format",          "_evidence_source_format", True),
             ("source_min_bitrate",     "_evidence_source_min_bitrate", True),
@@ -553,7 +556,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                    e.lineage_version AS _evidence_lineage_version,
                    e.spectral_grade AS _evidence_spectral_grade,
                    e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
-                   e.v0_source_lineage AS _evidence_v0_probe_kind,
+                   e.v0_subject AS _evidence_v0_probe_kind,
                    e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
                    e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
                    e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
@@ -583,7 +586,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                    e.lineage_version AS _evidence_lineage_version,
                    e.spectral_grade AS _evidence_spectral_grade,
                    e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
-                   e.v0_source_lineage AS _evidence_v0_probe_kind,
+                   e.v0_subject AS _evidence_v0_probe_kind,
                    e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
                    e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
                    e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
@@ -621,7 +624,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                    e.lineage_version AS _evidence_lineage_version,
                    e.spectral_grade AS _evidence_spectral_grade,
                    e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
-                   e.v0_source_lineage AS _evidence_v0_probe_kind,
+                   e.v0_subject AS _evidence_v0_probe_kind,
                    e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
                    e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
                    e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
@@ -673,7 +676,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                        e.lineage_version AS _evidence_lineage_version,
                        e.spectral_grade AS _evidence_spectral_grade,
                        e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
-                       e.v0_source_lineage AS _evidence_v0_probe_kind,
+                       e.v0_subject AS _evidence_v0_probe_kind,
                        e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
                        e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
                        e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
@@ -743,7 +746,13 @@ class _DownloadLogMixin(_PipelineDBBase):
                 dl.validation_result,
                 COALESCE(e.spectral_grade, dl.spectral_grade) AS spectral_grade,
                 COALESCE(e.spectral_bitrate_kbps, dl.spectral_bitrate) AS spectral_bitrate,
-                COALESCE(e.v0_source_lineage, dl.v0_probe_kind) AS v0_probe_kind,
+                COALESCE(
+                    CASE e.v0_subject
+                        WHEN 'source' THEN 'lossless_source_v0'
+                        WHEN 'installed' THEN 'native_lossy_research_v0'
+                    END,
+                    dl.v0_probe_kind
+                ) AS v0_probe_kind,
                 COALESCE(e.v0_avg_bitrate_kbps, dl.v0_probe_avg_bitrate) AS v0_probe_avg_bitrate,
                 e.codec AS evidence_source_codec,
                 e.container AS evidence_source_container,

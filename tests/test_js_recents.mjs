@@ -487,5 +487,33 @@ console.log('renderRecentsItems() omits the evidence strip when a row has no mea
   assertExcludes(html, 'r-evidence', 'no strip without measurements');
 }
 
+console.log('renderRecentsItems() surfaces retryable HAVE analysis failures');
+{
+  const html = renderRecentsFixture([{
+    id: 904,
+    request_id: 905,
+    outcome: 'have_analysis_error',
+    created_at: '2026-07-16T10:00:00+00:00',
+    album_title: 'Things We Lost in the Fire',
+    artist_name: 'Low',
+    badge: 'Environment failure',
+    badge_class: 'badge-warn',
+    border_color: '#a86f20',
+    summary: 'Installed HAVE analysis failed. Request remains wanted; a future download will retry normally.',
+    failure_category: 'permission_denied',
+    analysis_error: 'PermissionError: <denied>',
+    installed_path: '/mnt/Music/Beets/Low/<current>',
+    candidate_reference: '/mnt/Music/Incoming/candidate&next',
+  }]);
+  assertContains(html, 'border-left-color:#a86f20', 'environment border is distinct');
+  assertContains(html, 'Environment failure', 'environment badge rendered');
+  assertContains(html, 'permission denied', 'failure category is visible');
+  assertContains(html, 'HAVE /mnt/Music/Beets/Low/&lt;current&gt;', 'installed path is visible and escaped');
+  assertContains(html, 'candidate /mnt/Music/Incoming/candidate&amp;next', 'candidate reference is visible and escaped');
+  assertContains(html, 'PermissionError: &lt;denied&gt;', 'raw analysis error is visible and escaped');
+  assertContains(html, 'remains wanted', 'retryable state copy rendered');
+  assertExcludes(html, 'PermissionError: <denied>', 'raw error HTML is never rendered');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

@@ -14,6 +14,10 @@ from typing import Any, Sequence, TYPE_CHECKING, cast
 import msgspec
 
 from lib import transitions
+from lib.import_evidence import (
+    HaveAnalysisFailure,
+    classify_have_analysis_failure,
+)
 
 # Module-level DI seam for ``transitions.finalize_request`` (see the leaf-seam
 # allowlist in ``tests/_mock_audit_scanner.py``). Tests patch
@@ -34,6 +38,7 @@ from lib.dispatch.helpers import (_cleanup_staged_dir,
 from lib.terminal_outcomes import (
     PendingImportTerminalOutcome,
     PreviewTerminalOutcome,
+    TerminalCooldown,
     TerminalDenylist,
     TerminalDownloadAudit,
 )
@@ -101,7 +106,9 @@ def _reject_import_from_evidence_decision(
     action = dispatch_action(decision)
     # U11: force requeue on folder/audio-integrity rejects (formerly the
     # invariant enforced by the deleted ``_route_preimport_decision_reject``).
-    effective_requeue = requeue_on_failure or decision in _PREIMPORT_FACT_REJECT_DECISIONS
+    effective_requeue = (
+        requeue_on_failure or decision in _PREIMPORT_FACT_REJECT_DECISIONS
+    ) and not action.preserve_imported
     rejection_validation = validation_result or ValidationResult(
         distance=distance,
         scenario=decision or scenario,
@@ -142,6 +149,7 @@ def _reject_import_from_evidence_decision(
         attempt_result=attempt_result,
         import_job_id=import_job_id,
         source_download_log_id=source_download_log_id,
+        preserve_imported=action.preserve_imported,
     )
     if action.denylist:
         usernames = extract_usernames(files or [])
@@ -340,6 +348,7 @@ def _finalize_request_and_log_rejection(
     import_job_result: dict[str, Any] | None = None,
     denylist_username: str | None = None,
     denylist_reason: str | None = None,
+    preserve_imported: bool = False,
 ) -> int:
     """Sole writer of the four self-healing rejection side effects (U4).
 
@@ -352,10 +361,10 @@ def _finalize_request_and_log_rejection(
 
     Side effects, in order:
 
-      1. Optional request → ``wanted`` transition via
-         ``transitions.finalize_request`` (skipped when ``request_id is
-         None`` or ``requeue_to_wanted=False``). When the transition
-         fires and ``record_validation_attempt=True``, also bumps the
+      1. Optional request transition via ``transitions.finalize_request``:
+         proof-locked candidates restore terminal ``imported``; ordinary
+         automatic rejects go to ``wanted``. When the wanted transition
+         fires and ``record_validation_attempt=True``, it also bumps the
          validation attempt counter — matches pre-U4 importer behavior.
       2. ``download_log`` row write via ``db.log_download(**log_download_kwargs)``.
          Fires whenever ``request_id`` is present (raises otherwise — see
@@ -378,7 +387,13 @@ def _finalize_request_and_log_rejection(
     The preview worker's self-heal try/except absorbs it and the job is
     already ``failed`` from its step 1, so the queue still converges.
     """
-    if requeue_to_wanted and request_id is not None:
+    if preserve_imported and request_id is not None:
+        transitions.require_transition_applied(finalize_request(
+            db,
+            request_id,
+            transitions.RequestTransition.to_imported(),
+        ))
+    elif requeue_to_wanted and request_id is not None:
         transition_kwargs: dict[str, object] = {}
         if search_filetype_override is not None:
             transition_kwargs["search_filetype_override"] = search_filetype_override
@@ -436,6 +451,7 @@ def _record_rejection_and_maybe_requeue(
     attempt_result: ImportAttemptResult | None = None,
     import_job_id: int | None = None,
     source_download_log_id: int | None = None,
+    preserve_imported: bool = False,
 ) -> int | PendingImportTerminalOutcome:
     """Importer-side rejection entry point.
 
@@ -449,7 +465,8 @@ def _record_rejection_and_maybe_requeue(
 
     When ``requeue=True`` (auto-import): transitions to "wanted", records
     attempt. When ``requeue=False`` (force/manual import): only logs to
-    download_log.
+    download_log. ``preserve_imported=True`` is the proof-lock exception:
+    it transitions back to terminal "imported" without an attempt bump.
 
     Returns the new ``download_log`` row id — captured by the
     auto-import path for downstream Wrong Matches triage.
@@ -495,6 +512,7 @@ def _record_rejection_and_maybe_requeue(
             audit=TerminalDownloadAudit(**log_download_kwargs),
             requeue=requeue,
             search_filetype_override=search_filetype_override,
+            preserve_imported=preserve_imported,
         )
     return _finalize_request_and_log_rejection(
         db,
@@ -506,6 +524,7 @@ def _record_rejection_and_maybe_requeue(
         # Importer-side leaves job-failed + denylist to its caller.
         import_job_id=None,
         denylist_username=None,
+        preserve_imported=preserve_imported,
     )
 
 
@@ -584,6 +603,78 @@ def _record_preview_measurement_failed(
     return result.download_log_id
 
 
+def _record_have_analysis_error(
+    db: "PipelineDB",
+    *,
+    request_id: int,
+    dl_info: DownloadInfo,
+    raw_error: str,
+    installed_path: str | None,
+    candidate_reference: str | None,
+    snapshot_guard: str | None,
+    import_job_id: int | None,
+    source_download_log_id: int | None = None,
+    cooled_down_users: set[str] | None = None,
+) -> int | PendingImportTerminalOutcome:
+    """Persist the non-quality abort for a failed installed-HAVE analysis."""
+
+    failure = HaveAnalysisFailure(
+        failure_category=classify_have_analysis_failure(
+            raw_error,
+            snapshot_guard=snapshot_guard,
+        ),
+        error=raw_error,
+        installed_path=installed_path,
+        candidate_reference=candidate_reference,
+    )
+    validation_json = msgspec.json.encode(failure).decode("utf-8")
+    detail = (
+        "Installed HAVE analysis failed "
+        f"({failure.failure_category}): {raw_error}"
+    )
+    audit = TerminalDownloadAudit(
+        soulseek_username=dl_info.username,
+        filetype=dl_info.filetype,
+        download_path=installed_path,
+        beets_scenario="have_analysis_error",
+        beets_detail=detail,
+        outcome="have_analysis_error",
+        staged_path=candidate_reference,
+        error_message=raw_error,
+        validation_result=validation_json,
+        source_download_log_id=source_download_log_id,
+    )
+    transition = transitions.RequestTransition.to_wanted_fields(
+        attempt_type="validation",
+        fields={},
+    )
+    cooldowns = (
+        (TerminalCooldown(dl_info.username),)
+        if dl_info.username
+        else ()
+    )
+    if import_job_id is not None:
+        return PendingImportTerminalOutcome(
+            request_id=request_id,
+            import_job_id=import_job_id,
+            initial_transition=transition,
+            audit=audit,
+            cooldowns=cooldowns,
+        )
+
+    download_log_id = _finalize_request_and_log_rejection(
+        db,
+        request_id,
+        audit.as_log_kwargs(),
+        requeue_to_wanted=True,
+        record_validation_attempt=True,
+    )
+    if dl_info.username and db.check_and_apply_cooldown(dl_info.username):
+        if cooled_down_users is not None:
+            cooled_down_users.add(dl_info.username)
+    return download_log_id
+
+
 def _pending_rejection_outcome(
     *,
     request_id: int,
@@ -591,13 +682,16 @@ def _pending_rejection_outcome(
     audit: TerminalDownloadAudit,
     requeue: bool,
     search_filetype_override: str | None = None,
+    preserve_imported: bool = False,
 ) -> PendingImportTerminalOutcome:
     """Build the DB-owned terminal rejection command without writing."""
     fields: dict[str, object] = {}
     if search_filetype_override is not None:
         fields["search_filetype_override"] = search_filetype_override
     transition = (
-        transitions.RequestTransition.to_wanted_fields(
+        transitions.RequestTransition.to_imported()
+        if preserve_imported
+        else transitions.RequestTransition.to_wanted_fields(
             attempt_type="validation",
             fields=fields,
         )

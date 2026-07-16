@@ -20,13 +20,14 @@ from lib.quality import (DownloadInfo, QualityEvidenceActionPayload,
                          QualityEvidenceActionProvenance, SpectralMeasurement,
                          evidence_decision_name)
 from lib.quality_evidence import (
+    EvidenceBuildResult,
     audit_v0_probe_from_metric,
     backfill_current_evidence_from_album_info,
     propagate_candidate_evidence_to_current,
-    verified_lossless_proof_from_import_result,
 )
 from lib.import_evidence import (
     CandidateEvidenceActionResult,
+    CURRENT_STATUS_FAILED,
     CURRENT_STATUS_MISSING,
     ensure_candidate_evidence_for_action,
     load_current_evidence_for_action,
@@ -39,7 +40,12 @@ from lib.dispatch.types import (DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
     from lib.pipeline_db import PipelineDB
-    from lib.quality import AlbumQualityEvidence, ImportResult, QualityRankConfig
+    from lib.quality import (
+        AlbumQualityEvidence,
+        ImportResult,
+        QualityRankConfig,
+        SpectralAnalysisDetail,
+    )
     from lib.sidecar_service import SidecarDB, SidecarWriteResult
 
 logger = logging.getLogger("cratedigger")
@@ -126,7 +132,16 @@ def _import_allowed_by_evidence_pipeline(result: dict[str, object]) -> bool:
 def _current_evidence_allows_action(gate: EvidenceImportGate) -> bool:
     """Current evidence may be absent only when Beets has no current album."""
 
-    return not gate.current_fail_closed
+    return (
+        not gate.current_fail_closed
+        or gate.current_status == CURRENT_STATUS_MISSING
+    )
+
+
+def _current_evidence_analysis_failed(gate: EvidenceImportGate) -> bool:
+    """Only a failed HAVE analysis aborts; a genuinely absent HAVE proceeds."""
+
+    return gate.current_status == CURRENT_STATUS_FAILED
 
 
 def _download_info_from_candidate_evidence(
@@ -220,6 +235,8 @@ def _load_evidence_import_gate(
     candidate_import_job_id: int | None,
     candidate_download_log_id: int | None,
     prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
+    attempt_existing_spectral: SpectralAnalysisDetail | None = None,
+    attempt_have_audit_available: bool = False,
     beets_library_root: str = "",
 ) -> EvidenceImportGate:
     """Load persisted evidence for import-time quality authority."""
@@ -262,6 +279,36 @@ def _load_evidence_import_gate(
             snapshot_guard=candidate_result.provenance.snapshot_guard,
         )
 
+    fresh_have_failure: str | None = None
+    if attempt_have_audit_available:
+        if attempt_existing_spectral is None:
+            fresh_have_failure = "attempt returned no installed HAVE spectral result"
+        elif not attempt_existing_spectral.attempted:
+            fresh_have_failure = "attempt did not run installed HAVE spectral analysis"
+        elif attempt_existing_spectral.error is not None:
+            fresh_have_failure = attempt_existing_spectral.error
+        elif attempt_existing_spectral.grade in (None, "error"):
+            fresh_have_failure = (
+                "attempt did not produce a usable installed HAVE spectral grade"
+            )
+    if fresh_have_failure is not None:
+        current = current_result.evidence
+        return EvidenceImportGate(
+            current=None,
+            candidate=candidate_result.evidence,
+            candidate_status=candidate_result.provenance.candidate_status,
+            candidate_reason=candidate_result.provenance.fallback_reason,
+            current_status=CURRENT_STATUS_FAILED,
+            current_reason=fresh_have_failure,
+            current_path=(
+                current_result.provenance.installed_path
+                or (current.source_path if current is not None else None)
+            ),
+            current_snapshot_guard=current_result.provenance.snapshot_guard,
+            current_fail_closed=True,
+            snapshot_guard=candidate_result.provenance.snapshot_guard,
+        )
+
     return EvidenceImportGate(
         current=current_result.evidence if current_result.available else None,
         candidate=candidate_result.evidence,
@@ -269,6 +316,8 @@ def _load_evidence_import_gate(
         candidate_reason=candidate_result.provenance.fallback_reason,
         current_status=current_result.provenance.current_status,
         current_reason=current_result.provenance.fallback_reason,
+        current_path=current_result.provenance.installed_path,
+        current_snapshot_guard=current_result.provenance.snapshot_guard,
         current_fail_closed=current_result.provenance.fail_closed,
         snapshot_guard=candidate_result.provenance.snapshot_guard,
     )
@@ -283,7 +332,7 @@ def _refresh_current_evidence_after_import(
     source_candidate: AlbumQualityEvidence | None = None,
     import_result: ImportResult | None = None,
     beets_library_root: str = "",
-) -> None:
+) -> EvidenceBuildResult:
     """Persist current evidence for the just-imported Beets album.
 
     When ``source_candidate`` is supplied (the normal post-U10 path), the new
@@ -316,16 +365,21 @@ def _refresh_current_evidence_after_import(
     with BeetsDB(library_root=beets_library_root) as beets:
         album_info = beets.get_album_info(mb_release_id, cfg)
     if album_info is None:
-        return
+        return EvidenceBuildResult(None, "empty_current", "album not in beets")
 
     if source_candidate is not None:
-        propagate_candidate_evidence_to_current(
+        result = propagate_candidate_evidence_to_current(
             db,
             request_id=request_id,
             candidate_evidence=source_candidate,
             album_info=album_info,
         )
-        return
+        return _exact_linked_refresh_result(
+            db,
+            request_id=request_id,
+            mb_release_id=mb_release_id,
+            result=result,
+        )
 
     # Legacy fallback: no candidate evidence on hand. Rebuild from beets +
     # carry-forward verified_lossless_proof from the import_result, matching
@@ -334,11 +388,11 @@ def _refresh_current_evidence_after_import(
     verified_lossless_proof = None
     if decision != "preflight_existing":
         verified_lossless_proof = (
-            verified_lossless_proof_from_import_result(import_result)
+            import_result.verified_lossless_proof
             if import_result is not None
             else None
         )
-    backfill_current_evidence_from_album_info(
+    result = backfill_current_evidence_from_album_info(
         db,
         request_id=request_id,
         mb_release_id=mb_release_id,
@@ -348,6 +402,50 @@ def _refresh_current_evidence_after_import(
             import_result is None or decision == "preflight_existing"
         ),
     )
+    return _exact_linked_refresh_result(
+        db,
+        request_id=request_id,
+        mb_release_id=mb_release_id,
+        result=result,
+    )
+
+
+def _exact_linked_refresh_result(
+    db: "PipelineDB",
+    *,
+    request_id: int,
+    mb_release_id: str,
+    result: EvidenceBuildResult,
+) -> EvidenceBuildResult:
+    """Resolve a ready refresh to the exact row linked by this write."""
+
+    if result.status != "ready" or result.evidence is None:
+        return result
+    try:
+        linked_id = db.get_request_current_evidence_id(request_id)
+        linked = (
+            db.load_album_quality_evidence_by_id(linked_id)
+            if linked_id is not None
+            else None
+        )
+    except Exception as exc:
+        return EvidenceBuildResult(
+            None,
+            "failed",
+            f"{type(exc).__name__}: {exc}",
+        )
+    if (
+        linked is None
+        or linked.id is None
+        or linked.mb_release_id != mb_release_id
+        or linked.snapshot_fingerprint != result.evidence.snapshot_fingerprint
+    ):
+        return EvidenceBuildResult(
+            None,
+            "stale_request",
+            "post-import evidence is not the exact linked current snapshot",
+        )
+    return EvidenceBuildResult(linked, "ready")
 
 
 def _write_album_sidecar_after_import(

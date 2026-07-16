@@ -410,7 +410,7 @@ class TestConversionTimeoutSeconds(unittest.TestCase):
 class TestM4aAlacDetection(unittest.TestCase):
     """ALAC .m4a detection gates lossless conversion."""
 
-    @patch("harness.import_one.subprocess.run")
+    @patch("lib.measurement.subprocess.run")
     def test_parses_structured_ffprobe_codec_output(self, mock_run):
         """Structured ffprobe output must identify ALAC as lossless."""
         from harness.import_one import _is_m4a_alac
@@ -426,7 +426,7 @@ class TestM4aAlacDetection(unittest.TestCase):
         cmd = mock_run.call_args.args[0]
         self.assertEqual(cmd[cmd.index("-of") + 1], "json")
 
-    @patch("harness.import_one.subprocess.run")
+    @patch("lib.measurement.subprocess.run")
     def test_non_alac_m4a_is_not_lossless(self, mock_run):
         from harness.import_one import _is_m4a_alac
 
@@ -453,8 +453,10 @@ class TestQualityDecisionStage(unittest.TestCase):
     def test_downgrade_exit_5(self):
         from harness.import_one import quality_decision_stage
         from lib.quality import AudioQualityMeasurement
-        new = AudioQualityMeasurement(min_bitrate_kbps=192)
-        existing = AudioQualityMeasurement(min_bitrate_kbps=320)
+        new = AudioQualityMeasurement(
+            min_bitrate_kbps=192, avg_bitrate_kbps=192, format="MP3")
+        existing = AudioQualityMeasurement(
+            min_bitrate_kbps=320, avg_bitrate_kbps=320, format="MP3")
         r = quality_decision_stage(new, existing, is_transcode=False)
         self.assertEqual(r.decision, "downgrade")
         self.assertEqual(r.exit_code, 5)
@@ -463,8 +465,10 @@ class TestQualityDecisionStage(unittest.TestCase):
     def test_transcode_downgrade_exit_6(self):
         from harness.import_one import quality_decision_stage
         from lib.quality import AudioQualityMeasurement
-        new = AudioQualityMeasurement(min_bitrate_kbps=128)
-        existing = AudioQualityMeasurement(min_bitrate_kbps=192)
+        new = AudioQualityMeasurement(
+            min_bitrate_kbps=128, avg_bitrate_kbps=128, format="MP3")
+        existing = AudioQualityMeasurement(
+            min_bitrate_kbps=192, avg_bitrate_kbps=192, format="MP3")
         r = quality_decision_stage(new, existing, is_transcode=True)
         self.assertEqual(r.decision, "transcode_downgrade")
         self.assertEqual(r.exit_code, 6)
@@ -473,8 +477,10 @@ class TestQualityDecisionStage(unittest.TestCase):
     def test_import_continues(self):
         from harness.import_one import quality_decision_stage
         from lib.quality import AudioQualityMeasurement
-        new = AudioQualityMeasurement(min_bitrate_kbps=245, verified_lossless=True)
-        existing = AudioQualityMeasurement(min_bitrate_kbps=192)
+        new = AudioQualityMeasurement(
+            min_bitrate_kbps=245, avg_bitrate_kbps=245, format="MP3")
+        existing = AudioQualityMeasurement(
+            min_bitrate_kbps=192, avg_bitrate_kbps=192, format="MP3")
         r = quality_decision_stage(new, existing, is_transcode=False)
         self.assertEqual(r.decision, "import")
         self.assertEqual(r.exit_code, 0)
@@ -483,8 +489,10 @@ class TestQualityDecisionStage(unittest.TestCase):
     def test_transcode_upgrade_continues(self):
         from harness.import_one import quality_decision_stage
         from lib.quality import AudioQualityMeasurement
-        new = AudioQualityMeasurement(min_bitrate_kbps=245)
-        existing = AudioQualityMeasurement(min_bitrate_kbps=128)
+        new = AudioQualityMeasurement(
+            min_bitrate_kbps=245, avg_bitrate_kbps=245, format="MP3")
+        existing = AudioQualityMeasurement(
+            min_bitrate_kbps=128, avg_bitrate_kbps=128, format="MP3")
         r = quality_decision_stage(new, existing, is_transcode=True)
         self.assertEqual(r.decision, "transcode_upgrade")
         self.assertEqual(r.exit_code, 0)
@@ -493,7 +501,8 @@ class TestQualityDecisionStage(unittest.TestCase):
     def test_first_import_no_existing(self):
         from harness.import_one import quality_decision_stage
         from lib.quality import AudioQualityMeasurement
-        new = AudioQualityMeasurement(min_bitrate_kbps=245, verified_lossless=True)
+        new = AudioQualityMeasurement(
+            min_bitrate_kbps=245, avg_bitrate_kbps=245, format="MP3")
         r = quality_decision_stage(new, None, is_transcode=False)
         self.assertEqual(r.decision, "import")
         self.assertFalse(r.is_terminal)
@@ -505,8 +514,10 @@ class TestQualityDecisionStage(unittest.TestCase):
         from lib.quality import AudioQualityMeasurement
         # existing beets=320 but override=128 (spectral detected fake 320)
         # Caller resolves: existing gets 128. new=245 > 128, so upgrade.
-        new = AudioQualityMeasurement(min_bitrate_kbps=245, verified_lossless=True)
-        existing = AudioQualityMeasurement(min_bitrate_kbps=128)  # override applied by caller
+        new = AudioQualityMeasurement(
+            min_bitrate_kbps=245, avg_bitrate_kbps=245, format="MP3")
+        existing = AudioQualityMeasurement(  # override applied by caller
+            min_bitrate_kbps=128, avg_bitrate_kbps=128, format="MP3")
         r = quality_decision_stage(new, existing, is_transcode=False)
         self.assertEqual(r.decision, "import")
         self.assertFalse(r.is_terminal)
@@ -1090,6 +1101,8 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                 median_bitrate_kbps=250,
                 format="MP3",
                 spectral_grade="genuine",
+                spectral_subject="source",
+                spectral_provenance="measured",
             ),
             measured_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             files=files,
@@ -1498,7 +1511,6 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                 avg_bitrate_kbps=811,
                 median_bitrate_kbps=803,
                 format="FLAC",
-                verified_lossless=True,
             ),
             v0_probe=V0ProbeEvidence(
                 kind="lossless_source_v0",
@@ -1534,7 +1546,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
         self.assertEqual(measurement.avg_bitrate_kbps, 132)
         self.assertEqual(measurement.median_bitrate_kbps, 144)
         self.assertEqual(measurement.format, "Opus")
-        self.assertTrue(measurement.verified_lossless)
+        self.assertFalse(hasattr(measurement, "verified_lossless"))
         self.assertEqual(measurement.was_converted_from, "flac")
 
     def test_evidence_materialization_removes_lossless_left_by_retry_skip(self):

@@ -748,15 +748,15 @@ class TestAlbumQualityEvidenceSchema(unittest.TestCase):
                 INSERT INTO album_quality_evidence (
                     mb_release_id, snapshot_fingerprint, source_path,
                     measured_at, format,
-                    verified_lossless, verified_lossless_proof_origin,
+                    verified_lossless, verified_lossless_provenance,
                     verified_lossless_source, verified_lossless_classifier,
-                    v0_avg_bitrate_kbps, v0_source_lineage
+                    v0_avg_bitrate_kbps, v0_subject, v0_provenance
                 )
                 VALUES (
                     'aqe-schema-mbid', 'fp-2', '/p/2', NOW(), 'flac',
-                    TRUE, 'import',
+                    TRUE, 'measured',
                     'lossless candidate', 'spectral+v0', 228,
-                    'lossless_container_source'
+                    'source', 'measured'
                 )
             """)
             evidence_id = self._query(
@@ -784,6 +784,68 @@ class TestAlbumQualityEvidenceSchema(unittest.TestCase):
                 ("aqe-schema-mbid",),
             )
             self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_v4_rejects_installed_carried_cross_products(self):
+        for fact_columns, fact_values in (
+            (
+                "spectral_grade, spectral_subject, spectral_provenance",
+                ("genuine", "installed", "carried"),
+            ),
+            (
+                "v0_avg_bitrate_kbps, v0_subject, v0_provenance",
+                (245, "installed", "carried"),
+            ),
+        ):
+            with self.subTest(fact_columns=fact_columns):
+                with self.assertRaises(psycopg2.errors.CheckViolation):
+                    self._exec(
+                        f"""
+                        INSERT INTO album_quality_evidence (
+                            mb_release_id, snapshot_fingerprint, source_path,
+                            measured_at, format, lineage_version,
+                            {fact_columns}
+                        )
+                        VALUES (
+                            'aqe-two-axis-invalid', %s, '/p/invalid',
+                            NOW(), 'MP3', 4, %s, %s, %s
+                        )
+                        """,
+                        (fact_columns, *fact_values),
+                    )
+
+    def test_v3_unknown_legacy_values_remain_deploy_safe(self):
+        mbid = "aqe-two-axis-legacy"
+        try:
+            self._exec(
+                """
+                INSERT INTO album_quality_evidence (
+                    mb_release_id, snapshot_fingerprint, source_path,
+                    measured_at, format, lineage_version,
+                    v0_avg_bitrate_kbps, v0_subject, v0_provenance
+                )
+                VALUES (
+                    %s, 'legacy-fp', '/p/legacy', NOW(), 'MP3', 3,
+                    245, 'unknown-live-subject', 'unknown-live-provenance'
+                )
+                """,
+                (mbid,),
+            )
+            self.assertEqual(
+                self._query(
+                    """
+                    SELECT lineage_version, v0_subject, v0_provenance
+                    FROM album_quality_evidence
+                    WHERE mb_release_id = %s
+                    """,
+                    (mbid,),
+                ),
+                [(3, "unknown-live-subject", "unknown-live-provenance")],
+            )
+        finally:
+            self._exec(
+                "DELETE FROM album_quality_evidence WHERE mb_release_id = %s",
+                (mbid,),
+            )
 
 
 @requires_postgres
@@ -1417,6 +1479,7 @@ class TestReplaceSupersedeSchema(unittest.TestCase):
         self.assertEqual(rows, [])
 
 
+@requires_postgres
 class TestBackfillV0MetricFromMeasurementSchema(unittest.TestCase):
     """Migration 024 backfills v0_metric on album_quality_evidence and
     v0_probe_* columns on download_log from the row's own
@@ -1484,8 +1547,23 @@ class TestBackfillV0MetricFromMeasurementSchema(unittest.TestCase):
           )
     """
 
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._db_name = "cratedigger_test_mig024_replay"
+        cls._dsn = _create_fresh_database(cls._db_name)
+        cls._migration_dir = tempfile.mkdtemp(prefix="cratedigger-mig024-")
+        for migration in discover_migrations(DEFAULT_MIGRATIONS_DIR):
+            if migration.version <= 24:
+                shutil.copy(migration.path, cls._migration_dir)
+        apply_migrations(cls._dsn, cls._migration_dir)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        shutil.rmtree(cls._migration_dir)
+        _drop_database(cls._db_name)
+
     def _query(self, sql: str, params: tuple = ()):
-        conn = psycopg2.connect(TEST_DSN)
+        conn = psycopg2.connect(self._dsn)
         conn.autocommit = True
         try:
             with conn.cursor() as cur:
@@ -1495,7 +1573,7 @@ class TestBackfillV0MetricFromMeasurementSchema(unittest.TestCase):
             conn.close()
 
     def _exec(self, sql: str, params: tuple = ()):
-        conn = psycopg2.connect(TEST_DSN)
+        conn = psycopg2.connect(self._dsn)
         conn.autocommit = True
         try:
             with conn.cursor() as cur:
@@ -3307,7 +3385,7 @@ class TestPinStatusDomainMigration(unittest.TestCase):
         dsn = _create_fresh_database(name)
         try:
             applied = apply_migrations(dsn, DEFAULT_MIGRATIONS_DIR)
-            self.assertEqual(applied[-1].version, 54)
+            self.assertEqual(applied[-1].version, 55)
             self.assertEqual(
                 self._query(
                     dsn,
@@ -3579,6 +3657,244 @@ class TestQualityEvidenceLineageVersionMigration(unittest.TestCase):
                     """)
         finally:
             conn.close()
+
+
+@requires_postgres
+class TestEvidenceTwoAxisVocabularyMigration(unittest.TestCase):
+    """Migration 055 preserves legacy facts while changing vocabulary."""
+
+    def _copy_through(self, target: str, version: int) -> None:
+        for migration in discover_migrations(DEFAULT_MIGRATIONS_DIR):
+            if migration.version <= version:
+                shutil.copy2(migration.path, target)
+
+    def test_replays_pre055_rows_and_enforces_v4_shape(self) -> None:
+        name = "cratedigger_test_evidence_two_axis_055"
+        dsn = _create_fresh_database(name)
+        try:
+            with tempfile.TemporaryDirectory() as migrations_dir:
+                self._copy_through(migrations_dir, 54)
+                apply_migrations(dsn, migrations_dir)
+
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        rows = (
+                            (
+                                "lossless", "fp-lossless", "/lossless",
+                                "FLAC", "FLAC", 3, "genuine", 900, True,
+                                180, 228, 230, "lossless_source",
+                                "lossless_source_v0", "lossless_source_v0",
+                                "import_result", "flac", "spectral",
+                                "genuine cliff",
+                            ),
+                            (
+                                "request-scalar", "fp-request", "/request",
+                                "FLAC", "FLAC", 1, None, None, False,
+                                170, 220, 225, "lossless_source",
+                                "album_requests.current_lossless_source_v0_probe",
+                                "legacy_request_seed", None, None, None, None,
+                            ),
+                            (
+                                "native", "fp-native", "/native",
+                                "MP3", "MP3", 1, None, None, False,
+                                190, 245, 248, "native_lossy_research",
+                                "native_lossy_research_v0", "research",
+                                None, None, None, None,
+                            ),
+                            (
+                                "on-disk", "fp-disk", "/disk",
+                                "MP3", "MP3", 1, None, None, False,
+                                160, 200, 205, "on_disk_research",
+                                "on_disk_research_v0", "research",
+                                None, None, None, None,
+                            ),
+                            (
+                                "fallback", "fp-fallback", "/fallback",
+                                "MP3", "MP3", 1, None, None, False,
+                                128, 160, 160, "unknown_v0_source",
+                                "new_measurement_fallback", "fallback",
+                                None, None, None, None,
+                            ),
+                            (
+                                "legacy-proof", "fp-proof", "/proof",
+                                "FLAC", "FLAC", 1, None, None, True,
+                                None, None, None, None, None, None,
+                                "legacy_request_seed", "flac", "request_seed",
+                                "request scalar",
+                            ),
+                        )
+                        cur.executemany(
+                            """
+                            INSERT INTO album_quality_evidence (
+                                mb_release_id, snapshot_fingerprint,
+                                source_path, measured_at, storage_format,
+                                format, lineage_version, spectral_grade,
+                                spectral_bitrate_kbps, verified_lossless,
+                                v0_min_bitrate_kbps, v0_avg_bitrate_kbps,
+                                v0_median_bitrate_kbps, v0_source_lineage,
+                                v0_source_provenance, v0_proof_provenance,
+                                verified_lossless_proof_origin,
+                                verified_lossless_source,
+                                verified_lossless_classifier,
+                                verified_lossless_detail
+                            ) VALUES (
+                                %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s,
+                                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                            )
+                            """,
+                            rows,
+                        )
+                finally:
+                    conn.close()
+
+                self._copy_through(migrations_dir, 55)
+                applied = apply_migrations(dsn, migrations_dir)
+                self.assertEqual([migration.version for migration in applied], [55])
+
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT name FROM schema_migrations WHERE version = 55"
+                        )
+                        self.assertEqual(
+                            cur.fetchone(), ("evidence_two_axis_vocabulary",)
+                        )
+
+                        cur.execute("""
+                            SELECT mb_release_id, lineage_version,
+                                   v0_min_bitrate_kbps, v0_avg_bitrate_kbps,
+                                   v0_median_bitrate_kbps,
+                                   v0_subject, v0_provenance,
+                                   spectral_grade, spectral_bitrate_kbps,
+                                   spectral_subject, spectral_provenance,
+                                   verified_lossless,
+                                   verified_lossless_provenance,
+                                   verified_lossless_source,
+                                   verified_lossless_classifier,
+                                   verified_lossless_detail
+                            FROM album_quality_evidence
+                            ORDER BY mb_release_id
+                        """)
+                        migrated = {row[0]: row[1:] for row in cur.fetchall()}
+                        self.assertEqual(
+                            migrated["lossless"],
+                            (
+                                3, 180, 228, 230, "source", "measured",
+                                "genuine", 900, "installed", "measured",
+                                True, "measured", "flac", "spectral",
+                                "genuine cliff",
+                            ),
+                        )
+                        self.assertEqual(
+                            migrated["request-scalar"][:6],
+                            (1, 170, 220, 225, "source", "carried"),
+                        )
+                        self.assertEqual(
+                            migrated["native"][:6],
+                            (1, 190, 245, 248, "installed", "measured"),
+                        )
+                        self.assertEqual(
+                            migrated["on-disk"][:6],
+                            (1, 160, 200, 205, "installed", "measured"),
+                        )
+                        self.assertEqual(
+                            migrated["fallback"][:6],
+                            (1, 128, 160, 160, "installed", "measured"),
+                        )
+                        self.assertEqual(
+                            migrated["legacy-proof"][11:],
+                            (
+                                "carried", "flac", "request_seed",
+                                "request scalar",
+                            ),
+                        )
+
+                        cur.execute("""
+                            SELECT column_name
+                            FROM information_schema.columns
+                            WHERE table_schema = 'public'
+                              AND table_name = 'album_quality_evidence'
+                        """)
+                        columns = {row[0] for row in cur.fetchall()}
+                        self.assertTrue({
+                            "v0_subject", "v0_provenance",
+                            "spectral_subject", "spectral_provenance",
+                            "verified_lossless_provenance",
+                        }.issubset(columns))
+                        self.assertTrue({
+                            "v0_source_lineage", "v0_source_provenance",
+                            "v0_proof_provenance",
+                            "verified_lossless_proof_origin",
+                        }.isdisjoint(columns))
+
+                        cur.execute("""
+                            INSERT INTO album_quality_evidence (
+                                mb_release_id, snapshot_fingerprint,
+                                source_path, measured_at
+                            ) VALUES (
+                                'new-default-055', 'fp-new-default-055',
+                                '/new-default', NOW()
+                            )
+                            RETURNING lineage_version
+                        """)
+                        self.assertEqual(cur.fetchone(), (4,))
+
+                        cur.execute("""
+                            SELECT conname, convalidated
+                            FROM pg_constraint
+                            WHERE conrelid = 'album_quality_evidence'::regclass
+                        """)
+                        constraints = dict(cur.fetchall())
+                        expected_constraints = {
+                            "album_quality_evidence_lineage_version_check",
+                            "album_quality_evidence_v0_subject_domain",
+                            "album_quality_evidence_v0_provenance_domain",
+                            "album_quality_evidence_spectral_subject_domain",
+                            "album_quality_evidence_spectral_provenance_domain",
+                            "album_quality_evidence_verified_provenance_domain",
+                            "album_quality_evidence_v0_metric_shape",
+                            "album_quality_evidence_v0_cross_product",
+                            "album_quality_evidence_spectral_shape",
+                            "album_quality_evidence_spectral_cross_product",
+                            "album_quality_evidence_verified_proof_shape",
+                        }
+                        self.assertTrue(expected_constraints.issubset(constraints))
+                        self.assertTrue(
+                            all(constraints[name] for name in expected_constraints)
+                        )
+
+                        with self.assertRaises(psycopg2.errors.CheckViolation):
+                            cur.execute("""
+                                INSERT INTO album_quality_evidence (
+                                    mb_release_id, snapshot_fingerprint,
+                                    source_path, measured_at, lineage_version,
+                                    v0_avg_bitrate_kbps,
+                                    v0_subject, v0_provenance
+                                ) VALUES (
+                                    'invalid-055', 'fp-invalid-055',
+                                    '/invalid', NOW(), 4,
+                                    220, 'installed', 'carried'
+                                )
+                            """)
+                        with self.assertRaises(psycopg2.errors.CheckViolation):
+                            cur.execute("""
+                                INSERT INTO album_quality_evidence (
+                                    mb_release_id, snapshot_fingerprint,
+                                    source_path, measured_at, lineage_version
+                                ) VALUES (
+                                    'invalid-version-055',
+                                    'fp-invalid-version-055',
+                                    '/invalid-version', NOW(), 2
+                                )
+                            """)
+                finally:
+                    conn.close()
+        finally:
+            _drop_database(name)
 
 
 @requires_postgres

@@ -69,6 +69,11 @@ from lib.quality import (
     AlbumQualityEvidence,
     AlbumQualityV0Metric,
     CooldownConfig,
+    EVIDENCE_PROVENANCE_MEASURED,
+    EVIDENCE_SUBJECT_INSTALLED,
+    EVIDENCE_SUBJECT_SOURCE,
+    V0_PROBE_LOSSLESS_SOURCE,
+    V0_PROBE_NATIVE_LOSSY_RESEARCH,
 )
 from lib import transitions
 from lib.terminal_outcomes import (
@@ -1311,6 +1316,16 @@ class FakePipelineDB:
                     )
                     cooled.add(entry.username)
                     boundary("cooldown")
+            for entry in command.cooldowns:
+                if self.check_and_apply_cooldown(entry.username):
+                    cfg = CooldownConfig()
+                    self.add_cooldown(
+                        entry.username,
+                        _utcnow() + timedelta(days=cfg.cooldown_days),
+                        f"{cfg.failure_threshold} consecutive failures",
+                    )
+                    cooled.add(entry.username)
+                    boundary("cooldown")
             if command.job.status == "completed":
                 job = self.mark_import_job_completed(
                     command.import_job_id,
@@ -2520,6 +2535,7 @@ class FakePipelineDB:
         # erase a successful attempt-time scan on the same audio snapshot.
         if (
             existing is not None
+            and existing.lineage_version >= 4
             and existing.measurement.spectral_grade is not None
             and evidence.measurement.spectral_grade is None
         ):
@@ -2531,12 +2547,17 @@ class FakePipelineDB:
                     spectral_bitrate_kbps=(
                         existing.measurement.spectral_bitrate_kbps
                     ),
+                    spectral_subject=existing.measurement.spectral_subject,
+                    spectral_provenance=(
+                        existing.measurement.spectral_provenance
+                    ),
                 ),
             )
         # V0 is an atomic tuple. A stale writer with no metric preserves the
         # whole stored fact; a valid incoming metric replaces it wholesale.
         if (
             existing is not None
+            and existing.lineage_version >= 4
             and existing.v0_metric is not None
             and evidence.v0_metric is None
         ):
@@ -2633,6 +2654,8 @@ class FakePipelineDB:
             evidence.measurement,
             spectral_grade=grade,
             spectral_bitrate_kbps=bitrate_kbps,
+            spectral_subject=EVIDENCE_SUBJECT_INSTALLED,
+            spectral_provenance=EVIDENCE_PROVENANCE_MEASURED,
         )
         completed = copy.deepcopy(msgspec.structs.replace(
             evidence,
@@ -3540,7 +3563,7 @@ class FakePipelineDB:
                     if current_measurement is not None else None
                 ),
                 "_current_evidence_v0_probe_kind": (
-                    current_v0.source_lineage if current_v0 is not None else None
+                    current_v0.subject if current_v0 is not None else None
                 ),
                 "_current_evidence_v0_probe_min_bitrate": (
                     current_v0.min_bitrate_kbps if current_v0 is not None else None
@@ -4582,7 +4605,7 @@ class FakePipelineDB:
         if ev is not None:
             ev_m = ev.measurement
             ev_v0 = ev.v0_metric
-            source_semantic = ev.lineage_version == 3
+            source_semantic = ev.lineage_version in (3, 4)
             if source_semantic \
                     and row.get("source_format") is None \
                     and ev_m.format is not None:
@@ -4607,12 +4630,11 @@ class FakePipelineDB:
                     and ev_m.spectral_bitrate_kbps is not None:
                 row["spectral_bitrate"] = ev_m.spectral_bitrate_kbps
             if row.get("v0_probe_kind") is None \
-                    and ev_v0 is not None and ev_v0.source_lineage is not None:
+                    and ev_v0 is not None:
                 row["v0_probe_kind"] = {
-                    "lossless_source": "lossless_source_v0",
-                    "native_lossy_research": "native_lossy_research_v0",
-                    "on_disk_research": "on_disk_research_v0",
-                }.get(ev_v0.source_lineage, ev_v0.source_lineage)
+                    EVIDENCE_SUBJECT_SOURCE: V0_PROBE_LOSSLESS_SOURCE,
+                    EVIDENCE_SUBJECT_INSTALLED: V0_PROBE_NATIVE_LOSSY_RESEARCH,
+                }[ev_v0.subject]
             if row.get("v0_probe_min_bitrate") is None \
                     and ev_v0 is not None \
                     and ev_v0.min_bitrate_kbps is not None:
@@ -4673,7 +4695,16 @@ class FakePipelineDB:
                 if ev_measurement is not None else None
             ) or entry.extra.get("spectral_bitrate")
             v0_probe_kind = (
-                ev_v0.source_lineage if ev_v0 is not None else None
+                (
+                    V0_PROBE_LOSSLESS_SOURCE
+                    if (
+                        ev_v0 is not None
+                        and ev_v0.subject == EVIDENCE_SUBJECT_SOURCE
+                    )
+                    else V0_PROBE_NATIVE_LOSSY_RESEARCH
+                    if ev_v0 is not None
+                    else None
+                )
             ) or entry.extra.get("v0_probe_kind")
             v0_probe_avg_bitrate = (
                 ev_v0.avg_bitrate_kbps if ev_v0 is not None else None
@@ -4718,8 +4749,7 @@ class FakePipelineDB:
                     if ev_measurement is not None else None
                 ),
                 "evidence_verified_lossless": (
-                    bool(ev_measurement.verified_lossless)
-                    if ev_measurement is not None else False
+                    ev is not None and ev.verified_lossless_proof is not None
                 ),
                 "request_status": req.get("status"),
                 "request_min_bitrate": req.get("min_bitrate"),

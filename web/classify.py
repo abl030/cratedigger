@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 import msgspec
 
+from lib.import_evidence import HaveAnalysisFailure
 from lib.import_queue import ImportJob
 from lib.quality import ImportResult, QualityComparisonBasis, dispatch_action
 from lib.validation_envelope import decode_validation_envelope
@@ -41,6 +42,8 @@ class LogEntry:
     beets_detail: Optional[str] = None
     soulseek_username: Optional[str] = None
     error_message: Optional[str] = None
+    download_path: Optional[str] = None
+    staged_path: Optional[str] = None
     import_result: Optional[Any] = None
     validation_result: Optional[Any] = None
     # Per-file failure detail audit blob (issue #564 C7, migration 043) —
@@ -184,6 +187,13 @@ class ClassifiedEntry(msgspec.Struct):
     existing_v0_probe_min_bitrate: int | None = None
     existing_v0_probe_avg_bitrate: int | None = None
     existing_v0_probe_median_bitrate: int | None = None
+    # Environment-failure diagnostics for ``have_analysis_error``. These are
+    # intentionally distinct from quality evidence: the installed copy could
+    # not be analysed, so the attempt aborted before a quality verdict.
+    failure_category: str | None = None
+    analysis_error: str | None = None
+    installed_path: str | None = None
+    candidate_reference: str | None = None
 
 
 class ImportJobDisplay(msgspec.Struct, frozen=True):
@@ -202,6 +212,15 @@ class _Classification(msgspec.Struct, frozen=True):
     badge_class: str
     border_color: str
     verdict: str
+
+
+class _HaveAnalysisDiagnostics(msgspec.Struct, frozen=True):
+    """Display-safe projection of the U2 typed failure audit."""
+
+    failure_category: str | None = None
+    error: str | None = None
+    installed_path: str | None = None
+    candidate_reference: str | None = None
 
 
 def classify_import_job_display(
@@ -314,7 +333,12 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
     Returns a ClassifiedEntry with badge, verdict, summary, and downloaded_label.
     """
     triage = _extract_wrong_match_triage(entry)
-    core = _classify(entry, triage_action=triage["action"])
+    have_analysis = _extract_have_analysis_diagnostics(entry)
+    core = _classify(
+        entry,
+        triage_action=triage["action"],
+        have_analysis=have_analysis,
+    )
     summary = _build_summary(entry, core.badge, core.verdict)
     downloaded_label = _build_downloaded_label(entry)
     (
@@ -430,6 +454,56 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         existing_v0_probe_median_bitrate=(
             current_v0.median_bitrate_kbps
             if current_v0 is not None else entry.existing_v0_probe_median_bitrate
+        ),
+        failure_category=have_analysis.failure_category,
+        analysis_error=have_analysis.error,
+        installed_path=have_analysis.installed_path,
+        candidate_reference=have_analysis.candidate_reference,
+    )
+
+
+def _extract_have_analysis_diagnostics(
+    entry: LogEntry,
+) -> _HaveAnalysisDiagnostics:
+    """Decode a HAVE-analysis audit without letting legacy damage 500 Recents."""
+
+    if entry.outcome != "have_analysis_error":
+        return _HaveAnalysisDiagnostics()
+
+    failure: HaveAnalysisFailure | None = None
+    try:
+        if isinstance(entry.validation_result, str):
+            failure = msgspec.json.decode(
+                entry.validation_result,
+                type=HaveAnalysisFailure,
+            )
+        elif entry.validation_result is not None:
+            failure = msgspec.convert(
+                entry.validation_result,
+                type=HaveAnalysisFailure,
+                strict=True,
+            )
+    except (msgspec.ValidationError, msgspec.DecodeError):
+        # The top-level columns still carry enough information for a useful
+        # environment-failure card if one historical JSONB value is damaged.
+        failure = None
+
+    return _HaveAnalysisDiagnostics(
+        failure_category=(
+            failure.failure_category if failure is not None else None
+        ),
+        error=(
+            failure.error if failure is not None else entry.error_message
+        ),
+        installed_path=(
+            failure.installed_path
+            if failure is not None and failure.installed_path is not None
+            else entry.download_path
+        ),
+        candidate_reference=(
+            failure.candidate_reference
+            if failure is not None and failure.candidate_reference is not None
+            else entry.staged_path
         ),
     )
 
@@ -729,8 +803,25 @@ def _classify(
     entry: LogEntry,
     *,
     triage_action: str | None = None,
+    have_analysis: _HaveAnalysisDiagnostics | None = None,
 ) -> _Classification:
     """Build the typed core classification for one log entry."""
+
+    # --- Installed-HAVE analysis failure (environment, not quality) ---
+    if entry.outcome == "have_analysis_error":
+        diagnostics = have_analysis or _HaveAnalysisDiagnostics()
+        category = (
+            _humanize_token(diagnostics.failure_category)
+            if diagnostics.failure_category
+            else "unknown analyser failure"
+        )
+        verdict = (
+            f"Installed HAVE analysis failed ({category}). "
+            "Request remains wanted; a future download will retry normally."
+        )
+        return _Classification(
+            "Environment failure", "badge-warn", "#a86f20", verdict,
+        )
 
     # --- Rejected ---
     if entry.outcome == "rejected":

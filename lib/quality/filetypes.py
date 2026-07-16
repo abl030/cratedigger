@@ -106,10 +106,10 @@ def rejection_backfill_override(
     callers select ``linked_current_evidence`` only after loading the request's
     complete, exact-release evidence row.
 
-    The threshold is deliberately the canonical ``TRANSPARENT`` rank, not
-    ``cfg.gate_min_rank``: merely excellent lossy copies can still be improved
-    by another lossy source.  Codecs without a rank band (for example Ogg)
-    stay ``UNKNOWN`` and fail open to continued searching.
+    The threshold is deliberately the canonical ``TRANSPARENT`` rank: merely
+    excellent lossy copies can still be improved by another lossy source.
+    Codecs without a rank band stay ``UNKNOWN`` and fail open to continued
+    searching.
     """
     if cfg is None:
         cfg = QualityRankConfig.defaults()

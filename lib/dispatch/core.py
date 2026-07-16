@@ -22,8 +22,7 @@ finalize_request = transitions.finalize_request
 
 from lib.processing_paths import normalize_source_dirs
 from lib.quality import (AlbumQualityEvidenceDecisionFacts, DownloadInfo,
-                         ImportResult, QUALITY_UPGRADE_TIERS,
-                         TargetQualityContract, ValidationResult,
+                         ImportResult, TargetQualityContract, ValidationResult,
                          comparison_basis_from_decision,
                          dispatch_action, evidence_decision_name,
                          extract_usernames,
@@ -31,8 +30,12 @@ from lib.quality import (AlbumQualityEvidenceDecisionFacts, DownloadInfo,
                          narrow_override_on_lossless_source_lock,
                          override_bitrate_from_current_evidence,
                          resolve_rejection_search_override)
-from lib.quality_evidence import (audit_v0_probe_from_metric,
-                                  legacy_current_lossless_v0_probe_from_request)
+from lib.quality.decisions import (
+    PostImportSearchAction,
+    post_import_search_action_if_known,
+)
+from lib.quality.dispatch_actions import DispatchAction
+from lib.quality_evidence import EvidenceBuildResult, audit_v0_probe_from_metric
 from lib.util import cleanup_disambiguation_orphans
 
 from lib.dispatch.types import (DispatchOutcome, FORCE_MANUAL_SCENARIOS,
@@ -44,6 +47,7 @@ from lib.dispatch.helpers import (_cleanup_staged_dir, _guard_failure_detail,
                                   _quarantine_duplicate_remove_guard_source,
                                   _should_cleanup_path)
 from lib.dispatch.evidence_gate import (_current_evidence_allows_action,
+                                        _current_evidence_analysis_failed,
                                         _import_allowed_by_evidence_pipeline,
                                         _load_evidence_import_gate,
                                         _refresh_current_evidence_after_import,
@@ -52,6 +56,7 @@ from lib.dispatch.evidence_gate import (_current_evidence_allows_action,
                                         _write_album_sidecar_after_import,
                                         _write_quality_evidence_action_file)
 from lib.dispatch.outcome_actions import (_do_mark_done,
+                                          _record_have_analysis_error,
                                           _record_rejection_and_maybe_requeue,
                                           _reject_import_from_evidence_decision)
 from lib.dispatch.quality_gate import QualityGatePlan, _check_quality_gate_core
@@ -108,17 +113,73 @@ def _run_or_stage_quality_gate(
     if pending is None:
         quality_gate_fn(**kwargs)
         return None
-    initial = pending.initial_transition
     plan = quality_gate_fn(
         **kwargs,
         apply=False,
-        request_fields=dict(initial.fields) if initial is not None else None,
     )
     if not isinstance(plan, QualityGatePlan):
         return pending
     return pending.append_transitions(plan.transition).append_denylists(
         *plan.denylists
     )
+
+
+def _resolve_post_import_search_policy(
+    *,
+    decision: str,
+    action: DispatchAction,
+    force: bool,
+    scenario: str,
+    files: Sequence[object] | None,
+    fallback_username: str | None,
+) -> tuple[PostImportSearchAction | None, bool, set[str], list[object]]:
+    """Resolve automatic search policy and its peer attribution once."""
+
+    automatic = not force and scenario not in FORCE_MANUAL_SCENARIOS
+    search_action = (
+        post_import_search_action_if_known(decision) if automatic else None
+    )
+    should_denylist = (
+        search_action.denylist
+        if search_action is not None
+        else action.denylist
+    )
+    file_list = list(files or ())
+    usernames = extract_usernames(file_list) if should_denylist else set()
+    if should_denylist and fallback_username:
+        usernames.add(fallback_username)
+    return search_action, should_denylist, usernames, file_list
+
+
+def _apply_post_import_search_action(
+    db: "PipelineDB",
+    *,
+    request_id: int,
+    pending: PendingImportTerminalOutcome | None,
+    decision: str,
+    search_action: PostImportSearchAction | None,
+    mark_done: bool,
+    new_bitrate: int | None,
+) -> PendingImportTerminalOutcome | None:
+    """Apply the canonical retained-import requeue, when one is requested."""
+
+    if search_action is None:
+        return pending
+    if search_action.status != "wanted":
+        raise ValueError(
+            "requeueing import decision mapped to non-wanted "
+            f"status: {decision} -> {search_action.status}"
+        )
+    fields: dict[str, object] = {
+        "search_filetype_override": search_action.search_filetype_override,
+    }
+    if mark_done and new_bitrate is not None:
+        fields["min_bitrate"] = new_bitrate
+    transition = transitions.RequestTransition.to_wanted_fields(
+        from_status="imported",
+        fields=fields,
+    )
+    return _apply_or_stage_transition(db, request_id, pending, transition)
 
 
 def dispatch_import_core(
@@ -244,12 +305,9 @@ def dispatch_import_core(
             #   fails, wiping the staged copy forces a redownload
             #   from Soulseek. Staging is preserved so the retry
             #   resumes with the local files already in place.
-            # - No spectral clear. Codex PR #136 R3 P2: the prior
-            #   reset-to-wanted left ``current_spectral_*`` populated
-            #   from a download that was never imported, skewing the
-            #   next cycle's quality-gate decisions. With no reset,
-            #   ``measure_preimport_state`` re-runs on retry and
-            #   re-populates spectral from the same files.
+            # - No spectral-stamp clear. The request stamps remain historical
+            #   audit data; linked evidence and fresh attempt analysis own
+            #   subsequent decisions.
             #
             # Force/manual paths (scenario in FORCE_MANUAL_SCENARIOS)
             # surface the message to the user via
@@ -265,15 +323,6 @@ def dispatch_import_core(
 
         quality_evidence_action_file: str | None = None
         try:
-            try:
-                request_row = db.get_request(request_id)
-            except Exception:
-                logger.debug(
-                    "Failed to read request row before import",
-                    exc_info=True,
-                )
-                request_row = None
-
             evidence_gate = _load_evidence_import_gate(
                 db,
                 request_id=request_id,
@@ -283,8 +332,47 @@ def dispatch_import_core(
                 candidate_import_job_id=candidate_import_job_id,
                 candidate_download_log_id=candidate_download_log_id,
                 prevalidated_candidate_result=prevalidated_candidate_result,
+                attempt_existing_spectral=(
+                    attempt_result.audit.existing
+                    if attempt_result.audit is not None
+                    else None
+                ),
+                attempt_have_audit_available=attempt_result.audit is not None,
                 beets_library_root=getattr(cfg, "beets_directory", "") if cfg is not None else "",
             )
+            if (
+                evidence_gate.candidate is not None
+                and _current_evidence_analysis_failed(evidence_gate)
+            ):
+                reason = (
+                    evidence_gate.current_reason
+                    or "installed HAVE analysis failed without diagnostics"
+                )
+                pending = _record_have_analysis_error(
+                    db,
+                    request_id=request_id,
+                    dl_info=dl_info,
+                    raw_error=reason,
+                    installed_path=evidence_gate.current_path,
+                    candidate_reference=path,
+                    snapshot_guard=evidence_gate.current_snapshot_guard,
+                    import_job_id=candidate_import_job_id,
+                    source_download_log_id=candidate_download_log_id,
+                    cooled_down_users=cooled_down_users,
+                )
+                return DispatchOutcome(
+                    success=False,
+                    message=(
+                        "Installed HAVE analysis failed; request remains "
+                        "wanted and a future attempt will retry"
+                    ),
+                    code="have_analysis_error",
+                    terminal_outcome=(
+                        pending
+                        if isinstance(pending, PendingImportTerminalOutcome)
+                        else None
+                    ),
+                )
             existing_v0_probe = audit_v0_probe_from_metric(
                 evidence_gate.current.v0_metric
                 if evidence_gate.current is not None
@@ -295,10 +383,6 @@ def dispatch_import_core(
             )
             if evidence_override is not None:
                 override_min_bitrate = evidence_override
-            if existing_v0_probe is None:
-                existing_v0_probe = legacy_current_lossless_v0_probe_from_request(
-                    request_row)
-
             if (
                 (candidate_import_job_id is not None
                  or candidate_download_log_id is not None)
@@ -526,12 +610,26 @@ def dispatch_import_core(
                 )
                 decision = ir.decision or "unknown"
                 action = dispatch_action(decision)
-                file_list = files or []
-                usernames = extract_usernames(file_list) if action.denylist else set()
-                if action.denylist and dl_info.username:
-                    usernames.add(dl_info.username)
+                (
+                    search_action,
+                    should_denylist,
+                    usernames,
+                    file_list,
+                ) = _resolve_post_import_search_policy(
+                    decision=decision,
+                    action=action,
+                    force=force,
+                    scenario=scenario,
+                    files=files,
+                    fallback_username=dl_info.username,
+                )
                 narrowed_override = None
                 current_override = None
+                post_import_evidence = EvidenceBuildResult(
+                    None,
+                    "failed",
+                    "post-import evidence refresh did not run",
+                )
 
                 new_br = ir.source_measurement.min_bitrate_kbps if ir.source_measurement else None
                 prev_br = ir.current_measurement.min_bitrate_kbps if ir.current_measurement else None
@@ -558,7 +656,7 @@ def dispatch_import_core(
                     if isinstance(pending, PendingImportTerminalOutcome):
                         terminal_outcome = pending
                     try:
-                        _refresh_current_evidence_after_import(
+                        post_import_evidence = _refresh_current_evidence_after_import(
                             db,
                             request_id=request_id,
                             mb_release_id=mb_release_id,
@@ -571,11 +669,16 @@ def dispatch_import_core(
                                 cfg.beets_directory if cfg is not None else ""
                             ),
                         )
-                    except Exception:
+                    except Exception as exc:
                         logger.exception(
                             "Failed to refresh current quality evidence "
                             "after import for request %s",
                             request_id,
+                        )
+                        post_import_evidence = EvidenceBuildResult(
+                            None,
+                            "failed",
+                            f"{type(exc).__name__}: {exc}",
                         )
                     try:
                         _write_album_sidecar_after_import(
@@ -772,8 +875,9 @@ def dispatch_import_core(
                             f" -> '{narrowed_override}' after downgrade")
                     outcome_message = f"Rejected: {fail_scenario} — {fail_detail}"
 
-                # --- Common actions driven by flags ---
-                if action.denylist:
+                # Rejections use dispatch_action; retained imports use the
+                # canonical post-import reducer for the same denylist write.
+                if should_denylist:
                     if decision == "downgrade":
                         reason = "quality downgrade prevented"
                     elif decision == "provisional_lossless_upgrade":
@@ -808,24 +912,24 @@ def dispatch_import_core(
                 # counters and records the validation attempt. This second
                 # requeue is only for successful imports that intentionally go
                 # back to wanted to keep searching for a better source.
-                if action.requeue and action.mark_done:
-                    requeue_fields: dict[str, object] = {
-                        "search_filetype_override": QUALITY_UPGRADE_TIERS,
-                    }
-                    if action.mark_done and new_br is not None:
-                        requeue_fields["min_bitrate"] = new_br
-                    requeue_transition = transitions.RequestTransition.to_wanted_fields(
-                        from_status="imported",
-                        fields=requeue_fields,
-                    )
-                    terminal_outcome = _apply_or_stage_transition(
-                        db,
-                        request_id,
-                        terminal_outcome,
-                        requeue_transition,
-                    )
+                terminal_outcome = _apply_post_import_search_action(
+                    db,
+                    request_id=request_id,
+                    pending=terminal_outcome,
+                    decision=decision,
+                    search_action=search_action,
+                    mark_done=action.mark_done,
+                    new_bitrate=new_br,
+                )
 
-                if action.run_quality_gate:
+                # The post-import gate is automatic search-policy machinery.
+                # Force/manual imports are explicit operator decisions: they
+                # may replace a proof-bearing HAVE (U7) and must remain
+                # terminally imported instead of being reopened by U5's
+                # automatic wanted/lossless-or-full-tier policy.
+                if (action.run_quality_gate
+                        and not force
+                        and scenario not in FORCE_MANUAL_SCENARIOS):
                     terminal_outcome = _run_or_stage_quality_gate(
                         quality_gate_fn,
                         terminal_outcome,
@@ -835,6 +939,13 @@ def dispatch_import_core(
                         files=list(file_list),
                         db=db,
                         quality_ranks=cfg.quality_ranks if cfg is not None else None,
+                        expected_current_evidence_id=(
+                            post_import_evidence.evidence.id
+                            if post_import_evidence.status == "ready"
+                            and post_import_evidence.evidence is not None
+                            and post_import_evidence.evidence.id is not None
+                            else 0
+                        ),
                     )
                 if action.trigger_notifiers and cfg is not None:
                     # Capture the album's pre-upgrade Plex addedAt BEFORE the

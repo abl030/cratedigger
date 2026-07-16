@@ -851,7 +851,7 @@ def _result(
     current_evidence: AlbumQualityEvidence | None = None,
 ) -> WrongMatchCleanupOutcome:
     ambiguous_source_lineage = any(
-        evidence is not None and evidence.lineage_version != 3
+        evidence is not None and evidence.lineage_version not in (3, 4)
         for evidence in (candidate_evidence, current_evidence)
     )
     # Migration 050 lineage-v1 measurements may be target projections. A
@@ -867,7 +867,7 @@ def _result(
     ) -> AudioQualityMeasurement | None:
         if evidence is None:
             return None
-        if evidence.lineage_version == 3:
+        if evidence.lineage_version in (3, 4):
             return evidence.measurement
         # Spectral facts were never target projections. Preserve only that
         # valid subset, while an explicit empty measurement makes Recents
@@ -876,6 +876,8 @@ def _result(
         return AudioQualityMeasurement(
             spectral_grade=measurement.spectral_grade,
             spectral_bitrate_kbps=measurement.spectral_bitrate_kbps,
+            spectral_subject=measurement.spectral_subject,
+            spectral_provenance=measurement.spectral_provenance,
         )
 
     return WrongMatchCleanupOutcome(

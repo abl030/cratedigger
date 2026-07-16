@@ -1,5 +1,6 @@
 """Tests for unified import preview service."""
 
+import configparser
 import os
 import shutil
 import tempfile
@@ -11,6 +12,7 @@ from unittest.mock import patch
 from lib.config import CratediggerConfig
 from lib.import_preview import (
     ImportPreviewValues,
+    _lossless_candidate_spectral_failure,
     _prefer_successful_spectral_detail,
     compose_attempt_spectral_audit,
     enrich_current_v0_research_for_preview,
@@ -39,7 +41,42 @@ from tests.fakes import FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
 
 
+def _preview_config() -> CratediggerConfig:
+    ini = configparser.ConfigParser()
+    ini["Beets Validation"] = {
+        "harness_path": "/fake/harness/run_beets_harness.sh",
+        "audio_check": "off",
+    }
+    ini["Pipeline DB"] = {"enabled": "true"}
+    return CratediggerConfig.from_ini(ini)
+
+
 class TestSpectralAuditMerge(unittest.TestCase):
+    def test_lossless_candidate_requires_a_successful_usable_grade(self):
+        cases = (
+            ("absent", None),
+            ("not_attempted", SpectralAnalysisDetail(attempted=False)),
+            (
+                "error",
+                SpectralAnalysisDetail(
+                    attempted=True,
+                    error="RuntimeError: decoder failed",
+                ),
+            ),
+            ("grade_none", SpectralAnalysisDetail(attempted=True, grade=None)),
+            ("grade_error", SpectralAnalysisDetail(attempted=True, grade="error")),
+        )
+        for name, candidate in cases:
+            with self.subTest(name=name):
+                failure = _lossless_candidate_spectral_failure(
+                    PreimportMeasurement(
+                        lossless_candidate=True,
+                        spectral_audit=SpectralDetail(candidate=candidate),
+                    ),
+                    lossless_candidate=True,
+                )
+                self.assertIsNotNone(failure)
+
     def test_wav_conversion_preserves_source_spectral(self):
         """WAV→Opus is a lossless-source derivative, just like FLAC→Opus."""
         from lib.import_preview import preserve_existing_source_spectral
@@ -121,7 +158,7 @@ class TestSpectralAuditMerge(unittest.TestCase):
         db.set_request_current_evidence(42, persisted.id)
 
         loaded, detail, authoritative = load_persisted_existing_spectral(
-            db, 42, req)
+            db, 42)
 
         self.assertIsNotNone(loaded)
         self.assertTrue(authoritative)
@@ -155,7 +192,7 @@ class TestSpectralAuditMerge(unittest.TestCase):
                 )
                 with context:
                     loaded, detail, authoritative = (
-                        load_persisted_existing_spectral(db, 42, req)
+                        load_persisted_existing_spectral(db, 42)
                     )
 
                 self.assertIsNone(loaded)
@@ -409,6 +446,129 @@ class TestImportPreviewPath(unittest.TestCase):
         db.set_request_current_evidence(42, stored.id)
         return stored
 
+    def test_aac_m4a_preview_entrypoints_reuse_measurement_codec_probe(self):
+        """Neither preview path may repeat M4A classification after measure."""
+        from lib.dispatch.types import ImportOneRun
+        from lib.measurement import ExistingSpectralAuditLookup
+
+        run = ImportOneRun(
+            command=("import_one",),
+            returncode=0,
+            stdout="",
+            stderr="",
+            import_result=ImportResult(
+                decision="import",
+                source_measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=256,
+                    avg_bitrate_kbps=256,
+                    median_bitrate_kbps=256,
+                    format="AAC",
+                ),
+            ),
+        )
+        for entrypoint in ("worker", "direct"):
+            with self.subTest(entrypoint=entrypoint):
+                db = self._db()
+                source = tempfile.mkdtemp()
+                try:
+                    with open(os.path.join(source, "01.m4a"), "wb") as handle:
+                        handle.write(b"aac")
+                    with patch(
+                        "lib.config.read_runtime_config",
+                        return_value=_preview_config(),
+                    ), patch(
+                        "lib.import_preview.load_persisted_existing_spectral",
+                        return_value=(
+                            None,
+                            SpectralAnalysisDetail(attempted=False),
+                            False,
+                        ),
+                    ), patch(
+                        "lib.import_preview.load_current_evidence_for_preview",
+                        return_value=None,
+                    ), patch(
+                        "lib.measurement.existing_spectral_resolver_for_config",
+                        return_value=(
+                            lambda _release_id: ExistingSpectralAuditLookup()
+                        ),
+                    ), patch(
+                        "lib.measurement.ffprobe_audio_codec_name",
+                        return_value="aac",
+                    ) as codec_probe, patch(
+                        "lib.import_preview.persist_candidate_evidence_from_import_result",
+                        return_value=EvidenceBuildResult(None, "ready"),
+                    ), patch(
+                        "lib.import_preview.run_import_one",
+                        return_value=run,
+                    ):
+                        if entrypoint == "worker":
+                            result = measure_and_persist_candidate_evidence(
+                                db,
+                                request_id=42,
+                                path=source,
+                                run_import_fn=lambda **_kwargs: run,
+                            )
+                        else:
+                            result = preview_import_from_path(
+                                db,
+                                request_id=42,
+                                path=source,
+                            )
+
+                    self.assertNotEqual(result.decision, "spectral_analysis_failed")
+                    self.assertEqual(codec_probe.call_count, 1)
+                finally:
+                    shutil.rmtree(source, ignore_errors=True)
+
+    def test_m4a_codec_probe_failure_is_measurement_failed_before_harness(self):
+        from lib.measurement import ExistingSpectralAuditLookup
+
+        db = self._db()
+        source = tempfile.mkdtemp()
+        harness_called = False
+        try:
+            with open(os.path.join(source, "01.m4a"), "wb") as handle:
+                handle.write(b"unknown-codec")
+
+            def run_import(**_kwargs: Any):
+                nonlocal harness_called
+                harness_called = True
+                raise AssertionError("harness must not run after codec probe failure")
+
+            with patch(
+                "lib.config.read_runtime_config",
+                return_value=_preview_config(),
+            ), patch(
+                "lib.import_preview.load_persisted_existing_spectral",
+                return_value=(
+                    None,
+                    SpectralAnalysisDetail(attempted=False),
+                    False,
+                ),
+            ), patch(
+                "lib.import_preview.load_current_evidence_for_preview",
+                return_value=None,
+            ), patch(
+                "lib.measurement.existing_spectral_resolver_for_config",
+                return_value=lambda _release_id: ExistingSpectralAuditLookup(),
+            ), patch(
+                "lib.measurement.ffprobe_audio_codec_name",
+                return_value=None,
+            ):
+                result = measure_and_persist_candidate_evidence(
+                    db,
+                    request_id=42,
+                    path=source,
+                    run_import_fn=run_import,
+                )
+
+            self.assertEqual(result.verdict, "measurement_failed")
+            self.assertEqual(result.decision, "measurement_crashed")
+            self.assertIn("codec probe", result.detail or "")
+            self.assertFalse(harness_called)
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
     def test_preview_loader_rebuilds_blank_source_path_current_evidence(self):
         """A blank-path HAVE row must be rebuilt, not reused authoritatively.
 
@@ -480,7 +640,7 @@ class TestImportPreviewPath(unittest.TestCase):
             shutil.rmtree(source, ignore_errors=True)
 
     def test_preview_loader_rebuilds_v1_current_evidence_for_import_attempt(self):
-        """An actual import attempt must decide from a fresh v3 HAVE row."""
+        """An actual import attempt must decide from a fresh v4 HAVE row."""
         from lib.beets_db import AlbumInfo
         from lib.import_preview import load_current_evidence_for_preview
         from tests.fakes import FakeBeetsDB
@@ -534,7 +694,7 @@ class TestImportPreviewPath(unittest.TestCase):
 
             assert current is not None
             self.assertEqual(current.id, stored.id)
-            self.assertEqual(current.lineage_version, 3)
+            self.assertEqual(current.lineage_version, 4)
             self.assertEqual(current.measurement.format, "AAC")
             self.assertEqual(current.measurement.avg_bitrate_kbps, 256)
         finally:
@@ -643,6 +803,48 @@ class TestImportPreviewPath(unittest.TestCase):
             import shutil
             shutil.rmtree(source, ignore_errors=True)
             shutil.rmtree(other, ignore_errors=True)
+
+    def test_fresh_have_failure_overrides_stored_spectral_success(self):
+        db = self._db()
+        source = self._source_dir()
+        try:
+            evidence = make_album_quality_evidence(
+                mb_release_id="mbid-42",
+                source_path=source,
+                files=snapshot_audio_files(source),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=320,
+                    avg_bitrate_kbps=320,
+                    median_bitrate_kbps=320,
+                    format="MP3",
+                    spectral_grade="genuine",
+                    spectral_subject="installed",
+                    spectral_provenance="measured",
+                ),
+            )
+            db.upsert_album_quality_evidence(evidence)
+            current = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert current is not None and current.id is not None
+            db.set_request_current_evidence(42, current.id)
+
+            result = persist_exact_current_spectral_from_attempt(
+                db,
+                request_id=42,
+                current_evidence=current,
+                measured_existing=SpectralAnalysisDetail(
+                    attempted=True,
+                    error="RuntimeError: fresh HAVE scan failed",
+                ),
+                measured_existing_path=source,
+            )
+
+            self.assertEqual(result.status, "incomplete")
+            self.assertIn("fresh HAVE scan failed", result.reason or "")
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
 
     def test_measurement_worker_wires_have_scan_into_current_evidence(self):
         db = self._db()
@@ -785,9 +987,10 @@ class TestImportPreviewPath(unittest.TestCase):
             self.assertTrue(result.evidence.on_disk_v0_research_attempted)
             assert result.evidence.v0_metric is not None
             self.assertEqual(
-                result.evidence.v0_metric.source_lineage,
-                "on_disk_research",
+                result.evidence.v0_metric.subject,
+                "installed",
             )
+            self.assertEqual(result.evidence.v0_metric.provenance, "measured")
             self.assertEqual(result.evidence.v0_metric.avg_bitrate_kbps, 259)
         finally:
             import shutil
@@ -939,7 +1142,7 @@ class TestImportPreviewPath(unittest.TestCase):
             import shutil
             shutil.rmtree(source, ignore_errors=True)
 
-    def test_direct_preview_legacy_no_fk_uses_spectral_floor(self):
+    def test_direct_preview_no_fk_ignores_request_spectral_floor(self):
         db = self._db()
         db.request(42).update(
             min_bitrate=320,
@@ -947,7 +1150,7 @@ class TestImportPreviewPath(unittest.TestCase):
             current_spectral_bitrate=96,
         )
 
-        self.assertEqual(self._direct_preview_override(db), 96)
+        self.assertIsNone(self._direct_preview_override(db))
 
     def test_direct_preview_authoritative_empty_ignores_stale_scalars(self):
         db = self._db()
@@ -1059,10 +1262,10 @@ class TestImportPreviewPath(unittest.TestCase):
                 preview.import_result.spectral.existing.bitrate_kbps,
                 224,
             )
-            self.assertEqual(
-                mock_run.call_args.kwargs["existing_v0_probe"].avg_bitrate_kbps,
-                171,
-            )
+            # The request-row V0 stamps are audit-only.  With no linked
+            # current evidence, preview must not reconstruct a policy probe
+            # from those legacy scalars.
+            self.assertIsNone(mock_run.call_args.kwargs["existing_v0_probe"])
         finally:
             import shutil
             shutil.rmtree(source, ignore_errors=True)
@@ -1257,13 +1460,13 @@ class TestImportPreviewPath(unittest.TestCase):
             self.assertEqual(loaded.measurement.format, "FLAC")
             self.assertEqual(loaded.target_format, "opus 128")
             self.assertFalse(loaded.target_is_cbr)
-            self.assertEqual(loaded.lineage_version, 3)
+            self.assertEqual(loaded.lineage_version, 4)
             wrong_match = db.get_wrong_matches()[0]
             self.assertEqual(
                 wrong_match["evidence_target_format"], "opus 128"
             )
             self.assertFalse(wrong_match["evidence_target_is_cbr"])
-            self.assertEqual(wrong_match["evidence_lineage_version"], 3)
+            self.assertEqual(wrong_match["evidence_lineage_version"], 4)
         finally:
             import shutil
             shutil.rmtree(source, ignore_errors=True)
@@ -1877,7 +2080,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
         self.assertEqual(db.request(42)["status"], "wanted")
         current = db.load_album_quality_evidence_by_id(current_id)
         assert current is not None
-        self.assertEqual(current.lineage_version, 3)
+        self.assertEqual(current.lineage_version, 4)
         self.assertEqual(current.measurement.format, "AAC")
         self.assertEqual(current.measurement.avg_bitrate_kbps, 256)
 

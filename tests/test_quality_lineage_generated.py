@@ -156,7 +156,7 @@ def assert_failure_v1_refresh_phases(
         raise AssertionError("failure preparation rebuilt v1 before wanted")
     if refresh_status != "wanted":
         raise AssertionError("failure refresh ran before request became wanted")
-    if final_lineage != 3:
+    if final_lineage != 4:
         raise AssertionError("post-failure refresh retained ambiguous lineage")
 
 
@@ -166,27 +166,30 @@ def assert_import_attempt_uses_v3_current_evidence(
     decision_lineage: int | None,
 ) -> None:
     """An actual import attempt may not decide from ambiguous v1 evidence."""
-    if initial_lineage == 1 and decision_lineage != 3:
+    if initial_lineage == 1 and decision_lineage != 4:
         raise AssertionError("import attempt retained ambiguous current lineage")
 
 
-def assert_action_refresh_preserves_lossless_source_v0(
+def assert_action_refresh_carries_only_source_facts(
     *,
     decision_lineage: int | None,
-    v0_source_lineage: str | None,
+    v0_subject: str | None,
+    v0_provenance: str | None,
     v0_average: int | None,
     spectral_grade: str | None,
     spectral_bitrate: int | None,
 ) -> None:
-    """Lineage repair must retain exact-snapshot neutral facts atomically."""
-    if decision_lineage != 3:
-        raise AssertionError("action did not rebuild current evidence as v3")
-    if v0_source_lineage != "lossless_source":
+    """Lineage repair carries source facts and drops ambiguous on-disk facts."""
+    if decision_lineage != 4:
+        raise AssertionError("action did not rebuild current evidence as v4")
+    if v0_subject != "source":
         raise AssertionError("action discarded lossless-source V0 evidence")
+    if v0_provenance != "carried":
+        raise AssertionError("action did not mark source V0 evidence carried")
     if v0_average != 195:
         raise AssertionError("action replaced exact-snapshot V0 evidence")
-    if (spectral_grade, spectral_bitrate) != ("likely_transcode", 96):
-        raise AssertionError("action mixed exact-snapshot spectral evidence")
+    if spectral_grade is not None or spectral_bitrate is not None:
+        raise AssertionError("action retained ambiguous legacy spectral evidence")
 
 
 class TestQualityLineagePins(unittest.TestCase):
@@ -238,10 +241,22 @@ class TestQualityLineagePins(unittest.TestCase):
 
     def test_action_refresh_checker_rejects_lost_lossless_source_v0(self):
         with self.assertRaisesRegex(AssertionError, "discarded"):
-            assert_action_refresh_preserves_lossless_source_v0(
-                decision_lineage=3,
-                v0_source_lineage=None,
+            assert_action_refresh_carries_only_source_facts(
+                decision_lineage=4,
+                v0_subject=None,
+                v0_provenance=None,
                 v0_average=None,
+                spectral_grade=None,
+                spectral_bitrate=None,
+            )
+
+    def test_action_refresh_checker_rejects_legacy_spectral_carry(self):
+        with self.assertRaisesRegex(AssertionError, "ambiguous legacy spectral"):
+            assert_action_refresh_carries_only_source_facts(
+                decision_lineage=4,
+                v0_subject="source",
+                v0_provenance="carried",
+                v0_average=195,
                 spectral_grade="likely_transcode",
                 spectral_bitrate=96,
             )
@@ -286,7 +301,7 @@ class TestQualityLineagePins(unittest.TestCase):
                     min_bitrate_kbps=201,
                     avg_bitrate_kbps=259,
                     median_bitrate_kbps=255,
-                    source_lineage="on_disk_research",
+                    subject="installed",
                 )
                 if v0_present
                 else None
@@ -410,7 +425,7 @@ class TestQualityLineagePins(unittest.TestCase):
                     min_bitrate_kbps=259,
                     avg_bitrate_kbps=267,
                     median_bitrate_kbps=269,
-                    source_lineage="native_lossy_research",
+                    subject="installed",
                 ),
             )
             db.upsert_album_quality_evidence(legacy)
@@ -531,7 +546,7 @@ class TestQualityLineagePins(unittest.TestCase):
                     min_bitrate_kbps=189,
                     avg_bitrate_kbps=195,
                     median_bitrate_kbps=195,
-                    source_lineage="lossless_source",
+                    subject="source",
                 ),
             )
             db.upsert_album_quality_evidence(legacy)
@@ -610,14 +625,20 @@ class TestQualityLineagePins(unittest.TestCase):
         self.assertEqual(current.measurement.avg_bitrate_kbps, average)
         self.assertEqual(current.measurement.median_bitrate_kbps, median)
         action_evidence = action.evidence
-        assert_action_refresh_preserves_lossless_source_v0(
+        assert_action_refresh_carries_only_source_facts(
             decision_lineage=(
                 action_evidence.lineage_version
                 if action_evidence is not None
                 else None
             ),
-            v0_source_lineage=(
-                action_evidence.v0_metric.source_lineage
+            v0_subject=(
+                action_evidence.v0_metric.subject
+                if action_evidence is not None
+                and action_evidence.v0_metric is not None
+                else None
+            ),
+            v0_provenance=(
+                action_evidence.v0_metric.provenance
                 if action_evidence is not None
                 and action_evidence.v0_metric is not None
                 else None
@@ -736,7 +757,7 @@ class TestQualityLineagePins(unittest.TestCase):
                 min_bitrate_kbps=201,
                 avg_bitrate_kbps=259,
                 median_bitrate_kbps=255,
-                source_lineage="native_lossy_research",
+                subject="installed",
             ),
         )
         current = make_album_quality_evidence(
@@ -754,7 +775,7 @@ class TestQualityLineagePins(unittest.TestCase):
                 min_bitrate_kbps=202,
                 avg_bitrate_kbps=260,
                 median_bitrate_kbps=256,
-                source_lineage="on_disk_research",
+                subject="installed",
             ),
         )
         outcome = _result(
@@ -890,7 +911,7 @@ class TestQualityLineagePins(unittest.TestCase):
                 min_bitrate_kbps=201,
                 avg_bitrate_kbps=259,
                 median_bitrate_kbps=255,
-                source_lineage="on_disk_research",
+                subject="installed",
             ),
         )
         assert_research_v0_is_policy_neutral(
@@ -948,7 +969,7 @@ class TestQualityLineagePins(unittest.TestCase):
                 min_bitrate_kbps=probe_min,
                 avg_bitrate_kbps=probe_avg,
                 median_bitrate_kbps=probe_avg,
-                source_lineage="on_disk_research",
+                subject="installed",
             ),
         )
         assert_research_v0_is_policy_neutral(
@@ -961,7 +982,6 @@ class TestQualityLineagePins(unittest.TestCase):
             avg_bitrate_kbps=811,
             median_bitrate_kbps=803,
             format="FLAC",
-            verified_lossless=True,
         )
         probe = V0ProbeEvidence(
             kind="lossless_source_v0",
@@ -987,7 +1007,7 @@ class TestQualityLineagePins(unittest.TestCase):
 
         assert_source_target_lineage(result)
         decoded = ImportResult.from_json(result.to_json())
-        self.assertEqual(decoded.version, 3)
+        self.assertEqual(decoded.version, 4)
         self.assertEqual(decoded.source_measurement, source)
         self.assertEqual(decoded.v0_probe, probe)
         self.assertIsNotNone(decoded.target_quality_contract)
@@ -1079,13 +1099,11 @@ class TestQualityLineagePins(unittest.TestCase):
             min_bitrate_kbps=191,
             avg_bitrate_kbps=224,
             format="opus 128",
-            verified_lossless=True,
         )
         source = AudioQualityMeasurement(
             min_bitrate_kbps=742,
             avg_bitrate_kbps=811,
             format="FLAC",
-            verified_lossless=True,
         )
 
         old_decision = measured_import_decision(
@@ -1102,7 +1120,6 @@ class TestQualityLineagePins(unittest.TestCase):
             min_bitrate_kbps=121,
             avg_bitrate_kbps=128,
             format="Opus",
-            verified_lossless=True,
         )
         self.assertEqual(
             quality_gate_decision(output, cfg=cfg, target_contract=contract),
@@ -1111,7 +1128,6 @@ class TestQualityLineagePins(unittest.TestCase):
                     min_bitrate_kbps=121,
                     avg_bitrate_kbps=128,
                     format="opus 128",
-                    verified_lossless=True,
                 ),
                 cfg=cfg,
             ),
@@ -1229,7 +1245,7 @@ class TestQualityLineagePins(unittest.TestCase):
                     quality_gate_decision(
                         v0_output, cfg=cfg, target_contract=contract
                     ),
-                    "accept",
+                    "requeue_upgrade",
                 )
             with self.subTest(label="mp3 320", supplied_mode=supplied_mode):
                 contract = TargetQualityContract.from_projection(
@@ -1244,7 +1260,7 @@ class TestQualityLineagePins(unittest.TestCase):
                     quality_gate_decision(
                         cbr_output, cfg=cfg, target_contract=contract
                     ),
-                    "requeue_lossless",
+                    "requeue_upgrade",
                 )
 
     def test_early_downgrade_keeps_projected_target_for_dispatch_audit(self):
@@ -1361,7 +1377,7 @@ class TestQualityLineageGenerated(unittest.TestCase):
         )
         self.assertEqual(
             quality_gate_decision(output, cfg=cfg, target_contract=contract),
-            "requeue_lossless" if expected_cbr else "accept",
+            "requeue_upgrade",
         )
 
     @given(
@@ -1690,13 +1706,11 @@ class TestQualityLineageGenerated(unittest.TestCase):
             min_bitrate_kbps=probe_min,
             avg_bitrate_kbps=probe_avg,
             format=target,
-            verified_lossless=True,
         )
         source = AudioQualityMeasurement(
             min_bitrate_kbps=source_min,
             avg_bitrate_kbps=source_avg,
             format="FLAC",
-            verified_lossless=True,
         )
         probe = V0ProbeEvidence(
             kind="lossless_source_v0",
@@ -1720,7 +1734,6 @@ class TestQualityLineageGenerated(unittest.TestCase):
             min_bitrate_kbps=probe_min,
             avg_bitrate_kbps=probe_avg,
             format=target.split()[0],
-            verified_lossless=True,
         )
         self.assertEqual(
             quality_gate_decision(output, cfg=cfg, target_contract=contract),
