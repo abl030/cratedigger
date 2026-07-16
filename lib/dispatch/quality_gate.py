@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Sequence, TYPE_CHECKING
+from typing import Callable, Sequence, TYPE_CHECKING
 
 import msgspec
 
@@ -157,6 +157,7 @@ def _check_quality_gate_core(
     quality_ranks: "QualityRankConfig | None" = None,
     expected_current_evidence_id: int | None = None,
     apply: bool = True,
+    state_loader: Callable[..., QualityGateState | None] = load_quality_gate_state,
 ) -> QualityGatePlan | None:
     """Apply the post-import policy to linked current evidence."""
     from lib.quality import QualityRankConfig
@@ -168,7 +169,7 @@ def _check_quality_gate_core(
         return
     plan: QualityGatePlan
     try:
-        state = load_quality_gate_state(
+        state = state_loader(
             request_id=request_id,
             db=db,
             mb_id=mb_id,

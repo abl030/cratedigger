@@ -565,11 +565,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
                 verified_lossless_proof=ir.verified_lossless_proof,
             )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
-                 patch(
-                     "lib.dispatch.core._load_evidence_import_gate",
-                     return_value=EvidenceImportGate(candidate=candidate),
-                 ):
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=stdout, stderr="")
                 dispatch_import_core(
@@ -590,6 +586,11 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
                         quality_gate_fn
                         if quality_gate_fn is not None
                         else _check_quality_gate_core
+                    ),
+                    evidence_gate_fn=(
+                        lambda *_args, **_kwargs: EvidenceImportGate(
+                            candidate=candidate
+                        )
                     ),
                 )
         finally:
@@ -2698,11 +2699,7 @@ class TestReleaseLockContention(unittest.TestCase):
                 verified_lossless_proof=ir.verified_lossless_proof,
             )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
-                 patch(
-                     "lib.dispatch.core._load_evidence_import_gate",
-                     return_value=EvidenceImportGate(candidate=candidate),
-                 ):
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=_make_stdout(ir), stderr="")
                 dispatch_import_core(
@@ -2718,6 +2715,11 @@ class TestReleaseLockContention(unittest.TestCase):
                     files=[MagicMock(username="user1",
                                      filename="01 - Track.mp3")],
                     cfg=self._make_cfg(),
+                    evidence_gate_fn=(
+                        lambda *_args, **_kwargs: EvidenceImportGate(
+                            candidate=candidate
+                        )
+                    ),
                 )
         finally:
             beets_info.album_path = original_album_path

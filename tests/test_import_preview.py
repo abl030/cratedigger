@@ -37,7 +37,7 @@ from lib.quality import (
 )
 from lib.quality_evidence import EvidenceBuildResult, snapshot_audio_files
 
-from tests.fakes import FakePipelineDB
+from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
 
 
@@ -473,31 +473,17 @@ class TestImportPreviewPath(unittest.TestCase):
                 try:
                     with open(os.path.join(source, "01.m4a"), "wb") as handle:
                         handle.write(b"aac")
+                    fake_beets = FakeBeetsDB()
                     with patch(
                         "lib.config.read_runtime_config",
                         return_value=_preview_config(),
                     ), patch(
-                        "lib.import_preview.load_persisted_existing_spectral",
-                        return_value=(
-                            None,
-                            SpectralAnalysisDetail(attempted=False),
-                            False,
-                        ),
-                    ), patch(
-                        "lib.import_preview.load_current_evidence_for_preview",
-                        return_value=None,
-                    ), patch(
-                        "lib.measurement.existing_spectral_resolver_for_config",
-                        return_value=(
-                            lambda _release_id: ExistingSpectralAuditLookup()
-                        ),
+                        "lib.beets_db.BeetsDB",
+                        lambda **_kwargs: fake_beets,
                     ), patch(
                         "lib.measurement.ffprobe_audio_codec_name",
                         return_value="aac",
                     ) as codec_probe, patch(
-                        "lib.import_preview.persist_candidate_evidence_from_import_result",
-                        return_value=EvidenceBuildResult(None, "ready"),
-                    ), patch(
                         "lib.import_preview.run_import_one",
                         return_value=run,
                     ):
@@ -507,6 +493,9 @@ class TestImportPreviewPath(unittest.TestCase):
                                 request_id=42,
                                 path=source,
                                 run_import_fn=lambda **_kwargs: run,
+                                existing_spectral_resolver=(
+                                    lambda _release_id: ExistingSpectralAuditLookup()
+                                ),
                             )
                         else:
                             result = preview_import_from_path(
@@ -535,22 +524,13 @@ class TestImportPreviewPath(unittest.TestCase):
                 harness_called = True
                 raise AssertionError("harness must not run after codec probe failure")
 
+            fake_beets = FakeBeetsDB()
             with patch(
                 "lib.config.read_runtime_config",
                 return_value=_preview_config(),
             ), patch(
-                "lib.import_preview.load_persisted_existing_spectral",
-                return_value=(
-                    None,
-                    SpectralAnalysisDetail(attempted=False),
-                    False,
-                ),
-            ), patch(
-                "lib.import_preview.load_current_evidence_for_preview",
-                return_value=None,
-            ), patch(
-                "lib.measurement.existing_spectral_resolver_for_config",
-                return_value=lambda _release_id: ExistingSpectralAuditLookup(),
+                "lib.beets_db.BeetsDB",
+                lambda **_kwargs: fake_beets,
             ), patch(
                 "lib.measurement.ffprobe_audio_codec_name",
                 return_value=None,
@@ -560,6 +540,9 @@ class TestImportPreviewPath(unittest.TestCase):
                     request_id=42,
                     path=source,
                     run_import_fn=run_import,
+                    existing_spectral_resolver=(
+                        lambda _release_id: ExistingSpectralAuditLookup()
+                    ),
                 )
 
             self.assertEqual(result.verdict, "measurement_failed")

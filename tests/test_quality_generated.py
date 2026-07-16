@@ -589,17 +589,14 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
             measurement=measurement,
             verified_lossless_proof=decision == "accept",
         )
-        with patch(
-            "lib.dispatch.quality_gate.load_quality_gate_state",
-            return_value=state,
-        ):
-            plan = _check_quality_gate_core(
-                mb_id="generated-mbid", label="Generated",
-                request_id=42,
-                files=[SimpleNamespace(username="peer")],
-                db=SimpleNamespace(),  # type: ignore[arg-type]
-                apply=False,
-            )
+        plan = _check_quality_gate_core(
+            mb_id="generated-mbid", label="Generated",
+            request_id=42,
+            files=[SimpleNamespace(username="peer")],
+            db=SimpleNamespace(),  # type: ignore[arg-type]
+            apply=False,
+            state_loader=lambda **_kwargs: state,
+        )
         self.assertIsNotNone(plan)
         assert plan is not None
         raw_override = plan.transition.fields.get("search_filetype_override")

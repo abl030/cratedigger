@@ -27,6 +27,7 @@ from lib.quality_evidence import (
 )
 from lib.import_evidence import (
     CandidateEvidenceActionResult,
+    CurrentEvidenceActionResult,
     CURRENT_STATUS_FAILED,
     CURRENT_STATUS_MISSING,
     ensure_candidate_evidence_for_action,
@@ -238,6 +239,9 @@ def _load_evidence_import_gate(
     attempt_existing_spectral: SpectralAnalysisDetail | None = None,
     attempt_have_audit_available: bool = False,
     beets_library_root: str = "",
+    current_evidence_loader: Callable[
+        ..., CurrentEvidenceActionResult | None
+    ] = load_current_evidence_for_action,
 ) -> EvidenceImportGate:
     """Load persisted evidence for import-time quality authority."""
 
@@ -260,7 +264,7 @@ def _load_evidence_import_gate(
             snapshot_guard=candidate_result.provenance.snapshot_guard,
         )
 
-    current_result = load_current_evidence_for_action(
+    current_result = current_evidence_loader(
         db,
         request_id=request_id,
         mb_release_id=mb_release_id,

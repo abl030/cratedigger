@@ -262,11 +262,11 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         logs = r["db"].download_logs
         self.assertEqual(logs[-1].source_download_log_id, logs[0].id)
 
-    def test_successful_force_and_manual_imports_run_post_import_pipeline(self):
+    def test_successful_force_and_manual_imports_skip_automatic_gate_and_notify(self):
         for force in (True, False):
             with self.subTest(force=force):
                 r = self._dispatch(force=force)
-                r["mock_gate"].assert_called_once()
+                r["mock_gate"].assert_not_called()
                 r["mock_jellyfin"].assert_called_once()
 
     def test_no_double_download_log(self):

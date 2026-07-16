@@ -828,9 +828,6 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
                 payload={"failed_path": tmpdir},
             )
             with patch_dispatch_externals() as ext, patch(
-                "lib.dispatch.evidence_gate.load_current_evidence_for_action",
-                return_value=current_result,
-            ), patch(
                 "lib.dispatch.subprocess_runner.parse_import_result",
                 return_value=make_import_result(decision="import"),
             ):
@@ -849,6 +846,9 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
                     candidate_import_job_id=job.id,
                     prevalidated_candidate_result=candidate_result,
                     quality_gate_fn=noop_quality_gate,
+                    current_evidence_loader=(
+                        lambda *_args, **_kwargs: current_result
+                    ),
                 )
         return db, outcome, ext
 
@@ -1849,13 +1849,6 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
     def test_existing_v0_probe_state_serializes_to_argv(self):
         from lib.dispatch.types import EvidenceImportGate
 
-        row = make_request_row(
-            status="downloading",
-            current_lossless_source_v0_probe_min_bitrate=128,
-            current_lossless_source_v0_probe_avg_bitrate=171,
-            current_lossless_source_v0_probe_median_bitrate=169,
-        )
-
         current = make_album_quality_evidence(
             mb_release_id="test-mbid",
             v0_metric=AlbumQualityV0Metric(
@@ -1867,14 +1860,36 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
             ),
         )
 
-        # ``EvidenceImportGate.current`` is the linked-evidence adapter
-        # output.  Keep this seam test focused on argv propagation; loader
-        # freshness and FK behavior have their own action-evidence tests.
-        with patch(
-            "lib.dispatch.core._load_evidence_import_gate",
-            return_value=EvidenceImportGate(current=current),
+        # Keep this seam test focused on core-to-subprocess argv propagation;
+        # loader freshness and FK behavior have their own action-evidence tests.
+        from lib.dispatch import dispatch_import_core
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
+        with patch_dispatch_externals() as ext, patch(
+            "lib.dispatch.subprocess_runner.parse_import_result",
+            return_value=make_import_result(decision="import"),
         ):
-            cmd = _dispatch_valid_result_cmd(db_fields=row)
+            dispatch_import_core(
+                path="/tmp/dest",
+                mb_release_id="test-mbid",
+                request_id=42,
+                label="Test Artist - Test Album",
+                beets_harness_path=_HARNESS,
+                cfg=_full_dispatch_config(),
+                db=db,  # type: ignore[arg-type]
+                dl_info=DownloadInfo(filetype="mp3"),
+                files=[make_download_file(username="user1", filename="01.mp3")],
+                quality_gate_fn=noop_quality_gate,
+                evidence_gate_fn=(
+                    lambda *_args, **_kwargs: EvidenceImportGate(current=current)
+                ),
+            )
+            cmd = ext.run.call_args[0][0]
 
         self.assertIn("--existing-v0-probe-min-bitrate", cmd)
         self.assertEqual(
@@ -2105,17 +2120,17 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="imported"))
 
-        with patch(
-            "lib.dispatch.quality_gate.load_quality_gate_state",
-            side_effect=RuntimeError("evidence store unavailable"),
-        ):
-            plan = _check_quality_gate_core(
-                mb_id="test-mbid",
-                label="Failed Evidence",
-                request_id=42,
-                files=[make_download_file(username="winner", filename="01.mp3")],
-                db=db,  # type: ignore[arg-type]
-            )
+        def unavailable_state(**_kwargs):
+            raise RuntimeError("evidence store unavailable")
+
+        plan = _check_quality_gate_core(
+            mb_id="test-mbid",
+            label="Failed Evidence",
+            request_id=42,
+            files=[make_download_file(username="winner", filename="01.mp3")],
+            db=db,  # type: ignore[arg-type]
+            state_loader=unavailable_state,
+        )
 
         self.assertIsNotNone(plan)
         self.assertEqual(db.request(42)["status"], "wanted")

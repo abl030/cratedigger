@@ -6156,7 +6156,7 @@ class TestGetWrongMatches(unittest.TestCase):
         # NULL denorm columns) reach the row payload.
         self.assertEqual(row["spectral_grade"], "genuine")
         self.assertEqual(row["spectral_bitrate"], 21)
-        self.assertEqual(row["v0_probe_kind"], "lossless_source")
+        self.assertEqual(row["v0_probe_kind"], "lossless_source_v0")
         self.assertEqual(row["v0_probe_avg_bitrate"], 265)
 
         # New evidence-only fields surfaced for the entry quality badge.
@@ -6314,7 +6314,7 @@ class TestGetWrongMatches(unittest.TestCase):
         self.assertIsNone(entry.get("source_median_bitrate"))
         self.assertEqual(entry["spectral_grade"], "likely_transcode")
         self.assertEqual(entry["spectral_bitrate"], 96)
-        self.assertEqual(entry["v0_probe_kind"], "on_disk_research_v0")
+        self.assertEqual(entry["v0_probe_kind"], "native_lossy_research_v0")
         self.assertEqual(entry["v0_probe_avg_bitrate"], 259)
 
     def test_download_history_keeps_explicit_denorm_when_evidence_missing(self):

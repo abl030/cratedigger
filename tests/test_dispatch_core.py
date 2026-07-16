@@ -612,7 +612,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def test_persisted_candidate_evidence_backfills_stale_current_before_decision(self):
+    def test_stale_current_backfill_requires_fresh_enrichment_before_decision(self):
         from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
@@ -688,17 +688,17 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     candidate_import_job_id=job.id,
                 )
 
-            from lib.dispatch import DISPATCH_CODE_QUALITY_PIPELINE_REJECTED
-
             self.assertFalse(result.success)
-            self.assertIn("Rejected by persisted quality evidence", result.message)
-            self.assertEqual(result.code, DISPATCH_CODE_QUALITY_PIPELINE_REJECTED)
+            self.assertIn("Installed HAVE analysis failed", result.message)
+            self.assertEqual(result.code, "have_analysis_error")
             ext.run.assert_not_called()
             refreshed_id = db.get_request_current_evidence_id(42)
             self.assertIsNotNone(refreshed_id)
             refreshed = db.load_album_quality_evidence_by_id(refreshed_id)
             assert refreshed is not None
             self.assertEqual(refreshed.measurement.min_bitrate_kbps, 320)
+            self.assertIsNone(refreshed.measurement.spectral_grade)
+            self.assertIsNone(refreshed.v0_metric)
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)

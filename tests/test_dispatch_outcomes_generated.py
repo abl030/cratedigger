@@ -527,10 +527,7 @@ def _run_have_analysis_abort(
             request_id=42,
             payload=payload,
         )
-        with patch_dispatch_externals(), patch(
-            "lib.dispatch.evidence_gate.load_current_evidence_for_action",
-            return_value=current_result,
-        ):
+        with patch_dispatch_externals():
             outcome = dispatch_import_core(
                 path=tmpdir,
                 mb_release_id="generated-have-analysis-mbid",
@@ -546,6 +543,9 @@ def _run_have_analysis_abort(
                 candidate_import_job_id=job.id,
                 prevalidated_candidate_result=candidate_result,
                 quality_gate_fn=noop_quality_gate,
+                current_evidence_loader=(
+                    lambda *_args, **_kwargs: current_result
+                ),
             )
     if outcome.terminal_outcome is None:
         raise AssertionError("HAVE-analysis abort did not build a terminal outcome")

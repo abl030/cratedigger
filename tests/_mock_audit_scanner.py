@@ -181,6 +181,8 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^lib\.measurement\._iter_audio_files$"),
     re.compile(r"^lib\.measurement\.hash_audio_content$"),
     re.compile(r"^lib\.measurement\.validate_audio$"),
+    # Direct ffprobe wrapper used to distinguish AAC from ALAC in M4A files.
+    re.compile(r"^lib\.measurement\.ffprobe_audio_codec_name$"),
     re.compile(r"^lib\.spectral_check\.analyze_track$"),
     re.compile(r"^lib\.audio_hash\.hash_audio_content$"),
 
@@ -228,6 +230,8 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^scripts\.\w+\.logger\.(error|warning|exception|info|debug)$"),
     re.compile(r"^web\.\w+\.logger\.(error|warning|exception|info|debug)$"),
     re.compile(r"^harness\.\w+\.logger\.(error|warning|exception|info|debug)$"),
+    # Top-level entrypoint logger is the same assertion-only logging seam.
+    re.compile(r"^cratedigger\.logger\.(error|warning|exception|info|debug)$"),
 
     # Internal logging helper in the harness — wraps stderr writes.
     re.compile(r"^harness\.import_one\._log$"),

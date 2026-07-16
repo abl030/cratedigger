@@ -38,8 +38,9 @@ from lib.quality.dispatch_actions import DispatchAction
 from lib.quality_evidence import EvidenceBuildResult, audit_v0_probe_from_metric
 from lib.util import cleanup_disambiguation_orphans
 
-from lib.dispatch.types import (DispatchOutcome, FORCE_MANUAL_SCENARIOS,
-                                ImportAttemptResult, ImportOneRun, QualityGateFn)
+from lib.dispatch.types import (DispatchOutcome, EvidenceImportGate,
+                                FORCE_MANUAL_SCENARIOS, ImportAttemptResult,
+                                ImportOneRun, QualityGateFn)
 from lib.dispatch.subprocess_runner import run_import_one
 from lib.dispatch.helpers import (_cleanup_staged_dir, _guard_failure_detail,
                                   _log_postflight_bad_extensions,
@@ -64,7 +65,8 @@ from lib.terminal_outcomes import PendingImportTerminalOutcome, TerminalDenylist
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
-    from lib.import_evidence import CandidateEvidenceActionResult
+    from lib.import_evidence import (CandidateEvidenceActionResult,
+                                     CurrentEvidenceActionResult)
     from lib.pipeline_db import DownloadLogOutcome, PipelineDB
     from lib.quality import SpectralDetail
 
@@ -210,6 +212,10 @@ def dispatch_import_core(
     prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
     quality_gate_fn: QualityGateFn = _check_quality_gate_core,
     run_import_fn: Callable[..., ImportOneRun] | None = None,
+    evidence_gate_fn: Callable[..., EvidenceImportGate] = _load_evidence_import_gate,
+    current_evidence_loader: Callable[
+        ..., "CurrentEvidenceActionResult | None"
+    ] | None = None,
 ) -> "DispatchOutcome":
     """Core import dispatch — takes plain params + PipelineDB directly.
 
@@ -323,7 +329,12 @@ def dispatch_import_core(
 
         quality_evidence_action_file: str | None = None
         try:
-            evidence_gate = _load_evidence_import_gate(
+            evidence_gate_kwargs: dict[str, object] = {}
+            if current_evidence_loader is not None:
+                evidence_gate_kwargs["current_evidence_loader"] = (
+                    current_evidence_loader
+                )
+            evidence_gate = evidence_gate_fn(
                 db,
                 request_id=request_id,
                 mb_release_id=mb_release_id,
@@ -339,6 +350,7 @@ def dispatch_import_core(
                 ),
                 attempt_have_audit_available=attempt_result.audit is not None,
                 beets_library_root=getattr(cfg, "beets_directory", "") if cfg is not None else "",
+                **evidence_gate_kwargs,
             )
             if (
                 evidence_gate.candidate is not None

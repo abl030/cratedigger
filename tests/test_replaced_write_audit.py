@@ -63,10 +63,10 @@ class _AlbumRequestUpdate:
 # The ratchet does not infer parameter dataflow: transition SQL must use the
 # canonical direct call grammar below.
 _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/terminal_outcomes.py", 79, "741f55b2f7eee516"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 80, "741f55b2f7eee516"): (
         "terminal metadata keys use the existing validated request-field vocabulary"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 218, "6cfaff9c6507c211"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 219, "6cfaff9c6507c211"): (
         "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
     ),
     ("lib/beets_db.py", 339, "8f86dc625b889913"): (
@@ -84,16 +84,16 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/dashboard.py", 481, "5e3b8177198ccbed"): (
         "dashboard WHERE and ORDER fragments come from closed enum branches"
     ),
-    ("lib/pipeline_db/download_log.py", 734, "a4d9b82e27a004bb"): (
+    ("lib/pipeline_db/download_log.py", 737, "554f509613ff1b04"): (
         "validation key is selected from a closed server-owned vocabulary"
     ),
-    ("lib/pipeline_db/download_log.py", 786, "e0154e89026dc8ef"): (
+    ("lib/pipeline_db/download_log.py", 795, "e0154e89026dc8ef"): (
         "validation key is selected from a closed server-owned vocabulary"
     ),
-    ("lib/pipeline_db/download_log.py", 804, "1ca75e0c21fa6d7e"): (
+    ("lib/pipeline_db/download_log.py", 813, "1ca75e0c21fa6d7e"): (
         "validation key is closed vocabulary and IN list is value placeholders"
     ),
-    ("lib/pipeline_db/download_log.py", 821, "d87a36ba1d1768e7"): (
+    ("lib/pipeline_db/download_log.py", 830, "d87a36ba1d1768e7"): (
         "JSON path key is selected from a closed server-owned vocabulary"
     ),
     ("lib/pipeline_db/import_jobs.py", 105, "ecf3d1844c67f653"): (
@@ -149,16 +149,16 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
 # beside the implementation they review; movement or SQL-shape drift fails the
 # ratchet just like the dynamic-SQL exceptions above.
 _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/terminal_outcomes.py", 121, "72791581d0b54266"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 122, "72791581d0b54266"): (
         "atomic terminal transition mirrors typed wanted CAS inside one transaction"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 180, "9ab1fc9fb20fb77b"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 181, "9ab1fc9fb20fb77b"): (
         "atomic preview recovery accepts only downloading as its exact source"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 259, "786d2b82f14ac409"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 260, "786d2b82f14ac409"): (
         "atomic terminal import CASes status with rescue audit in the same transaction"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 299, "0a9c4396d1185b94"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 300, "0a9c4396d1185b94"): (
         "atomic terminal typed transition CASes the source status selected by the DAG"
     ),
     ("lib/pipeline_db/download_log.py", 403, "b04c5ae9eb3423c1"): (

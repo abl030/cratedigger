@@ -155,8 +155,8 @@ def import_quality_decision(
     QualityRank bands (via quality_rank/measurement_rank), so cross-codec
     comparisons (Opus 128 vs MP3 V0) are correctly treated as equivalent.
 
-    The verified_lossless bypass is now a tier-gated preference:
-    ``verified_lossless=True`` still forces an import when the verdict is
+    The verified-lossless proof bypass is now a tier-gated preference:
+    ``verified_lossless_proof=True`` still forces an import when the verdict is
     "better" or "equivalent", but NOT when it would be a downgrade — this
     blocks a deliberately too-low ``verified_lossless_target`` (e.g. Opus
     64) from replacing a good existing album. When the bypass CHANGED the
@@ -195,8 +195,8 @@ def import_quality_decision(
     )
     verdict = basis.verdict
 
-    # verified_lossless is a soft preference: "better" or "equivalent" still
-    # import, but "worse" is blocked regardless of verified_lossless status.
+    # Verified-lossless proof is a soft preference: "better" or "equivalent"
+    # still import, but "worse" is blocked regardless of proof status.
     # This prevents a deliberately too-low verified-lossless target from
     # blindly replacing a good existing album (issue #60 acceptance criterion).
     if verified_lossless_proof and verdict == "equivalent":

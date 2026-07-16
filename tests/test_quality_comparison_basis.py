@@ -179,7 +179,7 @@ class TestCompareQualityBasisBranches(unittest.TestCase):
     def test_verified_lossless_bypass_defaults_false_from_compare(self):
         """compare_quality never sets the bypass — that's the caller's fact."""
         basis = compare_quality(
-            _m(avg_bitrate_kbps=250, format="MP3", verified_lossless=True),
+            _m(avg_bitrate_kbps=250, format="MP3"),
             _m(avg_bitrate_kbps=248, format="MP3"),
             CFG,
         )
@@ -213,8 +213,11 @@ class TestImportQualityDecisionBasis(unittest.TestCase):
 
     def test_equivalent_verified_lossless_records_bypass(self):
         result = import_quality_decision(
-            _m(avg_bitrate_kbps=250, format="MP3", verified_lossless=True),
-            _m(avg_bitrate_kbps=248, format="MP3"), cfg=CFG)
+            _m(avg_bitrate_kbps=250, format="MP3"),
+            _m(avg_bitrate_kbps=248, format="MP3"),
+            cfg=CFG,
+            verified_lossless_proof=True,
+        )
         self.assertEqual(result.decision, "import")
         assert result.basis is not None
         self.assertEqual(result.basis.verdict, "equivalent")
@@ -224,8 +227,11 @@ class TestImportQualityDecisionBasis(unittest.TestCase):
         """The bypass flag means the bypass CHANGED the outcome — not merely
         that verified_lossless was true."""
         result = import_quality_decision(
-            _m(avg_bitrate_kbps=288, format="MP3", verified_lossless=True),
-            _m(avg_bitrate_kbps=196, format="MP3"), cfg=CFG)
+            _m(avg_bitrate_kbps=288, format="MP3"),
+            _m(avg_bitrate_kbps=196, format="MP3"),
+            cfg=CFG,
+            verified_lossless_proof=True,
+        )
         self.assertEqual(result.decision, "import")
         assert result.basis is not None
         self.assertFalse(result.basis.verified_lossless_bypass)
@@ -240,8 +246,11 @@ class TestImportQualityDecisionBasis(unittest.TestCase):
 
     def test_worse_verified_lossless_still_blocked_no_bypass(self):
         result = import_quality_decision(
-            _m(avg_bitrate_kbps=196, format="MP3", verified_lossless=True),
-            _m(avg_bitrate_kbps=288, format="MP3"), cfg=CFG)
+            _m(avg_bitrate_kbps=196, format="MP3"),
+            _m(avg_bitrate_kbps=288, format="MP3"),
+            cfg=CFG,
+            verified_lossless_proof=True,
+        )
         self.assertEqual(result.decision, "downgrade")
         assert result.basis is not None
         self.assertEqual(result.basis.verdict, "worse")

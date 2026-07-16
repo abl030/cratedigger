@@ -1961,6 +1961,7 @@ class TestClassifyComparisonBasis(unittest.TestCase):
             AudioQualityMeasurement(**new_kw),
             AudioQualityMeasurement(**existing_kw),
             cfg=QualityRankConfig.defaults(),
+            verified_lossless_proof=True,
         )
         assert result.basis is not None
         return msgspec.to_builtins(result.basis)
@@ -2067,7 +2068,7 @@ class TestClassifyComparisonBasis(unittest.TestCase):
 
     def test_verified_lossless_bypass_names_the_bypass(self):
         basis = self._bypass_basis_dict(
-            dict(avg_bitrate_kbps=250, format="MP3", verified_lossless=True),
+            dict(avg_bitrate_kbps=250, format="MP3"),
             dict(avg_bitrate_kbps=248, format="MP3"),
         )
         self.assertTrue(basis["verified_lossless_bypass"])
