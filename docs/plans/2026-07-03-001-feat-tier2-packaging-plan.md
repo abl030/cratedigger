@@ -323,7 +323,7 @@ Unit index:
 | Gate | Command | Applies to |
 |---|---|---|
 | Full suite (pinned shell) | `nix-shell --run "bash scripts/run_tests.sh"` then read `/tmp/cratedigger-test-output.txt` | every unit touching `.py`/`.js` |
-| Pyright (whole repo) | `nix-shell --run "pyright"` — 0 errors | every unit touching `.py` |
+| Pyright (whole repo) | `nix-shell --run "pyright --threads 4"` — 0 errors | every unit touching `.py` |
 | Real-beets drift gate | `tests/test_harness_beets2_contract.py` inside the pinned shell | U1, U3, U5, and every future `nix flake update` |
 | Module VM boot gate | `nix build .#checks.x86_64-linux.moduleVm` | U2, U4, U7, U10 |
 | Package build | `nix build .#default` + `nix run .#pipeline-cli -- --help` | U8 |

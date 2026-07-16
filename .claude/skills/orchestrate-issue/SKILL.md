@@ -1,6 +1,6 @@
 ---
 name: orchestrate-issue
-description: Orchestrate a substantial Cratedigger issue through scoped PRs, independent review, merge, deployment, live verification, tagging, and closure. Use for whole-issue delivery, especially when several workstreams can run concurrently. Do not use for a small patch, diagnosis-only request, or ordinary review.
+description: Orchestrate a substantial Cratedigger issue through scoped PRs, independent review, final validation, merge, deployment, live verification, and closure. Use for whole-issue delivery, especially when several workstreams can run concurrently. Do not use for a small patch, diagnosis-only request, or ordinary review.
 ---
 
 # Orchestrate Issue
@@ -48,11 +48,12 @@ Review returns either one consolidated finding batch or `CLEAN`. Fix findings
 locally and repeat on the new SHA. An independent `CLEAN` verdict is final. If
 current `main` changes the reviewed tree, integrate it and review the new SHA.
 
-Push the reviewed SHA with one ordinary branch push through the repository
-pre-push hook, then open the PR. The hook is the sole release-grade code gate.
-If a hook failure requires a code change, review that new local SHA before the
-next push. Do not add post-push review, duplicate suites, artifact gates, Nix
-replays, or post-merge code audits.
+On the reviewed committed SHA, run the check skill once: whole-repo threaded
+Pyright followed by the full suite. Push that validated SHA with one ordinary
+branch push, then open the PR. If final validation requires a code change,
+reconverge with focused tests and review the new SHA before restarting the final
+validation sequence. Do not add post-push review, duplicate suites, Nix replays,
+or post-merge code audits.
 
 ## Merge and advance
 
@@ -72,10 +73,8 @@ source and the real user-facing behavior, including the post-switch successor
 cycle where the service lifecycle requires it. Screenshots or live data should
 prove the reported symptom, not merely that deployment commands succeeded.
 
-Create the signed release tag at the verified merge. Push the signed tag with `--no-verify`;
-it adds no code. Confirm the remote tag, then record the PR, review, deploy, and
-live evidence. Only after the signed tag push succeeds, close the issue
-deliberately.
+Record the PR, review, deploy, and live evidence. Only after the coverage ledger
+is complete and live verification succeeds, close the issue deliberately.
 
 ## Keep perspective
 

@@ -506,7 +506,7 @@ Origin AEs traced to the units that exercise them via test scenarios:
 
 - **Per-unit tests** as enumerated above; every unit's verification block names the unittest module to run.
 - **Full suite** after the last unit: `nix-shell --run "bash scripts/run_tests.sh"` — must pass clean. Pre-existing `OK (skipped=0)` invariant per `tests/test_skip_audit.py` is preserved (no new skip-gated tests).
-- **pyright clean** on the full repo per `.claude/rules/code-quality.md`: `nix-shell --run "pyright"` exits with 0 errors after the change.
+- **pyright clean** on the full repo per `.claude/rules/code-quality.md`: `nix-shell --run "pyright --threads 4"` exits with 0 errors after the change.
 - **Live smoke after deploy**:
   - `pipeline-cli youtube-album <known-popular-mbid>` — happy path: returns matrix, exit 0.
   - `pipeline-cli youtube-album <known-obscure-mbid>` — returns empty matrix (R11), exit 0.

@@ -24,7 +24,7 @@ _CLOSERS = (
 
 
 def assert_skill_reference_contract(skill_text: str) -> None:
-    """Assert the tracked skill owns the safe reference/release sequence."""
+    """Assert the tracked skill never auto-closes an issue from a PR."""
     violations = find_closing_issue_references(skill_text)
     if violations:
         rendered = ", ".join(
@@ -34,76 +34,6 @@ def assert_skill_reference_contract(skill_text: str) -> None:
         )
         raise AssertionError(
             f"orchestrator skill contains auto-closing references: {rendered}"
-        )
-
-    normalized_skill = " ".join(skill_text.split())
-    required_fragments = (
-        "coverage ledger",
-        "isolated worktrees",
-        "canonical `Refs #N` or a plain issue URL",
-        "PR body and every branch commit message",
-        "python3 scripts/audit_issue_references.py",
-        "An independent `CLEAN` verdict is final",
-        "one ordinary branch push through the repository pre-push hook",
-        "Compose agents around bounded jobs, not a fixed per-PR template",
-        "Use available agent slots for independent work when it shortens the critical path",
-        "Serialize only for a concrete dependency",
-        "Do not spend tokens on duplicate generalist reviews",
-        "Never carry a subagent into the next PR",
-        "post-switch successor cycle",
-        "Only after the signed tag push succeeds",
-    )
-    missing = [
-        fragment for fragment in required_fragments
-        if fragment not in normalized_skill
-    ]
-    if missing:
-        raise AssertionError(
-            "orchestrator skill is missing reference/release contract: "
-            + ", ".join(missing)
-        )
-
-    if len(skill_text.split()) > 750:
-        raise AssertionError("orchestrator skill has become a runbook again")
-
-    release_section = normalized_skill.partition("## Ship")[2]
-    forbidden_fragments = (
-        "CRATEDIGGER_TEST_ARTIFACT",
-        "binding `CLEAN`",
-        "full suite",
-        "artifact verification",
-        "exact final merge SHA",
-        "mandatory post-ship reflection",
-        "Search for stale old-owner imports",
-        "Use a fresh implementation agent for each PR",
-        "a separate read-only reviewer",
-    )
-    present_forbidden = [
-        fragment for fragment in forbidden_fragments
-        if fragment in normalized_skill
-    ]
-    if present_forbidden:
-        raise AssertionError(
-            "orchestrator skill still duplicates release gates: "
-            + ", ".join(present_forbidden)
-        )
-
-    tag_marker = "Push the signed tag with `--no-verify`"
-    close_marker = "Only after the signed tag push succeeds"
-    if not release_section:
-        raise AssertionError("orchestrator skill has no release section")
-    missing_release_markers = [
-        marker for marker in (tag_marker, close_marker)
-        if marker not in release_section
-    ]
-    if missing_release_markers:
-        raise AssertionError(
-            "orchestrator skill is missing ordered release markers: "
-            + ", ".join(missing_release_markers)
-        )
-    if release_section.find(tag_marker) >= release_section.find(close_marker):
-        raise AssertionError(
-            "orchestrator skill must push the verified tag before closure"
         )
 
 
@@ -157,20 +87,6 @@ class TestIssueReferenceContract(unittest.TestCase):
         ).read_text(encoding="utf-8")
         assert_skill_reference_contract(skill)
 
-    def test_skill_contract_is_independent_of_markdown_wrapping(self) -> None:
-        skill = (
-            Path(__file__).parents[1]
-            / ".claude"
-            / "skills"
-            / "orchestrate-issue"
-            / "SKILL.md"
-        ).read_text(encoding="utf-8")
-        wrapped = skill.replace(
-            "Push the signed tag with `--no-verify`",
-            "Push the signed tag\nwith `--no-verify`",
-        )
-        assert_skill_reference_contract(wrapped)
-
     def test_planted_skill_fault_proves_content_audit_trips(self) -> None:
         skill = (
             Path(__file__).parents[1]
@@ -183,21 +99,6 @@ class TestIssueReferenceContract(unittest.TestCase):
             AssertionError, "contains auto-closing references"
         ):
             assert_skill_reference_contract(skill + "\nCloses #609\n")
-
-        with self.assertRaisesRegex(
-            AssertionError, "still duplicates release gates"
-        ):
-            assert_skill_reference_contract(
-                skill + "\nRun the full suite again after merge.\n"
-            )
-
-        missing_push = skill.replace(
-            "Push the signed tag with `--no-verify`", "Push the release tag"
-        )
-        with self.assertRaisesRegex(
-            AssertionError, "missing ordered release markers"
-        ):
-            assert_skill_reference_contract(missing_push)
 
     def test_cli_reads_stdin_and_reports_bad_reference_location(self) -> None:
         script = (

@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from hypothesis import given, strategies as st
 
-import tests._hypothesis_profiles  # noqa: F401 - registers suite/push/fuzz
+import tests._hypothesis_profiles  # noqa: F401 - registers suite/fuzz
 from lib.config import CratediggerConfig
 from lib.util import trigger_jellyfin_scan
 

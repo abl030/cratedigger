@@ -381,7 +381,7 @@ def _run_rejection_writer(
         if real_filesystem:
             # The deterministic pin below owns the full quarantine move and
             # tracking-file integration. Repeating those filesystem effects
-            # for every push/fuzz example makes the property impractical
+            # for every fuzz example makes the property impractical
             # without adding projection coverage.
             with tempfile.TemporaryDirectory() as tmpdir:
                 cfg = CratediggerConfig(

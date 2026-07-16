@@ -239,7 +239,7 @@ flowchart TB
 | Gate | Command | Applies to |
 |---|---|---|
 | Full suite (JS syntax + JS tests + vulture + unittest, includes real-PG tests) | `nix-shell --run "bash scripts/run_tests.sh"` then grep `^FAIL\|^ERROR` in `/tmp/cratedigger-test-output.txt` | U1-U5 |
-| Type check, whole repo, zero errors | `nix-shell --run "pyright"` | U1-U5 |
+| Type check, whole repo, zero errors | `nix-shell --run "pyright --threads 4"` | U1-U5 |
 | Single-module loop during dev | `nix-shell --run "python3 -m unittest tests.test_mbid_replace_service -v"` (and peers) | U1, U3, U4 |
 | Route audit self-check | included in the suite (`tests/web/test_route_audit.py`) | U4, U5 |
 | Live smoke | Playwright against `music.ablz.au` + `pipeline-cli show`/`query` on doc2 | U6 |

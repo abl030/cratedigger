@@ -38,8 +38,8 @@
       # Content-addressed version (first 8 chars of runtimeSrc's store
       # hash): unique per runtime content, deliberately NOT per commit —
       # a rev-coupled version would invalidate the package + moduleVm on
-      # every push regardless of what changed. Release tags (vYYYY.MM.DD,
-      # U9) record verified states in git itself.
+      # every commit regardless of what changed. Deployment identity comes
+      # from the exact Git revision and signed nixosconfig pin.
       version = "0-unstable-"
         + builtins.substring 0 8 (baseNameOf (toString runtimeSrc));
     in {

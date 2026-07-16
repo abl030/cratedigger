@@ -58,14 +58,22 @@ Call the full pipeline.
 
 # PYRIGHT CLEAN ALWAYS
 
-**Never run pyright on just the files you touched.** Run `nix-shell --run "pyright"` on the full repo, every time. Pre-existing errors are not someone else's problem — they accumulate as drift the moment you decide they're not yours to fix. Fixing each one is cheap; the expensive part is re-discovering them later and arguing about ownership. Triaging "is this mine or pre-existing?" via `git checkout` costs more tokens than just fixing it. **The repo is either 0-errors or it is not. Make it 0-errors.**
+**Never scope the final Pyright check to just the files you touched.** Run
+`nix-shell --run "pyright --threads 4"` on the full repo before the first branch
+push. Pre-existing errors are not someone else's problem — they accumulate as
+drift the moment you decide they're not yours to fix. Fixing each one is cheap;
+the expensive part is re-discovering them later and arguing about ownership.
+Triaging "is this mine or pre-existing?" via `git checkout` costs more tokens
+than just fixing it. **The repo is either 0-errors or it is not. Make it
+0-errors.**
 
 - All new dataclasses, functions, and module-level code must pass pyright with 0 errors
 - Use typed dataclasses (not dicts) for structured data crossing module boundaries
 - **No dual-interface types.** Never add `__getitem__`, `.get()`, or `isinstance(x, dict)` dispatch to a dataclass. If a function receives both dicts and dataclasses, that is a type error — fix the callers, not the receiver. Temporary bridges become permanent bugs.
 - If a function parameter is untyped and accepts multiple representations (dict or dataclass), type it and fix all callers to pass the correct type
 - Inner data structures must also be typed — no `list[dict]` when a dataclass exists
-- Verify with: `pyright <files>` on every touched file before committing
+- For focused feedback during implementation, use
+  `pyright --threads 4 <files>`; the final check still covers the whole repo
 
 ## HTTP request bodies — use `pydantic.BaseModel`
 
@@ -151,17 +159,15 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   operator/agent one-shot — never committed (`scope.md`); record the kill
   matrix in the issue/PR. Canonical run: issue #548, 2026-07-08 — 13
   mutants, incl. reverting fix `6cf26a4`, led to PR #555.
-- Use `nix-shell --run "bash scripts/run_tests.sh"` for full suite
-- Copy the unique artifact directory printed at start/completion; read its
-  `output.log` instead of re-running the 2-minute suite. `summary.json` records
-  the canonical worktree, start/end HEAD and cleanliness, timestamps, status,
-  Python discovered/run counts, capture exit status, and the completed
-  output's exact byte count and SHA-256. There is no global latest-output alias.
-- An exact-target citation must pass the `verify` subcommand of
-  `scripts/test_artifact.py` for the expected commit. Set
-  `CRATEDIGGER_TEST_ARTIFACT` on `git push` when the hook must require that
-  citation for every peeled target commit.
-- For single modules during dev: `nix-shell --run "python3 -m unittest tests.<module> -v"`
+- During implementation, run focused modules:
+  `nix-shell --run "python3 -m unittest tests.<module> -v"`
+- After the final tree is reviewed and committed, run
+  `nix-shell --run "pyright --threads 4"` and then
+  `nix-shell --run "bash scripts/run_tests.sh"` exactly once before the first
+  branch push. Both must pass on the pushed tree.
+- If final validation finds a problem, fix it, reconverge with focused tests,
+  commit and review the new tree, then restart the final sequence. Do not replay
+  the final suite for an unchanged tree after push or merge.
 
 ## Prefer canonical contracts over semantic scanners
 
@@ -420,7 +426,9 @@ When adding a wrapper to the allowlist, include a one-line rationale next to the
 
 ## Commits & PRs
 - One logical change per commit
-- Run full test suite + pyright before committing
+- Use focused tests while implementing. Review and commit the final tree, then
+  run whole-repo threaded Pyright and the full suite once immediately before
+  the first branch push.
 - Non-trivial work goes on a feature branch with a PR (e.g. `feat/cooldowns`, `fix/spectral-race`)
 - PRs are merged via GitHub **Create a merge commit** (not Rebase-and-merge, not Squash-and-merge). This keeps the PR attached to mainline history while preserving the individual commits, so write them well.
 - Deploy and verify live after merging

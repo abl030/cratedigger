@@ -7,7 +7,7 @@ import unittest
 
 from hypothesis import example, given, strategies as st
 
-import tests._hypothesis_profiles  # noqa: F401 - registers suite/push/fuzz tiers
+import tests._hypothesis_profiles  # noqa: F401 - registers suite/fuzz tiers
 from tests.test_unused_import_audit import (
     assert_redundant_alias_baseline,
     assert_import_liveness,

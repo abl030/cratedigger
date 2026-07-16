@@ -175,7 +175,7 @@ Deferred all framework / language redesign per `docs/solutions/web-rewrite-defer
 
 **Verification:**
 - All four test categories above pass under `nix-shell --run "python3 -m unittest tests.test_web_server -v"`.
-- `pyright web/server.py tests/test_web_server.py` reports 0 new errors on the changed files.
+- `nix-shell --run "pyright --threads 4 web/server.py tests/test_web_server.py"` reports 0 new errors on the changed files.
 - The pre-commit pyright hook passes on staged files.
 
 ---

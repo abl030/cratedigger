@@ -51,7 +51,6 @@ Hunting — Generated-First".
 | `tests/test_convergence_runner_generated.py` | `lib/convergence.py::run_convergence_steps` | every registered convergence step is attempted exactly once in declared order even when any arbitrary subset raises; Phase 0 order and the end-of-cycle harvest-before-purge constraint are pinned as registry data rather than source inspection; import failures are isolated like call failures |
 | `tests/test_current_library_quality_generated.py` | `BeetsDB.check_mbids_detail` + `lib.banding.band_from_detail` | current beets projections preserve the positive-track minimum as floor data, expose the positive-track mean explicitly, and select that mean for codec-aware rank; the known-bad min-selected mutant is rejected |
 | `tests/test_unused_import_audit_generated.py` | pinned Ruff `F401`/`F811` source-local analysis | an import is live only through its own binding in the importing module; same-named peer uses, parameter/comprehension shadows, and rebindings cannot mask it; exact intentional redundant-alias baselines reject expansions, duplicate identities, and stale entries even though Ruff accepts explicit re-exports; planted aggregate-name and baseline-delta faults qualify the checkers |
-| `tests/test_suite_artifact_generated.py` | `scripts/test_artifact.py` exact-target provenance checker | a suite artifact is citeable iff its gate and synchronous output capture completed green, it started and ended clean at the expected HEAD, it ran every test in the exact discovered suite, and it records completed-output byte/SHA-256 integrity; deterministic pins exercise real concurrent allocations, delayed/failing capture processes, output tampering, and planted wrong-HEAD/dirty evidence |
 | `tests/test_js_ast_generated.py` | flake-pinned tree-sitter JavaScript structural audits | supported direct payload literals produce exactly the independent field oracle across raw/escaped identifiers, shorthand, quoted/computed, nested, array, comment, string, template, Unicode, and ordering worlds; production payload fixtures use exact local aliases registered from the real renderer module, while raw renderer references, default/namespace/alternate imports, non-top-level or shadowed `__test__` registrations, computed `__test__` fixture calls, spreads, elisions, fixture indirection, and methods fail closed without attempting JavaScript dataflow inference; independent boundary worlds vary lexical scopes, repeated names, `let`/`const`, before/after member mutation, duplicate keys, registration/import shapes, unknown selectors, full browser-global-rooted semantic Object chains, and target expressions; unrelated modules and inert strings remain valid; emitted window handlers preserve ECMAScript raw/cooked escape semantics (including Unicode line continuations and lone surrogates), while bindings normalize escaped keys, treat full member chains rooted at `window`/`globalThis`/`self` as browser globals, reject every computed call rooted at semantic `Object` in a window-binding owner, and accept only exact direct `Object.assign(window, {...})` shapes across multiple blocks; planted quoted-key, template-interpolation, state-boundary, fail-open binding, and missing-binding mutants qualify the checkers |
 | `tests/test_issue_reference_contract_generated.py` | `scripts/audit_issue_references.py` | implementation PR bodies and branch commit messages never use any GitHub auto-closing keyword with same-repo, cross-repo, or full-URL issue references across case, colon, whitespace, and issue-number worlds; canonical `Refs #N` and plain issue URLs remain valid, with the real premature-close shapes for issues #598 and #609 pinned as known-bad examples |
 | `tests/test_deploy_pin_generated.py` | `scripts/pin_nixosconfig.sh` through deterministic process-level git/nix/token seams | a retry never creates a second signed pin across failures or signals after commit because the commit transaction advances a private pending ref; transient command failures and inconclusive signature status retain that ref while a definitively bad or unsigned candidate is discarded; every push follows promotion to the durable receipt ref and carries the token header only in a trace-sanitized environment; every started detached worktree gets a cleanup attempt across update, signature, post-commit recovery, push, and cleanup faults, with planted invalid-pending, two-signed-commits/one-receipt, push-before-ref, and missing-cleanup violations qualifying the checker |
@@ -74,22 +73,14 @@ target/observation worlds are generated in the two Python modules above; a
 second JavaScript property stack would duplicate those policies rather than
 exercise a new invariant.
 
-## Three tiers, one knob
+## Two tiers, one knob
 
-`tests/_hypothesis_profiles.py` registers three profiles, selected by
+`tests/_hypothesis_profiles.py` registers two profiles, selected by
 `CRATEDIGGER_HYPOTHESIS_PROFILE`:
 
 - **`suite`** (default) — deterministic (`derandomize=True`, no example
   database), bounded examples. Runs on every `scripts/run_tests.sh`,
-  identical on every machine. This is the merge gate.
-- **`push`** — quick randomized burst (2k examples) that `scripts/pre-push`
-  runs on every `git push`, before the flake check. The generated modules
-  run as parallel single-module processes (wall-clock = slowest module,
-  not the sum; the shared `.hypothesis/` database is multi-process safe).
-  Fresh entropy per push means exploration accumulates over time with
-  zero operator effort; a push-found failure is remembered in
-  `.hypothesis/` and replays first in dev. Escape hatch, as for the whole
-  hook: `git push --no-verify`.
+  identical on every machine. This is part of the final local gate.
 - **`fuzz`** — deep randomized burst (20k examples) for local exploration.
   Fresh entropy per run, local example database (`.hypothesis/`,
   gitignored) so found failures replay first on the next burst,
@@ -174,20 +165,20 @@ only. How to pick mutants:
 - flip decision comparisons; remove early-exit guards and readiness gates;
 - for each property, plant the exact violation it claims to catch.
 
-Interpret results per mutant: **killed** = the property works; **killed
-only at push/fuzz entropy** = suite-budget miss, acceptable because the
-pre-push hook runs the entropy tier on every push; **survived all tiers** =
-either a missing invariant (add it, with a known-bad self-test) or a world
-the strategies rarely make decisive (pin the decisive world as an
-`@example`). The mutation driver is an operator/agent one-shot — never
-committed (`.claude/rules/scope.md`); record the kill matrix in the
-issue/PR.
+Interpret results per mutant: **killed** = the property works; **killed only at
+fuzz entropy** = the deterministic suite budget misses the decisive world, so
+pin it as an `@example`; **survived both tiers** = either a missing invariant
+(add it, with a known-bad self-test) or a world the strategies rarely make
+decisive (again, pin the decisive world). The mutation driver is an
+operator/agent one-shot — never committed (`.claude/rules/scope.md`); record
+the kill matrix in the issue/PR.
 
 Canonical run (issue #548, 2026-07-08): 13 mutants — including reverting
 fix `6cf26a4`, which the generated lifecycle property killed independently
-of its hand-written regression tests — 10 killed outright, 1 at push-tier
-entropy, 2 survivors fixed in PR #555 (`assert_below_gate_never_stops_search`
-and the `_SPECTRAL_OVERRIDE_DECISIVE_WORLD` parity pin).
+of its hand-written regression tests — 10 killed outright, 1 only under
+deeper randomized entropy, 2 survivors fixed in PR #555
+(`assert_below_gate_never_stops_search` and the
+`_SPECTRAL_OVERRIDE_DECISIVE_WORLD` parity pin).
 
 ## Writing new generated tests
 
@@ -204,7 +195,7 @@ and the `_SPECTRAL_OVERRIDE_DECISIVE_WORLD` parity pin).
   can prove each one trips. Every checker owes one — a property that has
   never failed anything is unfalsifiable until proven otherwise.
 - Import `tests._hypothesis_profiles` for the side effect before using
-  `@given` — that is what wires the module into the suite/push/fuzz tiers.
+  `@given` — that is what wires the module into the suite/fuzz tiers.
 - Reuse the shared fakes/builders (`tests/fakes/`, `tests/helpers.py`)
   per `.claude/rules/code-quality.md`; leaf-seam mock rules apply to
   generated tests like any other test.

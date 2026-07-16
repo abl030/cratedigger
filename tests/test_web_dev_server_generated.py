@@ -16,7 +16,7 @@ from typing import Any
 
 from hypothesis import given, strategies as st
 
-import tests._hypothesis_profiles  # noqa: F401 - registers suite/push/fuzz
+import tests._hypothesis_profiles  # noqa: F401 - registers suite/fuzz
 from tests.test_web_cache import FakeRedis
 from web import cache
 from web.api_bases import PUBLIC_MB_ORIGIN
@@ -301,9 +301,8 @@ class TestBrowseResolveWarmCacheGenerated(unittest.TestCase):
             f"{self.base}/api/browse/resolve?source=discogs&"
             f"id={discogs_id}&kind={kind}"
         )
-        # The pre-push gate runs every generated module in parallel. Keep this
-        # bounded, but allow enough scheduling headroom for the server thread
-        # when the host is saturated by the sharded fuzz burst.
+        # Keep this bounded while allowing scheduling headroom for the server
+        # thread on a busy development host.
         with self.assertRaises(urllib.error.HTTPError) as raised:
             urllib.request.urlopen(url, timeout=10)
         self.assertEqual(raised.exception.code, 503)

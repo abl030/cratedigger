@@ -129,7 +129,7 @@ The full account (sizes, replication tokens, degraded-mode math) is in [`docs/mi
 nix flake check github:abl030/cratedigger
 ```
 
-boots a NixOS VM in the stranger posture — local postgres, rendered beets config, public-MB defaults — and asserts the invariants that have historically eaten libraries (beets `duplicate_keys` nesting, the plugin list, path templates). The same check gates every push to this repo via a pre-push hook; known-good states are tagged `vYYYY.MM.DD`.
+boots a NixOS VM in the stranger posture — local postgres, rendered beets config, public-MB defaults — and asserts the invariants that have historically eaten libraries (beets `duplicate_keys` nesting, the plugin list, path templates). Run it when changing the Nix package, flake, or NixOS module; it is a scoped infrastructure check, not a universal push gate.
 
 ## Quality pipeline in one paragraph
 
@@ -163,17 +163,15 @@ A request can be `wanted` while intentionally skipped for a few hours: retry-wor
 ## Development
 
 ```bash
-nix-shell --run "bash scripts/run_tests.sh"   # full suite; prints a unique artifact directory
-nix-shell --run "pyright"                     # 0 errors, enforced
+nix-shell --run "python3 -m unittest tests.test_X -v"  # focused iteration
+nix-shell --run "pyright --threads 4"                   # final whole repo
+nix-shell --run "bash scripts/run_tests.sh"             # final full suite
 ```
 
-Each suite invocation stores its complete gate output and structured
-worktree/commit/count provenance plus the output byte count and SHA-256 in the
-printed directory. Read that run's `output.log`; there is no shared
-latest-output file that concurrent worktrees can overwrite. A clean committed
-run can be checked with
-the `verify` subcommand of `scripts/test_artifact.py`, and cited to the push
-hook via `CRATEDIGGER_TEST_ARTIFACT=<printed-directory> git push`.
+Use focused tests while implementing. On the final reviewed and committed tree,
+run threaded whole-repo Pyright followed by the full suite exactly once before
+the first branch push. Both commands must pass; CI does not enforce this local
+agent workflow.
 
 The dev shell resolves the same pinned nixpkgs as the module and production — one beets everywhere; `tests/test_harness_beets2_contract.py` runs the real beets so version drift fails the suite instead of production.
 
