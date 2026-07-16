@@ -479,6 +479,68 @@ class TestImportPreviewPath(unittest.TestCase):
             import shutil
             shutil.rmtree(source, ignore_errors=True)
 
+    def test_preview_loader_rebuilds_v1_current_evidence_for_import_attempt(self):
+        """An actual import attempt must decide from a fresh v3 HAVE row."""
+        from lib.beets_db import AlbumInfo
+        from lib.import_preview import load_current_evidence_for_preview
+        from tests.fakes import FakeBeetsDB
+
+        db = self._db()
+        source = self._source_dir()
+        try:
+            evidence = make_album_quality_evidence(
+                mb_release_id="mbid-42",
+                source_path=source,
+                files=snapshot_audio_files(source),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=256,
+                    avg_bitrate_kbps=256,
+                    median_bitrate_kbps=256,
+                    format="AAC",
+                    is_cbr=True,
+                ),
+                lineage_version=1,
+                on_disk_v0_research_attempted=True,
+            )
+            db.upsert_album_quality_evidence(evidence)
+            stored = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            db.set_request_current_evidence(42, stored.id)
+
+            fake_beets = FakeBeetsDB()
+            fake_beets.set_album_info("mbid-42", AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=256,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=256,
+                is_cbr=True,
+                album_path=source,
+                format="AAC",
+            ))
+            with patch("lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets):
+                current = load_current_evidence_for_preview(
+                    db,
+                    request_id=42,
+                    mb_release_id="mbid-42",
+                    quality_ranks=QualityRankConfig.defaults(),
+                    beets_library_root=source,
+                    preloaded_evidence=stored,
+                    preloaded_authoritative=True,
+                )
+
+            assert current is not None
+            self.assertEqual(current.id, stored.id)
+            self.assertEqual(current.lineage_version, 3)
+            self.assertEqual(current.measurement.format, "AAC")
+            self.assertEqual(current.measurement.avg_bitrate_kbps, 256)
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
     def test_attempt_scan_persists_qigong_current_spectral_snapshot(self):
         """Qigong: the exact installed HAVE scan becomes durable evidence."""
         db = self._db()
@@ -1688,6 +1750,9 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
         return enrich_incomplete_current_evidence_for_request(
             db,
             request_id=42,
+            mb_release_id="mbid-42",
+            quality_ranks=QualityRankConfig.defaults(),
+            beets_library_root="",
             spectral_analyzer=analyzer,
             probe_fn=probe,
         )
@@ -1734,6 +1799,87 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
             db.load_album_quality_evidence_by_id(current_id),
             before,
         )
+
+    def test_failure_defers_complete_v1_rebuild_until_after_wanted(self):
+        from lib.beets_db import AlbumInfo
+        from tests.fakes import FakeBeetsDB
+
+        db = self._db()
+        source = self._source_dir()
+        evidence = make_album_quality_evidence(
+            mb_release_id="mbid-42",
+            source_path=source,
+            files=snapshot_audio_files(source),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=256,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=256,
+                format="AAC",
+                is_cbr=True,
+                spectral_grade="genuine",
+            ),
+            lineage_version=1,
+            on_disk_v0_research_attempted=True,
+        )
+        db.upsert_album_quality_evidence(evidence)
+        before = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert before is not None and before.id is not None
+        db.set_request_current_evidence(42, before.id)
+        fake_beets = FakeBeetsDB()
+        fake_beets.set_album_info("mbid-42", AlbumInfo(
+            album_id=1,
+            track_count=1,
+            min_bitrate_kbps=256,
+            avg_bitrate_kbps=256,
+            median_bitrate_kbps=256,
+            is_cbr=True,
+            album_path=source,
+            format="AAC",
+        ))
+
+        db.update_status(42, "downloading", expected_status="wanted")
+        with patch(
+            "lib.beets_db.BeetsDB",
+            side_effect=AssertionError("pre-log failure phase must not open Beets"),
+        ):
+            prepared = prepare_current_evidence_for_failure(
+                db,
+                request_id=42,
+                mb_release_id="mbid-42",
+                quality_ranks=QualityRankConfig.defaults(),
+                beets_library_root=source,
+            )
+
+        self.assertEqual(prepared, "ready")
+        current_id = db.get_request_current_evidence_id(42)
+        self.assertEqual(current_id, before.id)
+        current = db.load_album_quality_evidence_by_id(current_id)
+        assert current is not None
+        self.assertEqual(current.lineage_version, 1)
+        self.assertEqual(db.request(42)["status"], "downloading")
+
+        db.update_status(42, "wanted", expected_status="downloading")
+        with patch("lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets):
+            enriched = enrich_incomplete_current_evidence_for_request(
+                db,
+                request_id=42,
+                mb_release_id="mbid-42",
+                quality_ranks=QualityRankConfig.defaults(),
+                beets_library_root=source,
+                spectral_analyzer=lambda _path: self._good_scan(),
+                probe_fn=lambda _path: None,
+            )
+
+        self.assertEqual(enriched, "enriched")
+        self.assertEqual(db.request(42)["status"], "wanted")
+        current = db.load_album_quality_evidence_by_id(current_id)
+        assert current is not None
+        self.assertEqual(current.lineage_version, 3)
+        self.assertEqual(current.measurement.format, "AAC")
+        self.assertEqual(current.measurement.avg_bitrate_kbps, 256)
 
     def test_fills_both_missing_pieces(self):
         db = self._db()
@@ -1877,6 +2023,9 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
             outcome = enrich_incomplete_current_evidence_for_request(
                 db,
                 request_id=42,
+                mb_release_id="mbid-42",
+                quality_ranks=QualityRankConfig.defaults(),
+                beets_library_root=source,
                 spectral_analyzer=analyzer,
                 probe_fn=probe,
             )

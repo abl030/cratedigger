@@ -364,6 +364,7 @@ def _prepare_have_evidence_before_failure_log(
 
 def _enrich_have_evidence_after_failure(
     request_id: int,
+    mb_release_id: str,
     ctx: CratediggerContext,
     *,
     prepared_outcome: str,
@@ -389,6 +390,9 @@ def _enrich_have_evidence_after_failure(
         outcome = enrich_fn(
             db,
             request_id=request_id,
+            mb_release_id=mb_release_id,
+            quality_ranks=ctx.cfg.quality_ranks,
+            beets_library_root=ctx.cfg.beets_directory,
         )
     except Exception:
         ctx.evidence_enrichment_budget -= 1
@@ -462,6 +466,7 @@ def _timeout_album(
     ))
     _enrich_have_evidence_after_failure(
         request_id,
+        entry.mb_release_id,
         ctx,
         prepared_outcome=prepared_outcome,
         enrich_fn=enrich_fn,
@@ -858,6 +863,7 @@ def _enqueue_completed_processing(
             ))
             _enrich_have_evidence_after_failure(
                 request_id,
+                entry.mb_release_id,
                 ctx,
                 prepared_outcome=prepared_outcome,
             )

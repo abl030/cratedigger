@@ -18,6 +18,7 @@ from lib.import_evidence import (
 )
 from lib.quality import (
     AlbumQualityEvidence,
+    AlbumQualityV0Metric,
     AudioQualityMeasurement,
     QualityRankConfig,
 )
@@ -167,6 +168,119 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         self.assertTrue(result.available)
         self.assertEqual(result.provenance.current_status, "loaded")
         self.assertEqual(result.provenance.snapshot_guard, "matched")
+
+    def test_matching_v1_current_evidence_rebuilds_as_v3(self):
+        evidence = make_album_quality_evidence(
+            mb_release_id="release-1",
+            files=snapshot_audio_files(self.root),
+            lineage_version=1,
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.db.set_request_current_evidence(42, persisted.id)
+
+        result = ensure_current_evidence_for_action(
+            self.db,
+            request_id=42,
+            mb_release_id="release-1",
+            current_album_path=self.root,
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=256,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=256,
+                is_cbr=True,
+                album_path=self.root,
+                format="AAC",
+            ),
+        )
+
+        self.assertTrue(result.available)
+        self.assertEqual(result.provenance.current_status, "backfilled")
+        self.assertIn("lineage_version", result.provenance.fallback_reason or "")
+        assert result.evidence is not None
+        self.assertEqual(result.evidence.lineage_version, 3)
+        self.assertEqual(result.evidence.measurement.format, "AAC")
+        self.assertEqual(result.evidence.measurement.avg_bitrate_kbps, 256)
+        self.assertEqual(
+            self.db.get_request_current_evidence_id(42),
+            persisted.id,
+        )
+
+    def test_v1_lossless_transcode_rebuild_preserves_source_v0_metric(self):
+        self.db.update_request_fields(
+            42,
+            current_spectral_grade="genuine",
+            current_spectral_bitrate=None,
+            current_lossless_source_v0_probe_min_bitrate=211,
+            current_lossless_source_v0_probe_avg_bitrate=222,
+            current_lossless_source_v0_probe_median_bitrate=220,
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="release-1",
+            files=snapshot_audio_files(self.root),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=108,
+                avg_bitrate_kbps=114,
+                median_bitrate_kbps=114,
+                format="Opus",
+                is_cbr=False,
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=96,
+                was_converted_from="flac",
+            ),
+            lineage_version=1,
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=189,
+                avg_bitrate_kbps=195,
+                median_bitrate_kbps=195,
+                source_lineage="lossless_source",
+            ),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.db.set_request_current_evidence(42, persisted.id)
+
+        result = ensure_current_evidence_for_action(
+            self.db,
+            request_id=42,
+            mb_release_id="release-1",
+            current_album_path=self.root,
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=108,
+                avg_bitrate_kbps=114,
+                median_bitrate_kbps=114,
+                is_cbr=False,
+                album_path=self.root,
+                format="Opus",
+            ),
+        )
+
+        self.assertTrue(result.available)
+        assert result.evidence is not None
+        self.assertEqual(result.evidence.lineage_version, 3)
+        self.assertEqual(
+            result.evidence.measurement.spectral_grade,
+            "likely_transcode",
+        )
+        self.assertEqual(result.evidence.measurement.spectral_bitrate_kbps, 96)
+        assert result.evidence.v0_metric is not None
+        self.assertEqual(
+            result.evidence.v0_metric.source_lineage,
+            "lossless_source",
+        )
+        self.assertEqual(result.evidence.v0_metric.avg_bitrate_kbps, 195)
 
     def test_missing_current_evidence_backfills_from_album_info(self):
         result = ensure_current_evidence_for_action(

@@ -3589,6 +3589,111 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(fake_db.download_logs[0].outcome, "failed")
         self.assertIn("EVENT-PATH MISSING", "\n".join(logs.output))
 
+    def test_materialize_failure_defers_v1_refresh_until_after_wanted(self):
+        from lib.beets_db import AlbumInfo
+        from lib.download import poll_active_downloads
+        from lib.quality import AlbumQualityV0Metric, AudioQualityMeasurement
+        from lib.quality_evidence import snapshot_audio_files
+        from tests.fakes import FakeBeetsDB
+
+        old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        row = self._make_downloading_row(state_dict={
+            "filetype": "flac",
+            "enqueued_at": old,
+            "last_progress_at": _utc_now_iso(),
+            "processing_started_at": old,
+            "files": [{
+                "username": "user1",
+                "filename": "user1\\Music\\01.flac",
+                "file_dir": "user1\\Music",
+                "size": 30000000,
+                "local_path": None,
+                "last_state": "Completed, Succeeded",
+                "bytes_transferred": 30000000,
+            }],
+        })
+        ctx, fake_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd_downloads=[{
+                "username": "user1",
+                "directories": [{"directory": "user1\\Music", "files": [{
+                    "filename": "user1\\Music\\01.flac",
+                    "id": "tid-1",
+                    "state": "Completed, Succeeded",
+                    "bytesTransferred": 30000000,
+                }]}],
+            }],
+        )
+        source = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, source, ignore_errors=True)
+        with open(os.path.join(source, "01.m4a"), "wb") as handle:
+            handle.write(b"materialize-failure current bytes")
+        cast(Any, ctx.cfg).beets_directory = source
+        legacy = make_album_quality_evidence(
+            mb_release_id="test-mbid-1",
+            source_path=source,
+            files=snapshot_audio_files(source),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=256,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=256,
+                format="AAC",
+                is_cbr=True,
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=96,
+            ),
+            lineage_version=1,
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=259,
+                avg_bitrate_kbps=267,
+                median_bitrate_kbps=269,
+                source_lineage="native_lossy_research",
+            ),
+        )
+        fake_db.upsert_album_quality_evidence(legacy)
+        stored = fake_db.find_album_quality_evidence(
+            mb_release_id=legacy.mb_release_id,
+            snapshot_fingerprint=legacy.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        fake_db.set_request_current_evidence(1, stored.id)
+        fake_beets = FakeBeetsDB()
+        fake_beets.set_album_info("test-mbid-1", AlbumInfo(
+            album_id=1,
+            track_count=1,
+            min_bitrate_kbps=256,
+            avg_bitrate_kbps=256,
+            median_bitrate_kbps=256,
+            is_cbr=True,
+            album_path=source,
+            format="AAC",
+        ))
+        original_get_album_info = fake_beets.get_album_info
+        beets_statuses: list[str] = []
+
+        def get_album_info(*args: Any, **kwargs: Any):
+            beets_statuses.append(str(fake_db.request(1)["status"]))
+            return original_get_album_info(*args, **kwargs)
+
+        with patch(
+            "lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets,
+        ), patch.object(
+            fake_beets,
+            "get_album_info",
+            side_effect=get_album_info,
+        ):
+            poll_active_downloads(ctx)
+
+        self.assertEqual(beets_statuses, ["wanted"])
+        self.assertEqual(fake_db.request(1)["status"], "wanted")
+        current = fake_db.load_album_quality_evidence_by_id(stored.id)
+        assert current is not None
+        self.assertEqual(current.lineage_version, 3)
+        self.assertEqual(current.measured_at, stored.measured_at)
+        log_row = fake_db.get_log(limit=1)[0]
+        self.assertTrue(log_row["_current_evidence_is_pre_attempt"])
+        self.assertEqual(log_row["_current_evidence_format"], "AAC")
+
     def test_poll_active_all_complete_uses_async_preview_gate(self):
         """Completed automation downloads are materialized before preview."""
         from lib.download import poll_active_downloads
@@ -6445,6 +6550,7 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
 
         _enrich_have_evidence_after_failure(
             42,
+            "mb-uuid",
             ctx,
             prepared_outcome="ready",
             enrich_fn=enrich,
@@ -6478,6 +6584,31 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
         self.assertIs(received["quality_ranks"], cfg.quality_ranks)
         self.assertEqual(received["beets_library_root"], "/library")
 
+    def test_post_failure_hook_wires_release_identity_and_beets_config(self):
+        from lib.config import CratediggerConfig
+        from lib.download import _enrich_have_evidence_after_failure
+
+        cfg = CratediggerConfig(beets_directory="/library")
+        ctx = make_ctx_with_fake_db(FakePipelineDB(), cfg=cfg)
+        received: dict[str, Any] = {}
+
+        def enrich(db: Any, **kwargs: Any) -> str:
+            received.update(kwargs)
+            return "enriched"
+
+        _enrich_have_evidence_after_failure(
+            42,
+            "mb-exact-release",
+            ctx,
+            prepared_outcome="ready",
+            enrich_fn=enrich,
+        )
+
+        self.assertEqual(received["request_id"], 42)
+        self.assertEqual(received["mb_release_id"], "mb-exact-release")
+        self.assertIs(received["quality_ranks"], cfg.quality_ranks)
+        self.assertEqual(received["beets_library_root"], "/library")
+
     def test_free_outcomes_do_not_consume_budget(self):
         from lib.download import _enrich_have_evidence_after_failure
         for outcome in ("complete", "no_current_evidence", "stale"):
@@ -6487,6 +6618,7 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
 
                 _enrich_have_evidence_after_failure(
                     42,
+                    "mb-uuid",
                     ctx,
                     prepared_outcome="ready",
                     enrich_fn=enrich,
@@ -6503,6 +6635,7 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
 
         _enrich_have_evidence_after_failure(
             42,
+            "mb-uuid",
             ctx,
             prepared_outcome="ready",
             enrich_fn=enrich,
@@ -6517,6 +6650,7 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
 
         _enrich_have_evidence_after_failure(
             42,
+            "mb-uuid",
             ctx,
             prepared_outcome="ready",
             enrich_fn=enrich,
@@ -6537,7 +6671,7 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
             self.assertEqual(db.request(42)["status"], "downloading")
             return "ready"
 
-        def enrich(db: Any, *, request_id: int) -> str:
+        def enrich(db: Any, *, request_id: int, **_kwargs: Any) -> str:
             db.assert_log(self, 0, outcome="timeout")
             self.assertEqual(db.request(request_id)["status"], "wanted")
             calls.append(request_id)
@@ -6681,6 +6815,98 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
         self.assertTrue(log_row["_current_evidence_is_pre_attempt"])
         self.assertEqual(log_row["_current_evidence_format"], "MP3")
         self.assertEqual(log_row["_current_evidence_avg_bitrate"], 190)
+
+    def test_timeout_v1_refresh_runs_after_wanted_and_preserves_history(self):
+        """Timeout bookkeeping stays fast while its v3 repair stays historical."""
+        from lib.beets_db import AlbumInfo
+        from lib.config import CratediggerConfig
+        from lib.download import _timeout_album
+        from lib.quality import AlbumQualityV0Metric, AudioQualityMeasurement
+        from lib.quality_evidence import snapshot_audio_files
+        from tests.fakes import FakeBeetsDB
+
+        source = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, source, ignore_errors=True)
+        with open(os.path.join(source, "01.m4a"), "wb") as handle:
+            handle.write(b"legacy current-library bytes")
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mb-uuid",
+            status="downloading",
+        ))
+        legacy = make_album_quality_evidence(
+            mb_release_id="mb-uuid",
+            source_path=source,
+            files=snapshot_audio_files(source),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=256,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=256,
+                format="AAC",
+                is_cbr=True,
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=96,
+            ),
+            lineage_version=1,
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=259,
+                avg_bitrate_kbps=267,
+                median_bitrate_kbps=269,
+                source_lineage="native_lossy_research",
+            ),
+        )
+        db.upsert_album_quality_evidence(legacy)
+        stored = db.find_album_quality_evidence(
+            mb_release_id=legacy.mb_release_id,
+            snapshot_fingerprint=legacy.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        db.set_request_current_evidence(42, stored.id)
+
+        fake_beets = FakeBeetsDB()
+        fake_beets.set_album_info("mb-uuid", AlbumInfo(
+            album_id=1,
+            track_count=1,
+            min_bitrate_kbps=256,
+            avg_bitrate_kbps=256,
+            median_bitrate_kbps=256,
+            is_cbr=True,
+            album_path=source,
+            format="AAC",
+        ))
+        original_get_album_info = fake_beets.get_album_info
+        beets_statuses: list[str] = []
+
+        def get_album_info(*args: Any, **kwargs: Any):
+            beets_statuses.append(str(db.request(42)["status"]))
+            return original_get_album_info(*args, **kwargs)
+
+        ctx = make_ctx_with_fake_db(
+            db,
+            cfg=CratediggerConfig(beets_directory=source),
+        )
+        with patch("lib.download.cancel_and_delete"), patch(
+            "lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets,
+        ), patch.object(
+            fake_beets,
+            "get_album_info",
+            side_effect=get_album_info,
+        ):
+            _timeout_album(self._entry(), 42, "stalled", ctx)
+
+        self.assertEqual(beets_statuses, ["wanted"])
+        self.assertEqual(db.request(42)["status"], "wanted")
+        current = db.load_album_quality_evidence_by_id(stored.id)
+        assert current is not None
+        self.assertEqual(current.lineage_version, 3)
+        self.assertEqual(current.measured_at, stored.measured_at)
+        self.assertEqual(ctx.evidence_enrichment_budget, 1)
+        log_row = db.get_log(limit=1)[0]
+        self.assertTrue(log_row["_current_evidence_is_pre_attempt"])
+        self.assertEqual(log_row["_current_evidence_format"], "AAC")
+        self.assertEqual(log_row["_current_evidence_avg_bitrate"], 256)
 
 
 if __name__ == "__main__":

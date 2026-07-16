@@ -295,7 +295,14 @@ target contract. Source measurements cannot carry `was_converted_from`; that
 field describes materialized output lineage. These rules are enforced at the
 v3 wire decoder/encoder and again before evidence persistence. Active evidence
 rows carry `lineage_version=3`; migration 050 marks older ambiguous rows as
-version 1 instead of guessing their meaning from values.
+version 1 instead of guessing their meaning from values. Current-evidence
+loaders treat those v1 rows as rebuild-required. Actual import/action attempts
+remeasure the exact installed Beets album before deciding. Download failures
+first retain a policy-complete v1 row for the audit log, return the request to
+`wanted`, then upgrade that exact content-addressed row to v3 in the bounded
+post-failure enrichment phase. A same-snapshot repair preserves its original
+`measured_at` and neutral research so historical Recents cards remain
+pre-attempt evidence.
 
 **Motivation (request 6039 / download_log 36608):** a genuine avg 196→288
 rank upgrade (GOOD → TRANSPARENT) rendered as "Upgrade: MP3 V2 to MP3 V2"
