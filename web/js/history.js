@@ -139,7 +139,7 @@ function basisSidePhrase(basis, side) {
 }
 
 function emptyEvidenceCells() {
-  return { source: '', metric: '', rank: '', spectral: '', v0: '' };
+  return { source: '', metric: '', spectral: '', v0: '' };
 }
 
 function avgMinPhrase(avg, median, min) {
@@ -356,7 +356,6 @@ function renderEvidenceRow(side, label, cells) {
     + `<strong class="r-ev-tag">${label}</strong>`
     + renderEvidenceCell('source', cells.source)
     + renderEvidenceCell('metric', cells.metric)
-    + renderEvidenceCell('rank', cells.rank)
     + renderEvidenceCell('spectral', cells.spectral)
     + renderEvidenceCell('v0', cells.v0)
     + `</span>`;
