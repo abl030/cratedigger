@@ -359,23 +359,26 @@ describe the upstream source audio at import time, not the on-disk
 file. Wrong-match cleanup triage compares future candidates against
 this evidence to reject same-source duplicates.
 
-**Incomplete current evidence self-heals at the failure point.** A
+**Missing or incomplete current evidence self-heals at the failure point.** A
 current-evidence row's spectral scan and on-disk V0 research normally
 complete during import preview — but a request whose downloads always
 fail never reaches preview, so its HAVE snapshot (and therefore the
-Recents IN/HAVE strip) stays partial forever. Download-phase failure
-finalizers (`_timeout_album` and the materialize-grace reset in
-`lib/download.py`) therefore call
-`enrich_incomplete_current_evidence_for_request`
-(`lib/import_preview.py`): it plans exactly the missing pieces
-(`plan_current_evidence_enrichment`, pure), measures the on-disk copy
-directly, and persists through the same preview-owned once-only helpers
-— never overwriting present evidence, never re-probing an attempted
-snapshot, and refusing stale on-disk state. Bounded by
-`CratediggerContext.evidence_enrichment_budget` per cycle so failure
-bursts never balloon the loop; complete rows cost nothing. Over time
-the failed-download cohort's evidence converges without any download
-succeeding.
+Recents IN/HAVE strip) stays absent or partial forever. Download-phase
+failure finalizers (`_timeout_album` and the materialize-grace reset in
+`lib/download.py`) therefore perform two fail-soft steps. Before recording
+the failed attempt, `prepare_current_evidence_for_failure`
+(`lib/import_preview.py`) loads or backfills only the exact release's
+canonical current snapshot; an already-linked complete row returns without
+opening Beets or rewriting evidence. After the download log and request-state
+reset are safely persisted, `enrich_incomplete_current_evidence_for_request`
+plans exactly the missing pieces (`plan_current_evidence_enrichment`, pure),
+measures the on-disk copy directly, and persists through the same
+preview-owned once-only helpers — never overwriting present evidence, never
+re-probing an attempted snapshot, and refusing stale on-disk state. Adapter
+or backfill failures and actual measurement work consume the per-cycle
+`CratediggerContext.evidence_enrichment_budget`; complete or authoritatively
+absent library copies cost nothing. Over time the failed-download cohort's
+evidence converges without delaying or bypassing download cleanup.
 
 **A blank `source_path` is policy-incomplete.** Every enrichment
 helper verifies the scanned path against the row's recorded

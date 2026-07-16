@@ -6417,7 +6417,7 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
     def _recorder(self, outcome: str = "enriched", error: Exception | None = None):
         calls: list[int] = []
 
-        def enrich(db: Any, *, request_id: int) -> str:
+        def enrich(db: Any, *, request_id: int, **_kwargs: Any) -> str:
             calls.append(request_id)
             if error is not None:
                 raise error
@@ -6443,10 +6443,40 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
         ctx = make_ctx_with_fake_db(FakePipelineDB())
         enrich, calls = self._recorder("enriched")
 
-        _enrich_have_evidence_after_failure(42, ctx, enrich_fn=enrich)
+        _enrich_have_evidence_after_failure(
+            42,
+            ctx,
+            prepared_outcome="ready",
+            enrich_fn=enrich,
+        )
 
         self.assertEqual(calls, [42])
         self.assertEqual(ctx.evidence_enrichment_budget, 1)
+
+    def test_hook_wires_release_identity_and_beets_config(self):
+        from lib.config import CratediggerConfig
+        from lib.download import _prepare_have_evidence_before_failure_log
+
+        cfg = CratediggerConfig(beets_directory="/library")
+        ctx = make_ctx_with_fake_db(FakePipelineDB(), cfg=cfg)
+        received: dict[str, Any] = {}
+
+        def prepare(db: Any, **kwargs: Any) -> str:
+            received.update(kwargs)
+            return "ready"
+
+        outcome = _prepare_have_evidence_before_failure_log(
+            42,
+            "mb-exact-release",
+            ctx,
+            prepare_fn=prepare,
+        )
+
+        self.assertEqual(outcome, "ready")
+        self.assertEqual(received["request_id"], 42)
+        self.assertEqual(received["mb_release_id"], "mb-exact-release")
+        self.assertIs(received["quality_ranks"], cfg.quality_ranks)
+        self.assertEqual(received["beets_library_root"], "/library")
 
     def test_free_outcomes_do_not_consume_budget(self):
         from lib.download import _enrich_have_evidence_after_failure
@@ -6455,7 +6485,12 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
                 ctx = make_ctx_with_fake_db(FakePipelineDB())
                 enrich, calls = self._recorder(outcome)
 
-                _enrich_have_evidence_after_failure(42, ctx, enrich_fn=enrich)
+                _enrich_have_evidence_after_failure(
+                    42,
+                    ctx,
+                    prepared_outcome="ready",
+                    enrich_fn=enrich,
+                )
 
                 self.assertEqual(calls, [42])
                 self.assertEqual(ctx.evidence_enrichment_budget, 2)
@@ -6466,7 +6501,12 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
         ctx.evidence_enrichment_budget = 0
         enrich, calls = self._recorder("enriched")
 
-        _enrich_have_evidence_after_failure(42, ctx, enrich_fn=enrich)
+        _enrich_have_evidence_after_failure(
+            42,
+            ctx,
+            prepared_outcome="ready",
+            enrich_fn=enrich,
+        )
 
         self.assertEqual(calls, [])
 
@@ -6475,25 +6515,78 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
         ctx = make_ctx_with_fake_db(FakePipelineDB())
         enrich, calls = self._recorder(error=RuntimeError("scan exploded"))
 
-        _enrich_have_evidence_after_failure(42, ctx, enrich_fn=enrich)
+        _enrich_have_evidence_after_failure(
+            42,
+            ctx,
+            prepared_outcome="ready",
+            enrich_fn=enrich,
+        )
 
         self.assertEqual(calls, [42])
         self.assertEqual(ctx.evidence_enrichment_budget, 1)
 
-    def test_timeout_album_runs_enrichment_after_failure_bookkeeping(self):
+    def test_timeout_album_runs_enrichment_and_failure_bookkeeping(self):
         from lib.download import _timeout_album
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
         ctx = make_ctx_with_fake_db(db)
-        enrich, calls = self._recorder("enriched")
+        calls: list[int] = []
+
+        def prepare(db: Any, **_kwargs: Any) -> str:
+            self.assertEqual(db.get_log(limit=1), [])
+            self.assertEqual(db.request(42)["status"], "downloading")
+            return "ready"
+
+        def enrich(db: Any, *, request_id: int) -> str:
+            db.assert_log(self, 0, outcome="timeout")
+            self.assertEqual(db.request(request_id)["status"], "wanted")
+            calls.append(request_id)
+            return "enriched"
 
         with patch("lib.download.cancel_and_delete"):
-            _timeout_album(self._entry(), 42, "stalled", ctx, enrich_fn=enrich)
+            _timeout_album(
+                self._entry(),
+                42,
+                "stalled",
+                ctx,
+                prepare_fn=prepare,
+                enrich_fn=enrich,
+            )
 
         db.assert_log(self, 0, outcome="timeout")
         self.assertEqual(db.request(42)["status"], "wanted")
         self.assertEqual(calls, [42])
         self.assertEqual(ctx.evidence_enrichment_budget, 1)
+
+    def test_failed_have_preparation_consumes_budget(self):
+        from lib.download import _prepare_have_evidence_before_failure_log
+
+        ctx = make_ctx_with_fake_db(FakePipelineDB())
+
+        outcome = _prepare_have_evidence_before_failure_log(
+            42,
+            "mb-uuid",
+            ctx,
+            prepare_fn=lambda *_args, **_kwargs: "failed",
+        )
+
+        self.assertEqual(outcome, "failed")
+        self.assertEqual(ctx.evidence_enrichment_budget, 1)
+
+    def test_absent_have_preparation_does_not_consume_budget(self):
+        from lib.download import _prepare_have_evidence_before_failure_log
+
+        ctx = make_ctx_with_fake_db(FakePipelineDB())
+
+        outcome = _prepare_have_evidence_before_failure_log(
+            42,
+            "mb-uuid",
+            ctx,
+            prepare_fn=lambda *_args, **_kwargs: "no_current_evidence",
+        )
+
+        self.assertEqual(outcome, "no_current_evidence")
+        self.assertEqual(ctx.evidence_enrichment_budget, 2)
 
     def test_timeout_album_default_enrichment_marks_v0_attempted(self):
         """Default wiring, no injection: a real (failing) probe still lands
@@ -6541,6 +6634,53 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
         self.assertEqual(ctx.evidence_enrichment_budget, 1)
         db.assert_log(self, 0, outcome="timeout")
         self.assertEqual(db.request(42)["status"], "wanted")
+
+    def test_timeout_backfill_predates_failure_log_for_recents(self):
+        """A newly linked HAVE remains provably historical for its card."""
+        from lib.beets_db import AlbumInfo
+        from lib.config import CratediggerConfig
+        from lib.download import _timeout_album
+        from tests.fakes import FakeBeetsDB
+
+        source = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, source, ignore_errors=True)
+        with open(os.path.join(source, "01.mp3"), "wb") as handle:
+            handle.write(b"garbage bytes: analyzers fail fast")
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mb-uuid",
+            status="downloading",
+        ))
+        fake_beets = FakeBeetsDB()
+        fake_beets.set_album_info("mb-uuid", AlbumInfo(
+            album_id=1,
+            track_count=1,
+            min_bitrate_kbps=183,
+            avg_bitrate_kbps=190,
+            median_bitrate_kbps=191,
+            is_cbr=False,
+            album_path=source,
+            format="MP3",
+        ))
+        ctx = make_ctx_with_fake_db(
+            db,
+            cfg=CratediggerConfig(beets_directory=source),
+        )
+
+        with patch("lib.download.cancel_and_delete"), patch(
+            "lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets,
+        ):
+            _timeout_album(self._entry(), 42, "stalled", ctx)
+
+        evidence_id = db.get_request_current_evidence_id(42)
+        self.assertIsNotNone(evidence_id)
+        log_row = db.get_log(limit=1)[0]
+        self.assertEqual(log_row["outcome"], "timeout")
+        self.assertTrue(log_row["_current_evidence_is_pre_attempt"])
+        self.assertEqual(log_row["_current_evidence_format"], "MP3")
+        self.assertEqual(log_row["_current_evidence_avg_bitrate"], 190)
 
 
 if __name__ == "__main__":
