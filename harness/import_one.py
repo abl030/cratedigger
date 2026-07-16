@@ -875,6 +875,7 @@ def convert_lossless(album_path: str, spec: ConversionSpec,
         # that already auto-downmix (libmp3lame, aac) ignore the
         # redundant flag.
         cmd = ["ffmpeg", "-i", src_path,
+               "-map", "0:a",
                "-ac", "2",
                "-c:a", spec.codec, *spec.codec_args,
                *spec.metadata_args,
