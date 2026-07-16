@@ -436,7 +436,6 @@ MULTILINE_PATCH_BASELINE: dict[str, int] = {
     'lib.convergence.import_module': 1,
     'lib.dispatch.dispatch_import_from_db': 14,
     'lib.dispatch.entry_points.ensure_candidate_evidence_for_action': 3,
-    'lib.dispatch.evidence_gate.load_current_evidence_for_action': 2,
     'lib.download._run_completed_processing': 3,
     'lib.download_validation._handle_valid_result': 1,
     'lib.download_materialization._materialize_processing_dir': 2,
