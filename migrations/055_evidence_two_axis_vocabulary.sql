@@ -49,13 +49,21 @@ SET v0_subject = CASE v0_subject
         WHEN 'legacy_request_seed' THEN 'carried'
         ELSE verified_lossless_provenance
     END,
-    -- Existing spectral facts describe the row's installed snapshot. New
-    -- writers decide between installed/measured and source/carried explicitly.
+    -- Existing spectral facts describe the row's installed snapshot — except
+    -- converted rows (was_converted_from set), whose grade was measured on
+    -- the pre-conversion source bytes and must stay a source-subject
+    -- acquisition fact so rebuild-on-touch carries it instead of dropping it.
+    -- New writers decide between installed/measured and source/carried
+    -- explicitly.
     spectral_subject = CASE
+        WHEN spectral_grade IS NOT NULL AND was_converted_from IS NOT NULL
+            THEN 'source'
         WHEN spectral_grade IS NOT NULL THEN 'installed'
         ELSE spectral_subject
     END,
     spectral_provenance = CASE
+        WHEN spectral_grade IS NOT NULL AND was_converted_from IS NOT NULL
+            THEN 'carried'
         WHEN spectral_grade IS NOT NULL THEN 'measured'
         ELSE spectral_provenance
     END

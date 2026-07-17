@@ -3746,6 +3746,32 @@ class TestEvidenceTwoAxisVocabularyMigration(unittest.TestCase):
                             """,
                             rows,
                         )
+                        cur.execute(
+                            """
+                            INSERT INTO album_quality_evidence (
+                                mb_release_id, snapshot_fingerprint,
+                                source_path, measured_at, storage_format,
+                                format, lineage_version, spectral_grade,
+                                spectral_bitrate_kbps, was_converted_from,
+                                verified_lossless,
+                                v0_min_bitrate_kbps, v0_avg_bitrate_kbps,
+                                v0_median_bitrate_kbps, v0_source_lineage,
+                                v0_source_provenance, v0_proof_provenance,
+                                verified_lossless_proof_origin,
+                                verified_lossless_source,
+                                verified_lossless_classifier,
+                                verified_lossless_detail
+                            ) VALUES (
+                                'converted', 'fp-converted', '/converted',
+                                NOW(), 'OPUS', 'FLAC', 3, 'genuine', 950,
+                                'flac', TRUE, 185, 226, 229,
+                                'lossless_source', 'lossless_source_v0',
+                                'lossless_source_v0', 'import_result',
+                                'flac', 'spectral',
+                                'converted from lossless source'
+                            )
+                            """
+                        )
                 finally:
                     conn.close()
 
@@ -3787,6 +3813,18 @@ class TestEvidenceTwoAxisVocabularyMigration(unittest.TestCase):
                                 "genuine", 900, "installed", "measured",
                                 True, "measured", "flac", "spectral",
                                 "genuine cliff",
+                            ),
+                        )
+                        # Converted rows keep their source-bytes grade as a
+                        # source-subject acquisition fact so rebuild-on-touch
+                        # carries it instead of dropping it.
+                        self.assertEqual(
+                            migrated["converted"],
+                            (
+                                3, 185, 226, 229, "source", "measured",
+                                "genuine", 950, "source", "carried",
+                                True, "measured", "flac", "spectral",
+                                "converted from lossless source",
                             ),
                         )
                         self.assertEqual(
