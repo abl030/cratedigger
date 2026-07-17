@@ -46,7 +46,7 @@ The narrowing branch requires `spectral_subject == 'installed'`, but every impor
 ### P2 — Moderate
 
 **#4. `lib/dispatch/core.py` crossed the structural threshold (955 -> 1078 lines)**
-`lib/dispatch/core.py:187` — maintainability. Confidence 100 (fact verified directly). Recalibrated from the persona's P1: no codified repo rule, no runtime impact. Design call: extract the post-import policy cluster (`_resolve_post_import_search_policy`, `_apply_post_import_search_action`, the inline HAVE-abort branch) into `lib/dispatch/post_import.py`, or accept the size.
+`lib/dispatch/core.py:187` — maintainability. Confidence 100 (fact verified directly). Recalibrated from the persona's P1: no codified repo rule, no runtime impact. Design call: extract the post-import policy cluster (`_resolve_post_import_search_policy`, `_apply_post_import_search_action`, the inline HAVE-abort branch) into a new post-import module under `lib/dispatch/`, or accept the size.
 
 **#5. `have_analysis_error` feeds the offering peer's global cooldown streak** — SETTLED CONFLICT (decision 5 / R12)
 `lib/dispatch/outcome_actions.py:651` — adversarial-codex (confidence 100). The code is FAITHFUL to your settled record: decision 5 and R12 explicitly mandate ordinary attempt bookkeeping including the global user-cooldown streak. Codex's objection (an our-side analyzer fault cools innocent peers — 5 outcomes = 3-day global cooldown, potentially hiding a rare peer in its only window) is recorded as the rejected alternative; report-only, never apply. Related residual worth knowing: the abort applies cooldown via two different mechanisms depending on `import_job_id` presence (pending-outcome `TerminalCooldown` vs direct `check_and_apply_cooldown`) — latent divergence.
