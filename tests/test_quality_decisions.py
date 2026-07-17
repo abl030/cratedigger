@@ -1878,6 +1878,28 @@ class TestFullPipelineContract(unittest.TestCase):
         self.assertEqual(r["target_final_format"], "opus 128")
         self.assertIsNone(r["stage3_quality_gate"])
 
+    def test_fred_again_ae2_boundary_provisional_upgrade_stays_unverified(self):
+        """AE2 (Fred again.., request 5219 / download 31854): suspect FLAC
+        with V0 min 193 / avg 256 against anchor 248 imports as a
+        provisional upgrade (256 beats 248 beyond tolerance) AND stays
+        unverified — min 193 misses the hardcoded 200 override floor.
+        The minimum-track guard is intentional (settled decision 10).
+        """
+        r = full_pipeline_decision(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="suspect", spectral_bitrate=160,
+            converted_count=10,
+            post_conversion_min_bitrate=193,
+            candidate_v0_probe_avg=256,
+            existing_v0_probe_avg=248,
+        )
+        self.assertEqual(
+            r["stage2_import"], DECISION_PROVISIONAL_LOSSLESS_UPGRADE)
+        self.assertTrue(r["imported"])
+        self.assertFalse(r["verified_lossless"])
+        self.assertTrue(r["keep_searching"])
+        self.assertEqual(r["final_status"], "wanted")
+
     def test_provisional_lossless_uses_converted_v0_when_spectral_would_reject(self):
         r = full_pipeline_decision(
             is_flac=True, min_bitrate=0, is_cbr=False,
