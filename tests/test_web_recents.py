@@ -663,6 +663,23 @@ class TestClassifyBadge(unittest.TestCase):
             "override; searching continues",
         )
 
+    def test_rejected_verified_lossless_locked_renders_as_proof_lock(self):
+        # A proof-lock decline is non-punitive: the archival copy is
+        # verified, the request stays imported, and the source is not
+        # denylisted. It must NOT wear the red "Rejected" badge or leak
+        # the raw scenario token.
+        result = classify_log_entry(_entry(
+            outcome="rejected",
+            beets_scenario="verified_lossless_locked",
+        ))
+        self.assertEqual(result.badge, "Proof locked")
+        self.assertEqual(result.badge_class, "badge-library")
+        self.assertEqual(
+            result.verdict,
+            "Verified lossless already on disk; automatic candidate "
+            "declined (no denylist); acquisition is complete",
+        )
+
     def test_reject_verdicts_use_one_short_grammar_per_decision_class(self):
         cases = {
             "quality_downgrade": (

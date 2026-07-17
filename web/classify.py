@@ -823,6 +823,17 @@ def _classify(
             "Environment failure", "badge-warn", "#a86f20", verdict,
         )
 
+    # --- Verified-lossless proof lock (non-punitive decline) ---
+    # The archival copy is proof-verified and the request stays imported;
+    # the candidate is declined without denylist or narrowing. Render as a
+    # lock, not a rejection, so the audit trail is not mislabeled.
+    if (entry.outcome == "rejected"
+            and _entry_rejection_decision(entry) == "verified_lossless_locked"):
+        return _Classification(
+            "Proof locked", "badge-library", "#1a3a5a",
+            _verified_lossless_locked_verdict(),
+        )
+
     # --- Rejected ---
     if entry.outcome == "rejected":
         verdict = _rejection_verdict(entry)
@@ -1211,6 +1222,20 @@ def _lossless_source_locked_verdict() -> str:
     )
 
 
+def _verified_lossless_locked_verdict() -> str:
+    """Verdict copy for the verified-lossless proof lock.
+
+    Fires when an automatic candidate completes against an album whose
+    verified-lossless proof is already recorded: acquisition is complete,
+    the candidate is declined without blame (no denylist, no narrowing),
+    and only operator actions (Replace, re-request, force-import) reopen it.
+    """
+    return (
+        "Verified lossless already on disk; automatic candidate declined "
+        "(no denylist); acquisition is complete"
+    )
+
+
 def _provisional_verdict(entry: LogEntry, *, imported: bool) -> str:
     if not imported:
         return (
@@ -1293,6 +1318,12 @@ def _rejection_verdict(entry: LogEntry) -> str:
     # fallback for validation-only rejects and remains available as forensic
     # evidence in the row payload.
     scenario = _entry_rejection_decision(entry)
+
+    # Proof lock: the decision is current-proof-driven, so the quality
+    # comparison sentence built from the ImportResult would mislabel it —
+    # return the dedicated policy sentence before any delegation.
+    if scenario == "verified_lossless_locked":
+        return _verified_lossless_locked_verdict()
 
     # Quality comparison scenarios — delegate to ImportResult when available
     if scenario in (
