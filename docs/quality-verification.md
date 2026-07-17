@@ -296,7 +296,7 @@ action file, and the dispatch-synthesized reject `ImportResult`. Re-typing
 back from the dict goes through `comparison_basis_from_decision()` — the one
 converter.
 
-Version 3 import results persist five disjoint concerns:
+Version 4 import results persist five disjoint concerns:
 
 - `source_measurement` is measured from the downloaded bytes before mutation;
 - `verified_lossless_proof` is the optional acquisition claim, deliberately
@@ -323,7 +323,7 @@ Every new measured format is a bare codec label (`FLAC`, `MP3`, `AAC`, `Opus`,
 profile/bitrate labels such as `mp3 v0` and `opus 128` belong only to the
 target contract. Source measurements cannot carry `was_converted_from`; that
 field describes materialized output lineage. These rules are enforced at the
-v3 wire decoder/encoder and again before evidence persistence. Active evidence
+v4 wire decoder/encoder and again before evidence persistence. Active evidence
 rows carry `lineage_version=4`: spectral and V0 facts add `subject`
 (`installed` | `source`) and `provenance` (`measured` | `carried`), while
 verified-lossless lives only in its proof object. Migration 055 maps old field

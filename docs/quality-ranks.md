@@ -119,13 +119,12 @@ Three metrics are supported:
 - **`min`** — minimum per-track bitrate. Legacy behavior; conservative but
   prone to false negatives on lo-fi VBR.
 
-Spectral cliff detection and `transcode_detection()` continue to use `min`
-regardless of this setting — those care about the worst track, not the
-typical one. The transcode-detection spectral-fallback threshold is now
-derived from `cfg.mp3_vbr.excellent` (issue #66) so it tracks any retuning
-of the gate threshold automatically — operators who lower the gate to
-accept lower-quality V0 also implicitly lower what counts as "credible
-V0" for the spectral fallback.
+Spectral cliff detection continues to use `min` regardless of this setting —
+it cares about the worst track, not the typical one. `transcode_detection()`
+no longer reads any bitrate: absent or errored spectral analysis fails
+closed as a transcode verdict. The former spectral-fallback threshold
+derived from `cfg.mp3_vbr.excellent` (issue #66) is gone — missing or
+errored evidence cannot be converted into a positive quality fact.
 
 `measurement_rank()` is the single dispatch point. Each metric reads its
 matching field on `AudioQualityMeasurement` (`avg_bitrate_kbps`,
@@ -205,7 +204,10 @@ mapping via `mp3_vbr_levels` handles labeled conversions separately.
 `QUALITY_MIN_BITRATE_KBPS` is now defaults-only. Every numeric classification
 threshold (including this 210) lives in `QualityRankConfig` and can be retuned
 in the `[Quality Ranks]` section of `config.ini`. Ranks govern relative
-replacement and search narrowing; they are not an acceptance floor.
+replacement and search narrowing; they are not an acceptance floor. One
+deliberate exception: the V0 trust override (avg ≥ 230 / min ≥ 200 in
+`lib/quality/decisions.py`) is hardcoded, not configurable — those two
+numbers guard the verified-lossless terminal stop.
 
 ### MP3 CBR
 
