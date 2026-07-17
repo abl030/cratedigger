@@ -934,14 +934,13 @@ def dispatch_import_core(
                     new_bitrate=new_br,
                 )
 
-                # The post-import gate is automatic search-policy machinery.
-                # Force/manual imports are explicit operator decisions: they
-                # may replace a proof-bearing HAVE (U7) and must remain
-                # terminally imported instead of being reopened by U5's
-                # automatic wanted/lossless-or-full-tier policy.
-                if (action.run_quality_gate
-                        and not force
-                        and scenario not in FORCE_MANUAL_SCENARIOS):
+                # Decision 19: force-import overrides the beets distance and
+                # NOTHING else. Operator imports run the identical
+                # post-import search-policy gate as automatic imports — no
+                # separate state, never silently terminal. The only operator
+                # exception is stage-2: force may replace a proof-bearing
+                # HAVE (U7); once imported, the copy is judged like any other.
+                if action.run_quality_gate:
                     terminal_outcome = _run_or_stage_quality_gate(
                         quality_gate_fn,
                         terminal_outcome,

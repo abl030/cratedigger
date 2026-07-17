@@ -600,8 +600,11 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
 
         return db
 
-    def test_force_and_manual_imports_skip_automatic_search_policy(self):
-        """Explicit operator imports remain imported and never invoke U5."""
+    def test_force_and_manual_imports_run_the_same_post_import_gate(self):
+        """Decision 19: force-import overrides the beets distance and
+        nothing else — operator imports run the identical post-import
+        search-policy gate as automatic imports (never silently terminal).
+        """
         ir = make_import_result(decision="import", new_min_bitrate=180)
         beets_info = AlbumInfo(
             album_id=1, track_count=10, min_bitrate_kbps=180,
@@ -613,9 +616,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
             (False, "manual_import"),
         ):
             with self.subTest(scenario=scenario):
-                gate = MagicMock(
-                    side_effect=AssertionError(
-                        "operator import invoked automatic quality gate"))
+                gate = RecordingQualityGate()
                 db = self._run_dispatch(
                     ir,
                     beets_info,
@@ -623,7 +624,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
                     scenario=scenario,
                     quality_gate_fn=gate,
                 )
-                gate.assert_not_called()
+                gate.assert_called_once()
                 self.assertEqual(db.request(42)["status"], "imported")
 
     def test_import_with_unmeasured_distance_records_null(self):
@@ -1904,7 +1905,10 @@ class TestForceImportSlice(unittest.TestCase):
 
         self.assertTrue(result.success)
         row = db.request(42)
-        self.assertEqual(row["status"], "imported")
+        # Decision 19: a force-import runs the identical post-import gate;
+        # an unverified retained copy keeps searching — never silently
+        # terminal.
+        self.assertEqual(row["status"], "wanted")
         # #550 defect #4: force import bypasses the beets distance check —
         # no measurement exists, so the write is NULL (was a fabricated
         # 0.0), overwriting the stale 0.31 seeded above.
