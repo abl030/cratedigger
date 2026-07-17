@@ -603,14 +603,14 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             scanned_grade=scanned_grade,
             scanned_bitrate=scanned_bitrate,
         )
+        # R19: a source-subject V0 anchor alone proves lossless lineage —
+        # enrichment-born rows carry no was_converted_from, and their
+        # installed derivative must not be scanned into a fresh grade.
         self.assertEqual(
             preserve_existing_source,
             (
                 (converted_from or "").lower() in LOSSLESS_CODECS
-                or (
-                    (converted_from or "").lower() == "m4a"
-                    and lossless_v0_lineage
-                )
+                or lossless_v0_lineage
             ),
         )
         for calls in (normal_calls, reused_calls):

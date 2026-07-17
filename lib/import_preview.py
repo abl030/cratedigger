@@ -273,6 +273,16 @@ def persist_exact_current_spectral_from_attempt(
             "stale",
             "current evidence changed before HAVE spectral persistence",
         )
+    # R19 belt-and-braces: a lossless-sourced row keeps its source spectral
+    # (or stays empty until it is carried in) — an attempt-time scan of the
+    # installed derivative must never be persisted as its grade, whatever
+    # the caller's preserve flag said.
+    if preserve_existing_source_spectral(refreshed):
+        return EvidenceBuildResult(
+            refreshed,
+            "skipped",
+            "lossless-sourced copy keeps its source spectral (R19)",
+        )
     refreshed_measurement = refreshed.measurement
     if (
         refreshed_measurement.spectral_grade is not None
@@ -904,7 +914,17 @@ def load_current_evidence_for_preview(
 def preserve_existing_source_spectral(
     current_evidence: AlbumQualityEvidence | None,
 ) -> bool:
-    """Whether HAVE must retain lossless-source pre-conversion evidence."""
+    """Whether HAVE must retain lossless-source pre-conversion evidence.
+
+    R19: a lossless-sourced installed copy wears its SOURCE's spectral;
+    scanning the installed derivative can rewrite a transcode-like source
+    as apparently genuine (fullband codecs like Opus always scan clean).
+    Any row-local acquisition fact proves lossless lineage: a lossless
+    ``was_converted_from``, verified-lossless proof, or a source-subject
+    V0 anchor (the provisional lane's marker — enrichment-born rows carry
+    no ``was_converted_from``, which is how the #711 deploy-night rows
+    were minted ``genuine/installed``).
+    """
     if current_evidence is None:
         return False
     converted_from = (
@@ -912,10 +932,11 @@ def preserve_existing_source_spectral(
     ).lower()
     if converted_from in LOSSLESS_CODECS:
         return True
+    if current_evidence.verified_lossless_proof is not None:
+        return True
     v0_metric = current_evidence.v0_metric
     return (
-        converted_from == "m4a"
-        and v0_metric is not None
+        v0_metric is not None
         and v0_metric.subject == EVIDENCE_SUBJECT_SOURCE
     )
 
