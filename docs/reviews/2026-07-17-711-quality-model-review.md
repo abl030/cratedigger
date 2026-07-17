@@ -111,6 +111,18 @@ Recommended around deploy (read-only): `SELECT DISTINCT v0_subject, v0_provenanc
 
 ---
 
+## Operator decisions — 2026-07-17 (post-review settlement)
+
+Settled in-session with the operator after the panel + validation pass. These resolve every open decision gate; the plan's Key Decisions gain D17-D20 and the issue #711 thread carries the same record.
+
+1. **Finding #2 + #10 — AE6 stands; narrowing is subject-blind.** The transparent+genuine -> lossless-only rule fires at import time on the genuine grade; the subject label does not gate narrowing, and the post-import gate and rejection backfill share one identical condition. For an unconverted lossy import the source-subject grade describes the installed bytes (out-of-band mutation is outside the state model, decision 6). `test_cbr_320_genuine` / `test_cbr_256_genuine` restore to the U5-directed expectations; AE6 both-halves pins added.
+2. **Finding #1 — the evidence-unavailable path reopens without blame.** When the post-import gate cannot load the linked current evidence, the request returns to `wanted` with NO denylist entry — a denylist attaches only after a quality decision on successfully loaded evidence. Local bookkeeping failure is never attributed to a peer. The pinning test flips to assert no denylist.
+3. **Finding #8 — force-import overrides the beets distance and nothing else.** No separate code path, no separate state, never terminal: force/manual imports run the identical post-import quality-gate/search-policy decision as automatic imports. The only surviving operator exception is stage-2: force-import is not blocked by an existing proof lock (decision 1 / U7). The `FORCE_MANUAL_SCENARIOS` gate skip is removed; the gate-runs pin restores.
+4. **Finding #4 — split now.** The post-import policy cluster extracts from `lib/dispatch/core.py` into its own module under `lib/dispatch/` in the same wave as the behavior fixes.
+5. **Finding #5 — decision 5 reaffirmed.** `have_analysis_error` keeps feeding the global user-cooldown streak: the cooldown is good-citizen protection — do not hammer a slskd peer while the local install is busted — not punishment. Codex's alternative stays rejected. The two cooldown application mechanisms (pending-outcome vs no-job path) unify without policy change.
+
+Finding #12's complete flip enumeration is produced against the post-fix tree (the #2 and #8 restorations shrink it).
+
 ## Verdict: NOT READY (as-is) — high-fidelity implementation, three confirmed P1s gate the merge
 
 Two of the P1s are operator decisions the plan itself classifies as stop-conditions (surface, don't adapt around); one is a mechanical migration amendment that must land before 055 ships. Everything else is mechanical cleanup.

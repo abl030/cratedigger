@@ -33,7 +33,7 @@ Issue #708 exposed four semantic collisions: `gate_min_rank` conflated acceptanc
 
 ### Key Decisions
 
-Decisions 1–10 and 16 were settled in the issue #711 thread (2026-07-16 settlement pass); the thread records each superseded alternative. Decisions 11–15 were settled in this session.
+Decisions 1–10 and 16 were settled in the issue #711 thread (2026-07-16 settlement pass); the thread records each superseded alternative. Decisions 11–15 were settled in this session. Decisions 17–20 were settled 2026-07-17 in the post-review session (multi-agent review of the first implementation branch; record in `docs/reviews/2026-07-17-711-quality-model-review.md` and the issue thread).
 
 1. **Verified-lossless proof is the sole, absolute terminal boundary.** No automatic candidate — lossy or lossless — crosses it in either direction; there is nothing left to acquire. Operator Replace/re-request is the only way back in and is never blocked by proof.
 2. **No acceptance floor; `gate_min_rank` is retired outright.** First acquisition is gated by identity and structural usability, not quality. Quality ranks govern relative replacement and search scope only. This supersedes the issue body's "acceptance floor" framing.
@@ -51,6 +51,10 @@ Decisions 1–10 and 16 were settled in the issue #711 thread (2026-07-16 settle
 14. **The proof object is the sole writable owner of verified-lossless** (session-settled: user-approved — the boolean leaves the byte-measurement struct so a measurement can never assert an acquisition claim; the row-level boolean stays as a derived, CHECK-tied convenience).
 15. **Existing evidence rows convert via a `lineage_version` bump and the existing rebuild-on-next-touch machinery** (session-settled: user-directed — chosen over an SQL relabel: the machinery is already built and already handles failures; acquisition facts carry per decision 6).
 16. **Request stamps stay as point-in-time history.** They keep being written and rendered; after the deploy one-shot they feed no rebuild and no decision. Divergence between stamps and evidence rows is not corruption.
+17. **Narrowing is subject-blind; AE6's import-time letter stands** (session-settled: user-directed, 2026-07-17 — chosen over ratifying the installed-subject deferral the first implementation shipped). A genuine grade on the request's current evidence triggers the transparent+genuine → lossless-only rule at import time; the post-import gate and the rejection backfill share one identical condition. For an unconverted lossy import the source-subject grade describes the installed bytes — out-of-band mutation is outside the state model per decision 6.
+18. **The post-import evidence-unavailable path reopens without blame** (session-settled: user-directed, 2026-07-17). When the gate cannot load the linked current evidence after a successful import, the request returns to `wanted` with no denylist entry; a denylist attaches only after a quality decision on successfully loaded evidence. Local bookkeeping failure is never attributed to a peer.
+19. **Force-import overrides the beets distance and nothing else** (session-settled: user-directed, 2026-07-17). Force/manual imports take the identical post-import quality-gate/search-policy path as automatic imports — no separate code path, no separate state, never terminal. The one surviving operator exception is stage-2: force-import is not blocked by an existing proof lock (decision 1).
+20. **Decision 5 reaffirmed against the cross-model review objection** (session-settled: user-directed, 2026-07-17). `have_analysis_error` keeps feeding the global user-cooldown streak — the cooldown is good-citizen protection (do not hammer a slskd peer while the local install is busted), not punishment. The two cooldown application mechanisms unify without policy change.
 
 ### Requirements
 
