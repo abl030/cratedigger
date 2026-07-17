@@ -864,6 +864,61 @@ class TestIsVerifiedLossless(unittest.TestCase):
                 )
 
 
+class TestMintVerifiedLosslessProof(unittest.TestCase):
+    """Proof construction policy (the 2026-07-18 args.filetype crash owner)."""
+
+    # (desc, will_be, was_converted_from, detected_format, grade,
+    #  expected_source or None-for-no-proof)
+    CASES = [
+        ("not verified mints nothing", False, "flac", "FLAC", "genuine", None),
+        ("converted flac", True, "flac", "FLAC", "genuine", "flac"),
+        ("normalized alac keeps true origin", True, "alac", "FLAC", "genuine", "alac"),
+        ("kept lossless falls to detected", True, None, "FLAC", "genuine", "flac"),
+        ("detected lowercases", True, None, "WAV", "marginal", "wav"),
+        ("undetectable falls to sentinel", True, None, "UNKNOWN", "genuine",
+         "lossless_source"),
+        ("nothing known falls to sentinel", True, None, None, "genuine",
+         "lossless_source"),
+        ("blank strings fall through", True, "  ", "", "genuine",
+         "lossless_source"),
+    ]
+
+    def test_mint_cases(self):
+        from lib.quality import mint_verified_lossless_proof
+
+        for desc, will_be, converted_from, detected, grade, expected in self.CASES:
+            with self.subTest(desc=desc):
+                proof = mint_verified_lossless_proof(
+                    will_be,
+                    was_converted_from=converted_from,
+                    detected_source_format=detected,
+                    spectral_grade=grade,
+                )
+                if expected is None:
+                    self.assertIsNone(proof)
+                else:
+                    assert proof is not None
+                    self.assertEqual(proof.source, expected)
+                    self.assertEqual(proof.provenance, "measured")
+                    self.assertEqual(
+                        proof.classifier, "spectral_verified_lossless")
+                    self.assertEqual(proof.detail, grade)
+
+    def test_v0_override_mint_records_the_disputed_grade(self):
+        """A V0-override mint (suspect spectral, strong V0) keeps the
+        suspect grade in ``detail`` for the audit trail."""
+        from lib.quality import mint_verified_lossless_proof
+
+        proof = mint_verified_lossless_proof(
+            True,
+            was_converted_from="flac",
+            detected_source_format="FLAC",
+            spectral_grade="suspect",
+        )
+        assert proof is not None
+        self.assertEqual(proof.detail, "suspect")
+
+
 # ============================================================================
 # full_pipeline_decision contract tests
 # ============================================================================

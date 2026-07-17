@@ -75,12 +75,12 @@ from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          V0_PROBE_LOSSLESS_SOURCE,
                          V0_PROBE_NATIVE_LOSSY_RESEARCH,
                          V0ProbeEvidence,
-                         VerifiedLosslessProof,
                          SPECTRAL_TRANSCODE_GRADES,
                          build_existing_quality_measurement,
                          comparison_basis_from_decision,
                          comparison_format_hint, native_codec_format_label,
                          determine_verified_lossless,
+                         mint_verified_lossless_proof,
                          evidence_decision_name,
                          measured_import_decision,
                          provisional_lossless_decision, transcode_detection,
@@ -1355,6 +1355,7 @@ def _run_quality_evidence_authorized_import(
         payload = _load_quality_evidence_action_file(action_file)
         r.decision = _evidence_action_decision_name(payload)
         r.source_measurement = payload.candidate.measurement
+        r.verified_lossless_proof = payload.candidate.verified_lossless_proof
         r.current_measurement = (
             payload.current.measurement if payload.current is not None else None
         )
@@ -1922,15 +1923,11 @@ def main():
         existing_spectral_bitrate=existing_spectral_bitrate,
     )
     r.source_measurement = new_m
-    r.verified_lossless_proof = (
-        VerifiedLosslessProof(
-            provenance=EVIDENCE_PROVENANCE_MEASURED,
-            source=args.filetype or "lossless_source",
-            classifier="spectral_verified_lossless",
-            detail=spectral_grade,
-        )
-        if will_be_verified_lossless
-        else None
+    r.verified_lossless_proof = mint_verified_lossless_proof(
+        will_be_verified_lossless,
+        was_converted_from=r.conversion.original_filetype,
+        detected_source_format=source_format,
+        spectral_grade=spectral_grade,
     )
     r.current_measurement = existing_m
     r.target_quality_contract = target_contract

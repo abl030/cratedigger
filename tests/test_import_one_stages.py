@@ -1064,6 +1064,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
         target_final_format: str | None = None,
         target_format: str | None = None,
         verified_lossless_target: str | None = None,
+        verified_lossless_proof=None,
     ):
         from lib.quality import (
             AlbumQualityEvidence,
@@ -1115,6 +1116,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                 if target_format is not None
                 else None
             ),
+            verified_lossless_proof=verified_lossless_proof,
         )
         decision_payload: dict[str, object] = {"stage2_import": decision}
         if imported is not None:
@@ -1226,6 +1228,78 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                 "reused",
             )
             self.assertEqual(result["postflight"]["beets_id"], 77)
+
+    def test_evidence_backed_import_emits_candidate_proof(self):
+        """The authorized import must carry the candidate row's
+        verified-lossless proof into the emitted ImportResult — dropping it
+        underreports the import in download_log JSONB and starves every
+        legacy proof reader downstream."""
+        from harness import import_one
+        from lib.beets_db import AlbumInfo
+        from lib.quality import VerifiedLosslessProof
+
+        proof = VerifiedLosslessProof(
+            provenance="measured",
+            source="flac",
+            classifier="spectral_verified_lossless",
+            detail="genuine",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            album = os.path.join(tmpdir, "album")
+            imported = os.path.join(tmpdir, "library", "album")
+            os.makedirs(album)
+            os.makedirs(imported)
+            with open(os.path.join(album, "01 - Track.mp3"), "wb") as f:
+                f.write(b"not real audio")
+            action_path = os.path.join(tmpdir, "action.json")
+            self._write_payload(
+                self._payload_for_album(
+                    album, verified_lossless_proof=proof),
+                action_path,
+            )
+
+            beets = FakeBeetsDB()
+            beets.set_album_exists("mbid-123", False)
+            beets.set_album_ids_for_release("mbid-123", [77])
+            beets.set_album_info("mbid-123", AlbumInfo(
+                album_id=77,
+                track_count=1,
+                min_bitrate_kbps=245,
+                is_cbr=False,
+                album_path=imported,
+                avg_bitrate_kbps=252,
+                median_bitrate_kbps=250,
+                format="MP3",
+            ))
+            beets.set_item_paths("mbid-123", [])
+
+            stdout = io.StringIO()
+            argv = [
+                "import_one.py",
+                album,
+                "mbid-123",
+                "--quality-evidence-action-file",
+                action_path,
+            ]
+            with patch.object(sys, "argv", argv), \
+                 patch("sys.stdout", stdout), \
+                 patch("harness.import_one.BeetsDB", return_value=beets), \
+                 patch("harness.import_one.run_import",
+                       return_value=import_one.RunImportOutcome(0, [])), \
+                 patch("harness.import_one.fix_library_modes"), \
+                 self.assertRaises(SystemExit) as cm:
+                import_one.main()
+
+            self.assertEqual(cm.exception.code, 0)
+            sentinel = stdout.getvalue().strip().splitlines()[-1]
+            result = json.loads(sentinel.removeprefix("__IMPORT_RESULT__"))
+            emitted = result["verified_lossless_proof"]
+            self.assertIsNotNone(
+                emitted,
+                "authorized import dropped the candidate's proof",
+            )
+            self.assertEqual(emitted["source"], "flac")
+            self.assertEqual(emitted["provenance"], "measured")
 
     def test_evidence_backed_snapshot_mismatch_fails_before_run_import(self):
         from harness import import_one
@@ -1626,6 +1700,83 @@ class TestFindTargetCandidate(unittest.TestCase):
     def test_empty_candidates_returns_none(self):
         from harness.import_one import _find_target_candidate
         self.assertIsNone(_find_target_candidate([], "2085134"))
+
+
+class TestDryRunMintsVerifiedLosslessProof(unittest.TestCase):
+    """The proof mint must survive the REAL argparse namespace.
+
+    Live incident (2026-07-18, Passenger / request 8877): the mint read
+    ``args.filetype``, an attribute no argparse argument defines, so every
+    would-be-verified-lossless dry-run crashed mid-mint and persisted
+    proof-less candidate evidence. Only a test that drives ``main()``
+    through ``sys.argv`` can catch this class — synthetic Namespace objects
+    happily grow whatever attribute the code asks for.
+    """
+
+    def _run_dry_run(self, album: str) -> dict:
+        from harness import import_one
+        from lib.quality import SpectralAnalysisDetail, SpectralDetail
+
+        audit = SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True, grade="genuine", suspect_pct=0.0),
+            existing=SpectralAnalysisDetail(attempted=False),
+        )
+        beets = FakeBeetsDB()
+        beets.set_album_exists("mbid-flac", False)
+        beets.set_album_info("mbid-flac", None)
+
+        stdout = io.StringIO()
+        argv = [
+            "import_one.py",
+            album,
+            "mbid-flac",
+            "--dry-run",
+            "--verified-lossless-target", "opus 128",
+        ]
+        with patch.object(sys, "argv", argv), \
+             patch("sys.stdout", stdout), \
+             patch("harness.import_one.BeetsDB", return_value=beets), \
+             patch("lib.measurement.collect_attempt_spectral_audit",
+                   return_value=audit), \
+             patch("harness.import_one.convert_lossless",
+                   return_value=(2, 0, "flac", 2)), \
+             patch("harness.import_one._get_folder_bitrates",
+                   return_value=[240, 251]), \
+             patch("harness.import_one._get_folder_min_bitrate",
+                   return_value=240), \
+             patch("harness.import_one._detect_source_format",
+                   return_value="FLAC"), \
+             patch("harness.import_one._detect_native_codec_family",
+                   return_value="flac"), \
+             self.assertRaises(SystemExit) as cm:
+            import_one.main()
+
+        self.assertEqual(cm.exception.code, 0)
+        sentinel = stdout.getvalue().strip().splitlines()[-1]
+        self.assertTrue(sentinel.startswith("__IMPORT_RESULT__"))
+        return json.loads(sentinel.removeprefix("__IMPORT_RESULT__"))
+
+    def test_dry_run_lossless_source_emits_measured_proof(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            album = os.path.join(tmpdir, "album")
+            os.makedirs(album)
+            for name in ("01 - One.flac", "02 - Two.flac"):
+                with open(os.path.join(album, name), "wb") as f:
+                    f.write(b"not real audio")
+
+            result = self._run_dry_run(album)
+
+        self.assertNotEqual(result["decision"], "crash")
+        proof = result["verified_lossless_proof"]
+        self.assertIsNotNone(
+            proof,
+            "genuine lossless dry-run must mint a verified-lossless proof",
+        )
+        self.assertEqual(proof["provenance"], "measured")
+        self.assertEqual(proof["source"], "flac")
+        self.assertEqual(proof["classifier"], "spectral_verified_lossless")
+        self.assertEqual(proof["detail"], "genuine")
 
 
 if __name__ == "__main__":

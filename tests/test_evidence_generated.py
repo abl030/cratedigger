@@ -828,5 +828,171 @@ class TestTwoAxisCarryCheckerTripsOnViolations(unittest.TestCase):
             )
 
 
+# ---------------------------------------------------------------------------
+# 2026-07-18 proof-mint incident (Passenger / request 8877) — two invariants:
+#
+# 1. Proof minting is total over its input space: it never raises, mints a
+#    proof exactly when the attempt is verified lossless, and the minted
+#    source is a normalised non-empty token.
+# 2. A crashed harness result (decision="crash") NEVER becomes candidate
+#    evidence, however complete its partial measurements look — the live
+#    crash fired one line after source_measurement was set, so the partial
+#    result persisted proof-less and the proof lock silently never engaged.
+# ---------------------------------------------------------------------------
+
+
+def assert_minted_proof_consistent(
+    will_be: bool,
+    was_converted_from: Any,
+    detected_source_format: Any,
+    spectral_grade: Any,
+    proof: Any,
+) -> None:
+    """Checker: mint output obeys the proof-construction contract."""
+    if not will_be:
+        assert proof is None, "unverified attempt must not mint a proof"
+        return
+    assert proof is not None, "verified attempt must mint a proof"
+    assert proof.provenance == "measured", proof.provenance
+    assert proof.classifier == "spectral_verified_lossless", proof.classifier
+    assert proof.source, "minted proof source must be non-empty"
+    assert proof.source == proof.source.strip().lower(), proof.source
+    assert proof.detail == spectral_grade
+
+
+def assert_crashed_result_never_persists(
+    decision: Any,
+    build_result: Any,
+) -> None:
+    """Checker: decision='crash' never yields buildable evidence."""
+    if decision == "crash":
+        assert build_result.evidence is None, (
+            "a crashed ImportResult must never become candidate evidence"
+        )
+        assert build_result.status == "crashed_result", build_result.status
+
+
+_filetype_token = st.one_of(
+    st.none(),
+    st.sampled_from(["flac", "FLAC", "alac", "wav", "m4a", "UNKNOWN", "  "]),
+    st.text(max_size=8),
+)
+
+_grade_token = st.sampled_from(
+    [None, "genuine", "marginal", "suspect", "likely_transcode", "error"]
+)
+
+
+class TestGeneratedProofMint(unittest.TestCase):
+    @given(
+        will_be=st.booleans(),
+        was_converted_from=_filetype_token,
+        detected=_filetype_token,
+        grade=_grade_token,
+    )
+    @example(  # the live Passenger world that crashed on args.filetype
+        will_be=True, was_converted_from="flac", detected="FLAC",
+        grade="genuine",
+    )
+    def test_mint_is_total_and_consistent(
+        self, will_be, was_converted_from, detected, grade,
+    ):
+        from lib.quality import mint_verified_lossless_proof
+
+        proof = mint_verified_lossless_proof(
+            will_be,
+            was_converted_from=was_converted_from,
+            detected_source_format=detected,
+            spectral_grade=grade,
+        )
+        assert_minted_proof_consistent(
+            will_be, was_converted_from, detected, grade, proof)
+
+
+class TestGeneratedCrashedResultPersistGate(unittest.TestCase):
+    @given(
+        decision=st.sampled_from(
+            ["crash", "import", "reject", "conversion_failed", None]
+        ),
+        with_measurement=st.booleans(),
+        error=st.one_of(st.none(), st.text(max_size=40)),
+    )
+    @example(  # the live 2026-07-18 shape
+        decision="crash", with_measurement=True,
+        error="AttributeError: 'Namespace' object has no attribute 'filetype'",
+    )
+    def test_crashed_results_never_build_evidence(
+        self, decision, with_measurement, error,
+    ):
+        from lib.quality import AlbumQualityEvidenceFile as EvidenceFile
+        from lib.quality import ImportResult
+        from lib.quality_evidence import evidence_from_import_result
+
+        measurement = (
+            AudioQualityMeasurement(
+                min_bitrate_kbps=767, avg_bitrate_kbps=851,
+                median_bitrate_kbps=847, format="FLAC",
+                spectral_grade="genuine", spectral_subject="source",
+                spectral_provenance="measured",
+            )
+            if with_measurement else None
+        )
+        result = evidence_from_import_result(
+            mb_release_id="mbid-crash-gate",
+            source_path="/nonexistent/crash-gate",
+            import_result=ImportResult(
+                decision=decision,
+                error=error,
+                source_measurement=measurement,
+            ),
+            files=[
+                EvidenceFile(
+                    relative_path="01.mp3", size_bytes=47, mtime_ns=1,
+                    extension="mp3", container="mp3", codec="mp3",
+                )
+            ],
+        )
+        assert_crashed_result_never_persists(decision, result)
+
+
+@dataclass(frozen=True)
+class EvidenceBuildResultForTest:
+    """Planted stand-in for the known-bad checker self-test only."""
+
+    evidence: Any
+    status: str
+
+
+class TestProofMintCheckersTripOnViolations(unittest.TestCase):
+    def test_trips_on_missing_proof_for_verified_attempt(self):
+        with self.assertRaises(AssertionError):
+            assert_minted_proof_consistent(
+                True, "flac", "FLAC", "genuine", None)
+
+    def test_trips_on_phantom_proof_for_unverified_attempt(self):
+        planted = VerifiedLosslessProof(
+            provenance="measured", source="flac",
+            classifier="spectral_verified_lossless",
+        )
+        with self.assertRaises(AssertionError):
+            assert_minted_proof_consistent(
+                False, "flac", "FLAC", "genuine", planted)
+
+    def test_trips_on_unnormalised_source(self):
+        planted = VerifiedLosslessProof(
+            provenance="measured", source="FLAC ",
+            classifier="spectral_verified_lossless", detail="genuine",
+        )
+        with self.assertRaises(AssertionError):
+            assert_minted_proof_consistent(
+                True, "FLAC ", None, "genuine", planted)
+
+    def test_trips_when_crashed_result_builds_evidence(self):
+        planted = EvidenceBuildResultForTest(
+            evidence=object(), status="ready")
+        with self.assertRaises(AssertionError):
+            assert_crashed_result_never_persists("crash", planted)
+
+
 if __name__ == "__main__":
     unittest.main()
