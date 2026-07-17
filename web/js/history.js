@@ -180,7 +180,14 @@ function storageFormatLabel(h, fallback) {
   if (contract.includes('flac')) return 'FLAC';
   const format = h.materialized_format || fallback || '';
   const normalized = String(format).trim();
-  return normalized.toUpperCase() === 'OPUS' ? 'Opus' : normalized.toUpperCase();
+  /** @type {Record<string, string>} */
+  const displayLabels = {
+    OPUS: 'Opus',
+    VORBIS: 'Vorbis',
+    WMA: 'WMA',
+  };
+  const codec = normalized.toUpperCase();
+  return displayLabels[codec] || codec;
 }
 
 function sourceStorageLabel(sourceFormat, storageFormat) {
@@ -446,7 +453,10 @@ export function renderDownloadHistoryItem(h) {
   // transparent, verified lossless bypass) must not tell a quality
   // success story with the actual reason buried as a dim line below
   // the grid (request 8781 / download_log 36660: mbid_missing).
-  const FAILURE_OUTCOMES = ['rejected', 'failed', 'timeout', 'user_offline', 'curator_ban'];
+  const FAILURE_OUTCOMES = [
+    'rejected', 'failed', 'timeout', 'user_offline', 'curator_ban',
+    'have_analysis_error',
+  ];
   const verdict = h.verdict || h.beets_scenario || '';
   if (verdict) {
     const rejectCls = FAILURE_OUTCOMES.includes(outcome) ? ' p-hist-verdict-reject' : '';
@@ -454,6 +464,16 @@ export function renderDownloadHistoryItem(h) {
   }
 
   const rows = [];
+
+  if (outcome === 'have_analysis_error') {
+    const category = h.failure_category
+      ? String(h.failure_category).replace(/_/g, ' ')
+      : 'unknown analyser failure';
+    rows.push(['Failure category', esc(category)]);
+    rows.push(['Installed HAVE', h.installed_path ? esc(h.installed_path) : '—']);
+    rows.push(['Candidate', h.candidate_reference ? esc(h.candidate_reference) : '—']);
+    rows.push(['Analysis error', h.analysis_error ? esc(h.analysis_error) : '—']);
+  }
 
   if (h.source_format) {
     const sourceMetric = h.source_avg_bitrate != null
@@ -628,5 +648,6 @@ export function renderDownloadHistoryItem(h) {
 export const __test__ = {
   formatV0Probe,
   formatSpectral,
+  storageFormatLabel,
   withWas,
 };

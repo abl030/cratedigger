@@ -20,6 +20,7 @@ from lib.quality.decisions import (
     DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
     DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
     DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
+    DECISION_VERIFIED_LOSSLESS_LOCKED,
 )
 
 
@@ -34,10 +35,10 @@ class DispatchAction:
     mark_done: bool = False
     record_rejection: bool = False
     denylist: bool = False
-    requeue: bool = False
     cleanup: bool = True
     trigger_notifiers: bool = False
     run_quality_gate: bool = False
+    preserve_imported: bool = False
 
 
 def dispatch_action(decision: str) -> DispatchAction:
@@ -50,21 +51,27 @@ def dispatch_action(decision: str) -> DispatchAction:
                               run_quality_gate=True, cleanup=True)
     elif decision == "downgrade":
         return DispatchAction(record_rejection=True, denylist=True, cleanup=True)
+    elif decision == DECISION_VERIFIED_LOSSLESS_LOCKED:
+        return DispatchAction(
+            record_rejection=True,
+            cleanup=True,
+            preserve_imported=True,
+        )
     elif decision == DECISION_PROVISIONAL_LOSSLESS_UPGRADE:
-        return DispatchAction(mark_done=True, denylist=True, requeue=True,
-                              trigger_notifiers=True, cleanup=True)
+        return DispatchAction(mark_done=True, trigger_notifiers=True,
+                              cleanup=True)
     elif decision in ("transcode_upgrade", "transcode_first"):
-        return DispatchAction(mark_done=True, denylist=True, requeue=True,
-                              trigger_notifiers=True, cleanup=True)
+        return DispatchAction(mark_done=True, trigger_notifiers=True,
+                              cleanup=True)
     elif decision in (
         DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
         DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
         DECISION_LOSSLESS_SOURCE_LOCKED,
     ):
         return DispatchAction(record_rejection=True, denylist=True,
-                              requeue=True, cleanup=True)
+                              cleanup=True)
     elif decision == "transcode_downgrade":
-        return DispatchAction(record_rejection=True, denylist=True, requeue=True,
+        return DispatchAction(record_rejection=True, denylist=True,
                               cleanup=True)
     elif decision == "spectral_reject":
         return DispatchAction(record_rejection=True, denylist=True, cleanup=True)
@@ -95,7 +102,7 @@ def dispatch_action(decision: str) -> DispatchAction:
         # for a fully-lossless source. See ``has_mixed_lossless_and_lossy``.
         return DispatchAction(record_rejection=True, denylist=True, cleanup=True)
     elif decision == "duplicate_remove_guard_failed":
-        return DispatchAction(record_rejection=True, denylist=True, requeue=False,
+        return DispatchAction(record_rejection=True, denylist=True,
                               cleanup=False)
     else:  # import_failed, conversion_failed, mbid_missing, crash, etc.
         return DispatchAction(record_rejection=True)

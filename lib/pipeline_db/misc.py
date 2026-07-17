@@ -239,16 +239,18 @@ class _MiscMixin(_PipelineDBBase):
         return [r["username"] for r in cur.fetchall()]
 
 
-    def check_and_apply_cooldown(
+    def _cooldown_streak_verdict(
         self,
         username: str,
         config: CooldownConfig | None = None,
-    ) -> bool:
-        """Check a user's recent outcomes and apply cooldown if warranted.
+    ) -> tuple[datetime, str] | None:
+        """Evaluate one username's global outcome streak.
 
-        Queries the last N download_log outcomes for this user globally
-        (across all requests), then delegates to should_cooldown().
-        Returns True if a cooldown was applied.
+        The single evaluator both cooldown writers share (decision 20
+        follow-up): ``check_and_apply_cooldown`` (direct, autocommit) and
+        ``_persist_terminal_cooldown`` (inside the terminal-outcome
+        transaction). Returns ``(cooldown_until, reason)`` when a cooldown
+        is warranted, else ``None``.
         """
         cfg = config or CooldownConfig()
         cur = self._execute("""
@@ -266,12 +268,25 @@ class _MiscMixin(_PipelineDBBase):
         """, (username, cfg.lookback_window))
         outcomes = [r["outcome"] for r in cur.fetchall()]
         if not should_cooldown(outcomes, cfg):
-            return False
+            return None
         cooldown_until = datetime.now(timezone.utc) + timedelta(days=cfg.cooldown_days)
-        self.add_cooldown(
-            username, cooldown_until,
-            f"{cfg.failure_threshold} consecutive failures",
-        )
+        return cooldown_until, f"{cfg.failure_threshold} consecutive failures"
+
+    def check_and_apply_cooldown(
+        self,
+        username: str,
+        config: CooldownConfig | None = None,
+    ) -> bool:
+        """Check a user's recent outcomes and apply cooldown if warranted.
+
+        Queries the last N download_log outcomes for this user globally
+        (across all requests), then delegates to should_cooldown().
+        Returns True if a cooldown was applied.
+        """
+        verdict = self._cooldown_streak_verdict(username, config)
+        if verdict is None:
+            return False
+        self.add_cooldown(username, verdict[0], verdict[1])
         return True
 
 

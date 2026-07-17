@@ -5,7 +5,7 @@ Pure move: every definition is AST-identical to the original.
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 import msgspec
 
 
@@ -17,6 +17,13 @@ V0_PROBE_KINDS = frozenset({
     V0_PROBE_NATIVE_LOSSY_RESEARCH,
     V0_PROBE_ON_DISK_RESEARCH,
 })
+
+EvidenceSubject = Literal["installed", "source"]
+EvidenceProvenance = Literal["measured", "carried"]
+EVIDENCE_SUBJECT_INSTALLED: EvidenceSubject = "installed"
+EVIDENCE_SUBJECT_SOURCE: EvidenceSubject = "source"
+EVIDENCE_PROVENANCE_MEASURED: EvidenceProvenance = "measured"
+EVIDENCE_PROVENANCE_CARRIED: EvidenceProvenance = "carried"
 
 
 # ---------------------------------------------------------------------------
@@ -56,7 +63,8 @@ class AudioQualityMeasurement(msgspec.Struct, frozen=True):
         is_cbr:                True if all tracks have the same bitrate
         spectral_grade:        spectral analysis result (genuine/marginal/suspect)
         spectral_bitrate_kbps: estimated original bitrate from spectral cliff
-        verified_lossless:     True if imported from spectral-verified genuine lossless
+        spectral_subject:      bytes the spectral fact describes
+        spectral_provenance:   whether the spectral fact was measured or carried
         was_converted_from:    output-only lineage: source format before
                                conversion (flac/m4a/wav). New source
                                measurements leave this None.
@@ -68,11 +76,17 @@ class AudioQualityMeasurement(msgspec.Struct, frozen=True):
     is_cbr: bool = False
     spectral_grade: Optional[str] = None
     spectral_bitrate_kbps: Optional[int] = None
-    verified_lossless: bool = False
+    spectral_subject: EvidenceSubject | None = None
+    spectral_provenance: EvidenceProvenance | None = None
     was_converted_from: Optional[str] = None
 
-    def new_row_validation_errors(self, *, source: bool = False) -> list[str]:
-        """Validate the unambiguous measurement shape emitted by v3 writers."""
+    def new_row_validation_errors(
+        self,
+        *,
+        source: bool = False,
+        two_axis: bool = True,
+    ) -> list[str]:
+        """Validate the two-axis measurement shape emitted by v4 writers."""
 
         errors: list[str] = []
         if self.format is not None:
@@ -85,6 +99,38 @@ class AudioQualityMeasurement(msgspec.Struct, frozen=True):
             errors.append(
                 "source measurement must not carry was_converted_from"
             )
+        if not two_axis:
+            return errors
+        if self.spectral_subject not in (
+            None,
+            EVIDENCE_SUBJECT_INSTALLED,
+            EVIDENCE_SUBJECT_SOURCE,
+        ):
+            errors.append("spectral subject must be installed or source")
+        if self.spectral_provenance not in (
+            None,
+            EVIDENCE_PROVENANCE_MEASURED,
+            EVIDENCE_PROVENANCE_CARRIED,
+        ):
+            errors.append("spectral provenance must be measured or carried")
+        if self.spectral_grade is None:
+            if self.spectral_bitrate_kbps is not None:
+                errors.append(
+                    "spectral bitrate requires a spectral grade"
+                )
+            if self.spectral_subject is not None or self.spectral_provenance is not None:
+                errors.append(
+                    "spectral markers require a spectral grade"
+                )
+        elif self.spectral_subject is None or self.spectral_provenance is None:
+            errors.append(
+                "spectral grade requires subject and provenance"
+            )
+        if (
+            self.spectral_subject == EVIDENCE_SUBJECT_INSTALLED
+            and self.spectral_provenance == EVIDENCE_PROVENANCE_CARRIED
+        ):
+            errors.append("installed spectral evidence cannot be carried")
         return errors
 
 
@@ -145,14 +191,6 @@ class TargetQualityContract(msgspec.Struct, frozen=True):
         return cls.from_explicit_label(format_hint)
 
 
-_LEGACY_POLICY_V0_PROBE_KINDS: tuple[str, ...] = (
-    "lossless_source_v0",
-    "native_lossy_research_v0",
-    "on_disk_research_v0",
-)
-V0_SOURCE_LINEAGE_LOSSLESS_SOURCE = "lossless_source"
-V0_SOURCE_LINEAGE_NATIVE_LOSSY_RESEARCH = "native_lossy_research"
-V0_SOURCE_LINEAGE_ON_DISK_RESEARCH = "on_disk_research"
 _NONCOMPARABLE_NEUTRAL_V0_PROBE_KIND = "neutral_v0_research"
 
 
@@ -188,47 +226,60 @@ class AlbumQualityEvidenceFile(msgspec.Struct, frozen=True):
 
 
 class AlbumQualityV0Metric(msgspec.Struct, frozen=True):
-    """Neutral V0 probe metric plus source/proof provenance.
+    """Neutral V0 probe metric plus subject and provenance.
 
     This deliberately does not carry the old policy-shaped probe ``kind``.
     Action code can interpret source/proof provenance later, but the durable
     evidence row remains a neutral measurement.
     """
 
+    subject: EvidenceSubject
+    provenance: EvidenceProvenance = EVIDENCE_PROVENANCE_MEASURED
     min_bitrate_kbps: int | None = None
     avg_bitrate_kbps: int | None = None
     median_bitrate_kbps: int | None = None
-    source_lineage: str | None = None
-    source_provenance: str | None = None
-    proof_provenance: str | None = None
 
     def validation_errors(self) -> list[str]:
         errors: list[str] = []
+        if self.subject not in (
+            EVIDENCE_SUBJECT_INSTALLED,
+            EVIDENCE_SUBJECT_SOURCE,
+        ):
+            errors.append("v0 subject must be installed or source")
+        if self.provenance not in (
+            EVIDENCE_PROVENANCE_MEASURED,
+            EVIDENCE_PROVENANCE_CARRIED,
+        ):
+            errors.append("v0 provenance must be measured or carried")
         if (
             self.min_bitrate_kbps is None
             and self.avg_bitrate_kbps is None
             and self.median_bitrate_kbps is None
         ):
             errors.append("v0_metric must include at least one bitrate metric")
-        if self.source_lineage in _LEGACY_POLICY_V0_PROBE_KINDS:
-            errors.append("v0_metric.source_lineage must not use legacy probe kinds")
-        if not self.source_lineage:
-            errors.append("v0_metric.source_lineage is required")
+        if (
+            self.subject == EVIDENCE_SUBJECT_INSTALLED
+            and self.provenance == EVIDENCE_PROVENANCE_CARRIED
+        ):
+            errors.append("installed v0 evidence cannot be carried")
         return errors
 
 
 class VerifiedLosslessProof(msgspec.Struct, frozen=True):
     """Provenance for a true verified-lossless classification."""
 
-    proof_origin: str
+    provenance: EvidenceProvenance
     source: str
     classifier: str
     detail: str | None = None
 
     def validation_errors(self) -> list[str]:
         errors: list[str] = []
-        if not self.proof_origin:
-            errors.append("verified_lossless proof_origin is required")
+        if self.provenance not in (
+            EVIDENCE_PROVENANCE_MEASURED,
+            EVIDENCE_PROVENANCE_CARRIED,
+        ):
+            errors.append("verified_lossless provenance must be measured or carried")
         if not self.source:
             errors.append("verified_lossless source is required")
         if not self.classifier:
@@ -266,8 +317,8 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
     # contract fact, not the downloaded source or materialized-output mode.
     target_is_cbr: bool | None = None
     # Migration 050 marks the interpretation of storage/target fields.
-    # Existing rows are v1; every new separated-lineage writer emits v3.
-    lineage_version: int = 3
+    # Historical rows are v1/v3; every two-axis writer emits v4.
+    lineage_version: int = 4
     v0_metric: AlbumQualityV0Metric | None = None
     # Preview-owned, content-snapshot-local idempotence marker. A failed or
     # empty on-disk V0 research probe is still an attempt; import/cleanup
@@ -323,10 +374,12 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
             errors.append("snapshot_fingerprint must be a non-empty string")
         if self.measured_at is None:
             errors.append("measured_at is required")
-        if self.lineage_version not in (1, 3):
-            errors.append("lineage_version must be 1 or 3")
-        if self.lineage_version == 3:
-            errors.extend(self.measurement.new_row_validation_errors())
+        if self.lineage_version not in (1, 3, 4):
+            errors.append("lineage_version must be 1, 3, or 4")
+        if self.lineage_version >= 3:
+            errors.extend(self.measurement.new_row_validation_errors(
+                two_axis=self.lineage_version == 4,
+            ))
             if (self.target_format is None) != (self.target_is_cbr is None):
                 errors.append(
                     "target_format and target_is_cbr must be set together"
@@ -375,15 +428,11 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
                     f"duplicate snapshot relative_path: {file.relative_path}"
                 )
             relative_paths.add(file.relative_path)
-        if self.v0_metric is not None:
-            errors.extend(self.v0_metric.validation_errors())
-        if self.measurement.verified_lossless:
-            if self.verified_lossless_proof is None:
-                errors.append("verified_lossless=true requires proof provenance")
-            else:
-                errors.extend(self.verified_lossless_proof.validation_errors())
-        elif self.verified_lossless_proof is not None:
-            errors.append("verified_lossless=false cannot store proof provenance")
+        if self.lineage_version == 4:
+            if self.v0_metric is not None:
+                errors.extend(self.v0_metric.validation_errors())
+        if self.lineage_version == 4 and self.verified_lossless_proof is not None:
+            errors.extend(self.verified_lossless_proof.validation_errors())
         return errors
 
     def policy_incomplete_reasons(self) -> list[str]:

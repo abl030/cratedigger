@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -60,14 +61,14 @@ class TestNeedsSpectralCheckDecisions(unittest.TestCase):
     """Pure-function coverage for ``_needs_spectral_check``.
 
     The equivalent tests used to live on the deleted
-    ``TestGatherSpectralContextFunction`` (flac skips, VBR skips, CBR runs).
+    ``TestGatherSpectralContextFunction`` (lossless runs, VBR skips, CBR runs).
     Keeping them as pure input/output assertions here so the auto path's
     branch-selection logic stays covered without re-introducing the old
     SpectralContext plumbing.
 
     Signature (see lib/measurement.py::_needs_spectral_check):
         _needs_spectral_check(filetype, is_vbr, avg_bitrate_kbps,
-                              vbr_threshold_kbps) -> bool
+                              vbr_threshold_kbps, lossless_candidate) -> bool
 
     The VBR branch is gated on ``avg_bitrate_kbps < vbr_threshold_kbps``
     so transcodes uploaded as fake V0 (avg ~180kbps) are still analyzed.
@@ -81,16 +82,88 @@ class TestNeedsSpectralCheckDecisions(unittest.TestCase):
         from lib.measurement import _needs_spectral_check
         return _needs_spectral_check(
             filetype, is_vbr,
+            lossless_candidate=any(
+                codec in {"flac", "wav", "alac"}
+                for codec in filetype.lower().replace(",", " ").split()
+            ),
             avg_bitrate_kbps=avg_kbps,
             vbr_threshold_kbps=threshold if threshold is not None else self.THRESHOLD,
         )
 
-    def test_flac_skips(self):
-        # FLAC uses a different flow (convert → V0 → compare).
-        self.assertFalse(self._run("flac", False))
-        self.assertFalse(self._run("flac", None))
-        self.assertFalse(self._run("flac", True))
-        self.assertFalse(self._run("flac", True, avg_kbps=150))
+    def test_unambiguous_lossless_containers_always_run(self):
+        """Affirmative verification requires preview-time source evidence."""
+        for filetype in ("flac", "wav", "alac"):
+            with self.subTest(filetype=filetype):
+                self.assertTrue(self._run(filetype, False))
+                self.assertTrue(self._run(filetype, None))
+                self.assertTrue(self._run(filetype, True))
+                self.assertTrue(self._run(filetype, True, avg_kbps=150))
+
+    def test_aac_in_m4a_is_not_a_lossless_candidate(self):
+        """The M4A container must not promote its lossy AAC codec."""
+        from lib.measurement import has_supported_lossless_audio
+
+        probes: list[str] = []
+
+        def probe(path: str) -> str:
+            probes.append(path)
+            return "aac"
+
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "01.m4a").write_bytes(b"aac")
+            self.assertFalse(
+                has_supported_lossless_audio(
+                    "m4a",
+                    [Path(folder) / "01.m4a"],
+                    codec_probe=probe,
+                )
+            )
+            self.assertEqual(probes, [str(Path(folder) / "01.m4a")])
+
+    def test_alac_in_m4a_requires_preview_spectral_analysis(self):
+        """An ALAC stream in M4A still enters affirmative verification."""
+        from lib.measurement import (
+            _needs_spectral_check,
+            has_supported_lossless_audio,
+        )
+
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "01.m4a").write_bytes(b"alac")
+            lossless_candidate = has_supported_lossless_audio(
+                "m4a",
+                [Path(folder) / "01.m4a"],
+                codec_probe=lambda _path: "alac",
+            )
+            self.assertTrue(
+                _needs_spectral_check(
+                    "m4a",
+                    False,
+                    lossless_candidate=lossless_candidate,
+                    avg_bitrate_kbps=None,
+                    vbr_threshold_kbps=self.THRESHOLD,
+                )
+            )
+
+    def test_m4a_probe_failure_is_distinct_from_positive_aac_and_alac(self):
+        from lib.measurement import AudioCodecProbeError, has_supported_lossless_audio
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "01.m4a"
+            path.write_bytes(b"audio")
+            self.assertFalse(
+                has_supported_lossless_audio(
+                    "m4a", [path], codec_probe=lambda _path: "aac",
+                )
+            )
+            self.assertTrue(
+                has_supported_lossless_audio(
+                    "m4a", [path], codec_probe=lambda _path: "alac",
+                )
+            )
+            with self.assertRaises(AudioCodecProbeError):
+                has_supported_lossless_audio(
+                    "m4a", [path], codec_probe=lambda _path: None,
+                )
 
     def test_cbr_mp3_always_runs(self):
         """CBR MP3 always runs spectral — avg bitrate irrelevant."""
@@ -104,9 +177,9 @@ class TestNeedsSpectralCheckDecisions(unittest.TestCase):
         self.assertTrue(self._run("mp3", None))
         self.assertTrue(self._run("mp3", None, avg_kbps=245))
 
-    def test_mixed_mp3_flac_skips(self):
-        """Filetype containing both 'flac' and 'mp3' is treated as non-MP3."""
-        self.assertFalse(self._run("flac, mp3", False))
+    def test_mixed_mp3_flac_runs_for_lossless_member(self):
+        """A lossless member still requires an affirmative candidate scan."""
+        self.assertTrue(self._run("flac, mp3", False))
 
     def test_empty_filetype_skips(self):
         self.assertFalse(self._run("", False))
@@ -392,14 +465,10 @@ class TestAudioFailuresPreserveSubdirContext(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-class TestPreimportFallsBackToPersistedSpectral(unittest.TestCase):
-    """When BeetsDB can't walk the on-disk album_path (stale/missing),
-    measure_preimport_state must fall back to the spectral state already
-    stored on album_requests. Otherwise the importer's evidence pipeline
-    sees a missing existing_spectral and the next attempt has stale state.
-    """
+class TestPreimportDoesNotReadRequestSpectral(unittest.TestCase):
+    """Missing HAVE analysis cannot be replaced by request-row stamps."""
 
-    def test_stored_spectral_used_when_beets_lookup_empty(self):
+    def test_stored_spectral_ignored_when_beets_lookup_empty(self):
         from lib.measurement import measure_preimport_state
 
         db = FakePipelineDB()
@@ -436,11 +505,7 @@ class TestPreimportFallsBackToPersistedSpectral(unittest.TestCase):
                 propagate_download_to_existing=False,
             )
 
-        # With stored spectral fallback, existing_spectral comes from the
-        # persisted album_requests state (128kbps), not from beets.
-        self.assertIsNotNone(measurement.existing_spectral)
-        assert measurement.existing_spectral is not None
-        self.assertEqual(measurement.existing_spectral.bitrate_kbps, 128)
+        self.assertIsNone(measurement.existing_spectral)
         # Measurement never decides — the importer's full pipeline owns
         # the spectral comparison.
         self.assertFalse(measurement.audio_corrupt)

@@ -7,6 +7,8 @@ TestTargetFormat*) exercise the surviving auto-import seam in
 Pure function tests (TestPopulateDlInfo*, TestCleanupStagedDir) test in/out.
 """
 
+import configparser
+import json
 import os
 import shutil
 import subprocess as sp
@@ -17,14 +19,18 @@ from unittest.mock import MagicMock, patch
 from lib.config import CratediggerConfig
 from lib.quality import (DownloadInfo, ImportResult, ConversionInfo,
                          DuplicateRemoveCandidate, DuplicateRemoveGuardInfo,
-                         AudioQualityMeasurement, PostflightInfo,
+                         AlbumQualityV0Metric, AudioQualityMeasurement,
+                         EvidenceProvenance, EvidenceSubject,
+                         PostflightInfo, SpectralMeasurement,
                          QUALITY_UPGRADE_TIERS, QUALITY_FLAC_ONLY,
                          V0_PROBE_LOSSLESS_SOURCE, V0ProbeEvidence,
-                         ValidationResult)
+                         ValidationResult, VerifiedLosslessProof)
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
     RecordingQualityGate,
+    make_album_quality_evidence,
     make_ctx_with_fake_db,
+    make_download_file,
     make_import_result,
     make_request_row,
     noop_quality_gate,
@@ -45,6 +51,8 @@ def _make_album_data(artist="Test Artist", title="Test Album",
     mock.db_request_id = db_request_id
     mock.db_source = db_source
     mock.db_target_format = None
+    mock.current_min_bitrate = None
+    mock.current_spectral = None
     mock.files = [MagicMock(
         username="user1",
         filename="01 - Track.mp3",
@@ -94,6 +102,13 @@ def _make_bv_result(distance=0.05):
 
 
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
+
+
+def _full_dispatch_config() -> CratediggerConfig:
+    ini = configparser.RawConfigParser()
+    ini["Beets Validation"] = {"harness_path": _HARNESS}
+    ini["Pipeline DB"] = {"enabled": "true"}
+    return CratediggerConfig.from_ini(ini)
 
 
 def _dispatch_valid_result_cmd(
@@ -407,6 +422,8 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
                 format="MP3",
                 spectral_grade="likely_transcode",
                 spectral_bitrate_kbps=128,
+                spectral_subject="source",
+                spectral_provenance="measured",
             ),
             current_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=192,
@@ -557,7 +574,7 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
         malformed_job = MagicMock(
             preview_result={
                 "import_result": {
-                    "version": 3,
+                    "version": 4,
                     "spectral": "malformed-preview-audit",
                 },
             },
@@ -584,6 +601,8 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
                 # Persisted measurement state must not impersonate the
                 # missing attempt-local HAVE audit.
                 spectral_grade="genuine",
+                spectral_subject="installed",
+                spectral_provenance="measured",
             ),
         ))
 
@@ -633,15 +652,25 @@ class TestRejectImportFromEvidenceDecisionForcedRequeue(unittest.TestCase):
 
     FOUR_FACT_DECISIONS = ["audio_corrupt", "bad_audio_hash", "nested_layout", "empty_fileset"]
 
-    def _reject(self, *, decision: str, requeue_on_failure: bool):
+    def _reject(
+        self,
+        *,
+        decision: str,
+        requeue_on_failure: bool,
+        pending: bool = False,
+        search_filetype_override: str | None = None,
+    ):
         from lib.dispatch import _reject_import_from_evidence_decision
         from lib.dispatch.types import ImportAttemptResult
+        from lib.import_queue import IMPORT_JOB_AUTOMATION
         from lib.quality import AudioQualityMeasurement, ImportResult
+        from lib.terminal_outcomes import ImportJobTerminal
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42, status="downloading",
             mb_release_id="test-mbid",
+            search_filetype_override=search_filetype_override,
         ))
         dl_info = DownloadInfo(filetype="mp3", username="user1")
         ir = ImportResult(
@@ -656,8 +685,15 @@ class TestRejectImportFromEvidenceDecisionForcedRequeue(unittest.TestCase):
         )
         attempt_result = ImportAttemptResult(None)
         attempt_result.merge(ir)
+        import_job_id = None
+        if pending:
+            import_job_id = db.enqueue_import_job(
+                IMPORT_JOB_AUTOMATION,
+                request_id=42,
+                payload={},
+            ).id
         with patch_dispatch_externals():
-            _reject_import_from_evidence_decision(
+            outcome = _reject_import_from_evidence_decision(
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
                 dl_info=dl_info,
@@ -672,6 +708,18 @@ class TestRejectImportFromEvidenceDecisionForcedRequeue(unittest.TestCase):
                 files=None,
                 source_path_cleanup_scenario=decision,
                 cooled_down_users=None,
+                import_job_id=import_job_id,
+            )
+        if pending:
+            self.assertIsNotNone(outcome.terminal_outcome)
+            assert outcome.terminal_outcome is not None
+            db.persist_import_terminal_outcome(
+                outcome.terminal_outcome.with_job(ImportJobTerminal(
+                    status="failed",
+                    error=outcome.message,
+                    result={"success": False},
+                    message=outcome.message,
+                ))
             )
         return db
 
@@ -702,13 +750,330 @@ class TestRejectImportFromEvidenceDecisionForcedRequeue(unittest.TestCase):
         db = self._reject(decision="downgrade", requeue_on_failure=False)
         self.assertEqual(db.request(42)["status"], "downloading")
 
+    def test_verified_lossless_lock_preserves_terminal_imported_state(self) -> None:
+        """The proof lock audits and cleans without reopening acquisition."""
+        db = self._reject(
+            decision="verified_lossless_locked",
+            requeue_on_failure=True,
+            search_filetype_override=QUALITY_UPGRADE_TIERS,
+        )
+        self.assertEqual(db.request(42)["status"], "imported")
+        self.assertEqual(
+            db.request(42)["search_filetype_override"],
+            QUALITY_UPGRADE_TIERS,
+        )
+        self.assertEqual(db.denylist, [])
+        self.assertEqual(db.download_logs[-1].outcome, "rejected")
+
+    def test_verified_lossless_lock_holds_for_force_imports(self) -> None:
+        """Decision 21: a force/manual import against a proof-bearing
+        request is declined by the same lock (requeue_on_failure=False is
+        the operator paths' setting) — force bypasses only the beets
+        distance; Replace/re-request is the way back in.
+        """
+        db = self._reject(
+            decision="verified_lossless_locked",
+            requeue_on_failure=False,
+            search_filetype_override=QUALITY_UPGRADE_TIERS,
+        )
+        self.assertEqual(db.request(42)["status"], "imported")
+        self.assertEqual(db.denylist, [])
+        self.assertEqual(db.download_logs[-1].outcome, "rejected")
+
+    def test_verified_lossless_lock_pending_outcome_is_atomic(self) -> None:
+        """The import-job owner commits the proof lock and audit together."""
+        db = self._reject(
+            decision="verified_lossless_locked",
+            requeue_on_failure=True,
+            pending=True,
+            search_filetype_override=QUALITY_UPGRADE_TIERS,
+        )
+        self.assertEqual(db.request(42)["status"], "imported")
+        self.assertEqual(
+            db.request(42)["search_filetype_override"],
+            QUALITY_UPGRADE_TIERS,
+        )
+        self.assertEqual(db.denylist, [])
+        self.assertEqual(db.download_logs[-1].outcome, "rejected")
+
+
+class TestHaveAnalysisErrorAbort(unittest.TestCase):
+    """A failed installed-HAVE analysis is an attempt-local abort."""
+
+    def _dispatch_with_current_result(
+        self,
+        current_result,
+        *,
+        force: bool,
+        db: FakePipelineDB | None = None,
+        candidate=None,
+    ):
+        from lib.dispatch import dispatch_import_core
+        from lib.import_evidence import (
+            ActionEvidenceProvenance,
+            CandidateEvidenceActionResult,
+        )
+        from lib.import_queue import IMPORT_JOB_FORCE, IMPORT_JOB_MANUAL
+
+        if db is None:
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                status="downloading",
+                search_filetype_override="lossless",
+                active_download_state={"files": [], "filetype": "flac"},
+            ))
+        if candidate is None:
+            candidate = make_album_quality_evidence(
+                mb_release_id="test-mbid",
+                source_path="/tmp/candidate",
+            )
+        candidate_result = CandidateEvidenceActionResult(
+            evidence=candidate,
+            provenance=ActionEvidenceProvenance(
+                candidate_status="reused",
+                snapshot_guard="matched",
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE if force else IMPORT_JOB_MANUAL,
+                request_id=42,
+                payload={"failed_path": tmpdir},
+            )
+            with patch_dispatch_externals() as ext, patch(
+                "lib.dispatch.subprocess_runner.parse_import_result",
+                return_value=make_import_result(decision="import"),
+            ):
+                outcome = dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="test-mbid",
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    force=force,
+                    beets_harness_path=_HARNESS,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=DownloadInfo(filetype="flac", username="bad-peer"),
+                    scenario="force_import" if force else "manual_import",
+                    cfg=_full_dispatch_config(),
+                    requeue_on_failure=False,
+                    candidate_import_job_id=job.id,
+                    prevalidated_candidate_result=candidate_result,
+                    quality_gate_fn=noop_quality_gate,
+                    current_evidence_loader=(
+                        lambda *_args, **_kwargs: current_result
+                    ),
+                )
+        return db, outcome, ext
+
+    def _persist_failed_outcome(self, db, outcome) -> None:
+        from lib.terminal_outcomes import ImportJobTerminal
+
+        self.assertIsNotNone(outcome.terminal_outcome)
+        assert outcome.terminal_outcome is not None
+        db.persist_import_terminal_outcome(
+            outcome.terminal_outcome.with_job(ImportJobTerminal(
+                status="failed",
+                error=outcome.message,
+                result={"success": False},
+                message=outcome.message,
+            ))
+        )
+
+    def _failed_current_result(self, raw_error: str):
+        from lib.import_evidence import (
+            ActionEvidenceProvenance,
+            CurrentEvidenceActionResult,
+        )
+
+        return CurrentEvidenceActionResult(
+            evidence=None,
+            provenance=ActionEvidenceProvenance(
+                current_status="failed",
+                snapshot_guard="failed",
+                fallback_reason=raw_error,
+                installed_path="/library/Test Artist/Test Album",
+                fail_closed=True,
+            ),
+        )
+
+    def test_force_import_fail_closed_current_analysis_self_heals(self) -> None:
+        db, outcome, ext = self._dispatch_with_current_result(
+            self._failed_current_result(
+                "PermissionError: [Errno 13] Permission denied"
+            ),
+            force=True,
+        )
+        db.set_cooldown_result(True)
+        self._persist_failed_outcome(db, outcome)
+
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["validation_attempts"], 1)
+        self.assertIsNotNone(row["next_retry_after"])
+        self.assertEqual(row["search_filetype_override"], "lossless")
+        self.assertEqual(db.download_logs[-1].outcome, "have_analysis_error")
+        self.assertEqual(db.download_logs[-1].soulseek_username, "bad-peer")
+        self.assertEqual(
+            db.download_logs[-1].extra["download_path"],
+            "/library/Test Artist/Test Album",
+        )
+        payload = json.loads(db.download_logs[-1].validation_result)
+        self.assertEqual(payload["failure_category"], "permission_denied")
+        self.assertEqual(
+            payload["error"],
+            "PermissionError: [Errno 13] Permission denied",
+        )
+        self.assertEqual(
+            payload["installed_path"],
+            "/library/Test Artist/Test Album",
+        )
+        self.assertTrue(payload["candidate_reference"])
+        self.assertEqual(db.denylist, [])
+        self.assertEqual(db.cooldowns_applied, ["bad-peer"])
+        self.assertIn("bad-peer", db.user_cooldowns)
+        ext.run.assert_not_called()
+
+    def test_manual_import_gets_the_same_non_quality_abort(self) -> None:
+        db, outcome, ext = self._dispatch_with_current_result(
+            self._failed_current_result("FileNotFoundError: path not found"),
+            force=False,
+        )
+        self._persist_failed_outcome(db, outcome)
+
+        self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertEqual(db.download_logs[-1].outcome, "have_analysis_error")
+        payload = json.loads(db.download_logs[-1].validation_result)
+        self.assertEqual(payload["failure_category"], "path_missing")
+        self.assertEqual(db.denylist, [])
+        ext.run.assert_not_called()
+
+    def test_missing_have_is_not_an_analysis_failure(self) -> None:
+        from lib.import_evidence import (
+            ActionEvidenceProvenance,
+            CurrentEvidenceActionResult,
+        )
+
+        missing = CurrentEvidenceActionResult(
+            evidence=None,
+            provenance=ActionEvidenceProvenance(
+                current_status="missing",
+                snapshot_guard="missing",
+                fallback_reason="no current album in beets",
+                fail_closed=True,
+            ),
+        )
+        db, outcome, ext = self._dispatch_with_current_result(
+            missing,
+            force=False,
+        )
+
+        ext.run.assert_called_once()
+        self.assertNotEqual(outcome.code, "have_analysis_error")
+        self.assertFalse(any(
+            row.outcome == "have_analysis_error" for row in db.download_logs
+        ))
+
+    def test_failure_category_taxonomy(self) -> None:
+        from lib.import_evidence import classify_have_analysis_failure
+
+        cases = (
+            ("PermissionError: permission denied", "permission_denied"),
+            ("FileNotFoundError: no such file", "path_missing"),
+            ("no audio files found", "no_audio_files"),
+            ("snapshot changed during analysis", "snapshot_changed"),
+            ("ffmpeg analyser exited 1", "analyser_failure"),
+        )
+        for raw_error, expected in cases:
+            with self.subTest(raw_error=raw_error):
+                self.assertEqual(
+                    classify_have_analysis_failure(raw_error),
+                    expected,
+                )
+        self.assertEqual(
+            classify_have_analysis_failure(
+                "current album files changed since evidence capture",
+                snapshot_guard="stale",
+            ),
+            "snapshot_changed",
+        )
+
+    def test_abort_is_attempt_local_and_next_healthy_attempt_proceeds(self) -> None:
+        from lib.import_evidence import (
+            ActionEvidenceProvenance,
+            CurrentEvidenceActionResult,
+        )
+        from lib.quality import AudioQualityMeasurement
+
+        candidate = make_album_quality_evidence(
+            mb_release_id="test-mbid",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                is_cbr=True,
+                spectral_grade="genuine",
+            ),
+        )
+        db, first, first_ext = self._dispatch_with_current_result(
+            self._failed_current_result("analyser crashed"),
+            force=True,
+            candidate=candidate,
+        )
+        self._persist_failed_outcome(db, first)
+        first_ext.run.assert_not_called()
+
+        request = db.request(42)
+        request["status"] = "downloading"
+        request["active_download_state"] = {"files": [], "filetype": "mp3"}
+        healthy = CurrentEvidenceActionResult(
+            evidence=make_album_quality_evidence(
+                mb_release_id="test-mbid",
+                source_path="/library/Test Artist/Test Album",
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=96,
+                    avg_bitrate_kbps=96,
+                    median_bitrate_kbps=96,
+                    format="MP3",
+                    spectral_grade="genuine",
+                ),
+            ),
+            provenance=ActionEvidenceProvenance(
+                current_status="loaded",
+                snapshot_guard="matched",
+            ),
+        )
+        db, second, second_ext = self._dispatch_with_current_result(
+            healthy,
+            force=True,
+            db=db,
+            candidate=candidate,
+        )
+
+        second_ext.run.assert_called_once()
+        self.assertNotEqual(second.code, "have_analysis_error")
+        self.assertEqual(
+            sum(log.outcome == "have_analysis_error" for log in db.download_logs),
+            1,
+        )
+
 
 class TestDispatchImport(unittest.TestCase):
     """Orchestration tests — assert domain state via FakePipelineDB."""
 
     _SENTINEL = object()
 
-    def _dispatch(self, ir=_SENTINEL, request_overrides=None):
+    def _dispatch(
+        self,
+        ir=_SENTINEL,
+        request_overrides=None,
+        *,
+        scenario="strong_match",
+        force=False,
+        initial_status="downloading",
+    ):
         from lib.dispatch import dispatch_import_core
         if ir is self._SENTINEL:
             ir = make_import_result(decision="import")
@@ -719,13 +1084,10 @@ class TestDispatchImport(unittest.TestCase):
             **(request_overrides or {}),
         }
         db.seed_request(make_request_row(
-            id=42, status="downloading",
+            id=42, status=initial_status,
             **request_overrides,
         ))
-        cfg = CratediggerConfig(
-            beets_harness_path=_HARNESS,
-            pipeline_db_enabled=True,
-        )
+        cfg = _full_dispatch_config()
         dl_info = DownloadInfo(filetype="mp3")
 
         mock_gate = RecordingQualityGate()
@@ -742,11 +1104,12 @@ class TestDispatchImport(unittest.TestCase):
                     db=db,  # type: ignore[arg-type]
                     dl_info=dl_info,
                     distance=0.05,
-                    scenario="strong_match",
+                    scenario=scenario,
                     files=[MagicMock(username="user1",
                                      filename="01 - Track.mp3")],
                     cfg=cfg,
                     quality_gate_fn=mock_gate,
+                    force=force,
                 )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -757,6 +1120,40 @@ class TestDispatchImport(unittest.TestCase):
             "mock_jellyfin": ext.jellyfin,
             "mock_gate": mock_gate,
         }
+
+    def test_operator_retained_import_decisions_requeue_like_automatic(self):
+        # Decision 19: force/manual imports resolve through the same
+        # canonical retained-import mapping as automatic imports — the
+        # provisional lane narrows to lossless-only, transcode lanes stay on
+        # full tiers, every retained lossy source is denylisted, and nothing
+        # parks silently terminal. (These decisions map directly, so the
+        # post-import gate itself is not invoked for them.)
+        decisions = (
+            ("provisional_lossless_upgrade", "lossless"),
+            ("transcode_upgrade", None),
+            ("transcode_first", None),
+        )
+        operator_modes = (
+            ("force", "force_import", True),
+            ("manual", "manual_import", False),
+        )
+        for mode, scenario, force in operator_modes:
+            for decision, expected_override in decisions:
+                with self.subTest(mode=mode, decision=decision):
+                    result = self._dispatch(
+                        make_import_result(decision=decision),
+                        scenario=scenario,
+                        force=force,
+                        initial_status="manual",
+                    )
+                    row = result["db"].request(42)
+                    self.assertEqual(row["status"], "wanted")
+                    self.assertEqual(
+                        row["search_filetype_override"], expected_override)
+                    self.assertEqual(
+                        [e.username for e in result["db"].denylist],
+                        ["user1"])
+                    result["mock_gate"].assert_not_called()
 
     def test_import_success(self):
         imported_path = "/mnt/virtio/Music/Beets/Test Artist/2026 - Test Album"
@@ -936,7 +1333,7 @@ class TestDispatchImport(unittest.TestCase):
         self.assertEqual(row["status"], "wanted")
         self.assertFalse(row["verified_lossless"])
         self.assertEqual(row["current_lossless_source_v0_probe_avg_bitrate"], 228)
-        self.assertEqual(row["search_filetype_override"], QUALITY_UPGRADE_TIERS)
+        self.assertEqual(row["search_filetype_override"], QUALITY_FLAC_ONLY)
         self.assertEqual(r["db"].download_logs[0].outcome, "success")
         self.assertEqual(r["db"].download_logs[0].beets_scenario,
                          "provisional_lossless_upgrade")
@@ -1345,8 +1742,14 @@ class TestOverrideMinBitrate(unittest.TestCase):
     None grades must leave the container bitrate untouched — see issue #61.
     """
 
-    def _get_override_value(self, db_fields):
-        cmd = _dispatch_valid_result_cmd(db_fields=db_fields)
+    def _get_override_value(self, min_br, spectral_br, grade):
+        album_data = _make_album_data()
+        album_data.current_min_bitrate = min_br
+        album_data.current_spectral = SpectralMeasurement.from_parts(
+            grade,
+            spectral_br,
+        )
+        cmd = _dispatch_valid_result_cmd(album_data=album_data)
 
         for i, arg in enumerate(cmd):
             if arg == "--override-min-bitrate" and i + 1 < len(cmd):
@@ -1368,16 +1771,11 @@ class TestOverrideMinBitrate(unittest.TestCase):
         ("no container, genuine spectral ignored",  None, 128, "genuine",         None),
     ]
 
-    def test_override_from_db_table(self):
+    def test_override_from_attempt_local_have_table(self):
         for desc, min_br, spectral_br, grade, expected in self.CASES:
             with self.subTest(desc=desc):
-                row = make_request_row(
-                    min_bitrate=min_br,
-                    current_spectral_bitrate=spectral_br,
-                    current_spectral_grade=grade,
-                )
                 self.assertEqual(
-                    self._get_override_value(row), expected,
+                    self._get_override_value(min_br, spectral_br, grade), expected,
                     f"{desc}: override from min_bitrate={min_br!r} "
                     f"spectral_bitrate={spectral_br!r} grade={grade!r} "
                     f"expected {expected!r}",
@@ -1438,14 +1836,19 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
         self.assertEqual(restored, cfg.quality_ranks)
 
     def test_custom_cfg_serializes_to_argv(self):
-        """Custom gate_min_rank + metric survive the argv round-trip."""
+        """Custom policy and codec bands survive the argv round-trip."""
         from lib.config import CratediggerConfig
-        from lib.quality import (QualityRank, QualityRankConfig,
+        from lib.quality import (CodecRankBands, QualityRankConfig,
                                  RankBitrateMetric)
+        vorbis = CodecRankBands(
+            transparent=201, excellent=161, good=113, acceptable=97)
+        wma = CodecRankBands(
+            transparent=321, excellent=257, good=193, acceptable=129)
         custom_ranks = QualityRankConfig(
             bitrate_metric=RankBitrateMetric.MIN,
-            gate_min_rank=QualityRank.GOOD,
             within_rank_tolerance_kbps=15,
+            vorbis=vorbis,
+            wma=wma,
         )
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS, quality_ranks=custom_ranks)
@@ -1455,8 +1858,9 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
         assert raw is not None  # for pyright
         restored = QualityRankConfig.from_json(raw)
         self.assertEqual(restored.bitrate_metric, RankBitrateMetric.MIN)
-        self.assertEqual(restored.gate_min_rank, QualityRank.GOOD)
         self.assertEqual(restored.within_rank_tolerance_kbps, 15)
+        self.assertEqual(restored.vorbis, vorbis)
+        self.assertEqual(restored.wma, wma)
 
     def test_missing_cfg_omits_argv(self):
         """When cfg=None, the --quality-rank-config argv is not emitted.
@@ -1467,14 +1871,49 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
         self.assertNotIn("--quality-rank-config", cmd)
 
     def test_existing_v0_probe_state_serializes_to_argv(self):
-        row = make_request_row(
-            status="downloading",
-            current_lossless_source_v0_probe_min_bitrate=128,
-            current_lossless_source_v0_probe_avg_bitrate=171,
-            current_lossless_source_v0_probe_median_bitrate=169,
+        from lib.dispatch.types import EvidenceImportGate
+
+        current = make_album_quality_evidence(
+            mb_release_id="test-mbid",
+            v0_metric=AlbumQualityV0Metric(
+                subject="source",
+                provenance="carried",
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=171,
+                median_bitrate_kbps=169,
+            ),
         )
 
-        cmd = _dispatch_valid_result_cmd(db_fields=row)
+        # Keep this seam test focused on core-to-subprocess argv propagation;
+        # loader freshness and FK behavior have their own action-evidence tests.
+        from lib.dispatch import dispatch_import_core
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
+        with patch_dispatch_externals() as ext, patch(
+            "lib.dispatch.subprocess_runner.parse_import_result",
+            return_value=make_import_result(decision="import"),
+        ):
+            dispatch_import_core(
+                path="/tmp/dest",
+                mb_release_id="test-mbid",
+                request_id=42,
+                label="Test Artist - Test Album",
+                beets_harness_path=_HARNESS,
+                cfg=_full_dispatch_config(),
+                db=db,  # type: ignore[arg-type]
+                dl_info=DownloadInfo(filetype="mp3"),
+                files=[make_download_file(username="user1", filename="01.mp3")],
+                quality_gate_fn=noop_quality_gate,
+                evidence_gate_fn=(
+                    lambda *_args, **_kwargs: EvidenceImportGate(current=current)
+                ),
+            )
+            cmd = ext.run.call_args[0][0]
 
         self.assertIn("--existing-v0-probe-min-bitrate", cmd)
         self.assertEqual(
@@ -1490,11 +1929,8 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
 class TestLoadQualityGateState(unittest.TestCase):
     """Direct tests for the shared quality-gate state adapter."""
 
-    def test_uses_full_request_row_to_apply_final_format(self):
-        """The shared adapter must honor persisted final_format labels."""
-        from lib.beets_db import AlbumInfo
+    def test_uses_linked_measurement_and_ignores_request_quality_stamps(self):
         from lib.dispatch import load_quality_gate_state
-        from lib.quality import QualityRankConfig
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1506,75 +1942,125 @@ class TestLoadQualityGateState(unittest.TestCase):
             current_spectral_grade="genuine",
             current_spectral_bitrate=96,
         ))
-
-        with patch("lib.beets_db.BeetsDB") as mock_beets_cls:
-            mock_beets = MagicMock()
-            mock_beets.__enter__ = MagicMock(return_value=mock_beets)
-            mock_beets.__exit__ = MagicMock(return_value=False)
-            mock_beets.get_album_info.return_value = AlbumInfo(
-                album_id=1,
-                track_count=10,
+        evidence = make_album_quality_evidence(
+            mb_release_id="mbid-123",
+            measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=207,
                 avg_bitrate_kbps=207,
+                median_bitrate_kbps=207,
                 format="MP3",
                 is_cbr=False,
-                album_path="/Beets/Artist/Album",
-            )
-            mock_beets_cls.return_value = mock_beets
+            ),
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_request_current_evidence(42, persisted.id)
 
+        with patch.object(
+            db,
+            "get_request",
+            side_effect=AssertionError("explicit MBID must avoid request lookup"),
+        ) as get_request:
             state = load_quality_gate_state(
                 request_id=42,
                 db=db,  # type: ignore[arg-type]
-                quality_ranks=QualityRankConfig.defaults(),
+                mb_id="mbid-123",
             )
 
         self.assertIsNotNone(state)
         assert state is not None
-        self.assertEqual(state.min_bitrate_kbps, 207)
+        self.assertEqual(state.measurement.min_bitrate_kbps, 207)
         self.assertEqual(state.measurement.format, "MP3")
-        self.assertIsNotNone(state.target_contract)
-        assert state.target_contract is not None
-        self.assertEqual(state.target_contract.format, "mp3 v0")
         self.assertEqual(state.measurement.avg_bitrate_kbps, 207)
         self.assertFalse(state.measurement.is_cbr)
-        self.assertTrue(state.measurement.verified_lossless)
-        self.assertIsNone(state.spectral_bitrate_kbps)
+        self.assertFalse(state.verified_lossless_proof)
+        self.assertIsNone(state.measurement.spectral_bitrate_kbps)
+        get_request.assert_not_called()
 
 
 class TestQualityGateUsesIntent(unittest.TestCase):
     """Orchestration tests for _check_quality_gate_core via FakePipelineDB.
 
-    Each scenario constructs a real :class:`lib.beets_db.AlbumInfo` whose
-    measurement produces the desired ``quality_gate_decision`` branch when
-    classified by the real (un-stubbed) decision function. See
+    Each scenario builds linked evidence from an ``AlbumInfo``-shaped fixture
+    whose measurement produces the desired ``quality_gate_decision`` branch
+    when classified by the real (un-stubbed) decision function. See
     ``tests/test_quality_decisions.py::TestQualityGateDecision.CASES`` for
     the canonical input → decision table — these tests pick inputs from the
     same table so the orchestration test exercises the same code path the
     decision unit tests pin.
     """
 
-    def _run_quality_gate(self, *, info, **extra_req_fields):
+    def _run_quality_gate(
+        self,
+        *,
+        info,
+        verified_lossless_proof: bool = False,
+        linked_spectral_grade: str | None = None,
+        linked_spectral_bitrate: int | None = None,
+        linked_spectral_subject: EvidenceSubject | None = None,
+        linked_spectral_provenance: EvidenceProvenance | None = None,
+        **extra_req_fields,
+    ):
         """Drive ``_check_quality_gate_core`` with a real ``AlbumInfo`` and the
         real ``quality_gate_decision`` (no patch on the pure decision)."""
         from lib.dispatch import _check_quality_gate_core
         db = FakePipelineDB()
         merged = {"status": "imported", "current_spectral_bitrate": None,
+                  "current_spectral_grade": None,
                   "verified_lossless": False}
         merged.update(extra_req_fields)
         db.seed_request(make_request_row(id=42, **merged))
+        evidence = make_album_quality_evidence(
+            mb_release_id="test-mbid",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=info.min_bitrate_kbps,
+                avg_bitrate_kbps=info.avg_bitrate_kbps,
+                median_bitrate_kbps=info.median_bitrate_kbps,
+                format=info.format,
+                is_cbr=info.is_cbr,
+                spectral_grade=linked_spectral_grade,
+                spectral_bitrate_kbps=linked_spectral_bitrate,
+                spectral_subject=(
+                    linked_spectral_subject
+                    if linked_spectral_grade is not None
+                    else None
+                ) or (
+                    "installed" if linked_spectral_grade is not None else None
+                ),
+                spectral_provenance=(
+                    linked_spectral_provenance
+                    if linked_spectral_grade is not None
+                    else None
+                ) or (
+                    "measured" if linked_spectral_grade is not None else None
+                ),
+            ),
+            verified_lossless_proof=(
+                VerifiedLosslessProof(
+                    provenance="carried",
+                    source="flac",
+                    classifier="spectral_verified_lossless",
+                ) if verified_lossless_proof else None
+            ),
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_request_current_evidence(42, persisted.id)
 
-        with patch("lib.beets_db.BeetsDB") as mock_beets_cls:
-            mock_beets = MagicMock()
-            mock_beets.__enter__ = MagicMock(return_value=mock_beets)
-            mock_beets.__exit__ = MagicMock(return_value=False)
-            mock_beets.get_album_info.return_value = info
-            mock_beets_cls.return_value = mock_beets
-            _check_quality_gate_core(
-                mb_id="test-mbid", label="Test Artist - Test Album",
-                request_id=42,
-                files=[MagicMock(username="user1", filename="01.mp3")],
-                db=db,  # type: ignore[arg-type]
-            )
+        _check_quality_gate_core(
+            mb_id="test-mbid", label="Test Artist - Test Album",
+            request_id=42,
+            files=[make_download_file(username="user1", filename="01.mp3")],
+            db=db,  # type: ignore[arg-type]
+        )
 
         return db
 
@@ -1618,208 +2104,160 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         # Status unchanged — gate returned early
         self.assertEqual(db.request(42)["status"], "imported")
 
+    def test_missing_linked_evidence_reopens_full_tier_search(self):
+        """An unverified import cannot become terminal by losing its FK."""
+        from lib.dispatch import _check_quality_gate_core
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="imported",
+            min_bitrate=245,
+            search_filetype_override="lossless",
+            verified_lossless=True,
+        ))
+
+        plan = _check_quality_gate_core(
+            mb_id="test-mbid",
+            label="Missing Evidence",
+            request_id=42,
+            files=[make_download_file(username="winner", filename="01.mp3")],
+            db=db,  # type: ignore[arg-type]
+        )
+
+        self.assertIsNotNone(plan)
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["min_bitrate"], 245)
+        self.assertIsNone(row["search_filetype_override"])
+        # Decision 18: a local bookkeeping failure is never attributed to
+        # the winning peer — the request reopens, the peer stays available.
+        self.assertEqual(db.denylist, [])
+
+    def test_linked_evidence_load_error_reopens_full_tier_search(self):
+        """Adapter errors follow the same explicit retry path as absence."""
+        from lib.dispatch import _check_quality_gate_core
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="imported"))
+
+        def unavailable_state(**_kwargs):
+            raise RuntimeError("evidence store unavailable")
+
+        plan = _check_quality_gate_core(
+            mb_id="test-mbid",
+            label="Failed Evidence",
+            request_id=42,
+            files=[make_download_file(username="winner", filename="01.mp3")],
+            db=db,  # type: ignore[arg-type]
+            state_loader=unavailable_state,
+        )
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertIsNone(db.request(42)["search_filetype_override"])
+        # Decision 18: adapter errors reopen without blaming the peer.
+        self.assertEqual(db.denylist, [])
+
     def test_requeue_upgrade_uses_intent(self):
         db = self._run_quality_gate(info=self._bare_mp3_vbr_low())
         row = db.request(42)
         self.assertEqual(row["status"], "wanted")
-        self.assertEqual(row["search_filetype_override"], QUALITY_UPGRADE_TIERS)
+        self.assertIsNone(row["search_filetype_override"])
 
-    def test_requeue_upgrade_verified_lossless_still_requeues(self):
-        # verified_lossless=True on a low-bitrate MP3 still classifies below
-        # EXCELLENT because measurement_rank reads avg/min, not the lossless
-        # flag — gate_rank only skips the spectral clamp for verified rows.
+    def test_verified_lossless_proof_accepts_regardless_of_rank(self):
         db = self._run_quality_gate(
-            info=self._bare_mp3_vbr_low(), verified_lossless=True)
+            info=self._bare_mp3_vbr_low(), verified_lossless_proof=True)
         row = db.request(42)
-        self.assertEqual(row["status"], "wanted")
-        self.assertEqual(row["search_filetype_override"], QUALITY_UPGRADE_TIERS)
+        self.assertEqual(row["status"], "imported")
+        self.assertIsNone(row["search_filetype_override"])
 
-    def test_requeue_upgrade_verified_lossless_denylist_reason_preserved(self):
+    def test_verified_lossless_proof_does_not_denylist(self):
         db = self._run_quality_gate(
             info=self._bare_mp3_vbr_low(),
-            verified_lossless=True,
+            verified_lossless_proof=True,
             current_spectral_grade=None,
         )
-        self.assertEqual(len(db.denylist), 1)
-        self.assertIn("quality gate", db.denylist[0].reason or "")
+        self.assertEqual(db.denylist, [])
 
-    def test_requeue_upgrade_denylist_reason_is_rank_aware(self):
-        """Denylist reason text must reflect the actual rank/threshold, not the
-        legacy hardcoded 210kbps constant.
-
-        The reason is persisted to the DB and surfaces in operator-facing
-        history. Before this fix, every requeue_upgrade row was tagged with
-        '< 210kbps' regardless of cfg.gate_min_rank. After the fix the reason
-        carries the rank name + the configured gate threshold.
-        """
-        from lib.dispatch import _check_quality_gate_core
-        from lib.quality import QualityRankConfig
+    def test_full_tier_denylist_reason_names_missing_proof(self):
+        """The persisted reason explains policy, not a retired rank floor."""
         from lib.beets_db import AlbumInfo
 
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42, status="imported", verified_lossless=False,
-            current_spectral_bitrate=None, current_spectral_grade=None,
-            mb_release_id="mbid-low",
+        db = self._run_quality_gate(info=AlbumInfo(
+            album_id=1, track_count=10,
+            min_bitrate_kbps=150, avg_bitrate_kbps=150,
+            format="MP3", is_cbr=False,
+            album_path="/Beets/Artist/Album",
         ))
-
-        # Bare MP3 at 150kbps avg → ACCEPTABLE rank, below default EXCELLENT gate.
-        with patch("lib.beets_db.BeetsDB") as mock_beets_cls:
-            mock_beets = MagicMock()
-            mock_beets.__enter__ = MagicMock(return_value=mock_beets)
-            mock_beets.__exit__ = MagicMock(return_value=False)
-            mock_beets.get_album_info.return_value = AlbumInfo(
-                album_id=1, track_count=10,
-                min_bitrate_kbps=150, avg_bitrate_kbps=150,
-                format="MP3", is_cbr=False,
-                album_path="/Beets/Artist/Album",
-            )
-            mock_beets_cls.return_value = mock_beets
-            _check_quality_gate_core(
-                mb_id="mbid-low", label="Artist - Album",
-                request_id=42,
-                files=[MagicMock(username="loweruser", filename="01.mp3")],
-                db=db,  # type: ignore[arg-type]
-                quality_ranks=QualityRankConfig.defaults(),
-            )
 
         self.assertEqual(len(db.denylist), 1)
         reason = db.denylist[0].reason or ""
-        # New format: includes the actual rank name and gate threshold
-        self.assertIn("ACCEPTABLE", reason,
-                      f"reason should name the actual rank, got: {reason}")
-        self.assertIn("EXCELLENT", reason,
-                      f"reason should name the configured gate threshold, got: {reason}")
-        # Old format pinned the legacy 210kbps constant — must NOT appear
-        self.assertNotIn("< 210kbps", reason,
-                         f"reason still references legacy 210kbps: {reason}")
+        self.assertIn("no verified-lossless proof", reason)
+        self.assertIn("full-tier search", reason)
+        self.assertNotIn("ACCEPTABLE", reason)
+        self.assertNotIn("EXCELLENT", reason)
 
-    def test_requeue_upgrade_denylist_reason_honours_custom_gate(self):
-        """Custom gate_min_rank=GOOD must surface in the persisted reason.
-
-        Verifies the reason text actually threads cfg through to the
-        denylist entry, not just the decision.
-        """
-        from lib.dispatch import _check_quality_gate_core
-        from lib.quality import QualityRankConfig, QualityRank
-        from lib.beets_db import AlbumInfo
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=43, status="imported", verified_lossless=False,
-            current_spectral_bitrate=None, current_spectral_grade=None,
-            mb_release_id="mbid-mid",
-        ))
-
-        # 140 kbps avg → ACCEPTABLE under any cfg, below GOOD threshold.
-        with patch("lib.beets_db.BeetsDB") as mock_beets_cls:
-            mock_beets = MagicMock()
-            mock_beets.__enter__ = MagicMock(return_value=mock_beets)
-            mock_beets.__exit__ = MagicMock(return_value=False)
-            mock_beets.get_album_info.return_value = AlbumInfo(
-                album_id=1, track_count=10,
-                min_bitrate_kbps=140, avg_bitrate_kbps=140,
-                format="MP3", is_cbr=False,
-                album_path="/Beets/Artist/Album",
-            )
-            mock_beets_cls.return_value = mock_beets
-            _check_quality_gate_core(
-                mb_id="mbid-mid", label="Artist - Album",
-                request_id=43,
-                files=[MagicMock(username="middleuser", filename="01.mp3")],
-                db=db,  # type: ignore[arg-type]
-                quality_ranks=QualityRankConfig(gate_min_rank=QualityRank.GOOD),
-            )
-
+    def test_transparent_genuine_copy_narrows_to_lossless(self):
+        db = self._run_quality_gate(
+            info=self._cbr_320_unverified(),
+            linked_spectral_grade="genuine",
+        )
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["search_filetype_override"], QUALITY_FLAC_ONLY)
         self.assertEqual(len(db.denylist), 1)
-        reason = db.denylist[0].reason or ""
-        self.assertIn("GOOD", reason,
-                      f"reason should name the custom gate_min_rank=GOOD, got: {reason}")
 
-    def test_requeue_lossless_uses_intent(self):
-        db = self._run_quality_gate(info=self._cbr_320_unverified())
+    def test_transparent_carried_source_grade_also_narrows(self):
+        # Decision 17: narrowing keys on the genuine grade, never the
+        # subject label — the carried source grade narrows identically.
+        db = self._run_quality_gate(
+            info=self._cbr_320_unverified(),
+            linked_spectral_grade="genuine",
+            linked_spectral_subject="source",
+            linked_spectral_provenance="carried",
+        )
         row = db.request(42)
         self.assertEqual(row["status"], "wanted")
         self.assertEqual(row["search_filetype_override"], QUALITY_FLAC_ONLY)
 
-    def test_quality_gate_reads_current_spectral_not_last_download(self):
-        """Quality gate must use current_spectral_bitrate (what's on disk),
-        not last_download_spectral_bitrate (stale from a previous download).
-
-        Observable proof: a stale last_download_* of "likely_transcode" at
-        180 kbps WOULD clamp an MP3 VBR 226 album down to GOOD and requeue.
-        Reading current_* (None) leaves the rank at EXCELLENT → accept,
-        and the request row stays ``imported``.
-        """
-        from lib.dispatch import _check_quality_gate_core
+    def test_quality_gate_ignores_request_spectral_stamps(self):
+        """Mutating request-row quality stamps cannot change linked policy."""
         from lib.beets_db import AlbumInfo
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42, status="imported",
+
+        db = self._run_quality_gate(
+            info=AlbumInfo(
+                album_id=1, track_count=10,
+                min_bitrate_kbps=226, avg_bitrate_kbps=226,
+                format="MP3", is_cbr=False,
+                album_path="/Beets/Artist/Album",
+            ),
             last_download_spectral_bitrate=180,
             last_download_spectral_grade="likely_transcode",
-            current_spectral_bitrate=None,
-            current_spectral_grade=None,
-            verified_lossless=False,
-        ))
-
-        info = AlbumInfo(
-            album_id=1, track_count=10,
-            min_bitrate_kbps=226, avg_bitrate_kbps=226,
-            format="MP3", is_cbr=False,
-            album_path="/Beets/Artist/Album",
+            current_spectral_bitrate=96,
+            current_spectral_grade="likely_transcode",
+            final_format="mp3 64",
         )
-        with patch("lib.beets_db.BeetsDB") as mock_beets_cls:
-            mock_beets = MagicMock()
-            mock_beets.__enter__ = MagicMock(return_value=mock_beets)
-            mock_beets.__exit__ = MagicMock(return_value=False)
-            mock_beets.get_album_info.return_value = info
-            mock_beets_cls.return_value = mock_beets
-            _check_quality_gate_core(
-                mb_id="test-mbid", label="Test Artist - Test Album",
-                request_id=42, files=[],
-                db=db)  # type: ignore[arg-type]
 
-        self.assertEqual(
-            db.request(42)["status"], "imported",
-            "stale last_download_* spectral must not influence the gate; "
-            "current_spectral_* is None, so the gate sees EXCELLENT and accepts")
+        self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertIsNone(db.request(42)["search_filetype_override"])
 
     def test_genuine_v0_replacing_transcode_accepted(self):
         """Genuine V0 replacing a transcode should be accepted, not requeued."""
-        from lib.dispatch import _check_quality_gate_core
         from lib.beets_db import AlbumInfo
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42, status="imported",
-            last_download_spectral_bitrate=None,
-            last_download_spectral_grade="genuine",
-            current_spectral_bitrate=None,
-            current_spectral_grade="genuine",
-            verified_lossless=False,
-        ))
-
-        info = AlbumInfo(
-            album_id=1, track_count=10,
-            min_bitrate_kbps=226, avg_bitrate_kbps=226,
-            format="MP3", is_cbr=False,
-            album_path="/Beets/Artist/Album",
+        db = self._run_quality_gate(
+            info=AlbumInfo(
+                album_id=1, track_count=10,
+                min_bitrate_kbps=226, avg_bitrate_kbps=226,
+                format="MP3", is_cbr=False,
+                album_path="/Beets/Artist/Album",
+            ),
+            linked_spectral_grade="genuine",
         )
-        with patch("lib.beets_db.BeetsDB") as mock_beets_cls:
-            mock_beets = MagicMock()
-            mock_beets.__enter__ = MagicMock(return_value=mock_beets)
-            mock_beets.__exit__ = MagicMock(return_value=False)
-            mock_beets.get_album_info.return_value = info
-            mock_beets_cls.return_value = mock_beets
-            _check_quality_gate_core(
-                mb_id="test-mbid", label="Test Artist - Test Album",
-                request_id=42, files=[],
-                db=db)  # type: ignore[arg-type]
 
-        # Should stay imported (not requeued) — rank is EXCELLENT with no
-        # spectral clamp because the grade is "genuine".
-        self.assertEqual(db.request(42)["status"], "imported")
+        # Genuine evidence below TRANSPARENT is retained on full tiers.
+        self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertIsNone(db.request(42)["search_filetype_override"])
 
     def test_quality_gate_uses_likely_transcode_spectral(self):
         """likely_transcode album grade must feed into the gate, not just suspect.
@@ -1833,32 +2271,17 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         GOOD, which is < EXCELLENT (gate_min) → requeue_upgrade. Without
         the clamp the status would stay ``imported``.
         """
-        from lib.dispatch import _check_quality_gate_core
         from lib.beets_db import AlbumInfo
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42, status="imported",
-            current_spectral_grade="likely_transcode",
-            current_spectral_bitrate=180,
-            verified_lossless=False,
-        ))
-        info = AlbumInfo(
-            album_id=1, track_count=10,
-            min_bitrate_kbps=226, avg_bitrate_kbps=226,
-            format="MP3", is_cbr=False,
-            album_path="/Beets/Artist/Album",
+        db = self._run_quality_gate(
+            info=AlbumInfo(
+                album_id=1, track_count=10,
+                min_bitrate_kbps=226, avg_bitrate_kbps=226,
+                format="MP3", is_cbr=False,
+                album_path="/Beets/Artist/Album",
+            ),
+            linked_spectral_grade="likely_transcode",
+            linked_spectral_bitrate=180,
         )
-        with patch("lib.beets_db.BeetsDB") as mock_beets_cls:
-            mock_beets = MagicMock()
-            mock_beets.__enter__ = MagicMock(return_value=mock_beets)
-            mock_beets.__exit__ = MagicMock(return_value=False)
-            mock_beets.get_album_info.return_value = info
-            mock_beets_cls.return_value = mock_beets
-            _check_quality_gate_core(
-                mb_id="test-mbid", label="Test Artist - Test Album",
-                request_id=42, files=[],
-                db=db)  # type: ignore[arg-type]
 
         self.assertEqual(
             db.request(42)["status"], "wanted",
@@ -1874,34 +2297,20 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         container bitrate for non-transcode grades, so the gate sees a
         clean EXCELLENT rank and the request stays imported.
         """
-        from lib.dispatch import _check_quality_gate_core
         from lib.beets_db import AlbumInfo
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42, status="imported",
-            current_spectral_grade="genuine",
-            current_spectral_bitrate=160,
-            verified_lossless=False,
-        ))
-        info = AlbumInfo(
-            album_id=1, track_count=10,
-            min_bitrate_kbps=226, avg_bitrate_kbps=226,
-            format="MP3", is_cbr=False,
-            album_path="/Beets/Artist/Album",
+        db = self._run_quality_gate(
+            info=AlbumInfo(
+                album_id=1, track_count=10,
+                min_bitrate_kbps=226, avg_bitrate_kbps=226,
+                format="MP3", is_cbr=False,
+                album_path="/Beets/Artist/Album",
+            ),
+            linked_spectral_grade="genuine",
+            linked_spectral_bitrate=160,
         )
-        with patch("lib.beets_db.BeetsDB") as mock_beets_cls:
-            mock_beets = MagicMock()
-            mock_beets.__enter__ = MagicMock(return_value=mock_beets)
-            mock_beets.__exit__ = MagicMock(return_value=False)
-            mock_beets.get_album_info.return_value = info
-            mock_beets_cls.return_value = mock_beets
-            _check_quality_gate_core(
-                mb_id="test-mbid", label="Test Artist - Test Album",
-                request_id=42, files=[],
-                db=db)  # type: ignore[arg-type]
 
-        self.assertEqual(db.request(42)["status"], "imported")
+        self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertIsNone(db.request(42)["search_filetype_override"])
 
     def test_dispatch_requeue_uses_intent(self):
         """Transcode-upgrade requeue path uses quality constants."""
@@ -1929,7 +2338,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
 
         row = db.request(42)
         self.assertEqual(row["status"], "wanted")
-        self.assertEqual(row["search_filetype_override"], QUALITY_UPGRADE_TIERS)
+        self.assertIsNone(row["search_filetype_override"])
 
 
 class TestQualityGatePreservesTargetFormat(unittest.TestCase):
@@ -1948,6 +2357,21 @@ class TestQualityGatePreservesTargetFormat(unittest.TestCase):
             current_spectral_bitrate=None,
             search_filetype_override="lossless",  # should be cleared
         ))
+        evidence = make_album_quality_evidence(
+            mb_release_id="test-mbid",
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="carried",
+                source="flac",
+                classifier="spectral_verified_lossless",
+            ),
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_request_current_evidence(42, persisted.id)
 
         # FLAC → measurement_rank returns LOSSLESS regardless of bitrate, so
         # the real quality_gate_decision accepts.
@@ -2010,8 +2434,11 @@ class TestOpusConversionDispatch(unittest.TestCase):
             final_format="opus 128",
             v0_verification_bitrate=247,
             source_measurement=AudioQualityMeasurement(
-                min_bitrate_kbps=128, verified_lossless=True,
+                min_bitrate_kbps=128,
                 was_converted_from="flac"),
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="measured", source="flac", classifier="spectral"
+            ),
             conversion=ConversionInfo(
                 was_converted=True, original_filetype="flac",
                 target_filetype="opus", final_format="opus 128"),

@@ -21,8 +21,7 @@ if TYPE_CHECKING:
     from lib.import_evidence import CandidateEvidenceActionResult
     from lib.pipeline_db import DownloadLogOutcome, PipelineDB
     from lib.quality import (AlbumQualityEvidence, AudioQualityMeasurement,
-                             DownloadInfo, ImportResult, SpectralDetail,
-                             TargetQualityContract)
+                             DownloadInfo, ImportResult, SpectralDetail)
     from lib.terminal_outcomes import PendingImportTerminalOutcome
 
 
@@ -65,10 +64,8 @@ FORCE_MANUAL_SCENARIOS: frozenset[str] = frozenset({"force_import", "manual_impo
 class QualityGateState:
     """Resolved on-disk state for a quality-gate evaluation."""
     measurement: AudioQualityMeasurement
-    min_bitrate_kbps: int
-    spectral_bitrate_kbps: int | None
-    spectral_grade: str | None
-    target_contract: TargetQualityContract | None = None
+    verified_lossless_proof: bool = False
+    source_v0_avg_bitrate_kbps: int | None = None
 
 
 @dataclass(frozen=True)
@@ -209,6 +206,8 @@ class EvidenceImportGate:
     candidate_reason: str | None = None
     current_status: str | None = None
     current_reason: str | None = None
+    current_path: str | None = None
+    current_snapshot_guard: str | None = None
     current_fail_closed: bool = False
     snapshot_guard: str | None = None
 
@@ -239,4 +238,4 @@ QualityGateFn = Callable[..., object | None]
 tests can pass a stub or a recorder instead of patching the module
 attribute. Signature matches ``_check_quality_gate_core`` (keyword-args
 including ``mb_id``, ``label``, ``request_id``, ``files``, ``db``,
-``quality_ranks``)."""
+   ``quality_ranks``, ``expected_current_evidence_id``)."""

@@ -7,6 +7,7 @@ hand-rolling dicts or dataclass constructors with many fields.
 from __future__ import annotations
 
 import json
+import msgspec
 import types
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -15,7 +16,9 @@ from unittest.mock import MagicMock, patch
 
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.quality import (
-    V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
+    EVIDENCE_PROVENANCE_MEASURED,
+    EVIDENCE_SUBJECT_INSTALLED,
+    EVIDENCE_SUBJECT_SOURCE,
     ActiveDownloadFileState,
     ActiveDownloadState,
     AlbumQualityEvidence,
@@ -33,9 +36,9 @@ from lib.quality import (
     RankBitrateMetric,
     SpectralMeasurement,
     TargetQualityContract,
+    VerifiedLosslessProof,
     V0ProbeEvidence,
     ValidationResult,
-    VerifiedLosslessProof,
 )
 from lib.quality_evidence import snapshot_fingerprint
 from lib.slskd_client import DownloadDirectory, DownloadUser, TransferSnapshot
@@ -139,7 +142,7 @@ def make_album_quality_evidence(
     storage_format: str | None = "MP3",
     target_format: str | None = None,
     target_is_cbr: bool | None = None,
-    lineage_version: int = 3,
+    lineage_version: int = 4,
     on_disk_v0_research_attempted: bool = False,
 ) -> AlbumQualityEvidence:
     """Build production-shaped active album-quality evidence.
@@ -170,6 +173,16 @@ def make_album_quality_evidence(
             format="MP3",
             spectral_grade="genuine",
             spectral_bitrate_kbps=None,
+        )
+    if (
+        lineage_version == 4
+        and measurement.spectral_grade is not None
+        and measurement.spectral_subject is None
+    ):
+        measurement = msgspec.structs.replace(
+            measurement,
+            spectral_subject=EVIDENCE_SUBJECT_INSTALLED,
+            spectral_provenance=EVIDENCE_PROVENANCE_MEASURED,
         )
     return AlbumQualityEvidence(
         mb_release_id=mb_release_id,
@@ -243,6 +256,13 @@ def build_parity_candidate_evidence(
             is_cbr=False,
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate,
+            spectral_subject=(
+                EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
+            ),
+            spectral_provenance=(
+                EVIDENCE_PROVENANCE_MEASURED
+                if spectral_grade is not None else None
+            ),
         )
     elif is_flac:
         container = codec = "flac"
@@ -255,6 +275,13 @@ def build_parity_candidate_evidence(
             is_cbr=False,
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate,
+            spectral_subject=(
+                EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
+            ),
+            spectral_provenance=(
+                EVIDENCE_PROVENANCE_MEASURED
+                if spectral_grade is not None else None
+            ),
         )
     else:
         container = codec = native_codec
@@ -268,6 +295,13 @@ def build_parity_candidate_evidence(
             is_cbr=is_cbr,
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate,
+            spectral_subject=(
+                EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
+            ),
+            spectral_provenance=(
+                EVIDENCE_PROVENANCE_MEASURED
+                if spectral_grade is not None else None
+            ),
         )
 
     v0_metric = None
@@ -276,8 +310,8 @@ def build_parity_candidate_evidence(
             min_bitrate_kbps=candidate_v0_probe_min,
             avg_bitrate_kbps=candidate_v0_probe_avg,
             median_bitrate_kbps=candidate_v0_probe_avg,
-            source_lineage=V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
-            source_provenance="neutral_album_quality_evidence",
+            subject=EVIDENCE_SUBJECT_SOURCE,
+            provenance=EVIDENCE_PROVENANCE_MEASURED,
         )
 
     files = [AlbumQualityEvidenceFile(
@@ -349,6 +383,15 @@ def build_parity_current_evidence(
             is_cbr=is_cbr,
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate,
+            spectral_subject=(
+                EVIDENCE_SUBJECT_INSTALLED
+                if spectral_grade is not None
+                else None
+            ),
+            spectral_provenance=(
+                EVIDENCE_PROVENANCE_MEASURED
+                if spectral_grade is not None else None
+            ),
         ),
         measured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
         files=files,
@@ -459,8 +502,23 @@ def make_import_result(
             median_bitrate_kbps=new_min_bitrate,
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate,
-            verified_lossless=verified_lossless,
+            spectral_subject=(
+                EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
+            ),
+            spectral_provenance=(
+                EVIDENCE_PROVENANCE_MEASURED
+                if spectral_grade is not None else None
+            ),
             format=(original_filetype or "FLAC").upper() if was_converted else None,
+        ),
+        verified_lossless_proof=(
+            VerifiedLosslessProof(
+                provenance=EVIDENCE_PROVENANCE_MEASURED,
+                source=original_filetype or "lossless_source",
+                classifier="test_helper",
+                detail=spectral_grade,
+            )
+            if verified_lossless else None
         ),
         current_measurement=(AudioQualityMeasurement(
                                   min_bitrate_kbps=prev_min_bitrate,
@@ -491,7 +549,6 @@ def make_import_result(
 def make_quality_rank_config(
     *,
     bitrate_metric: RankBitrateMetric | None = None,
-    gate_min_rank: QualityRank | None = None,
     within_rank_tolerance_kbps: int | None = None,
     opus: CodecRankBands | None = None,
     mp3_vbr: CodecRankBands | None = None,
@@ -501,14 +558,13 @@ def make_quality_rank_config(
     """Build a QualityRankConfig with test-friendly overrides.
 
     Defaults match QualityRankConfig.defaults() — override individual fields
-    to test metric swaps, alternate gate floors, or custom codec bands. Use
+    to test metric swaps or custom codec bands. Use
     this instead of constructing QualityRankConfig directly so tests stay
     stable when the dataclass grows new fields.
     """
     base = QualityRankConfig.defaults()
     return QualityRankConfig(
         bitrate_metric=bitrate_metric if bitrate_metric is not None else base.bitrate_metric,
-        gate_min_rank=gate_min_rank if gate_min_rank is not None else base.gate_min_rank,
         within_rank_tolerance_kbps=(
             within_rank_tolerance_kbps
             if within_rank_tolerance_kbps is not None

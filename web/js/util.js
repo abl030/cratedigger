@@ -16,9 +16,11 @@ export function qualityLabel(formats, kbps) {
   const fmt = formats.split(',')[0].trim().toUpperCase();
   if (fmt === 'FLAC' || fmt === 'ALAC') return fmt;
   if (!kbps || kbps <= 0) return fmt;
-  if (kbps >= 295) return fmt + ' 320';
-  if (kbps >= 220) return fmt + ' V0';
-  if (kbps >= 170) return fmt + ' V2';
+  if (fmt === 'MP3') {
+    if (kbps >= 295) return fmt + ' 320';
+    if (kbps >= 220) return fmt + ' V0';
+    if (kbps >= 170) return fmt + ' V2';
+  }
   return fmt + ' ' + kbps + 'k';
 }
 
@@ -27,7 +29,8 @@ export function qualityLabel(formats, kbps) {
  * badge use. Examples: "M V2", "M 320", "F", "O 128", "AL".
  *
  * Format code map:
- *   MP3 → M, FLAC → F, ALAC → AL, WAV → W, OPUS → O, AAC → A, OGG → OG
+ *   MP3 → M, FLAC → F, ALAC → AL, WAV → W, OPUS → O, AAC → A,
+ *   OGG → OG, VORBIS → V, WMA → WM
  *   Anything else → upper-cased name as-is.
  *
  * Bitrate tiers match qualityLabel(): >=295 → 320, >=220 → V0,
@@ -43,12 +46,12 @@ export function qualityLabelShort(formats, kbps) {
   const raw = formats.split(',')[0].trim().toUpperCase();
   const codeMap = {
     MP3: 'M', FLAC: 'F', ALAC: 'AL', WAV: 'W',
-    OPUS: 'O', AAC: 'A', OGG: 'OG',
+    OPUS: 'O', AAC: 'A', OGG: 'OG', VORBIS: 'V', WMA: 'WM',
   };
   const fmt = codeMap[raw] || raw;
   if (raw === 'FLAC' || raw === 'ALAC' || raw === 'WAV') return fmt;
   if (!kbps || kbps <= 0) return fmt;
-  // V0/V2 are MP3-specific tier names; for AAC/Opus/OGG show raw kbps.
+  // V0/V2 are MP3-specific tier names; other lossy codecs show raw kbps.
   if (raw === 'MP3') {
     if (kbps >= 295) return fmt + ' 320';
     if (kbps >= 220) return fmt + ' V0';

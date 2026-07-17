@@ -250,9 +250,9 @@ class TestDetermineVerifiedLossless(unittest.TestCase):
     def test_flac_marginal_is_verified(self):
         self.assertTrue(self._dvl(target_format="flac", spectral_grade="marginal"))
 
-    def test_flac_no_spectral_is_verified(self):
-        """No spectral ran → FLAC on disk is still verified (it IS lossless)."""
-        self.assertTrue(self._dvl(target_format="flac", spectral_grade=None))
+    def test_flac_no_spectral_is_not_verified(self):
+        """A lossless container is not proof without an affirmative scan."""
+        self.assertFalse(self._dvl(target_format="flac", spectral_grade=None))
 
     def test_flac_suspect_is_not_verified(self):
         self.assertFalse(self._dvl(target_format="flac", spectral_grade="suspect"))
@@ -269,7 +269,11 @@ class TestDetermineVerifiedLossless(unittest.TestCase):
     # --- Standard conversion path ---
 
     def test_converted_genuine_is_verified(self):
-        self.assertTrue(self._dvl(converted_count=12, is_transcode=False))
+        self.assertTrue(self._dvl(
+            spectral_grade="genuine",
+            converted_count=12,
+            is_transcode=False,
+        ))
 
     def test_converted_transcode_is_not_verified(self):
         self.assertFalse(self._dvl(converted_count=12, is_transcode=True))
@@ -277,18 +281,21 @@ class TestDetermineVerifiedLossless(unittest.TestCase):
     def test_not_converted_is_not_verified(self):
         self.assertFalse(self._dvl(converted_count=0, is_transcode=False))
 
-    def test_spectral_irrelevant_for_standard_path(self):
-        """Standard path uses is_transcode (derived from spectral), not spectral directly."""
-        self.assertTrue(self._dvl(spectral_grade="suspect",
-                                  converted_count=12, is_transcode=False))
+    def test_standard_path_requires_affirmative_spectral(self):
+        """An inconsistent non-transcode flag cannot overrule a suspect scan."""
+        self.assertFalse(self._dvl(
+            spectral_grade="suspect",
+            converted_count=12,
+            is_transcode=False,
+        ))
 
     # --- "lossless" target_format (same as "flac") ---
 
     def test_lossless_genuine_is_verified(self):
         self.assertTrue(self._dvl(target_format="lossless", spectral_grade="genuine"))
 
-    def test_lossless_no_spectral_is_verified(self):
-        self.assertTrue(self._dvl(target_format="lossless", spectral_grade=None))
+    def test_lossless_no_spectral_is_not_verified(self):
+        self.assertFalse(self._dvl(target_format="lossless", spectral_grade=None))
 
     def test_lossless_suspect_is_not_verified(self):
         self.assertFalse(self._dvl(target_format="lossless", spectral_grade="suspect"))
@@ -327,6 +334,14 @@ class TestDetermineVerifiedLossless(unittest.TestCase):
         self.assertTrue(self._dvl(
             converted_count=12, is_transcode=True,
             spectral_grade="likely_transcode",
+            v0_probe=self._v0(avg=276, min=237, median=279),
+        ))
+
+    def test_spectral_error_never_reaches_v0_override(self):
+        """A failed scan is absence of evidence, not disagreement to rescue."""
+        self.assertFalse(self._dvl(
+            converted_count=12, is_transcode=True,
+            spectral_grade="error",
             v0_probe=self._v0(avg=276, min=237, median=279),
         ))
 
@@ -712,7 +727,7 @@ class TestConversionPipelineE2E(unittest.TestCase):
     """
 
     def test_genuine_flac_default_is_verified_lossless(self):
-        """Genuine FLAC → V0 → bitrate > 210 → verified lossless."""
+        """Genuine FLAC → V0 + affirmative spectral proof → verified."""
         from harness.import_one import convert_lossless, V0_SPEC
         from lib.quality import (determine_verified_lossless,
                                  transcode_detection)
@@ -721,17 +736,9 @@ class TestConversionPipelineE2E(unittest.TestCase):
             make_test_album(album, track_count=2, cutoff_hz=15500)
             converted, failed, _, _ = convert_lossless(album, V0_SPEC)
 
-            # Measure V0 bitrate
-            min_br = None
-            for f in os.listdir(album):
-                if f.endswith(".mp3"):
-                    br = get_bitrate_kbps(os.path.join(album, f))
-                    if min_br is None or br < min_br:
-                        min_br = br
-
             # Decision chain
             is_transcode = transcode_detection(
-                converted, min_br, spectral_grade="genuine")
+                converted, spectral_grade="genuine")
             self.assertFalse(is_transcode)
 
             verified = determine_verified_lossless(
@@ -739,7 +746,7 @@ class TestConversionPipelineE2E(unittest.TestCase):
             self.assertTrue(verified)
 
     def test_transcode_flac_not_verified(self):
-        """Transcode FLAC → V0 → bitrate < 210 → NOT verified lossless."""
+        """Transcode FLAC → V0 + suspect spectral grade → not verified."""
         from harness.import_one import convert_lossless, V0_SPEC
         from lib.quality import (determine_verified_lossless,
                                  transcode_detection)
@@ -748,15 +755,8 @@ class TestConversionPipelineE2E(unittest.TestCase):
             make_test_album(album, track_count=2, cutoff_hz=12000)
             converted, failed, _, _ = convert_lossless(album, V0_SPEC)
 
-            min_br = None
-            for f in os.listdir(album):
-                if f.endswith(".mp3"):
-                    br = get_bitrate_kbps(os.path.join(album, f))
-                    if min_br is None or br < min_br:
-                        min_br = br
-
             is_transcode = transcode_detection(
-                converted, min_br, spectral_grade="suspect")
+                converted, spectral_grade="suspect")
             self.assertTrue(is_transcode)
 
             verified = determine_verified_lossless(
@@ -786,7 +786,7 @@ class TestConversionPipelineE2E(unittest.TestCase):
 
             # Step 2: Decision — verified lossless, convert to target
             is_transcode = transcode_detection(
-                converted, v0_min, spectral_grade="genuine")
+                converted, spectral_grade="genuine")
             verified = determine_verified_lossless(
                 None, "genuine", converted, is_transcode)
             self.assertTrue(verified)
@@ -821,15 +821,8 @@ class TestConversionPipelineE2E(unittest.TestCase):
             # V0 verification (keep source because target was configured)
             converted, _, _, _ = convert_lossless(album, V0_SPEC, keep_source=True)
 
-            v0_min = None
-            for f in os.listdir(album):
-                if f.endswith(".mp3"):
-                    br = get_bitrate_kbps(os.path.join(album, f))
-                    if v0_min is None or br < v0_min:
-                        v0_min = br
-
             is_transcode = transcode_detection(
-                converted, v0_min, spectral_grade="suspect")
+                converted, spectral_grade="suspect")
             self.assertTrue(is_transcode)
 
             verified = determine_verified_lossless(

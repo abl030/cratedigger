@@ -881,11 +881,11 @@ class TestReduceAlbumFormat(unittest.TestCase):
             _reduce_album_format({"Vorbis", "WAV"}, self.cfg), "Vorbis")
 
     def test_precedence_beats_alphabetical(self) -> None:
-        """A precedence-match wins over an alphabetically earlier unknown codec."""
+        """The worse first-class codec wins a mixed lossy album."""
         from lib.beets_db import _reduce_album_format
-        # "AAC" is earlier alphabetically than "Vorbis" AND is in precedence
+        # Vorbis is ahead of AAC in the conservative worst-first precedence.
         self.assertEqual(
-            _reduce_album_format({"Vorbis", "AAC"}, self.cfg), "AAC")
+            _reduce_album_format({"Vorbis", "AAC"}, self.cfg), "Vorbis")
 
     def test_case_insensitive_precedence_match(self) -> None:
         """Lowercase beets format ("flac") still matches precedence."""

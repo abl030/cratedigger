@@ -300,7 +300,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     min_bitrate_kbps=141,
                     avg_bitrate_kbps=240,
                     median_bitrate_kbps=240,
-                    source_lineage="lossless_source",
+                    subject="source",
                 ),
             )
             _seed_current_for_request(
@@ -322,7 +322,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     min_bitrate_kbps=211,
                     avg_bitrate_kbps=260,
                     median_bitrate_kbps=260,
-                    source_lineage="lossless_source",
+                    subject="source",
                 ),
             )
             cfg = CratediggerConfig(
@@ -490,7 +490,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             verified_lossless=False,
         ))
         proof = VerifiedLosslessProof(
-            proof_origin="candidate_import",
+            provenance="measured",
             source="flac",
             classifier="spectral_verified_lossless",
             detail="genuine",
@@ -503,7 +503,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 avg_bitrate_kbps=128,
                 median_bitrate_kbps=127,
                 format="Opus",
-                verified_lossless=True,
             ),
             verified_lossless_proof=proof,
             storage_format="Opus",
@@ -525,7 +524,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                             avg_bitrate_kbps=256,
                             median_bitrate_kbps=252,
                             format="MP3",
-                            verified_lossless=False,
                         ),
                     ),
                 )
@@ -535,7 +533,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         self.assertIsNotNone(refreshed_id)
         loaded = db.load_album_quality_evidence_by_id(refreshed_id)
         assert loaded is not None
-        self.assertFalse(loaded.measurement.verified_lossless)
         self.assertIsNone(loaded.verified_lossless_proof)
 
     def test_persisted_candidate_evidence_imports_when_no_current_album(self):
@@ -615,7 +612,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def test_persisted_candidate_evidence_backfills_stale_current_before_decision(self):
+    def test_stale_current_backfill_requires_fresh_enrichment_before_decision(self):
         from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
@@ -691,17 +688,17 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     candidate_import_job_id=job.id,
                 )
 
-            from lib.dispatch import DISPATCH_CODE_QUALITY_PIPELINE_REJECTED
-
             self.assertFalse(result.success)
-            self.assertIn("Rejected by persisted quality evidence", result.message)
-            self.assertEqual(result.code, DISPATCH_CODE_QUALITY_PIPELINE_REJECTED)
+            self.assertIn("Installed HAVE analysis failed", result.message)
+            self.assertEqual(result.code, "have_analysis_error")
             ext.run.assert_not_called()
             refreshed_id = db.get_request_current_evidence_id(42)
             self.assertIsNotNone(refreshed_id)
             refreshed = db.load_album_quality_evidence_by_id(refreshed_id)
             assert refreshed is not None
             self.assertEqual(refreshed.measurement.min_bitrate_kbps, 320)
+            self.assertIsNone(refreshed.measurement.spectral_grade)
+            self.assertIsNone(refreshed.v0_metric)
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -761,7 +758,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 )
 
             self.assertFalse(result.success)
-            self.assertIn("Current quality evidence unavailable", result.message)
+            self.assertIn("Installed HAVE analysis failed", result.message)
             ext.run.assert_not_called()
         finally:
             import shutil
@@ -824,7 +821,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 )
 
             self.assertFalse(result.success)
-            self.assertIn("Current quality evidence unavailable", result.message)
+            self.assertIn("Installed HAVE analysis failed", result.message)
             ext.run.assert_not_called()
         finally:
             import shutil

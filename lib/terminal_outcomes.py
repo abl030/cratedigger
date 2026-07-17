@@ -75,6 +75,13 @@ class TerminalDenylist:
 
 
 @dataclass(frozen=True)
+class TerminalCooldown:
+    """One global source-user cooldown evaluation, without a denylist write."""
+
+    username: str
+
+
+@dataclass(frozen=True)
 class ImportJobTerminal:
     """Terminal import-job fields committed with its domain outcome."""
 
@@ -101,6 +108,7 @@ class ImportTerminalOutcome:
     job: ImportJobTerminal
     post_audit_transitions: tuple[RequestTransition, ...] = ()
     denylists: tuple[TerminalDenylist, ...] = ()
+    cooldowns: tuple[TerminalCooldown, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -113,6 +121,7 @@ class PendingImportTerminalOutcome:
     audit: TerminalDownloadAudit
     post_audit_transitions: tuple[RequestTransition, ...] = ()
     denylists: tuple[TerminalDenylist, ...] = ()
+    cooldowns: tuple[TerminalCooldown, ...] = ()
 
     def with_job(self, job: ImportJobTerminal) -> ImportTerminalOutcome:
         return ImportTerminalOutcome(
@@ -123,6 +132,7 @@ class PendingImportTerminalOutcome:
             job=job,
             post_audit_transitions=self.post_audit_transitions,
             denylists=self.denylists,
+            cooldowns=self.cooldowns,
         )
 
     def append_transitions(
@@ -139,7 +149,6 @@ class PendingImportTerminalOutcome:
         *entries: TerminalDenylist,
     ) -> "PendingImportTerminalOutcome":
         return replace(self, denylists=self.denylists + entries)
-
 
 @dataclass(frozen=True)
 class PreviewTerminalOutcome:

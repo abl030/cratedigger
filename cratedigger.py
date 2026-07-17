@@ -60,6 +60,34 @@ cfg: CratediggerConfig = None  # type: ignore[assignment]  # Set in main()
 slskd: SlskdClient = None  # type: ignore[assignment]  # Set in main()
 logger = logging.getLogger("cratedigger")
 
+
+def _warn_if_verified_lossless_target_below_transparent(
+    config: "CratediggerConfig",
+) -> None:
+    """Warn when a proof-bearing conversion target is below archival quality."""
+    if not config.verified_lossless_target:
+        return
+    try:
+        from lib.quality import QualityRank, quality_rank
+
+        target_rank = quality_rank(
+            config.verified_lossless_target,
+            bitrate_kbps=None,
+            is_cbr=False,
+            cfg=config.quality_ranks,
+        )
+        if target_rank < QualityRank.TRANSPARENT:
+            logger.warning(
+                f"verified_lossless_target={config.verified_lossless_target!r} "
+                f"has rank {target_rank.name}, below canonical TRANSPARENT. "
+                f"Files converted to this target carry verified-lossless proof "
+                f"and complete acquisition terminally, so Cratedigger will not "
+                f"continue searching for a higher-quality copy. Raise the target "
+                f"format to TRANSPARENT or better."
+            )
+    except Exception as exc:
+        logger.debug(f"verified_lossless_target rank check failed: {exc}")
+
 # Per-search progress watchdog (issue #212) + response-settle (issue #242)
 # constants and helpers now live in ``lib/search_exec.py`` alongside the
 # unified ``execute_search`` lifecycle they govern (issue #466). Imported at
@@ -1263,31 +1291,7 @@ def main():
             logger.info(f"Beets validation ENABLED: harness={cfg.beets_harness_path}, "
                         f"threshold={cfg.beets_distance_threshold}, staging={cfg.beets_staging_dir}")
 
-        # --- Soft warning for sub-gate verified_lossless_target (issue #60) ---
-        # When the configured verified_lossless_target has a declared rank
-        # below gate_min_rank, the resulting imports will fail the quality
-        # gate and be re-queued for upgrade — meaning they'll never stabilize
-        # as "imported". Log loudly at startup so operators see this before
-        # it surprises them downstream.
-        if cfg.verified_lossless_target:
-            try:
-                from lib.quality import quality_rank, QualityRank
-                target_rank = quality_rank(
-                    cfg.verified_lossless_target,
-                    bitrate_kbps=None, is_cbr=False, cfg=cfg.quality_ranks)
-                if (target_rank != QualityRank.UNKNOWN
-                        and target_rank < cfg.quality_ranks.gate_min_rank):
-                    logger.warning(
-                        f"verified_lossless_target={cfg.verified_lossless_target!r} "
-                        f"has rank {target_rank.name}, below configured "
-                        f"gate_min_rank={cfg.quality_ranks.gate_min_rank.name}. "
-                        f"Files converted to this target will fail the quality "
-                        f"gate and be re-queued for upgrade. Either raise the "
-                        f"target format or lower gate_min_rank in config.ini "
-                        f"[Quality Ranks]."
-                    )
-            except Exception as exc:
-                logger.debug(f"verified_lossless_target rank check failed: {exc}")
+        _warn_if_verified_lossless_target_below_transparent(cfg)
 
         # --- Fail-loud schema gate ---
         # cratedigger.service uses Wants=, not Requires=, on

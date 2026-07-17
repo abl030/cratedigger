@@ -86,7 +86,7 @@ def _run_have_boundary_through_both_adapters(
         measure_preimport_state,
     )
     from lib.quality import (
-        V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
+        EVIDENCE_SUBJECT_SOURCE,
         AlbumQualityV0Metric,
         AudioQualityMeasurement,
         ImportResult,
@@ -116,8 +116,8 @@ def _run_have_boundary_through_both_adapters(
                 min_bitrate_kbps=200,
                 avg_bitrate_kbps=228,
                 median_bitrate_kbps=225,
-                source_lineage=V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
-                source_provenance="generated",
+                subject=EVIDENCE_SUBJECT_SOURCE,
+                provenance="measured",
             )
             if lossless_v0_lineage
             else None
@@ -514,6 +514,11 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             current_spectral_bitrate=stale_bitrate,
         )
         db.seed_request(req)
+        evidence_spectral_bitrate = (
+            authoritative_bitrate
+            if authoritative_grade is not None
+            else None
+        )
         evidence = make_album_quality_evidence(
             mb_release_id=req["mb_release_id"],
             measurement=AudioQualityMeasurement(
@@ -522,7 +527,13 @@ class TestAttemptAuditGenerated(unittest.TestCase):
                 median_bitrate_kbps=127,
                 format="Opus",
                 spectral_grade=authoritative_grade,
-                spectral_bitrate_kbps=authoritative_bitrate,
+                spectral_bitrate_kbps=evidence_spectral_bitrate,
+                spectral_subject=(
+                    "installed" if authoritative_grade is not None else None
+                ),
+                spectral_provenance=(
+                    "measured" if authoritative_grade is not None else None
+                ),
             ),
             codec="opus",
             container="opus",
@@ -536,13 +547,13 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         assert persisted is not None and persisted.id is not None
         db.set_request_current_evidence(42, persisted.id)
 
-        _, detail, authoritative = load_persisted_existing_spectral(db, 42, req)
+        _, detail, authoritative = load_persisted_existing_spectral(db, 42)
 
         self.assertTrue(authoritative)
         self.assertTrue(_authoritative_have_matches(
             detail,
             authoritative_grade,
-            authoritative_bitrate,
+            evidence_spectral_bitrate,
         ))
 
     @given(

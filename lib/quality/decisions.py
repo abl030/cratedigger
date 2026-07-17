@@ -4,11 +4,14 @@ Extracted verbatim from the monolithic ``lib/quality.py`` (issue #477).
 Pure move: every definition is AST-identical to the original.
 """
 
+from dataclasses import dataclass
 from typing import Literal, Optional
 import msgspec
 
 from lib.quality.evidence_types import (
     AudioQualityMeasurement,
+    EVIDENCE_PROVENANCE_MEASURED,
+    EVIDENCE_SUBJECT_INSTALLED,
     QualityComparisonBasis,
     SPECTRAL_TRANSCODE_GRADES,
     TargetQualityContract,
@@ -23,10 +26,10 @@ DECISION_PROVISIONAL_LOSSLESS_UPGRADE = "provisional_lossless_upgrade"
 DECISION_SUSPECT_LOSSLESS_DOWNGRADE = "suspect_lossless_downgrade"
 DECISION_SUSPECT_LOSSLESS_PROBE_MISSING = "suspect_lossless_probe_missing"
 DECISION_LOSSLESS_SOURCE_LOCKED = "lossless_source_locked"
+DECISION_VERIFIED_LOSSLESS_LOCKED = "verified_lossless_locked"
 
 
 QUALITY_MIN_BITRATE_KBPS = 210  # V0 floor — below this triggers upgrade
-TRANSCODE_MIN_BITRATE_KBPS = 210  # V0 from genuine lossless is always >= this
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +144,7 @@ def import_quality_decision(
     *,
     target_contract: TargetQualityContract | None = None,
     v0_probe: V0ProbeEvidence | None = None,
+    verified_lossless_proof: bool = False,
 ) -> ImportQualityDecision:
     """Decide whether to import based on codec-aware quality comparison (issue #60).
 
@@ -151,8 +155,8 @@ def import_quality_decision(
     QualityRank bands (via quality_rank/measurement_rank), so cross-codec
     comparisons (Opus 128 vs MP3 V0) are correctly treated as equivalent.
 
-    The verified_lossless bypass is now a tier-gated preference:
-    ``verified_lossless=True`` still forces an import when the verdict is
+    The verified-lossless proof bypass is now a tier-gated preference:
+    ``verified_lossless_proof=True`` still forces an import when the verdict is
     "better" or "equivalent", but NOT when it would be a downgrade — this
     blocks a deliberately too-low ``verified_lossless_target`` (e.g. Opus
     64) from replacing a good existing album. When the bypass CHANGED the
@@ -191,11 +195,11 @@ def import_quality_decision(
     )
     verdict = basis.verdict
 
-    # verified_lossless is a soft preference: "better" or "equivalent" still
-    # import, but "worse" is blocked regardless of verified_lossless status.
+    # Verified-lossless proof is a soft preference: "better" or "equivalent"
+    # still import, but "worse" is blocked regardless of proof status.
     # This prevents a deliberately too-low verified-lossless target from
     # blindly replacing a good existing album (issue #60 acceptance criterion).
-    if new.verified_lossless and verdict == "equivalent":
+    if verified_lossless_proof and verdict == "equivalent":
         return ImportQualityDecision(
             decision="transcode_upgrade" if is_transcode else "import",
             basis=msgspec.structs.replace(basis, verified_lossless_bypass=True),
@@ -226,6 +230,7 @@ class MeasuredImportDecisionInput(msgspec.Struct, frozen=True):
     is_transcode: bool = False
     target_contract: TargetQualityContract | None = None
     v0_probe: V0ProbeEvidence | None = None
+    verified_lossless_proof: bool = False
 
 
 class MeasuredImportDecisionResult(msgspec.Struct, frozen=True):
@@ -289,8 +294,8 @@ def provisional_lossless_decision(
     if not candidate.supported_lossless_source:
         # Lossless-source lock: when the existing album was previously
         # imported as a provisional lossless source we transcoded down (so
-        # current_lossless_source_v0_probe_avg_bitrate is the only V0-grade
-        # signal we have), a lossy candidate cannot produce comparable
+        # the linked source-subject V0 metric is the only comparable anchor),
+        # a lossy candidate cannot produce comparable
         # evidence and must not be allowed to override on raw avg alone.
         # The recorded V0 probe is the truth-of-source anchor; only another
         # lossless-container candidate (which can be ground to V0) is
@@ -430,6 +435,12 @@ def build_existing_quality_measurement(
         is_cbr=is_cbr,
         spectral_grade=spectral_grade,
         spectral_bitrate_kbps=spectral_bitrate_kbps,
+        spectral_subject=(
+            EVIDENCE_SUBJECT_INSTALLED if spectral_grade is not None else None
+        ),
+        spectral_provenance=(
+            EVIDENCE_PROVENANCE_MEASURED if spectral_grade is not None else None
+        ),
     )
 
 
@@ -446,6 +457,7 @@ def measured_import_decision(
         cfg=cfg,
         target_contract=measured.target_contract,
         v0_probe=measured.v0_probe,
+        verified_lossless_proof=measured.verified_lossless_proof,
     )
     decision = quality.decision
     exit_code = 0
@@ -487,9 +499,7 @@ def measured_import_decision(
     )
 
 
-def transcode_detection(converted_count, post_conversion_min_bitrate,
-                        spectral_grade=None,
-                        cfg: "QualityRankConfig | None" = None):
+def transcode_detection(converted_count, *, spectral_grade=None):
     """Detect whether a FLAC→V0 conversion produced a transcode.
 
     Called in import_one.py after convert_flac_to_v0().
@@ -498,38 +508,18 @@ def transcode_detection(converted_count, post_conversion_min_bitrate,
     (MP3 wrapped in FLAC container).
 
     Inputs:
-        converted_count:             number of FLAC files converted
-        post_conversion_min_bitrate: min bitrate after conversion (kbps), or None
-        spectral_grade:              album spectral grade, or None if unavailable
-        cfg:                         QualityRankConfig — the spectral-fallback
-                                     threshold is taken from
-                                     ``cfg.mp3_vbr.excellent``. When omitted,
-                                     falls back to the legacy
-                                     ``TRANSCODE_MIN_BITRATE_KBPS`` constant
-                                     (210) so existing callers stay
-                                     bit-for-bit compatible. Issue #66.
+        converted_count: number of FLAC files converted
+        spectral_grade:  affirmative album spectral grade; absent or errored
+                         analysis fails closed
     """
     if converted_count == 0:
         return False
-    if post_conversion_min_bitrate is None:
+    if spectral_grade in ("genuine", "marginal"):
         return False
-    # When spectral data is available, it's authoritative.
-    # 'error' is inconclusive (decoder failed on every track — usually a
-    # missing codec or hostile input). Fail closed: treat as transcode so
-    # determine_verified_lossless can't pass it without V0 corroboration.
-    if spectral_grade is not None:
-        # Cliff detected, suspect, or analysis failed = treat as transcode
-        if spectral_grade in ("suspect", "likely_transcode", "error"):
-            return True
-        # No cliff = not a transcode (lo-fi lossless produces low V0 bitrates)
-        return False
-    # No spectral data — fall back to bitrate threshold. Derived from cfg
-    # so the threshold tracks gate retuning automatically: an operator who
-    # lowers mp3_vbr.excellent to accept lower-quality V0 also implicitly
-    # lowers what counts as "credible V0" for the spectral fallback.
-    threshold = (cfg.mp3_vbr.excellent if cfg is not None
-                 else TRANSCODE_MIN_BITRATE_KBPS)
-    return post_conversion_min_bitrate < threshold
+    # Suspect/likely-transcode are affirmative disagreement and may later be
+    # rescued by the V0 override. Missing/error/unknown evidence is an abort,
+    # represented conservatively here so it can never mint verification.
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -580,12 +570,11 @@ def determine_verified_lossless(
 ) -> bool:
     """Single source of truth for verified lossless status (pure).
 
-    Two paths:
-    1. target_format="lossless"/"flac" (lossless kept on disk): verified if
-       spectral says genuine or marginal, or if no spectral ran (None).
-       The lossless source IS on disk — no conversion needed to prove it.
-    2. Default (lossless→V0/target): verified if we actually converted
-       lossless files AND spectral didn't flag them as transcodes.
+    Two paths, both requiring affirmative spectral evidence:
+    1. target_format="lossless"/"flac" (lossless kept on disk): verified when
+       spectral says genuine or marginal.
+    2. Default (lossless→V0/target): verified when lossless files were
+       converted and spectral affirmatively says genuine or marginal.
 
     V0-avg trust override (issue #205-style — Bill Hicks): in either path,
     when spectral disagrees with V0 evidence (suspect/likely_transcode but a
@@ -604,13 +593,21 @@ def determine_verified_lossless(
     """
     if has_lossy_passthrough:
         return False
+    if spectral_grade in (None, "error"):
+        return False
+    spectral_affirms = spectral_grade in ("genuine", "marginal")
+    spectral_disagrees = spectral_grade in (
+        "suspect",
+        "likely_transcode",
+    )
     if target_format in ("flac", "lossless"):
-        if spectral_grade in ("genuine", "marginal", None):
+        if spectral_affirms:
             return True
-        return v0_probe_overrides_spectral(v0_probe)
-    if converted_count > 0 and not is_transcode:
+        return spectral_disagrees and v0_probe_overrides_spectral(v0_probe)
+    if converted_count > 0 and spectral_affirms and not is_transcode:
         return True
-    if converted_count > 0 and v0_probe_overrides_spectral(v0_probe):
+    if (converted_count > 0 and spectral_disagrees
+            and v0_probe_overrides_spectral(v0_probe)):
         return True
     return False
 
@@ -631,18 +628,73 @@ def is_verified_lossless(was_converted: bool, original_filetype: Optional[str],
     return original_filetype.lower() in _LOSSLESS_EXTS
 
 
+QualityGateDecision = Literal["accept", "requeue_upgrade", "requeue_lossless"]
+
+
+@dataclass(frozen=True)
+class PostImportSearchAction:
+    """Canonical state transition for a retained automatic import.
+
+    ``search_filetype_override=None`` deliberately means the ordinary full
+    search surface, including the catch-all lane for codecs the rank model
+    does not know.  Lossless narrowing is the sole non-null policy override.
+    """
+
+    status: Literal["imported", "wanted"]
+    search_filetype_override: Literal["lossless"] | None
+    denylist: bool
+
+
+_POST_IMPORT_SEARCH_ACTIONS: dict[str, PostImportSearchAction] = {
+    "accept": PostImportSearchAction("imported", None, False),
+    "requeue_lossless": PostImportSearchAction("wanted", "lossless", True),
+    "requeue_upgrade": PostImportSearchAction("wanted", None, True),
+    DECISION_PROVISIONAL_LOSSLESS_UPGRADE: PostImportSearchAction(
+        "wanted", "lossless", True
+    ),
+    "transcode_upgrade": PostImportSearchAction("wanted", None, True),
+    "transcode_first": PostImportSearchAction("wanted", None, True),
+}
+
+
+def post_import_search_action(decision: str) -> PostImportSearchAction:
+    """Map every retained-import decision to status, scope, and exclusion.
+
+    This is the one policy owner shared by the post-import gate, the import
+    dispatch tail, and the simulator.  Kept lossy/provisional sources are
+    denylisted because another offer from the same peer cannot improve the
+    copy already on disk.
+    """
+
+    action = _POST_IMPORT_SEARCH_ACTIONS.get(decision)
+    if action is None:
+        raise ValueError(f"unknown retained-import decision: {decision}")
+    return action
+
+
+def post_import_search_action_if_known(
+    decision: str,
+) -> PostImportSearchAction | None:
+    """Return automatic retained-import policy when ``decision`` owns one."""
+
+    return _POST_IMPORT_SEARCH_ACTIONS.get(decision)
+
+
 def quality_gate_decision(
     current: AudioQualityMeasurement,
     cfg: "QualityRankConfig | None" = None,
     *,
     target_contract: TargetQualityContract | None = None,
-) -> str:
-    """Codec-aware post-import quality gate (issue #60).
+    verified_lossless_proof: bool = False,
+) -> QualityGateDecision:
+    """Choose post-import search policy from proof and measured authority.
 
-    Classifies ``current`` via ``gate_rank()`` (which applies the spectral
-    clamp) and compares against ``cfg.gate_min_rank``.
-
-    Returns one of: "accept", "requeue_upgrade", "requeue_lossless".
+    Verified-lossless proof is the only terminal boundary.  A transparent
+    copy with a genuine spectral grade narrows to lossless-only regardless
+    of the grade's subject label (decision 17): for an unconverted lossy
+    import the source-subject grade describes the installed bytes, and
+    out-of-band mutation is outside the state model.  Every other retained
+    copy stays wanted on the full search surface.
 
     Args:
         current: measurement of the files now on disk (from beets DB + spectral)
@@ -651,16 +703,17 @@ def quality_gate_decision(
     if cfg is None:
         cfg = QualityRankConfig.defaults()
 
-    rank = gate_rank(current, cfg, target_contract=target_contract)
-
-    if rank == QualityRank.UNKNOWN or rank < cfg.gate_min_rank:
-        return "requeue_upgrade"
-    effective_is_cbr = (
-        target_contract.is_cbr
-        if target_contract is not None
-        else current.is_cbr
+    if verified_lossless_proof:
+        return "accept"
+    rank = gate_rank(
+        current,
+        cfg,
+        target_contract=target_contract,
+        verified_lossless_proof=verified_lossless_proof,
     )
-    if (not current.verified_lossless and effective_is_cbr
-            and rank < QualityRank.LOSSLESS):
+    if (
+        rank == QualityRank.TRANSPARENT
+        and current.spectral_grade == "genuine"
+    ):
         return "requeue_lossless"
-    return "accept"
+    return "requeue_upgrade"

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 import msgspec
@@ -11,10 +11,10 @@ import psycopg2.extras
 
 from lib import transitions
 from lib.import_queue import ImportJob, validate_preview_failure_status
-from lib.quality import CooldownConfig, should_cooldown
 from lib.terminal_outcomes import (
     ImportTerminalOutcome,
     PreviewTerminalOutcome,
+    TerminalCooldown,
     TerminalDenylist,
     TerminalDownloadAudit,
     TerminalOutcomeResult,
@@ -428,27 +428,27 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
             boundary("denylist")
         if not entry.apply_cooldown:
             return False
-        cfg = CooldownConfig()
-        recent = self._execute(
-            """
-            SELECT outcome FROM download_log
-            WHERE outcome IS NOT NULL
-              AND COALESCE(beets_scenario, '') <> 'abandoned_auto_import'
-              AND %s = ANY(
-                  regexp_split_to_array(
-                      regexp_replace(COALESCE(soulseek_username, ''), '\\s*,\\s*', ',', 'g'),
-                      ','
-                  )
-              )
-            ORDER BY id DESC
-            LIMIT %s
-            """,
-            (entry.username, cfg.lookback_window),
+        return self._persist_terminal_cooldown(
+            TerminalCooldown(entry.username),
+            boundary,
         )
-        outcomes = [str(row["outcome"]) for row in recent.fetchall()]
-        if not should_cooldown(outcomes, cfg):
+
+    def _persist_terminal_cooldown(
+        self,
+        entry: TerminalCooldown,
+        boundary: Callable[[str], None],
+    ) -> bool:
+        """Evaluate one username's global outcome streak without denylisting.
+
+        Shares the ONE streak evaluator with ``check_and_apply_cooldown``
+        (decision 20 follow-up) but keeps its write inside the enclosing
+        terminal-outcome transaction — delegating the write too would
+        commit mid-transaction and break the all-or-none contract.
+        """
+
+        verdict = self._cooldown_streak_verdict(entry.username)
+        if verdict is None:
             return False
-        cooldown_until = datetime.now(timezone.utc) + timedelta(days=cfg.cooldown_days)
         self._execute(
             """
             INSERT INTO user_cooldowns (username, cooldown_until, reason)
@@ -457,11 +457,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 SET cooldown_until = EXCLUDED.cooldown_until,
                     reason = EXCLUDED.reason
             """,
-            (
-                entry.username,
-                cooldown_until,
-                f"{cfg.failure_threshold} consecutive failures",
-            ),
+            (entry.username, verdict[0], verdict[1]),
         )
         boundary("cooldown")
         return True
@@ -541,6 +537,9 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                     entry,
                     boundary,
                 ):
+                    cooled.add(entry.username)
+            for entry in command.cooldowns:
+                if self._persist_terminal_cooldown(entry, boundary):
                     cooled.add(entry.username)
             job = self._persist_terminal_import_job(command, boundary)
             self.conn.commit()

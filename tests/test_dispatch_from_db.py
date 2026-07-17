@@ -263,6 +263,8 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         self.assertEqual(logs[-1].source_download_log_id, logs[0].id)
 
     def test_successful_force_and_manual_imports_run_post_import_pipeline(self):
+        # Decision 19: force-import overrides the beets distance and nothing
+        # else — operator imports run the identical post-import gate.
         for force in (True, False):
             with self.subTest(force=force):
                 r = self._dispatch(force=force)
@@ -1140,20 +1142,18 @@ class TestLoadEvidenceImportGateDelegation(unittest.TestCase):
 
         db = FakePipelineDB()
         candidate_result = self._candidate_result()
-        with patch(
-            "lib.dispatch.evidence_gate.load_current_evidence_for_action",
-            return_value=None,
-        ) as mock_helper:
-            gate = _load_evidence_import_gate(
-                db,  # type: ignore[arg-type]
-                request_id=42,
-                mb_release_id="mbid-123",
-                path="/tmp/stage",
-                quality_ranks=None,
-                candidate_import_job_id=7,
-                candidate_download_log_id=None,
-                prevalidated_candidate_result=candidate_result,
-            )
+        mock_helper = MagicMock(return_value=None)
+        gate = _load_evidence_import_gate(
+            db,  # type: ignore[arg-type]
+            request_id=42,
+            mb_release_id="mbid-123",
+            path="/tmp/stage",
+            quality_ranks=None,
+            candidate_import_job_id=7,
+            candidate_download_log_id=None,
+            prevalidated_candidate_result=candidate_result,
+            current_evidence_loader=mock_helper,
+        )
 
         mock_helper.assert_called_once()
         self.assertIsNone(gate.current)
@@ -1179,20 +1179,17 @@ class TestLoadEvidenceImportGateDelegation(unittest.TestCase):
         fail_result = CurrentEvidenceActionResult(
             evidence=None, provenance=fail_provenance
         )
-        with patch(
-            "lib.dispatch.evidence_gate.load_current_evidence_for_action",
-            return_value=fail_result,
-        ):
-            gate = _load_evidence_import_gate(
-                db,  # type: ignore[arg-type]
-                request_id=42,
-                mb_release_id="mbid-123",
-                path="/tmp/stage",
-                quality_ranks=None,
-                candidate_import_job_id=7,
-                candidate_download_log_id=None,
-                prevalidated_candidate_result=candidate_result,
-            )
+        gate = _load_evidence_import_gate(
+            db,  # type: ignore[arg-type]
+            request_id=42,
+            mb_release_id="mbid-123",
+            path="/tmp/stage",
+            quality_ranks=None,
+            candidate_import_job_id=7,
+            candidate_download_log_id=None,
+            prevalidated_candidate_result=candidate_result,
+            current_evidence_loader=MagicMock(return_value=fail_result),
+        )
 
         self.assertIsNone(gate.current)
         self.assertEqual(gate.current_status, "failed")

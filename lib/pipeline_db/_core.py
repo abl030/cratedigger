@@ -28,11 +28,15 @@ class _PipelineDBBase:
     def _execute(self, sql: str, params: Any = ()) -> Any: ...
     def _atomic(self) -> Any: ...
     def advisory_lock(self, namespace: int, key: int) -> Any: ...
-    # Sole cross-cluster call: the dashboard metrics aggregator reaches into
-    # the search-plan cluster for readiness. Declared here so _DashboardMixin
-    # type-checks; resolved to _SearchPlanMixin.get_search_plan_readiness at
-    # runtime via the composed MRO.
+    # Cross-cluster calls: declared here so the calling mixin type-checks;
+    # resolved to the owning sibling mixin at runtime via the composed MRO.
+    # - dashboard metrics aggregator -> search-plan cluster readiness:
     def get_search_plan_readiness(self, *args: Any, **kwargs: Any) -> Any: ...
+    # - terminal-outcome cooldown -> the one streak evaluator in _MiscMixin
+    #   (decision 20 follow-up: pending and direct paths share it):
+    def _cooldown_streak_verdict(
+        self, *args: Any, **kwargs: Any
+    ) -> Any: ...
 
 
 class _CoreMixin(_PipelineDBBase):

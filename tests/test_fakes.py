@@ -324,9 +324,8 @@ class TestFakePipelineDB(unittest.TestCase):
             min_bitrate_kbps=201,
             avg_bitrate_kbps=259,
             median_bitrate_kbps=255,
-            source_lineage="on_disk_research",
-            source_provenance="installed album ffmpeg V0",
-            proof_provenance="exact content snapshot",
+            subject="installed",
+            provenance="measured",
         )
         evidence = make_album_quality_evidence(
             mb_release_id="mb-preserve-v0-1",
@@ -351,7 +350,7 @@ class TestFakePipelineDB(unittest.TestCase):
 
         replacement = AlbumQualityV0Metric(
             avg_bitrate_kbps=261,
-            source_lineage="native_lossy_research",
+            subject="installed",
         )
         db.upsert_album_quality_evidence(msgspec.structs.replace(
             evidence,
@@ -970,8 +969,17 @@ class TestFakePipelineDB(unittest.TestCase):
         fake and crashed on the real CHECK constraint)."""
         import psycopg2.errors
         db = FakePipelineDB()
-        with self.assertRaises(psycopg2.errors.CheckViolation):
-            db.log_download(42, outcome="error")
+        for outcome in ("error", "have_analysis_errors"):
+            with self.subTest(outcome=outcome):
+                with self.assertRaises(psycopg2.errors.CheckViolation):
+                    db.log_download(42, outcome=outcome)
+
+    def test_log_download_accepts_have_analysis_error(self):
+        db = FakePipelineDB()
+        log_id = db.log_download(42, outcome="have_analysis_error")
+
+        self.assertEqual(log_id, 1)
+        self.assertEqual(db.download_logs[0].outcome, "have_analysis_error")
 
     def test_set_update_download_state_error_raises_and_leaves_row_untouched(self):
         """Issue #564 review: the injection seam mirrors a psycopg2 error

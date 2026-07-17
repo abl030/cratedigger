@@ -8,7 +8,6 @@ by stale ``current_spectral_bitrate`` (issue #18).
 import argparse
 
 from lib import transitions
-from lib.release_identity import normalize_release_id
 from scripts.pipeline_cli._format import _fmt_br
 
 # Module-level DI seam for ``transitions.finalize_request`` — see
@@ -57,26 +56,13 @@ def _quality_preview_target_label(
     return "V0"
 
 
-def _load_beets_album_info(mb_release_id, rank_cfg):
-    """Best-effort Beets album lookup for current quality metadata."""
-    from lib.beets_db import BeetsDB
-
-    if not mb_release_id:
-        return None
-    try:
-        with BeetsDB() as beets:
-            return beets.get_album_info(mb_release_id, rank_cfg)
-    except Exception:
-        return None
-
-
 def cmd_quality(db, args):
     """Show quality state and simulate decisions for common download scenarios."""
+    from lib.dispatch import load_quality_gate_state
     from lib.quality import (full_pipeline_decision, quality_gate_decision,
-                             AudioQualityMeasurement, gate_rank,
+                             gate_rank,
                              rejection_backfill_override,
-                             search_tiers, compute_effective_override_bitrate,
-                             TargetQualityContract)
+                             search_tiers, compute_effective_override_bitrate)
 
     rank_cfg = _load_runtime_rank_config()
 
@@ -86,139 +72,108 @@ def cmd_quality(db, args):
         return
 
     label = f"{req['artist_name']} - {req['album_title']}"
-    min_br = req.get("min_bitrate")
-    verified = bool(req.get("verified_lossless"))
-    current_br = req.get("current_spectral_bitrate")
+    request_min_br = req.get("min_bitrate")
+    request_current_br = req.get("current_spectral_bitrate")
     q_override = req.get("search_filetype_override")
-    spectral_grade = req.get("current_spectral_grade")
-    final_format = req.get("final_format")
+    request_spectral_grade = req.get("current_spectral_grade")
+    request_final_format = req.get("final_format")
     target_format = req.get("target_format")
     verified_lossless_target = _load_runtime_verified_lossless_target() or None
     # Existing-side lossless-source V0 probe — anchors the lossless_source_locked
     # rule. When set, lossy candidates short-circuit to reject inside the
     # provisional lane regardless of how their on-disk avg compares.
-    existing_v0_probe_avg = req.get("current_lossless_source_v0_probe_avg_bitrate")
+    request_v0_probe_avg = req.get(
+        "current_lossless_source_v0_probe_avg_bitrate"
+    )
 
-    linked_current_measurement = None
     try:
-        evidence_id = db.get_request_current_evidence_id(args.id)
-        evidence = (
-            db.load_album_quality_evidence_by_id(evidence_id)
-            if evidence_id is not None
-            else None
+        gate_state = load_quality_gate_state(
+            request_id=args.id,
+            db=db,
+            mb_id=req.get("mb_release_id"),
         )
-        if (
-            evidence is not None
-            and not evidence.policy_incomplete_reasons()
-            and normalize_release_id(evidence.mb_release_id)
-            == normalize_release_id(req.get("mb_release_id"))
-        ):
-            linked_current_measurement = evidence.measurement
     except Exception:
         # This is a diagnostic command. Missing/stale evidence must fail open
         # without reviving the legacy request spectral scalar as authority.
-        linked_current_measurement = None
+        gate_state = None
+
+    linked_current_measurement = (
+        gate_state.measurement if gate_state is not None else None
+    )
+    linked_current_verified_lossless_proof = (
+        gate_state.verified_lossless_proof if gate_state is not None else False
+    )
+    linked_current_v0_probe_avg = (
+        gate_state.source_v0_avg_bitrate_kbps
+        if gate_state is not None
+        else None
+    )
 
     print(f"  {label}")
     print(f"  Status: {req['status']}")
-    print(f"  Rank config: metric={rank_cfg.bitrate_metric.value}, "
-          f"gate_min_rank={rank_cfg.gate_min_rank.name}")
+    print(f"  Rank config: metric={rank_cfg.bitrate_metric.value}")
     print(f"  Verified-lossless output: "
           f"{_quality_preview_target_label(target_format, verified_lossless_target)}")
+    print(
+        "  Request quality stamps (audit only): "
+        f"min_bitrate={_fmt_br(request_min_br)}, "
+        f"spectral_grade={request_spectral_grade or 'n/a'}, "
+        f"spectral_bitrate={_fmt_br(request_current_br)}, "
+        f"source_v0_avg={_fmt_br(request_v0_probe_avg)}, "
+        f"final_format={request_final_format or 'n/a'}"
+    )
     print()
 
     # --- Current quality gate ---
-    is_cbr = False
-    avg_br = None
-    median_br = None
-    existing_format_hint = None
-    mbid = req.get("mb_release_id")
-    beets_lookup_error = None
-    try:
-        info = _load_beets_album_info(mbid, rank_cfg)
-    except Exception as exc:
-        # Keep this diagnostic command defensive around its best-effort
-        # lookup seam too; missing Beets state must never become a traceback.
-        info = None
-        beets_lookup_error = exc
-    target_contract = None
-    gate_unavailable_reason = None
-    if min_br is not None:
-        if final_format:
-            try:
-                target_contract = (
-                    TargetQualityContract.from_projection(
-                        str(final_format),
-                        projected_is_cbr=info.is_cbr,
-                    )
-                    if info is not None
-                    else TargetQualityContract.from_explicit_label(
-                        str(final_format)
-                    )
-                )
-            except ValueError:
-                gate_unavailable_reason = "materialized MP3 mode unknown"
-        if info:
-            is_cbr = info.is_cbr
-            avg_br = info.avg_bitrate_kbps
-            median_br = info.median_bitrate_kbps
-            if not existing_format_hint:
-                existing_format_hint = info.format
-        elif target_contract is not None:
-            # Explicit labels remain self-describing without a Beets row.
-            is_cbr = target_contract.is_cbr
-        if gate_unavailable_reason is not None:
-            print(f"  Quality gate:  UNAVAILABLE ({gate_unavailable_reason})")
-            if beets_lookup_error is not None:
-                print(
-                    "    Beets lookup: unavailable "
-                    f"({type(beets_lookup_error).__name__})"
-                )
-            print("    current-album comparisons omitted; scenarios continue")
-        else:
-            gate_spectral_br = None
-            effective_gate_br = compute_effective_override_bitrate(
-                min_br, current_br, spectral_grade)
-            if (min_br is not None and effective_gate_br is not None
-                    and effective_gate_br < min_br):
-                gate_spectral_br = current_br
-            current = AudioQualityMeasurement(
-                min_bitrate_kbps=min_br,
-                avg_bitrate_kbps=avg_br,
-                median_bitrate_kbps=median_br,
-                format=existing_format_hint or "MP3",
-                is_cbr=is_cbr,
-                verified_lossless=verified,
-                spectral_grade=spectral_grade,
-                spectral_bitrate_kbps=gate_spectral_br)
-            # gate_rank centralizes the spectral clamp the gate applies, so the
-            # displayed label always matches the verdict (no more EXCELLENT next
-            # to NEEDS UPGRADE on a fake CBR 320).
-            current_rank = gate_rank(
-                current, rank_cfg, target_contract=target_contract
-            )
-            gate = quality_gate_decision(
-                current, cfg=rank_cfg, target_contract=target_contract
-            )
-            gate_label = {"accept": "DONE", "requeue_upgrade": "NEEDS UPGRADE",
-                          "requeue_lossless": "NEEDS LOSSLESS"}[gate]
-            print(f"  Quality gate:  {gate_label}  (rank={current_rank.name})")
-            print(f"    min_bitrate={_fmt_br(min_br)}, "
-                  f"avg_bitrate={_fmt_br(avg_br) if avg_br else 'n/a'}, "
-                  f"median_bitrate={_fmt_br(median_br) if median_br else 'n/a'}, "
-                  f"format={existing_format_hint or '(unknown)'}, "
-                  f"verified_lossless={verified}, is_cbr={is_cbr}")
-            if current_br:
-                print(f"    current_spectral_bitrate={current_br}kbps")
-            if spectral_grade:
-                print(f"    current_spectral_grade={spectral_grade}")
-            if existing_v0_probe_avg is not None:
-                print(f"    current_lossless_source_v0_probe_avg={existing_v0_probe_avg}kbps "
-                      f"(locks lossy candidates)")
-            if q_override:
-                print(f"    searching: {q_override}")
+    current = linked_current_measurement
+    min_br = current.min_bitrate_kbps if current is not None else None
+    avg_br = current.avg_bitrate_kbps if current is not None else None
+    median_br = current.median_bitrate_kbps if current is not None else None
+    existing_format_hint = current.format if current is not None else None
+    is_cbr = current.is_cbr if current is not None else False
+    spectral_grade = current.spectral_grade if current is not None else None
+    current_br = (
+        current.spectral_bitrate_kbps if current is not None else None
+    )
+    gate_unavailable_reason = (
+        None
+        if current is not None and min_br is not None
+        else (
+            "linked current evidence unavailable"
+            if current is None
+            else "linked current evidence has no minimum bitrate"
+        )
+    )
+    if current is not None and min_br is not None:
+        # gate_rank centralizes the spectral clamp the gate applies, so the
+        # displayed label always matches the verdict.
+        current_rank = gate_rank(
+            current,
+            rank_cfg,
+            verified_lossless_proof=linked_current_verified_lossless_proof,
+        )
+        gate = quality_gate_decision(
+            current,
+            cfg=rank_cfg,
+            verified_lossless_proof=linked_current_verified_lossless_proof,
+        )
+        gate_label = {"accept": "DONE", "requeue_upgrade": "NEEDS UPGRADE",
+                      "requeue_lossless": "NEEDS LOSSLESS"}[gate]
+        print(f"  Quality gate:  {gate_label}  (rank={current_rank.name})")
+        print(f"    min_bitrate={_fmt_br(min_br)}, "
+              f"avg_bitrate={_fmt_br(avg_br) if avg_br else 'n/a'}, "
+              f"median_bitrate={_fmt_br(median_br) if median_br else 'n/a'}, "
+              f"format={existing_format_hint or '(unknown)'}, "
+              "verified_lossless_proof="
+              f"{linked_current_verified_lossless_proof}, is_cbr={is_cbr}")
+        if linked_current_v0_probe_avg is not None:
+            print(f"    linked_source_v0_probe_avg={linked_current_v0_probe_avg}kbps "
+                  f"(locks lossy candidates)")
+        if q_override:
+            print(f"    searching: {q_override}")
     else:
-        print(f"  Quality gate:  NO DATA (not yet imported)")
+        print(f"  Quality gate:  UNAVAILABLE ({gate_unavailable_reason})")
+        print("    current-album comparisons omitted; scenarios continue")
 
     # --- Rejection backfill status ---
     backfill = rejection_backfill_override(
@@ -241,13 +196,13 @@ def cmd_quality(db, args):
     # A missing mode makes current-album comparisons nonclaiming.  Candidate
     # scenarios can still exercise their independent decision paths.
     comparable_min_br = (
-        min_br if gate_unavailable_reason is None else None
+        min_br if current is not None else None
     )
     comparable_current_br = (
-        current_br if gate_unavailable_reason is None else None
+        current_br if current is not None else None
     )
     comparable_spectral_grade = (
-        spectral_grade if gate_unavailable_reason is None else None
+        spectral_grade if current is not None else None
     )
     effective_existing = compute_effective_override_bitrate(
         comparable_min_br, comparable_current_br, comparable_spectral_grade)
@@ -386,15 +341,18 @@ def cmd_quality(db, args):
             override_min_bitrate=override_min_bitrate,
             existing_format=(
                 existing_format_hint
-                if gate_unavailable_reason is None
+                if current is not None
                 else None
             ),
             existing_is_cbr=is_cbr,
-            verified_lossless=verified,
+            candidate_verified_lossless_proof=False,
             target_format=target_format,
             verified_lossless_target=verified_lossless_target,
-            existing_v0_probe_avg=existing_v0_probe_avg,
+            existing_v0_probe_avg=linked_current_v0_probe_avg,
             cfg=rank_cfg,
+            current_verified_lossless_proof=(
+                linked_current_verified_lossless_proof
+            ),
             **params_with_runtime)
 
         imported = "IMPORT" if result["imported"] else "REJECT"
@@ -422,7 +380,7 @@ def cmd_quality(db, args):
                 tiers, _ = search_tiers(q_override, [])
                 print(f"      next search: {', '.join(tiers)}")
             elif gate_unavailable_reason is not None:
-                print("      no backfill simulation (current MP3 mode unknown)")
+                print("      no backfill simulation (linked evidence unavailable)")
             else:
                 # Importer narrowing requires an independent attempt-local
                 # audit of the exact HAVE copy. Candidate spectral fields in
@@ -471,10 +429,9 @@ def cmd_repair_spectral(db, args):
         state = load_quality_gate_state(
             request_id=rid,
             db=db,
-            quality_ranks=rank_cfg,
         )
         effective_min_br = (
-            state.min_bitrate_kbps
+            state.measurement.min_bitrate_kbps
             if state is not None
             else req["min_bitrate"]
         )
@@ -487,7 +444,7 @@ def cmd_repair_spectral(db, args):
             quality_gate_decision(
                 state.measurement,
                 cfg=rank_cfg,
-                target_contract=state.target_contract,
+                verified_lossless_proof=state.verified_lossless_proof,
             )
             if state is not None
             else "requeue_upgrade"

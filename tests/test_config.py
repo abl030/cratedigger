@@ -428,16 +428,21 @@ class TestReadRuntimeConfig(unittest.TestCase):
 class TestReadRuntimeRankConfig(unittest.TestCase):
     def test_missing_config_returns_defaults(self):
         cfg = read_runtime_rank_config("/nonexistent/config.ini")
-        self.assertEqual(cfg.gate_min_rank.name, "EXCELLENT")
+        self.assertEqual(cfg, cfg.defaults())
 
     def test_reads_quality_ranks_from_runtime_config(self):
-        from lib.quality import QualityRank
-
         with tempfile.NamedTemporaryFile("w", delete=False, suffix=".ini") as tmp:
             tmp.write(
                 "[Quality Ranks]\n"
-                "gate_min_rank = good\n"
                 "bitrate_metric = min\n"
+                "vorbis.transparent = 201\n"
+                "vorbis.excellent = 161\n"
+                "vorbis.good = 113\n"
+                "vorbis.acceptable = 97\n"
+                "wma.transparent = 321\n"
+                "wma.excellent = 257\n"
+                "wma.good = 193\n"
+                "wma.acceptable = 129\n"
             )
             config_path = tmp.name
         try:
@@ -445,8 +450,65 @@ class TestReadRuntimeRankConfig(unittest.TestCase):
         finally:
             os.unlink(config_path)
 
-        self.assertEqual(cfg.gate_min_rank, QualityRank.GOOD)
         self.assertEqual(cfg.bitrate_metric.value, "min")
+        self.assertEqual(
+            (cfg.vorbis.transparent, cfg.vorbis.excellent,
+             cfg.vorbis.good, cfg.vorbis.acceptable),
+            (201, 161, 113, 97),
+        )
+        self.assertEqual(
+            (cfg.wma.transparent, cfg.wma.excellent,
+             cfg.wma.good, cfg.wma.acceptable),
+            (321, 257, 193, 129),
+        )
+
+    def test_retired_gate_min_rank_key_is_ignored(self):
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".ini") as tmp:
+            tmp.write(
+                "[Quality Ranks]\n"
+                "gate_min_rank = not-a-rank-anymore\n"
+                "bitrate_metric = median\n"
+            )
+            config_path = tmp.name
+        try:
+            cfg = read_runtime_rank_config(config_path)
+        finally:
+            os.unlink(config_path)
+
+        self.assertEqual(cfg.bitrate_metric.value, "median")
+        self.assertFalse(hasattr(cfg, "gate_min_rank"))
+
+
+class TestVerifiedLosslessTargetStartupWarning(unittest.TestCase):
+    @staticmethod
+    def _config(target: str) -> CratediggerConfig:
+        ini = configparser.RawConfigParser()
+        ini.add_section("Beets Validation")
+        ini.set("Beets Validation", "verified_lossless_target", target)
+        return CratediggerConfig.from_ini(ini)
+
+    def test_warns_below_canonical_transparent(self):
+        import cratedigger
+
+        cfg = self._config("opus 64")
+        with patch.object(cratedigger.logger, "warning") as warning:
+            cratedigger._warn_if_verified_lossless_target_below_transparent(cfg)
+
+        warning.assert_called_once()
+        message = warning.call_args.args[0]
+        self.assertIn("below canonical TRANSPARENT", message)
+        self.assertIn("complete acquisition terminally", message)
+
+    def test_silent_at_transparent_or_better(self):
+        import cratedigger
+
+        for target in ("opus 112", "mp3 v0", "flac"):
+            with self.subTest(target=target), \
+                patch.object(cratedigger.logger, "warning") as warning:
+                cratedigger._warn_if_verified_lossless_target_below_transparent(
+                    self._config(target)
+                )
+                warning.assert_not_called()
 
 
 class TestReadSecretFile(unittest.TestCase):

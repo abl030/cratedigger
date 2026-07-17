@@ -30,9 +30,9 @@ from lib.quality.evidence_types import (
 # Grep the decision path for a bare kbps value and you should find zero hits
 # outside log strings — everything routes through cfg.quality_ranks.<field>.
 #
-# Spectral cliff detection and transcode_detection() continue to use min
-# bitrate regardless of QualityRankConfig.bitrate_metric — those care about
-# the worst track, not the album average. Rank classification is different
+# Spectral scan selection uses the configured VBR average-bitrate threshold
+# regardless of QualityRankConfig.bitrate_metric. The transcode decision then
+# consumes the resulting spectral grade. Rank classification is different
 # because a single quiet track in a legitimately encoded VBR album should not
 # drag the whole album down a rank.
 
@@ -138,10 +138,11 @@ class QualityRankConfig:
       ``QUALITY_MIN_BITRATE_KBPS`` constant; V2 averages ~190 → excellent at 170.
     - MP3 CBR ``transparent=320``: unverifiable CBR is only transparent at 320.
     - AAC ``transparent=192``: hydrogenaudio consensus ceiling for music.
+    - Vorbis ``transparent=192``: conservative q6-region ceiling; one VBR table.
+    - WMA ``transparent=320``: conservative parity with the MP3-CBR table.
     """
     # --- Policy ---
     bitrate_metric: RankBitrateMetric = RankBitrateMetric.AVG
-    gate_min_rank: QualityRank = QualityRank.EXCELLENT
     within_rank_tolerance_kbps: int = 5
 
     # --- Per-codec band tables ---
@@ -158,6 +159,10 @@ class QualityRankConfig:
         transparent=320, excellent=256, good=192, acceptable=128))
     aac:     CodecRankBands = field(default_factory=lambda: CodecRankBands(
         transparent=192, excellent=144, good=112, acceptable=80))
+    vorbis:  CodecRankBands = field(default_factory=lambda: CodecRankBands(
+        transparent=192, excellent=160, good=112, acceptable=96))
+    wma:     CodecRankBands = field(default_factory=lambda: CodecRankBands(
+        transparent=320, excellent=256, good=192, acceptable=128))
 
     # --- LAME VBR V-level → rank (10-tuple indexed by V0..V9) ---
     # V-level semantics are a LAME encoder contract, but surfacing them here
@@ -181,7 +186,8 @@ class QualityRankConfig:
     # --- Mixed-format album precedence (worst codec wins for classification) ---
     # When an album has multiple formats on disk (rare), pick the lowest-rank
     # codec as the album's "canonical" codec so the rank stays conservative.
-    mixed_format_precedence: tuple[str, ...] = ("mp3", "aac", "opus", "flac")
+    mixed_format_precedence: tuple[str, ...] = (
+        "wma", "mp3", "vorbis", "aac", "opus", "flac")
 
     @classmethod
     def defaults(cls) -> "QualityRankConfig":
@@ -206,10 +212,9 @@ class QualityRankConfig:
         Key names (all lowercase, codec-prefixed for bands):
 
             bitrate_metric            = min | avg | median
-            gate_min_rank             = unknown|poor|acceptable|good|excellent|transparent|lossless
             within_rank_tolerance_kbps = <int>
             <codec>.<band>            = <int>
-              codecs: opus, mp3_vbr, mp3_cbr, aac
+              codecs: opus, mp3_vbr, mp3_cbr, aac, vorbis, wma
               bands:  transparent, excellent, good, acceptable
             mp3_vbr_levels            = <rank>,<rank>,... (exactly 10, V0..V9)
             lossless_codecs           = <codec>,<codec>,... (set, lowercased)
@@ -248,13 +253,6 @@ class QualityRankConfig:
                 f"{[m.value for m in RankBitrateMetric]}, got {metric_str!r}"
             ) from exc
 
-        rank_str = _get_str("gate_min_rank", base.gate_min_rank.name.lower()).lower()
-        if rank_str not in _RANK_NAME_TO_VALUE:
-            raise ValueError(
-                f"[{section}] gate_min_rank: expected one of "
-                f"{sorted(_RANK_NAME_TO_VALUE.keys())}, got {rank_str!r}")
-        gate_min_rank = _RANK_NAME_TO_VALUE[rank_str]
-
         tolerance = _get_int("within_rank_tolerance_kbps", base.within_rank_tolerance_kbps)
         if tolerance < 0:
             raise ValueError(
@@ -274,6 +272,8 @@ class QualityRankConfig:
             mp3_vbr = _get_bands("mp3_vbr", base.mp3_vbr)
             mp3_cbr = _get_bands("mp3_cbr", base.mp3_cbr)
             aac = _get_bands("aac", base.aac)
+            vorbis = _get_bands("vorbis", base.vorbis)
+            wma = _get_bands("wma", base.wma)
         except ValueError as exc:
             # CodecRankBands.__post_init__ raises on non-monotonic; re-wrap
             # with section context.
@@ -334,12 +334,13 @@ class QualityRankConfig:
 
         return cls(
             bitrate_metric=metric,
-            gate_min_rank=gate_min_rank,
             within_rank_tolerance_kbps=tolerance,
             opus=opus,
             mp3_vbr=mp3_vbr,
             mp3_cbr=mp3_cbr,
             aac=aac,
+            vorbis=vorbis,
+            wma=wma,
             mp3_vbr_levels=mp3_vbr_levels,
             lossless_codecs=lossless_codecs,
             mixed_format_precedence=mixed_format_precedence,
@@ -353,12 +354,13 @@ class QualityRankConfig:
         """Serialize to JSON for the --quality-rank-config harness argv."""
         payload: dict[str, Any] = {
             "bitrate_metric": self.bitrate_metric.value,
-            "gate_min_rank": int(self.gate_min_rank),
             "within_rank_tolerance_kbps": self.within_rank_tolerance_kbps,
             "opus": asdict(self.opus),
             "mp3_vbr": asdict(self.mp3_vbr),
             "mp3_cbr": asdict(self.mp3_cbr),
             "aac": asdict(self.aac),
+            "vorbis": asdict(self.vorbis),
+            "wma": asdict(self.wma),
             "mp3_vbr_levels": [int(r) for r in self.mp3_vbr_levels],
             "lossless_codecs": sorted(self.lossless_codecs),
             "mixed_format_precedence": list(self.mixed_format_precedence),
@@ -383,12 +385,13 @@ class QualityRankConfig:
         try:
             return cls(
                 bitrate_metric=RankBitrateMetric(payload["bitrate_metric"]),
-                gate_min_rank=QualityRank(int(payload["gate_min_rank"])),
                 within_rank_tolerance_kbps=int(payload["within_rank_tolerance_kbps"]),
                 opus=CodecRankBands(**payload["opus"]),
                 mp3_vbr=CodecRankBands(**payload["mp3_vbr"]),
                 mp3_cbr=CodecRankBands(**payload["mp3_cbr"]),
                 aac=CodecRankBands(**payload["aac"]),
+                vorbis=CodecRankBands(**payload["vorbis"]),
+                wma=CodecRankBands(**payload["wma"]),
                 mp3_vbr_levels=tuple(
                     QualityRank(int(r)) for r in payload["mp3_vbr_levels"]),
                 lossless_codecs=frozenset(payload["lossless_codecs"]),
@@ -402,7 +405,10 @@ class QualityRankConfig:
 
 # Known codec family names produced by _codec_family_of().
 _KNOWN_CODEC_FAMILIES: frozenset[str] = frozenset(
-    {"opus", "mp3", "aac", "flac", "alac", "wav", "lossless", "unknown"})
+    {
+        "opus", "mp3", "aac", "vorbis", "wma",
+        "flac", "alac", "wav", "lossless", "unknown",
+    })
 
 
 def _codec_family_of(format_hint: Optional[str]) -> str:
@@ -474,8 +480,8 @@ def quality_rank(
            over any measured bitrate.
         5. Bare codec name ("MP3" / "Opus" / "AAC"): classify the measured
            bitrate_kbps against the matching band table. "MP3" + is_cbr=True
-           → cfg.mp3_cbr, otherwise cfg.mp3_vbr. Opus and AAC always use
-           their own VBR-ish bands.
+           → cfg.mp3_cbr, otherwise cfg.mp3_vbr. Opus, AAC, Vorbis, and WMA
+           always use their own single band table.
         6. Unknown codec → UNKNOWN (never promote garbage).
     """
     if format_hint is None and bitrate_kbps is None:
@@ -504,6 +510,10 @@ def quality_rank(
                 return cfg.mp3_cbr.rank_for(declared)
             if family == "aac":
                 return cfg.aac.rank_for(declared)
+            if family == "vorbis":
+                return cfg.vorbis.rank_for(declared)
+            if family == "wma":
+                return cfg.wma.rank_for(declared)
             return QualityRank.UNKNOWN
 
     # Step 5 — bare codec name + measured bitrate
@@ -511,6 +521,10 @@ def quality_rank(
         return cfg.opus.rank_for(bitrate_kbps)
     if family == "aac":
         return cfg.aac.rank_for(bitrate_kbps)
+    if family == "vorbis":
+        return cfg.vorbis.rank_for(bitrate_kbps)
+    if family == "wma":
+        return cfg.wma.rank_for(bitrate_kbps)
     if family == "mp3":
         if is_cbr:
             return cfg.mp3_cbr.rank_for(bitrate_kbps)
@@ -611,6 +625,7 @@ def gate_rank(
     cfg: "QualityRankConfig",
     *,
     target_contract: TargetQualityContract | None = None,
+    verified_lossless_proof: bool = False,
 ) -> QualityRank:
     """Rank used by ``quality_gate_decision()`` — measurement rank with the
     spectral clamp applied.
@@ -632,7 +647,7 @@ def gate_rank(
     legacy low-spectral transcodes.
     """
     rank = measurement_rank(current, cfg, target_contract=target_contract)
-    if current.verified_lossless:
+    if verified_lossless_proof:
         return rank
     if current.spectral_bitrate_kbps is not None:
         spectral_rank = quality_rank(

@@ -37,7 +37,7 @@ Hunting — Generated-First".
 | `tests/test_quality_generated.py` | the decision twins (`full_pipeline_decision` / `full_pipeline_decision_from_evidence`) | decisions are definitive (totality); raw verified-lossless FLAC never replaced by lossy; transparent lossy never accepts obvious downgrades; **twin parity** over the shared world language; evidence-only integrity facts (corrupt / bad-hash / nested / mixed) always reject in priority order; classification layer (`classify_full_pipeline_decision` / `evidence_decision_name` — cleanup eligibility) coherent with every generated decision; incomplete evidence fails closed |
 | `tests/test_search_override_generated.py` | `rejection_backfill_override` over codec measurements and attempt-local HAVE audits | lossless-only search narrowing occurs exactly for canonically TRANSPARENT measurements with a completed genuine HAVE audit; excellent, unknown/lossless codecs, missing/failed audits, and non-genuine grades fail open |
 | `tests/test_quality_lineage_generated.py` | target-quality contracts and measurement/evidence projection | `from_explicit_label` rejects bare MP3 across case/whitespace variants; `from_projection` requires a CBR/VBR boolean and preserves it for bare MP3; explicit V/numeric labels own their mode and gate policy even when the measured boolean contradicts them; exact single/equal/differing-track projections preserve mode; measurement-only early rejects never claim target policy |
-| `tests/test_evidence_generated.py` | `ensure_current_evidence_for_action` | converted current evidence requires source V0 (fix `6cf26a4`): never `loaded` without a V0 metric, scalar state backfills, otherwise fail closed |
+| `tests/test_evidence_generated.py` | `ensure_current_evidence_for_action` | converted current evidence requires a linked source V0 fact (fix `6cf26a4`): never `loaded` without it, request scalar mutations cannot change the result, and missing evidence fails closed; fingerprint rebuilds carry only source-subject facts with `carried` provenance |
 | `tests/test_slskd_events_generated.py` | `ingest_download_file_events` (event stamping — the ONLY source of completed-file locations) | stamping oracle (newest decodable event per key in the new-events window, nothing else); totality + exactly-once over wild feeds (dup ids, garbage timestamps, undecodable payloads, pruned/absent cursors, rows leaving `downloading` mid-ingest); duplicate-id invariance (mid-pagination shape) |
 | `tests/test_completed_purge_generated.py` | `purge_completed_transfers` | a write-ahead intent becomes ownership only after POST acceptance; pending and foreign keys are never mutated; 1-N successor IDs for each confirmed `(username, filename)` key remain owned across every terminal state; terminal accounting conserves every row through successful removals, false returns, and exceptions (`removed + removal_failed + foreign`); failed removals remain resident, a successful second pass is idempotent, and every removal uses `remove=true` |
 | `tests/test_transfer_ledger_generated.py` | enqueue write-ahead ownership + `prune_transfer_ledger` | every owned enqueue is ledgered before POST and gains destructive authority iff accepted; pending intents older than the strict cutoff are pruned regardless of request status, while old accepted evidence survives only for `wanted`/`downloading`; exact-cutoff rows survive |
@@ -89,8 +89,20 @@ exercise a new invariant.
 Run a deep burst whenever quality policy changes:
 
 ```bash
+nix-shell --run "bash scripts/fuzz_burst.sh"                    # all generated modules
+nix-shell --run "bash scripts/fuzz_burst.sh tests.test_quality_generated"  # subset
+```
+
+`scripts/fuzz_burst.sh` runs each generated module in its own process,
+parallelised to the host's core count (`nproc`) — Hypothesis is
+single-threaded, so a serial burst pegs one core and leaves the rest of
+whatever machine you are on idle. Per-module logs surface only on failure;
+the 20k-example budget is unchanged. The serial equivalent, when you need
+one module's live output:
+
+```bash
 nix-shell --run "CRATEDIGGER_HYPOTHESIS_PROFILE=fuzz \
-    python3 -m unittest discover -s tests -t . -p 'test_*_generated.py' -v"
+    python3 -m unittest tests.test_quality_generated -v"
 ```
 
 It is pure and safe: no prod DB, no slskd, no beets, no network; the only

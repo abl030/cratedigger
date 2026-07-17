@@ -84,16 +84,16 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/dashboard.py", 481, "5e3b8177198ccbed"): (
         "dashboard WHERE and ORDER fragments come from closed enum branches"
     ),
-    ("lib/pipeline_db/download_log.py", 734, "a4d9b82e27a004bb"): (
+    ("lib/pipeline_db/download_log.py", 737, "554f509613ff1b04"): (
         "validation key is selected from a closed server-owned vocabulary"
     ),
-    ("lib/pipeline_db/download_log.py", 786, "e0154e89026dc8ef"): (
+    ("lib/pipeline_db/download_log.py", 795, "e0154e89026dc8ef"): (
         "validation key is selected from a closed server-owned vocabulary"
     ),
-    ("lib/pipeline_db/download_log.py", 804, "1ca75e0c21fa6d7e"): (
+    ("lib/pipeline_db/download_log.py", 813, "1ca75e0c21fa6d7e"): (
         "validation key is closed vocabulary and IN list is value placeholders"
     ),
-    ("lib/pipeline_db/download_log.py", 821, "d87a36ba1d1768e7"): (
+    ("lib/pipeline_db/download_log.py", 830, "d87a36ba1d1768e7"): (
         "JSON path key is selected from a closed server-owned vocabulary"
     ),
     ("lib/pipeline_db/import_jobs.py", 105, "ecf3d1844c67f653"): (
@@ -105,10 +105,10 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/misc.py", 188, "12cfdd83a367c90e"): (
         "track-count batch IN list contains only psycopg value placeholders"
     ),
-    ("lib/pipeline_db/misc.py", 381, "0a14fd5e6252e398"): (
+    ("lib/pipeline_db/misc.py", 396, "0a14fd5e6252e398"): (
         "bulk VALUES fragment contains only fixed value-placeholder tuples"
     ),
-    ("lib/pipeline_db/misc.py", 555, "47e316b5c87e000f"): (
+    ("lib/pipeline_db/misc.py", 570, "47e316b5c87e000f"): (
         "triage joins and predicates are selected from closed service enums"
     ),
     ("lib/pipeline_db/requests.py", 69, "092ac19c7715cd88"): (

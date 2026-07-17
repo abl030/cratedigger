@@ -8,6 +8,7 @@ hashing-error / DB-error fall-through behavior of the gate.
 
 from __future__ import annotations
 
+import configparser
 import unittest
 import tempfile
 from types import SimpleNamespace
@@ -529,6 +530,67 @@ class TestMeasurePreimportState(unittest.TestCase):
     verify the measurement fields populate correctly for representative
     fixture shapes.
     """
+
+    def test_aac_m4a_lossless_detection_probes_each_file_once(self):
+        """One measurement owns M4A classification for all downstream users."""
+        from lib.config import CratediggerConfig
+        from lib.measurement import (
+            ExistingSpectralAuditLookup,
+            measure_preimport_state,
+        )
+
+        ini = configparser.ConfigParser()
+        ini["Beets Validation"] = {"audio_check": "off"}
+        cfg = CratediggerConfig.from_ini(ini)
+        with tempfile.TemporaryDirectory() as folder:
+            paths = [Path(folder) / "01.m4a", Path(folder) / "02.m4a"]
+            for path in paths:
+                path.write_bytes(b"aac")
+            with patch(
+                "lib.measurement.ffprobe_audio_codec_name",
+                return_value="aac",
+            ) as codec_probe:
+                measurement = measure_preimport_state(
+                    path=folder,
+                    mb_release_id="mbid-aac",
+                    label="AAC container",
+                    download_filetype="m4a",
+                    download_min_bitrate_bps=None,
+                    download_is_vbr=False,
+                    cfg=cfg,
+                    existing_spectral_resolver=(
+                        lambda _release_id: ExistingSpectralAuditLookup()
+                    ),
+                )
+
+        self.assertFalse(measurement.lossless_candidate)
+        self.assertEqual(
+            [call.args[0] for call in codec_probe.call_args_list],
+            [str(path) for path in paths],
+        )
+
+    def test_m4a_codec_probe_none_or_exception_is_not_a_lossy_measurement(self):
+        from lib.measurement import (
+            AudioCodecProbeError,
+            has_supported_lossless_audio,
+        )
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "01.m4a"
+            path.write_bytes(b"unknown")
+
+            def raises(_path: str) -> str:
+                raise RuntimeError("ffprobe exploded")
+
+            for name, probe in (("none", lambda _path: None), ("error", raises)):
+                with self.subTest(name=name), self.assertRaises(
+                    AudioCodecProbeError,
+                ):
+                    has_supported_lossless_audio(
+                        "m4a",
+                        [path],
+                        codec_probe=probe,
+                    )
 
     def test_audio_corrupt_short_circuits_with_facts(self):
         """audio_corrupt=True must flow through; spectral / file counts

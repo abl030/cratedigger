@@ -70,12 +70,16 @@ def comparison_format_hint(
 
 
 # Probed-codec / extension → native-lossy rank-model format label. Only codecs
-# with a lossy rank band table are mapped; everything else returns None so the
-# caller applies its conservative legacy "MP3" fallback rather than this
-# function inventing a band.
+# with a lossy rank band table are mapped; everything else returns None.
 _NATIVE_CODEC_LABELS: dict[str, str] = {
     "opus": "opus",
     "aac": "aac",
+    "vorbis": "vorbis",
+    "wma": "wma",
+    "wmav1": "wma",
+    "wmav2": "wma",
+    "wmapro": "wma",
+    "wmavoice": "wma",
     "mp3": "MP3",
     "mp3float": "MP3",
 }
@@ -83,6 +87,7 @@ _NATIVE_EXT_LABELS: dict[str, str] = {
     "opus": "opus",
     "aac": "aac",
     "m4a": "aac",
+    "wma": "wma",
     "mp3": "MP3",
 }
 
@@ -93,10 +98,10 @@ def native_codec_format_label(
     """Map a probed codec name (or file-extension fallback) to the native-lossy
     ``AudioQualityMeasurement.format`` label the rank model keys on.
 
-    Returns a label ``_codec_family_of`` recognises ("opus" / "aac" / "MP3"),
-    or None for codecs with no lossy rank band (vorbis, unknown) so the caller
-    can fall back conservatively. The probed codec name wins over the
-    extension — an Opus stream in an ``.ogg`` container is "opus", not vorbis.
+    Returns a label ``_codec_family_of`` recognises (for example ``"opus"``,
+    ``"vorbis"``, ``"wma"``, or ``"MP3"``), or None for codecs with no lossy
+    rank band. The probed codec name wins over the extension — an Opus stream
+    in an ``.ogg`` container is "opus", not vorbis.
 
     This is the fix for the Opus-recorded-as-MP3 bug: native lossy downloads
     used to be hardcoded to "MP3", so a genuine Opus 124 was scored on the
@@ -362,8 +367,19 @@ def compare_quality(
             spectral_clamped=spectral_clamped,
         )
 
-    # Same rank. LOSSLESS is always equivalent — FLAC bitrates vary with sample
-    # rate and bit depth, not quality.
+    # Same rank. UNKNOWN has no orderable quality evidence, so measured
+    # bitrate cannot turn one unmapped codec into an upgrade over another.
+    # Keep the existing ``metric_missing`` basis vocabulary: the metrics are
+    # deliberately not comparable for this rank even when byte probes found
+    # numeric bitrates.
+    if new_rank == QualityRank.UNKNOWN:
+        return _basis(
+            "equivalent", "metric_missing", new_rank, existing_rank,
+            spectral_clamped=spectral_clamped,
+        )
+
+    # LOSSLESS is always equivalent — FLAC bitrates vary with sample rate and
+    # bit depth, not quality.
     if new_rank == QualityRank.LOSSLESS:
         return _basis(
             "equivalent", "lossless_same_rank", new_rank, existing_rank,

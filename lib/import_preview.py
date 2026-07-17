@@ -21,6 +21,8 @@ import msgspec
 from lib.dispatch import run_import_one
 from lib.dispatch.types import ImportOneRun
 from lib.measurement import (
+    ExistingSpectralResolver,
+    PreimportMeasurement,
     SpectralDetailAnalyzer,
     analyze_spectral_audit_path,
     inspect_local_files,
@@ -32,9 +34,9 @@ from lib.quality_evidence import (
     QualityEvidenceDB,
     audio_snapshot_matches,
     current_evidence_rebuild_reasons,
-    legacy_current_lossless_v0_probe_from_request,
     load_or_backfill_current_evidence,
     audit_v0_probe_from_metric,
+    evidence_from_measurement,
     neutral_v0_metric_from_probe,
     persist_candidate_evidence_from_import_result,
     persist_candidate_evidence_from_measurement,
@@ -42,8 +44,9 @@ from lib.quality_evidence import (
 )
 from lib.quality import (
     LOSSLESS_CODECS,
-    V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
+    EVIDENCE_SUBJECT_SOURCE,
     AlbumQualityEvidence,
+    AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     ImportResult,
@@ -51,6 +54,8 @@ from lib.quality import (
     MeasurementFailureReason,
     QUALITY_DECISION_IMPORT_STAGE_DECISIONS,
     QualityRankConfig,
+    QualityEvidenceActionPayload,
+    QualityEvidenceActionProvenance,
     SpectralAnalysisDetail,
     SpectralDetail,
     TargetQualityContract,
@@ -100,6 +105,59 @@ def compose_attempt_spectral_audit(
         candidate=candidate,
         existing=existing,
     )
+
+
+def _lossless_candidate_spectral_failure(
+    measurement: PreimportMeasurement,
+    *,
+    lossless_candidate: bool,
+) -> str | None:
+    """Return diagnostics when lossless verification lacks a usable grade."""
+    if not lossless_candidate:
+        return None
+    candidate = measurement.spectral_audit.candidate
+    if candidate is None or not candidate.attempted:
+        return "lossless candidate spectral analysis did not run"
+    if candidate.error:
+        return candidate.error
+    if candidate.grade in (None, "error"):
+        return "lossless candidate spectral analysis returned no usable grade"
+    return None
+
+
+def _write_preview_spectral_evidence_file(
+    *,
+    directory: str,
+    mb_release_id: str,
+    source_path: str,
+    measurement: PreimportMeasurement,
+    files: list[AlbumQualityEvidenceFile] | None,
+    lossless_candidate: bool,
+) -> str | None:
+    """Carry preview-measured lossless spectral facts into the dry-run harness."""
+    if not lossless_candidate:
+        return None
+    built = evidence_from_measurement(
+        mb_release_id=mb_release_id,
+        source_path=source_path,
+        measurement=measurement,
+        files=files,
+    )
+    if built.evidence is None:
+        raise ValueError(
+            built.reason or "could not encode preview spectral evidence"
+        )
+    payload = QualityEvidenceActionPayload(
+        candidate=built.evidence,
+        provenance=QualityEvidenceActionProvenance(
+            candidate_status="preview_measured",
+            snapshot_status="matched",
+        ),
+    )
+    path = os.path.join(directory, "preview-spectral-evidence.json")
+    with open(path, "wb") as handle:
+        handle.write(msgspec.json.encode(payload))
+    return path
 
 
 @runtime_checkable
@@ -166,22 +224,24 @@ def persist_exact_current_spectral_from_attempt(
     """
     if current_evidence is None or current_evidence.id is None:
         return EvidenceBuildResult(None, "missing", "current evidence is missing")
-    measurement = current_evidence.measurement
-    if (
-        measurement.spectral_grade is not None
-        or measurement.spectral_bitrate_kbps is not None
-    ):
-        return EvidenceBuildResult(current_evidence, "ready")
     if (
         measured_existing is None
         or not measured_existing.attempted
         or measured_existing.error is not None
-        or measured_existing.grade is None
+        or measured_existing.grade in (None, "error")
     ):
+        if measured_existing is None:
+            reason = "attempt returned no HAVE spectral result"
+        elif not measured_existing.attempted:
+            reason = "attempt did not run HAVE spectral analysis"
+        elif measured_existing.error is not None:
+            reason = measured_existing.error
+        else:
+            reason = "attempt did not produce a usable HAVE spectral grade"
         return EvidenceBuildResult(
             current_evidence,
             "incomplete",
-            "attempt did not produce a successful HAVE spectral grade",
+            reason,
         )
     if (
         not measured_existing_path
@@ -258,16 +318,8 @@ def persist_exact_current_spectral_from_attempt(
 def load_persisted_existing_spectral(
     db: ImportPreviewDB,
     request_id: int,
-    req: dict[str, Any],
 ) -> tuple[AlbumQualityEvidence | None, SpectralAnalysisDetail, bool]:
-    """Load persisted HAVE provenance for the conditional audit boundary.
-
-    Once ``current_evidence_id`` exists, that row is authoritative even when
-    it deliberately carries no spectral fields. The request scalar columns are
-    a legacy fallback only for requests that have never been linked to current
-    evidence; using them after an empty or unreadable linked row could resurrect
-    stale pre-reset provenance.
-    """
+    """Load linked HAVE provenance for the conditional audit boundary."""
     try:
         evidence_id = db.get_request_current_evidence_id(request_id)
     except Exception:
@@ -278,14 +330,7 @@ def load_persisted_existing_spectral(
         )
         return None, SpectralAnalysisDetail(attempted=False), True
     if evidence_id is None:
-        return (
-            None,
-            spectral_detail_from_persisted_source(
-                req.get("current_spectral_grade"),
-                req.get("current_spectral_bitrate"),
-            ),
-            False,
-        )
+        return None, SpectralAnalysisDetail(attempted=False), False
     try:
         current_evidence = db.load_album_quality_evidence_by_id(evidence_id)
     except Exception:
@@ -871,7 +916,7 @@ def preserve_existing_source_spectral(
     return (
         converted_from == "m4a"
         and v0_metric is not None
-        and v0_metric.source_lineage == V0_SOURCE_LINEAGE_LOSSLESS_SOURCE
+        and v0_metric.subject == EVIDENCE_SUBJECT_SOURCE
     )
 
 
@@ -908,7 +953,7 @@ class ImportPreviewValues(msgspec.Struct, frozen=True):
     post_conversion_min_bitrate: int | None = None
     post_conversion_is_cbr: bool | None = None
     converted_count: int = 0
-    verified_lossless: bool = False
+    candidate_verified_lossless_proof: bool = False
     verified_lossless_target: str | None = None
     target_format: str | None = None
     new_format: str | None = None
@@ -1186,7 +1231,9 @@ def preview_import_from_values(
         post_conversion_min_bitrate=values.post_conversion_min_bitrate,
         post_conversion_is_cbr=values.post_conversion_is_cbr,
         converted_count=values.converted_count,
-        verified_lossless=values.verified_lossless,
+        candidate_verified_lossless_proof=(
+            values.candidate_verified_lossless_proof
+        ),
         verified_lossless_target=values.verified_lossless_target,
         target_format=values.target_format,
         new_format=values.new_format,
@@ -1218,6 +1265,7 @@ def _quality_gate_stage(
     measurement: AudioQualityMeasurement | None,
     cfg: QualityRankConfig,
     target_contract: TargetQualityContract | None = None,
+    verified_lossless_proof: bool = False,
 ) -> str | None:
     if measurement is None:
         return None
@@ -1225,6 +1273,7 @@ def _quality_gate_stage(
         measurement,
         cfg=cfg,
         target_contract=target_contract,
+        verified_lossless_proof=verified_lossless_proof,
     )
 
 
@@ -1243,6 +1292,7 @@ def _classify_import_result(
             ir.source_measurement,
             cfg,
             ir.target_quality_contract,
+            ir.verified_lossless_proof is not None,
         )
         if gate is not None:
             chain.append(f"stage3_quality_gate:{gate}")
@@ -1270,6 +1320,8 @@ def measure_and_persist_candidate_evidence(
     import_job_id: int | None = None,
     persist_measurement_fn: Callable[..., EvidenceBuildResult] | None = None,
     run_import_fn: Callable[..., ImportOneRun] | None = None,
+    spectral_detail_analyzer: SpectralDetailAnalyzer | None = None,
+    existing_spectral_resolver: ExistingSpectralResolver | None = None,
 ) -> ImportPreviewResult:
     """Measure a source folder and persist candidate evidence; never decide.
 
@@ -1384,7 +1436,7 @@ def measure_and_persist_candidate_evidence(
         current_evidence,
         existing_spectral_evidence,
         current_evidence_authoritative,
-    ) = load_persisted_existing_spectral(db, request_id, req)
+    ) = load_persisted_existing_spectral(db, request_id)
     current_evidence = load_current_evidence_for_preview(
         db,
         request_id=request_id,
@@ -1441,6 +1493,8 @@ def measure_and_persist_candidate_evidence(
                 preserve_existing_source_spectral=preserve_have_source,
                 propagate_download_to_existing=False,
                 precomputed_inspection=inspection,
+                spectral_detail_analyzer=spectral_detail_analyzer,
+                existing_spectral_resolver=existing_spectral_resolver,
             )
             spectral_result = persist_exact_current_spectral_from_attempt(
                 db,
@@ -1460,6 +1514,22 @@ def measure_and_persist_candidate_evidence(
                 request_id=request_id,
                 download_log_id=download_log_id,
                 source_path=path,
+            )
+
+        spectral_failure = _lossless_candidate_spectral_failure(
+            measurement,
+            lossless_candidate=measurement.lossless_candidate,
+        )
+        if spectral_failure is not None:
+            return _measurement_failed_result(
+                mode="path",
+                reason="measurement_crashed",
+                decision="spectral_analysis_failed",
+                detail=spectral_failure,
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+                import_result=ImportResult(spectral=measurement.spectral_audit),
             )
 
         # --- Measurement-only evidence path ---
@@ -1537,7 +1607,7 @@ def measure_and_persist_candidate_evidence(
             )
 
         # --- Harness path: measurement allows continuing ---
-        existing_v0_probe = legacy_current_lossless_v0_probe_from_request(req)
+        existing_v0_probe: V0ProbeEvidence | None = None
         existing_spectral = measurement.existing_spectral
         existing_grade = (
             existing_spectral.grade
@@ -1561,13 +1631,21 @@ def measure_and_persist_candidate_evidence(
             (
                 current_evidence.measurement.min_bitrate_kbps
                 if current_evidence is not None
-                else req.get("min_bitrate")
+                else measurement.existing_min_bitrate
             ),
             existing_bitrate if isinstance(existing_bitrate, int) else None,
             existing_grade if isinstance(existing_grade, str) else None,
         )
 
         try:
+            preview_spectral_file = _write_preview_spectral_evidence_file(
+                directory=temp_root,
+                mb_release_id=mbid,
+                source_path=path,
+                measurement=measurement,
+                files=source_snapshot,
+                lossless_candidate=measurement.lossless_candidate,
+            )
             run = (run_import_fn or run_import_one)(
                 path=preview_path,
                 mb_release_id=mbid,
@@ -1581,6 +1659,7 @@ def measure_and_persist_candidate_evidence(
                 beets_harness_path=cfg.beets_harness_path,
                 quality_rank_config_json=cfg.quality_ranks.to_json(),
                 existing_v0_probe=existing_v0_probe,
+                quality_evidence_action_file=preview_spectral_file,
             )
         except Exception as exc:
             return _measurement_failed_result(
@@ -1794,7 +1873,7 @@ def preview_import_from_path(
         current_evidence,
         existing_spectral_evidence,
         current_evidence_authoritative,
-    ) = load_persisted_existing_spectral(db, request_id, req)
+    ) = load_persisted_existing_spectral(db, request_id)
     preserve_have_source = preserve_existing_source_spectral(current_evidence)
 
     # --- Source cleanup BEFORE snapshot ---
@@ -1869,32 +1948,59 @@ def preview_import_from_path(
         # spectral propagation belongs to the persisted ``AlbumQualityEvidence``
         # row that the importer reads — preview is now a pure measurement
         # surface.
-        measurement = measure_preimport_state(
-            path=preview_path,
-            mb_release_id=mbid,
-            label=_request_label(req),
-            download_filetype=inspection.filetype,
-            download_min_bitrate_bps=inspection.min_bitrate_bps,
-            download_is_vbr=inspection.is_vbr,
-            cfg=cfg,
-            db=None,
-            request_id=None,
-            existing_spectral_evidence=(
-                existing_spectral_evidence
-            ),
-            preserve_existing_source_spectral=preserve_have_source,
-            propagate_download_to_existing=False,
-            precomputed_inspection=inspection,
+        try:
+            measurement = measure_preimport_state(
+                path=preview_path,
+                mb_release_id=mbid,
+                label=_request_label(req),
+                download_filetype=inspection.filetype,
+                download_min_bitrate_bps=inspection.min_bitrate_bps,
+                download_is_vbr=inspection.is_vbr,
+                cfg=cfg,
+                db=None,
+                request_id=None,
+                existing_spectral_evidence=(
+                    existing_spectral_evidence
+                ),
+                preserve_existing_source_spectral=preserve_have_source,
+                propagate_download_to_existing=False,
+                precomputed_inspection=inspection,
+            )
+            spectral_result = persist_exact_current_spectral_from_attempt(
+                db,
+                request_id=request_id,
+                current_evidence=current_evidence,
+                measured_existing=measurement.spectral_audit.existing,
+                measured_existing_path=measurement.existing_spectral_path,
+            )
+            if spectral_result.evidence is not None:
+                current_evidence = spectral_result.evidence
+        except Exception as exc:
+            return _measurement_failed_result(
+                mode="path",
+                reason="measurement_crashed",
+                decision="measurement_crashed",
+                detail=f"{type(exc).__name__}: {exc}",
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+            )
+
+        spectral_failure = _lossless_candidate_spectral_failure(
+            measurement,
+            lossless_candidate=measurement.lossless_candidate,
         )
-        spectral_result = persist_exact_current_spectral_from_attempt(
-            db,
-            request_id=request_id,
-            current_evidence=current_evidence,
-            measured_existing=measurement.spectral_audit.existing,
-            measured_existing_path=measurement.existing_spectral_path,
-        )
-        if spectral_result.evidence is not None:
-            current_evidence = spectral_result.evidence
+        if spectral_failure is not None:
+            return _measurement_failed_result(
+                mode="path",
+                reason="measurement_crashed",
+                decision="spectral_analysis_failed",
+                detail=spectral_failure,
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+                import_result=ImportResult(spectral=measurement.spectral_audit),
+            )
 
         # Four-fact reject (mirror worker-mode lines 517-522). ``nested_layout``
         # is already handled by the ``inspection.has_nested_audio`` branch
@@ -1972,18 +2078,26 @@ def preview_import_from_path(
             (
                 current_evidence.measurement.min_bitrate_kbps
                 if current_evidence is not None
-                else req.get("min_bitrate")
+                else measurement.existing_min_bitrate
             ),
             existing_bitrate if isinstance(existing_bitrate, int) else None,
             existing_grade if isinstance(existing_grade, str) else None,
         )
 
-        existing_v0_probe = legacy_current_lossless_v0_probe_from_request(req)
+        existing_v0_probe: V0ProbeEvidence | None = None
         if current_evidence is not None and current_evidence.v0_metric is not None:
             existing_v0_probe = audit_v0_probe_from_metric(
                 current_evidence.v0_metric
             )
 
+        preview_spectral_file = _write_preview_spectral_evidence_file(
+            directory=temp_root,
+            mb_release_id=mbid,
+            source_path=path,
+            measurement=measurement,
+            files=source_snapshot,
+            lossless_candidate=measurement.lossless_candidate,
+        )
         run = run_import_one(
             path=preview_path,
             mb_release_id=mbid,
@@ -1997,6 +2111,7 @@ def preview_import_from_path(
             beets_harness_path=cfg.beets_harness_path,
             quality_rank_config_json=cfg.quality_ranks.to_json(),
             existing_v0_probe=existing_v0_probe,
+            quality_evidence_action_file=preview_spectral_file,
         )
         if run.import_result is not None:
             run.import_result.spectral = compose_attempt_spectral_audit(

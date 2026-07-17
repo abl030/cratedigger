@@ -120,7 +120,9 @@ class CooldownConfig:
     """
     failure_threshold: int = 5
     cooldown_days: int = 3
-    failure_outcomes: frozenset[str] = frozenset({"timeout", "failed", "rejected"})
+    failure_outcomes: frozenset[str] = frozenset({
+        "timeout", "failed", "rejected", "have_analysis_error",
+    })
     lookback_window: int = 5
 
 

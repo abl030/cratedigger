@@ -308,13 +308,14 @@
     lib.strings.removeSuffix "\n" ''
       [Quality Ranks]
       bitrate_metric = ${qr.bitrateMetric}
-      gate_min_rank = ${qr.gateMinRank}
       within_rank_tolerance_kbps = ${toString qr.withinRankToleranceKbps}
 
       ${bandSection "opus" qr.bands.opus}
       ${bandSection "mp3_vbr" qr.bands.mp3Vbr}
       ${bandSection "mp3_cbr" qr.bands.mp3Cbr}
       ${bandSection "aac" qr.bands.aac}
+      ${bandSection "vorbis" qr.bands.vorbis}
+      ${bandSection "wma" qr.bands.wma}
     '';
 
   # Issue #117: secrets live at the *File paths referenced here. The cratedigger
@@ -1221,10 +1222,6 @@ in {
     };
 
     qualityRanks = {
-      gateMinRank = mkOption {
-        type = types.enum ["unknown" "poor" "acceptable" "good" "excellent" "transparent" "lossless"];
-        default = "excellent";
-      };
       bitrateMetric = mkOption {
         type = types.enum ["min" "avg" "median"];
         default = "avg";
@@ -1257,6 +1254,18 @@ in {
           excellent = 144;
           good = 112;
           acceptable = 80;
+        };
+        vorbis = mkCodecBands "Vorbis" {
+          transparent = 192;
+          excellent = 160;
+          good = 112;
+          acceptable = 96;
+        };
+        wma = mkCodecBands "WMA" {
+          transparent = 320;
+          excellent = 256;
+          good = 192;
+          acceptable = 128;
         };
       };
     };

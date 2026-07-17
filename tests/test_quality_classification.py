@@ -523,7 +523,7 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         from lib.quality import (
             AlbumQualityEvidenceDecisionFacts,
             AlbumQualityV0Metric,
-            V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
+            EVIDENCE_SUBJECT_SOURCE,
             classify_full_pipeline_decision,
             full_pipeline_decision_from_evidence,
         )
@@ -549,8 +549,8 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
                 min_bitrate_kbps=184,
                 avg_bitrate_kbps=215,
                 median_bitrate_kbps=215,
-                source_lineage=V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
-                source_provenance="neutral_album_quality_evidence",
+                subject=EVIDENCE_SUBJECT_SOURCE,
+                provenance="measured",
             ),
         )
 
@@ -697,7 +697,7 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
             full_pipeline_decision_from_evidence,
         )
         from lib.quality.evidence_types import (
-            V0_SOURCE_LINEAGE_NATIVE_LOSSY_RESEARCH,
+            EVIDENCE_SUBJECT_INSTALLED,
         )
 
         candidate = self._build_candidate(
@@ -716,7 +716,7 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
                 min_bitrate_kbps=208,
                 avg_bitrate_kbps=250,
                 median_bitrate_kbps=251,
-                source_lineage=V0_SOURCE_LINEAGE_NATIVE_LOSSY_RESEARCH,
+                subject=EVIDENCE_SUBJECT_INSTALLED,
             ),
         )
 
@@ -949,6 +949,8 @@ class TestPreimportFactRejects(unittest.TestCase):
                 format="FLAC",
                 is_cbr=False,
                 spectral_grade="genuine",
+                spectral_subject="source",
+                spectral_provenance="measured",
             ),
             measured_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
             files=files,

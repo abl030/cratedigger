@@ -19,6 +19,7 @@ from lib.quality import (
     AudioQualityMeasurement, DuplicateRemoveCandidate,
     DuplicateRemoveGuardInfo,
     DownloadInfo, SpectralMeasurement, TargetQualityContract, V0ProbeEvidence,
+    VerifiedLosslessProof,
     parse_import_result, IMPORT_RESULT_SENTINEL,
 )
 
@@ -28,7 +29,7 @@ class TestImportResultConstruction(unittest.TestCase):
 
     def test_default_construction(self):
         r = ImportResult()
-        self.assertEqual(r.version, 3)
+        self.assertEqual(r.version, 4)
         self.assertEqual(r.exit_code, 0)
         self.assertIsNone(r.decision)
         self.assertFalse(r.already_in_beets)
@@ -99,7 +100,7 @@ class TestImportResultConstruction(unittest.TestCase):
         self.assertFalse(m.is_cbr)
         self.assertIsNone(m.spectral_grade)
         self.assertIsNone(m.spectral_bitrate_kbps)
-        self.assertFalse(m.verified_lossless)
+        self.assertFalse(hasattr(m, "verified_lossless"))
         self.assertIsNone(m.was_converted_from)
 
     def test_v0_probe_defaults(self):
@@ -407,23 +408,29 @@ class TestImportResultConstruction(unittest.TestCase):
                 "postflight": {"replaced_albums": "not-a-list"},
             })
 
-    def test_v3_rows_do_not_receive_legacy_shape_repairs(self):
+    def test_v4_rows_do_not_receive_legacy_shape_repairs(self):
         with self.assertRaises(msgspec.ValidationError):
-            ImportResult.from_dict({"version": 3, "postflight": "malformed"})
+            ImportResult.from_dict({"version": 4, "postflight": "malformed"})
 
-    def test_v3_rows_reject_historical_measurement_names(self):
+    def test_v4_rows_reject_historical_measurement_names(self):
+        with self.assertRaisesRegex(ValueError, "source/current"):
+            ImportResult.from_dict(
+                {"version": 4, "new_measurement": {"format": "MP3"}}
+            )
+
+    def test_v3_rows_reject_v2_measurement_names(self):
         with self.assertRaisesRegex(ValueError, "source/current"):
             ImportResult.from_dict(
                 {"version": 3, "new_measurement": {"format": "MP3"}}
             )
 
-    def test_v3_rows_cannot_spoof_legacy_projection_marker(self):
-        with self.assertRaisesRegex(ValueError, "reserved for the v1/v2 reader"):
+    def test_v4_rows_cannot_spoof_legacy_projection_marker(self):
+        with self.assertRaisesRegex(ValueError, "reserved for the v1/v2/v3 reader"):
             ImportResult.from_dict(
-                {"version": 3, "legacy_projection_version": 2}
+                {"version": 4, "legacy_projection_version": 2}
             )
         spoofed = ImportResult(legacy_projection_version=2)
-        with self.assertRaisesRegex(ValueError, "reserved for the v1/v2 reader"):
+        with self.assertRaisesRegex(ValueError, "reserved for the v1/v2/v3 reader"):
             spoofed.to_json()
 
     def test_old_version_cannot_reach_new_evidence_persistence(self):
@@ -431,8 +438,24 @@ class TestImportResultConstruction(unittest.TestCase):
             version=1,
             source_measurement=AudioQualityMeasurement(format="FLAC"),
         )
-        with self.assertRaisesRegex(ValueError, "version 3"):
+        with self.assertRaisesRegex(ValueError, "version 4"):
             legacy_shaped.validate_new_row()
+
+    def test_v4_rows_reject_v3_verified_lossless_shapes(self):
+        with self.assertRaisesRegex(ValueError, "cannot carry verified_lossless"):
+            ImportResult.from_dict({
+                "version": 4,
+                "source_measurement": {"verified_lossless": True},
+            })
+        with self.assertRaisesRegex(ValueError, "must use provenance"):
+            ImportResult.from_dict({
+                "version": 4,
+                "verified_lossless_proof": {
+                    "proof_origin": "import_result",
+                    "source": "flac",
+                    "classifier": "spectral",
+                },
+            })
 
     def test_explicit_source_label_is_rejected_without_target_contract(self):
         result = ImportResult(
@@ -453,6 +476,21 @@ class TestImportResultConstruction(unittest.TestCase):
             )
         )
         with self.assertRaisesRegex(ValueError, "was_converted_from"):
+            result.to_json()
+
+    def test_verified_lossless_proof_rejects_invalid_wire_values(self):
+        result = ImportResult(
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="unknown",  # type: ignore[arg-type]
+                source="",
+                classifier="",
+            )
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "verified_lossless provenance.*source is required.*classifier is required",
+        ):
             result.to_json()
 
     def test_postflight_moved_siblings_wrong_element_type_raises(self):
@@ -529,10 +567,15 @@ class TestImportResultConstruction(unittest.TestCase):
             already_in_beets=True,
             source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245, spectral_grade="genuine",
-                verified_lossless=True, was_converted_from="flac"),
+                spectral_subject="source", spectral_provenance="measured",
+                was_converted_from="flac"),
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="measured", source="flac", classifier="spectral"
+            ),
             current_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=192, spectral_grade="suspect",
-                spectral_bitrate_kbps=128),
+                spectral_bitrate_kbps=128, spectral_subject="installed",
+                spectral_provenance="measured"),
             conversion=ConversionInfo(
                 converted=10, failed=0, was_converted=True,
                 original_filetype="flac", target_filetype="mp3"),
@@ -543,7 +586,7 @@ class TestImportResultConstruction(unittest.TestCase):
         self.assertEqual(r.decision, "import")
         self.assertEqual(r.conversion.converted, 10)
         assert r.source_measurement is not None
-        self.assertTrue(r.source_measurement.verified_lossless)
+        self.assertIsNotNone(r.verified_lossless_proof)
         assert r.current_measurement is not None
         self.assertEqual(r.current_measurement.spectral_bitrate_kbps, 128)
         self.assertEqual(r.postflight.track_count, 12)
@@ -564,10 +607,12 @@ class TestImportResultSerialization(unittest.TestCase):
             decision="transcode_upgrade",
             source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=180, spectral_grade="suspect",
-                spectral_bitrate_kbps=128),
+                spectral_bitrate_kbps=128, spectral_subject="source",
+                spectral_provenance="measured"),
             current_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=128, spectral_grade="suspect",
-                spectral_bitrate_kbps=96),
+                spectral_bitrate_kbps=96, spectral_subject="installed",
+                spectral_provenance="measured"),
             conversion=ConversionInfo(converted=8, failed=0, was_converted=True,
                                       original_filetype="flac", target_filetype="mp3",
                                       is_transcode=True),
@@ -612,7 +657,7 @@ class TestImportResultSerialization(unittest.TestCase):
         r = ImportResult(decision="import", exit_code=0)
         parsed = json.loads(r.to_json())
         self.assertEqual(parsed["decision"], "import")
-        self.assertEqual(parsed["version"], 3)
+        self.assertEqual(parsed["version"], 4)
 
     def test_from_dict_missing_optional_sections(self):
         """from_dict should handle missing sub-dicts gracefully."""
@@ -689,12 +734,22 @@ class TestImportResultSerialization(unittest.TestCase):
             },
         }
         r = ImportResult.from_dict(v1_dict)
-        self.assertEqual(r.version, 3)
+        self.assertEqual(r.version, 4)
         self.assertEqual(r.legacy_projection_version, 1)
         assert r.source_measurement is not None
         self.assertEqual(r.source_measurement.min_bitrate_kbps, 245)
         self.assertEqual(r.source_measurement.spectral_grade, "genuine")
-        self.assertTrue(r.source_measurement.verified_lossless)
+        self.assertIsNotNone(r.verified_lossless_proof)
+        assert r.verified_lossless_proof is not None
+        self.assertEqual(
+            msgspec.to_builtins(r.verified_lossless_proof),
+            {
+                "provenance": "measured",
+                "source": "flac",
+                "classifier": "legacy_import_result",
+                "detail": None,
+            },
+        )
         self.assertEqual(r.source_measurement.was_converted_from, "flac")
         assert r.current_measurement is not None
         self.assertEqual(r.current_measurement.min_bitrate_kbps, 192)
@@ -730,6 +785,101 @@ class TestImportResultProductionFixtures(unittest.TestCase):
     the live doc2 database while scoping issue #141 (wire-boundary encoder
     unification) — they lock down the shapes the refactor MUST preserve.
     """
+
+    def test_base_writer_v3_projects_verified_and_spectral_facts(self):
+        """A genuine pre-711 v3 writer payload remains fully auditable."""
+        base_v3_row = {
+            "version": 3,
+            "exit_code": 0,
+            "decision": "import",
+            "source_measurement": {
+                "min_bitrate_kbps": 890,
+                "avg_bitrate_kbps": 1024,
+                "median_bitrate_kbps": 980,
+                "format": "FLAC",
+                "is_cbr": False,
+                "spectral_grade": "genuine",
+                "spectral_bitrate_kbps": None,
+                "verified_lossless": True,
+                "was_converted_from": None,
+            },
+            "current_measurement": {
+                "min_bitrate_kbps": 128,
+                "avg_bitrate_kbps": 160,
+                "median_bitrate_kbps": 160,
+                "format": "MP3",
+                "is_cbr": False,
+                "spectral_grade": "suspect",
+                "spectral_bitrate_kbps": 128,
+                "verified_lossless": False,
+                "was_converted_from": None,
+            },
+            "materialized_measurement": {
+                "min_bitrate_kbps": 124,
+                "avg_bitrate_kbps": 130,
+                "median_bitrate_kbps": 128,
+                "format": "Opus",
+                "is_cbr": False,
+                "spectral_grade": "genuine",
+                "spectral_bitrate_kbps": None,
+                "verified_lossless": True,
+                "was_converted_from": "flac",
+            },
+            "conversion": {
+                "converted": 10,
+                "failed": 0,
+                "was_converted": True,
+                "original_filetype": "flac",
+                "target_filetype": "opus",
+            },
+        }
+
+        result = ImportResult.from_dict(base_v3_row)
+
+        self.assertEqual(result.version, 4)
+        self.assertEqual(result.legacy_projection_version, 3)
+        assert result.source_measurement is not None
+        self.assertEqual(result.source_measurement.spectral_subject, "source")
+        self.assertEqual(result.source_measurement.spectral_provenance, "measured")
+        assert result.current_measurement is not None
+        self.assertEqual(result.current_measurement.spectral_subject, "installed")
+        self.assertEqual(result.current_measurement.spectral_provenance, "measured")
+        assert result.materialized_measurement is not None
+        self.assertEqual(
+            result.materialized_measurement.spectral_subject, "installed"
+        )
+        self.assertEqual(
+            result.materialized_measurement.spectral_provenance, "measured"
+        )
+        assert result.verified_lossless_proof is not None
+        self.assertEqual(result.verified_lossless_proof.provenance, "measured")
+        self.assertEqual(result.verified_lossless_proof.source, "flac")
+        self.assertEqual(
+            result.verified_lossless_proof.classifier, "legacy_import_result"
+        )
+        with self.assertRaisesRegex(
+            ValueError, "reserved for the v1/v2/v3 reader"
+        ):
+            result.to_json()
+
+    def test_transitional_v3_proof_origin_projects_to_provenance(self):
+        for proof_origin, expected in (
+            ("import_result", "measured"),
+            ("legacy_request_seed", "carried"),
+        ):
+            with self.subTest(proof_origin=proof_origin):
+                result = ImportResult.from_dict({
+                    "version": 3,
+                    "verified_lossless_proof": {
+                        "proof_origin": proof_origin,
+                        "source": "flac",
+                        "classifier": "spectral",
+                    },
+                })
+                assert result.verified_lossless_proof is not None
+                self.assertEqual(
+                    result.verified_lossless_proof.provenance, expected
+                )
 
     def test_production_v2_current_shape_roundtrip(self):
         """Current (2026-04) production v2 row from a successful import with
@@ -801,8 +951,8 @@ class TestImportResultProductionFixtures(unittest.TestCase):
         self.assertEqual(r.current_measurement.spectral_bitrate_kbps, 160)
         self.assertEqual(len(r.spectral.per_track), 2)
         self.assertEqual(r.spectral.suspect_pct, 80.0)
-        # Legacy projections are read-only and cannot spoof a new v3 row.
-        with self.assertRaisesRegex(ValueError, "reserved for the v1/v2 reader"):
+        # Legacy projections are read-only and cannot spoof a new v4 row.
+        with self.assertRaisesRegex(ValueError, "reserved for the v1/v2/v3 reader"):
             r.to_json()
 
     def test_production_v2_with_moved_siblings_roundtrip(self):
@@ -855,8 +1005,8 @@ class TestImportResultProductionFixtures(unittest.TestCase):
         self.assertEqual(sib.mb_albumid,
                          "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")
         assert r.source_measurement is not None
-        self.assertTrue(r.source_measurement.verified_lossless)
-        with self.assertRaisesRegex(ValueError, "reserved for the v1/v2 reader"):
+        self.assertIsNotNone(r.verified_lossless_proof)
+        with self.assertRaisesRegex(ValueError, "reserved for the v1/v2/v3 reader"):
             r.to_json()
 
     def test_production_v1_row_roundtrip(self):
@@ -898,8 +1048,8 @@ class TestImportResultProductionFixtures(unittest.TestCase):
             "already_in_beets": True,
         }
         r = ImportResult.from_dict(v1_row)
-        # Migrated to v2 in memory.
-        self.assertEqual(r.version, 3)
+        # Projected into the current model in memory.
+        self.assertEqual(r.version, 4)
         self.assertEqual(r.decision, "import")
         assert r.source_measurement is not None
         self.assertEqual(r.source_measurement.min_bitrate_kbps, 320)
@@ -907,7 +1057,7 @@ class TestImportResultProductionFixtures(unittest.TestCase):
         self.assertEqual(r.current_measurement.min_bitrate_kbps, 128)
         self.assertEqual(r.postflight.beets_id, 9026)
         self.assertEqual(r.postflight.track_count, 13)
-        with self.assertRaisesRegex(ValueError, "reserved for the v1/v2 reader"):
+        with self.assertRaisesRegex(ValueError, "reserved for the v1/v2/v3 reader"):
             r.to_json()
 
     def test_production_v2_pre_133_disambiguation_failure_roundtrip(self):
@@ -939,8 +1089,8 @@ class TestImportResultProductionFixtures(unittest.TestCase):
         self.assertEqual(df.reason, "nonzero_rc")
         self.assertIn("ModuleNotFoundError", df.detail)
         self.assertEqual(df.selector, "")
-        # Historical adapters are read-only; re-emission as v3 is forbidden.
-        with self.assertRaisesRegex(ValueError, "reserved for the v1/v2 reader"):
+        # Historical adapters are read-only; re-emission as v4 is forbidden.
+        with self.assertRaisesRegex(ValueError, "reserved for the v1/v2/v3 reader"):
             r.to_json()
 
     def test_all_observed_production_null_shapes_decode(self):
@@ -1104,7 +1254,11 @@ class TestImportResultScenarios(unittest.TestCase):
             decision="import",
             source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245, spectral_grade="genuine",
-                verified_lossless=True, was_converted_from="flac"),
+                spectral_subject="source", spectral_provenance="measured",
+                was_converted_from="flac"),
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="measured", source="flac", classifier="spectral"
+            ),
             conversion=ConversionInfo(
                 converted=12, failed=0, was_converted=True,
                 original_filetype="flac", target_filetype="mp3"),
@@ -1115,7 +1269,7 @@ class TestImportResultScenarios(unittest.TestCase):
         self.assertEqual(r.exit_code, 0)
         self.assertTrue(r.conversion.was_converted)
         assert r.source_measurement is not None
-        self.assertTrue(r.source_measurement.verified_lossless)
+        self.assertIsNotNone(r.verified_lossless_proof)
         self.assertFalse(r.conversion.is_transcode)
         self.assertIsNone(r.error)
 
@@ -1138,7 +1292,8 @@ class TestImportResultScenarios(unittest.TestCase):
             decision="transcode_upgrade",
             source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=180, spectral_grade="suspect",
-                spectral_bitrate_kbps=128),
+                spectral_bitrate_kbps=128, spectral_subject="source",
+                spectral_provenance="measured"),
             current_measurement=AudioQualityMeasurement(min_bitrate_kbps=128),
             conversion=ConversionInfo(
                 converted=10, failed=0, was_converted=True,
@@ -1252,9 +1407,15 @@ class TestDownloadInfo(unittest.TestCase):
             decision="import",
             source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245, spectral_grade="genuine",
-                format="FLAC", verified_lossless=True),
+                format="FLAC", spectral_subject="source",
+                spectral_provenance="measured"),
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="measured", source="flac", classifier="spectral"
+            ),
             current_measurement=AudioQualityMeasurement(
-                spectral_bitrate_kbps=128),
+                spectral_grade="suspect", spectral_bitrate_kbps=128,
+                spectral_subject="installed",
+                spectral_provenance="measured"),
             target_quality_contract=TargetQualityContract.from_explicit_label(
                 "mp3 v0"
             ),
@@ -1308,9 +1469,15 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
         ir = ImportResult(
             source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245, spectral_grade="genuine",
-                verified_lossless=True, was_converted_from="flac"),
+                spectral_subject="source", spectral_provenance="measured",
+                was_converted_from="flac"),
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="measured", source="flac", classifier="spectral"
+            ),
             current_measurement=AudioQualityMeasurement(
-                spectral_bitrate_kbps=128),
+                spectral_grade="suspect", spectral_bitrate_kbps=128,
+                spectral_subject="installed",
+                spectral_provenance="measured"),
             conversion=ConversionInfo(converted=10, was_converted=True,
                                       original_filetype="flac", target_filetype="mp3"),
         )

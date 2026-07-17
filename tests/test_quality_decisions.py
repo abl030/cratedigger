@@ -12,6 +12,8 @@ import unittest
 from datetime import datetime, timezone
 from typing import Any
 
+import msgspec
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.quality import (
@@ -29,7 +31,6 @@ from lib.quality import (
     rejected_download_tier,
     narrow_override_on_downgrade,
     resolve_rejection_search_override,
-    TRANSCODE_MIN_BITRATE_KBPS,
     # Codec-aware rank model (issue #60)
     QualityRank,
     RankBitrateMetric,
@@ -49,9 +50,11 @@ from lib.quality import (
     DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
     DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
     DECISION_LOSSLESS_SOURCE_LOCKED,
+    VerifiedLosslessProof,
     evidence_decision_name,
     full_pipeline_decision_from_evidence,
 )
+from lib.quality.decisions import post_import_search_action
 
 
 # ============================================================================
@@ -241,27 +244,27 @@ class TestImportQualityDecision(unittest.TestCase):
          dict(format="mp3 v0", avg_bitrate_kbps=245),
          False, "downgrade"),
         ("Opus 128 equivalent to MP3 V0 + verified_lossless → import",
-         dict(format="opus 128", avg_bitrate_kbps=130, verified_lossless=True),
+         dict(format="opus 128", avg_bitrate_kbps=130, verified_lossless_proof=True),
          dict(format="mp3 v0", avg_bitrate_kbps=245),
          False, "import"),
         ("FLAC→Opus 128 equivalent to MP3 CBR 320 + verified_lossless → import",
-         dict(format="opus 128", avg_bitrate_kbps=130, verified_lossless=True),
+         dict(format="opus 128", avg_bitrate_kbps=130, verified_lossless_proof=True),
          dict(format="mp3 320", avg_bitrate_kbps=320, is_cbr=True),
          False, "import"),
 
         # --- verified_lossless guardrail (core #60 fix) ---
         ("Opus 64 verified CANNOT replace MP3 V0 245",
-         dict(format="opus 64", avg_bitrate_kbps=64, verified_lossless=True),
+         dict(format="opus 64", avg_bitrate_kbps=64, verified_lossless_proof=True),
          dict(format="mp3 v0", avg_bitrate_kbps=245),
          False, "downgrade"),
         ("Opus 48 verified CANNOT replace MP3 CBR 320",
-         dict(format="opus 48", avg_bitrate_kbps=48, verified_lossless=True),
+         dict(format="opus 48", avg_bitrate_kbps=48, verified_lossless_proof=True),
          dict(format="mp3 320", avg_bitrate_kbps=320, is_cbr=True),
          False, "downgrade"),
 
         # --- Lo-fi genuine V0 (label semantics preserved) ---
         ("lo-fi V0 (207) equivalent to dense V0 (245) + verified → import",
-         dict(format="mp3 v0", avg_bitrate_kbps=207, verified_lossless=True),
+         dict(format="mp3 v0", avg_bitrate_kbps=207, verified_lossless_proof=True),
          dict(format="mp3 v0", avg_bitrate_kbps=245),
          False, "import"),
 
@@ -296,7 +299,11 @@ class TestImportQualityDecision(unittest.TestCase):
     def test_import_quality_decisions(self):
         for desc, new_kwargs, existing_kwargs, is_transcode, expected in self.CASES:
             with self.subTest(desc=desc):
-                new = AudioQualityMeasurement(**new_kwargs)
+                measurement_kwargs = dict(new_kwargs)
+                proof = bool(
+                    measurement_kwargs.pop("verified_lossless_proof", False)
+                )
+                new = AudioQualityMeasurement(**measurement_kwargs)
                 existing = (
                     AudioQualityMeasurement(**existing_kwargs)
                     if existing_kwargs is not None
@@ -307,6 +314,7 @@ class TestImportQualityDecision(unittest.TestCase):
                         new,
                         existing,
                         is_transcode=is_transcode,
+                        verified_lossless_proof=proof,
                     ).decision,
                     expected,
                     f"{desc}: new={new_kwargs} existing={existing_kwargs} "
@@ -468,6 +476,20 @@ class TestProvisionalLosslessDecision(unittest.TestCase):
                 self.assertIsNone(result.decision)
                 self.assertFalse(result.would_import)
 
+    def test_only_shared_transcode_grades_enter_provisional_policy(self):
+        """The provisional branch consumes the canonical grade set."""
+        from lib.quality import SPECTRAL_TRANSCODE_GRADES
+
+        for grade in SPECTRAL_TRANSCODE_GRADES:
+            with self.subTest(grade=grade):
+                self.assertEqual(
+                    self._decide(grade=grade).decision,
+                    DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
+                )
+        for grade in ("genuine", "marginal", "error", "unknown"):
+            with self.subTest(grade=grade):
+                self.assertIsNone(self._decide(grade=grade).decision)
+
     def test_lossy_candidate_locks_when_existing_has_lossless_source_probe(self):
         # Message to Bears EP1 shape: existing on-disk is a transcoded opus
         # we made from a suspect FLAC, with the original lossless-source V0
@@ -567,96 +589,32 @@ class TestTranscodeDetection(unittest.TestCase):
     """Test post-conversion transcode detection."""
 
     CASES = [
-        # desc, converted_count, min_bitrate, spectral_grade, expected
-        ("no conversion", 0, 150, None, False),
-        ("none bitrate", 5, None, None, False),
-        ("above threshold", 10, 240, None, False),
-        ("at threshold", 10, TRANSCODE_MIN_BITRATE_KBPS, None, False),
-        ("below threshold", 10, 190, None, True),
-        ("way below threshold", 1, 96, None, True),
-        ("just below threshold", 5, TRANSCODE_MIN_BITRATE_KBPS - 1, None, True),
-        ("genuine overrides low bitrate", 12, 190, "genuine", False),
-        ("marginal overrides low bitrate", 12, 190, "marginal", False),
-        ("suspect overrides high bitrate", 12, 240, "suspect", True),
-        ("likely transcode overrides high bitrate", 12, 240, "likely_transcode", True),
-        ("no spectral low bitrate fallback", 12, 190, None, True),
-        ("no spectral high bitrate fallback", 12, 240, None, False),
-        ("no conversion beats spectral", 0, 190, "suspect", False),
+        # desc, converted_count, spectral_grade, expected
+        ("no conversion", 0, None, False),
+        ("affirmative genuine proof", 12, "genuine", False),
+        ("affirmative marginal proof", 12, "marginal", False),
+        ("suspect", 12, "suspect", True),
+        ("likely transcode", 12, "likely_transcode", True),
+        ("analysis error aborts", 12, "error", True),
+        ("missing analysis aborts", 12, None, True),
+        ("no conversion beats spectral", 0, "suspect", False),
     ]
 
     def test_transcode_detection_cases(self):
-        for desc, converted_count, min_bitrate, spectral_grade, expected in self.CASES:
+        for desc, converted_count, spectral_grade, expected in self.CASES:
             with self.subTest(desc=desc):
                 self.assertEqual(
                     transcode_detection(
                         converted_count,
-                        min_bitrate,
                         spectral_grade=spectral_grade,
                     ),
                     expected,
                 )
 
-    # ---- Issue #66: configurable spectral-fallback threshold -------------
-
-    def test_default_constant_matches_default_cfg_mp3_vbr_excellent(self):
-        """Legacy module constant must equal the default cfg's mp3_vbr.excellent.
-
-        These are two different surfaces for the same number — if a future
-        change tunes mp3_vbr.excellent without updating the legacy constant,
-        the runtime transcode threshold drifts from the legacy-constant
-        surface. Pin the equality so the divergence is loud.
-        """
-        defaults_excellent = QualityRankConfig.defaults().mp3_vbr.excellent
-        self.assertEqual(TRANSCODE_MIN_BITRATE_KBPS, defaults_excellent)
-
-    def test_transcode_detection_uses_cfg_mp3_vbr_excellent(self):
-        """Custom cfg must shift the spectral-fallback threshold."""
-        # Default cfg → threshold 210 → 200 is a transcode.
-        default_cfg = QualityRankConfig.defaults()
-        self.assertTrue(transcode_detection(
-            10, 200, spectral_grade=None, cfg=default_cfg))
-
-        # Lower the threshold to 180 → 200 is no longer a transcode.
-        loose_cfg = QualityRankConfig(
-            mp3_vbr=CodecRankBands(
-                transparent=245, excellent=180, good=140, acceptable=100))
-        self.assertFalse(transcode_detection(
-            10, 200, spectral_grade=None, cfg=loose_cfg))
-
-        # Raise the threshold to 240 → 230 becomes a transcode.
-        strict_cfg = QualityRankConfig(
-            mp3_vbr=CodecRankBands(
-                transparent=300, excellent=240, good=180, acceptable=140))
-        self.assertTrue(transcode_detection(
-            10, 230, spectral_grade=None, cfg=strict_cfg))
-        # And just above the strict threshold passes.
-        self.assertFalse(transcode_detection(
-            10, 240, spectral_grade=None, cfg=strict_cfg))
-
-    def test_transcode_detection_cfg_does_not_override_spectral(self):
-        """Spectral grade is still authoritative even with a custom cfg."""
-        loose_cfg = QualityRankConfig(
-            mp3_vbr=CodecRankBands(
-                transparent=245, excellent=180, good=140, acceptable=100))
-        # Spectral=suspect → transcode regardless of bitrate (240 > threshold).
-        self.assertTrue(transcode_detection(
-            10, 240, spectral_grade="suspect", cfg=loose_cfg))
-        # Spectral=genuine → not transcode even when bitrate < threshold.
-        self.assertFalse(transcode_detection(
-            10, 100, spectral_grade="genuine", cfg=loose_cfg))
-
-    def test_transcode_detection_default_cfg_when_omitted(self):
-        """Omitting cfg must reproduce the legacy hardcoded behavior.
-
-        Critical for backward compatibility — every existing caller that
-        doesn't pass cfg keeps using the 210 kbps threshold.
-        """
-        # Same as the legacy "below threshold" case (210 - 20 = 190).
-        self.assertTrue(transcode_detection(10, 190, spectral_grade=None))
-        # Same as the legacy "at threshold" case.
-        self.assertFalse(transcode_detection(
-            10, TRANSCODE_MIN_BITRATE_KBPS, spectral_grade=None))
-
+    def test_removed_bitrate_argument_is_rejected(self):
+        """The deleted bitrate fallback cannot survive as a positional shim."""
+        with self.assertRaises(TypeError):
+            transcode_detection(12, 240)  # type: ignore[call-arg]
 
 # ============================================================================
 # quality_gate_decision
@@ -675,56 +633,75 @@ class TestQualityGateDecision(unittest.TestCase):
     CASES = [
         # (description, measurement_kwargs, expected_decision)
 
-        # --- accept: labels with TRANSPARENT rank (cross-codec equivalence) ---
-        ("MP3 V0 label lo-fi accepts without bypass",
-         dict(format="mp3 v0", avg_bitrate_kbps=207), "accept"),
+        # --- unverified retained copies stay wanted on full tiers ---
+        ("MP3 V0 label lo-fi stays searchable without proof",
+         dict(format="mp3 v0", avg_bitrate_kbps=207), "requeue_upgrade"),
         ("MP3 V0 label dense",
-         dict(format="mp3 v0", avg_bitrate_kbps=245), "accept"),
+         dict(format="mp3 v0", avg_bitrate_kbps=245), "requeue_upgrade"),
+        # --- verified-lossless proof is absolute, regardless of target rank ---
         ("Opus 128 verified lossless",
-         dict(format="opus 128", avg_bitrate_kbps=130, verified_lossless=True), "accept"),
-        ("Opus 128 not verified (label still transparent)",
-         dict(format="opus 128", avg_bitrate_kbps=130), "accept"),
+         dict(format="opus 128", avg_bitrate_kbps=130, verified_lossless_proof=True), "accept"),
+        ("Opus 128 not verified stays searchable",
+         dict(format="opus 128", avg_bitrate_kbps=130), "requeue_upgrade"),
         ("bare MP3 VBR above rank",
-         dict(format="MP3", avg_bitrate_kbps=240, is_cbr=False), "accept"),
+         dict(format="MP3", avg_bitrate_kbps=240, is_cbr=False), "requeue_upgrade"),
 
-        # --- requeue_upgrade: rank below gate_min_rank (EXCELLENT) ---
+        # --- unverified copies remain nonterminal at every rank ---
         ("bare MP3 VBR below rank",
          dict(format="MP3", avg_bitrate_kbps=150, is_cbr=False), "requeue_upgrade"),
         ("Opus 64 verified (target too low)",
-         dict(format="opus 64", avg_bitrate_kbps=64, verified_lossless=True), "requeue_upgrade"),
+         dict(format="opus 64", avg_bitrate_kbps=64, verified_lossless_proof=True), "accept"),
         ("Opus 48 verified (target far too low)",
-         dict(format="opus 48", avg_bitrate_kbps=48, verified_lossless=True), "requeue_upgrade"),
+         dict(format="opus 48", avg_bitrate_kbps=48, verified_lossless_proof=True), "accept"),
         ("spectral clamp pulls CBR 320 down",
          dict(format="mp3 320", avg_bitrate_kbps=320, is_cbr=True,
               spectral_bitrate_kbps=128), "requeue_upgrade"),
         ("no format no bitrate → UNKNOWN",
          dict(), "requeue_upgrade"),
 
-        # --- requeue_lossless: CBR at TRANSPARENT but unverified ---
-        ("CBR 320 unverified → requeue_lossless",
-         dict(format="mp3 320", avg_bitrate_kbps=320, is_cbr=True), "requeue_lossless"),
-        ("bare MP3 CBR 320 unverified → requeue_lossless",
-         dict(format="MP3", avg_bitrate_kbps=320, is_cbr=True), "requeue_lossless"),
-        ("bare MP3 CBR 256 unverified → requeue_lossless",
-         dict(format="MP3", avg_bitrate_kbps=256, is_cbr=True), "requeue_lossless"),
+        # --- lossless narrowing requires transparent + genuine evidence ---
+        ("CBR 320 unmeasured stays on full tiers",
+         dict(format="mp3 320", avg_bitrate_kbps=320, is_cbr=True), "requeue_upgrade"),
+        ("bare MP3 CBR 320 unmeasured stays on full tiers",
+         dict(format="MP3", avg_bitrate_kbps=320, is_cbr=True), "requeue_upgrade"),
+        ("bare MP3 CBR 256 unmeasured stays on full tiers",
+         dict(format="MP3", avg_bitrate_kbps=256, is_cbr=True), "requeue_upgrade"),
+        ("CBR 320 genuine narrows to lossless",
+         dict(format="mp3 320", avg_bitrate_kbps=320, is_cbr=True,
+              spectral_grade="genuine", spectral_subject="installed",
+              spectral_provenance="measured"), "requeue_lossless"),
+        ("CBR 320 genuine source-subject grade also narrows (D17)",
+         dict(format="mp3 320", avg_bitrate_kbps=320, is_cbr=True,
+              spectral_grade="genuine", spectral_subject="source",
+              spectral_provenance="carried"), "requeue_lossless"),
+        ("CBR 320 suspect stays on full tiers",
+         dict(format="mp3 320", avg_bitrate_kbps=320, is_cbr=True,
+              spectral_grade="suspect", spectral_bitrate_kbps=192), "requeue_upgrade"),
 
-        # --- lossless accepts regardless ---
-        ("FLAC accepts",
-         dict(format="FLAC", avg_bitrate_kbps=900), "accept"),
-        ("lossless label accepts with no bitrate",
-         dict(format="flac"), "accept"),
+        # A lossless container is not itself verified-lossless proof.
+        ("unverified FLAC stays searchable",
+         dict(format="FLAC", avg_bitrate_kbps=900), "requeue_upgrade"),
+        ("unverified lossless label stays searchable",
+         dict(format="flac"), "requeue_upgrade"),
 
         # --- legacy verified_lossless cases (still honoured via label if present) ---
-        ("legacy no format, verified_lossless → UNKNOWN → requeue_upgrade",
-         dict(min_bitrate_kbps=180, verified_lossless=True), "requeue_upgrade"),
+        ("legacy no format with verified-lossless proof accepts",
+         dict(min_bitrate_kbps=180, verified_lossless_proof=True), "accept"),
     ]
 
     def test_quality_gate_decisions(self):
         for desc, kwargs, expected in self.CASES:
             with self.subTest(desc=desc):
-                m = AudioQualityMeasurement(**kwargs)
+                measurement_kwargs = dict(kwargs)
+                proof = bool(
+                    measurement_kwargs.pop("verified_lossless_proof", False)
+                )
+                m = AudioQualityMeasurement(**measurement_kwargs)
                 self.assertEqual(
-                    quality_gate_decision(m), expected,
+                    quality_gate_decision(
+                        m,
+                        verified_lossless_proof=proof,
+                    ), expected,
                     f"{desc}: {kwargs} expected {expected!r}")
 
 
@@ -762,12 +739,17 @@ class TestGateRank(unittest.TestCase):
         m = AudioQualityMeasurement(
             format="opus 128",
             avg_bitrate_kbps=141,
-            verified_lossless=True,
             spectral_bitrate_kbps=160,
         )
         cfg = QualityRankConfig.defaults()
-        self.assertEqual(gate_rank(m, cfg), measurement_rank(m, cfg))
-        self.assertEqual(quality_gate_decision(m, cfg), "accept")
+        self.assertEqual(
+            gate_rank(m, cfg, verified_lossless_proof=True),
+            measurement_rank(m, cfg),
+        )
+        self.assertEqual(
+            quality_gate_decision(m, cfg, verified_lossless_proof=True),
+            "accept",
+        )
 
     def test_clamp_does_nothing_when_higher(self):
         """Spectral above measurement rank: no clamp."""
@@ -808,9 +790,42 @@ class TestGateRank(unittest.TestCase):
         cfg = QualityRankConfig.defaults()
         for desc, kwargs, expected in TestQualityGateDecision.CASES:
             with self.subTest(desc=desc):
-                m = AudioQualityMeasurement(**kwargs)
-                self.assertEqual(quality_gate_decision(m, cfg), expected,
+                measurement_kwargs = dict(kwargs)
+                proof = bool(
+                    measurement_kwargs.pop("verified_lossless_proof", False)
+                )
+                m = AudioQualityMeasurement(**measurement_kwargs)
+                self.assertEqual(quality_gate_decision(
+                    m,
+                    cfg,
+                    verified_lossless_proof=proof,
+                ), expected,
                                  f"{desc}: quality_gate_decision diverges from CASE expectation")
+
+
+class TestPostImportSearchAction(unittest.TestCase):
+    """Independent decision-to-state table for the post-import policy."""
+
+    CASES = (
+        ("accept", "imported", None, False),
+        ("requeue_lossless", "wanted", "lossless", True),
+        ("requeue_upgrade", "wanted", None, True),
+        ("provisional_lossless_upgrade", "wanted", "lossless", True),
+        ("transcode_upgrade", "wanted", None, True),
+        ("transcode_first", "wanted", None, True),
+    )
+
+    def test_action_mapping_matches_independent_table(self):
+        for decision, status, override, denylist in self.CASES:
+            with self.subTest(decision=decision):
+                action = post_import_search_action(decision)
+                self.assertEqual(action.status, status)
+                self.assertEqual(action.search_filetype_override, override)
+                self.assertEqual(action.denylist, denylist)
+
+    def test_unknown_decision_is_rejected(self):
+        with self.assertRaises(ValueError):
+            post_import_search_action("invented")
 
 
 # ============================================================================
@@ -902,7 +917,7 @@ EXPECTED_PARAMS = {
     "override_min_bitrate",
     "existing_format", "existing_is_cbr",
     "post_conversion_min_bitrate", "post_conversion_is_cbr", "converted_count",
-    "verified_lossless", "verified_lossless_target",
+    "candidate_verified_lossless_proof", "verified_lossless_target",
     "target_format",
     "new_format", "cfg",
     "candidate_v0_probe_avg", "candidate_v0_probe_min",
@@ -913,6 +928,9 @@ EXPECTED_PARAMS = {
     # pipeline in sync with lib.measurement.measure_preimport_state + preimport_decide.
     "audio_check_mode", "audio_corrupt",
     "import_mode", "has_nested_audio",
+    # U7 proof-bearing HAVE lock: an explicit simulator input, not a
+    # request-scalar inference.
+    "current_verified_lossless_proof",
 }
 
 
@@ -943,13 +961,17 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
         storage_format = storage_format or fmt
         metric = None
         if v0_lineage is not None:
+            subject = (
+                "source"
+                if v0_lineage == "lossless_source"
+                else "installed"
+            )
             metric = AlbumQualityV0Metric(
                 min_bitrate_kbps=v0_min,
                 avg_bitrate_kbps=v0_avg,
                 median_bitrate_kbps=v0_avg,
-                source_lineage=v0_lineage,
-                source_provenance="neutral_album_quality_evidence",
-                proof_provenance=v0_proof,
+                subject=subject,
+                provenance="measured",
             )
         # Post-migration 021: evidence is content-addressed by
         # (mb_release_id, snapshot_fingerprint). For pure decision tests we
@@ -969,6 +991,14 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
                 is_cbr=is_cbr,
                 spectral_grade=spectral_grade,
                 spectral_bitrate_kbps=spectral_bitrate,
+                spectral_subject=(
+                    "installed"
+                    if owner_type == "request_current" and spectral_grade is not None
+                    else "source" if spectral_grade is not None else None
+                ),
+                spectral_provenance=(
+                    "measured" if spectral_grade is not None else None
+                ),
             ),
             measured_at=datetime(2026, 5, 14, tzinfo=timezone.utc),
             files=[
@@ -1020,6 +1050,78 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
             v0_avg=260,
             v0_proof="neutral_v0_probe",
         )
+
+    def test_current_proof_precedes_every_candidate_integrity_reject(self):
+        candidate = self._evidence(
+            owner_type="download_log_candidate",
+            owner_id=7,
+            min_bitrate=320,
+            avg_bitrate=320,
+            fmt="MP3",
+            container="mp3",
+        )
+        current = self._evidence(
+            owner_type="request_current",
+            owner_id=42,
+            min_bitrate=128,
+            avg_bitrate=128,
+            fmt="Opus",
+            container="opus",
+        )
+        current = msgspec.structs.replace(
+            current,
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="measured",
+                source="test",
+                classifier="test",
+            ),
+        )
+        mixed_file = AlbumQualityEvidenceFile(
+            relative_path="bonus.flac",
+            size_bytes=1,
+            mtime_ns=1,
+            extension="flac",
+            container="flac",
+            codec="flac",
+        )
+        variants = {
+            "audio_corrupt": msgspec.structs.replace(
+                candidate, audio_corrupt=True
+            ),
+            "bad_audio_hash": msgspec.structs.replace(
+                candidate,
+                matched_bad_audio_hash_id=1,
+                matched_bad_audio_hash_path="01.mp3",
+            ),
+            "nested_layout": msgspec.structs.replace(
+                candidate, folder_layout="nested"
+            ),
+            "empty_fileset": msgspec.structs.replace(
+                candidate, files=[], audio_file_count=0
+            ),
+            "mixed_source": msgspec.structs.replace(
+                candidate, files=[*candidate.files, mixed_file]
+            ),
+        }
+
+        for integrity_fact, variant in variants.items():
+            with self.subTest(integrity_fact=integrity_fact):
+                result = full_pipeline_decision_from_evidence(variant, current)
+                self.assertEqual(
+                    result["stage2_import"], "verified_lossless_locked"
+                )
+                self.assertEqual(result["final_status"], "imported")
+                self.assertFalse(result["imported"])
+                self.assertFalse(result["denylisted"])
+                self.assertFalse(result["keep_searching"])
+                for key in (
+                    "preimport_audio",
+                    "preimport_bad_hash",
+                    "preimport_nested",
+                    "preimport_empty_fileset",
+                    "preimport_mixed_source",
+                ):
+                    self.assertIsNone(result[key])
 
     def test_stale_preview_candidate_loses_when_recomputed_against_current_evidence(self):
         candidate = self._suspect_lossless_candidate()
@@ -1097,8 +1199,8 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
             lossless_metric.avg_bitrate_kbps,
         )
         self.assertEqual(
-            native_metric.proof_provenance,
-            lossless_metric.proof_provenance,
+            native_metric.provenance,
+            lossless_metric.provenance,
         )
 
         native_result = full_pipeline_decision_from_evidence(
@@ -1397,10 +1499,10 @@ class TestFullPipelineContract(unittest.TestCase):
             False,  # existing_is_cbr
             None,  # post_conversion_min_bitrate
             0,  # converted_count
-            False,  # verified_lossless
+            False,  # candidate_verified_lossless_proof
             None,  # verified_lossless_target
             None,  # target_format
-            None,  # new_format
+            "MP3",  # new_format
             "auto",  # audio_check_mode
             False,  # audio_corrupt
             "auto",  # import_mode
@@ -1410,6 +1512,42 @@ class TestFullPipelineContract(unittest.TestCase):
 
         r = full_pipeline_decision(*positional)
         self.assertEqual(r["stage2_import"], "import")
+
+    def test_current_proof_cannot_become_candidate_proof(self):
+        """The HAVE lock is not a candidate verification input or output."""
+        result = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=245,
+            is_cbr=False,
+            new_format="MP3",
+            candidate_verified_lossless_proof=False,
+            current_verified_lossless_proof=True,
+        )
+
+        self.assertEqual(result["stage2_import"], "verified_lossless_locked")
+        self.assertFalse(result["verified_lossless"])
+        self.assertFalse(result["imported"])
+        self.assertIsNone(result["stage3_quality_gate"])
+
+    def test_current_proof_precedes_flat_preimport_rejects(self):
+        cases: tuple[tuple[str, dict[str, Any]], ...] = (
+            ("audio_corrupt", {"audio_corrupt": True}),
+            ("nested_layout", {"has_nested_audio": True}),
+        )
+        for integrity_fact, kwargs in cases:
+            with self.subTest(integrity_fact=integrity_fact):
+                result = full_pipeline_decision(
+                    is_flac=False,
+                    min_bitrate=245,
+                    is_cbr=False,
+                    current_verified_lossless_proof=True,
+                    **kwargs,
+                )
+                self.assertEqual(
+                    result["stage2_import"], "verified_lossless_locked"
+                )
+                self.assertIsNone(result["preimport_audio"])
+                self.assertIsNone(result["preimport_nested"])
 
     def test_stage1_values_in_contract(self):
         """Stage 1 spectral decisions must be from the known set."""
@@ -1469,8 +1607,10 @@ class TestFullPipelineContract(unittest.TestCase):
     def test_stage3_grade_aware_spectral_gate(self):
         """Full simulator must match production's grade-aware quality gate."""
         cases = [
-            ("genuine ignores low spectral", "genuine", 160, "accept", "imported"),
-            ("marginal ignores low spectral", "marginal", 160, "accept", "imported"),
+            ("genuine below transparent stays full-tier", "genuine", 160,
+             "requeue_upgrade", "wanted"),
+            ("marginal never narrows", "marginal", 160,
+             "requeue_upgrade", "wanted"),
             ("likely_transcode uses low spectral", "likely_transcode", 160,
              "requeue_upgrade", "wanted"),
             ("suspect uses low spectral", "suspect", 160, "requeue_upgrade", "wanted"),
@@ -1563,7 +1703,8 @@ class TestFullPipelineContract(unittest.TestCase):
     def test_avg_bitrate_flows_into_stage3_rank(self):
         """Issue #93 round 4: avg_bitrate must flow past stage 0 into the
         rank comparison. Under the default cfg.bitrate_metric=AVG policy,
-        a VBR V0 at min=200 / avg=245 must rank as TRANSPARENT (accepts).
+        a VBR V0 at min=200 / avg=245 must rank as TRANSPARENT. Without
+        verified-lossless proof it is retained while full-tier search continues.
         Pre-fix: simulator used min=200 as avg → GOOD < EXCELLENT → requeue.
         """
         r = full_pipeline_decision(
@@ -1574,9 +1715,9 @@ class TestFullPipelineContract(unittest.TestCase):
         self.assertEqual(r["stage0_spectral_gate"], "skipped_vbr_high_avg")
         # Stage 2 uses AVG metric → 245 → TRANSPARENT → import
         self.assertEqual(r["stage2_import"], "import")
-        # Stage 3 gate: AVG=245 passes EXCELLENT threshold → accept
-        self.assertEqual(r["stage3_quality_gate"], "accept")
-        self.assertEqual(r["final_status"], "imported")
+        # Stage 3 is search policy, not an acceptance floor.
+        self.assertEqual(r["stage3_quality_gate"], "requeue_upgrade")
+        self.assertEqual(r["final_status"], "wanted")
 
     def test_missing_avg_bitrate_falls_back_to_min(self):
         """Backward-compat: callers that don't pass avg_bitrate get the
@@ -1669,6 +1810,7 @@ class TestFullPipelineContract(unittest.TestCase):
             existing_spectral_bitrate=96,
             existing_format="MP3",
             existing_is_cbr=True,
+            new_format="MP3",
         )
         self.assertEqual(r["stage2_import"], "import")
         self.assertTrue(r["imported"])
@@ -1735,6 +1877,28 @@ class TestFullPipelineContract(unittest.TestCase):
         self.assertEqual(r["final_status"], "wanted")
         self.assertEqual(r["target_final_format"], "opus 128")
         self.assertIsNone(r["stage3_quality_gate"])
+
+    def test_fred_again_ae2_boundary_provisional_upgrade_stays_unverified(self):
+        """AE2 (Fred again.., request 5219 / download 31854): suspect FLAC
+        with V0 min 193 / avg 256 against anchor 248 imports as a
+        provisional upgrade (256 beats 248 beyond tolerance) AND stays
+        unverified — min 193 misses the hardcoded 200 override floor.
+        The minimum-track guard is intentional (settled decision 10).
+        """
+        r = full_pipeline_decision(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="suspect", spectral_bitrate=160,
+            converted_count=10,
+            post_conversion_min_bitrate=193,
+            candidate_v0_probe_avg=256,
+            existing_v0_probe_avg=248,
+        )
+        self.assertEqual(
+            r["stage2_import"], DECISION_PROVISIONAL_LOSSLESS_UPGRADE)
+        self.assertTrue(r["imported"])
+        self.assertFalse(r["verified_lossless"])
+        self.assertTrue(r["keep_searching"])
+        self.assertEqual(r["final_status"], "wanted")
 
     def test_provisional_lossless_uses_converted_v0_when_spectral_would_reject(self):
         r = full_pipeline_decision(
@@ -1914,6 +2078,8 @@ class TestFullPipelineContract(unittest.TestCase):
             existing_min_bitrate=192,
             existing_avg_bitrate=192,
             existing_is_cbr=True,
+            existing_format="MP3",
+            new_format="MP3",
         )
         self.assertNotEqual(r["stage2_import"], DECISION_LOSSLESS_SOURCE_LOCKED)
         self.assertTrue(r["imported"])
@@ -2061,33 +2227,33 @@ class TestDispatchAction(unittest.TestCase):
     # (decision, {flag: expected_value, ...})
     CASES = [
         ("import", dict(mark_done=True, record_rejection=False, denylist=False,
-                        requeue=False, cleanup=True, trigger_notifiers=True,
+                        cleanup=True, trigger_notifiers=True,
                         run_quality_gate=True)),
         ("preflight_existing", dict(mark_done=True, trigger_notifiers=True,
                                     run_quality_gate=True)),
         ("downgrade", dict(mark_done=False, record_rejection=True, denylist=True,
-                           requeue=False, cleanup=True)),
-        ("transcode_upgrade", dict(mark_done=True, denylist=True, requeue=True,
+                           cleanup=True)),
+        ("transcode_upgrade", dict(mark_done=True, denylist=False,
                                    trigger_notifiers=True)),
         ("transcode_downgrade", dict(mark_done=False, record_rejection=True,
-                                     denylist=True, requeue=True)),
-        ("transcode_first", dict(mark_done=True, denylist=True, requeue=True,
+                                     denylist=True)),
+        ("transcode_first", dict(mark_done=True, denylist=False,
                                  trigger_notifiers=True)),
         ("provisional_lossless_upgrade",
-         dict(mark_done=True, denylist=True, requeue=True,
+         dict(mark_done=True, denylist=False,
               trigger_notifiers=True, run_quality_gate=False)),
         ("suspect_lossless_downgrade",
          dict(mark_done=False, record_rejection=True, denylist=True,
-              requeue=True, cleanup=True)),
+              cleanup=True)),
         ("suspect_lossless_probe_missing",
          dict(mark_done=False, record_rejection=True, denylist=True,
-              requeue=True, cleanup=True)),
+              cleanup=True)),
         ("lossless_source_locked",
          dict(mark_done=False, record_rejection=True, denylist=True,
-              requeue=True, cleanup=True)),
+              cleanup=True)),
         ("spectral_reject",
          dict(mark_done=False, record_rejection=True, denylist=True,
-              requeue=False, cleanup=True)),
+              cleanup=True)),
         ("conversion_failed", dict(record_rejection=True, denylist=False)),
         ("import_failed", dict(record_rejection=True)),
         ("target_conversion_failed", dict(record_rejection=True, denylist=False)),
@@ -2367,7 +2533,6 @@ class TestRejectionBackfillOverride(unittest.TestCase):
             median_bitrate_kbps=min_bitrate_kbps,
             format=format,
             is_cbr=is_cbr,
-            verified_lossless=verified_lossless,
         )
         audit = SpectralAnalysisDetail(
             attempted=spectral_grade is not None,
@@ -2513,17 +2678,7 @@ class TestRejectionBackfillOverride(unittest.TestCase):
 
     # --- Rank-aware: codec-band cfg threading ---
     #
-    # Search narrowing follows the configured codec's TRANSPARENT boundary,
-    # while deliberately ignoring the separately configurable import gate.
-
-    def test_custom_good_gate_does_not_lower_transparent_boundary(self):
-        """Search narrowing is transparent-only, independent of import gate."""
-        lenient = QualityRankConfig(gate_min_rank=QualityRank.GOOD)
-        result = self._override(
-            is_cbr=False, min_bitrate_kbps=180,
-            spectral_grade="genuine", verified_lossless=False,
-            cfg=lenient)
-        self.assertIsNone(result)
+    # Search narrowing follows the configured codec's TRANSPARENT boundary.
 
     def test_default_transparent_boundary_blocks_lower_vbr(self):
         """The canonical TRANSPARENT boundary blocks the same 180kbps VBR."""
@@ -2533,25 +2688,21 @@ class TestRejectionBackfillOverride(unittest.TestCase):
         # 180 → GOOD, not TRANSPARENT → no backfill
         self.assertIsNone(result)
 
-    def test_gate_min_rank_does_not_promote_excellent_cbr(self):
-        """CBR 256 stays open even when the import gate is TRANSPARENT."""
-        strict = QualityRankConfig(gate_min_rank=QualityRank.TRANSPARENT)
+    def test_excellent_cbr_does_not_meet_transparent_boundary(self):
+        """CBR 256 stays open because narrowing is transparent-only."""
         result = self._override(
             is_cbr=True, min_bitrate_kbps=256,
-            spectral_grade="genuine", verified_lossless=False,
-            cfg=strict)
+            spectral_grade="genuine", verified_lossless=False)
         # 256 against mp3_cbr (transparent=320, excellent=256) → EXCELLENT,
         # EXCELLENT < TRANSPARENT → no backfill
         self.assertIsNone(result)
 
-    def test_gate_min_rank_does_not_block_transparent_cbr(self):
-        """CBR 320 still narrows when the import gate is TRANSPARENT."""
+    def test_transparent_cbr_meets_narrowing_boundary(self):
+        """CBR 320 narrows when affirmative evidence makes it transparent."""
         from lib.quality import QUALITY_LOSSLESS
-        strict = QualityRankConfig(gate_min_rank=QualityRank.TRANSPARENT)
         result = self._override(
             is_cbr=True, min_bitrate_kbps=320,
-            spectral_grade="genuine", verified_lossless=False,
-            cfg=strict)
+            spectral_grade="genuine", verified_lossless=False)
         self.assertEqual(result, QUALITY_LOSSLESS)
 
 
@@ -2596,6 +2747,8 @@ class TestTransparentGenuineLossyRejectionBackfill(unittest.TestCase):
             ("mp3 v0 measurement", "MP3", cfg.mp3_vbr.transparent, False),
             ("opus transparent", "Opus", cfg.opus.transparent, False),
             ("aac transparent", "AAC", cfg.aac.transparent, False),
+            ("vorbis transparent", "Vorbis", cfg.vorbis.transparent, False),
+            ("wma transparent", "WMA", cfg.wma.transparent, False),
         ]
         for description, format, bitrate, is_cbr in cases:
             with self.subTest(description=description):
@@ -2616,6 +2769,9 @@ class TestTransparentGenuineLossyRejectionBackfill(unittest.TestCase):
             ("transparent marginal", "MP3", cfg.mp3_cbr.transparent, True, True, "marginal", None),
             ("failed audit", "MP3", cfg.mp3_cbr.transparent, True, True, None, "spectral failed"),
             ("missing audit", "MP3", cfg.mp3_cbr.transparent, True, False, None, None),
+            ("vorbis transparent suspect", "Vorbis", cfg.vorbis.transparent, False, True, "suspect", None),
+            ("vorbis transparent likely transcode", "Vorbis", cfg.vorbis.transparent, False, True, "likely_transcode", None),
+            ("wma transparent suspect", "WMA", cfg.wma.transparent, False, True, "suspect", None),
             ("ogg has no rank band", "Ogg", 500, False, True, "genuine", None),
             ("lossless is already final", "FLAC", 1000, False, True, "genuine", None),
         ]
@@ -2745,6 +2901,10 @@ class TestQualityRank(unittest.TestCase):
         ("aac 144 label",                          "aac 144",        144, False, QualityRank.EXCELLENT),
         ("aac 112 label",                          "aac 112",        112, False, QualityRank.GOOD),
         ("aac 80 label",                           "aac 80",          80, False, QualityRank.ACCEPTABLE),
+        ("vorbis bitrate label ignores measurement",
+         f"vorbis {CFG.vorbis.transparent}", 1, False, QualityRank.TRANSPARENT),
+        ("wma bitrate label ignores measurement",
+         f"wma {CFG.wma.transparent}", 1, False, QualityRank.TRANSPARENT),
 
         # --- Step 5: bare codec name + measured bitrate (beets items.format path) ---
         # Default mp3_vbr bands: transparent=245, excellent=210, good=170, acceptable=130
@@ -2769,10 +2929,30 @@ class TestQualityRank(unittest.TestCase):
         ("AAC beets 150",                          "AAC",            150, False, QualityRank.EXCELLENT),
         ("AAC beets 120",                          "AAC",            120, False, QualityRank.GOOD),
 
+        # Vorbis: exact and immediately below every configured band edge.
+        ("Vorbis transparent edge", "Vorbis", CFG.vorbis.transparent, False, QualityRank.TRANSPARENT),
+        ("Vorbis below transparent", "Vorbis", CFG.vorbis.transparent - 1, False, QualityRank.EXCELLENT),
+        ("Vorbis excellent edge", "Vorbis", CFG.vorbis.excellent, False, QualityRank.EXCELLENT),
+        ("Vorbis below excellent", "Vorbis", CFG.vorbis.excellent - 1, False, QualityRank.GOOD),
+        ("Vorbis good edge", "Vorbis", CFG.vorbis.good, False, QualityRank.GOOD),
+        ("Vorbis below good", "Vorbis", CFG.vorbis.good - 1, False, QualityRank.ACCEPTABLE),
+        ("Vorbis acceptable edge", "Vorbis", CFG.vorbis.acceptable, False, QualityRank.ACCEPTABLE),
+        ("Vorbis below acceptable", "Vorbis", CFG.vorbis.acceptable - 1, False, QualityRank.POOR),
+
+        # WMA: exact and immediately below every configured band edge.
+        ("WMA transparent edge", "WMA", CFG.wma.transparent, False, QualityRank.TRANSPARENT),
+        ("WMA below transparent", "WMA", CFG.wma.transparent - 1, False, QualityRank.EXCELLENT),
+        ("WMA excellent edge", "WMA", CFG.wma.excellent, False, QualityRank.EXCELLENT),
+        ("WMA below excellent", "WMA", CFG.wma.excellent - 1, False, QualityRank.GOOD),
+        ("WMA good edge", "WMA", CFG.wma.good, False, QualityRank.GOOD),
+        ("WMA below good", "WMA", CFG.wma.good - 1, False, QualityRank.ACCEPTABLE),
+        ("WMA acceptable edge", "WMA", CFG.wma.acceptable, False, QualityRank.ACCEPTABLE),
+        ("WMA below acceptable", "WMA", CFG.wma.acceptable - 1, False, QualityRank.POOR),
+
         # --- Step 6: unknown codec family ---
-        ("unknown codec",                          "vorbis",         200, False, QualityRank.UNKNOWN),
-        ("unknown codec with bitrate label",       "vorbis 192",     None, False, QualityRank.UNKNOWN),
-        ("unknown codec with vbr-ish label",       "wma v0",         None, False, QualityRank.UNKNOWN),
+        ("unknown codec",                          "musepack",       200, False, QualityRank.UNKNOWN),
+        ("unknown codec with bitrate label",       "musepack 192",  None, False, QualityRank.UNKNOWN),
+        ("unsupported WMA vbr-ish label",          "wma v0",         None, False, QualityRank.UNKNOWN),
         ("empty string format",                    "",               200, False, QualityRank.UNKNOWN),
         ("whitespace-only format",                 "   ",            200, False, QualityRank.UNKNOWN),
 
@@ -2788,6 +2968,38 @@ class TestQualityRank(unittest.TestCase):
                     quality_rank(fmt, br, is_cbr, CFG), expected,
                     f"{desc}: quality_rank({fmt!r}, {br!r}, {is_cbr!r}) "
                     f"expected {expected!r}",
+                )
+
+    def test_vorbis_and_wma_ignore_cbr_inference(self):
+        for family, bands in (("Vorbis", CFG.vorbis), ("WMA", CFG.wma)):
+            for bitrate in (
+                bands.transparent, bands.transparent - 1,
+                bands.excellent, bands.excellent - 1,
+                bands.good, bands.good - 1,
+                bands.acceptable, bands.acceptable - 1,
+            ):
+                with self.subTest(family=family, bitrate=bitrate):
+                    self.assertEqual(
+                        quality_rank(family, bitrate, False, CFG),
+                        quality_rank(family, bitrate, True, CFG),
+                    )
+
+    def test_cross_codec_band_parity(self):
+        cases = [
+            ("transparent", "Vorbis", CFG.vorbis.transparent,
+             "AAC", CFG.aac.transparent),
+            ("excellent", "Vorbis", CFG.vorbis.excellent,
+             "WMA", CFG.wma.excellent),
+            ("good", "Vorbis", CFG.vorbis.good,
+             "WMA", CFG.wma.good),
+            ("acceptable", "Vorbis", CFG.vorbis.acceptable,
+             "WMA", CFG.wma.acceptable),
+        ]
+        for desc, left_fmt, left_br, right_fmt, right_br in cases:
+            with self.subTest(desc=desc):
+                self.assertEqual(
+                    quality_rank(left_fmt, left_br, False, CFG),
+                    quality_rank(right_fmt, right_br, False, CFG),
                 )
 
 
@@ -3260,7 +3472,6 @@ class TestQualityRankConfigFromIni(unittest.TestCase):
         cfg = self._parse(
             "[Quality Ranks]\n"
             "bitrate_metric = min\n"
-            "gate_min_rank = good\n"
             "within_rank_tolerance_kbps = 10\n"
             "opus.transparent = 120\n"
             "opus.excellent = 100\n"
@@ -3278,14 +3489,23 @@ class TestQualityRankConfigFromIni(unittest.TestCase):
             "aac.excellent = 150\n"
             "aac.good = 120\n"
             "aac.acceptable = 90\n"
+            "vorbis.transparent = 200\n"
+            "vorbis.excellent = 170\n"
+            "vorbis.good = 120\n"
+            "vorbis.acceptable = 100\n"
+            "wma.transparent = 321\n"
+            "wma.excellent = 257\n"
+            "wma.good = 193\n"
+            "wma.acceptable = 129\n"
         )
         self.assertEqual(cfg.bitrate_metric, RankBitrateMetric.MIN)
-        self.assertEqual(cfg.gate_min_rank, QualityRank.GOOD)
         self.assertEqual(cfg.within_rank_tolerance_kbps, 10)
         self.assertEqual(cfg.opus.transparent, 120)
         self.assertEqual(cfg.mp3_vbr.transparent, 220)
         self.assertEqual(cfg.mp3_cbr.excellent, 250)
         self.assertEqual(cfg.aac.acceptable, 90)
+        self.assertEqual(cfg.vorbis.excellent, 170)
+        self.assertEqual(cfg.wma.acceptable, 129)
 
     def test_invalid_metric_raises(self):
         with self.assertRaises(ValueError) as ctx:
@@ -3296,11 +3516,6 @@ class TestQualityRankConfigFromIni(unittest.TestCase):
         """`bitrate_metric = median` is a valid policy (issue #64)."""
         cfg = self._parse("[Quality Ranks]\nbitrate_metric = median\n")
         self.assertEqual(cfg.bitrate_metric, RankBitrateMetric.MEDIAN)
-
-    def test_invalid_rank_raises(self):
-        with self.assertRaises(ValueError) as ctx:
-            self._parse("[Quality Ranks]\ngate_min_rank = perfect\n")
-        self.assertIn("gate_min_rank", str(ctx.exception))
 
     def test_non_integer_band_raises(self):
         with self.assertRaises(ValueError) as ctx:
@@ -3320,24 +3535,17 @@ class TestQualityRankConfigFromIni(unittest.TestCase):
             self._parse("[Quality Ranks]\nwithin_rank_tolerance_kbps = -3\n")
         self.assertIn("within_rank_tolerance_kbps", str(ctx.exception))
 
-    def test_case_insensitive_metric_and_rank(self):
-        cfg = self._parse(
-            "[Quality Ranks]\n"
-            "bitrate_metric = AVG\n"
-            "gate_min_rank = TRANSPARENT\n"
-        )
+    def test_case_insensitive_metric(self):
+        cfg = self._parse("[Quality Ranks]\nbitrate_metric = AVG\n")
         self.assertEqual(cfg.bitrate_metric, RankBitrateMetric.AVG)
-        self.assertEqual(cfg.gate_min_rank, QualityRank.TRANSPARENT)
 
     def test_empty_value_falls_through_to_default(self):
         """Empty `key =` should yield the default, matching _get_int behavior."""
         cfg = self._parse(
             "[Quality Ranks]\n"
             "bitrate_metric = \n"
-            "gate_min_rank =    \n"
         )
         self.assertEqual(cfg.bitrate_metric, RankBitrateMetric.AVG)
-        self.assertEqual(cfg.gate_min_rank, QualityRank.EXCELLENT)
 
     def test_repo_config_ini_parses_cleanly(self):
         """The in-repo config.ini template must parse to a valid QualityRankConfig."""
@@ -3488,14 +3696,17 @@ class TestQualityRankConfigRoundTrip(unittest.TestCase):
     def test_custom_round_trip(self):
         original = QualityRankConfig(
             bitrate_metric=RankBitrateMetric.MIN,
-            gate_min_rank=QualityRank.TRANSPARENT,
             within_rank_tolerance_kbps=8,
             opus=CodecRankBands(transparent=120, excellent=100, good=80, acceptable=60),
+            vorbis=CodecRankBands(transparent=200, excellent=170, good=120, acceptable=100),
+            wma=CodecRankBands(transparent=321, excellent=257, good=193, acceptable=129),
         )
         payload = original.to_json()
         restored = QualityRankConfig.from_json(payload)
         self.assertEqual(restored, original)
         self.assertEqual(restored.opus.transparent, 120)
+        self.assertEqual(restored.vorbis.excellent, 170)
+        self.assertEqual(restored.wma.acceptable, 129)
 
     def test_median_metric_round_trip(self):
         """RankBitrateMetric.MEDIAN survives the harness argv round-trip."""
@@ -3508,15 +3719,14 @@ class TestQualityRankConfigRoundTrip(unittest.TestCase):
         import json
         payload = json.loads(QualityRankConfig.defaults().to_json())
         expected_keys = {
-            "bitrate_metric", "gate_min_rank", "within_rank_tolerance_kbps",
-            "opus", "mp3_vbr", "mp3_cbr", "aac",
+            "bitrate_metric", "within_rank_tolerance_kbps",
+            "opus", "mp3_vbr", "mp3_cbr", "aac", "vorbis", "wma",
             "mp3_vbr_levels", "lossless_codecs", "mixed_format_precedence",
         }
         self.assertEqual(set(payload.keys()), expected_keys)
 
-    def test_json_rank_is_int(self):
+    def test_json_vbr_ranks_are_ints(self):
         payload = json.loads(QualityRankConfig.defaults().to_json())
-        self.assertIsInstance(payload["gate_min_rank"], int)
         for r in payload["mp3_vbr_levels"]:
             self.assertIsInstance(r, int)
 
@@ -3551,11 +3761,11 @@ class TestQualityRankConfigRoundTrip(unittest.TestCase):
             QualityRankConfig.from_json(raw)
         self.assertIn("failed to reconstruct", str(ctx.exception))
 
-    def test_from_json_invalid_rank_int_raises_value_error(self):
-        """Out-of-range QualityRank ints raise ValueError, not blow up."""
+    def test_from_json_invalid_vbr_rank_int_raises_value_error(self):
+        """Out-of-range VBR rank ints raise ValueError, not a bare enum error."""
         import json as _json
         payload = _json.loads(QualityRankConfig.defaults().to_json())
-        payload["gate_min_rank"] = 9999  # invalid enum value
+        payload["mp3_vbr_levels"][0] = 9999
         with self.assertRaises(ValueError) as ctx:
             QualityRankConfig.from_json(_json.dumps(payload))
         self.assertIn("failed to reconstruct", str(ctx.exception))
@@ -3583,9 +3793,6 @@ class TestQualityRankConfigDefaults(unittest.TestCase):
     def test_default_metric_is_avg(self):
         self.assertEqual(CFG.bitrate_metric, RankBitrateMetric.AVG)
 
-    def test_default_gate_min_rank_is_excellent(self):
-        self.assertEqual(CFG.gate_min_rank, QualityRank.EXCELLENT)
-
     def test_default_within_rank_tolerance(self):
         self.assertEqual(CFG.within_rank_tolerance_kbps, 5)
 
@@ -3595,8 +3802,10 @@ class TestQualityRankConfigDefaults(unittest.TestCase):
             frozenset({"flac", "lossless", "alac", "wav"}))
 
     def test_default_mixed_format_precedence_worst_first(self):
-        # MP3 is the "worst" (least trustworthy cross-codec) so it wins ties.
-        self.assertEqual(CFG.mixed_format_precedence, ("mp3", "aac", "opus", "flac"))
+        self.assertEqual(
+            CFG.mixed_format_precedence,
+            ("wma", "mp3", "vorbis", "aac", "opus", "flac"),
+        )
 
     def test_default_mp3_vbr_levels_length_is_ten(self):
         self.assertEqual(len(CFG.mp3_vbr_levels), 10)
@@ -3649,6 +3858,18 @@ class TestQualityRankConfigDefaults(unittest.TestCase):
         self.assertEqual(CFG.aac.excellent, 144)
         self.assertEqual(CFG.aac.good, 112)
         self.assertEqual(CFG.aac.acceptable, 80)
+
+    def test_default_vorbis_bands(self):
+        self.assertEqual(CFG.vorbis.transparent, 192)
+        self.assertEqual(CFG.vorbis.excellent, 160)
+        self.assertEqual(CFG.vorbis.good, 112)
+        self.assertEqual(CFG.vorbis.acceptable, 96)
+
+    def test_default_wma_bands(self):
+        self.assertEqual(CFG.wma.transparent, 320)
+        self.assertEqual(CFG.wma.excellent, 256)
+        self.assertEqual(CFG.wma.good, 192)
+        self.assertEqual(CFG.wma.acceptable, 128)
 
 
 # ============================================================================

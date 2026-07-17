@@ -30,8 +30,10 @@ Full usage guide: docs/generated-testing.md.
 import os
 import sys
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -49,14 +51,18 @@ from lib.quality import (
     AudioQualityMeasurement,
     COMPARISON_BASIS_BRANCHES,
     QUALITY_UPGRADE_TIERS,
-    V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
-    V0_SOURCE_LINEAGE_NATIVE_LOSSY_RESEARCH,
+    EVIDENCE_SUBJECT_SOURCE,
+    EVIDENCE_SUBJECT_INSTALLED,
     VerifiedLosslessProof,
     classify_full_pipeline_decision,
     compute_effective_override_bitrate,
+    determine_verified_lossless,
     evidence_decision_name,
     full_pipeline_decision_from_evidence,
+    quality_gate_decision,
 )
+from lib.dispatch.quality_gate import _check_quality_gate_core
+from lib.dispatch.types import QualityGateState
 from lib.quality.filetypes import has_mixed_lossless_and_lossy
 from tests.helpers import (
     build_parity_candidate_evidence,
@@ -72,8 +78,11 @@ from tests.test_simulator_scenarios import (
 _GRADES = (None, "genuine", "marginal", "suspect", "likely_transcode")
 _TARGET_FORMATS = (None, "flac", "lossless", "mp3 v0", "opus 128")
 _VL_TARGETS = (None, "opus 128", "mp3 v0")
-_LOSSY_FORMATS = ("MP3", "Opus", "AAC")
-_CURRENT_FORMATS = ("MP3", "Opus", "FLAC")
+_LOSSY_FORMATS = ("MP3", "Opus", "AAC", "Vorbis", "WMA")
+_CURRENT_FORMATS = ("MP3", "Opus", "AAC", "Vorbis", "WMA", "FLAC")
+_RANKED_CODEC_FAMILIES = frozenset(
+    {"mp3", "opus", "aac", "vorbis", "wma", "flac", "alac", "wav", "lossless"}
+)
 
 
 def _bitrates(min_value: int = 1, max_value: int = 3000) -> st.SearchStrategy[int]:
@@ -82,6 +91,14 @@ def _bitrates(min_value: int = 1, max_value: int = 3000) -> st.SearchStrategy[in
 
 def _optional_bitrates(max_value: int = 3000) -> st.SearchStrategy[int | None]:
     return st.one_of(st.none(), _bitrates(max_value=max_value))
+
+
+def _unmapped_codec_labels() -> st.SearchStrategy[str]:
+    return st.text(
+        alphabet="abcdefghijklmnopqrstuvwxyz",
+        min_size=1,
+        max_size=16,
+    ).filter(lambda value: value not in _RANKED_CODEC_FAMILIES)
 
 
 # ===========================================================================
@@ -124,18 +141,126 @@ def assert_obvious_downgrade_not_accepted(result: SimResult) -> None:
             f"obvious lower-rank lossy candidate accepted: {result!r}")
 
 
-def assert_below_gate_never_stops_search(result: SimResult) -> None:
-    """The archivist invariant at the post-import gate: importing an
-    obviously below-gate file must never end the search. Added after a
-    fault-injection run showed a gate-always-accepts mutant survived the
-    generated tier (the obvious-downgrade guard only covers worlds with an
-    existing album; fresh requests reached the gate unpinned)."""
+def assert_unverified_lossy_never_terminal(result: SimResult) -> None:
+    """A retained lossy first copy is inventory, never a stopping proof."""
+    if not result.imported:
+        raise AssertionError(f"usable lossy first copy was not retained: {result!r}")
+    if result.stage3_quality_gate == "accept":
+        raise AssertionError(f"unverified lossy copy was accepted terminally: {result!r}")
+    if result.final_status != "wanted" or not result.keep_searching:
+        raise AssertionError(f"unverified lossy copy stopped searching: {result!r}")
+    if not result.denylisted:
+        raise AssertionError(f"retained lossy source was not denylisted: {result!r}")
+
+
+_POST_IMPORT_EXPECTATIONS = {
+    "accept": ("imported", None, False),
+    "requeue_lossless": ("wanted", "lossless", True),
+    "requeue_upgrade": ("wanted", None, True),
+}
+
+
+def assert_post_import_action_matches(
+    *,
+    decision: str,
+    status: str,
+    search_filetype_override: str | None,
+    denylist: bool,
+) -> None:
+    """Independent oracle for every observable post-import action field."""
+    expected = _POST_IMPORT_EXPECTATIONS[decision]
+    actual = (status, search_filetype_override, denylist)
+    if actual != expected:
+        raise AssertionError(
+            f"post-import mapping drift for {decision}: {actual!r} != {expected!r}"
+        )
+
+
+def assert_verified_lossless_proof_locks_candidate(result: SimResult) -> None:
+    """A proof-bearing HAVE is terminal for every automatic candidate."""
+    if result.imported:
+        raise AssertionError("proof-bearing HAVE was automatically replaced")
+    if result.stage2_import != "verified_lossless_locked":
+        raise AssertionError(
+            "proof-bearing HAVE missed verified_lossless_locked: "
+            f"{result.stage2_import!r}"
+        )
+    if result.final_status != "imported" or result.keep_searching:
+        raise AssertionError(
+            "proof lock did not preserve terminal imported state: "
+            f"status={result.final_status!r}, keep={result.keep_searching!r}"
+        )
+    if result.denylisted:
+        raise AssertionError("proof lock punished the candidate source")
+
+
+def assert_evidence_proof_lock_preserves_imported(result: dict) -> None:
+    """The evidence twin must ignore every automatic candidate reject."""
+    if result["stage2_import"] != "verified_lossless_locked":
+        raise AssertionError(
+            f"evidence proof lock missed: {result['stage2_import']!r}"
+        )
+    if result["final_status"] != "imported" or result["imported"]:
+        raise AssertionError(
+            "evidence proof lock did not preserve the installed HAVE"
+        )
+    if result["denylisted"] or result["keep_searching"]:
+        raise AssertionError("evidence proof lock reopened or punished source")
+    for key in _EARLY_EXIT_REJECT_VALUES:
+        if result[key] is not None:
+            raise AssertionError(
+                f"evidence proof lock leaked candidate reject {key}="
+                f"{result[key]!r}"
+            )
+
+
+def assert_verified_lossless_has_affirmative_evidence(
+    result: bool,
+    *,
+    spectral_grade: str | None,
+    v0_probe_kind: str | None,
+    v0_avg: int | None,
+    v0_min: int | None,
+) -> None:
+    """Verification needs an affirmative grade or a qualifying disagreement."""
+    if not result:
+        return
+    if spectral_grade in ("genuine", "marginal"):
+        return
+    override_qualifies = (
+        spectral_grade in ("suspect", "likely_transcode")
+        and v0_probe_kind == "lossless_source_v0"
+        and v0_avg is not None
+        and v0_avg >= 230
+        and v0_min is not None
+        and v0_min >= 200
+    )
+    if not override_qualifies:
+        raise AssertionError(
+            "verified lossless minted without affirmative spectral evidence: "
+            f"grade={spectral_grade!r}, probe_kind={v0_probe_kind!r}, "
+            f"avg={v0_avg!r}, min={v0_min!r}"
+        )
+
+
+def assert_unmapped_first_copy_stays_searchable(result: SimResult) -> None:
+    """An unmapped exact-release first copy is retained without a ceiling."""
+    if not result.imported or result.stage2_import != "import":
+        raise AssertionError(
+            f"unmapped first copy was not retained: {result!r}"
+        )
+    if result.final_status != "wanted" or not result.keep_searching:
+        raise AssertionError(
+            f"unmapped first copy became terminal: {result!r}"
+        )
     if result.stage3_quality_gate == "accept":
         raise AssertionError(
-            f"below-gate import was gate-accepted: {result!r}")
-    if not result.keep_searching:
+            f"unmapped first copy claimed a quality ceiling: {result!r}"
+        )
+    if result.search_filetype_override_after == "lossless":
         raise AssertionError(
-            f"below-gate outcome stopped the search: {result!r}")
+            f"unmapped first copy narrowed to lossless: {result!r}"
+        )
 
 
 _MEASURED_STAGE2_DECISIONS = frozenset({
@@ -278,7 +403,7 @@ def album_states(draw) -> AlbumState:
             st.sampled_from((None, "lossless", QUALITY_UPGRADE_TIERS))),
         target_format=draw(st.sampled_from(_TARGET_FORMATS)),
         existing_format=draw(
-            st.sampled_from((None, "MP3", "Opus", "aac", "FLAC"))),
+            st.sampled_from((None, *_CURRENT_FORMATS))),
         avg_bitrate=draw(_optional_bitrates(max_value=4000)),
         existing_v0_probe_avg=draw(_optional_bitrates(max_value=4000)),
     )
@@ -306,7 +431,7 @@ def download_scenarios(draw) -> DownloadScenario:
             and (converted_count > 0 or post_conversion_min_bitrate is not None)
             else None
         ),
-        new_format=(None if is_flac else draw(st.sampled_from(("MP3", "opus", "aac")))),
+        new_format=(None if is_flac else draw(st.sampled_from(_LOSSY_FORMATS))),
         is_vbr=draw(st.sampled_from((None, True, False))),
         avg_bitrate=draw(_optional_bitrates(max_value=4000)),
         candidate_v0_probe_avg=draw(_optional_bitrates(max_value=400)),
@@ -344,7 +469,7 @@ def lossy_downloads(draw) -> DownloadScenario:
         is_cbr=draw(st.booleans()),
         spectral_grade=draw(st.sampled_from(_GRADES)),
         spectral_bitrate=draw(_optional_bitrates(max_value=400)),
-        new_format=draw(st.sampled_from(("MP3", "opus", "aac"))),
+        new_format=draw(st.sampled_from(_LOSSY_FORMATS)),
         is_vbr=draw(st.sampled_from((None, True, False))),
         avg_bitrate=draw(_optional_bitrates(max_value=2000)),
     )
@@ -361,29 +486,7 @@ def obvious_lower_rank_lossy_downloads(draw) -> DownloadScenario:
         is_cbr=is_cbr,
         spectral_grade=draw(st.sampled_from(_GRADES)),
         spectral_bitrate=draw(_optional_bitrates(max_value=190)),
-        new_format=draw(st.sampled_from(("MP3", "opus", "aac"))),
-        is_vbr=not is_cbr,
-        avg_bitrate=bitrate,
-    )
-
-
-@st.composite
-def below_gate_mp3_downloads(draw) -> DownloadScenario:
-    """MP3 candidates unambiguously below the default gate rank (EXCELLENT).
-
-    MP3-only on purpose: codec-aware ranks can legitimately place low-
-    bitrate Opus at or above the gate, so MP3 ≤128 kbps is the anchor
-    codec/bitrate for 'obviously below gate'."""
-    bitrate = draw(_bitrates(max_value=128))
-    is_cbr = draw(st.booleans())
-    return DownloadScenario(
-        name="generated_below_gate_mp3",
-        is_flac=False,
-        min_bitrate=bitrate,
-        is_cbr=is_cbr,
-        spectral_grade=draw(st.sampled_from(_GRADES)),
-        spectral_bitrate=draw(_optional_bitrates(max_value=128)),
-        new_format="MP3",
+        new_format=draw(st.sampled_from(_LOSSY_FORMATS)),
         is_vbr=not is_cbr,
         avg_bitrate=bitrate,
     )
@@ -430,6 +533,16 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
         result = simulate(album, download)
         assert_lossy_not_imported_over_verified_lossless(result)
 
+    @given(album=raw_verified_lossless_albums(), download=download_scenarios())
+    def test_current_proof_blocks_every_automatic_candidate(
+            self, album, download):
+        result = simulate(
+            album,
+            download,
+            current_verified_lossless_proof=True,
+        )
+        assert_verified_lossless_proof_locks_candidate(result)
+
     @given(album=transparent_mp3_albums(),
            download=obvious_lower_rank_lossy_downloads())
     def test_transparent_existing_never_accepts_obvious_downgrade(
@@ -437,11 +550,169 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
         result = simulate(album, download)
         assert_obvious_downgrade_not_accepted(result)
 
-    @given(download=below_gate_mp3_downloads())
-    def test_fresh_request_below_gate_import_never_stops_search(
+    @given(download=lossy_downloads())
+    def test_unverified_lossy_first_copy_never_accepts_at_any_bitrate(
             self, download):
         result = simulate(_FRESH_ALBUM, download)
-        assert_below_gate_never_stops_search(result)
+        assert_unverified_lossy_never_terminal(result)
+
+    @given(decision=st.sampled_from(tuple(_POST_IMPORT_EXPECTATIONS)))
+    def test_real_quality_gate_matches_post_import_action_table(self, decision):
+        measurement = {
+            "accept": AudioQualityMeasurement(
+                format="opus 64", min_bitrate_kbps=64,
+                avg_bitrate_kbps=64,
+            ),
+            "requeue_lossless": AudioQualityMeasurement(
+                format="MP3", min_bitrate_kbps=320,
+                avg_bitrate_kbps=320, is_cbr=True,
+                spectral_grade="genuine",
+                spectral_subject=EVIDENCE_SUBJECT_INSTALLED,
+                spectral_provenance="measured",
+            ),
+            "requeue_upgrade": AudioQualityMeasurement(
+                format="MP3", min_bitrate_kbps=320,
+                avg_bitrate_kbps=320, is_cbr=True,
+                spectral_grade="suspect", spectral_bitrate_kbps=192,
+                spectral_subject=EVIDENCE_SUBJECT_INSTALLED,
+                spectral_provenance="measured",
+            ),
+        }[decision]
+        self.assertEqual(
+            quality_gate_decision(
+                measurement,
+                verified_lossless_proof=decision == "accept",
+            ),
+            decision,
+        )
+        state = QualityGateState(
+            measurement=measurement,
+            verified_lossless_proof=decision == "accept",
+        )
+        plan = _check_quality_gate_core(
+            mb_id="generated-mbid", label="Generated",
+            request_id=42,
+            files=[SimpleNamespace(username="peer")],
+            db=SimpleNamespace(),  # type: ignore[arg-type]
+            apply=False,
+            state_loader=lambda **_kwargs: state,
+        )
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        raw_override = plan.transition.fields.get("search_filetype_override")
+        if raw_override is not None and not isinstance(raw_override, str):
+            raise AssertionError(
+                f"quality gate wrote a non-string override: {raw_override!r}"
+            )
+        assert_post_import_action_matches(
+            decision=decision,
+            status=plan.transition.target_status,
+            search_filetype_override=raw_override,
+            denylist=bool(plan.denylists),
+        )
+
+    @given(subject=st.sampled_from((
+        EVIDENCE_SUBJECT_SOURCE,
+        EVIDENCE_SUBJECT_INSTALLED,
+    )))
+    def test_lossless_narrowing_is_subject_blind_for_genuine_transparent(
+        self, subject
+    ):
+        # Decision 17: the transparent+genuine narrowing rule keys on the
+        # grade, never the subject label — an unconverted import's
+        # source-subject grade describes the installed bytes.
+        measurement = AudioQualityMeasurement(
+            format="MP3",
+            min_bitrate_kbps=320,
+            avg_bitrate_kbps=320,
+            is_cbr=True,
+            spectral_grade="genuine",
+            spectral_subject=subject,
+            spectral_provenance=(
+                "measured"
+                if subject == EVIDENCE_SUBJECT_INSTALLED
+                else "carried"
+            ),
+        )
+        self.assertEqual(
+            quality_gate_decision(measurement), "requeue_lossless")
+
+    @given(
+        target_format=st.sampled_from(_TARGET_FORMATS),
+        spectral_grade=st.sampled_from(
+            (None, "error", "genuine", "marginal", "suspect", "likely_transcode")
+        ),
+        converted_count=st.integers(min_value=0, max_value=24),
+        is_transcode=st.booleans(),
+        probe_kind=st.one_of(
+            st.none(),
+            st.sampled_from(("lossless_source_v0", "native_lossy_research_v0")),
+        ),
+        v0_avg=_optional_bitrates(max_value=400),
+        v0_min=_optional_bitrates(max_value=400),
+    )
+    def test_verified_lossless_requires_affirmative_spectral_evidence(
+        self,
+        target_format,
+        spectral_grade,
+        converted_count,
+        is_transcode,
+        probe_kind,
+        v0_avg,
+        v0_min,
+    ):
+        from lib.quality import V0ProbeEvidence
+
+        probe = (
+            V0ProbeEvidence(
+                kind=probe_kind,
+                avg_bitrate_kbps=v0_avg,
+                min_bitrate_kbps=v0_min,
+            )
+            if probe_kind is not None else None
+        )
+        result = determine_verified_lossless(
+            target_format,
+            spectral_grade,
+            converted_count,
+            is_transcode,
+            v0_probe=probe,
+        )
+        assert_verified_lossless_has_affirmative_evidence(
+            result,
+            spectral_grade=spectral_grade,
+            v0_probe_kind=probe_kind,
+            v0_avg=v0_avg,
+            v0_min=v0_min,
+        )
+
+    @given(
+        codec_label=_unmapped_codec_labels(),
+        bitrate=_bitrates(max_value=4000),
+        is_cbr=st.booleans(),
+        spectral_grade=st.sampled_from((None, "genuine", "marginal")),
+    )
+    def test_unmapped_codec_first_copy_never_claims_a_ceiling(
+        self,
+        codec_label,
+        bitrate,
+        is_cbr,
+        spectral_grade,
+    ):
+        result = simulate(
+            _FRESH_ALBUM,
+            DownloadScenario(
+                name="generated_unmapped_codec",
+                is_flac=False,
+                min_bitrate=bitrate,
+                is_cbr=is_cbr,
+                is_vbr=not is_cbr,
+                avg_bitrate=bitrate,
+                spectral_grade=spectral_grade,
+                new_format=codec_label,
+            ),
+        )
+        assert_unmapped_first_copy_stays_searchable(result)
 
     @given(album=album_states(), download=download_scenarios())
     def test_generated_basis_never_contradicts_decision(self, album, download):
@@ -494,6 +765,7 @@ class ParityWorld:
     current_grade: str | None
     current_spectral_bitrate: int | None
     current_v0_avg: int | None
+    current_verified_lossless_proof: bool
     # Candidate download.
     candidate_kind: str  # "lossy" | "flac_raw" | "flac_converted"
     min_bitrate: int
@@ -521,8 +793,13 @@ def parity_worlds(draw) -> ParityWorld:
         current_format = draw(st.sampled_from(_CURRENT_FORMATS))
         current_is_cbr = draw(st.booleans())
         current_grade = draw(st.sampled_from(_GRADES))
-        current_spectral_bitrate = draw(_optional_bitrates(max_value=400))
+        current_spectral_bitrate = (
+            draw(_optional_bitrates(max_value=400))
+            if current_grade is not None
+            else None
+        )
         current_v0_avg = draw(_optional_bitrates(max_value=400))
+        current_verified_lossless_proof = draw(st.booleans())
     else:
         current_min = current_avg = None
         current_format = "MP3"
@@ -530,13 +807,18 @@ def parity_worlds(draw) -> ParityWorld:
         current_grade = None
         current_spectral_bitrate = None
         current_v0_avg = None
+        current_verified_lossless_proof = False
 
     # candidate_format only matters for lossy worlds; FLAC kinds carry the
     # placeholder "FLAC" (the evidence builder ignores native_codec/format
     # when is_flac=True).
     kind = draw(st.sampled_from(("lossy", "flac_raw", "flac_converted")))
     grade = draw(st.sampled_from(_GRADES))
-    spectral_bitrate = draw(_optional_bitrates(max_value=400))
+    spectral_bitrate = (
+        draw(_optional_bitrates(max_value=400))
+        if grade is not None
+        else None
+    )
     if kind == "lossy":
         min_bitrate = draw(_bitrates(max_value=2000))
         is_cbr = draw(st.booleans())
@@ -581,6 +863,7 @@ def parity_worlds(draw) -> ParityWorld:
         current_grade=current_grade,
         current_spectral_bitrate=current_spectral_bitrate,
         current_v0_avg=current_v0_avg,
+        current_verified_lossless_proof=current_verified_lossless_proof,
         candidate_kind=kind,
         min_bitrate=min_bitrate,
         is_cbr=is_cbr,
@@ -598,7 +881,14 @@ def parity_worlds(draw) -> ParityWorld:
     )
 
 
-_NATIVE_CODECS = {"MP3": "mp3", "Opus": "opus", "AAC": "aac", "FLAC": "flac"}
+_NATIVE_CODECS = {
+    "MP3": "mp3",
+    "Opus": "opus",
+    "AAC": "aac",
+    "Vorbis": "vorbis",
+    "WMA": "wma",
+    "FLAC": "flac",
+}
 
 
 def _parity_simulator_result(world: ParityWorld) -> SimResult:
@@ -636,6 +926,7 @@ def _parity_simulator_result(world: ParityWorld) -> SimResult:
     return simulate(
         album, download,
         verified_lossless_target=world.verified_lossless_target,
+        current_verified_lossless_proof=world.current_verified_lossless_proof,
     )
 
 
@@ -664,8 +955,8 @@ def _parity_evidence_result(world: ParityWorld) -> dict:
             min_bitrate_kbps=None,
             avg_bitrate_kbps=world.current_v0_avg,
             median_bitrate_kbps=world.current_v0_avg,
-            source_lineage=V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
-            source_provenance="neutral_album_quality_evidence",
+            subject=EVIDENCE_SUBJECT_SOURCE,
+            provenance="measured",
         )
     current = build_parity_current_evidence(
         min_bitrate=world.current_min,
@@ -676,6 +967,15 @@ def _parity_evidence_result(world: ParityWorld) -> dict:
         spectral_bitrate=world.current_spectral_bitrate,
         v0_metric=v0_metric,
     )
+    if current is not None and world.current_verified_lossless_proof:
+        current = msgspec.structs.replace(
+            current,
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="measured",
+                source="generated",
+                classifier="generated",
+            ),
+        )
     facts = AlbumQualityEvidenceDecisionFacts(
         import_mode="auto",
         verified_lossless_target=world.verified_lossless_target,
@@ -693,7 +993,7 @@ def _parity_evidence_result(world: ParityWorld) -> dict:
 _MOUNTAIN_GOATS_FLUX_WORLD = ParityWorld(
     current_min=320, current_avg=320, current_format="MP3",
     current_is_cbr=True, current_grade=None, current_spectral_bitrate=None,
-    current_v0_avg=None,
+    current_v0_avg=None, current_verified_lossless_proof=False,
     candidate_kind="flac_converted", min_bitrate=900, is_cbr=False,
     avg_bitrate=None, grade="suspect", spectral_bitrate=160,
     candidate_format="FLAC", converted_count=13,
@@ -712,6 +1012,7 @@ _SPECTRAL_OVERRIDE_DECISIVE_WORLD = ParityWorld(
     current_min=320, current_avg=320, current_format="MP3",
     current_is_cbr=True, current_grade="likely_transcode",
     current_spectral_bitrate=96, current_v0_avg=None,
+    current_verified_lossless_proof=False,
     candidate_kind="lossy", min_bitrate=192, is_cbr=True, avg_bitrate=192,
     grade=None, spectral_bitrate=None, candidate_format="MP3",
     converted_count=0, post_conversion_min_bitrate=None, v0_avg=None,
@@ -722,8 +1023,20 @@ _HERETIC_PRIDE_WORLD = ParityWorld(
     current_min=192, current_avg=192, current_format="MP3",
     current_is_cbr=False, current_grade="genuine",
     current_spectral_bitrate=None, current_v0_avg=None,
+    current_verified_lossless_proof=False,
     candidate_kind="lossy", min_bitrate=192, is_cbr=False, avg_bitrate=192,
     grade="genuine", spectral_bitrate=None, candidate_format="MP3",
+    converted_count=0, post_conversion_min_bitrate=None, v0_avg=None,
+    post_conversion_is_cbr=None,
+    v0_min=None, target_format=None, verified_lossless_target=None,
+)
+_PARTS_AND_LABOR_VORBIS_WORLD = ParityWorld(
+    current_min=128, current_avg=128, current_format="MP3",
+    current_is_cbr=True, current_grade=None,
+    current_spectral_bitrate=None, current_v0_avg=None,
+    current_verified_lossless_proof=False,
+    candidate_kind="lossy", min_bitrate=192, is_cbr=False, avg_bitrate=192,
+    grade="genuine", spectral_bitrate=None, candidate_format="Vorbis",
     converted_count=0, post_conversion_min_bitrate=None, v0_avg=None,
     post_conversion_is_cbr=None,
     v0_min=None, target_format=None, verified_lossless_target=None,
@@ -738,9 +1051,24 @@ class TestGeneratedParity(unittest.TestCase):
     @example(world=_MOUNTAIN_GOATS_FLUX_WORLD)
     @example(world=_HERETIC_PRIDE_WORLD)
     @example(world=_SPECTRAL_OVERRIDE_DECISIVE_WORLD)
+    @example(world=_PARTS_AND_LABOR_VORBIS_WORLD)
     def test_decision_twins_agree(self, world):
         sim = _parity_simulator_result(world)
         evidence_result = _parity_evidence_result(world)
+        assert_twins_agree(sim, evidence_result)
+
+    @given(world=parity_worlds())
+    def test_proof_bearing_current_blocks_every_candidate_in_both_twins(
+            self, world):
+        proof_world = replace(
+            world,
+            current_min=(world.current_min or 245),
+            current_avg=(world.current_avg or 245),
+            current_verified_lossless_proof=True,
+        )
+        sim = _parity_simulator_result(proof_world)
+        evidence_result = _parity_evidence_result(proof_world)
+        assert_verified_lossless_proof_locks_candidate(sim)
         assert_twins_agree(sim, evidence_result)
 
 
@@ -771,18 +1099,18 @@ def wild_ready_candidate_evidence(draw) -> AlbumQualityEvidence:
             min_bitrate_kbps=draw(_optional_bitrates(max_value=400)),
             avg_bitrate_kbps=draw(_bitrates(max_value=400)),
             median_bitrate_kbps=None,
-            source_lineage=draw(st.sampled_from((
-                V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
-                V0_SOURCE_LINEAGE_NATIVE_LOSSY_RESEARCH,
+            subject=draw(st.sampled_from((
+                EVIDENCE_SUBJECT_SOURCE,
+                EVIDENCE_SUBJECT_INSTALLED,
             ))),
-            source_provenance="generated",
+            provenance="measured",
         )
     # verified_lossless=True is only a ready (storable-for-action) state
     # when a proof provenance rides along — pair them, as production does.
     verified_lossless = draw(st.booleans())
     proof = (
         VerifiedLosslessProof(
-            proof_origin="generated", source="generated",
+            provenance="measured", source="generated",
             classifier="generated")
         if verified_lossless else None
     )
@@ -798,26 +1126,34 @@ def wild_ready_candidate_evidence(draw) -> AlbumQualityEvidence:
         or verified_lossless
         or (
             v0_metric is not None
-            and v0_metric.source_lineage == V0_SOURCE_LINEAGE_LOSSLESS_SOURCE
+            and v0_metric.subject == EVIDENCE_SUBJECT_SOURCE
         )
     )
     if lossless_source:
-        # Actionable v3 evidence from a lossless source has already projected
+        # Actionable v4 evidence from a lossless source has already projected
         # its target. Measurement-only rows are the separate early-reject
         # writer and never enter this ready-candidate strategy.
         target_format = draw(
             st.sampled_from(("MP3", "mp3 v0", "opus 128", "flac"))
         )
         target_is_cbr = draw(st.booleans())
+    spectral_grade = draw(st.sampled_from(_GRADES))
+    spectral_bitrate = (
+        draw(_optional_bitrates(max_value=400))
+        if spectral_grade is not None else None
+    )
     measurement = AudioQualityMeasurement(
         min_bitrate_kbps=draw(_bitrates(max_value=4000)),
         avg_bitrate_kbps=draw(_optional_bitrates(max_value=4000)),
         median_bitrate_kbps=draw(_optional_bitrates(max_value=4000)),
         format=measured_format,
         is_cbr=draw(st.booleans()),
-        spectral_grade=draw(st.sampled_from(_GRADES)),
-        spectral_bitrate_kbps=draw(_optional_bitrates(max_value=400)),
-        verified_lossless=verified_lossless,
+        spectral_grade=spectral_grade,
+        spectral_bitrate_kbps=spectral_bitrate,
+        spectral_subject=("source" if spectral_grade is not None else None),
+        spectral_provenance=(
+            "measured" if spectral_grade is not None else None
+        ),
     )
     has_bad_hash = draw(st.booleans())
     return AlbumQualityEvidence(
@@ -851,9 +1187,11 @@ def _expected_early_exit_key(candidate: AlbumQualityEvidence) -> str | None:
         return "preimport_bad_hash"
     if candidate.folder_layout == "nested":
         return "preimport_nested"
-    # files are always non-empty in this strategy, so empty_fileset (which
-    # requires count=0 AND no snapshot files) is unreachable here; it is
-    # pinned by TestPreimportFactRejects in test_quality_classification.py.
+    effective_audio_file_count = (
+        len(candidate.files) if candidate.files else candidate.audio_file_count
+    )
+    if effective_audio_file_count == 0:
+        return "preimport_empty_fileset"
     if has_mixed_lossless_and_lossy(candidate.files):
         return "preimport_mixed_source"
     return None
@@ -874,6 +1212,60 @@ _EARLY_EXIT_FACT_NAMES = {
     "preimport_empty_fileset": "empty_fileset",
     "preimport_mixed_source": "mixed_source",
 }
+
+_INTEGRITY_FACTS = (
+    "audio_corrupt",
+    "bad_audio_hash",
+    "nested_layout",
+    "empty_fileset",
+    "mixed_source",
+)
+
+
+def _with_integrity_fact(
+    candidate: AlbumQualityEvidence,
+    fact: str,
+) -> AlbumQualityEvidence:
+    mp3_file = AlbumQualityEvidenceFile(
+        relative_path="01.mp3",
+        size_bytes=1,
+        mtime_ns=1,
+        extension="mp3",
+        container="mp3",
+        codec="mp3",
+    )
+    clean = msgspec.structs.replace(
+        candidate,
+        files=[mp3_file],
+        audio_corrupt=False,
+        folder_layout="flat",
+        audio_file_count=1,
+        matched_bad_audio_hash_id=None,
+        matched_bad_audio_hash_path=None,
+    )
+    if fact == "audio_corrupt":
+        return msgspec.structs.replace(clean, audio_corrupt=True)
+    if fact == "bad_audio_hash":
+        return msgspec.structs.replace(
+            clean,
+            matched_bad_audio_hash_id=1,
+            matched_bad_audio_hash_path="01.mp3",
+        )
+    if fact == "nested_layout":
+        return msgspec.structs.replace(clean, folder_layout="nested")
+    if fact == "empty_fileset":
+        return msgspec.structs.replace(clean, files=[], audio_file_count=0)
+    if fact == "mixed_source":
+        flac_file = AlbumQualityEvidenceFile(
+            relative_path="02.flac",
+            size_bytes=1,
+            mtime_ns=1,
+            extension="flac",
+            container="flac",
+            codec="flac",
+        )
+        return msgspec.structs.replace(clean, files=[mp3_file, flac_file])
+    raise AssertionError(f"unknown generated integrity fact: {fact}")
 
 _VALID_VERDICTS = ("confident_reject", "would_import", "uncertain")
 
@@ -950,6 +1342,47 @@ class TestGeneratedEvidenceDecider(unittest.TestCase):
             self.assertIsNone(result["final_status"])
             self.assertFalse(result["keep_searching"])
 
+    @given(
+        candidate=wild_ready_candidate_evidence(),
+        integrity_fact=st.sampled_from(_INTEGRITY_FACTS),
+    )
+    def test_current_proof_precedes_integrity_for_every_import_mode(
+        self,
+        candidate,
+        integrity_fact,
+    ):
+        candidate = _with_integrity_fact(candidate, integrity_fact)
+        current = build_parity_current_evidence(
+            min_bitrate=128,
+            avg_bitrate=128,
+            format="Opus",
+        )
+        assert current is not None
+        current = msgspec.structs.replace(
+            current,
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="measured",
+                source="generated",
+                classifier="generated",
+            ),
+        )
+
+        automatic = full_pipeline_decision_from_evidence(candidate, current)
+        assert_evidence_proof_lock_preserves_imported(automatic)
+
+        # Decision 21: the proof lock is absolute — force mode hits it the
+        # same way, before any integrity reject can fire.
+        forced = full_pipeline_decision_from_evidence(
+            candidate,
+            current,
+            facts=AlbumQualityEvidenceDecisionFacts(import_mode="force"),
+        )
+        assert_evidence_proof_lock_preserves_imported(forced)
+        self.assertEqual(
+            forced["stage2_import"],
+            "verified_lossless_locked",
+        )
+
     @given(candidate=wild_ready_candidate_evidence(),
            import_mode=st.sampled_from(("auto", "force")))
     def test_decision_classification_is_coherent(self, candidate, import_mode):
@@ -981,6 +1414,44 @@ class TestGeneratedEvidenceDecider(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             full_pipeline_decision_from_evidence(no_bitrates, None)
+
+    def test_force_import_respects_current_proof(self):
+        """Decision 21: force-import bypasses only the beets distance —
+        the verified-lossless proof lock is absolute for every import
+        mode; Replace/re-request is the operator's way back in.
+        """
+        candidate = build_parity_candidate_evidence(
+            is_flac=False,
+            min_bitrate=320,
+            avg_bitrate=320,
+            is_cbr=True,
+        )
+        current = build_parity_current_evidence(
+            min_bitrate=128,
+            avg_bitrate=128,
+            format="MP3",
+            is_cbr=True,
+        )
+        assert current is not None
+        current = msgspec.structs.replace(
+            current,
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="measured",
+                source="test",
+                classifier="test",
+            ),
+        )
+        result = full_pipeline_decision_from_evidence(
+            candidate,
+            current,
+            facts=AlbumQualityEvidenceDecisionFacts(import_mode="force"),
+        )
+        self.assertEqual(
+            result["stage2_import"],
+            "verified_lossless_locked",
+        )
+        self.assertFalse(result["imported"])
+        self.assertEqual(result["final_status"], "imported")
 
 
 # ===========================================================================
@@ -1022,13 +1493,98 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             assert_lossy_not_imported_over_verified_lossless(
                 _planted_bad_import())
 
+    def test_proof_lock_checker_kills_proof_ignoring_mutant(self):
+        """Omitting the proof input recreates the pre-U7 replacement bug."""
+        mutant = simulate(
+            AlbumState(
+                "proof_ignored",
+                207,
+                False,
+                "genuine",
+                None,
+                True,
+                None,
+                existing_format="MP3",
+                avg_bitrate=207,
+            ),
+            DownloadScenario(
+                "higher_candidate",
+                is_flac=False,
+                min_bitrate=240,
+                is_cbr=False,
+                is_vbr=True,
+                avg_bitrate=245,
+                new_format="MP3",
+            ),
+            current_verified_lossless_proof=False,
+        )
+        with self.assertRaises(AssertionError):
+            assert_verified_lossless_proof_locks_candidate(mutant)
+
+    def test_evidence_proof_lock_checker_trips_on_integrity_reject(self):
+        with self.assertRaises(AssertionError):
+            assert_evidence_proof_lock_preserves_imported({
+                "stage2_import": None,
+                "final_status": "wanted",
+                "imported": False,
+                "denylisted": True,
+                "keep_searching": True,
+                "preimport_audio": "reject_corrupt",
+                "preimport_bad_hash": None,
+                "preimport_nested": None,
+                "preimport_empty_fileset": None,
+                "preimport_mixed_source": None,
+            })
+
     def test_downgrade_checker_trips_on_accept(self):
         with self.assertRaises(AssertionError):
             assert_obvious_downgrade_not_accepted(_planted_bad_import())
 
-    def test_below_gate_checker_trips_on_accepted_import(self):
+    def test_unverified_lossy_checker_trips_on_terminal_import(self):
         with self.assertRaises(AssertionError):
-            assert_below_gate_never_stops_search(_planted_bad_import())
+            assert_unverified_lossy_never_terminal(_planted_bad_import())
+
+    def test_action_mapping_checker_trips_on_each_output_field(self):
+        for field, overrides in (
+            ("status", {"status": "imported"}),
+            ("override", {"search_filetype_override": "lossless"}),
+            ("denylist", {"denylist": False}),
+        ):
+            kwargs = {
+                "decision": "requeue_upgrade",
+                "status": "wanted",
+                "search_filetype_override": None,
+                "denylist": True,
+                **overrides,
+            }
+            with self.subTest(field=field), self.assertRaises(AssertionError):
+                assert_post_import_action_matches(**kwargs)
+
+    def test_affirmative_verification_checker_trips_on_absent_evidence(self):
+        with self.assertRaises(AssertionError):
+            assert_verified_lossless_has_affirmative_evidence(
+                True,
+                spectral_grade=None,
+                v0_probe_kind="lossless_source_v0",
+                v0_avg=300,
+                v0_min=250,
+            )
+
+    def test_unmapped_codec_checker_trips_on_terminal_narrowing(self):
+        bad = SimResult(
+            imported=True,
+            keep_searching=False,
+            denylisted=False,
+            final_status="imported",
+            stage0_spectral_gate="skip_vbr_high",
+            stage1_spectral=None,
+            stage2_import="import",
+            stage3_quality_gate="accept",
+            backfill_override=None,
+            search_filetype_override_after="lossless",
+        )
+        with self.assertRaises(AssertionError):
+            assert_unmapped_first_copy_stays_searchable(bad)
 
     def test_classification_checker_trips_on_bad_verdict(self):
         # A dict claiming both imported and a reject-stage decision would

@@ -10,9 +10,14 @@ import msgspec
 
 from lib.quality.evidence_types import (
     AudioQualityMeasurement,
+    EVIDENCE_PROVENANCE_CARRIED,
+    EVIDENCE_PROVENANCE_MEASURED,
+    EVIDENCE_SUBJECT_INSTALLED,
+    EVIDENCE_SUBJECT_SOURCE,
     QualityComparisonBasis,
     TargetQualityContract,
     V0ProbeEvidence,
+    VerifiedLosslessProof,
 )
 
 
@@ -217,16 +222,17 @@ class ImportResult(msgspec.Struct):
     ``@dataclass`` so ``asdict`` could recurse; unifying on
     ``msgspec.json.encode`` let every type become a Struct with one rule.
     """
-    version: int = 3
+    version: int = 4
     exit_code: int = 0
     decision: Optional[str] = None      # from import_quality_decision() or error label
     already_in_beets: bool = False
     source_measurement: Optional[AudioQualityMeasurement] = None
+    verified_lossless_proof: Optional[VerifiedLosslessProof] = None
     current_measurement: Optional[AudioQualityMeasurement] = None
     target_quality_contract: Optional[TargetQualityContract] = None
     materialized_measurement: Optional[AudioQualityMeasurement] = None
-    # Set only by the quarantined v1/v2 reader.  New v3 producers never infer
-    # lineage from historical equality or label heuristics.
+    # Set only by the quarantined v1/v2/v3 reader. New v4 producers never
+    # infer lineage from historical equality or label heuristics.
     legacy_projection_version: Optional[int] = None
     conversion: ConversionInfo = msgspec.field(default_factory=ConversionInfo)
     spectral: SpectralDetail = msgspec.field(default_factory=SpectralDetail)
@@ -250,19 +256,19 @@ class ImportResult(msgspec.Struct):
 
     def to_json(self) -> str:
         """Serialize to JSON string via msgspec.json.encode."""
-        if self.version != 3:
-            raise ValueError("new ImportResult rows must use version 3")
+        if self.version != 4:
+            raise ValueError("new ImportResult rows must use version 4")
         self.validate_new_row()
         return msgspec.json.encode(self).decode()
 
     def validate_new_row(self) -> None:
-        """Reject ambiguous facts on every v3 producer/persistence boundary."""
+        """Reject ambiguous facts on every v4 producer/persistence boundary."""
 
-        if self.version != 3:
-            raise ValueError("new ImportResult rows must use version 3")
+        if self.version != 4:
+            raise ValueError("new ImportResult rows must use version 4")
         if self.legacy_projection_version is not None:
             raise ValueError(
-                "legacy_projection_version is reserved for the v1/v2 reader"
+                "legacy_projection_version is reserved for the v1/v2/v3 reader"
             )
         target = self.target_quality_contract
         if target is not None and not target.format.strip():
@@ -277,6 +283,13 @@ class ImportResult(msgspec.Struct):
             errors = measurement.new_row_validation_errors(source=source)
             if errors:
                 raise ValueError(f"{field_name}: {'; '.join(errors)}")
+        proof = self.verified_lossless_proof
+        if proof is not None:
+            errors = proof.validation_errors()
+            if errors:
+                raise ValueError(
+                    f"verified_lossless_proof: {'; '.join(errors)}"
+                )
 
     def to_sentinel_line(self) -> str:
         """Format as the stdout sentinel line for subprocess communication."""
@@ -284,7 +297,7 @@ class ImportResult(msgspec.Struct):
 
     @classmethod
     def _migrate_v1(cls, d: dict) -> "ImportResult":
-        """Project version 1 (QualityInfo + SpectralInfo) into the v3 model.
+        """Project version 1 (QualityInfo + SpectralInfo) into the v4 model.
 
         v1 rows in production (~226 on doc2 as of 2026-04) carry
         ``quality`` and ``spectral`` sub-objects instead of measurements.
@@ -353,17 +366,109 @@ class ImportResult(msgspec.Struct):
 
         Historical ``new_measurement`` sometimes combined V0-probe numbers
         with a target label.  Preserve that historical projection for reads,
-        mark its origin explicitly, and never run this adapter for v3 rows.
+        mark its origin explicitly, and never run this adapter for v4 rows.
         """
 
         projected = cls._normalise_legacy_postflight(d)
-        projected["version"] = 3
+        projected["version"] = 4
         projected["legacy_projection_version"] = source_version
         projected["source_measurement"] = projected.pop("new_measurement", None)
         projected["current_measurement"] = projected.pop(
             "existing_measurement", None
         )
         projected.setdefault("target_quality_contract", None)
+        source_measurement = projected.get("source_measurement")
+        legacy_verified = False
+        if isinstance(source_measurement, dict):
+            legacy_verified = bool(source_measurement.pop("verified_lossless", False))
+        if legacy_verified:
+            conversion = projected.get("conversion")
+            original_filetype = (
+                conversion.get("original_filetype")
+                if isinstance(conversion, dict)
+                else None
+            )
+            proof = VerifiedLosslessProof(
+                provenance=EVIDENCE_PROVENANCE_MEASURED,
+                source=original_filetype or "lossless_source",
+                classifier="legacy_import_result",
+            )
+            projected["verified_lossless_proof"] = msgspec.to_builtins(proof)
+        return msgspec.convert(projected, type=cls)
+
+    @classmethod
+    def _project_legacy_v3(cls, d: dict[str, Any]) -> "ImportResult":
+        """Project persisted v3 facts into the explicit v4 two-axis model.
+
+        The base v3 writer put verified-lossless on the source measurement and
+        emitted spectral facts without subject/provenance markers. A short-lived
+        v3 proof shape also used ``proof_origin``. Preserve those audit facts,
+        mark the byte subject directly from the measurement slot, and quarantine
+        the projection so it can never be re-emitted as a new row.
+        """
+
+        projected = dict(d)
+        projected["version"] = 4
+        projected["legacy_projection_version"] = 3
+
+        conversion = projected.get("conversion")
+        original_filetype = (
+            conversion.get("original_filetype")
+            if isinstance(conversion, dict)
+            else None
+        )
+        legacy_verified = False
+        for field_name, subject in (
+            ("source_measurement", EVIDENCE_SUBJECT_SOURCE),
+            ("current_measurement", EVIDENCE_SUBJECT_INSTALLED),
+            ("materialized_measurement", EVIDENCE_SUBJECT_INSTALLED),
+        ):
+            raw_measurement = projected.get(field_name)
+            if not isinstance(raw_measurement, dict):
+                continue
+            measurement = dict(raw_measurement)
+            if field_name == "source_measurement":
+                legacy_verified = bool(
+                    measurement.pop("verified_lossless", False)
+                )
+            else:
+                measurement.pop("verified_lossless", None)
+            if (
+                measurement.get("spectral_grade") is not None
+                or measurement.get("spectral_bitrate_kbps") is not None
+            ):
+                measurement.setdefault("spectral_subject", subject)
+                measurement.setdefault(
+                    "spectral_provenance", EVIDENCE_PROVENANCE_MEASURED
+                )
+            projected[field_name] = measurement
+
+        raw_proof = projected.get("verified_lossless_proof")
+        if isinstance(raw_proof, dict):
+            proof = dict(raw_proof)
+            proof_origin = proof.pop("proof_origin", None)
+            if proof.get("provenance") is None and proof_origin is not None:
+                proof["provenance"] = (
+                    EVIDENCE_PROVENANCE_CARRIED
+                    if proof_origin == "legacy_request_seed"
+                    else EVIDENCE_PROVENANCE_MEASURED
+                )
+            projected["verified_lossless_proof"] = proof
+        elif legacy_verified:
+            source_measurement = projected.get("source_measurement")
+            converted_from = (
+                source_measurement.get("was_converted_from")
+                if isinstance(source_measurement, dict)
+                else None
+            )
+            projected["verified_lossless_proof"] = msgspec.to_builtins(
+                VerifiedLosslessProof(
+                    provenance=EVIDENCE_PROVENANCE_MEASURED,
+                    source=converted_from or original_filetype or "lossless_source",
+                    classifier="legacy_import_result",
+                )
+            )
+
         return msgspec.convert(projected, type=cls)
 
     @staticmethod
@@ -401,8 +506,8 @@ class ImportResult(msgspec.Struct):
     def from_dict(cls, d: dict) -> "ImportResult":
         """Construct from a dict (e.g. parsed JSON).
 
-        Handles historical v1/v2 rows through a quarantined projection and
-        decodes v3 rows strictly. The legacy path uses ``msgspec.convert`` for
+        Handles historical v1/v2/v3 rows through quarantined projections and
+        decodes v4 rows strictly. The legacy path uses ``msgspec.convert`` for
         typed decode; two pre-convert hedges preserve the
         pre-#141 ``_postflight_from_dict`` tolerance:
 
@@ -418,24 +523,43 @@ class ImportResult(msgspec.Struct):
            JSONB) falls back to ``[]``.
 
         Both hedges fire only inside the historical reader for data shapes
-        observed in production. New v3 rows receive no malformed-row repair.
+        observed in production. New v4 rows receive no malformed-row repair.
         """
         # Old format: has "quality" key, no "new_measurement".
         if "quality" in d and "new_measurement" not in d:
             return cls._migrate_v1(d)
         version = d.get("version", 2 if "new_measurement" in d else 3)
-        if version not in (2, 3):
+        if version not in (2, 3, 4):
             raise ValueError(f"unsupported ImportResult version: {version!r}")
-        if version == 3 and (
+        if version in (3, 4) and (
             "new_measurement" in d or "existing_measurement" in d
         ):
-            raise ValueError("v3 ImportResult must use source/current measurements")
-        if version == 3 and d.get("legacy_projection_version") is not None:
             raise ValueError(
-                "legacy_projection_version is reserved for the v1/v2 reader"
+                f"v{version} ImportResult must use source/current measurements"
+            )
+        if version in (3, 4) and d.get("legacy_projection_version") is not None:
+            raise ValueError(
+                "legacy_projection_version is reserved for the v1/v2/v3 reader"
             )
         if version == 2 or "new_measurement" in d:
             return cls._project_legacy_v2(d)
+        if version == 3:
+            return cls._project_legacy_v3(d)
+        for field_name in (
+            "source_measurement",
+            "current_measurement",
+            "materialized_measurement",
+        ):
+            measurement = d.get(field_name)
+            if isinstance(measurement, dict) and "verified_lossless" in measurement:
+                raise ValueError(
+                    f"v4 {field_name} cannot carry verified_lossless"
+                )
+        proof = d.get("verified_lossless_proof")
+        if isinstance(proof, dict) and "proof_origin" in proof:
+            raise ValueError(
+                "v4 verified_lossless_proof must use provenance"
+            )
         result = msgspec.convert(d, type=cls)
         result.validate_new_row()
         return result

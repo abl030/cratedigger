@@ -48,7 +48,9 @@ def assert_transparent_have_search_override(
 @st.composite
 def have_worlds(draw):
     cfg = QualityRankConfig.defaults()
-    format = draw(st.sampled_from(["MP3", "AAC", "Opus", "Ogg", "FLAC", None]))
+    format = draw(st.sampled_from([
+        "MP3", "AAC", "Opus", "Vorbis", "WMA", "Ogg", "FLAC", None,
+    ]))
     bitrate = draw(st.one_of(
         st.none(),
         st.integers(min_value=0, max_value=1200),
@@ -62,7 +64,6 @@ def have_worlds(draw):
         spectral_grade=draw(st.one_of(st.none(), st.sampled_from([
             "genuine", "marginal", "suspect", "likely_transcode",
         ]))),
-        verified_lossless=draw(st.booleans()),
         was_converted_from=draw(st.one_of(
             st.none(), st.sampled_from(["flac", "alac", "wav", "mp3"])
         )),
@@ -101,6 +102,27 @@ class TestTransparentHaveSearchOverrideChecker(unittest.TestCase):
 
 
 class TestGeneratedTransparentHaveSearchOverride(unittest.TestCase):
+    @example(world=(
+        AudioQualityMeasurement(
+            min_bitrate_kbps=CFG.vorbis.transparent,
+            avg_bitrate_kbps=CFG.vorbis.transparent,
+            format="Vorbis",
+            spectral_grade="suspect",
+        ),
+        SpectralAnalysisDetail(attempted=True, grade="suspect"),
+        CFG,
+    ))
+    @example(world=(
+        AudioQualityMeasurement(
+            min_bitrate_kbps=CFG.wma.transparent,
+            avg_bitrate_kbps=CFG.wma.transparent,
+            format="WMA",
+            is_cbr=True,
+            spectral_grade="likely_transcode",
+        ),
+        SpectralAnalysisDetail(attempted=True, grade="likely_transcode"),
+        CFG,
+    ))
     @example(world=(
         AudioQualityMeasurement(
             min_bitrate_kbps=CFG.mp3_cbr.transparent,

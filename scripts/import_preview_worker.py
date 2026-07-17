@@ -456,7 +456,6 @@ def process_claimed_preview_job(
                     load_persisted_existing_spectral(
                         db,
                         job.request_id,
-                        req,
                     )
                 )
                 preview_cfg = read_runtime_config()

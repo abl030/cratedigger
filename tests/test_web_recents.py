@@ -663,6 +663,23 @@ class TestClassifyBadge(unittest.TestCase):
             "override; searching continues",
         )
 
+    def test_rejected_verified_lossless_locked_renders_as_proof_lock(self):
+        # A proof-lock decline is non-punitive: the archival copy is
+        # verified, the request stays imported, and the source is not
+        # denylisted. It must NOT wear the red "Rejected" badge or leak
+        # the raw scenario token.
+        result = classify_log_entry(_entry(
+            outcome="rejected",
+            beets_scenario="verified_lossless_locked",
+        ))
+        self.assertEqual(result.badge, "Proof locked")
+        self.assertEqual(result.badge_class, "badge-library")
+        self.assertEqual(
+            result.verdict,
+            "Verified lossless already on disk; automatic candidate "
+            "declined (no denylist); acquisition is complete",
+        )
+
     def test_reject_verdicts_use_one_short_grammar_per_decision_class(self):
         cases = {
             "quality_downgrade": (
@@ -1961,6 +1978,7 @@ class TestClassifyComparisonBasis(unittest.TestCase):
             AudioQualityMeasurement(**new_kw),
             AudioQualityMeasurement(**existing_kw),
             cfg=QualityRankConfig.defaults(),
+            verified_lossless_proof=True,
         )
         assert result.basis is not None
         return msgspec.to_builtins(result.basis)
@@ -2067,7 +2085,7 @@ class TestClassifyComparisonBasis(unittest.TestCase):
 
     def test_verified_lossless_bypass_names_the_bypass(self):
         basis = self._bypass_basis_dict(
-            dict(avg_bitrate_kbps=250, format="MP3", verified_lossless=True),
+            dict(avg_bitrate_kbps=250, format="MP3"),
             dict(avg_bitrate_kbps=248, format="MP3"),
         )
         self.assertTrue(basis["verified_lossless_bypass"])

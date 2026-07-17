@@ -70,11 +70,8 @@ class TestNativeCodecFormatLabel(unittest.TestCase):
         # .ogg container carrying opus → opus, not vorbis-guess from ext.
         self.assertEqual(self._label("opus", ".ogg"), "opus")
 
-    def test_unmapped_codec_returns_none(self):
-        # vorbis/flac/etc. have no lossy rank band here — None lets the
-        # caller apply its conservative "MP3" fallback rather than this
-        # function inventing a band.
-        self.assertIsNone(self._label("vorbis"))
+    def test_vorbis_maps_to_vorbis_and_true_unknown_returns_none(self):
+        self.assertEqual(self._label("vorbis"), "vorbis")
         self.assertIsNone(self._label(None, None))
         self.assertIsNone(self._label("", ""))
 
@@ -115,20 +112,32 @@ class TestDetectNativeCodecFamilyRealAudio(unittest.TestCase):
             label = self._detect(d)
         self.assertEqual(label, "aac")
 
-    def test_empty_folder_falls_back_to_mp3(self):
-        # No probeable audio → conservative legacy fallback, never a crash.
+    def test_empty_folder_returns_no_audio_sentinel(self):
+        # Unreachable after the upstream empty_fileset rejection, but keep the
+        # helper total without inventing a codec family.
         with tempfile.TemporaryDirectory() as d:
-            self.assertEqual(self._detect(d), "MP3")
+            self.assertEqual(self._detect(d), "NO_AUDIO")
 
-    def test_vorbis_folder_falls_back_to_mp3(self):
-        # Known residual gap: Vorbis has no lossy rank band, so a native .ogg
-        # download maps to None and the walk falls back to MP3-band scoring.
-        # This pins the documented behaviour (and warns in the harness log) so
-        # a future Vorbis band addition has a failing test to flip.
+    def test_vorbis_folder_labelled_vorbis(self):
         with tempfile.TemporaryDirectory() as d:
             _make_audio(os.path.join(d, "01.ogg"),
                         ["-c:a", "libvorbis", "-q:a", "5"])
-            self.assertEqual(self._detect(d), "MP3")
+            self.assertEqual(self._detect(d), "vorbis")
+
+    def test_ogg_container_uses_actual_codec(self):
+        cases = [
+            ("vorbis", ["-c:a", "libvorbis", "-q:a", "5"]),
+            ("opus", ["-c:a", "libopus", "-b:a", "128k"]),
+        ]
+        for expected, codec_args in cases:
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as d:
+                _make_audio(os.path.join(d, "01.ogg"), codec_args)
+                self.assertEqual(self._detect(d), expected)
+
+    def test_unmapped_decodable_audio_labelled_unknown(self):
+        with tempfile.TemporaryDirectory() as d:
+            _make_audio(os.path.join(d, "01.flac"), ["-c:a", "flac"])
+            self.assertEqual(self._detect(d), "UNKNOWN")
 
     def test_first_mappable_file_wins_in_mixed_lossy_folder(self):
         # Mixed lossy+lossy (opus + mp3) is not caught by the mixed-source

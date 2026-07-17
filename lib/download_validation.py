@@ -356,17 +356,16 @@ def _handle_valid_result(
         if will_auto_import:
             assert request_id is not None, "pipeline request must have db_request_id"
             assert pdb is not None, "auto-import path must hold a pipeline DB handle"
-            override_min_bitrate: int | None = None
-            try:
-                req = pdb.get_request(request_id)
-                if req:
-                    override_min_bitrate = compute_effective_override_bitrate(
-                        req.get("min_bitrate"),
-                        req.get("current_spectral_bitrate"),
-                        req.get("current_spectral_grade"),
-                    )
-            except Exception:
-                logger.debug("DB lookup failed for override-min-bitrate")
+            current_spectral = album_data.current_spectral
+            override_min_bitrate = compute_effective_override_bitrate(
+                album_data.current_min_bitrate,
+                (
+                    current_spectral.bitrate_kbps
+                    if current_spectral is not None
+                    else None
+                ),
+                current_spectral.grade if current_spectral is not None else None,
+            )
 
             resolved_quality_gate_fn = (
                 quality_gate_fn
