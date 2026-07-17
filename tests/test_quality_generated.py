@@ -615,9 +615,12 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
         EVIDENCE_SUBJECT_SOURCE,
         EVIDENCE_SUBJECT_INSTALLED,
     )))
-    def test_lossless_narrowing_requires_installed_spectral_authority(
+    def test_lossless_narrowing_is_subject_blind_for_genuine_transparent(
         self, subject
     ):
+        # Decision 17: the transparent+genuine narrowing rule keys on the
+        # grade, never the subject label — an unconverted import's
+        # source-subject grade describes the installed bytes.
         measurement = AudioQualityMeasurement(
             format="MP3",
             min_bitrate_kbps=320,
@@ -631,12 +634,8 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
                 else "carried"
             ),
         )
-        expected = (
-            "requeue_lossless"
-            if subject == EVIDENCE_SUBJECT_INSTALLED
-            else "requeue_upgrade"
-        )
-        self.assertEqual(quality_gate_decision(measurement), expected)
+        self.assertEqual(
+            quality_gate_decision(measurement), "requeue_lossless")
 
     @given(
         target_format=st.sampled_from(_TARGET_FORMATS),

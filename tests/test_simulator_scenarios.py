@@ -1405,22 +1405,27 @@ class TestFreshRequestOutcomes(unittest.TestCase):
 
     # --- CBR with spectral ---
 
-    def test_cbr_320_candidate_genuine_stays_on_full_tiers(self):
+    def test_cbr_320_genuine(self):
+        # AE6 first half (decision 17): a genuine transparent import
+        # narrows to lossless-only AT IMPORT TIME and denylists its source.
         r = self._sim("cbr_320_genuine")
         self.assertTrue(r.imported)
         self.assertTrue(r.denylisted)
         self.assertTrue(r.keep_searching)
         self.assertEqual(r.final_status, "wanted")
-        self.assertEqual(r.stage3_quality_gate, "requeue_upgrade")
-        self.assertIsNone(r.search_filetype_override_after)
+        self.assertEqual(r.stage3_quality_gate, "requeue_lossless")
+        self.assertEqual(r.search_filetype_override_after, "lossless")
 
     def test_cbr_320_suspect_128(self):
+        # AE6 second half: a suspect transparent-rank import gains no
+        # narrowing from its band value — full tiers.
         r = self._sim("cbr_320_suspect_128")
         self.assertTrue(r.imported)
         self.assertTrue(r.denylisted)
         self.assertTrue(r.keep_searching)
         self.assertEqual(r.final_status, "wanted")
         self.assertEqual(r.stage3_quality_gate, "requeue_upgrade")
+        self.assertIsNone(r.search_filetype_override_after)
 
     def test_cbr_320_suspect_192(self):
         r = self._sim("cbr_320_suspect_192")

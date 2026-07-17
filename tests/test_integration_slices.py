@@ -646,19 +646,20 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
             request_overrides={"beets_distance": 0.31})
 
         row = db.request(42)
-        # Distance is audit metadata, not proof.  Candidate/source spectral
-        # evidence cannot narrow search until the installed snapshot is
-        # measured, so the retained copy keeps the full search surface open.
+        # Distance is audit metadata, not proof.  The genuine transparent
+        # copy narrows to lossless-only at import time (decision 17).
         self.assertEqual(row["status"], "wanted")
-        self.assertIsNone(row["search_filetype_override"])
+        self.assertEqual(row["search_filetype_override"], "lossless")
         self.assertIsNone(
             row["beets_distance"],
             "an unmeasured (None) dispatch distance must persist as NULL "
             "on the request row, not a fabricated number")
         db.assert_log(self, 0, outcome="success", beets_distance=None)
 
-    def test_unverified_transparent_import_keeps_full_tier_search(self):
-        """Source evidence cannot narrow before the installed copy is scanned."""
+    def test_genuine_transparent_import_narrows_to_lossless(self):
+        """Decision 17 / AE6: a genuine transparent import narrows to
+        lossless-only at import time — the request stays wanted and only
+        a lossless source can beat the retained copy."""
         ir = make_import_result(decision="import", new_min_bitrate=245)
         beets_info = AlbumInfo(
             album_id=1, track_count=10, min_bitrate_kbps=245,
@@ -669,7 +670,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
 
         row = db.request(42)
         self.assertEqual(row["status"], "wanted")
-        self.assertIsNone(row["search_filetype_override"])
+        self.assertEqual(row["search_filetype_override"], "lossless")
         self.assertEqual(row["min_bitrate"], 245)
         self.assertEqual(len(db.denylist), 1)
         self.assertEqual(len(db.download_logs), 1)
@@ -724,8 +725,10 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         self.assertEqual(db.denylist[0].username, "user1")
         self.assertIn("quality gate", db.denylist[0].reason or "")
 
-    def test_import_without_installed_spectral_requeues_full_tiers(self):
-        """CBR 320 source facts do not establish installed-HAVE authority."""
+    def test_genuine_cbr_320_import_narrows_at_import_time(self):
+        """AE6 first half through real dispatch (decision 17): a genuine
+        CBR-320 import leaves the request wanted with the lossless-only
+        override — no waiting for a later installed re-measurement."""
         ir = make_import_result(decision="import", new_min_bitrate=320)
         beets_info = AlbumInfo(
             album_id=1, track_count=10, min_bitrate_kbps=320,
@@ -736,7 +739,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
 
         row = db.request(42)
         self.assertEqual(row["status"], "wanted")
-        self.assertIsNone(row["search_filetype_override"])
+        self.assertEqual(row["search_filetype_override"], "lossless")
 
     def test_dispatch_gives_quality_gate_the_exact_refreshed_evidence_id(self):
         ir = make_import_result(decision="import", new_min_bitrate=245)
@@ -798,18 +801,17 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
     # The generated unverified-lossy property in test_quality_generated now
     # owns the stronger replacement guarantee across every lossy bitrate.
 
-    def test_source_metric_cannot_narrow_without_installed_spectral(self):
-        """MEDIAN policy cannot turn source-subject facts into HAVE authority.
+    def test_median_metric_narrows_outlier_album_at_import(self):
+        """MEDIAN policy reaches the transparent narrowing boundary.
 
         Album has tracks {60, 60, 245, 245, 245} — three V0 tracks plus two
         very-quiet intros. Under MIN the album is POOR (60), under AVG it's
-        GOOD (171), and only under MEDIAN does it reach TRANSPARENT (245)
-        and meet the canonical TRANSPARENT narrowing boundary.
+        GOOD (171), and only under MEDIAN does it reach TRANSPARENT (245).
 
-        The median still threads through dispatch, but issue #711 requires an
-        installed-subject spectral result before any narrowing decision.  A
-        carried source measurement therefore remains on full tiers even when
-        its median meets the transparent threshold.
+        Decision 17: the genuine grade narrows regardless of subject label,
+        so under the MEDIAN metric this genuine outlier album narrows to
+        lossless-only at import time. The AVG counterfactual below proves
+        the difference comes from the metric policy, not dispatch flow.
         """
         from lib.quality import QualityRankConfig, RankBitrateMetric
 
@@ -833,9 +835,8 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         row = db.request(42)
         self.assertEqual(
             row["status"], "wanted",
-            "automatic source evidence must retain the imported copy while "
-            "waiting for an installed-subject measurement")
-        self.assertIsNone(row["search_filetype_override"])
+            "a narrowed request keeps searching — narrowing is not stopping")
+        self.assertEqual(row["search_filetype_override"], "lossless")
 
     def test_default_avg_metric_requeues_same_outlier_album(self):
         """Counterfactual to MEDIAN slice: same album, default cfg, requeues.
@@ -885,7 +886,8 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
             row["status"], "wanted",
             "stale final_format labels must be cleared so the quality gate "
             "uses the new beets codec metadata")
-        self.assertIsNone(row["search_filetype_override"])
+        # Genuine transparent VBR narrows at import time (decision 17).
+        self.assertEqual(row["search_filetype_override"], "lossless")
         self.assertIsNone(row.get("final_format"))
 
     def test_native_cbr_import_clears_stale_verified_lossless(self):
@@ -911,7 +913,8 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
             row["status"], "wanted",
             "stale verified_lossless=True must be cleared so native CBR "
             "imports still requeue for lossless verification")
-        self.assertIsNone(row["search_filetype_override"])
+        # Genuine CBR 320 narrows to lossless-only at import (decision 17).
+        self.assertEqual(row["search_filetype_override"], "lossless")
         self.assertFalse(row["verified_lossless"])
 
 
@@ -2728,10 +2731,11 @@ class TestReleaseLockContention(unittest.TestCase):
 
         # Subprocess ran exactly once.
         ext.run.assert_called_once()
-        # Import succeeded, but source-subject evidence cannot narrow until
-        # the installed snapshot has its own spectral measurement.
+        # Import succeeded; genuine transparent copy narrows to
+        # lossless-only at import time (decision 17 / AE6).
         self.assertEqual(db.request(42)["status"], "wanted")
-        self.assertIsNone(db.request(42)["search_filetype_override"])
+        self.assertEqual(
+            db.request(42)["search_filetype_override"], "lossless")
         # Lock was taken on the RELEASE namespace with the hashed MBID
         # as key — NOT the request_id. Confirms keying is on the
         # release, which is the only way to serialise two different

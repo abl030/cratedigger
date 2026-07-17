@@ -690,9 +690,11 @@ def quality_gate_decision(
     """Choose post-import search policy from proof and measured authority.
 
     Verified-lossless proof is the only terminal boundary.  A transparent
-    installed copy narrows to lossless only when its own spectral analysis is
-    independently genuine.  Every other retained copy stays wanted on the
-    full search surface.
+    copy with a genuine spectral grade narrows to lossless-only regardless
+    of the grade's subject label (decision 17): for an unconverted lossy
+    import the source-subject grade describes the installed bytes, and
+    out-of-band mutation is outside the state model.  Every other retained
+    copy stays wanted on the full search surface.
 
     Args:
         current: measurement of the files now on disk (from beets DB + spectral)
@@ -712,7 +714,6 @@ def quality_gate_decision(
     if (
         rank == QualityRank.TRANSPARENT
         and current.spectral_grade == "genuine"
-        and current.spectral_subject == EVIDENCE_SUBJECT_INSTALLED
     ):
         return "requeue_lossless"
     return "requeue_upgrade"
