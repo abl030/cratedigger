@@ -2186,7 +2186,9 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         self.assertEqual(row["search_filetype_override"], QUALITY_FLAC_ONLY)
         self.assertEqual(len(db.denylist), 1)
 
-    def test_transparent_carried_source_grade_stays_on_full_tiers(self):
+    def test_transparent_carried_source_grade_also_narrows(self):
+        # Decision 17: narrowing keys on the genuine grade, never the
+        # subject label — the carried source grade narrows identically.
         db = self._run_quality_gate(
             info=self._cbr_320_unverified(),
             linked_spectral_grade="genuine",
@@ -2195,7 +2197,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         )
         row = db.request(42)
         self.assertEqual(row["status"], "wanted")
-        self.assertIsNone(row["search_filetype_override"])
+        self.assertEqual(row["search_filetype_override"], QUALITY_FLAC_ONLY)
 
     def test_quality_gate_ignores_request_spectral_stamps(self):
         """Mutating request-row quality stamps cannot change linked policy."""
