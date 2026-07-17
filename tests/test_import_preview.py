@@ -39,7 +39,11 @@ from lib.quality import (
     V0ProbeEvidence,
     full_pipeline_decision,
 )
-from lib.quality_evidence import EvidenceBuildResult, snapshot_audio_files
+from lib.quality_evidence import (
+    EvidenceBuildResult,
+    snapshot_audio_files,
+    snapshot_fingerprint,
+)
 
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
@@ -622,6 +626,103 @@ class TestImportPreviewPath(unittest.TestCase):
             self.assertEqual(result.decision, "measurement_crashed")
             self.assertIn("codec probe", result.detail or "")
             self.assertFalse(harness_called)
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
+    def _crashed_run(self):
+        """The live 2026-07-18 shape: a stage-2 crash mid-mint left a partial
+        ImportResult with a real source_measurement but no proof/target."""
+        from lib.dispatch.types import ImportOneRun
+
+        return ImportOneRun(
+            command=("import_one",),
+            returncode=99,
+            stdout="",
+            stderr="",
+            import_result=ImportResult(
+                exit_code=99,
+                decision="crash",
+                error="AttributeError: 'Namespace' object has no attribute 'filetype'",
+                source_measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=767,
+                    avg_bitrate_kbps=851,
+                    median_bitrate_kbps=847,
+                    format="FLAC",
+                    spectral_grade="genuine",
+                    spectral_subject="source",
+                    spectral_provenance="measured",
+                ),
+            ),
+        )
+
+    def _assert_nothing_persisted(self, db: FakePipelineDB, source: str) -> None:
+        stored = db.find_album_quality_evidence(
+            mb_release_id="mbid-42",
+            snapshot_fingerprint=snapshot_fingerprint(
+                snapshot_audio_files(source)),
+        )
+        self.assertIsNone(
+            stored, "a crashed ImportResult must never persist evidence")
+
+    def test_worker_stage2_crash_is_measurement_failed_not_evidence_ready(self):
+        from lib.measurement import ExistingSpectralAuditLookup
+
+        db = self._db()
+        source = self._source_dir()
+        run = self._crashed_run()
+        try:
+            fake_beets = FakeBeetsDB()
+            with patch(
+                "lib.config.read_runtime_config",
+                return_value=_preview_config(),
+            ), patch(
+                "lib.beets_db.BeetsDB",
+                lambda **_kwargs: fake_beets,
+            ):
+                result = measure_and_persist_candidate_evidence(
+                    db,
+                    request_id=42,
+                    path=source,
+                    import_job_id=7,
+                    run_import_fn=lambda **_kwargs: run,
+                    existing_spectral_resolver=(
+                        lambda _release_id: ExistingSpectralAuditLookup()
+                    ),
+                )
+
+            self.assertEqual(result.verdict, "measurement_failed")
+            self.assertEqual(result.decision, "crash")
+            self.assertIn("filetype", result.detail or "")
+            self._assert_nothing_persisted(db, source)
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_path_preview_stage2_crash_never_persists_evidence(self):
+        db = self._db()
+        source = self._source_dir()
+        run = self._crashed_run()
+        try:
+            fake_beets = FakeBeetsDB()
+            with patch(
+                "lib.config.read_runtime_config",
+                return_value=_preview_config(),
+            ), patch(
+                "lib.beets_db.BeetsDB",
+                lambda **_kwargs: fake_beets,
+            ), patch(
+                "lib.import_preview.run_import_one",
+                return_value=run,
+            ):
+                result = preview_import_from_path(
+                    db,
+                    request_id=42,
+                    path=source,
+                    import_job_id=7,
+                    persist_candidate_evidence=True,
+                )
+
+            self.assertNotEqual(result.verdict, "evidence_ready")
+            self._assert_nothing_persisted(db, source)
         finally:
             shutil.rmtree(source, ignore_errors=True)
 

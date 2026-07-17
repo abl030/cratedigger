@@ -1317,7 +1317,7 @@ def _classify_import_result(
         )
         if gate is not None:
             chain.append(f"stage3_quality_gate:{gate}")
-    if decision in ("conversion_failed", "target_conversion_failed"):
+    if decision in ("conversion_failed", "target_conversion_failed", "crash"):
         return "uncertain", False, decision, chain
     verdict, cleanup_eligible, reason = classify_quality_import_stages(
         decision,
@@ -1717,7 +1717,14 @@ def measure_and_persist_candidate_evidence(
         if run.import_result.decision in (
             "conversion_failed",
             "target_conversion_failed",
+            "crash",
         ):
+            # "crash" is the harness's top-level exception envelope: whatever
+            # partial measurements it carries were interrupted mid-build
+            # (2026-07-18: the proof mint crashed AFTER source_measurement was
+            # set, so the partial result looked persistable but had lost its
+            # verified-lossless proof). Analysis failure aborts loudly — it
+            # never becomes evidence_ready.
             return _measurement_failed_result(
                 mode="path",
                 reason="measurement_crashed",

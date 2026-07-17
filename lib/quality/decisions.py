@@ -16,6 +16,7 @@ from lib.quality.evidence_types import (
     SPECTRAL_TRANSCODE_GRADES,
     TargetQualityContract,
     V0ProbeEvidence,
+    VerifiedLosslessProof,
     is_comparable_lossless_source_probe,
 )
 from lib.quality.ranks import QualityRank, QualityRankConfig, gate_rank
@@ -610,6 +611,40 @@ def determine_verified_lossless(
             and v0_probe_overrides_spectral(v0_probe)):
         return True
     return False
+
+
+def mint_verified_lossless_proof(
+    will_be_verified_lossless: bool,
+    *,
+    was_converted_from: Optional[str],
+    detected_source_format: Optional[str],
+    spectral_grade: Optional[str],
+) -> Optional[VerifiedLosslessProof]:
+    """Mint the measured verified-lossless proof for a harness attempt (pure).
+
+    Single policy owner for proof construction: the harness supplies only
+    measured facts. ``source`` prefers the conversion's original filetype
+    (the lossless input actually consumed, e.g. ``flac``) over the detected
+    on-disk source format; both normalise to lowercase, and an undetectable
+    format (``UNKNOWN``) falls through to the ``lossless_source`` sentinel
+    rather than minting a proof sourced to "unknown".
+    """
+    if not will_be_verified_lossless:
+        return None
+    detected = (detected_source_format or "").strip().lower()
+    if detected == "unknown":
+        detected = ""
+    source = (
+        (was_converted_from or "").strip().lower()
+        or detected
+        or "lossless_source"
+    )
+    return VerifiedLosslessProof(
+        provenance=EVIDENCE_PROVENANCE_MEASURED,
+        source=source,
+        classifier="spectral_verified_lossless",
+        detail=spectral_grade,
+    )
 
 
 def is_verified_lossless(was_converted: bool, original_filetype: Optional[str],

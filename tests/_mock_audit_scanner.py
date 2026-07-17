@@ -213,11 +213,18 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^harness\.import_one\._probe_native_lossy_as_v0$"),
     re.compile(r"^harness\.import_one\._get_folder_bitrates$"),
     re.compile(r"^harness\.import_one\._get_folder_min_bitrate$"),
+    # ffprobe codec probes over the source folder (same subprocess seam
+    # as the _probe_* helpers above).
+    re.compile(r"^harness\.import_one\._detect_source_format$"),
+    re.compile(r"^harness\.import_one\._detect_native_codec_family$"),
     re.compile(r"^harness\.import_one\.BeetsDB$"),  # class replacement, see lib.beets_db.BeetsDB
 
     # Album-level spectral analysis — same sox/ffmpeg seam as
     # analyze_track, just aggregating across an album's tracks.
     re.compile(r"^lib\.spectral_check\.analyze_album$"),
+    # Two-sided attempt audit — forwards to analyze_spectral_audit_path
+    # (the same sox/ffmpeg seam) once per side.
+    re.compile(r"^lib\.measurement\.collect_attempt_spectral_audit$"),
 
     # Logger objects — patching the module-level logger lets tests
     # assert against log records without subclassing the logger. Also

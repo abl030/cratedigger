@@ -452,6 +452,17 @@ def evidence_from_import_result(
     bad-hash lookup) — the snapshot helper only knows file sizes and paths.
     """
 
+    if import_result is not None and import_result.decision == "crash":
+        # A crashed harness run emits whatever partial result it had built
+        # when the exception fired — fields set before the crash look
+        # complete while everything after it is silently absent (the
+        # 2026-07-18 incident persisted proof-less candidate rows this
+        # way). Fail closed: crashed results never become evidence.
+        return EvidenceBuildResult(
+            None,
+            "crashed_result",
+            import_result.error or "harness crashed mid-measurement",
+        )
     if import_result is None or import_result.source_measurement is None:
         return EvidenceBuildResult(None, "incomplete", "missing source measurement")
     try:
