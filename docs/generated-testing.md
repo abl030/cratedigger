@@ -89,8 +89,20 @@ exercise a new invariant.
 Run a deep burst whenever quality policy changes:
 
 ```bash
+nix-shell --run "bash scripts/fuzz_burst.sh"                    # all generated modules
+nix-shell --run "bash scripts/fuzz_burst.sh tests.test_quality_generated"  # subset
+```
+
+`scripts/fuzz_burst.sh` runs each generated module in its own process,
+parallelised to the host's core count (`nproc`) — Hypothesis is
+single-threaded, so a serial burst pegs one core and leaves the rest of
+whatever machine you are on idle. Per-module logs surface only on failure;
+the 20k-example budget is unchanged. The serial equivalent, when you need
+one module's live output:
+
+```bash
 nix-shell --run "CRATEDIGGER_HYPOTHESIS_PROFILE=fuzz \
-    python3 -m unittest discover -s tests -t . -p 'test_*_generated.py' -v"
+    python3 -m unittest tests.test_quality_generated -v"
 ```
 
 It is pure and safe: no prod DB, no slskd, no beets, no network; the only
