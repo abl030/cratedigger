@@ -973,6 +973,9 @@ def backfill_current_evidence_from_album_info(
     )
     if result.evidence is not None and existing is not None:
         existing_measurement = existing.measurement
+        same_snapshot = (
+            existing.snapshot_fingerprint == result.evidence.snapshot_fingerprint
+        )
         carry_spectral = (
             existing_measurement.spectral_grade is not None
             and existing_measurement.spectral_subject == EVIDENCE_SUBJECT_SOURCE
@@ -986,42 +989,72 @@ def backfill_current_evidence_from_album_info(
                 spectral_subject=EVIDENCE_SUBJECT_SOURCE,
                 spectral_provenance=EVIDENCE_PROVENANCE_CARRIED,
             )
+        elif (
+            same_snapshot
+            and existing_measurement.spectral_grade is not None
+            and existing_measurement.spectral_subject == EVIDENCE_SUBJECT_INSTALLED
+            and existing_measurement.spectral_provenance
+            == EVIDENCE_PROVENANCE_MEASURED
+        ):
+            # Same-address repair: identical bytes, so the installed
+            # measurement is still a true statement about them — preserve it
+            # verbatim (installed keeps provenance 'measured' per the
+            # cross-product rule; facts are invalidated by byte change, not
+            # by row repair). Ambiguous/off-vocabulary facts still drop —
+            # they cannot legally exist on a v4 row.
+            measurement = msgspec.structs.replace(
+                measurement,
+                spectral_grade=existing_measurement.spectral_grade,
+                spectral_bitrate_kbps=existing_measurement.spectral_bitrate_kbps,
+                spectral_subject=EVIDENCE_SUBJECT_INSTALLED,
+                spectral_provenance=EVIDENCE_PROVENANCE_MEASURED,
+            )
         existing_v0 = existing.v0_metric
-        carry_v0 = (
-            existing_v0 is not None
-            and existing_v0.subject == EVIDENCE_SUBJECT_SOURCE
-            and any(
-                value is not None
-                for value in (
-                    existing_v0.min_bitrate_kbps,
-                    existing_v0.avg_bitrate_kbps,
-                    existing_v0.median_bitrate_kbps,
-                )
+        has_v0_values = existing_v0 is not None and any(
+            value is not None
+            for value in (
+                existing_v0.min_bitrate_kbps,
+                existing_v0.avg_bitrate_kbps,
+                existing_v0.median_bitrate_kbps,
             )
         )
         carried_v0 = None
-        if carry_v0:
-            assert existing_v0 is not None
+        if (
+            existing_v0 is not None
+            and has_v0_values
+            and existing_v0.subject == EVIDENCE_SUBJECT_SOURCE
+        ):
             carried_v0 = msgspec.structs.replace(
                 existing_v0,
                 provenance=EVIDENCE_PROVENANCE_CARRIED,
             )
-        same_snapshot = (
-            existing.snapshot_fingerprint == result.evidence.snapshot_fingerprint
-        )
+        elif (
+            same_snapshot
+            and existing_v0 is not None
+            and has_v0_values
+            and existing_v0.subject == EVIDENCE_SUBJECT_INSTALLED
+            and existing_v0.provenance == EVIDENCE_PROVENANCE_MEASURED
+        ):
+            # Same-address repair preserves the installed research anchor —
+            # dropping it while `on_disk_v0_research_attempted` stays True
+            # would blind the async researcher forever (the deploy-night
+            # Seabear regression).
+            carried_v0 = existing_v0
         result = EvidenceBuildResult(
             msgspec.structs.replace(
                 result.evidence,
                 measurement=measurement,
-                # A same-address v4 repair keeps the historical capture time;
-                # the rebuilt facts still follow the source-only carry rule.
+                # A same-address v4 repair keeps the historical capture time.
                 measured_at=(
                     existing.measured_at
                     if same_snapshot
                     else result.evidence.measured_at
                 ),
-                # Only source-subject acquisition facts survive a rebuild;
-                # installed and ambiguous facts must be measured again.
+                # Source-subject acquisition facts survive every rebuild;
+                # valid installed facts survive a same-address repair (the
+                # bytes are unchanged); a fingerprint change drops installed
+                # facts for re-measurement — and resets the research marker
+                # (fresh build) so the async researcher re-fills the anchor.
                 v0_metric=carried_v0,
                 on_disk_v0_research_attempted=(
                     existing.on_disk_v0_research_attempted

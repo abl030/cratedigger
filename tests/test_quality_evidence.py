@@ -575,10 +575,13 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
             "carried",
         )
 
-    def test_v3_touch_drops_ambiguous_and_installed_facts(self):
+    def test_v3_touch_drops_ambiguous_facts(self):
+        # Off-vocabulary facts cannot legally exist on a v4 row — they drop
+        # on conversion whatever the snapshot did. Valid INSTALLED facts on
+        # a same-snapshot repair are preserved (see the pin below): facts
+        # are invalidated by byte change, not by row repair.
         for suffix, subject, provenance in (
             ("ambiguous", "unknown-live-subject", "unknown-live-provenance"),
-            ("installed", "installed", "measured"),
         ):
             with self.subTest(subject=subject):
                 db = FakePipelineDB()
@@ -635,6 +638,75 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
                 self.assertIsNone(result.evidence.measurement.spectral_subject)
                 self.assertIsNone(result.evidence.measurement.spectral_provenance)
                 self.assertIsNone(result.evidence.v0_metric)
+
+    def test_same_snapshot_repair_preserves_installed_facts(self):
+        """Identical bytes keep their installed measurements AND research
+        anchor. The pre-fix drop left `on_disk_v0_research_attempted=True`
+        with no anchor — blinding the async researcher forever (the
+        deploy-night Seabear regression, request 2748).
+        """
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, verified_lossless=False))
+        legacy = make_album_quality_evidence(
+            mb_release_id="mb-v3-installed-keep",
+            source_path=self.root,
+            files=snapshot_audio_files(self.root),
+            lineage_version=3,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=121,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=127,
+                format="Opus",
+                spectral_grade="likely_transcode",
+                spectral_subject="installed",
+                spectral_provenance="measured",
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                subject="installed",
+                provenance="measured",
+                avg_bitrate_kbps=213,
+                min_bitrate_kbps=158,
+            ),
+            on_disk_v0_research_attempted=True,
+            storage_format="Opus",
+        )
+        db.upsert_album_quality_evidence(legacy)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=legacy.mb_release_id,
+            snapshot_fingerprint=legacy.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_request_current_evidence(42, persisted.id)
+
+        result = backfill_current_evidence_from_album_info(
+            db,
+            request_id=42,
+            mb_release_id=legacy.mb_release_id,
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=2,
+                min_bitrate_kbps=121,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=127,
+                is_cbr=False,
+                album_path=self.root,
+                format="Opus",
+            ),
+        )
+
+        self.assertTrue(result.available)
+        assert result.evidence is not None
+        self.assertEqual(result.evidence.lineage_version, 4)
+        m = result.evidence.measurement
+        self.assertEqual(m.spectral_grade, "likely_transcode")
+        self.assertEqual(m.spectral_subject, "installed")
+        self.assertEqual(m.spectral_provenance, "measured")
+        v0 = result.evidence.v0_metric
+        assert v0 is not None
+        self.assertEqual(v0.subject, "installed")
+        self.assertEqual(v0.provenance, "measured")
+        self.assertEqual(v0.avg_bitrate_kbps, 213)
+        self.assertTrue(result.evidence.on_disk_v0_research_attempted)
 
     def test_fingerprint_flip_carries_only_source_facts(self):
         db = FakePipelineDB()
