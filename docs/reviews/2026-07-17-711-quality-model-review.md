@@ -194,6 +194,34 @@ denylist assertion — all now assert the peer stays available.
 
 ---
 
+## Appendix 2 — unauthorized-change audit (2026-07-17, post-fix)
+
+Operator-requested follow-up after the force-import discovery: an exhaustive code->authority sweep
+of the original implementation diff (3fa7ad7a..9730b628) demanding a written citation (D1-D20,
+R1-R33, KTD, AE, U-approach, CLAUDE.md invariants) for EVERY production behavioral delta — a
+rationale comment in code is not authorization. Full 76-entry delta inventory:
+`2026-07-17-711-unauthorized-change-audit.json` (this directory).
+
+**Verdict: no further force-import-class changes.** Zero unauthorized deltas beyond the four
+already caught and remediated (force-gate skip + retained-import-mapping door -> D19;
+evidence-unavailable denylist -> D18; subject-gated narrowing -> D17; migration 055 seed ->
+amended). The two force gates were the only caller-identity re-gatings in the diff.
+
+Residual-awareness items (all trace to written authority; recorded so they are chosen, not
+discovered):
+1. Retained-import requeues clear `search_filetype_override` to NULL — config defaults INCLUDING
+   the catch-all lane, where base pinned six tiers with catch-all off (R4 "full tiers" + AE4/R27's
+   UNKNOWN cohort; a real search-scope widening on retained lossy imports).
+2. Gate apply-failure after a successful import surfaces as a failed log row + self-heal instead of
+   staying silently imported (consequential to R4/D19; untested — recorded gap).
+3. Any snapshot-fingerprint change (retag) costs one `have_analysis_error` attempt before
+   enrichment self-heals (R9/R10 taxonomy).
+4. Wrong-match backfilled-proof flip traces to R18+D6 (carried proof trusted; the loaded-only
+   shortcut gate is byte-identical to base).
+5. Correction to finding #8's record: the original diff also dropped the denylist for force/manual
+   RETAINED imports; D19's mapping fix restored it — no residual defect.
+6. `empty_fileset` current-side reclassification MISSING->FAILED per the settled failure taxonomy.
+
 ## Verdict: NOT READY (as-is) — high-fidelity implementation, three confirmed P1s gate the merge
 
 Two of the P1s are operator decisions the plan itself classifies as stop-conditions (surface, don't adapt around); one is a mechanical migration amendment that must land before 055 ships. Everything else is mechanical cleanup.
