@@ -102,6 +102,75 @@ class TestSpectralAuditMerge(unittest.TestCase):
 
         self.assertTrue(preserve_existing_source_spectral(evidence))
 
+    def test_source_anchor_alone_preserves_source_spectral(self):
+        """R19: an enrichment-born provisional row (no was_converted_from)
+        is still lossless-sourced — its source-subject anchor proves it.
+        The 2026-07-17 deploy-night rows were minted genuine/installed
+        because this predicate could not see anchor-only lineage.
+        """
+        from lib.import_preview import preserve_existing_source_spectral
+        from lib.quality import EVIDENCE_SUBJECT_SOURCE, AlbumQualityV0Metric
+
+        evidence = make_album_quality_evidence(
+            mb_release_id="anchor-only",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=129,
+                avg_bitrate_kbps=129,
+                median_bitrate_kbps=129,
+                format="Opus",
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=187,
+                avg_bitrate_kbps=213,
+                median_bitrate_kbps=210,
+                subject=EVIDENCE_SUBJECT_SOURCE,
+                provenance="carried",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        self.assertTrue(preserve_existing_source_spectral(evidence))
+
+    def test_proof_alone_preserves_source_spectral(self):
+        """R19: verified-lossless proof is lossless lineage by definition."""
+        from lib.import_preview import preserve_existing_source_spectral
+        from lib.quality import VerifiedLosslessProof
+
+        evidence = make_album_quality_evidence(
+            mb_release_id="proof-only",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=129,
+                avg_bitrate_kbps=129,
+                median_bitrate_kbps=129,
+                format="Opus",
+            ),
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="carried",
+                source="flac",
+                classifier="request_seed",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        self.assertTrue(preserve_existing_source_spectral(evidence))
+
+    def test_native_row_without_lineage_is_not_preserved(self):
+        """A native copy with no lossless lineage is scanned normally."""
+        from lib.import_preview import preserve_existing_source_spectral
+
+        evidence = make_album_quality_evidence(
+            mb_release_id="native-mp3",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+            ),
+        )
+        self.assertFalse(preserve_existing_source_spectral(evidence))
+
     def test_candidate_measured_error_yields_to_harness_success(self):
         measured = SpectralAnalysisDetail(
             attempted=True, error="RuntimeError: measured failed")
@@ -740,6 +809,69 @@ class TestImportPreviewPath(unittest.TestCase):
                 result.evidence.snapshot_fingerprint,
                 stored.snapshot_fingerprint,
             )
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_attempt_scan_never_persists_onto_lossless_sourced_row(self):
+        """R19 guard: a lossless-sourced row (source anchor, empty spectral)
+        must refuse the installed-derivative scan — the source grade
+        governs; the slot stays empty until it is carried in. Reproduces
+        the 2026-07-17 deploy-night minting exactly.
+        """
+        from lib.quality import EVIDENCE_SUBJECT_SOURCE, AlbumQualityV0Metric
+
+        db = self._db()
+        source = self._source_dir()
+        try:
+            evidence = make_album_quality_evidence(
+                mb_release_id="mbid-6108",
+                source_path=source,
+                files=snapshot_audio_files(source),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=129,
+                    avg_bitrate_kbps=129,
+                    median_bitrate_kbps=129,
+                    format="Opus",
+                    spectral_grade=None,
+                    spectral_bitrate_kbps=None,
+                ),
+                v0_metric=AlbumQualityV0Metric(
+                    min_bitrate_kbps=187,
+                    avg_bitrate_kbps=213,
+                    median_bitrate_kbps=210,
+                    subject=EVIDENCE_SUBJECT_SOURCE,
+                    provenance="carried",
+                ),
+                codec="opus",
+                container="opus",
+                storage_format="Opus",
+            )
+            db.upsert_album_quality_evidence(evidence)
+            stored = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            db.set_request_current_evidence(42, stored.id)
+
+            result = persist_exact_current_spectral_from_attempt(
+                db,
+                request_id=42,
+                current_evidence=stored,
+                measured_existing=SpectralAnalysisDetail(
+                    attempted=True,
+                    grade="genuine",
+                    bitrate_kbps=128,
+                ),
+                measured_existing_path=source,
+            )
+
+            self.assertEqual(result.status, "skipped")
+            refreshed = db.load_album_quality_evidence_by_id(stored.id)
+            assert refreshed is not None
+            self.assertIsNone(refreshed.measurement.spectral_grade)
+            self.assertIsNone(refreshed.measurement.spectral_subject)
         finally:
             import shutil
             shutil.rmtree(source, ignore_errors=True)
