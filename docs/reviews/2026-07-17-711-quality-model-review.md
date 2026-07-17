@@ -123,6 +123,77 @@ Settled in-session with the operator after the panel + validation pass. These re
 
 Finding #12's complete flip enumeration is produced against the post-fix tree (the #2 and #8 restorations shrink it).
 
+## Appendix — complete corpus flip enumeration (finding #12; post-fix tree)
+
+Every behavioral test flip on the branch, by authority. "Plan" = enumerated in U4/U5/U7/U9's
+test-scenario lists; "D17"-"D19" = sanctioned by the 2026-07-17 operator decisions; "reverted" =
+an unsanctioned flip the decision commits flipped back. Mechanical churn (field/vocabulary
+renames, kwarg migrations with identical asserted behavior — e.g. `test_lofi_v0_still_imports`,
+`test_opus_64`) is excluded.
+
+**Family 1 + 5 (verified inversion; lossless re-import over proof) — plan:**
+`test_genuine_flac_reimports_verified` -> proof-lock pin; `test_mp3_higher_than_lofi_imports` -> lock pin.
+Family-consistent, enumerated here per #12: `test_deloris_flac_vs_flac_same_bitrate_downgrades`
+(downgrade -> verified_lossless_locked; its no-proof FLAC-vs-FLAC downgrade coverage is a noted
+testing gap).
+
+**Family 2 (terminal lossy accept abolished) — plan:** `test_mp3_v0_240` (canonical),
+`test_avg_bitrate_flows_into_stage3_rank`, the four accept-rows of `TestQualityGateDecision.CASES`,
+`test_stage3_grade_aware_spectral_gate` genuine/marginal rows,
+`test_quality_gate_reads_current_spectral_not_last_download`,
+`test_genuine_v0_replacing_transcode_accepted`, `test_quality_gate_ignores_genuine_low_spectral`,
+the "mp3 v0" subtest of `test_explicit_mp3_labels_ignore_contradictory_projected_modes`,
+`test_explicit_mp3_label_owns_mode_and_gate_policy` (both branches), Opus 64/48 verified-target
+re-pins. Family-consistent, enumerated here per #12:
+`test_step2_ceezles_crosses_excellent_threshold_on_avg` -> `..._cannot_terminate_on_bitrate_rank`,
+`test_import_quality_accept`/`_requeue_upgrade`/`_requeue_lossless`,
+`test_transcode_upgrade_requeues_with_denylist` -> `..._full_tiers_with_denylist`,
+`test_happy_path_acquires_lock_keyed_on_mbid_and_runs_import` -> `..._retains_unverified_import`,
+`test_median_metric_accepts_outlier_album_end_to_end` (deleted; replaced by the D17 median pair).
+
+**Family 3 (grade-blind CBR narrowing loosened) — plan:** the three CBR `requeue_lossless` rows in
+`TestQualityGateDecision.CASES`, `test_cbr_320_no_spectral`/`test_cbr_256_no_spectral`,
+`test_requeue_lossless_uses_intent`, the "mp3 320" subtest. Family-consistent, enumerated here:
+`test_cbr_256_genuine` (EXCELLENT rank no longer narrows),
+`test_suspect_spectral_triggers_requeue` -> `..._keeps_full_tier_search`,
+`test_step1_brandlos_imports_transcode_over_genuine_on_avg_gain` (override cleared).
+**Reverted by D17:** `test_cbr_320_genuine` (narrows + denylists again, per U5's directive).
+
+**Family 4 (absence-verifies inverted) — plan:** `test_flac_no_spectral_is_verified`,
+`test_lossless_no_spectral_is_verified`, the 8 spectral-None `TestTranscodeDetection` rows (+ the
+two cfg-fallback tests, deleted with the branch), the error-grade negative pin.
+
+**Codec-label pins (R27, additional to the families) — plan:**
+`test_vorbis_folder_falls_back_to_mp3` -> asserts vorbis; `test_empty_folder_falls_back_to_mp3` ->
+no-audio sentinel; the vorbis assertion in `test_unmapped_codec_returns_none`.
+
+**D17 (subject-blind narrowing; new flips by the decision commits):** the "CBR 320 carried source
+grade" `TestQualityGateDecision` row (full tiers -> narrows),
+`test_lossless_narrowing_requires_installed_spectral_authority` ->
+`..._is_subject_blind_for_genuine_transparent` (generated property),
+`test_transparent_carried_source_grade_stays_on_full_tiers` -> `..._also_narrows`,
+and six dispatch slices re-asserting the lossless override at import time
+(`test_genuine_transparent_import_narrows_to_lossless`,
+`test_genuine_cbr_320_import_narrows_at_import_time`, the median/AVG metric pair, the two
+stale-field-clearing slices, the lock-contention happy path,
+`test_import_with_unmeasured_distance_records_null`).
+
+**D18 (no-blame reopen):** `test_missing_linked_evidence_reopens_full_tier_search`,
+`test_linked_evidence_load_error_reopens_full_tier_search`,
+`test_unavailable_refresh_sentinel_cannot_consume_old_proof`,
+`test_suspect_spectral_keeps_full_tier_search` (stamps-only world), and the ceezles chain
+denylist assertion — all now assert the peer stays available.
+
+**D19 (force-import overrides distance only):**
+`test_successful_force_and_manual_imports_skip_automatic_gate_and_notify` ->
+`..._run_post_import_pipeline` (reverted to the pre-branch contract),
+`test_force_and_manual_imports_skip_automatic_search_policy` ->
+`..._run_the_same_post_import_gate`,
+`test_operator_retained_import_decisions_stay_terminal` -> `..._requeue_like_automatic`,
+`test_force_import_success` (force-imported unverified copy lands wanted, not imported).
+
+---
+
 ## Verdict: NOT READY (as-is) — high-fidelity implementation, three confirmed P1s gate the merge
 
 Two of the P1s are operator decisions the plan itself classifies as stop-conditions (surface, don't adapt around); one is a mechanical migration amendment that must land before 055 ships. Everything else is mechanical cleanup.
