@@ -1005,7 +1005,8 @@ class TestQualityGateVerifiedLosslessBypass(unittest.TestCase):
         row = db.request(42)
         self.assertEqual(row["status"], "wanted")
         self.assertIsNone(row["search_filetype_override"])
-        self.assertEqual(len(db.denylist), 1)
+        # Decision 18: the sentinel/unavailable path never blames the peer.
+        self.assertEqual(db.denylist, [])
 
 
 class TestQualityGateSpectralOverride(unittest.TestCase):
@@ -1040,8 +1041,9 @@ class TestQualityGateSpectralOverride(unittest.TestCase):
         row = db.request(42)
         self.assertEqual(row["status"], "wanted")
         self.assertIsNone(row["search_filetype_override"])
-        self.assertEqual(len(db.denylist), 1)
-        self.assertIn("full-tier search", db.denylist[0].reason or "")
+        # This world seeds only request-row stamps (no linked evidence), so
+        # the gate takes the unavailable path — decision 18: no blame.
+        self.assertEqual(db.denylist, [])
 
 
 class TestSpectralPropagationSlice(unittest.TestCase):
@@ -2452,7 +2454,10 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
             row["search_filetype_override"],
             "A likely-transcode copy stays on full tiers; the old upgrade "
             "override must be cleared.")
-        self.assertGreaterEqual(len(db.denylist), 1)
+        # The chain's transcode row reaches the gate with unavailable linked
+        # evidence (rebuild pending), so decision 18 reopens without blaming
+        # the peer — no denylist entry from this attempt.
+        self.assertEqual(db.denylist, [])
         # verified_lossless stays False, which is exactly why DONE is barred.
         self.assertFalse(row["verified_lossless"])
 

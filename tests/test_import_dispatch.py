@@ -2106,12 +2106,9 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         self.assertEqual(row["status"], "wanted")
         self.assertEqual(row["min_bitrate"], 245)
         self.assertIsNone(row["search_filetype_override"])
-        self.assertEqual(len(db.denylist), 1)
-        self.assertEqual(db.denylist[0].username, "winner")
-        self.assertIn(
-            "linked current evidence unavailable",
-            db.denylist[0].reason or "",
-        )
+        # Decision 18: a local bookkeeping failure is never attributed to
+        # the winning peer — the request reopens, the peer stays available.
+        self.assertEqual(db.denylist, [])
 
     def test_linked_evidence_load_error_reopens_full_tier_search(self):
         """Adapter errors follow the same explicit retry path as absence."""
@@ -2135,7 +2132,8 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         self.assertIsNotNone(plan)
         self.assertEqual(db.request(42)["status"], "wanted")
         self.assertIsNone(db.request(42)["search_filetype_override"])
-        self.assertEqual(len(db.denylist), 1)
+        # Decision 18: adapter errors reopen without blaming the peer.
+        self.assertEqual(db.denylist, [])
 
     def test_requeue_upgrade_uses_intent(self):
         db = self._run_quality_gate(info=self._bare_mp3_vbr_low())

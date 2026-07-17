@@ -34,34 +34,29 @@ class QualityGatePlan:
     denylists: tuple[TerminalDenylist, ...] = ()
 
 
-def _evidence_unavailable_plan(
-    files: Sequence[object],
-) -> QualityGatePlan:
+def _evidence_unavailable_plan() -> QualityGatePlan:
     """Keep acquisition open when installed-copy evidence is unavailable.
 
     Missing or failed linked evidence cannot prove either transparent quality
-    or verified-lossless lineage.  The conservative action is therefore a
-    full-tier retry.  The imported copy remains on disk; only the request is
-    reopened, and the winning peer is denied so the next cycle does not select
-    the same unassessable source again.
+    or verified-lossless lineage.  The conservative action is a full-tier
+    retry: the imported copy remains on disk and only the request reopens —
+    the next cycle rebuilds the evidence and re-settles the request.
+
+    Decision 18: NO denylist.  A local bookkeeping failure is never
+    attributed to the winning peer; a denylist attaches only after a
+    quality decision on successfully loaded evidence.  (The shared
+    ``post_import_search_action`` mapping sets ``denylist=True`` for
+    ``requeue_upgrade`` — that applies to decided retentions, deliberately
+    not to this environment-failure path.)
     """
 
-    reason = (
-        "quality gate: linked current evidence unavailable; "
-        "continuing full-tier search"
-    )
     action = post_import_search_action("requeue_upgrade")
     return QualityGatePlan(
         transition=transitions.RequestTransition.to_wanted(
             from_status="imported",
             search_filetype_override=action.search_filetype_override,
         ),
-        denylists=tuple(
-            TerminalDenylist(username, reason)
-            for username in (
-                sorted(extract_usernames(files)) if action.denylist else ()
-            )
-        ),
+        denylists=(),
     )
 
 
@@ -176,7 +171,7 @@ def _check_quality_gate_core(
             expected_current_evidence_id=expected_current_evidence_id,
         )
         if not state:
-            plan = _evidence_unavailable_plan(files)
+            plan = _evidence_unavailable_plan()
             logger.warning(
                 "QUALITY GATE: %s linked current evidence unavailable; "
                 "reopening full-tier search",
@@ -240,7 +235,7 @@ def _check_quality_gate_core(
             "QUALITY GATE: failed to load or decide linked quality; "
             "reopening full-tier search"
         )
-        plan = _evidence_unavailable_plan(files)
+        plan = _evidence_unavailable_plan()
 
     # Apply outside the evidence/decision try block.  A transition failure is
     # not an evidence failure and must propagate to dispatch instead of being
