@@ -130,17 +130,18 @@ def _resolve_post_import_search_policy(
     *,
     decision: str,
     action: DispatchAction,
-    force: bool,
-    scenario: str,
     files: Sequence[object] | None,
     fallback_username: str | None,
 ) -> tuple[PostImportSearchAction | None, bool, set[str], list[object]]:
-    """Resolve automatic search policy and its peer attribution once."""
+    """Resolve post-import search policy and its peer attribution once.
 
-    automatic = not force and scenario not in FORCE_MANUAL_SCENARIOS
-    search_action = (
-        post_import_search_action_if_known(decision) if automatic else None
-    )
+    Decision 19: force/manual imports resolve through the same canonical
+    mapping as automatic imports — a force-imported provisional lossless
+    copy gets the identical wanted + lossless-only requeue, never a
+    silently terminal parking spot.
+    """
+
+    search_action = post_import_search_action_if_known(decision)
     should_denylist = (
         search_action.denylist
         if search_action is not None
@@ -630,8 +631,6 @@ def dispatch_import_core(
                 ) = _resolve_post_import_search_policy(
                     decision=decision,
                     action=action,
-                    force=force,
-                    scenario=scenario,
                     files=files,
                     fallback_username=dl_info.username,
                 )

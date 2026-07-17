@@ -1106,18 +1106,24 @@ class TestDispatchImport(unittest.TestCase):
             "mock_gate": mock_gate,
         }
 
-    def test_operator_retained_import_decisions_stay_terminal(self):
+    def test_operator_retained_import_decisions_requeue_like_automatic(self):
+        # Decision 19: force/manual imports resolve through the same
+        # canonical retained-import mapping as automatic imports — the
+        # provisional lane narrows to lossless-only, transcode lanes stay on
+        # full tiers, every retained lossy source is denylisted, and nothing
+        # parks silently terminal. (These decisions map directly, so the
+        # post-import gate itself is not invoked for them.)
         decisions = (
-            "provisional_lossless_upgrade",
-            "transcode_upgrade",
-            "transcode_first",
+            ("provisional_lossless_upgrade", "lossless"),
+            ("transcode_upgrade", None),
+            ("transcode_first", None),
         )
         operator_modes = (
             ("force", "force_import", True),
             ("manual", "manual_import", False),
         )
         for mode, scenario, force in operator_modes:
-            for decision in decisions:
+            for decision, expected_override in decisions:
                 with self.subTest(mode=mode, decision=decision):
                     result = self._dispatch(
                         make_import_result(decision=decision),
@@ -1126,9 +1132,12 @@ class TestDispatchImport(unittest.TestCase):
                         initial_status="manual",
                     )
                     row = result["db"].request(42)
-                    self.assertEqual(row["status"], "imported")
-                    self.assertIsNone(row["search_filetype_override"])
-                    self.assertEqual(result["db"].denylist, [])
+                    self.assertEqual(row["status"], "wanted")
+                    self.assertEqual(
+                        row["search_filetype_override"], expected_override)
+                    self.assertEqual(
+                        [e.username for e in result["db"].denylist],
+                        ["user1"])
                     result["mock_gate"].assert_not_called()
 
     def test_import_success(self):
