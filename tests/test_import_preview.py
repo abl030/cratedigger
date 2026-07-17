@@ -24,7 +24,11 @@ from lib.import_preview import (
     preview_import_from_path,
     preview_import_from_values,
 )
-from lib.measurement import LocalFileInspection, PreimportMeasurement
+from lib.measurement import (
+    AudioCodecProbeError,
+    LocalFileInspection,
+    PreimportMeasurement,
+)
 from lib.quality import (
     AudioQualityMeasurement,
     ImportResult,
@@ -1759,6 +1763,44 @@ class TestImportPreviewPath(unittest.TestCase):
             self.assertTrue(preview.cleanup_eligible)
             self.assertEqual(preview.decision, "bad_audio_hash")
             self.assertEqual(db.denylist, [])
+            mock_run.assert_not_called()
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_measurement_crash_degrades_to_uncertain_instead_of_raising(self):
+        """A crashing measurement (e.g. an unprobeable .m4a raising
+        AudioCodecProbeError) must degrade to the measurement_failed
+        preview verdict like the worker path — never escape as an
+        exception the web route would surface as a 500.
+        """
+        db = self._db()
+        source = self._source_dir()
+        try:
+            with patch("lib.config.read_runtime_config",
+                       return_value=CratediggerConfig(
+                           beets_harness_path="/fake/harness/run_beets_harness.sh",
+                           pipeline_db_enabled=True,
+                       )), \
+                 patch("lib.import_preview.inspect_local_files",
+                       return_value=LocalFileInspection(
+                           filetype="m4a",
+                           min_bitrate_bps=256000,
+                           is_vbr=False,
+                       )), \
+                 patch("lib.import_preview.measure_preimport_state",
+                       side_effect=AudioCodecProbeError(
+                           "ffprobe could not read 01.m4a")), \
+                 patch("lib.import_preview.run_import_one") as mock_run:
+                preview = preview_import_from_path(
+                    db,
+                    request_id=42,
+                    path=source,
+                )
+
+            self.assertEqual(preview.verdict, "measurement_failed")
+            self.assertEqual(preview.decision, "measurement_crashed")
+            self.assertIn("AudioCodecProbeError", preview.detail or "")
             mock_run.assert_not_called()
         finally:
             import shutil

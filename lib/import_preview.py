@@ -1948,32 +1948,43 @@ def preview_import_from_path(
         # spectral propagation belongs to the persisted ``AlbumQualityEvidence``
         # row that the importer reads — preview is now a pure measurement
         # surface.
-        measurement = measure_preimport_state(
-            path=preview_path,
-            mb_release_id=mbid,
-            label=_request_label(req),
-            download_filetype=inspection.filetype,
-            download_min_bitrate_bps=inspection.min_bitrate_bps,
-            download_is_vbr=inspection.is_vbr,
-            cfg=cfg,
-            db=None,
-            request_id=None,
-            existing_spectral_evidence=(
-                existing_spectral_evidence
-            ),
-            preserve_existing_source_spectral=preserve_have_source,
-            propagate_download_to_existing=False,
-            precomputed_inspection=inspection,
-        )
-        spectral_result = persist_exact_current_spectral_from_attempt(
-            db,
-            request_id=request_id,
-            current_evidence=current_evidence,
-            measured_existing=measurement.spectral_audit.existing,
-            measured_existing_path=measurement.existing_spectral_path,
-        )
-        if spectral_result.evidence is not None:
-            current_evidence = spectral_result.evidence
+        try:
+            measurement = measure_preimport_state(
+                path=preview_path,
+                mb_release_id=mbid,
+                label=_request_label(req),
+                download_filetype=inspection.filetype,
+                download_min_bitrate_bps=inspection.min_bitrate_bps,
+                download_is_vbr=inspection.is_vbr,
+                cfg=cfg,
+                db=None,
+                request_id=None,
+                existing_spectral_evidence=(
+                    existing_spectral_evidence
+                ),
+                preserve_existing_source_spectral=preserve_have_source,
+                propagate_download_to_existing=False,
+                precomputed_inspection=inspection,
+            )
+            spectral_result = persist_exact_current_spectral_from_attempt(
+                db,
+                request_id=request_id,
+                current_evidence=current_evidence,
+                measured_existing=measurement.spectral_audit.existing,
+                measured_existing_path=measurement.existing_spectral_path,
+            )
+            if spectral_result.evidence is not None:
+                current_evidence = spectral_result.evidence
+        except Exception as exc:
+            return _measurement_failed_result(
+                mode="path",
+                reason="measurement_crashed",
+                decision="measurement_crashed",
+                detail=f"{type(exc).__name__}: {exc}",
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+            )
 
         spectral_failure = _lossless_candidate_spectral_failure(
             measurement,
