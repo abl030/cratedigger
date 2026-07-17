@@ -123,6 +123,8 @@ Settled in-session with the operator after the panel + validation pass. These re
 
 Finding #12's complete flip enumeration is produced against the post-fix tree (the #2 and #8 restorations shrink it).
 
+6. **Decision 21 (settled later the same day, after the unauthorized-change audit):** the verified-lossless proof lock is ABSOLUTE — force/manual imports hit `verified_lossless_locked` exactly like automatic candidates. Force-import bypasses the beets distance and nothing else; Replace/re-request is the operator's way back in (restoring decision 1's letter — the force-import bypass in KTD4/U7 was planning-time widening the operator never directed). Wrong-Matches cleanup unchanged: disk-loaded verified parents short-circuit-delete as before; backfilled parent proof now deletes through the reducer's locked decision (carried proof decisive through the audited path; out-of-band mutation outside the state model per D6). Flipped pins: `test_force_import_bypasses_verified_lossless_lock` -> `..._respects_...`, `test_force_fact_bypasses_current_proof` -> `test_force_import_respects_current_proof`, the integrity-precedence property covers every import mode, and a dispatch-level force-lock pin was added.
+
 ## Appendix — complete corpus flip enumeration (finding #12; post-fix tree)
 
 Every behavioral test flip on the branch, by authority. "Plan" = enumerated in U4/U5/U7/U9's

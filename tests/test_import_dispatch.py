@@ -765,6 +765,21 @@ class TestRejectImportFromEvidenceDecisionForcedRequeue(unittest.TestCase):
         self.assertEqual(db.denylist, [])
         self.assertEqual(db.download_logs[-1].outcome, "rejected")
 
+    def test_verified_lossless_lock_holds_for_force_imports(self) -> None:
+        """Decision 21: a force/manual import against a proof-bearing
+        request is declined by the same lock (requeue_on_failure=False is
+        the operator paths' setting) — force bypasses only the beets
+        distance; Replace/re-request is the way back in.
+        """
+        db = self._reject(
+            decision="verified_lossless_locked",
+            requeue_on_failure=False,
+            search_filetype_override=QUALITY_UPGRADE_TIERS,
+        )
+        self.assertEqual(db.request(42)["status"], "imported")
+        self.assertEqual(db.denylist, [])
+        self.assertEqual(db.download_logs[-1].outcome, "rejected")
+
     def test_verified_lossless_lock_pending_outcome_is_atomic(self) -> None:
         """The import-job owner commits the proof lock and audit together."""
         db = self._reject(

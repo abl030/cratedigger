@@ -445,6 +445,14 @@ def _cleanup_wrong_match(
     verdict, cleanup_eligible, reason = classify_full_pipeline_decision(decision)
     preview_decision = evidence_decision_name(decision)
 
+    # Decision 21: the proof lock fires in force mode too, so a backfilled
+    # (non-disk-loaded) parent proof now reaches this reducer as
+    # verified_lossless_locked — a cleanup-eligible confident reject.
+    # Deleting on it is deliberate and consistent with the disk-loaded
+    # short-circuit above: carried proof remains decisive through the
+    # audited reducer path (out-of-band audio mutation is outside the
+    # state model per decision 6).
+
     if verdict == "would_import":
         return _result(
             download_log_id,

@@ -169,11 +169,13 @@ def full_pipeline_decision(
         "comparison_basis": None,
     }
 
-    # A proof-bearing installed HAVE is the automatic acquisition ceiling.
-    # This guard deliberately precedes every candidate-derived reject,
-    # including folder/audio-integrity and spectral exits. Operator-authorized
-    # force/manual paths bypass it.
-    if import_mode == "auto" and current_verified_lossless_proof:
+    # A proof-bearing installed HAVE is the absolute acquisition ceiling
+    # (decision 21): no import — automatic OR force/manual — crosses it.
+    # Force-import bypasses only the beets distance; Replace/re-request is
+    # the operator's way back in. The guard deliberately precedes every
+    # candidate-derived reject, including folder/audio-integrity and
+    # spectral exits.
+    if current_verified_lossless_proof:
         result["stage2_import"] = DECISION_VERIFIED_LOSSLESS_LOCKED
         result["final_status"] = "imported"
         return result
@@ -1068,12 +1070,13 @@ def full_pipeline_decision_from_evidence(
     if current is not None:
         _require_evidence_ready("current", current)
 
-    # Current proof outranks every automatic candidate fact. In particular,
-    # a corrupt, nested, empty, mixed, or known-bad candidate cannot reopen a
-    # release that is already at the terminal archival ceiling.
+    # Current proof outranks every candidate fact for every import mode
+    # (decision 21): a corrupt, nested, empty, mixed, or known-bad candidate
+    # cannot reopen a release at the terminal archival ceiling, and a
+    # force-import cannot cross it either — force bypasses only the beets
+    # distance; Replace/re-request is the operator's way back in.
     if (
-        facts.import_mode == "auto"
-        and current is not None
+        current is not None
         and current.verified_lossless_proof is not None
     ):
         return {

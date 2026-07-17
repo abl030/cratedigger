@@ -1346,7 +1346,7 @@ class TestGeneratedEvidenceDecider(unittest.TestCase):
         candidate=wild_ready_candidate_evidence(),
         integrity_fact=st.sampled_from(_INTEGRITY_FACTS),
     )
-    def test_current_proof_precedes_integrity_only_for_automatic_policy(
+    def test_current_proof_precedes_integrity_for_every_import_mode(
         self,
         candidate,
         integrity_fact,
@@ -1370,18 +1370,15 @@ class TestGeneratedEvidenceDecider(unittest.TestCase):
         automatic = full_pipeline_decision_from_evidence(candidate, current)
         assert_evidence_proof_lock_preserves_imported(automatic)
 
+        # Decision 21: the proof lock is absolute — force mode hits it the
+        # same way, before any integrity reject can fire.
         forced = full_pipeline_decision_from_evidence(
             candidate,
             current,
             facts=AlbumQualityEvidenceDecisionFacts(import_mode="force"),
         )
-        expected_key = _expected_early_exit_key(candidate)
-        assert expected_key is not None
+        assert_evidence_proof_lock_preserves_imported(forced)
         self.assertEqual(
-            forced[expected_key],
-            _EARLY_EXIT_REJECT_VALUES[expected_key],
-        )
-        self.assertNotEqual(
             forced["stage2_import"],
             "verified_lossless_locked",
         )
@@ -1418,8 +1415,11 @@ class TestGeneratedEvidenceDecider(unittest.TestCase):
         with self.assertRaises(ValueError):
             full_pipeline_decision_from_evidence(no_bitrates, None)
 
-    def test_force_fact_bypasses_current_proof(self):
-        """The production twin preserves explicit operator authority."""
+    def test_force_import_respects_current_proof(self):
+        """Decision 21: force-import bypasses only the beets distance —
+        the verified-lossless proof lock is absolute for every import
+        mode; Replace/re-request is the operator's way back in.
+        """
         candidate = build_parity_candidate_evidence(
             is_flac=False,
             min_bitrate=320,
@@ -1446,11 +1446,12 @@ class TestGeneratedEvidenceDecider(unittest.TestCase):
             current,
             facts=AlbumQualityEvidenceDecisionFacts(import_mode="force"),
         )
-        self.assertNotEqual(
+        self.assertEqual(
             result["stage2_import"],
             "verified_lossless_locked",
         )
-        self.assertTrue(result["imported"])
+        self.assertFalse(result["imported"])
+        self.assertEqual(result["final_status"], "imported")
 
 
 # ===========================================================================

@@ -1557,16 +1557,20 @@ class TestVerifiedLosslessMatrix(unittest.TestCase):
         self.assertFalse(r.keep_searching)
         self.assertFalse(r.denylisted)
 
-    def test_force_import_bypasses_verified_lossless_lock(self):
-        """Operator authority may replace a proof-bearing HAVE unchanged."""
+    def test_force_import_respects_verified_lossless_lock(self):
+        """Decision 21: force-import bypasses only the beets distance —
+        the proof lock is absolute for every import mode. Replace or
+        re-request is the operator's way back in."""
         r = self._sim(
             "verified_lossless_lofi",
             "mp3_v0_240",
             current_proof=True,
             import_mode="force",
         )
-        self.assertTrue(r.imported)
-        self.assertNotEqual(r.stage2_import, "verified_lossless_locked")
+        self.assertFalse(r.imported)
+        self.assertEqual(r.stage2_import, "verified_lossless_locked")
+        self.assertEqual(r.final_status, "imported")
+        self.assertFalse(r.denylisted)
 
 
 # ============================================================================
