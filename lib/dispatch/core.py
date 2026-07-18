@@ -818,12 +818,15 @@ def dispatch_import_core(
                     new_bitrate=new_br,
                 )
 
-                # Decision 19: force-import overrides the beets distance and
-                # NOTHING else. Operator imports run the identical
-                # post-import search-policy gate as automatic imports — no
-                # separate state, never silently terminal. The only operator
-                # exception is stage-2: force may replace a proof-bearing
-                # HAVE (U7); once imported, the copy is judged like any other.
+                # Authority: "D19 — Force-import overrides the beets distance
+                # and nothing else."
+                # https://github.com/abl030/cratedigger/issues/711#issuecomment-4999204451
+                # Authority: "The verified-lossless proof lock is absolute
+                # for every import mode."
+                # https://github.com/abl030/cratedigger/issues/711#issuecomment-5000425284
+                # Operator imports therefore run the identical post-import
+                # policy path as automatic imports; Replace/re-request is the
+                # only way back in once proof exists.
                 if action.run_quality_gate:
                     terminal_outcome = _run_or_stage_quality_gate(
                         quality_gate_fn,

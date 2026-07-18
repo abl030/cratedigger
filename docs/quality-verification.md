@@ -381,18 +381,33 @@ Installed-subject spectral and V0 facts never cross a fingerprint change.
 The ordinary enrichment path remeasures those facts against the installed
 snapshot when policy needs them.
 
-Acquisition facts cannot be re-derived from converted library bytes, so proof,
-source-subject spectral, and source-subject V0 facts carry to the new row with
+**The canonical acquisition-fact set is exactly:** verified-lossless proof,
+source-subject spectral, and the source-subject V0 anchor. These facts cannot be
+re-derived from converted library bytes, so they carry to the new row with
 `provenance='carried'`. Their `subject='source'` continues to say that they
 describe the upstream acquisition bytes, not the installed derivative.
 Propagation reads those markers directly; codec names and conversion shape are
 never used as a lineage heuristic. Wrong-match cleanup may compare future
-candidates against these explicit source anchors.
+candidates against these explicit source anchors. Rebuilds, migrations, and
+operator one-shots must reference this canonical set rather than restating a
+subset.
 
 The same rule governs every evidence rebuild: proof and source-subject facts
 carry unconditionally with provenance `carried`; installed-subject facts are
 remeasured and can only have provenance `measured`. Proof is conceptually a
 source acquisition fact, so it needs only its provenance marker.
+
+**A genuine spectral grade does not prove source bitrate for fullband codecs.**
+Opus can retain a fullband cutoff at low bitrates, so a native Opus scan may
+look spectrally genuine without establishing that the acquisition was
+high-bitrate or transparent. More importantly, scanning an installed Opus copy
+derived from a lossless source measures the encoder output, not the upstream
+acquisition; persisting that result as source lineage would discard the fact we
+need to retain. That is why lossless-derived installed spectral facts are
+forbidden: the source-subject spectral fact carries instead. A native-Opus
+genuine grade may still participate in the documented narrowing policy, but it
+is weak spectral evidence, never proof of bitrate or verified-lossless
+acquisition.
 
 **Missing or incomplete current evidence self-heals at the failure point.** A
 current-evidence row's spectral scan and on-disk V0 research normally
