@@ -289,6 +289,13 @@ def _shipped_aunique_config() -> dict:
     m = re.search(r'default = "(\$albumartist[^"]+)";', src)
     assert m, "paths.default template not found in nix/module.nix"
     fields = dict(re.findall(r'album_fields\.(\w+) = "([^"]+)";', src))
+    # Fail loudly if a nix restyle stops the regex from seeing the shipped
+    # disambiguator — a vacuous sweep would keep passing while no longer
+    # exercising the production expression (review nit, PR #742).
+    assert "path_disambig" in fields, (
+        f"album_fields.path_disambig not extracted from nix/module.nix "
+        f"(got {sorted(fields)}); update the extraction regex"
+    )
     return {"template": m.group(1), "album_fields": fields}
 
 
