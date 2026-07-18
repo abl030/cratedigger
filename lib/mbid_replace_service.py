@@ -258,15 +258,15 @@ class MbidReplaceService:
            imported_path for Plex partial scan, old release id, status).
            The fresh re-read closes the race window where the importer
            worker finished between Phase 0 and Phase 1 — stale
-           ``old_status`` would skip beets cleanup; stale
            ``old_imported_path`` would mis-route the Plex rescan.
         3. DB transaction: ``supersede_request_mbid`` atomically flips
            the old row's status, clears ``imported_path``, inserts the
            new row, inserts tracks.
         4. Filesystem cleanup (non-fatal warnings collected):
-           - beets removal if old was imported
-             (``clear_pipeline_state=False`` so characteristic fields
-             stay frozen on the audit row)
+           - beets removal of the old release whenever its id resolves —
+             request status is irrelevant (backfill rows are wanted with
+             an install on disk; ``clear_pipeline_state=False`` so
+             characteristic fields stay frozen on the audit row)
            - wrong-matches group delete
            - staging folder rmtree (skipped when old was downloading)
         5. Post-cleanup (advisory lock RELEASED first): regenerate
@@ -861,8 +861,15 @@ class MbidReplaceService:
                     ),
                 )
 
-            # Phase 4 — filesystem cleanup (non-fatal).
-            if old_status == "imported" and old_release_id:
+            # Phase 4 — filesystem cleanup (non-fatal). Keyed on the old
+            # release id ONLY — never on request status. "wanted" does not
+            # mean "nothing on disk": library-backfill rows (2026-06-04)
+            # track pre-existing installs while still wanted, and Replace
+            # REPLACES — the old pressing's install is displaced whenever
+            # it resolves in beets (the Passenger regression, 2026-07-18).
+            # ``remove_and_reset_release`` is a safe no-op when the old
+            # release is not in beets.
+            if old_release_id:
                 try:
                     beets_db = self.beets_db_factory()
                     result = remove_and_reset_release(
