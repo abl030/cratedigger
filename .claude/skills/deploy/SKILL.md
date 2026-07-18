@@ -214,10 +214,10 @@ issue (pattern: #573, #590) or state that nothing clears the bar.
 
 ## Holding timer-driven work across a switch
 
-A runtime systemd mask is only the pre-switch half of an ordinary maintenance
-hold. A NixOS switch regenerates the runtime unit state and restarts timers, so
-a mask applied before `fleet-deploy` must be applied again and verified after
-the switch before any one-shot or state rewrite begins.
+A runtime systemd mask normally persists until reboot, including across a
+NixOS switch. It is still imperative state, not evidence that the post-switch
+system is safely held: re-apply it idempotently and verify both the timer and
+its service after the switch before any one-shot or state rewrite begins.
 
 For a hold on the two timer-driven Cratedigger jobs:
 
@@ -226,25 +226,27 @@ For a hold on the two timer-driven Cratedigger jobs:
    not interrupt it to create the maintenance window.
 2. Trigger the deploy and wait for the exact new `nixos-upgrade.service`
    invocation as described above.
-3. Immediately runtime-mask both timers again. Verify both are masked and both
-   `cratedigger.service` and `cratedigger-unfindable.service` are inactive.
-   If a cycle won the post-switch race, leave the timers masked and wait for
-   that cycle to finish before touching shared state, then assess and record
-   what it read or changed before continuing.
+3. Immediately runtime-mask both timers again as an idempotent safety step.
+   Verify both are masked and both `cratedigger.service` and
+   `cratedigger-unfindable.service` are inactive. If either service ran because
+   the pre-switch hold was absent or ineffective, leave the timers masked and
+   wait for that cycle to finish before touching shared state, then assess and
+   record what it read or changed before continuing.
 4. Run the one-shot only after those checks pass. When the maintenance work and
    its reconciliation checks are complete, unmask and start the timers.
 
-This runtime re-mask pattern is **not sufficient** when a transition requires a
-one-shot to complete before the new code's first cycle. For that strict hold,
-either run a backwards-compatible one-shot under the pre-switch mask and
-reconcile it before deploying, or deploy a reviewed declarative timer hold in
-the target NixOS generation and restore the timers in a later switch. If a
-new-code cycle starts before the strict one-shot, stop and assess/recover its
-reads and mutations; waiting for it to finish does not restore the precondition.
+Do not make a strict transition depend solely on imperative state, even though
+the runtime mask is expected to survive the switch. When a one-shot must finish
+before the new code's first cycle, either run a backwards-compatible one-shot
+under the pre-switch mask and reconcile it before deploying, or deploy a
+reviewed declarative timer hold in the target NixOS generation and restore the
+timers in a later switch. If a new-code cycle starts before the strict one-shot,
+stop and assess/recover its reads and mutations; waiting for it to finish does
+not restore the precondition.
 
-Apply the same post-switch re-mask rule to any long-running worker held for a
-maintenance operation. Never treat a pre-switch runtime mask as evidence that
-the post-switch system is still held.
+Apply the same idempotent post-switch hold verification to any long-running
+worker held for a maintenance operation. Never treat a pre-switch runtime mask
+alone as evidence that the post-switch system is still held.
 
 ## Database migrations
 
