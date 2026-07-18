@@ -212,6 +212,16 @@ syntax case are prohibited. Static audits may enforce a local syntactic fact
 with a deliberately bounded grammar; they must not substitute for Python or a
 database parser.
 
+**Good enough is a valid stopping condition.** When the production code states
+the boundary plainly, removes the dangerous input from the decision surface,
+and direct behavior tests pin the known failure modes, stop unless review can
+name a concrete remaining counterexample. Do not replace a rejected semantic
+scanner with a speculative typed policy layer or other abstraction whose only
+purpose is to make hypothetical future misunderstanding impossible. Clear code,
+behavior tests, and review are real guardrails; an issue must not stay open
+solely because the code could theoretically be made harder to misuse. Further
+centralization must identify a current failure or bypass that it would prevent.
+
 Qualify the narrow contract with known-bad variants and at least one real
 production-path test. Any non-canonical or unresolved construction must fail
 closed unless it is an explicitly reviewed, tightly bounded seam. If a real
