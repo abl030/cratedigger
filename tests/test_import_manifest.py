@@ -162,7 +162,6 @@ class TestForceImportManifestGuard(unittest.TestCase):
                 cast(Any, db),
                 request_id=42,
                 failed_path=root,
-                force=True,
                 import_job_id=job.id,
                 download_log_id=log_id,
             )
@@ -220,7 +219,6 @@ class TestForceImportManifestGuard(unittest.TestCase):
                 cast(Any, db),
                 request_id=42,
                 failed_path=root,
-                force=True,
                 import_job_id=job_id,
                 download_log_id=log_id,
             )
@@ -255,7 +253,6 @@ class TestForceImportManifestGuard(unittest.TestCase):
                 cast(Any, db),
                 request_id=42,
                 failed_path=root,
-                force=False,
                 import_job_id=job_id,
             )
 
@@ -287,7 +284,6 @@ class TestForceImportManifestGuard(unittest.TestCase):
                 cast(Any, db),
                 request_id=42,
                 failed_path=root,
-                force=False,
                 import_job_id=job_id,
             )
 
@@ -325,7 +321,6 @@ class TestForceImportManifestGuard(unittest.TestCase):
                 cast(Any, db),
                 request_id=42,
                 failed_path=root,
-                force=False,
                 import_job_id=job_id,
             )
 
@@ -374,7 +369,6 @@ class TestForceImportManifestGuard(unittest.TestCase):
                 cast(Any, db),
                 request_id=42,
                 failed_path=root,
-                force=True,
                 import_job_id=job_id,
                 download_log_id=log_id,
             )
