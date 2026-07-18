@@ -51,9 +51,14 @@ let
     assert cfg["discogs"]["user_token"] == "cratedigger-placeholder-token"
     assert "include" not in cfg, cfg.get("include")
 
-    # Path-affecting keys present and production-shaped.
+    # Path-affecting keys present and production-shaped. path_disambig is
+    # the never-empty aunique disambiguator (Passenger collision fix,
+    # 2026-07-18) — it must appear in the template AND be defined as an
+    # inline album field, or same-key sibling pressings collide into one
+    # folder again.
     assert cfg["asciify_paths"] is True
-    assert "short_mbid" in cfg["paths"]["default"], cfg["paths"]
+    assert "path_disambig" in cfg["paths"]["default"], cfg["paths"]
+    assert "path_disambig" in cfg["album_fields"], cfg.get("album_fields")
 
     print("BEETS_CONFIG_OK")
   '';

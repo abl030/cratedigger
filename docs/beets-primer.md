@@ -53,10 +53,17 @@ import:
 
 # Path templates
 paths:
-  default: $albumartist/$year - $album%aunique{albumartist album,albumtype year label catalognum albumdisambig releasegroupdisambig short_mbid}/$track $title
-  comp: Compilations/$album%aunique{albumartist album,albumtype year label catalognum albumdisambig releasegroupdisambig short_mbid}/$track $title
+  default: $albumartist/$year - $album%aunique{albumartist album,path_disambig}/$track $title
+  comp: Compilations/$album%aunique{albumartist album,path_disambig}/$track $title
   singleton: Non-Album/$artist/$title
-# (short_mbid comes from the inline plugin's item_fields/album_fields)
+# path_disambig is an inline-plugin album field: the first non-empty of
+# albumdisambig / releasegroupdisambig / catalognum / label / str(year).
+# It is never empty by construction — beets' %aunique renders an album's
+# OWN value for the chosen disambiguator, and an empty value renders NO
+# bracket (plain path → collides into the sibling pressing's folder; the
+# Passenger incident, 2026-07-18). Ties fall back to beets' album-id
+# bracket, which is also never empty. Contract-tested against real beets
+# in tests/test_harness_beets2_contract.py.
 
 # MusicBrainz — local mirror on doc2
 musicbrainz:
@@ -95,7 +102,7 @@ plugins: musicbrainz discogs fetchart embedart lyrics lastgenre scrub info missi
 | `fromfilename` | Guesses metadata from filenames when tags are missing | — |
 | `ftintitle` | Moves "feat." from artist to title field | — |
 | `the` | Handles "The" prefix in artist names | — |
-| `inline` | Lets config.yaml define computed item/album fields in Python — powers `short_mbid` (used in the path templates below) | — |
+| `inline` | Lets config.yaml define computed item/album fields in Python — powers `path_disambig` (the never-empty %aunique disambiguator in the path templates below) | — |
 | `permissions` | Sets imported file/art mode to 0664 and dir mode to 02775 (setgid) | Yes |
 
 `permissions` exists so media servers (Jellyfin) can read album art: beets'

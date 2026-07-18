@@ -173,6 +173,154 @@ print("BAD_RIP_CLEANUP_OK")
 '''
 
 
+# Fresh-interpreter sweep of the SHIPPED aunique config against real beets.
+# The Passenger collision class (2026-07-18): beets' %aunique picks the first
+# disambiguator field whose values are all-distinct across the same-key album
+# set, then renders each album's OWN value — an album whose value for that
+# field is EMPTY renders NO bracket and lands on the plain path, colliding
+# with the sibling's sticky plain path (old album label='ATO Records', new
+# album label='' → label is "all-distinct" → new album's bracket is empty).
+# The invariant: under the shipped template + album_fields, two same-key
+# albums with different release ids ALWAYS render distinct directories.
+_AUNIQUE_CONTRACT = r'''
+import itertools
+import json
+import os
+import sys
+import tempfile
+
+import beets
+from beets import config as bconfig
+from beets import plugins as bplugins
+from beets.library import Album, Library
+from beets.util import functemplate
+
+shipped = json.loads(os.environ["AUNIQUE_SHIPPED_CONFIG"])
+TEMPLATE = shipped["template"]
+ALBUM_FIELDS = shipped["album_fields"]
+
+# The pre-2026-07-18 poisoned template — the planted known-bad the sweep
+# must detect, proving the checker catches the class.
+OLD_TEMPLATE = (
+    "$albumartist/$year - $album%aunique{albumartist album,"
+    "albumtype year label catalognum albumdisambig releasegroupdisambig "
+    "short_mbid}/$track $title"
+)
+
+FIELD_STATES = [("", ""), ("X", ""), ("X", "X"), ("X", "Y")]
+SWEEP_FIELDS = ("albumdisambig", "releasegroupdisambig", "catalognum", "label")
+
+
+def find_collisions(lib, template, worlds):
+    """Return violating pairs under the collision invariant.
+
+    A violation is EITHER two same-key siblings rendering the same
+    directory, OR any sibling rendering its PLAIN stem (the template
+    with the %aunique call stripped) — the live hazard: the other
+    sibling's sticky on-disk path IS the plain stem, so a plain-stem
+    render lands the import inside the existing album's folder
+    (Passenger, 2026-07-18)."""
+    import re as _re
+
+    tmpl = functemplate.template(template)
+    stem_tmpl = functemplate.template(
+        _re.sub(r"%aunique\{[^}]*\}", "", template))
+    bad = []
+    for a, b in worlds:
+        da = a.evaluate_template(tmpl, True).rsplit("/", 1)[0]
+        db = b.evaluate_template(tmpl, True).rsplit("/", 1)[0]
+        stem_a = a.evaluate_template(stem_tmpl, True).rsplit("/", 1)[0]
+        stem_b = b.evaluate_template(stem_tmpl, True).rsplit("/", 1)[0]
+        if da == db or da == stem_a or db == stem_b:
+            bad.append((da, db))
+    return bad
+
+
+with tempfile.TemporaryDirectory() as d:
+    bconfig["directory"] = d
+    for name, expr in ALBUM_FIELDS.items():
+        bconfig["album_fields"][name] = expr
+    bconfig["plugins"] = "inline"
+    bplugins.load_plugins()
+    lib = Library(os.path.join(d, "lib.db"), d)
+
+    worlds = []
+    n = 0
+    for states in itertools.product(FIELD_STATES, repeat=len(SWEEP_FIELDS)):
+        for year_b in (2011, 2012):
+            n += 1
+            fields_a = {f: s[0] for f, s in zip(SWEEP_FIELDS, states)}
+            fields_b = {f: s[1] for f, s in zip(SWEEP_FIELDS, states)}
+            a = Album(albumartist="Lisa Hannigan", album=f"Passenger {n}",
+                      year=2011, albumtype="album",
+                      mb_albumid="dd578a59-ef6d-46fa-9f28-1e19c456dac8",
+                      **fields_a)
+            lib.add(a)
+            b = Album(albumartist="Lisa Hannigan", album=f"Passenger {n}",
+                      year=year_b, albumtype="album",
+                      mb_albumid="5e7a6000-ce08-4e7b-9773-22a26e0a2980",
+                      **fields_b)
+            lib.add(b)
+            worlds.append((a, b))
+
+    collisions = find_collisions(lib, TEMPLATE, worlds)
+    if collisions:
+        print("SHIPPED_TEMPLATE_COLLISIONS=%d" % len(collisions))
+        print("first:", collisions[0])
+        sys.exit(1)
+    print("AUNIQUE_SHIPPED_OK worlds=%d" % len(worlds))
+
+    # Known-bad: the poisoned historical template must trip the checker.
+    old_collisions = find_collisions(lib, OLD_TEMPLATE, worlds)
+    assert old_collisions, (
+        "sweep failed to detect the known-bad empty-disambiguator "
+        "collision in the pre-fix template — the checker is toothless"
+    )
+    print("AUNIQUE_KNOWN_BAD_DETECTED=%d" % len(old_collisions))
+'''
+
+
+def _shipped_aunique_config() -> dict:
+    """Extract the shipped beets path template + inline album_fields from
+    nix/module.nix — the test patrols what production actually renders."""
+    import re
+
+    src = open(os.path.join(_REPO, "nix", "module.nix")).read()
+    m = re.search(r'default = "(\$albumartist[^"]+)";', src)
+    assert m, "paths.default template not found in nix/module.nix"
+    fields = dict(re.findall(r'album_fields\.(\w+) = "([^"]+)";', src))
+    # Fail loudly if a nix restyle stops the regex from seeing the shipped
+    # disambiguator — a vacuous sweep would keep passing while no longer
+    # exercising the production expression (review nit, PR #742).
+    assert "path_disambig" in fields, (
+        f"album_fields.path_disambig not extracted from nix/module.nix "
+        f"(got {sorted(fields)}); update the extraction regex"
+    )
+    return {"template": m.group(1), "album_fields": fields}
+
+
+class TestAuniqueCollisionContract(unittest.TestCase):
+    def test_shipped_template_never_collides_same_key_siblings(self):
+        import json as _json
+
+        proc = subprocess.run(
+            [sys.executable, "-c", _AUNIQUE_CONTRACT],
+            cwd=_REPO,
+            env={**os.environ,
+                 "PYTHONPATH": _REPO + os.pathsep + os.environ.get("PYTHONPATH", ""),
+                 "AUNIQUE_SHIPPED_CONFIG": _json.dumps(_shipped_aunique_config())},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            proc.returncode, 0,
+            f"aunique collision contract failed\n"
+            f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}",
+        )
+        self.assertIn("AUNIQUE_SHIPPED_OK", proc.stdout)
+        self.assertIn("AUNIQUE_KNOWN_BAD_DETECTED", proc.stdout)
+
+
 class TestHarnessBeets2Contract(unittest.TestCase):
     def test_real_beets_import_library_and_duplicate_action(self):
         proc = subprocess.run(
