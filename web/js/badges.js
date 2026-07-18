@@ -34,6 +34,11 @@ import { qualityLabelShort } from './util.js';
  *   different rank).
  * @property {string|null|undefined} [pipeline_status]
  *   'wanted' | 'downloading' | 'imported' | 'manual' | null
+ * @property {boolean} [pipeline_verified_lossless] - The tracked install
+ *   carries a verified-lossless proof (terminal quality identity).
+ * @property {boolean} [pipeline_provisional] - The tracked install is an
+ *   unverified lossless-source conversion (provisional import — the
+ *   pipeline is still hunting a verified lossless copy).
  */
 
 /**
@@ -59,6 +64,14 @@ export function renderStatusBadges(item) {
     const rank = (item.library_rank || '').toLowerCase();
     const cls = rank ? `badge-rank-${rank}` : 'badge-library';
     html += `<span class="badge ${cls}">in library${suffix}</span>`;
+  }
+  // Quality identity of the tracked install (issue #711 provisional
+  // surfacing): verified is terminal; provisional means an unverified
+  // lossless-source conversion the pipeline is still trying to verify.
+  if (item.pipeline_verified_lossless) {
+    html += '<span class="badge badge-verified" title="verified lossless source — search complete">verified</span>';
+  } else if (item.pipeline_provisional) {
+    html += '<span class="badge badge-provisional" title="unverified lossless-source conversion — still hunting a verified lossless copy">provisional</span>';
   }
   if (pStatus === 'wanted') html += '<span class="badge badge-wanted">wanted</span>';
   if (pStatus === 'downloading') html += '<span class="badge badge-downloading">downloading</span>';

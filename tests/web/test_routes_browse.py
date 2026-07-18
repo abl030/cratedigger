@@ -48,6 +48,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
     RELEASE_GROUP_REQUIRED_FIELDS = {
         "id", "title", "country", "date", "format", "track_count", "status",
         "in_library", "beets_album_id", "pipeline_status", "pipeline_id",
+        "pipeline_verified_lossless", "pipeline_provisional",
     }
     RELEASE_DETAIL_REQUIRED_FIELDS = {
         "id", "title", "tracks", "in_library", "beets_album_id",
@@ -876,7 +877,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
                 patch("web.server.check_beets_library", return_value={self.RELEASE_ID}), \
                 patch("web.server._beets_db", return_value=beets_db), \
                 patch("web.server.check_pipeline",
-                      return_value={self.RELEASE_ID: {"id": 42, "status": "wanted"}}):
+                      return_value={self.RELEASE_ID: {"id": 42, "status": "wanted", "verified_lossless": False, "provisional_lossless": False}}):
             mock_mb.get_release_group_releases.return_value = {"releases": [release]}
             status, data = self._get(f"/api/release-group/{self.RG_ID}")
 
@@ -1024,7 +1025,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
                 patch("web.server.check_beets_library", return_value={"21491"}), \
                 patch("web.server._beets_db", return_value=beets_db), \
                 patch("web.server.check_pipeline",
-                      return_value={"21491": {"id": 42, "status": "wanted"}}):
+                      return_value={"21491": {"id": 42, "status": "wanted", "verified_lossless": False, "provisional_lossless": False}}):
             status, data = self._get("/api/release-group/0021491")
 
         self.assertEqual(status, 200)

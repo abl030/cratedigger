@@ -38,8 +38,12 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
                    return_value={"held", "both", "bad-quality"}), \
                 patch("web.server.check_pipeline",
                       return_value={
-                          "queued": {"id": 21, "status": "wanted"},
-                          "both": {"id": 22, "status": "queued"},
+                          "queued": {"id": 21, "status": "wanted",
+                                     "verified_lossless": False,
+                                     "provisional_lossless": True},
+                          "both": {"id": 22, "status": "queued",
+                                   "verified_lossless": True,
+                                   "provisional_lossless": False},
                       }), \
                 patch("web.server._beets_db", return_value=mock_beets):
             overlay_release_rows_in_place(rows, [r["id"] for r in rows])
@@ -59,6 +63,10 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
         self.assertIsNone(by_id["queued"]["beets_album_id"])
         self.assertEqual(by_id["queued"]["pipeline_status"], "wanted")
         self.assertEqual(by_id["queued"]["pipeline_id"], 21)
+        self.assertFalse(by_id["queued"]["pipeline_verified_lossless"])
+        self.assertTrue(by_id["queued"]["pipeline_provisional"])
+        self.assertFalse(by_id["held"]["pipeline_verified_lossless"])
+        self.assertFalse(by_id["held"]["pipeline_provisional"])
 
         self.assertTrue(by_id["both"]["in_library"])
         self.assertEqual(by_id["both"]["beets_album_id"], 11)
@@ -67,6 +75,8 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
         self.assertEqual(by_id["both"]["library_rank"], "transparent")
         self.assertEqual(by_id["both"]["pipeline_status"], "queued")
         self.assertEqual(by_id["both"]["pipeline_id"], 22)
+        self.assertTrue(by_id["both"]["pipeline_verified_lossless"])
+        self.assertFalse(by_id["both"]["pipeline_provisional"])
 
         self.assertFalse(by_id["neither"]["in_library"])
         self.assertIsNone(by_id["neither"]["beets_album_id"])
