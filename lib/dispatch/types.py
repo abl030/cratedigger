@@ -215,7 +215,7 @@ class EvidenceImportGate:
 # U11: ``_build_preimport_measurement_from_evidence``,
 # ``_PREIMPORT_REJECT_DENYLIST_REASONS``, and
 # ``_route_preimport_decision_reject`` have all been folded into the unified
-# decider + reject helper. The four folder/audio-integrity facts are now
+# decider + reject helper. The five folder/audio-integrity facts are now
 # early-exit branches inside ``full_pipeline_decision_from_evidence``; the
 # unified ``_reject_import_from_evidence_decision`` below handles their
 # denylist policy alongside the existing quality-side rejects. Lifecycle
@@ -225,8 +225,9 @@ class EvidenceImportGate:
 
 # Reject reasons that come from folder/audio-integrity facts persisted on
 # ``AlbumQualityEvidence`` (formerly emitted by ``preimport_decide``). The
-# unified reject helper uses this set for shared reject and denylist routing;
-# it still honours the caller's ``requeue_on_failure`` lifecycle authority.
+# set remains the shared taxonomy for generated routing/lifecycle coverage.
+# Production routes each decision through ``dispatch_action`` and honours the
+# caller's ``requeue_on_failure`` lifecycle authority.
 _PREIMPORT_FACT_REJECT_DECISIONS = PREIMPORT_FACT_REJECTION_SCENARIOS
 
 
