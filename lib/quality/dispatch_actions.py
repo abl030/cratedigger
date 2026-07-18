@@ -77,29 +77,27 @@ def dispatch_action(decision: str) -> DispatchAction:
         return DispatchAction(record_rejection=True, denylist=True, cleanup=True)
     elif decision == "audio_corrupt":
         # U11: folder/audio-integrity reject. The source decoded as garbage —
-        # denylist the peer + clean the staged dir. Caller forces requeue
-        # (always self-heal on the four-fact rejects).
+        # denylist the peer + clean the staged dir. The caller owns whether
+        # request lifecycle should self-heal.
         return DispatchAction(record_rejection=True, denylist=True, cleanup=True)
     elif decision == "bad_audio_hash":
         # U11: folder/audio-integrity reject. The candidate matched a curated
-        # bad-audio hash — denylist the peer + clean. Caller forces requeue.
+        # bad-audio hash — denylist the peer + clean.
         return DispatchAction(record_rejection=True, denylist=True, cleanup=True)
     elif decision == "nested_layout":
         # U11: folder-shape reject (audio in subdirectories). Not a peer
-        # quality problem — no denylist. Clean the staged dir; caller forces
-        # requeue.
+        # quality problem — no denylist. Clean the staged dir.
         return DispatchAction(record_rejection=True, denylist=False, cleanup=True)
     elif decision == "empty_fileset":
         # U11: folder-shape reject (no audio files). Not a peer quality
-        # problem — no denylist. Clean the staged dir; caller forces requeue.
+        # problem — no denylist. Clean the staged dir.
         return DispatchAction(record_rejection=True, denylist=False, cleanup=True)
     elif decision == "mixed_source":
         # Mixed lossless + lossy in one folder. Peer chose to bundle lossy
         # bonus tracks alongside lossless audio — denylist them so the same
         # source doesn't burn another cycle on the same mixed bag. Clean
-        # the staged dir; caller forces requeue via
-        # ``_PREIMPORT_FACT_REJECT_DECISIONS`` so the album stays searchable
-        # for a fully-lossless source. See ``has_mixed_lossless_and_lossy``.
+        # the staged dir. Automatic callers keep the album searchable for a
+        # fully-lossless source. See ``has_mixed_lossless_and_lossy``.
         return DispatchAction(record_rejection=True, denylist=True, cleanup=True)
     elif decision == "duplicate_remove_guard_failed":
         return DispatchAction(record_rejection=True, denylist=True,

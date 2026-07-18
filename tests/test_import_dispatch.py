@@ -638,16 +638,13 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
         self.assertIsNone(row["target_format"])
 
 
-class TestRejectImportFromEvidenceDecisionForcedRequeue(unittest.TestCase):
-    """U11 invariant: the four folder/audio-integrity facts always self-heal.
+class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
+    """Every rejection honors the lifecycle authority chosen by its caller.
 
-    ``_PREIMPORT_FACT_REJECT_DECISIONS`` lists the four decisions the deleted
-    ``_route_preimport_decision_reject`` helper used to handle. After the
-    fold-in, ``_reject_import_from_evidence_decision`` is the single helper
-    for all rejects and must preserve the old "always requeue on four-fact
-    reject" rule — even when the caller passes ``requeue_on_failure=False``
-    (force-import path). Spectral/quality-side rejects (e.g., ``downgrade``)
-    honor the caller's flag normally; only the four-fact reasons override.
+    Automatic imports pass ``requeue_on_failure=True`` so a bad candidate
+    self-heals to ``wanted``. Force imports pass False because the operator's
+    ``manual`` (next-step ``unsearchable``) status must not be cleared by a
+    candidate-integrity fact.
     """
 
     FOUR_FACT_DECISIONS = ["audio_corrupt", "bad_audio_hash", "nested_layout", "empty_fileset"]
@@ -703,7 +700,7 @@ class TestRejectImportFromEvidenceDecisionForcedRequeue(unittest.TestCase):
                 detail=f"test {decision}",
                 requeue_on_failure=requeue_on_failure,
                 validation_result=None,
-                staged_path="/tmp/cratedigger-forced-requeue-test",
+                staged_path="/tmp/cratedigger-caller-lifecycle-test",
                 scenario=decision,
                 files=None,
                 source_path_cleanup_scenario=decision,
@@ -723,17 +720,15 @@ class TestRejectImportFromEvidenceDecisionForcedRequeue(unittest.TestCase):
             )
         return db
 
-    def test_four_fact_rejects_force_requeue_even_when_caller_says_no(self) -> None:
+    def test_four_fact_rejects_preserve_status_when_caller_says_no(self) -> None:
         for decision in self.FOUR_FACT_DECISIONS:
             with self.subTest(decision=decision):
                 db = self._reject(decision=decision, requeue_on_failure=False)
-                # The request must be back in 'wanted' — self-heal invariant.
                 self.assertEqual(
                     db.request(42)["status"],
-                    "wanted",
+                    "downloading",
                     f"{decision} reject with requeue_on_failure=False must "
-                    f"still self-heal the request back to 'wanted' (the "
-                    f"album is still desired; only this source is bad).",
+                    "preserve the caller-owned request status",
                 )
 
     def test_four_fact_rejects_also_requeue_when_caller_says_yes(self) -> None:
@@ -819,7 +814,7 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
             db = FakePipelineDB()
             db.seed_request(make_request_row(
                 id=42,
-                status="downloading",
+                status="manual" if force else "downloading",
                 search_filetype_override="lossless",
                 active_download_state={"files": [], "filetype": "flac"},
             ))
@@ -898,7 +893,7 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
             ),
         )
 
-    def test_force_import_fail_closed_current_analysis_self_heals(self) -> None:
+    def test_force_import_fail_closed_current_analysis_preserves_operator_status(self) -> None:
         db, outcome, ext = self._dispatch_with_current_result(
             self._failed_current_result(
                 "PermissionError: [Errno 13] Permission denied"
@@ -909,9 +904,9 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
         self._persist_failed_outcome(db, outcome)
 
         row = db.request(42)
-        self.assertEqual(row["status"], "wanted")
-        self.assertEqual(row["validation_attempts"], 1)
-        self.assertIsNotNone(row["next_retry_after"])
+        self.assertEqual(row["status"], "manual")
+        self.assertEqual(row["validation_attempts"], 0)
+        self.assertIsNone(row["next_retry_after"])
         self.assertEqual(row["search_filetype_override"], "lossless")
         self.assertEqual(db.download_logs[-1].outcome, "have_analysis_error")
         self.assertEqual(db.download_logs[-1].soulseek_username, "bad-peer")
@@ -1110,6 +1105,7 @@ class TestDispatchImport(unittest.TestCase):
                     cfg=cfg,
                     quality_gate_fn=mock_gate,
                     force=force,
+                    requeue_on_failure=not force,
                 )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -1121,13 +1117,10 @@ class TestDispatchImport(unittest.TestCase):
             "mock_gate": mock_gate,
         }
 
-    def test_operator_retained_import_decisions_requeue_like_automatic(self):
-        # Decision 19: force imports resolve through the same
-        # canonical retained-import mapping as automatic imports — the
-        # provisional lane narrows to lossless-only, transcode lanes stay on
-        # full tiers, every retained lossy source is denylisted, and nothing
-        # parks silently terminal. (These decisions map directly, so the
-        # post-import gate itself is not invoked for them.)
+    def test_operator_retained_import_decisions_record_policy_without_reopening(self):
+        # Force imports resolve through the same quality/search mapping as
+        # automatic imports, but only the operator may clear the search stop.
+        # The quality fields are recorded and the operator stop is restored.
         decisions = (
             ("provisional_lossless_upgrade", "lossless"),
             ("transcode_upgrade", None),
@@ -1144,13 +1137,24 @@ class TestDispatchImport(unittest.TestCase):
                         initial_status="manual",
                     )
                     row = result["db"].request(42)
-                    self.assertEqual(row["status"], "wanted")
+                    self.assertEqual(row["status"], "manual")
                     self.assertEqual(
                         row["search_filetype_override"], expected_override)
                     self.assertEqual(
                         [e.username for e in result["db"].denylist],
                         ["user1"])
                     result["mock_gate"].assert_not_called()
+
+    def test_force_retained_import_from_wanted_remains_wanted(self):
+        result = self._dispatch(
+            make_import_result(decision="provisional_lossless_upgrade"),
+            scenario="force_import",
+            force=True,
+            initial_status="wanted",
+        )
+        row = result["db"].request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["search_filetype_override"], "lossless")
 
     def test_import_success(self):
         imported_path = "/mnt/virtio/Music/Beets/Test Artist/2026 - Test Album"
@@ -2000,6 +2004,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         linked_spectral_bitrate: int | None = None,
         linked_spectral_subject: EvidenceSubject | None = None,
         linked_spectral_provenance: EvidenceProvenance | None = None,
+        operator_stop_status: str | None = None,
         **extra_req_fields,
     ):
         """Drive ``_check_quality_gate_core`` with a real ``AlbumInfo`` and the
@@ -2052,12 +2057,26 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         assert persisted is not None and persisted.id is not None
         db.set_request_current_evidence(42, persisted.id)
 
-        _check_quality_gate_core(
-            mb_id="test-mbid", label="Test Artist - Test Album",
-            request_id=42,
-            files=[make_download_file(username="user1", filename="01.mp3")],
-            db=db,  # type: ignore[arg-type]
-        )
+        if operator_stop_status is None:
+            _check_quality_gate_core(
+                mb_id="test-mbid", label="Test Artist - Test Album",
+                request_id=42,
+                files=[make_download_file(username="user1", filename="01.mp3")],
+                db=db,  # type: ignore[arg-type]
+            )
+        else:
+            from lib.dispatch.post_import import _run_or_stage_quality_gate
+
+            _run_or_stage_quality_gate(
+                _check_quality_gate_core,
+                None,
+                db=db,  # type: ignore[arg-type]
+                request_id=42,
+                operator_stop_status=operator_stop_status,
+                mb_id="test-mbid",
+                label="Test Artist - Test Album",
+                files=[make_download_file(username="user1", filename="01.mp3")],
+            )
 
         return db
 
@@ -2204,6 +2223,25 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         self.assertEqual(row["status"], "wanted")
         self.assertEqual(row["search_filetype_override"], QUALITY_FLAC_ONLY)
         self.assertEqual(len(db.denylist), 1)
+
+    def test_operator_stop_survives_nonterminal_quality_gate(self):
+        db = self._run_quality_gate(
+            info=self._cbr_320_unverified(),
+            linked_spectral_grade="genuine",
+            operator_stop_status="manual",
+        )
+        row = db.request(42)
+        self.assertEqual(row["status"], "manual")
+        self.assertEqual(row["search_filetype_override"], QUALITY_FLAC_ONLY)
+        self.assertEqual(len(db.denylist), 1)
+
+    def test_operator_stop_yields_to_terminal_quality_acceptance(self):
+        db = self._run_quality_gate(
+            info=self._bare_mp3_vbr_low(),
+            verified_lossless_proof=True,
+            operator_stop_status="manual",
+        )
+        self.assertEqual(db.request(42)["status"], "imported")
 
     def test_transparent_carried_source_grade_also_narrows(self):
         # Decision 17: narrowing keys on the genuine grade, never the

@@ -35,9 +35,10 @@ hair-splitting; the branches were folded into
   (`_reject_import_from_evidence_decision` in `lib/dispatch/outcome_actions.py`)
   with one denylist policy. The
   four folder/audio-integrity reject reasons are listed in
-  `_PREIMPORT_FACT_REJECT_DECISIONS`; that frozenset gives them the
-  "always self-heal back to wanted" invariant (force/manual paths normally
-  pass `requeue_on_failure=False`, but the four facts override).
+  `_PREIMPORT_FACT_REJECT_DECISIONS`; that frozenset makes automation
+  requeue them to `wanted` even when a narrower reject path would otherwise
+  retain the row. Operator-started jobs preserve the captured operator search
+  stop while recording the same reject facts, audit, and denylist effects.
 
 **The album test set is the contract.** Live-bug scenarios go in
 `tests/test_quality_classification.py::TestLiveBugReproductions` (one test

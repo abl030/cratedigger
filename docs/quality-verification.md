@@ -410,7 +410,7 @@ genuine grade may still participate in the documented narrowing policy, but it
 is weak spectral evidence, never proof of bitrate or verified-lossless
 acquisition.
 
-**Missing or incomplete current evidence self-heals at the failure point.** A
+**Missing or incomplete current evidence converges at the failure point.** A
 current-evidence row's spectral scan and on-disk V0 research normally
 complete during import preview — but a request whose downloads always
 fail never reaches preview, so its HAVE snapshot (and therefore the
@@ -429,7 +429,10 @@ re-probing an attempted snapshot, and refusing stale on-disk state. Adapter
 or backfill failures and actual measurement work consume the per-cycle
 `CratediggerContext.evidence_enrichment_budget`; complete or authoritatively
 absent library copies cost nothing. Over time the failed-download cohort's
-evidence converges without delaying or bypassing download cleanup.
+evidence converges without delaying or bypassing download cleanup. Automation
+failure finalizers also reset the request to `wanted`; operator-started import
+jobs preserve their captured search-stop status while recording the same
+evidence and audit outcomes.
 
 **A blank `source_path` is policy-incomplete.** Every enrichment
 helper verifies the scanned path against the row's recorded

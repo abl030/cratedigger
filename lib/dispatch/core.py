@@ -1,7 +1,7 @@
 """Core import dispatch — the import_one.py orchestration state machine.
 
-``dispatch_import_core`` is the funnel every import path (auto / force /
-manual) runs through: acquire the RELEASE advisory lock, load evidence,
+``dispatch_import_core`` is the funnel every import path (automatic and
+force) runs through: acquire the RELEASE advisory lock, load evidence,
 run the subprocess, and dispatch on the decision.
 ``cleanup_disambiguation_orphans`` and ``_cleanup_staged_dir`` are looked
 up here (tests patch them on this module). The post-import search-policy
@@ -116,7 +116,17 @@ def dispatch_import_core(
 
     source_dirs = normalize_source_dirs(source_dirs or [])
 
-    mode = outcome_label.replace("_", "-").upper()
+    request_at_start = db.get_request(request_id)
+    operator_stop_status = (
+        "manual"
+        if request_at_start is not None
+        and request_at_start.get("status") == "manual"
+        else None
+    )
+
+    # Operation identity is distinct from the eventual download-log outcome:
+    # an automatic attempt can still reject or fail after this start message.
+    mode = "FORCE-IMPORT" if force else "AUTO-IMPORT"
     dist_label = f"{distance:.4f}" if distance is not None else "unmeasured"
     logger.info(f"{mode}: {label} "
                 f"(source=request, dist={dist_label})")
@@ -134,15 +144,15 @@ def dispatch_import_core(
 
     # Acquire the RELEASE (per-MBID) advisory lock for the duration of
     # the ``import_one.py`` subprocess. This is the funnel every path
-    # goes through (auto, force, manual), so the lock here closes the
+    # goes through (automatic and force), so the lock here closes the
     # cross-process race that could produce Palo Santo-*class* data loss
     # (issues #132 P1 / #133) for every entry point. The actual 04-20
     # Palo Santo incident had a different proximate cause (YAML misconfig —
     # see CLAUDE.md § Resolved canonical RCs); this lock defends against
     # an independent race vector the original fix left open.
     # Auto path: ``_handle_valid_result`` has already acquired RELEASE
-    # outer — this acquisition is a session-reentrant no-op. Force/
-    # manual path: this is the first RELEASE acquisition, nested inside
+    # outer — this acquisition is a session-reentrant no-op. Force path:
+    # this is the first RELEASE acquisition, nested inside
     # the IMPORT lock held by ``dispatch_import_from_db``.
     # See ``docs/advisory-locks.md`` for the full rationale, the
     # ordering rules, and the call-site index.
@@ -253,12 +263,17 @@ def dispatch_import_core(
                     import_job_id=candidate_import_job_id,
                     source_download_log_id=candidate_download_log_id,
                     cooled_down_users=cooled_down_users,
+                    requeue_to_wanted=requeue_on_failure,
                 )
                 return DispatchOutcome(
                     success=False,
                     message=(
-                        "Installed HAVE analysis failed; request remains "
-                        "wanted and a future attempt will retry"
+                        "Installed HAVE analysis failed; "
+                        + (
+                            "request returned to wanted for a future retry"
+                            if requeue_on_failure
+                            else "request lifecycle was preserved"
+                        )
                     ),
                     code="have_analysis_error",
                     terminal_outcome=(
@@ -313,10 +328,11 @@ def dispatch_import_core(
                 # U11: ``full_pipeline_decision_from_evidence`` is the single
                 # decision function. Folder/audio-integrity facts
                 # (audio_corrupt / bad_audio_hash / nested_layout /
-                # empty_fileset) are early-exit rejects at the top of that
-                # function — the unified reject helper below recognises them
-                # via ``_PREIMPORT_FACT_REJECT_DECISIONS`` and forces
-                # ``requeue=True`` so the parent request self-heals.
+                # empty_fileset / mixed_source) are early-exit rejects at the
+                # top of that function. They still use the unified reject
+                # helper below, which honours caller lifecycle authority:
+                # automation self-heals; force imports preserve operator
+                # status.
                 facts = AlbumQualityEvidenceDecisionFacts(
                     verified_lossless_target=verified_lossless_target or None,
                     target_format=target_format,
@@ -805,6 +821,7 @@ def dispatch_import_core(
                     search_action=search_action,
                     mark_done=action.mark_done,
                     new_bitrate=new_br,
+                    operator_stop_status=operator_stop_status,
                 )
 
                 # Authority: "D19 — Force-import overrides the beets distance
@@ -813,13 +830,15 @@ def dispatch_import_core(
                 # Authority: "The verified-lossless proof lock is absolute
                 # for every import mode."
                 # https://github.com/abl030/cratedigger/issues/711#issuecomment-5000425284
-                # Operator imports therefore run the identical post-import
-                # policy path as automatic imports; Replace/re-request is the
-                # only way back in once proof exists.
+                # Operator imports run the identical quality/search policy.
+                # Lifecycle application restores a captured operator search
+                # stop when that policy would otherwise reopen acquisition;
+                # terminal proof acceptance remains imported.
                 if action.run_quality_gate:
                     terminal_outcome = _run_or_stage_quality_gate(
                         quality_gate_fn,
                         terminal_outcome,
+                        operator_stop_status=operator_stop_status,
                         mb_id=mb_release_id,
                         label=label,
                         request_id=request_id,

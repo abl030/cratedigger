@@ -367,7 +367,7 @@ def _handle_measurement_failed(
     """Persist a measurement failure through one DB-owned terminal bundle.
 
     Request-backed jobs atomically commit the preview fields, failed job,
-    request self-heal, mandatory audit, and any denylist writes. A malformed
+    request lifecycle action, mandatory audit, and any denylist writes. A malformed
     orphan job with no request row has no legal ``download_log`` owner, so it
     remains a job-only precondition failure.
 
@@ -381,7 +381,7 @@ def _handle_measurement_failed(
     if payload is None:
         # Defensive: every measurement_failed result must carry a payload.
         # Synthesize one from the result fields so we never fall through
-        # without firing the self-heal.
+        # without firing the terminal lifecycle bundle.
         payload = MeasurementFailure(
             reason="measurement_crashed",
             detail=result.detail or result.reason or "measurement_failed",
@@ -403,6 +403,7 @@ def _handle_measurement_failed(
         payload=payload,
         import_result=result.import_result,
         preview_result=preview_payload,
+        requeue_to_wanted=job.job_type == IMPORT_JOB_AUTOMATION,
     )
     refreshed = getattr(db, "get_import_job", None)
     if callable(refreshed):
@@ -542,8 +543,8 @@ def process_claimed_preview_job(
     except Exception as exc:
         logger.exception("Import job %s preview crashed", job.id)
         # Worker-mode preview should not raise — but if it does, route the
-        # crash through the same self-healing helper so the parent request
-        # gets finalized to ``wanted`` and the job is marked failed.
+        # crash through the same lifecycle helper so automation is not
+        # stranded and operator state is not overwritten.
         crash_payload = MeasurementFailure(
             reason="measurement_crashed",
             detail=f"{type(exc).__name__}: {exc}",
@@ -569,7 +570,7 @@ def process_claimed_preview_job(
         # Belt-and-braces: confirm candidate evidence is actually
         # persisted on disk before marking importable. If the
         # persistence stage was skipped or partial, fall back to
-        # measurement_failed so the parent request still self-heals.
+        # measurement_failed so caller lifecycle authority still applies.
         evidence_ready, evidence_reason = _candidate_evidence_ready_for_job(
             db,
             job,
@@ -601,8 +602,8 @@ def process_claimed_preview_job(
         return _handle_measurement_failed(db, job, fallback_result)
 
     # Defensive: anything else (including legacy verdicts in case of bugs)
-    # routes through measurement_failed so the parent request self-heals
-    # rather than getting stuck.
+    # routes through measurement_failed so caller lifecycle authority applies
+    # and the job does not get stuck.
     logger.warning(
         "Import job %s preview returned unexpected verdict %r; treating as measurement_failed",
         job.id,

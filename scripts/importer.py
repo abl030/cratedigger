@@ -252,17 +252,17 @@ def _dispatch_outcome_from_completion(
     report the same four outcomes back to the importer queue; this is the
     single conversion so the two callers don't duplicate the match.
 
-    FORCE and MANUAL import jobs deliberately do NOT route through this
-    mapper (issue #510 considered and rejected folding all four job types
-    in here): they never produce a ``CompletionResult`` at all.
-    ``execute_import_job`` sends them straight to
+    FORCE import jobs deliberately do NOT route through this mapper (issue
+    #510 considered and rejected folding all three job types in here): they
+    never produce a ``CompletionResult`` at all. ``execute_import_job`` sends
+    them straight to
     ``dispatch_import_from_db`` -> ``dispatch_import_core`` — a
     structurally different decision tree (manifest guard, evidence gate,
     quality gate) that already returns ``DispatchOutcome`` directly from
     many branches. Routing them through here would mean wrapping that
     already-terminal ``DispatchOutcome`` in a synthetic completion tag
     just to unwrap it again a line later — ceremony, not dedup. The
-    mapper that DOES unify all four job types is one layer up:
+    mapper that DOES unify all three job types is one layer up:
     ``process_claimed_job`` (+ ``_job_result``) converts any
     ``DispatchOutcome`` — regardless of which job-type executor produced
     it — into the ``ImportJob``'s terminal queue status.
@@ -510,8 +510,8 @@ def process_claimed_job(
 ) -> ImportJob | None:
     """Execute a claimed job and persist its terminal queue status.
 
-    This is the single queue-outcome mapper all four job types (automation,
-    force, manual, youtube) route through: whichever job-type executor
+    This is the single queue-outcome mapper all three job types (automation,
+    force, youtube) route through: whichever job-type executor
     produced ``outcome``, the success/requeue/failure -> terminal
     ``ImportJob`` status conversion below is one shared path (see
     ``_dispatch_outcome_from_completion``'s docstring for why the

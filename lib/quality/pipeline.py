@@ -1092,8 +1092,9 @@ def full_pipeline_decision_from_evidence(
         preimport_mixed_source: str | None = None,
         denylisted: bool,
     ) -> dict[str, Any]:
-        # Folder/audio-integrity rejects always self-heal. Caller identity is
-        # deliberately absent from the quality reducer.
+        # The acquisition verdict remains wanted. Caller identity is absent
+        # from this reducer; the dispatch boundary decides whether that verdict
+        # may mutate an operator-owned request status.
         return {
             "preimport_audio": preimport_audio,
             "preimport_nested": preimport_nested,

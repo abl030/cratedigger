@@ -815,10 +815,13 @@ def _classify(
             if diagnostics.failure_category
             else "unknown analyser failure"
         )
-        verdict = (
-            f"Installed HAVE analysis failed ({category}). "
-            "Request remains wanted; a future download will retry normally."
-        )
+        if entry.request_status == "wanted":
+            lifecycle = "Search remains open; a future download will retry."
+        elif entry.request_status in {"manual", "unsearchable"}:
+            lifecycle = "Operator search stop remains in place."
+        else:
+            lifecycle = "The request lifecycle was preserved."
+        verdict = f"Installed HAVE analysis failed ({category}). {lifecycle}"
         return _Classification(
             "Environment failure", "badge-warn", "#a86f20", verdict,
         )

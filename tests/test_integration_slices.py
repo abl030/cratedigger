@@ -1902,10 +1902,9 @@ class TestForceImportSlice(unittest.TestCase):
 
         self.assertTrue(result.success)
         row = db.request(42)
-        # Decision 19: a force-import runs the identical post-import gate;
-        # an unverified retained copy keeps searching — never silently
-        # terminal.
-        self.assertEqual(row["status"], "wanted")
+        # Decision 19 keeps the quality/search policy identical; lifecycle
+        # application restores the operator-owned search stop.
+        self.assertEqual(row["status"], "manual")
         # #550 defect #4: force import bypasses the beets distance check —
         # no measurement exists, so the write is NULL (was a fabricated
         # 0.0), overwriting the stale 0.31 seeded above.
@@ -6358,14 +6357,14 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
         self.assertEqual(len(db.denylist), 0)
 
 
-class TestU5PreviewWorkerSelfHealSlice(unittest.TestCase):
-    """End-to-end slice: U5 preview-worker emits measurement_failed → self-heal.
+class TestU5PreviewWorkerLifecycleSlice(unittest.TestCase):
+    """End-to-end slice: U5 preview-worker emits measurement_failed.
 
     Covers AE3 (nested), AE4 (empty), AE5 (snapshot stale), AE6 (source
     vanished) at the worker level: the worker claims a job, preview returns
     ``verdict='measurement_failed'`` with a typed ``MeasurementFailure``
-    payload, and the worker routes it through U4's self-healing helper so the
-    parent request transitions to ``wanted`` and the job is marked failed
+    payload. Force-preview failures preserve the operator-owned request
+    status while the job is marked failed
     with ``preview_status='measurement_failed'``.
     """
 
@@ -6377,7 +6376,7 @@ class TestU5PreviewWorkerSelfHealSlice(unittest.TestCase):
         )
         db.seed_request(make_request_row(
             id=request_id,
-            status="downloading",
+            status="manual",
             mb_release_id="mbid-u5",
         ))
         download_log_id = db.log_download(
@@ -6397,9 +6396,9 @@ class TestU5PreviewWorkerSelfHealSlice(unittest.TestCase):
         )
         return db.claim_next_import_preview_job(worker_id="preview")
 
-    def test_ae6_source_vanished_self_heals_request_to_wanted(self):
+    def test_ae6_source_vanished_preserves_operator_status(self):
         """AE6: ffmpeg ENOENT during measurement → measurement_failed,
-        request → wanted, job → failed, download_log carries the typed
+        request remains manual, job → failed, download_log carries the typed
         payload."""
         from lib.import_preview import ImportPreviewResult
         from lib.quality import MeasurementFailure
@@ -6436,8 +6435,7 @@ class TestU5PreviewWorkerSelfHealSlice(unittest.TestCase):
         # Worker surface: preview_status reflects the new state, job failed.
         self.assertEqual(updated.preview_status, "measurement_failed")
         self.assertEqual(updated.status, "failed")
-        # U4 self-heal: request → wanted, download_log carries payload.
-        self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertEqual(db.request(42)["status"], "manual")
         # Two download_log rows: the original rejected entry + the new
         # measurement_failed one.
         outcomes = [log.outcome for log in db.download_logs]
@@ -6449,9 +6447,9 @@ class TestU5PreviewWorkerSelfHealSlice(unittest.TestCase):
         self.assertEqual(decoded["reason"], "source_vanished")
         self.assertEqual(decoded["source_path"], "/tmp/u5-vanished")
 
-    def test_ae5_snapshot_stale_self_heals(self):
+    def test_ae5_snapshot_stale_preserves_operator_status(self):
         """AE5: snapshot mismatch after retry → measurement_failed,
-        request → wanted."""
+        request remains manual."""
         from lib.import_preview import ImportPreviewResult
         from lib.quality import MeasurementFailure
         from scripts import import_preview_worker
@@ -6485,7 +6483,7 @@ class TestU5PreviewWorkerSelfHealSlice(unittest.TestCase):
 
         assert updated is not None
         self.assertEqual(updated.preview_status, "measurement_failed")
-        self.assertEqual(db.request(43)["status"], "wanted")
+        self.assertEqual(db.request(43)["status"], "manual")
 
     def test_request_not_found_no_finalize_subcase(self):
         """request_id=None subcase: the self-heal helper raises (the
@@ -6624,16 +6622,16 @@ class TestU5PreviewEvidenceReadySlice(unittest.TestCase):
 
 
 class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
-    """U6 integration slices: importer dispatch wires preimport_decide.
+    """U6 integration slices: force dispatch wires preimport decisions.
 
     Each slice seeds an ``import_jobs`` row with persisted candidate
     ``AlbumQualityEvidence`` carrying a reject-shaped U1 fact
     (``audio_corrupt``, nested ``folder_layout``, ``audio_file_count=0``,
     suspect spectral), drives ``dispatch_import_from_db`` (the importer's
-    entry point), and asserts the U4 self-healing side effects fire:
+    entry point), and asserts the rejection side effects fire:
 
       * ``download_log`` row with the reject scenario and validation_result
-      * request → ``wanted`` (with attempt-counter bump)
+      * operator-owned request status stays ``manual``
       * beets is NEVER touched (``sp.run`` is asserted not-called)
       * staged dir cleanup happens for auto-import scenarios
 
@@ -6813,9 +6811,9 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             pipeline_db_enabled=True,
         )
 
-    def test_audio_corrupt_evidence_routes_through_self_heal(self):
+    def test_audio_corrupt_evidence_preserves_operator_status(self):
         """AE2: candidate evidence with audio_corrupt=True → preimport_decide
-        rejects → request → wanted, download_log carries audio_corrupt scenario,
+        rejects without clearing manual, download_log carries the scenario,
         beets (sp.run) is never invoked."""
         import msgspec
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
@@ -6887,10 +6885,10 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         self.assertEqual(
             ext.run.call_count, 0,
             "beets import_one.py must not run when preimport_decide rejects")
-        # Self-heal: request → wanted with attempt bump.
+        # Force rejection must not clear the operator-owned search short-circuit.
         row = db.request(42)
-        self.assertEqual(row["status"], "wanted")
-        self.assertEqual(row["validation_attempts"], 1)
+        self.assertEqual(row["status"], "manual")
+        self.assertEqual(row["validation_attempts"], 0)
         # download_log row records the rejection scenario.
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
         self.assertIn(("rejected", "audio_corrupt"), outcomes)
@@ -6904,8 +6902,8 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             audit,
         )
 
-    def test_nested_layout_evidence_routes_through_self_heal(self):
-        """AE3: folder_layout='nested' → preimport_decide rejects → self-heal."""
+    def test_nested_layout_evidence_preserves_operator_status(self):
+        """AE3: nested evidence rejects without clearing manual status."""
         from lib.quality_evidence import snapshot_audio_files
 
         db = FakePipelineDB()
@@ -6946,22 +6944,21 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         self.assertIn("nested_layout", result.message or "")
         self.assertEqual(ext.run.call_count, 0)
         row = db.request(43)
-        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["status"], "manual")
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
         self.assertIn(("rejected", "nested_layout"), outcomes)
         # nested_layout is a folder-shape problem, not a peer-quality problem
         # — denylisting the peer would be unfair.
         self.assertEqual(len(db.denylist), 0)
 
-    def test_empty_fileset_evidence_routes_through_self_heal(self):
+    def test_empty_fileset_evidence_preserves_operator_status(self):
         """AE4 (issue #387): an empty source (0 audio files) with no request
-        track rows must self-heal, not stick.
+        track rows must reject without clearing operator-owned status.
 
         The untracked-audio guard no longer hard-rejects an empty source —
         it returns None so the import reaches the canonical ``empty_fileset``
         early-exit in ``full_pipeline_decision_from_evidence``, which
-        self-heals the request back to ``wanted`` (R20). ``empty_fileset``
-        is a documented "always self-heal" integrity fact.
+        rejects the candidate through the shared evidence decision.
         """
         db = FakePipelineDB()
         cfg = self._common_cfg()
@@ -6995,21 +6992,21 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         self.assertIn("empty_fileset", result.message or "")
         self.assertEqual(ext.run.call_count, 0)
         row = db.request(44)
-        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["status"], "manual")
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
         self.assertIn(("rejected", "empty_fileset"), outcomes)
         # empty_fileset is a missing-audio fault, not a peer-quality problem —
         # denylisting the peer would be unfair.
         self.assertEqual(len(db.denylist), 0)
 
-    def test_empty_fileset_with_track_rows_routes_through_self_heal(self):
+    def test_empty_fileset_with_track_rows_preserves_operator_status(self):
         """AE4 (issue #387): the auto-import shape — a ``source='request'``
         row that DOES carry track rows but stages 0 audio files.
 
         Previously the guard rejected with "source has 0 audio files but
         expects N" before the evidence decision ran, stalling the request.
         Now the empty source flows to the canonical ``empty_fileset``
-        self-heal regardless of track rows.
+        rejection regardless of track rows.
         """
         db = FakePipelineDB()
         cfg = self._common_cfg()
@@ -7044,7 +7041,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         self.assertIn("empty_fileset", result.message or "")
         self.assertEqual(ext.run.call_count, 0)
         row = db.request(46)
-        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["status"], "manual")
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
         self.assertIn(("rejected", "empty_fileset"), outcomes)
 
@@ -7346,7 +7343,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
         )
         db.seed_request(make_request_row(
             id=request_id,
-            status="downloading",
+            status="manual",
             mb_release_id=f"mbid-bocfix-{request_id}",
             artist_name="Boards of Canada",
             album_title="Geogaddi",
@@ -7494,8 +7491,8 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             assert persisted is not None
             self.assertEqual(persisted.measurement.spectral_grade, "genuine")
 
-    def test_flac_preview_spectral_error_self_heals_to_wanted(self):
-        """A failed lossless scan aborts before harness and remains wanted."""
+    def test_flac_preview_spectral_error_preserves_operator_status(self):
+        """A failed lossless scan aborts without clearing the operator stop."""
         from lib.import_preview import measure_and_persist_candidate_evidence
         from scripts import import_preview_worker
 
@@ -7551,7 +7548,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             assert updated is not None
             self.assertEqual(updated.preview_status, "measurement_failed")
             self.assertEqual(updated.status, "failed")
-            self.assertEqual(db.request(41)["status"], "wanted")
+            self.assertEqual(db.request(41)["status"], "manual")
             failures = [
                 log for log in db.download_logs
                 if log.outcome == "measurement_failed"
@@ -7707,7 +7704,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             # The non-quality failure is explicit in the audit trail.
             outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
             self.assertIn(("have_analysis_error", "have_analysis_error"), outcomes)
-            self.assertEqual(db.request(42)["status"], "wanted")
+            self.assertEqual(db.request(42)["status"], "manual")
 
     def test_clean_upgrade_persists_evidence_and_importer_accepts(self):
         """Happy path: suspect spectral but a clear bitrate upgrade.
@@ -7854,7 +7851,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             assert persisted is not None
             self.assertTrue(persisted.audio_corrupt)
 
-            # Drive the importer and assert reject + self-heal.
+            # Drive the importer and assert reject + lifecycle preservation.
             from lib.dispatch import dispatch_import_from_db
             beets_info_no_path = AlbumInfo(
                 album_id=1, track_count=10, min_bitrate_kbps=192,
@@ -7881,7 +7878,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             self.assertEqual(result.code, "have_analysis_error")
             self.assertIn("Installed HAVE analysis failed", result.message or "")
             self.assertEqual(ext.run.call_count, 0)
-            self.assertEqual(db.request(44)["status"], "wanted")
+            self.assertEqual(db.request(44)["status"], "manual")
             outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
             self.assertIn(("have_analysis_error", "have_analysis_error"), outcomes)
 

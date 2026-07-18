@@ -233,6 +233,22 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         r = self._dispatch(outcome_label="force_import")
         self.assertEqual(r["db"].download_logs[0].outcome, "force_import")
 
+    def test_start_log_names_automatic_operation_not_eventual_outcome(self):
+        with self.assertLogs("cratedigger", level="INFO") as captured:
+            self._dispatch(force=False, outcome_label="success")
+        self.assertTrue(any(
+            "AUTO-IMPORT: Test Artist - Test Album" in message
+            for message in captured.output
+        ))
+
+    def test_start_log_names_force_operation(self):
+        with self.assertLogs("cratedigger", level="INFO") as captured:
+            self._dispatch(force=True, outcome_label="force_import")
+        self.assertTrue(any(
+            "FORCE-IMPORT: Test Artist - Test Album" in message
+            for message in captured.output
+        ))
+
     # --- Downgrade prevention ---
 
     def test_downgrade_prevented(self):

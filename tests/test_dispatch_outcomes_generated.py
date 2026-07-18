@@ -4,7 +4,7 @@
 Hypothesis-driven properties over the importer dispatch/outcome layer:
 ``lib/dispatch/core.py::dispatch_import_core`` (the funnel every import path
 runs through) and ``lib/dispatch/outcome_actions.py::_reject_import_from_evidence_decision``
-(the unified reject helper that owns the U11 forced-requeue override).
+(the unified reject helper that honors caller-owned lifecycle authority).
 
 Two harnesses, both lifted verbatim from the established hand-written
 recipes (no new scaffolding):
@@ -16,7 +16,7 @@ recipes (no new scaffolding):
   feed a generated ``ImportResult`` decision (or ``None`` for the
   "no JSON" crash path) into the real ``dispatch_import_core``.
 * ``_reject_via_evidence_decision`` mirrors
-  ``tests/test_import_dispatch.py::TestRejectImportFromEvidenceDecisionForcedRequeue._reject`` —
+  ``tests/test_import_dispatch.py::TestRejectImportFromEvidenceDecisionCallerLifecycle._reject`` —
   drives the real ``_reject_import_from_evidence_decision`` directly with a
   generated ``decision`` string, generalizing that class's 4-decision
   hand-written table to the FULL production
@@ -173,7 +173,12 @@ def dispatch_worlds(draw) -> DispatchWorld:
     )
 
 
-def _run_dispatch(world: DispatchWorld) -> dict:
+def _run_dispatch(
+    world: DispatchWorld,
+    *,
+    initial_status: str = "downloading",
+    force: bool = False,
+) -> dict:
     """Established recipe (mirrors
     ``tests/test_dispatch_core.py::TestDispatchCoreOrchestration._dispatch``)
     for driving the REAL ``dispatch_import_core`` with a generated decision
@@ -194,7 +199,7 @@ def _run_dispatch(world: DispatchWorld) -> dict:
 
     db = FakePipelineDB()
     db.seed_request(make_request_row(
-        id=42, status="downloading",
+        id=42, status=initial_status,
         min_bitrate=180, current_spectral_bitrate=128,
         active_download_state={"files": [], "filetype": "mp3"},
     ))
@@ -218,7 +223,8 @@ def _run_dispatch(world: DispatchWorld) -> dict:
                 db=db,  # type: ignore[arg-type]
                 dl_info=dl_info,
                 distance=0.05,
-                scenario="strong_match",
+                scenario="force_import" if force else "strong_match",
+                force=force,
                 files=[MagicMock(username=world.source_username or "user1",
                                  filename="01 - Track.mp3")],
                 cfg=cfg,
@@ -240,7 +246,7 @@ def _reject_via_evidence_decision(
     distance: float | None = 0.0,
 ) -> FakePipelineDB:
     """Established recipe (mirrors
-    ``tests/test_import_dispatch.py::TestRejectImportFromEvidenceDecisionForcedRequeue._reject``)
+    ``tests/test_import_dispatch.py::TestRejectImportFromEvidenceDecisionCallerLifecycle._reject``)
     for driving the REAL ``_reject_import_from_evidence_decision`` directly
     with a generated ``decision`` string.
 
@@ -483,7 +489,7 @@ def _run_have_analysis_abort(
     db = FakePipelineDB()
     db.seed_request(make_request_row(
         id=42,
-        status="downloading",
+        status="manual" if mode == "force" else "downloading",
         search_filetype_override=search_override,
         active_download_state={"files": [], "filetype": "flac"},
     ))
@@ -654,20 +660,17 @@ def assert_dispatch_outcome_matches_routing(
             "for this outcome")
 
 
-def assert_preimport_fact_always_self_heals(
-    decision: str, db: FakePipelineDB,
+def assert_preimport_fact_honors_caller_flag(
+    decision: str, requeue_on_failure: bool, db: FakePipelineDB,
 ) -> None:
-    """U11 invariant: folder/audio-integrity facts fire upstream of any
-    beets mutation and upstream of any operator intent — the parent request
-    must always self-heal back to 'wanted', regardless of the caller's
-    ``requeue_on_failure`` flag (force-import passes False)."""
+    """Integrity rejection preserves operator-owned search state on force."""
     status = db.request(42)["status"]
-    if status != "wanted":
+    expected = "wanted" if requeue_on_failure else "downloading"
+    if status != expected:
         raise AssertionError(
             f"preimport-fact reject {decision!r} left status={status!r}, "
-            "want 'wanted' (U11 forced-requeue override must always "
-            "self-heal — the album is still desired, only this source "
-            "is bad)")
+            f"want {expected!r} for requeue_on_failure="
+            f"{requeue_on_failure}")
 
 
 def assert_beets_distance_round_trips(
@@ -747,15 +750,18 @@ def assert_verified_lossless_lock_preserves_imported(db: FakePipelineDB) -> None
 def assert_have_analysis_abort_is_non_quality(
     db: FakePipelineDB,
     *,
+    mode: str,
     expected_search_override: str | None,
 ) -> None:
-    """#711 invariant: analysis failure self-heals without quality policy."""
+    """Analysis failure preserves caller lifecycle without quality policy."""
 
     assert_download_log_row_created(db)
     row = db.request(42)
-    if row["status"] != "wanted":
+    expected_status = "wanted" if mode == "auto" else "manual"
+    if row["status"] != expected_status:
         raise AssertionError(
-            f"HAVE-analysis abort left status={row['status']!r}, want 'wanted'"
+            f"HAVE-analysis abort left status={row['status']!r}, "
+            f"want {expected_status!r} for {mode}"
         )
     if row["search_filetype_override"] != expected_search_override:
         raise AssertionError(
@@ -771,9 +777,33 @@ def assert_have_analysis_abort_is_non_quality(
         raise AssertionError(
             "HAVE-analysis abort did not persist outcome='have_analysis_error'"
         )
-    if row["validation_attempts"] != 1 or row["next_retry_after"] is None:
+    expected_attempts = 1 if mode == "auto" else 0
+    retry_state_wrong = (
+        row["next_retry_after"] is None
+        if mode == "auto"
+        else row["next_retry_after"] is not None
+    )
+    if row["validation_attempts"] != expected_attempts or retry_state_wrong:
         raise AssertionError(
-            "HAVE-analysis abort missed ordinary validation backoff bookkeeping"
+            "HAVE-analysis abort applied the wrong retry bookkeeping"
+        )
+
+
+def assert_operator_retained_lifecycle(
+    db: FakePipelineDB,
+    *,
+    initial_status: str,
+    expected_override: str | None,
+) -> None:
+    row = db.request(42)
+    if row["status"] != initial_status:
+        raise AssertionError(
+            f"retained force import changed lifecycle from {initial_status!r} "
+            f"to {row['status']!r}"
+        )
+    if row["search_filetype_override"] != expected_override:
+        raise AssertionError(
+            "retained force import failed to record canonical search policy"
         )
 
 
@@ -796,23 +826,20 @@ class TestGeneratedDispatchOutcomes(unittest.TestCase):
             world, outcome["db"], outcome["result"])
 
 
-class TestGeneratedEvidenceRejectSelfHeal(unittest.TestCase):
-    """Properties over ``_reject_import_from_evidence_decision`` — the U11
-    forced-requeue override, generalized to the FULL production
-    ``_PREIMPORT_FACT_REJECT_DECISIONS`` frozenset (5 entries; the
-    hand-written ``TestRejectImportFromEvidenceDecisionForcedRequeue`` table
-    only covers 4 — it is missing ``mixed_source``)."""
+class TestGeneratedEvidenceRejectLifecycle(unittest.TestCase):
+    """Every evidence rejection honors the caller lifecycle flag."""
 
     @given(decision=st.sampled_from(sorted(_PREIMPORT_FACT_REJECT_DECISIONS)),
            requeue_on_failure=st.booleans(),
            new_min_bitrate=_bitrates())
-    def test_preimport_facts_always_self_heal(
+    def test_preimport_facts_honor_caller_flag(
             self, decision, requeue_on_failure, new_min_bitrate):
         db = _reject_via_evidence_decision(
             decision=decision, requeue_on_failure=requeue_on_failure,
             new_min_bitrate=new_min_bitrate)
         assert_download_log_row_created(db)
-        assert_preimport_fact_always_self_heals(decision, db)
+        assert_preimport_fact_honors_caller_flag(
+            decision, requeue_on_failure, db)
 
     @given(decision=st.sampled_from(_CALLER_CONTROLLED_QUALITY_REJECTS),
            requeue_on_failure=st.booleans(),
@@ -938,7 +965,7 @@ class TestGeneratedHaveAnalysisAbortLifecycle(unittest.TestCase):
         search_override=st.sampled_from((None, "lossless", "lossless,mp3 v0")),
         username=st.sampled_from((None, "user1", "user2")),
     )
-    def test_abort_always_wanted_never_denylisted_or_narrowed(
+    def test_abort_preserves_caller_lifecycle_never_denylisted_or_narrowed(
         self,
         mode,
         raw_error,
@@ -953,7 +980,44 @@ class TestGeneratedHaveAnalysisAbortLifecycle(unittest.TestCase):
         )
         assert_have_analysis_abort_is_non_quality(
             db,
+            mode=mode,
             expected_search_override=search_override,
+        )
+
+
+class TestGeneratedOperatorRetainedLifecycle(unittest.TestCase):
+    """Nonterminal quality policy never clears the starting search state."""
+
+    @given(
+        decision=st.sampled_from(tuple(sorted(_AUTOMATIC_RETAINED_ACTIONS))),
+        initial_status=st.sampled_from(("wanted", "manual")),
+    )
+    def test_retained_policy_preserves_starting_search_lifecycle(
+        self,
+        decision,
+        initial_status,
+    ):
+        expected_override = _AUTOMATIC_RETAINED_ACTIONS[decision][1]
+        world = DispatchWorld(
+            mode="decision",
+            decision=decision,
+            new_min_bitrate=245,
+            prev_min_bitrate=192,
+            spectral_grade="genuine",
+            spectral_bitrate=None,
+            was_converted=False,
+            requeue_on_failure=False,
+            source_username="user1",
+        )
+        outcome = _run_dispatch(
+            world,
+            initial_status=initial_status,
+            force=True,
+        )
+        assert_operator_retained_lifecycle(
+            outcome["db"],
+            initial_status=initial_status,
+            expected_override=expected_override,
         )
 
 
@@ -1020,11 +1084,12 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_dispatch_outcome_matches_routing(world, db, outcome)
 
-    def test_self_heal_checker_trips_when_status_not_wanted(self):
+    def test_preimport_caller_flag_checker_trips_when_flag_ignored(self):
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(id=42, status="wanted"))
         with self.assertRaises(AssertionError):
-            assert_preimport_fact_always_self_heals("audio_corrupt", db)
+            assert_preimport_fact_honors_caller_flag(
+                "audio_corrupt", False, db)
 
     def test_quality_side_checker_trips_when_flag_ignored(self):
         db = FakePipelineDB()
@@ -1051,7 +1116,22 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_have_analysis_abort_is_non_quality(
                 db,
+                mode="auto",
                 expected_search_override=None,
+            )
+
+    def test_operator_retained_checker_trips_when_stop_is_cleared(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="wanted",
+            search_filetype_override="lossless",
+        ))
+        with self.assertRaises(AssertionError):
+            assert_operator_retained_lifecycle(
+                db,
+                initial_status="manual",
+                expected_override="lossless",
             )
 
     def test_distance_checker_trips_when_null_gets_fabricated_as_zero(self):

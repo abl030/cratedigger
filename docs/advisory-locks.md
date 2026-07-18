@@ -168,7 +168,7 @@ queue.
 
 ## Acquisition order
 
-Force/manual paths hold both locks at once. **IMPORT is outer, RELEASE
+Force-import paths hold both locks at once. **IMPORT is outer, RELEASE
 is inner.** Always. A reverse nesting would risk a cross-process
 deadlock if two flows acquire in opposite order, but because RELEASE is
 taken by the same session further down the call graph and no other
@@ -185,7 +185,7 @@ the locks across hashing, beets/filesystem deletion, pipeline cleanup and
 audit writes. Contention is a 409 / CLI exit 4 with zero mutation.
 
 ```
-FORCE/MANUAL (dispatch_import_from_db)
+FORCE (dispatch_import_from_db)
   └─ acquire IMPORT(request_id)                                ← outer
       └─ _dispatch_import_from_db_locked
           └─ dispatch_import_core

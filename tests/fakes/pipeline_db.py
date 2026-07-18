@@ -1368,13 +1368,15 @@ class FakePipelineDB:
 
         try:
             transition_db = _FakeTerminalTransitionsDB(self, boundary)
-            applied = transitions.require_transition_applied(
-                transitions.finalize_request(
-                    transition_db,
-                    command.request_id,
-                    command.request_transition,
-                )
-            )
+            applied = []
+            if command.request_transition is not None:
+                applied.append(transitions.require_transition_applied(
+                    transitions.finalize_request(
+                        transition_db,
+                        command.request_id,
+                        command.request_transition,
+                    )
+                ))
             download_log_id = cast(Any, self.log_download)(
                 request_id=command.request_id,
                 **command.audit.as_log_kwargs(),
@@ -1418,7 +1420,7 @@ class FakePipelineDB:
         return TerminalOutcomeResult(
             download_log_id=download_log_id,
             job=job,
-            transitions=(applied,),
+            transitions=tuple(applied),
             cooled_down_users=frozenset(cooled),
         )
 

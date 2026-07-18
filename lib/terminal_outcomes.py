@@ -156,7 +156,7 @@ class PreviewTerminalOutcome:
 
     request_id: int
     import_job_id: int
-    request_transition: RequestTransition
+    request_transition: RequestTransition | None
     audit: TerminalDownloadAudit
     preview_status: str
     preview_result: dict[str, object]

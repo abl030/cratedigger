@@ -1,4 +1,4 @@
-"""Manual import route handlers — import, wrong matches."""
+"""Operator import route handlers — force import and wrong matches."""
 
 import json
 import os

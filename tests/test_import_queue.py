@@ -687,12 +687,12 @@ class TestImporterWorker(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_force_import_extra_audio_keeps_wm_and_self_heals_end_to_end(self):
+    def test_force_import_extra_audio_keeps_wm_and_operator_status_end_to_end(self):
         """Issue #387 composition: force-importing a folder with extra audio,
         through the REAL manifest guard (no mocked dispatch).
 
-        Proves the two halves compose: the guard self-heals the request to
-        ``wanted`` (R20) AND its audit row does NOT inflate Wrong Matches,
+        Proves the two halves compose: the guard preserves the operator-owned
+        ``manual`` status AND its audit row does NOT inflate Wrong Matches,
         while the importer preserves the original WM entry for review (the
         ``IMPORT_MANIFEST_REJECTED`` code skips cleanup). beets never runs —
         the guard rejects upstream of it.
@@ -733,8 +733,8 @@ class TestImporterWorker(unittest.TestCase):
 
             assert updated is not None
             self.assertEqual(updated.status, "failed")
-            # R20: the album is still wanted; the request self-heals.
-            self.assertEqual(db.request(42)["status"], "wanted")
+            self.assertEqual(db.request(42)["status"], "manual")
+            self.assertEqual(db.request(42)["validation_attempts"], 0)
             # The dead WM entry is preserved (extra audio → operator review),
             # and the audit row did NOT create a second entry.
             self.assertEqual(len(db.get_wrong_matches()), 1)
@@ -749,14 +749,14 @@ class TestImporterWorker(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_force_import_undercount_preserves_folder_and_self_heals_end_to_end(self):
+    def test_force_import_undercount_preserves_folder_and_operator_status_end_to_end(self):
         """Issue #387 regression: force-importing an UNDER-COUNT folder (fewer
         audio files than the request's track rows, no extras) must NOT delete
         the operator's partial audio.
 
         An under-count source physically contains audio the operator chose to
-        import — it is not 'nothing to inspect'. The guard self-heals the
-        request to ``wanted`` (R20) but returns ``IMPORT_MANIFEST_REJECTED``
+        import — it is not 'nothing to inspect'. The guard preserves the
+        operator-owned status and returns ``IMPORT_MANIFEST_REJECTED``
         so the importer PRESERVES the folder (``_cleanup_failed_force_import``
         skips deletion on that code). Routing it through
         ``QUALITY_PIPELINE_REJECTED`` would ``shutil.rmtree`` the only
@@ -806,8 +806,9 @@ class TestImporterWorker(unittest.TestCase):
                 os.path.isdir(source),
                 "under-count force-import must NOT delete the operator's folder")
             self.assertTrue(os.path.isfile(os.path.join(source, "01.mp3")))
-            # R20: the album is still wanted; the request self-heals.
-            self.assertEqual(db.request(42)["status"], "wanted")
+            # The operator-owned request state is not this guard's to clear.
+            self.assertEqual(db.request(42)["status"], "manual")
+            self.assertEqual(db.request(42)["validation_attempts"], 0)
             # WM entry preserved (something to inspect), no duplicate.
             self.assertEqual(len(db.get_wrong_matches()), 1)
             outcomes = [

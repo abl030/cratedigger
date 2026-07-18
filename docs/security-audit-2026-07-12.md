@@ -53,7 +53,7 @@ against that reality, not against a hypothetical public exposure.
 |----|----------|-------|------------------|
 | CD-SEC-01 | High | Historical credentials committed to a public repo | deleted notifier docs, git history |
 | CD-SEC-02 | High | No auth + wildcard CORS on file-destructive endpoints | `web/server.py` |
-| CD-SEC-03 | Medium | Manual-import / import-preview accept an arbitrary absolute path (+ in-place `mp3val -f`) | `web/routes/imports.py`, `lib/util.py` |
+| CD-SEC-03 | Medium | Import-preview accepts an arbitrary absolute path (+ in-place `mp3val -f`) | `web/routes/imports.py`, `lib/util.py` |
 | CD-SEC-04 | Medium | No systemd sandboxing on services that process attacker-controlled bytes | `nix/module.nix` |
 | CD-SEC-05 | Low | Internal exception strings reflected in HTTP 500 bodies | `web/server.py` |
 | CD-SEC-06 | Medium | TLS verification disabled on the Plex/Jellyfin fallback path | `lib/util.py` |
@@ -333,7 +333,7 @@ successful path.
 
 `ImportJob` is a dataclass containing `dict[str, Any]` payload/result fields,
 and `from_row` manually coerces outer scalars rather than decoding job-specific
-wire contracts. Force/manual consumers then use permissive `.get()` checks. A
+wire contracts. Force-import consumers then use permissive `.get()` checks. A
 drifted `download_log_id: "42"`, for example, silently becomes `None`; the job
 continues without its wrong-match/audit ancestor instead of failing at the DB
 boundary. This violates the repository's `msgspec.Struct` policy for JSONB and

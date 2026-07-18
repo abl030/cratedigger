@@ -39,7 +39,7 @@ Library sections (Music = section 3):
 Single function: `lib/util.py::trigger_plex_scan(cfg, imported_path)`.
 
 - Called from `lib/dispatch/` after every successful import that
-  sets `action.trigger_notifiers = True` (auto, force, manual paths).
+  sets `action.trigger_notifiers = True` (automatic and force paths).
 - Sends `GET <plex_url>/library/sections/<id>/refresh?path=<...>&X-Plex-Token=<...>`.
 - Best-effort — failures don't block the import.
 

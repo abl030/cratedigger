@@ -218,16 +218,15 @@ class EvidenceImportGate:
 # decider + reject helper. The four folder/audio-integrity facts are now
 # early-exit branches inside ``full_pipeline_decision_from_evidence``; the
 # unified ``_reject_import_from_evidence_decision`` below handles their
-# denylist policy + forced-requeue invariant alongside the existing
-# quality-side rejects. See CLAUDE.md § "Quality decisions live in ONE place".
+# denylist policy alongside the existing quality-side rejects. Lifecycle
+# mutation remains caller-owned. See CLAUDE.md § "Quality decisions live in
+# ONE place".
 
 
 # Reject reasons that come from folder/audio-integrity facts persisted on
 # ``AlbumQualityEvidence`` (formerly emitted by ``preimport_decide``). The
-# unified reject helper forces ``requeue=True`` for these regardless of the
-# caller's ``requeue_on_failure`` flag — the candidate failed *upstream* of
-# any beets mutation, so the parent request must always self-heal back to
-# ``wanted`` even when the operator chose force-import.
+# unified reject helper uses this set for shared reject and denylist routing;
+# it still honours the caller's ``requeue_on_failure`` lifecycle authority.
 _PREIMPORT_FACT_REJECT_DECISIONS = PREIMPORT_FACT_REJECTION_SCENARIOS
 
 

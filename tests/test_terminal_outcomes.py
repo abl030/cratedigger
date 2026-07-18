@@ -410,6 +410,36 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             persist_method="persist_preview_terminal_outcome",
         )
 
+    def test_preview_failure_without_transition_preserves_operator_status(self):
+        db, request_id, job_id = _seed_running_preview()
+        self.addCleanup(db.close)
+        db._execute(
+            "UPDATE album_requests SET status = 'manual' WHERE id = %s",
+            (request_id,),
+        )
+        result = db.persist_preview_terminal_outcome(PreviewTerminalOutcome(
+            request_id=request_id,
+            import_job_id=job_id,
+            request_transition=None,
+            audit=TerminalDownloadAudit(
+                outcome="measurement_failed",
+                beets_scenario="measurement_failed",
+                beets_detail="source vanished",
+                validation_result=(
+                    '{"reason":"source_missing","detail":"source vanished"}'
+                ),
+            ),
+            preview_status="measurement_failed",
+            preview_result={"verdict": "measurement_failed"},
+            message="Preview measurement failed: source_missing",
+            error="source_missing",
+        ))
+
+        request = db.get_request(request_id)
+        assert request is not None
+        self.assertEqual(request["status"], "manual")
+        self.assertEqual(result.transitions, ())
+
     def test_import_success_round_trip_returns_complete_bundle(self):
         db, request_id, job_id = _seed_running_import(unfindable=True)
         self.addCleanup(db.close)

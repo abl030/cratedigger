@@ -559,13 +559,15 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
         cooled: set[str] = set()
         with self._atomic():
             transition_db = _TransactionalTransitionsDB(self, boundary)
-            applied = transitions.require_transition_applied(
-                transitions.finalize_request(
-                    transition_db,
-                    command.request_id,
-                    command.request_transition,
-                )
-            )
+            applied = []
+            if command.request_transition is not None:
+                applied.append(transitions.require_transition_applied(
+                    transitions.finalize_request(
+                        transition_db,
+                        command.request_id,
+                        command.request_transition,
+                    )
+                ))
             download_log_id = self._insert_terminal_download_audit(
                 command.request_id,
                 command.audit,
@@ -624,6 +626,6 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
         return TerminalOutcomeResult(
             download_log_id=download_log_id,
             job=job,
-            transitions=(applied,),
+            transitions=tuple(applied),
             cooled_down_users=frozenset(cooled),
         )
