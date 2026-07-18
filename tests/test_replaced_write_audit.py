@@ -84,7 +84,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/dashboard.py", 481, "5e3b8177198ccbed"): (
         "dashboard WHERE and ORDER fragments come from closed enum branches"
     ),
-    ("lib/pipeline_db/download_log.py", 737, "554f509613ff1b04"): (
+    ("lib/pipeline_db/download_log.py", 737, "d21a8be0a38ad4f3"): (
         "validation key is selected from a closed server-owned vocabulary"
     ),
     ("lib/pipeline_db/download_log.py", 795, "e0154e89026dc8ef"): (

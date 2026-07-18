@@ -251,9 +251,8 @@ class _DownloadLogMixin(_PipelineDBBase):
 
         Recents filters select the rows which are displayed, but a kept
         wrong-match row still needs its mutating successor. Active force-import
-        rows and historical manual-import rows explicitly link back to it.
-        Fetch those companions independently so changing a filter cannot
-        change the displayed evidence.
+        and historical manual-import rows explicitly link back to it. Fetch
+        those companions independently so filters cannot change the evidence.
         """
         if not source_log_ids:
             return []
