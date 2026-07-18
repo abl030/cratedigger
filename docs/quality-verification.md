@@ -15,9 +15,10 @@ The highest quality acquisition path for the library:
 
 VBR bitrate is useful evidence, not verification by itself. A genuine CD rip
 converted to V0 commonly produces ~240-260kbps while a lossy transcode commonly
-lands lower, but only an explicit verified-lossless proof completes automatic
-acquisition. That proof requires affirmative spectral evidence, or the narrow
-V0 trust override after spectral analysis ran and disagreed.
+lands lower, but only an explicit verified-lossless proof completes acquisition,
+and that proof lock is absolute in every import mode. The proof requires
+affirmative spectral evidence, or the narrow V0 trust override after spectral
+analysis ran and disagreed.
 
 ## Current Verification Methods
 
@@ -479,12 +480,13 @@ result writes only
 `search_tiers` disables the catch-all fallback for that override. The normal
 forever cadence continues, now searching only for the remaining meaningful
 upgrade: lossless. Every other unverified retained copy stays wanted on the
-full search surface; only verified-lossless proof ends automatic acquisition.
+full search surface; only verified-lossless proof ends acquisition, in every
+import mode.
 
 Older library rows may still have NULL spectral / V0 / bad-hash facts. The
-deploy transition materializes historical proof and source anchors that already
-exist in request history, but it never invents missing spectral evidence.
-Wrong-match and narrowing policy wait for a complete linked evidence row;
-fresh attempts remeasure the installed bytes. `lossless_source_locked` remains
-a separate defense-in-depth narrowing path. See
+deploy transition materializes each member of the canonical acquisition-fact
+set defined above that already exists in request history, but it never invents
+missing facts. Wrong-match and narrowing policy wait for a complete linked
+evidence row; fresh attempts remeasure the installed bytes.
+`lossless_source_locked` remains a separate defense-in-depth narrowing path. See
 `docs/brainstorms/2026-05-17-propagate-source-evidence-on-transcode-requirements.md`.

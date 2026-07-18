@@ -214,10 +214,10 @@ issue (pattern: #573, #590) or state that nothing clears the bar.
 
 ## Holding timer-driven work across a switch
 
-A runtime systemd mask is only the pre-switch half of a maintenance hold. A
-NixOS switch regenerates the runtime unit state and restarts timers, so a mask
-applied before `fleet-deploy` must be applied again and verified after the
-switch before any one-shot or state rewrite begins.
+A runtime systemd mask is only the pre-switch half of an ordinary maintenance
+hold. A NixOS switch regenerates the runtime unit state and restarts timers, so
+a mask applied before `fleet-deploy` must be applied again and verified after
+the switch before any one-shot or state rewrite begins.
 
 For a hold on the two timer-driven Cratedigger jobs:
 
@@ -229,9 +229,18 @@ For a hold on the two timer-driven Cratedigger jobs:
 3. Immediately runtime-mask both timers again. Verify both are masked and both
    `cratedigger.service` and `cratedigger-unfindable.service` are inactive.
    If a cycle won the post-switch race, leave the timers masked and wait for
-   that cycle to finish before touching shared state.
+   that cycle to finish before touching shared state, then assess and record
+   what it read or changed before continuing.
 4. Run the one-shot only after those checks pass. When the maintenance work and
    its reconciliation checks are complete, unmask and start the timers.
+
+This runtime re-mask pattern is **not sufficient** when a transition requires a
+one-shot to complete before the new code's first cycle. For that strict hold,
+either run a backwards-compatible one-shot under the pre-switch mask and
+reconcile it before deploying, or deploy a reviewed declarative timer hold in
+the target NixOS generation and restore the timers in a later switch. If a
+new-code cycle starts before the strict one-shot, stop and assess/recover its
+reads and mutations; waiting for it to finish does not restore the precondition.
 
 Apply the same post-switch re-mask rule to any long-running worker held for a
 maintenance operation. Never treat a pre-switch runtime mask as evidence that
@@ -255,6 +264,8 @@ map and new CHECK domain, and record the result in the PR or issue. An
 unexpected value is a stop condition: extend the reviewed migration map or
 surface it for a decision; do not let the deploy discover it.
 
+First inspect the schema:
+
 ```bash
 ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass \
   | grep "^PGPASSWORD=" | cut -d= -f2); pipeline-cli query "$(cat)"' <<'SQL'
@@ -262,7 +273,15 @@ SELECT column_name, data_type
 FROM information_schema.columns
 WHERE table_name = '<table>'
 ORDER BY ordinal_position;
+SQL
+```
 
+Then inspect the persisted vocabulary in a separate invocation so both result
+sets are rendered:
+
+```bash
+ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass \
+  | grep "^PGPASSWORD=" | cut -d= -f2); pipeline-cli query "$(cat)"' <<'SQL'
 SELECT <persisted_column>, COUNT(*)
 FROM <table>
 GROUP BY <persisted_column>
