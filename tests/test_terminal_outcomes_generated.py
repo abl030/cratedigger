@@ -133,6 +133,7 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
     @example(
         attempt_type="validation",
         existing_min_bitrate=320,
+        min_bitrate_present=True,
         min_bitrate=245,
         explicit_previous=False,
         search_override="lossless",
@@ -140,6 +141,7 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
     @example(
         attempt_type=None,
         existing_min_bitrate=0,
+        min_bitrate_present=True,
         min_bitrate=245,
         explicit_previous=False,
         search_override=None,
@@ -147,7 +149,8 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
     @example(
         attempt_type=None,
         existing_min_bitrate=None,
-        min_bitrate=245,
+        min_bitrate_present=True,
+        min_bitrate=None,
         explicit_previous=False,
         search_override=None,
     )
@@ -160,6 +163,7 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
             st.none(),
             st.integers(min_value=0, max_value=1500),
         ),
+        min_bitrate_present=st.booleans(),
         min_bitrate=st.one_of(
             st.none(),
             st.integers(min_value=0, max_value=1500),
@@ -174,6 +178,7 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
         self,
         attempt_type: str | None,
         existing_min_bitrate: int | None,
+        min_bitrate_present: bool,
         min_bitrate: int | None,
         explicit_previous: bool,
         search_override: str | None,
@@ -197,7 +202,7 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
         fields: dict[str, object] = {
             "search_filetype_override": search_override,
         }
-        if min_bitrate is not None:
+        if min_bitrate_present:
             fields["min_bitrate"] = min_bitrate
         if explicit_previous:
             fields["prev_min_bitrate"] = 256
@@ -227,7 +232,7 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
             row[f"{attempt_type}_attempts"] if attempt_type else 0,
             1 if attempt_type else 0,
         )
-        if min_bitrate is not None:
+        if min_bitrate_present:
             self.assertEqual(row["min_bitrate"], min_bitrate)
         self.assertEqual(
             row["prev_min_bitrate"],
@@ -235,7 +240,7 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
             if explicit_previous
             else (
                 existing_min_bitrate
-                if min_bitrate is not None and existing_min_bitrate is not None
+                if min_bitrate_present and existing_min_bitrate is not None
                 else 192
             ),
         )
