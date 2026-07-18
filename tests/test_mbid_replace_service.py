@@ -18,6 +18,9 @@ sys.path.insert(
     0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
 )
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+from hypothesis import given, strategies as st
+
 from lib.config import CratediggerConfig
 from lib.mbid_replace_service import (
     MbidReplaceService,
@@ -1169,6 +1172,49 @@ class TestReplaceHappyPath(_ServiceCase):
         self.assertEqual(kwargs.get("clear_pipeline_state"), False)
         self.assertEqual(kwargs.get("request_id"), 42)
         self.assertEqual(kwargs.get("release_id"), OLD_MBID)
+
+    def test_replace_removes_preexisting_install_on_wanted_backfill_row(self):
+        """The Passenger regression (2026-07-18): a library-backfill row is
+        ``wanted`` while its pre-existing install sits in beets. Replace
+        gated cleanup on ``old_status == "imported"`` — an invariant that
+        was true at U4 time and silently broke when the 2026-06-04 full-
+        library backfill created wanted rows tracking on-disk installs.
+        Replace REPLACES: the old release's install is displaced whenever
+        the old release id resolves, whatever the request status."""
+        self._patch_externals()
+        db, _, svc = self._replace(old_status="wanted")
+        from lib import mbid_replace_service as svcmod
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_MBID,
+        )
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        mock_remove = svcmod.remove_and_reset_release
+        assert isinstance(mock_remove, MagicMock)
+        mock_remove.assert_called_once()
+        _, kwargs = mock_remove.call_args
+        self.assertEqual(kwargs.get("release_id"), OLD_MBID)
+        self.assertEqual(kwargs.get("clear_pipeline_state"), False)
+
+    @given(old_status=st.sampled_from(
+        ["wanted", "downloading", "manual", "imported"]))
+    def test_replace_displaces_old_install_for_every_source_status(
+        self, old_status,
+    ):
+        """Generated pair for the pin above: over the complete source-status
+        space, Replace always routes the old release through
+        ``remove_and_reset_release`` (clear_pipeline_state=False). Status
+        is lifecycle; displacement keys on identity."""
+        mocks = self._patch_externals()
+        db, _, svc = self._replace(old_status=old_status)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_MBID,
+        )
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        mock_remove = mocks[0]
+        mock_remove.assert_called_once()
+        _, kwargs = mock_remove.call_args
+        self.assertEqual(kwargs.get("release_id"), OLD_MBID)
+        self.assertEqual(kwargs.get("clear_pipeline_state"), False)
 
     def test_happy_path_downloading_skips_staging_logs_warning(self):
         self._patch_externals()

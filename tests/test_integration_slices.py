@@ -9966,14 +9966,17 @@ class TestReplaceFullPath(unittest.TestCase):
         # slskd was never touched (R23).
         self.assertEqual(self._svc_slskd_mock.mock_calls, [])
 
-    def test_wanted_variant_no_beets_removal(self):
-        """For source ``status='wanted'`` there is no library entry —
-        the beets-removal primitive must not be called. Staging
+    def test_wanted_variant_displaces_old_install(self):
+        """``status='wanted'`` does NOT mean "nothing on disk" — library-
+        backfill rows track pre-existing installs while still wanted
+        (the Passenger regression, 2026-07-18). Replace displaces the
+        old release whenever its id resolves; the removal primitive is
+        a safe no-op when the release is absent from beets. Staging
         cleanup still runs."""
         from lib.mbid_replace_service import RESULT_REPLACED
         db, result, _, _, mocks = self._run(old_status="wanted")
         self.assertEqual(result.outcome, RESULT_REPLACED)
-        mocks["remove"].assert_not_called()
+        mocks["remove"].assert_called_once()
         if mocks["stage_path"]:
             self.assertFalse(
                 os.path.isdir(mocks["stage_path"]),
@@ -10011,11 +10014,12 @@ class TestReplaceFullPath(unittest.TestCase):
         self.assertIsNone(new["active_download_state"])
 
     def test_manual_variant(self):
-        """``status='manual'`` behaves like ``wanted`` for fs cleanup."""
+        """``status='manual'`` behaves like ``wanted`` for fs cleanup:
+        the old release is displaced whenever its id resolves."""
         from lib.mbid_replace_service import RESULT_REPLACED
         _db, result, _, _, mocks = self._run(old_status="manual")
         self.assertEqual(result.outcome, RESULT_REPLACED)
-        mocks["remove"].assert_not_called()
+        mocks["remove"].assert_called_once()
 
 
 # ---------------------------------------------------------------------------
