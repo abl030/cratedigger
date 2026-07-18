@@ -159,3 +159,120 @@ class TestGeneratedTransparentHaveSearchOverride(unittest.TestCase):
             actual,
             cfg,
         )
+
+
+# ---------------------------------------------------------------------------
+# No-widening invariant (issue #711 provisional surfacing, 2026-07-18): no
+# override-resolution path may ADD a lossy search tier. Redirecting scope to
+# "lossless" is legal narrowing (toward the terminal goal); everything else
+# in the result must already have been allowed by the input. This is the
+# structural guarantee that a provisional install's lossless-only scope can
+# never silently re-widen into MP3 tiers.
+# ---------------------------------------------------------------------------
+
+
+def _tiers(override):
+    return {t.strip() for t in override.split(",") if t.strip()}
+
+
+def assert_no_lossy_tier_added(input_override, result_override) -> None:
+    """Checker: result tiers ⊆ input tiers ∪ {"lossless"}."""
+    if result_override is None:
+        return
+    out = _tiers(result_override)
+    allowed = {"lossless"} if input_override is None else (
+        _tiers(input_override) | {"lossless"}
+    )
+    added = out - allowed
+    if added:
+        raise AssertionError(
+            f"override resolution widened with lossy tiers {sorted(added)}: "
+            f"{input_override!r} -> {result_override!r}"
+        )
+
+
+_override_csv = st.one_of(
+    st.none(),
+    st.sampled_from([
+        "lossless",
+        "lossless,mp3 v0,mp3 320",
+        "lossless,mp3 v0,mp3 320,aac,opus,ogg",
+        "mp3 v0,mp3 320",
+        "mp3 320",
+    ]),
+    st.lists(
+        st.sampled_from(
+            ["lossless", "mp3 v0", "mp3 320", "mp3 256", "aac", "opus", "ogg"]
+        ),
+        min_size=1, max_size=5, unique=True,
+    ).map(",".join),
+)
+
+
+@st.composite
+def rejection_worlds(draw):
+    from tests.helpers import make_download_info
+
+    override = draw(_override_csv)
+    dl_info = make_download_info(
+        filetype=draw(st.one_of(
+            st.none(),
+            st.sampled_from(["flac", "mp3", "mp3 320", "aac", "opus"]),
+        )),
+        bitrate=draw(st.one_of(
+            st.none(), st.integers(min_value=0, max_value=1200))),
+        is_vbr=draw(st.booleans()),
+        was_converted=draw(st.booleans()),
+        slskd_filetype=draw(st.one_of(
+            st.none(),
+            st.sampled_from(["flac", "mp3", "mp3 vbr", "aac"]),
+        )),
+    )
+    decision = draw(st.sampled_from([
+        "downgrade", "transcode_downgrade", "reject", "import", None,
+    ]))
+    measurement, audit, cfg = draw(have_worlds())
+    source = draw(st.sampled_from(
+        ["attempt_have_audit", "linked_current_evidence"]))
+    return override, dl_info, decision, measurement, audit, source, cfg
+
+
+class TestGeneratedNoOverrideWidening(unittest.TestCase):
+    @given(world=rejection_worlds())
+    def test_resolution_chain_never_adds_a_lossy_tier(self, world):
+        from lib.quality import (
+            narrow_override_on_downgrade,
+            resolve_rejection_search_override,
+        )
+
+        override, dl_info, decision, measurement, audit, source, cfg = world
+
+        narrowed = narrow_override_on_downgrade(override, dl_info)
+        assert_no_lossy_tier_added(override, narrowed)
+
+        resolution = resolve_rejection_search_override(
+            decision=decision,
+            current_override=override,
+            dl_info=dl_info,
+            current_measurement=measurement,
+            spectral_evidence_source=source,
+            have_spectral_audit=audit,
+            cfg=cfg,
+        )
+        assert_no_lossy_tier_added(override, resolution.override)
+
+
+class TestNoWideningCheckerTripsOnViolations(unittest.TestCase):
+    def test_trips_when_a_lossy_tier_is_added(self):
+        with self.assertRaisesRegex(AssertionError, "widened"):
+            assert_no_lossy_tier_added("lossless", "lossless,mp3 320")
+
+    def test_trips_when_unrestricted_result_invents_lossy_scope(self):
+        with self.assertRaisesRegex(AssertionError, "widened"):
+            assert_no_lossy_tier_added(None, "mp3 v0")
+
+    def test_accepts_redirect_to_lossless(self):
+        assert_no_lossy_tier_added("mp3 v0,mp3 320", "lossless")
+
+    def test_accepts_pure_narrowing(self):
+        assert_no_lossy_tier_added("lossless,mp3 v0,mp3 320", "lossless,mp3 v0")

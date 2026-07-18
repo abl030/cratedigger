@@ -90,14 +90,27 @@ class _RequestsMixin(_PipelineDBBase):
     ) -> dict[str, dict[str, Any]]:
         """Map mb_release_id → badge-overlay info for the browse /
         library views (#445 item 2 — formerly inline SQL in
-        ``web/overlay.py::check_pipeline``)."""
+        ``web/overlay.py::check_pipeline``).
+
+        ``verified_lossless`` / ``provisional_lossless`` derive from the
+        linked current evidence row only — a request without current
+        evidence makes no identity claim. Provisional = an unverified
+        install holding a lossless-source V0 anchor (the quality identity
+        the badge layer renders)."""
         if not mbids:
             return {}
         placeholders = ",".join(["%s"] * len(mbids))
         cur = self._execute(
-            f"SELECT id, mb_release_id, status, search_filetype_override, "
-            f"target_format, min_bitrate "
-            f"FROM album_requests WHERE mb_release_id IN ({placeholders})",
+            f"SELECT r.id, r.mb_release_id, r.status, "
+            f"r.search_filetype_override, r.target_format, r.min_bitrate, "
+            f"COALESCE(e.verified_lossless, FALSE) AS verified_lossless, "
+            f"(COALESCE(e.v0_subject, '') = 'source' "
+            f" AND NOT COALESCE(e.verified_lossless, FALSE)) "
+            f"AS provisional_lossless "
+            f"FROM album_requests r "
+            f"LEFT JOIN album_quality_evidence e "
+            f"ON e.id = r.current_evidence_id "
+            f"WHERE r.mb_release_id IN ({placeholders})",
             tuple(mbids),
         )
         return {
@@ -107,6 +120,8 @@ class _RequestsMixin(_PipelineDBBase):
                 "search_filetype_override": r["search_filetype_override"],
                 "target_format": r["target_format"],
                 "min_bitrate": r["min_bitrate"],
+                "verified_lossless": r["verified_lossless"],
+                "provisional_lossless": r["provisional_lossless"],
             }
             for r in cur.fetchall()
         }

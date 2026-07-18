@@ -3473,6 +3473,21 @@ class FakePipelineDB:
                 continue
             mbid = str(raw)
             if mbid in wanted:
+                evidence = None
+                evidence_id = r.get("current_evidence_id")
+                if evidence_id is not None:
+                    evidence = self.load_album_quality_evidence_by_id(
+                        evidence_id)
+                verified = bool(
+                    evidence is not None
+                    and evidence.verified_lossless_proof is not None
+                )
+                provisional = bool(
+                    evidence is not None
+                    and not verified
+                    and evidence.v0_metric is not None
+                    and evidence.v0_metric.subject == "source"
+                )
                 out[mbid] = {
                     "id": r["id"],
                     "status": r.get("status"),
@@ -3480,6 +3495,8 @@ class FakePipelineDB:
                         r.get("search_filetype_override"),
                     "target_format": r.get("target_format"),
                     "min_bitrate": r.get("min_bitrate"),
+                    "verified_lossless": verified,
+                    "provisional_lossless": provisional,
                 }
         return out
 

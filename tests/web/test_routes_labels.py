@@ -40,6 +40,7 @@ class TestLabelRouteContracts(_WebServerCase):
         "id", "title", "artist_name", "date", "format", "primary_type",
         "sub_label_name", "in_library", "beets_album_id",
         "pipeline_status", "pipeline_id",
+        "pipeline_verified_lossless", "pipeline_provisional",
     }
     LABEL_DETAIL_RESPONSE_REQUIRED_FIELDS = {
         "label", "releases", "sub_labels", "pagination", "include_sublabels",
@@ -178,7 +179,7 @@ class TestLabelRouteContracts(_WebServerCase):
                 patch("web.server.check_beets_library",
                       return_value={held_id}), \
                 patch("web.server.check_pipeline",
-                      return_value={in_pipeline_id: {"id": 99, "status": "wanted"}}), \
+                      return_value={in_pipeline_id: {"id": 99, "status": "wanted", "verified_lossless": False, "provisional_lossless": False}}), \
                 patch("web.server._beets_db", return_value=beets_db), \
                 patch("web.server.compute_library_rank",
                       side_effect=_compute_rank):

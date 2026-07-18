@@ -148,6 +148,13 @@ Browser → https://music.ablz.au
     and all of its musical type buckets stay collapsed even when a row is
     exactly owned or requested.
   - Releases already in pipeline DB or beets library are badged
+  - Tracked installs carry a quality-identity chip next to the library
+    badge (`web/js/badges.js`): green `verified` when the request's
+    current evidence holds a verified-lossless proof (search complete),
+    pale-green `provisional` when the install is an unverified
+    lossless-source conversion still hunting a verified copy. Derived
+    by `PipelineDB.get_pipeline_overlay` from the linked evidence row —
+    requests without current evidence show no chip.
   - Click release metadata to open MB release page in new tab
 - **Add button** — adds release to pipeline DB (same logic as `pipeline-cli add`)
 - **Pipeline tab** — operational Dashboard + Long Tail views. The old global

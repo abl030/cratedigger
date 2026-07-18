@@ -10076,6 +10076,81 @@ class TestGetPipelineOverlay(unittest.TestCase):
         self.assertIsNone(row["target_format"])
         self.assertEqual(row["min_bitrate"], 900)
 
+    def _seed_identity_state(self, db) -> None:
+        """Seed one verified, one provisional, one plain request."""
+        from lib.quality import AlbumQualityV0Metric, VerifiedLosslessProof
+        from tests.helpers import make_album_quality_evidence
+
+        def link_evidence(mbid: str, proof) -> None:
+            rid = db.add_request(
+                mb_release_id=mbid, artist_name="A",
+                album_title="B", source="request")
+            evidence = make_album_quality_evidence(
+                mb_release_id=mbid,
+                source_path=f"/library/{mbid}",
+                v0_metric=AlbumQualityV0Metric(
+                    subject="source", provenance="carried",
+                    avg_bitrate_kbps=251, min_bitrate_kbps=228,
+                ),
+                verified_lossless_proof=proof,
+            )
+            db.upsert_album_quality_evidence(evidence)
+            stored = db.find_album_quality_evidence(
+                mb_release_id=mbid,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            db.set_request_current_evidence(rid, stored.id)
+
+        link_evidence(
+            "overlay-idn-verified",
+            VerifiedLosslessProof(
+                provenance="carried", source="flac",
+                classifier="spectral_verified_lossless",
+            ),
+        )
+        link_evidence("overlay-idn-provisional", None)
+        db.add_request(
+            mb_release_id="overlay-idn-plain", artist_name="E",
+            album_title="F", source="request")
+
+    def test_overlay_carries_quality_identity(self):
+        """The badge overlay derives verified/provisional from the linked
+        current evidence — the persistent UI identity the provisional
+        engineering lost (2026-07-18)."""
+        self._seed_identity_state(self.db)
+
+        info = self.db.get_pipeline_overlay([
+            "overlay-idn-verified", "overlay-idn-provisional",
+            "overlay-idn-plain",
+        ])
+
+        self.assertTrue(info["overlay-idn-verified"]["verified_lossless"])
+        self.assertFalse(info["overlay-idn-verified"]["provisional_lossless"])
+        self.assertFalse(info["overlay-idn-provisional"]["verified_lossless"])
+        self.assertTrue(info["overlay-idn-provisional"]["provisional_lossless"])
+        self.assertFalse(info["overlay-idn-plain"]["verified_lossless"])
+        self.assertFalse(info["overlay-idn-plain"]["provisional_lossless"])
+
+    def test_identity_fake_parity(self):
+        from tests.fakes import FakePipelineDB
+
+        fake = FakePipelineDB()
+        self._seed_identity_state(self.db)
+        self._seed_identity_state(fake)
+        mbids = [
+            "overlay-idn-verified", "overlay-idn-provisional",
+            "overlay-idn-plain",
+        ]
+        strip = lambda o: {m: {k: v for k, v in row.items() if k != "id"}
+                           for m, row in o.items()}
+        self.assertEqual(
+            strip(self.db.get_pipeline_overlay(mbids)),
+            strip(fake.get_pipeline_overlay(mbids)),
+            "FakePipelineDB's overlay identity mirror drifted from the "
+            "real SQL — fix the fake, never the production SQL, unless "
+            "the SQL change is the point of your PR.")
+
     def test_fake_parity_on_identical_state(self):
         from tests.fakes import FakePipelineDB
 

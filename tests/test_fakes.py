@@ -6102,6 +6102,8 @@ class TestFakeGetPipelineOverlay(unittest.TestCase):
             "id": 7, "status": "wanted",
             "search_filetype_override": "lossless",
             "target_format": None, "min_bitrate": 900,
+            "verified_lossless": False,
+            "provisional_lossless": False,
         })
 
     def test_empty_mbids_short_circuits(self):

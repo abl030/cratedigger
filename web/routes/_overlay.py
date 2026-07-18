@@ -103,9 +103,12 @@ def overlay_release_rows_in_place(rows: list[dict], release_ids: Iterable[str]) 
         After overlay each row carries:
         `in_library`, `beets_album_id`, `library_format`,
         `library_min_bitrate`, `library_avg_bitrate`, `library_rank`,
-        `pipeline_status`, `pipeline_id`. Library quality fields are only set when the
+        `pipeline_status`, `pipeline_id`, `pipeline_verified_lossless`,
+        `pipeline_provisional`. Library quality fields are only set when the
         release is in the beets library AND the beets DB returned
-        details for it.
+        details for it. The identity pair derives from the request's
+        linked current evidence (verified proof / unverified
+        lossless-source anchor) — see `PipelineDB.get_pipeline_overlay`.
     release_ids
         Iterable of release ids to batch-query against beets / pipeline.
         Typically `[r["id"] for r in rows]`; passed in so callers that
@@ -146,3 +149,9 @@ def overlay_release_rows_in_place(rows: list[dict], release_ids: Iterable[str]) 
         pi = in_pipeline.get(rid)
         r["pipeline_status"] = pi["status"] if pi else None
         r["pipeline_id"] = pi["id"] if pi else None
+        r["pipeline_verified_lossless"] = (
+            bool(pi["verified_lossless"]) if pi else False
+        )
+        r["pipeline_provisional"] = (
+            bool(pi["provisional_lossless"]) if pi else False
+        )
