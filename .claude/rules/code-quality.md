@@ -169,6 +169,28 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   commit and review the new tree, then restart the final sequence. Do not replay
   the final suite for an unchanged tree after push or merge.
 
+## Authority for exceptions and bypasses
+
+Plans translate product authority; they do not create it. Any plan KTD,
+approach item, registry entry, or implementation note that grants an exception,
+bypass, mode/status-specific permission, or authority for a destructive or
+scope-affecting action must carry both:
+
+- a stable link to the exact operator or issue-thread decision; and
+- the controlling sentence quoted verbatim next to that link.
+
+Use the form `Authority: "<verbatim decision>" — <stable URL>`. A plan-internal
+identifier, summary, inferred rationale, or earlier implementation is not
+authority. If the citation does not exist or conflicting decisions remain, the
+item is an open question for the operator, not a settled decision. When a later
+decision supersedes an earlier exception, cite the superseding decision at the
+old site and remove or explicitly correct every stale grant.
+
+Canonical counterexample: issue #711's KTD4/U7 widened force-import into a
+verified-lossless proof-lock bypass without a thread decision. Decision 21
+reversed that planning-time grant; the plausible rationale did not make the
+grant authoritative. This rule records issue #737 item 5's process guard.
+
 ## Prefer canonical contracts over semantic scanners
 
 When an invariant can be enforced by narrowing the production contract, make

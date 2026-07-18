@@ -212,6 +212,42 @@ things fixed twice, duplication the series introduced, audits that could catch
 review findings for free), de-dupe against open issues, and file ONE covering
 issue (pattern: #573, #590) or state that nothing clears the bar.
 
+## Holding timer-driven work across a switch
+
+A runtime systemd mask normally persists until reboot, including across a
+NixOS switch. It is still imperative state, not evidence that the post-switch
+system is safely held: re-apply it idempotently and verify both the timer and
+its service after the switch before any one-shot or state rewrite begins.
+
+For a hold on the two timer-driven Cratedigger jobs:
+
+1. On doc2, runtime-mask and stop `cratedigger.timer` and
+   `cratedigger-unfindable.timer`. Let any already-running oneshot finish; do
+   not interrupt it to create the maintenance window.
+2. Trigger the deploy and wait for the exact new `nixos-upgrade.service`
+   invocation as described above.
+3. Immediately runtime-mask both timers again as an idempotent safety step.
+   Verify both are masked and both `cratedigger.service` and
+   `cratedigger-unfindable.service` are inactive. If either service ran because
+   the pre-switch hold was absent or ineffective, leave the timers masked and
+   wait for that cycle to finish before touching shared state, then assess and
+   record what it read or changed before continuing.
+4. Run the one-shot only after those checks pass. When the maintenance work and
+   its reconciliation checks are complete, unmask and start the timers.
+
+Do not make a strict transition depend solely on imperative state, even though
+the runtime mask is expected to survive the switch. When a one-shot must finish
+before the new code's first cycle, either run a backwards-compatible one-shot
+under the pre-switch mask and reconcile it before deploying, or deploy a
+reviewed declarative timer hold in the target NixOS generation and restore the
+timers in a later switch. If a new-code cycle starts before the strict one-shot,
+stop and assess/recover its reads and mutations; waiting for it to finish does
+not restore the precondition.
+
+Apply the same idempotent post-switch hold verification to any long-running
+worker held for a maintenance operation. Never treat a pre-switch runtime mask
+alone as evidence that the post-switch system is still held.
+
 ## Database migrations
 
 Schema is managed by versioned files in `migrations/NNN_name.sql`. The `cratedigger-db-migrate.service` oneshot unit runs the migrator (`scripts/migrate_db.py`) on every switch (fleet-update or break-glass rebuild) because `restartIfChanged = true`. `cratedigger-web.service` (and the other long-running workers) `requires` it, so a failed migration blocks them from starting. `cratedigger.service` and `cratedigger-unfindable.service` are timer-driven with `restartIfChanged = false`, so they only `wants`+`after` it (a `requires` edge would let the migrate unit's every-deploy restart SIGTERM a mid-flight cycle) and instead gate on schema currency themselves at startup (`lib/migrator.py::assert_schema_current`).
@@ -221,6 +257,39 @@ To add a schema change:
 2. Write the change as plain SQL — no `IF NOT EXISTS` guards needed (each file runs exactly once per DB).
 3. Test locally: `nix-shell --run "python3 -m unittest tests.test_migrator -v"`
 4. Commit, push, deploy. The migrator picks it up automatically.
+
+Before deploying a migration that maps, drops, renames, or constrains persisted
+values, preflight the live vocabulary on doc2. Pull the live column schema
+first, then run a `SELECT DISTINCT`/count query through `pipeline-cli query`
+using SQL on stdin. Compare every non-NULL value with the migration's explicit
+map and new CHECK domain, and record the result in the PR or issue. An
+unexpected value is a stop condition: extend the reviewed migration map or
+surface it for a decision; do not let the deploy discover it.
+
+First inspect the schema:
+
+```bash
+ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass \
+  | grep "^PGPASSWORD=" | cut -d= -f2); pipeline-cli query "$(cat)"' <<'SQL'
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_name = '<table>'
+ORDER BY ordinal_position;
+SQL
+```
+
+Then inspect the persisted vocabulary in a separate invocation so both result
+sets are rendered:
+
+```bash
+ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass \
+  | grep "^PGPASSWORD=" | cut -d= -f2); pipeline-cli query "$(cat)"' <<'SQL'
+SELECT <persisted_column>, COUNT(*)
+FROM <table>
+GROUP BY <persisted_column>
+ORDER BY <persisted_column> NULLS FIRST;
+SQL
+```
 
 For destructive changes, backup first:
 ```bash

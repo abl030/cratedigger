@@ -68,10 +68,12 @@ Key fields:
 Every v4 spectral or V0 fact answers the same two questions: `subject` says
 which bytes it describes (`installed` or `source`), and `provenance` says how
 it reached this row (`measured` or `carried`). `installed` + `carried` is
-invalid: installed bytes are re-measured. When a fingerprint changes, proof,
-source-subject spectral, and source-subject V0 acquisition facts may cross to
-the new row with provenance `carried`; installed-subject facts do not. Carry
-decisions use these markers directly and never infer lineage from codec names.
+invalid: installed bytes are re-measured. When a fingerprint changes, the
+canonical acquisition-fact set defined in
+[`quality-verification.md`](quality-verification.md#evidence-addressing-propagation-and-ownership)
+may cross to the new row with provenance `carried`; installed-subject facts do
+not. Carry decisions use these markers directly and never infer lineage from
+codec names.
 
 Migration 055 maps the old vocabulary mechanically before v4 rebuilds take
 over: `v0_source_lineage` becomes `v0_subject` (`lossless_source` → `source`,
