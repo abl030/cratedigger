@@ -98,7 +98,6 @@ def _reject_import_from_evidence_decision(
         raise RuntimeError("persisted-evidence rejection requires an import result")
     _populate_dl_info_from_import_result(dl_info, import_result)
     action = dispatch_action(decision)
-    effective_requeue = requeue_on_failure and not action.preserve_imported
     rejection_validation = validation_result or ValidationResult(
         distance=distance,
         scenario=decision or scenario,
@@ -131,7 +130,7 @@ def _reject_import_from_evidence_decision(
         dl_info,
         detail=detail,
         error=None,
-        requeue=effective_requeue,
+        requeue=requeue_on_failure and not action.preserve_imported,
         outcome_label="rejected",
         search_filetype_override=search_filetype_override,
         validation_result=rejection_validation,
@@ -312,7 +311,6 @@ def _do_mark_done(
             import_job_id=import_job_id,
             initial_transition=transition,
             audit=audit,
-            preserve_operator_search_stop=True,
         )
     transitions.require_transition_applied(finalize_request(
         db,
@@ -595,7 +593,6 @@ def _record_preview_measurement_failed(
         message=payload.detail,
         error=payload.reason,
         denylists=denylists,
-        preserve_operator_search_stop=requeue_to_wanted,
     ))
     return result.download_log_id
 

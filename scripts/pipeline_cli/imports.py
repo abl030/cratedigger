@@ -283,5 +283,4 @@ def add_imports_subparsers(sub: argparse._SubParsersAction) -> None:
     p_preview.add_argument("--new-format")
     p_preview.add_argument("--audio-check-mode")
     p_preview.add_argument("--audio-corrupt", action="store_true", default=None)
-    p_preview.add_argument("--import-mode")
     p_preview.add_argument("--has-nested-audio", action="store_true", default=None)

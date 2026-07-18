@@ -1714,14 +1714,13 @@ def main():
     # V0 must keep the lossless source when either a second conversion pass
     # is planned (``verified_lossless_target``) OR the caller asked us to
     # hold it until the quality decision (``--preserve-source``, issue #111).
-    keep_v0_source = has_target or args.preserve_source
     if not keep_lossless:
         _log(f"[CONVERT] {work_path}")
         stage_start = time.monotonic()
         try:
             converted, failed, original_ext, source_channels = convert_lossless(
                 work_path, V0_SPEC,
-                keep_source=keep_v0_source)
+                keep_source=has_target or args.preserve_source)
         finally:
             _log_timing("primary_conversion", stage_start)
         r.conversion.converted = converted
@@ -1744,8 +1743,12 @@ def main():
             _emit_and_exit(r)
 
         # --- Transcode detection ---
-        # When keep_v0_source=True, FLAC+MP3 coexist — measure only MP3 for V0 bitrate
-        v0_ext_filter = {".mp3"} if keep_v0_source and converted > 0 else None
+        # When the source is retained, FLAC+MP3 coexist — measure only MP3.
+        v0_ext_filter = (
+            {".mp3"}
+            if (has_target or args.preserve_source) and converted > 0
+            else None
+        )
         post_conv_br = _get_folder_min_bitrate(
             work_path, ext_filter=v0_ext_filter) if converted > 0 else None
         r.conversion.post_conversion_min_bitrate = post_conv_br

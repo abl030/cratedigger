@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import unittest
 from typing import Any
 
@@ -41,6 +42,64 @@ class FaultInjectingPipelineDB(PipelineDB):
         self.write_boundaries.append(label)
         if index == self.fail_after_write:
             raise InjectedTerminalWriteFailure(label)
+
+
+class PausingTerminalPipelineDB(PipelineDB):
+    """Expose the point after the terminal transaction owns the row lock."""
+
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        locked: threading.Event,
+        release: threading.Event,
+    ) -> None:
+        super().__init__(dsn)
+        self.locked = locked
+        self.release = release
+
+    def _lock_terminal_request_status(self, request_id: int) -> str | None:
+        status = super()._lock_terminal_request_status(request_id)
+        self.locked.set()
+        if not self.release.wait(timeout=10):
+            raise TimeoutError("terminal row-lock test was not released")
+        return status
+
+
+class ObservedOperatorPipelineDB(PipelineDB):
+    """Signal immediately before the operator's status CAS can block."""
+
+    def __init__(self, dsn: str, *, cas_started: threading.Event) -> None:
+        super().__init__(dsn)
+        self.cas_started = cas_started
+
+    def update_status(
+        self,
+        request_id: int,
+        status: str,
+        *,
+        expected_status: str | None = None,
+        **extra: Any,
+    ) -> bool:
+        self.cas_started.set()
+        return super().update_status(
+            request_id,
+            status,
+            expected_status=expected_status,
+            **extra,
+        )
+
+    def compare_request_status(
+        self,
+        request_id: int,
+        *,
+        expected_status: str,
+    ) -> bool:
+        self.cas_started.set()
+        return super().compare_request_status(
+            request_id,
+            expected_status=expected_status,
+        )
 
 
 def _snapshot(db: PipelineDB, request_id: int, job_id: int) -> dict[str, object]:
@@ -190,7 +249,6 @@ def _searching_import_outcome(
             result={"success": True},
             message="Import successful",
         ),
-        preserve_operator_search_stop=True,
     )
 
 
@@ -461,13 +519,209 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             preview_result={"verdict": "measurement_failed"},
             message="Preview measurement failed: source_missing",
             error="source_missing",
-            preserve_operator_search_stop=True,
         ))
 
         request = db.get_request(request_id)
         assert request is not None
         self.assertEqual(request["status"], "manual")
         self.assertEqual(result.transitions, ())
+
+    def test_import_rejection_preserves_operator_stop_and_policy_effects(self):
+        db, request_id, job_id = _seed_running_import()
+        self.addCleanup(db.close)
+        db._execute(
+            "UPDATE album_requests SET status = 'manual', min_bitrate = 320 "
+            "WHERE id = %s",
+            (request_id,),
+        )
+        result = db.persist_import_terminal_outcome(ImportTerminalOutcome(
+            request_id=request_id,
+            import_job_id=job_id,
+            initial_transition=transitions.RequestTransition.to_wanted(
+                from_status="downloading",
+                attempt_type="validation",
+                search_filetype_override="lossless",
+                min_bitrate=245,
+            ),
+            audit=TerminalDownloadAudit(
+                outcome="rejected",
+                validation_result='{"valid":false}',
+            ),
+            job=ImportJobTerminal(
+                status="failed",
+                result={"success": False},
+                message="rejected",
+                error="rejected",
+            ),
+        ))
+
+        request = db.get_request(request_id)
+        assert request is not None
+        self.assertEqual(request["status"], "manual")
+        self.assertEqual(request["validation_attempts"], 1)
+        self.assertEqual(request["search_filetype_override"], "lossless")
+        self.assertEqual(request["min_bitrate"], 245)
+        self.assertEqual(request["prev_min_bitrate"], 320)
+        self.assertEqual(
+            tuple(item.target_status for item in result.transitions),
+            ("manual",),
+        )
+
+    def test_operator_action_waiting_behind_terminal_lock_retries(self):
+        assert TEST_DSN is not None
+        seed, request_id, job_id = _seed_running_import()
+        seed.close()
+        locked = threading.Event()
+        release = threading.Event()
+        cas_started = threading.Event()
+        terminal_db = PausingTerminalPipelineDB(
+            TEST_DSN,
+            locked=locked,
+            release=release,
+        )
+        operator_db = ObservedOperatorPipelineDB(
+            TEST_DSN,
+            cas_started=cas_started,
+        )
+        self.addCleanup(terminal_db.close)
+        self.addCleanup(operator_db.close)
+        terminal_errors: list[BaseException] = []
+        operator_results: list[transitions.TransitionResult] = []
+
+        command = ImportTerminalOutcome(
+            request_id=request_id,
+            import_job_id=job_id,
+            initial_transition=transitions.RequestTransition.to_wanted(
+                from_status="downloading",
+                attempt_type="validation",
+            ),
+            audit=TerminalDownloadAudit(
+                outcome="rejected",
+                validation_result='{"valid":false}',
+            ),
+            job=ImportJobTerminal(
+                status="failed",
+                result={"success": False},
+                message="rejected",
+                error="rejected",
+            ),
+        )
+
+        def persist_terminal() -> None:
+            try:
+                terminal_db.persist_import_terminal_outcome(command)
+            except BaseException as exc:
+                terminal_errors.append(exc)
+
+        def apply_operator_stop() -> None:
+            operator_results.append(transitions.finalize_operator_request(
+                operator_db,
+                request_id,
+                transitions.RequestTransition.to_manual(
+                    from_status="downloading",
+                ),
+            ))
+
+        terminal_thread = threading.Thread(target=persist_terminal)
+        operator_thread = threading.Thread(target=apply_operator_stop)
+        terminal_thread.start()
+        self.assertTrue(locked.wait(timeout=10))
+        operator_thread.start()
+        self.assertTrue(cas_started.wait(timeout=10))
+        release.set()
+        terminal_thread.join(timeout=10)
+        operator_thread.join(timeout=10)
+        self.assertFalse(terminal_thread.is_alive())
+        self.assertFalse(operator_thread.is_alive())
+        self.assertEqual(terminal_errors, [])
+        self.assertEqual(len(operator_results), 1)
+        self.assertIsInstance(
+            operator_results[0],
+            transitions.TransitionApplied,
+        )
+        observer = PipelineDB(TEST_DSN)
+        self.addCleanup(observer.close)
+        request = observer.get_request(request_id)
+        assert request is not None
+        self.assertEqual(request["status"], "manual")
+        self.assertEqual(request["validation_attempts"], 1)
+
+    def test_same_status_operator_action_still_serializes_behind_lock(self):
+        assert TEST_DSN is not None
+        seed, request_id, job_id = _seed_running_import()
+        seed._execute(
+            "UPDATE album_requests SET status = 'manual' WHERE id = %s",
+            (request_id,),
+        )
+        seed.close()
+        locked = threading.Event()
+        release = threading.Event()
+        cas_started = threading.Event()
+        terminal_db = PausingTerminalPipelineDB(
+            TEST_DSN,
+            locked=locked,
+            release=release,
+        )
+        operator_db = ObservedOperatorPipelineDB(
+            TEST_DSN,
+            cas_started=cas_started,
+        )
+        self.addCleanup(terminal_db.close)
+        self.addCleanup(operator_db.close)
+        terminal_errors: list[BaseException] = []
+        operator_results: list[transitions.TransitionResult] = []
+        command = ImportTerminalOutcome(
+            request_id=request_id,
+            import_job_id=job_id,
+            initial_transition=transitions.RequestTransition.to_imported(
+                from_status="manual",
+                imported_path="/music/Atomic/Outcome",
+            ),
+            audit=TerminalDownloadAudit(outcome="success"),
+            job=ImportJobTerminal(
+                status="completed",
+                result={"success": True},
+                message="imported",
+            ),
+        )
+
+        def persist_terminal() -> None:
+            try:
+                terminal_db.persist_import_terminal_outcome(command)
+            except BaseException as exc:
+                terminal_errors.append(exc)
+
+        def reassert_operator_stop() -> None:
+            operator_results.append(transitions.finalize_operator_request(
+                operator_db,
+                request_id,
+                transitions.RequestTransition.to_manual(
+                    from_status="manual",
+                ),
+            ))
+
+        terminal_thread = threading.Thread(target=persist_terminal)
+        operator_thread = threading.Thread(target=reassert_operator_stop)
+        terminal_thread.start()
+        self.assertTrue(locked.wait(timeout=10))
+        operator_thread.start()
+        self.assertTrue(cas_started.wait(timeout=10))
+        release.set()
+        terminal_thread.join(timeout=10)
+        operator_thread.join(timeout=10)
+        self.assertFalse(terminal_thread.is_alive())
+        self.assertFalse(operator_thread.is_alive())
+        self.assertEqual(terminal_errors, [])
+        self.assertEqual(len(operator_results), 1)
+        self.assertIsInstance(
+            operator_results[0],
+            transitions.TransitionApplied,
+        )
+        observer = PipelineDB(TEST_DSN)
+        self.addCleanup(observer.close)
+        request = observer.get_request(request_id)
+        assert request is not None
+        self.assertEqual(request["status"], "manual")
 
     def test_import_terminal_policy_preserves_current_operator_stop(self):
         db, request_id, job_id = _seed_running_import()
@@ -535,7 +789,6 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
                 ),
             ),
             job=command.job,
-            preserve_operator_search_stop=True,
         )
 
         result = db.persist_import_terminal_outcome(command)

@@ -81,7 +81,6 @@ from lib.terminal_outcomes import (
     PreviewTerminalOutcome,
     TerminalOutcomeResult,
     operator_search_stop_is_current,
-    preserve_operator_stop_post_transitions,
 )
 from lib.beets_db import ReleaseLocation
 from lib.release_identity import (
@@ -114,6 +113,15 @@ class _FakeTerminalTransitionsDB:
     ) -> bool:
         del request_id, state_json, expected_status
         raise ValueError("terminal outcomes cannot transition to downloading")
+
+    def compare_request_status(
+        self,
+        request_id: int,
+        *,
+        expected_status: str,
+    ) -> bool:
+        row = self.get_request(request_id)
+        return bool(row is not None and row["status"] == expected_status)
 
     def reset_to_wanted(
         self,
@@ -148,6 +156,39 @@ class _FakeTerminalTransitionsDB:
         if applied:
             self._boundary("request.wanted")
         return applied
+
+    def apply_wanted_policy_without_requeue(
+        self,
+        request_id: int,
+        *,
+        expected_status: str,
+        fields: dict[str, object],
+        attempt_type: str | None,
+    ) -> bool:
+        row = self._db._requests.get(request_id)
+        if row is None or row.get("status") != expected_status:
+            return False
+        updates = dict(fields)
+        if "min_bitrate" in updates and "prev_min_bitrate" not in updates:
+            updates["prev_min_bitrate"] = (
+                row.get("min_bitrate") or row.get("prev_min_bitrate")
+            )
+        if updates:
+            applied = self._db.update_request_fields(
+                request_id,
+                expected_status=expected_status,
+                **updates,
+            )
+            if not applied:
+                return False
+            self._boundary("request.wanted_policy")
+        if attempt_type is not None:
+            return self.record_attempt(
+                request_id,
+                attempt_type,
+                expected_status=expected_status,
+            )
+        return True
 
     def record_attempt(
         self,
@@ -1261,6 +1302,66 @@ class FakePipelineDB:
     def _terminal_outcome_write_boundary(self, index: int, label: str) -> None:
         del index, label
 
+    def _apply_terminal_request_transition(
+        self,
+        transition_db: _FakeTerminalTransitionsDB,
+        request_id: int,
+        transition: transitions.RequestTransition,
+        *,
+        operator_stop_was_current: bool,
+    ) -> tuple[transitions.TransitionApplied, ...]:
+        if not (
+            operator_stop_was_current
+            and transition.target_status == "wanted"
+        ):
+            return (transitions.require_transition_applied(
+                transitions.finalize_request(
+                    transition_db,
+                    request_id,
+                    transition,
+                )
+            ),)
+        row = transition_db.get_request(request_id)
+        if row is None:
+            return (transitions.require_transition_applied(
+                transitions.finalize_request(
+                    transition_db,
+                    request_id,
+                    transition,
+                )
+            ),)
+        current_status = str(row["status"])
+        applied: list[transitions.TransitionApplied] = []
+        has_policy_effect = bool(transition.fields) or (
+            transition.attempt_type is not None
+        )
+        if has_policy_effect:
+            if not transition_db.apply_wanted_policy_without_requeue(
+                request_id,
+                expected_status=current_status,
+                fields=dict(transition.fields),
+                attempt_type=transition.attempt_type,
+            ):
+                raise RuntimeError(
+                    "locked operator-stop row changed during terminal policy"
+                )
+            applied.append(transitions.TransitionApplied(
+                request_id=request_id,
+                from_status=current_status,
+                target_status=current_status,
+            ))
+        if current_status != "manual":
+            applied.append(transitions.require_transition_applied(
+                transitions.finalize_request(
+                    transition_db,
+                    request_id,
+                    transitions.RequestTransition.to_manual(
+                        from_status=current_status,
+                    ),
+                )
+            ))
+        return tuple(applied)
+
     def persist_import_terminal_outcome(
         self,
         command: ImportTerminalOutcome,
@@ -1276,19 +1377,17 @@ class FakePipelineDB:
         try:
             transition_db = _FakeTerminalTransitionsDB(self, boundary)
             applied = []
-            current_status = (
+            operator_stop_was_current = operator_search_stop_is_current(
                 str(self._requests[command.request_id]["status"])
-                if command.preserve_operator_search_stop
-                and command.request_id in self._requests
+                if command.request_id in self._requests
                 else None
             )
             if command.initial_transition is not None:
-                applied.append(transitions.require_transition_applied(
-                    transitions.finalize_request(
-                        transition_db,
-                        command.request_id,
-                        command.initial_transition,
-                    )
+                applied.extend(self._apply_terminal_request_transition(
+                    transition_db,
+                    command.request_id,
+                    command.initial_transition,
+                    operator_stop_was_current=operator_stop_was_current,
                 ))
             download_log_id = cast(Any, self.log_download)(
                 request_id=command.request_id,
@@ -1296,18 +1395,12 @@ class FakePipelineDB:
             )
             boundary("download_log")
             for transition in command.post_audit_transitions:
-                effective = preserve_operator_stop_post_transitions(
-                    current_status,
+                applied.extend(self._apply_terminal_request_transition(
+                    transition_db,
+                    command.request_id,
                     transition,
-                ) if command.preserve_operator_search_stop else (transition,)
-                for item in effective:
-                    applied.append(transitions.require_transition_applied(
-                        transitions.finalize_request(
-                            transition_db,
-                            command.request_id,
-                            item,
-                        )
-                    ))
+                    operator_stop_was_current=operator_stop_was_current,
+                ))
             cooled: set[str] = set()
             for entry in command.denylists:
                 denied_before = len(self.denylist)
@@ -1384,8 +1477,7 @@ class FakePipelineDB:
             applied = []
             current_status = (
                 str(self._requests[command.request_id]["status"])
-                if command.preserve_operator_search_stop
-                and command.request_id in self._requests
+                if command.request_id in self._requests
                 else None
             )
             preserve_current = (
@@ -1502,6 +1594,19 @@ class FakePipelineDB:
             row[key] = val
         self.status_history.append((request_id, status))
         return True
+
+    def compare_request_status(
+        self,
+        request_id: int,
+        *,
+        expected_status: str,
+    ) -> bool:
+        row = self._requests.get(request_id)
+        return bool(
+            row is not None
+            and row.get("status") == expected_status
+            and row.get("status") != "replaced"
+        )
 
     def mark_imported_with_rescue(
         self,

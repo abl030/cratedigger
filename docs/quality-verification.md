@@ -433,9 +433,13 @@ or backfill failures and actual measurement work consume the per-cycle
 `CratediggerContext.evidence_enrichment_budget`; complete or authoritatively
 absent library copies cost nothing. Over time the failed-download cohort's
 evidence converges without delaying or bypassing download cleanup. Automation
-failure finalizers also reset the request to `wanted`; operator-started import
-jobs preserve their captured search-stop status while recording the same
-evidence and audit outcomes.
+failure finalizers also reset the request to `wanted`. Terminal persistence
+checks the operator search stop under its request-row lock for every `wanted`
+transition, including rejection, HAVE-abort, and local-completion bundles. It
+retains policy fields plus attempt/backoff accounting without clearing the
+stop. An operator lifecycle command already waiting behind that lock retries
+against the committed status, so neither concurrency ordering loses the
+operator action.
 
 **A blank `source_path` is policy-incomplete.** Every enrichment
 helper verifies the scanned path against the row's recorded

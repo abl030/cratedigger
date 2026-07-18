@@ -759,6 +759,24 @@ class _RequestsMixin(_PipelineDBBase):
         return str(row["status"]) if row is not None else None
 
 
+    def compare_request_status(
+        self,
+        request_id: int,
+        *,
+        expected_status: str,
+    ) -> bool:
+        """Linearizing no-op CAS for an idempotent operator command."""
+        if expected_status == "replaced":
+            return False
+        cur = self._execute(
+            "UPDATE album_requests SET status = status "
+            "WHERE id = %s AND status = %s AND status != 'replaced'",
+            (request_id, expected_status),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+
     def update_status(
         self,
         request_id: int,

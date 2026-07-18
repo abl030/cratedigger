@@ -130,6 +130,84 @@ def _persist_known_bad_split_outcome(
 
 
 class TestTerminalOutcomeGenerated(unittest.TestCase):
+    @example(
+        attempt_type="validation",
+        min_bitrate=245,
+        explicit_previous=False,
+        search_override="lossless",
+    )
+    @given(
+        attempt_type=st.one_of(
+            st.none(),
+            st.sampled_from(("search", "download", "validation")),
+        ),
+        min_bitrate=st.one_of(st.none(), st.integers(min_value=32, max_value=1500)),
+        explicit_previous=st.booleans(),
+        search_override=st.one_of(st.none(), st.sampled_from(("lossless", "flac,mp3 v0"))),
+    )
+    def test_operator_stop_retains_generated_wanted_policy_effects(
+        self,
+        attempt_type: str | None,
+        min_bitrate: int | None,
+        explicit_previous: bool,
+        search_override: str | None,
+    ) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="manual",
+            min_bitrate=320,
+            prev_min_bitrate=192,
+            manual_reason="operator_stop",
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            payload={"failed_path": "/tmp/generated"},
+        )
+        db.mark_import_job_preview_importable(job.id, preview_result={})
+        claimed = db.claim_next_import_job(worker_id="generated-stop")
+        assert claimed is not None
+        fields: dict[str, object] = {
+            "search_filetype_override": search_override,
+        }
+        if min_bitrate is not None:
+            fields["min_bitrate"] = min_bitrate
+        if explicit_previous:
+            fields["prev_min_bitrate"] = 256
+
+        db.persist_import_terminal_outcome(ImportTerminalOutcome(
+            request_id=42,
+            import_job_id=claimed.id,
+            initial_transition=transitions.RequestTransition.to_wanted_fields(
+                from_status="downloading",
+                attempt_type=attempt_type,
+                fields=fields,
+            ),
+            audit=TerminalDownloadAudit(outcome="rejected"),
+            job=ImportJobTerminal(
+                status="failed",
+                error="rejected",
+                result={"success": False},
+                message="rejected",
+            ),
+        ))
+
+        row = db.request(42)
+        self.assertEqual(row["status"], "manual")
+        self.assertEqual(row["manual_reason"], "operator_stop")
+        self.assertEqual(row["search_filetype_override"], search_override)
+        self.assertEqual(
+            row[f"{attempt_type}_attempts"] if attempt_type else 0,
+            1 if attempt_type else 0,
+        )
+        if min_bitrate is not None:
+            self.assertEqual(row["min_bitrate"], min_bitrate)
+        self.assertEqual(
+            row["prev_min_bitrate"],
+            256 if explicit_previous else (320 if min_bitrate is not None else 192),
+        )
+
     @given(fail_after=st.one_of(st.none(), st.integers(min_value=1, max_value=5)))
     def test_fake_transaction_is_unchanged_or_complete(
         self,

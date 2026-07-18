@@ -47,7 +47,6 @@ _MODE_NAMES = frozenset({
     "requeue_to_wanted",
     "allow_request_requeue",
     "operator_stop_status",
-    "preserve_operator_search_stop",
     "IMPORT_JOB_AUTOMATION",
     "IMPORT_JOB_FORCE",
     "IMPORT_JOB_MANUAL",
@@ -171,17 +170,23 @@ MODE_GATE_REGISTRY: dict[
      "preserve_source", "4796e2c7a7d737b9"): _PRESERVE_FORCE_SOURCE,
     ("harness/import_one.py", "main", 1577,
      "args.force", "1ad02461ea8af4a2"): _DISTANCE_ONLY,
-    ("harness/import_one.py", "main", 2127,
+    ("harness/import_one.py", "main", 2130,
      "not keep_lossless and target_cleanup_decision(target_achieved, has_target, converted, preserve_source=args.preserve_source)",
      "76ba9b5f5116a1e8"): _PRESERVE_FORCE_SOURCE,
-    ("harness/import_one.py", "main", 2001,
+    ("harness/import_one.py", "main", 2004,
      "args.preserve_source and (not keep_lossless) and (converted > 0)",
      "54723607d5081ee1"): _PRESERVE_FORCE_SOURCE,
-    ("harness/import_one.py", "main", 2020,
+    ("harness/import_one.py", "main", 2023,
      "args.preserve_source and (not keep_lossless) and (converted > 0)",
      "54723607d5081ee1"): _PRESERVE_FORCE_SOURCE,
-    ("harness/import_one.py", "main", 2129,
+    ("harness/import_one.py", "main", 1749,
+     "(has_target or args.preserve_source) and converted > 0",
+     "f066d6386305e215"): _PRESERVE_FORCE_SOURCE,
+    ("harness/import_one.py", "main", 2132,
      "preserve_source=args.preserve_source", "833a2f1fee949dce"): _PRESERVE_FORCE_SOURCE,
+    ("harness/import_one.py", "main", 1723,
+     "keep_source=has_target or args.preserve_source",
+     "100ad7c36bb48b60"): _PRESERVE_FORCE_SOURCE,
     ("lib/dispatch/core.py", "dispatch_import_core", 121,
      "force", "ecd75225e973c696"): _AUDITED_MODE_SET,
     ("lib/dispatch/core.py", "dispatch_import_core", 419,
@@ -221,23 +226,22 @@ MODE_GATE_REGISTRY: dict[
      "scenario not in FORCE_IMPORT_SCENARIOS", "77666a53867810de"): _FORCE_CLEANUP_BOUNDARY,
     ("lib/dispatch/manifest_guard.py", "_guard_reject", 113,
      "requeue=False", "bfdbc42f821a1db3"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/outcome_actions.py", "_finalize_request_and_log_rejection", 386,
+    ("lib/dispatch/outcome_actions.py", "_finalize_request_and_log_rejection", 384,
      "requeue_to_wanted and request_id is not None", "e2bfed59bcd70346"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/outcome_actions.py", "_record_have_analysis_error", 650,
+    ("lib/dispatch/outcome_actions.py", "_record_have_analysis_error", 647,
      "requeue_to_wanted", "6779ab3f329c7d06"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/outcome_actions.py", "_record_preview_measurement_failed", 576,
+    ("lib/dispatch/outcome_actions.py", "_record_preview_measurement_failed", 574,
      "requeue_to_wanted", "6779ab3f329c7d06"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/outcome_actions.py", "_record_have_analysis_error", 671,
+    ("lib/dispatch/outcome_actions.py", "_reject_import_from_evidence_decision", 133,
+     "requeue=requeue_on_failure and (not action.preserve_imported)",
+     "327ecf5f07a4066e"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
+    ("lib/dispatch/outcome_actions.py", "_record_have_analysis_error", 668,
      "requeue_to_wanted=requeue_to_wanted", "6779ab3f329c7d06"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/outcome_actions.py", "_record_have_analysis_error", 672,
+    ("lib/dispatch/outcome_actions.py", "_record_have_analysis_error", 669,
      "record_validation_attempt=requeue_to_wanted", "6779ab3f329c7d06"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/outcome_actions.py", "_do_mark_done", 315,
-     "preserve_operator_search_stop=True", "fc49e3ff31db631b"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/outcome_actions.py", "_record_preview_measurement_failed", 575,
+    ("lib/dispatch/outcome_actions.py", "_record_preview_measurement_failed", 573,
      "request_transition=transitions.RequestTransition.to_wanted() if requeue_to_wanted else None",
      "d3781a96bd337810"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/outcome_actions.py", "_record_preview_measurement_failed", 598,
-     "preserve_operator_search_stop=requeue_to_wanted", "6779ab3f329c7d06"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
     ("lib/dispatch/subprocess_runner.py", "build_import_one_command", 54,
      "force", "ecd75225e973c696"): _DISTANCE_ONLY,
     ("lib/dispatch/subprocess_runner.py", "build_import_one_command", 56,
@@ -262,15 +266,6 @@ MODE_GATE_REGISTRY: dict[
      "preserve_source=True", "fc49e3ff31db631b"): _PRESERVE_FORCE_SOURCE,
     ("lib/import_queue.py", "validate_payload", 264,
      "job_type == IMPORT_JOB_FORCE", "6a090b8735c2ff6a"): _FORCE_ONLY_ACTIVE_MODE,
-    ("lib/pipeline_db/terminal_outcomes.py", "persist_import_terminal_outcome", 526,
-     "command.preserve_operator_search_stop", "29cc3c24f990f6ea"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/pipeline_db/terminal_outcomes.py", "persist_preview_terminal_outcome", 586,
-     "command.preserve_operator_search_stop", "29cc3c24f990f6ea"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/pipeline_db/terminal_outcomes.py", "persist_import_terminal_outcome", 546,
-     "command.preserve_operator_search_stop", "29cc3c24f990f6ea"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/terminal_outcomes.py", "with_job", 176,
-     "preserve_operator_search_stop=self.preserve_operator_search_stop",
-     "3248914b98b5c940"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
     ("scripts/import_preview_worker.py", "_front_gate_source_path", 183,
      "job.job_type == IMPORT_JOB_FORCE", "e45cab5ab5498692"): _FORCE_ONLY_ACTIVE_MODE,
     ("scripts/import_preview_worker.py", "_front_gate_source_path", 203,
@@ -315,7 +310,7 @@ def _scope_name(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str:
 
 
 def _is_import_mode_condition(
-    condition: ast.expr,
+    condition: ast.AST,
     *,
     mode_names: frozenset[str] = _MODE_NAMES,
 ) -> bool:
@@ -345,8 +340,6 @@ def _is_mode_grant(
         return not (isinstance(value, ast.Constant) and value.value is False)
     if keyword in _LIFECYCLE_REQUEUE_KEYWORDS:
         return isinstance(value, ast.Constant) and value.value is False
-    if keyword == "preserve_operator_search_stop":
-        return not (isinstance(value, ast.Constant) and value.value is False)
     if keyword in _MODE_ASSIGNMENT_GRANTS:
         return not (isinstance(value, ast.Constant) and value.value is None)
     return False
@@ -373,75 +366,58 @@ def _assigned_names(target: ast.AST) -> set[str]:
 
 def _is_simple_mode_alias(
     value: ast.expr,
-    *,
-    mode_names: frozenset[str],
 ) -> bool:
-    if isinstance(value, ast.Name):
-        return value.id in mode_names
-    if isinstance(value, ast.Attribute):
-        return value.attr in mode_names
-    if isinstance(value, ast.Constant) and isinstance(value.value, str):
-        return value.value in _MODE_LITERALS
-    if isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.Not):
-        return _is_simple_mode_alias(value.operand, mode_names=mode_names)
+    """Return whether an expression would hide caller-mode authority."""
+    if isinstance(value, (ast.Name, ast.Attribute, ast.Constant)):
+        return _is_import_mode_condition(value)
+    if isinstance(value, ast.UnaryOp):
+        return _is_simple_mode_alias(value.operand)
+    if isinstance(value, ast.BoolOp):
+        return any(_is_simple_mode_alias(item) for item in value.values)
+    if isinstance(value, ast.Compare):
+        return _is_import_mode_condition(value)
+    if isinstance(value, ast.IfExp):
+        if (
+            isinstance(value.body, ast.Constant)
+            and isinstance(value.body.value, bool)
+            and isinstance(value.orelse, ast.Constant)
+            and isinstance(value.orelse.value, bool)
+            and _is_import_mode_condition(value.test)
+        ):
+            return True
+        return (
+            _is_simple_mode_alias(value.body)
+            or _is_simple_mode_alias(value.orelse)
+        )
     return False
 
 
-def _mode_alias_events_by_scope(
-    tree: ast.AST,
-    parents: dict[ast.AST, ast.AST],
-) -> dict[ast.AST, tuple[tuple[tuple[int, int], frozenset[str]], ...]]:
-    """Track simple aliases in source order, killing them on overwrite."""
+def _reject_mode_aliases(tree: ast.AST, *, path: str) -> None:
+    """Keep the audit grammar direct: canonical names only, no aliases.
 
-    scopes = {
-        _scope_owner(node, parents)
-        for node in ast.walk(tree)
-    }
-    events: dict[
-        ast.AST,
-        tuple[tuple[tuple[int, int], frozenset[str]], ...],
-    ] = {}
-    for scope in scopes:
-        names = set(_MODE_NAMES)
-        scope_events: list[tuple[tuple[int, int], frozenset[str]]] = []
-        assignments = sorted(
-            (
-                node for node in ast.walk(scope)
-                if _scope_owner(node, parents) is scope
-                and isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr))
-            ),
-            key=lambda node: (
-                int(getattr(node, "lineno", 0)),
-                int(getattr(node, "col_offset", 0)),
-            ),
-        )
-        for node in assignments:
-            targets: list[ast.AST]
-            value: ast.expr | None
-            if isinstance(node, ast.Assign):
-                targets = list(node.targets)
-                value = node.value
-            else:
-                targets = [node.target]
-                value = node.value
-            if value is None:
-                continue
-            assigned = set().union(*(
-                _assigned_names(target) for target in targets
-            ))
-            if _is_simple_mode_alias(value, mode_names=frozenset(names)):
-                names.update(assigned)
-            else:
-                names.difference_update(assigned - _MODE_NAMES)
-            scope_events.append((
-                (
-                    int(getattr(node, "end_lineno", node.lineno)),
-                    int(getattr(node, "end_col_offset", node.col_offset)),
-                ),
-                frozenset(names),
-            ))
-        events[scope] = tuple(scope_events)
-    return events
+    Flow-sensitive alias analysis is a poor security boundary. Production
+    gates must spell the canonical mode/lifecycle name or literal at the gate;
+    assignments may only target one of those canonical names directly.
+    """
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            continue
+        targets = list(node.targets) if isinstance(node, ast.Assign) else [node.target]
+        value = node.value
+        if value is None or not _is_simple_mode_alias(value):
+            continue
+        assigned = set().union(*(
+            _assigned_names(target) for target in targets
+        ))
+        hidden = sorted(assigned - _MODE_NAMES - _MODE_ASSIGNMENT_GRANTS)
+        if hidden:
+            violations.append(
+                f"{path}:{node.lineno}: mode aliases are forbidden: "
+                + ", ".join(hidden)
+            )
+    if violations:
+        raise AssertionError("\n".join(violations))
 
 
 def mode_gates_in_source(source: str, *, path: str) -> list[ModeGate]:
@@ -451,22 +427,8 @@ def mode_gates_in_source(source: str, *, path: str) -> list[ModeGate]:
         for parent in ast.walk(tree)
         for child in ast.iter_child_nodes(parent)
     }
-    alias_events = _mode_alias_events_by_scope(tree, parents)
-
-    def names_for(node: ast.AST) -> frozenset[str]:
-        names = frozenset(_MODE_NAMES)
-        position = (
-            int(getattr(node, "lineno", 0)),
-            int(getattr(node, "col_offset", 0)),
-        )
-        for event_position, event_names in alias_events[
-            _scope_owner(node, parents)
-        ]:
-            if event_position > position:
-                break
-            names = event_names
-        return names
-    conditions: list[tuple[ast.AST, ast.expr, str]] = []
+    _reject_mode_aliases(tree, path=path)
+    conditions: list[tuple[ast.AST, ast.AST, str]] = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.If, ast.IfExp, ast.While)):
             conditions.append((node, node.test, ast.unparse(node.test)))
@@ -478,16 +440,10 @@ def mode_gates_in_source(source: str, *, path: str) -> list[ModeGate]:
         elif isinstance(node, ast.match_case):
             if node.guard is not None:
                 conditions.append((node, node.guard, ast.unparse(node.guard)))
-            if (
-                isinstance(node.pattern, ast.MatchValue)
-                and _is_import_mode_condition(
-                    node.pattern.value,
-                    mode_names=names_for(node.pattern),
-                )
-            ):
+            if _is_import_mode_condition(node.pattern):
                 conditions.append((
                     node.pattern,
-                    node.pattern.value,
+                    node.pattern,
                     f"case {ast.unparse(node.pattern)}",
                 ))
 
@@ -495,7 +451,7 @@ def mode_gates_in_source(source: str, *, path: str) -> list[ModeGate]:
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Compare)
-            and _is_import_mode_condition(node, mode_names=names_for(node))
+            and _is_import_mode_condition(node)
         ):
             current: ast.AST | None = node
             covered = False
@@ -530,7 +486,6 @@ def mode_gates_in_source(source: str, *, path: str) -> list[ModeGate]:
             and _is_mode_grant(
                 node.arg,
                 node.value,
-                mode_names=names_for(node),
             )
         ):
             conditions.append((node, node.value, f"{node.arg}={ast.unparse(node.value)}"))
@@ -542,7 +497,6 @@ def mode_gates_in_source(source: str, *, path: str) -> list[ModeGate]:
                     and _is_mode_grant(
                         key.value,
                         value,
-                        mode_names=names_for(node),
                     )
                 ):
                     conditions.append(
@@ -551,19 +505,21 @@ def mode_gates_in_source(source: str, *, path: str) -> list[ModeGate]:
 
     findings: list[ModeGate] = []
     seen: set[tuple[int, str, str]] = set()
+    seen_condition_presentations: set[tuple[int, str]] = set()
     for node, condition, presentation in conditions:
-        mode_names = names_for(node)
+        condition_presentation = (id(condition), presentation)
+        if condition_presentation in seen_condition_presentations:
+            continue
+        seen_condition_presentations.add(condition_presentation)
         if not (
-            _is_import_mode_condition(condition, mode_names=mode_names)
+            _is_import_mode_condition(condition)
             or _is_mode_grant(
                 presentation.partition("=")[0],
-                condition,
-                mode_names=mode_names,
+                condition,  # type: ignore[arg-type]
             )
             or _is_mode_grant(
                 presentation.split(":", 1)[0].strip("'"),
-                condition,
-                mode_names=mode_names,
+                condition,  # type: ignore[arg-type]
             )
         ):
             continue
@@ -575,7 +531,18 @@ def mode_gates_in_source(source: str, *, path: str) -> list[ModeGate]:
             fingerprint,
         )
         if identity in seen:
-            continue
+            position = (
+                int(getattr(condition, "lineno", 0)),
+                int(getattr(condition, "col_offset", 0)),
+            )
+            fingerprint = hashlib.sha256(
+                f"{normalized}@{position[0]}:{position[1]}".encode()
+            ).hexdigest()[:16]
+            identity = (
+                int(getattr(condition, "lineno", 0)),
+                presentation,
+                fingerprint,
+            )
         seen.add(identity)
         findings.append(ModeGate(
             path=path,
@@ -614,8 +581,7 @@ def assert_mode_gate_registry_complete(
     stale = sorted(registered - found)
     if missing or stale:
         detail = [
-            *(f"unregistered: {item.path}:{item.line} "
-              f"{item.scope}: {item.condition}" for item in missing),
+            *(f"unregistered: {item.key!r}" for item in missing),
             *(f"stale registry entry: {item!r}" for item in stale),
         ]
         raise AssertionError("\n".join(detail))
@@ -658,6 +624,18 @@ class TestImportModeContract(unittest.TestCase):
             "import_mode",
             {field.name for field in msgspec.structs.fields(ImportPreviewValues)},
         )
+        parser, _, _ = _build_parser()
+        subcommands = next(
+            action.choices
+            for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        preview_options = {
+            option
+            for action in subcommands["import-preview"]._actions
+            for option in action.option_strings
+        }
+        self.assertNotIn("--import-mode", preview_options)
 
     def test_every_mode_gate_has_exact_authority(self):
         assert_mode_gate_registry_complete(
@@ -734,7 +712,7 @@ class TestImportModeAuditGenerated(unittest.TestCase):
     def test_detector_distinguishes_two_grants_on_the_same_line(self):
         findings = mode_gates_in_source(
             "def mutant(flag, target):\n"
-            "    target(force=flag, preserve_source=flag)\n",
+            "    target(force=flag); target(force=flag)\n",
             path="mutant.py",
         )
         self.assertEqual(len(findings), 2)
@@ -745,7 +723,7 @@ class TestImportModeAuditGenerated(unittest.TestCase):
                 {findings[0].key: _AUDITED_MODE_SET},
             )
 
-    def test_detector_propagates_simple_mode_aliases(self):
+    def test_detector_rejects_mode_aliases(self):
         mutants = {
             "boolean alias": (
                 "def mutant(force):\n"
@@ -759,15 +737,26 @@ class TestImportModeAuditGenerated(unittest.TestCase):
                 "    if job_type == force_type:\n"
                 "        return 1\n"
             ),
-            "forwarded lifecycle": (
-                "def mutant(requeue_on_failure, target):\n"
-                "    target(requeue=requeue_on_failure)\n"
+            "conditional overwrite": (
+                "def mutant(force, condition):\n"
+                "    alias = force\n"
+                "    if condition:\n"
+                "        alias = False\n"
+                "    if alias:\n"
+                "        return 1\n"
             ),
         }
         for label, source in mutants.items():
             with self.subTest(label=label):
-                findings = mode_gates_in_source(source, path="mutant.py")
-                self.assertEqual(len(findings), 1)
+                with self.assertRaisesRegex(AssertionError, "aliases are forbidden"):
+                    mode_gates_in_source(source, path="mutant.py")
+
+        findings = mode_gates_in_source(
+            "def mutant(requeue_on_failure, target):\n"
+            "    target(requeue=requeue_on_failure)\n",
+            path="mutant.py",
+        )
+        self.assertEqual(len(findings), 1)
 
     def test_detector_recognizes_lifecycle_grants(self):
         mutants = {
@@ -797,42 +786,11 @@ class TestImportModeAuditGenerated(unittest.TestCase):
         findings = mode_gates_in_source(
             "def mutant(mode):\n"
             "    match mode:\n"
-            "        case 'force_import':\n"
+            "        case 'force_import' | 'auto_import':\n"
             "            return 1\n",
             path="mutant.py",
         )
         self.assertEqual(len(findings), 1)
-
-    def test_alias_taint_respects_assignment_order_and_overwrite(self):
-        sources = {
-            "before assignment": (
-                "def mutant(force):\n"
-                "    if alias:\n"
-                "        return 0\n"
-                "    alias = force\n"
-            ),
-            "after overwrite": (
-                "def mutant(force):\n"
-                "    alias = force\n"
-                "    alias = False\n"
-                "    if alias:\n"
-                "        return 0\n"
-            ),
-        }
-        for label, source in sources.items():
-            with self.subTest(label=label):
-                self.assertEqual(
-                    mode_gates_in_source(source, path="mutant.py"),
-                    [],
-                )
-        live = mode_gates_in_source(
-            "def mutant(force):\n"
-            "    alias = force\n"
-            "    if alias:\n"
-            "        return 1\n",
-            path="mutant.py",
-        )
-        self.assertEqual(len(live), 1)
 
 
 if __name__ == "__main__":
