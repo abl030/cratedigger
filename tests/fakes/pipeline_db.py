@@ -80,6 +80,8 @@ from lib.terminal_outcomes import (
     ImportTerminalOutcome,
     PreviewTerminalOutcome,
     TerminalOutcomeResult,
+    operator_search_stop_is_current,
+    preserve_operator_stop_post_transitions,
 )
 from lib.beets_db import ReleaseLocation
 from lib.release_identity import (
@@ -1274,6 +1276,12 @@ class FakePipelineDB:
         try:
             transition_db = _FakeTerminalTransitionsDB(self, boundary)
             applied = []
+            current_status = (
+                str(self._requests[command.request_id]["status"])
+                if command.preserve_operator_search_stop
+                and command.request_id in self._requests
+                else None
+            )
             if command.initial_transition is not None:
                 applied.append(transitions.require_transition_applied(
                     transitions.finalize_request(
@@ -1288,13 +1296,18 @@ class FakePipelineDB:
             )
             boundary("download_log")
             for transition in command.post_audit_transitions:
-                applied.append(transitions.require_transition_applied(
-                    transitions.finalize_request(
-                        transition_db,
-                        command.request_id,
-                        transition,
-                    )
-                ))
+                effective = preserve_operator_stop_post_transitions(
+                    current_status,
+                    transition,
+                ) if command.preserve_operator_search_stop else (transition,)
+                for item in effective:
+                    applied.append(transitions.require_transition_applied(
+                        transitions.finalize_request(
+                            transition_db,
+                            command.request_id,
+                            item,
+                        )
+                    ))
             cooled: set[str] = set()
             for entry in command.denylists:
                 denied_before = len(self.denylist)
@@ -1369,7 +1382,18 @@ class FakePipelineDB:
         try:
             transition_db = _FakeTerminalTransitionsDB(self, boundary)
             applied = []
-            if command.request_transition is not None:
+            current_status = (
+                str(self._requests[command.request_id]["status"])
+                if command.preserve_operator_search_stop
+                and command.request_id in self._requests
+                else None
+            )
+            preserve_current = (
+                command.request_transition is not None
+                and command.request_transition.target_status == "wanted"
+                and operator_search_stop_is_current(current_status)
+            )
+            if command.request_transition is not None and not preserve_current:
                 applied.append(transitions.require_transition_applied(
                     transitions.finalize_request(
                         transition_db,

@@ -71,8 +71,9 @@ Provisional imports are deliberately not verified lossless. They may still use
 the configured lossless-source storage target, but `verified_lossless` remains
 false, the source is denylisted, normal post-import notifications run, and the
 search policy keeps acquisition open. Automation returns the request to
-`wanted`; an operator-started import retains its captured search stop while
-recording the same quality decision and narrowing fields.
+`wanted`; terminal persistence retains an operator search stop current when
+the request row is locked, while recording the same quality decision and
+narrowing fields.
 
 Exception: a comparable `lossless_source_v0` probe at avg ≥230kbps and min
 ≥200kbps is treated as stronger evidence than a suspect/`likely_transcode`

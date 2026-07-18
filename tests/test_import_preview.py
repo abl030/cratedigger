@@ -1916,7 +1916,7 @@ class TestImportPreviewPath(unittest.TestCase):
             shutil.rmtree(source, ignore_errors=True)
 
     def test_audio_corrupt_is_confident_reject_without_denylist_side_effects(self):
-        """U6: preview surfaces the four folder/audio-integrity facts as a
+        """U6: preview surfaces the five folder/audio-integrity facts as a
         confident_reject. Spectral / codec rank / V0 are NEVER decided in
         preview — those live in the importer's
         ``full_pipeline_decision_from_evidence``. Preview must also NEVER

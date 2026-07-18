@@ -116,14 +116,6 @@ def dispatch_import_core(
 
     source_dirs = normalize_source_dirs(source_dirs or [])
 
-    request_at_start = db.get_request(request_id)
-    operator_stop_status = (
-        "manual"
-        if request_at_start is not None
-        and request_at_start.get("status") == "manual"
-        else None
-    )
-
     # Operation identity is distinct from the eventual download-log outcome:
     # an automatic attempt can still reject or fail after this start message.
     mode = "FORCE-IMPORT" if force else "AUTO-IMPORT"
@@ -821,7 +813,6 @@ def dispatch_import_core(
                     search_action=search_action,
                     mark_done=action.mark_done,
                     new_bitrate=new_br,
-                    operator_stop_status=operator_stop_status,
                 )
 
                 # Authority: "D19 — Force-import overrides the beets distance
@@ -831,14 +822,13 @@ def dispatch_import_core(
                 # for every import mode."
                 # https://github.com/abl030/cratedigger/issues/711#issuecomment-5000425284
                 # Operator imports run the identical quality/search policy.
-                # Lifecycle application restores a captured operator search
-                # stop when that policy would otherwise reopen acquisition;
-                # terminal proof acceptance remains imported.
+                # The terminal DB transaction preserves an operator search
+                # stop that is current at commit time; terminal proof
+                # acceptance remains imported.
                 if action.run_quality_gate:
                     terminal_outcome = _run_or_stage_quality_gate(
                         quality_gate_fn,
                         terminal_outcome,
-                        operator_stop_status=operator_stop_status,
                         mb_id=mb_release_id,
                         label=label,
                         request_id=request_id,

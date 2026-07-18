@@ -166,6 +166,34 @@ def _seed_running_preview() -> tuple[PipelineDB, int, int]:
     return db, request_id, claimed.id
 
 
+def _searching_import_outcome(
+    request_id: int,
+    job_id: int,
+) -> ImportTerminalOutcome:
+    return ImportTerminalOutcome(
+        request_id=request_id,
+        import_job_id=job_id,
+        initial_transition=transitions.RequestTransition.to_imported(
+            imported_path="/music/Atomic/Outcome",
+            verified_lossless=False,
+        ),
+        audit=TerminalDownloadAudit(outcome="success"),
+        post_audit_transitions=(
+            transitions.RequestTransition.to_wanted(
+                from_status="imported",
+                search_filetype_override="lossless",
+                min_bitrate=320,
+            ),
+        ),
+        job=ImportJobTerminal(
+            status="completed",
+            result={"success": True},
+            message="Import successful",
+        ),
+        preserve_operator_search_stop=True,
+    )
+
+
 @requires_postgres
 class TestTerminalOutcomeAtomicity(unittest.TestCase):
     """Every injected write-boundary failure is invisible to a fresh session."""
@@ -410,7 +438,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             persist_method="persist_preview_terminal_outcome",
         )
 
-    def test_preview_failure_without_transition_preserves_operator_status(self):
+    def test_preview_failure_preserves_current_operator_status(self):
         db, request_id, job_id = _seed_running_preview()
         self.addCleanup(db.close)
         db._execute(
@@ -420,7 +448,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         result = db.persist_preview_terminal_outcome(PreviewTerminalOutcome(
             request_id=request_id,
             import_job_id=job_id,
-            request_transition=None,
+            request_transition=transitions.RequestTransition.to_wanted(),
             audit=TerminalDownloadAudit(
                 outcome="measurement_failed",
                 beets_scenario="measurement_failed",
@@ -433,12 +461,93 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             preview_result={"verdict": "measurement_failed"},
             message="Preview measurement failed: source_missing",
             error="source_missing",
+            preserve_operator_search_stop=True,
         ))
 
         request = db.get_request(request_id)
         assert request is not None
         self.assertEqual(request["status"], "manual")
         self.assertEqual(result.transitions, ())
+
+    def test_import_terminal_policy_preserves_current_operator_stop(self):
+        db, request_id, job_id = _seed_running_import()
+        self.addCleanup(db.close)
+        db._execute(
+            "UPDATE album_requests SET status = 'manual' WHERE id = %s",
+            (request_id,),
+        )
+
+        result = db.persist_import_terminal_outcome(
+            _searching_import_outcome(request_id, job_id)
+        )
+
+        request = db.get_request(request_id)
+        assert request is not None
+        self.assertEqual(request["status"], "manual")
+        self.assertEqual(request["search_filetype_override"], "lossless")
+        self.assertEqual(request["min_bitrate"], 320)
+        self.assertEqual(
+            tuple(item.target_status for item in result.transitions),
+            ("imported", "imported", "manual"),
+        )
+
+    def test_import_terminal_policy_does_not_restore_cleared_stop(self):
+        db, request_id, job_id = _seed_running_import()
+        self.addCleanup(db.close)
+        db._execute(
+            "UPDATE album_requests SET status = 'manual' WHERE id = %s",
+            (request_id,),
+        )
+        command = _searching_import_outcome(request_id, job_id)
+        db._execute(
+            "UPDATE album_requests SET status = 'wanted' WHERE id = %s",
+            (request_id,),
+        )
+
+        result = db.persist_import_terminal_outcome(command)
+
+        request = db.get_request(request_id)
+        assert request is not None
+        self.assertEqual(request["status"], "wanted")
+        self.assertEqual(request["search_filetype_override"], "lossless")
+        self.assertEqual(
+            tuple(item.target_status for item in result.transitions),
+            ("imported", "wanted"),
+        )
+
+    def test_import_terminal_acceptance_supersedes_operator_stop(self):
+        db, request_id, job_id = _seed_running_import()
+        self.addCleanup(db.close)
+        db._execute(
+            "UPDATE album_requests SET status = 'manual' WHERE id = %s",
+            (request_id,),
+        )
+        command = _searching_import_outcome(request_id, job_id)
+        command = ImportTerminalOutcome(
+            request_id=command.request_id,
+            import_job_id=command.import_job_id,
+            initial_transition=command.initial_transition,
+            audit=command.audit,
+            post_audit_transitions=(
+                transitions.RequestTransition.to_imported(
+                    from_status="imported",
+                    min_bitrate=320,
+                ),
+            ),
+            job=command.job,
+            preserve_operator_search_stop=True,
+        )
+
+        result = db.persist_import_terminal_outcome(command)
+
+        request = db.get_request(request_id)
+        assert request is not None
+        self.assertEqual(request["status"], "imported")
+        self.assertEqual(request["min_bitrate"], 320)
+        self.assertEqual(
+            tuple(item.target_status for item in result.transitions),
+            ("imported", "imported"),
+        )
 
     def test_import_success_round_trip_returns_complete_bundle(self):
         db, request_id, job_id = _seed_running_import(unfindable=True)

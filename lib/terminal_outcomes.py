@@ -16,6 +16,44 @@ if TYPE_CHECKING:
     from lib.pipeline_db.download_log import DownloadLogOutcome
 
 
+OPERATOR_SEARCH_STOP_STATUS = "manual"
+
+
+def operator_search_stop_is_current(status: str | None) -> bool:
+    """Return whether the request currently carries the operator stop."""
+    return status == OPERATOR_SEARCH_STOP_STATUS
+
+
+def preserve_operator_stop_post_transitions(
+    current_status: str | None,
+    transition: RequestTransition,
+) -> tuple[RequestTransition, ...]:
+    """Retain current operator state while applying mode-blind policy fields.
+
+    A successful import first moves the request to ``imported``. If its
+    canonical post-import policy then says ``wanted`` but the row carried the
+    operator stop when the terminal transaction locked it, persist the policy
+    fields on ``imported`` and restore the stop. Terminal ``imported`` policy
+    remains terminal.
+    """
+    if (
+        not operator_search_stop_is_current(current_status)
+        or transition.target_status != "wanted"
+    ):
+        return (transition,)
+    if transition.attempt_type is not None:
+        raise ValueError(
+            "operator-stop preservation cannot rewrite an attempt transition"
+        )
+    return (
+        RequestTransition.to_imported_fields(
+            from_status=transition.from_status,
+            fields=transition.fields,
+        ),
+        RequestTransition.to_manual(from_status="imported"),
+    )
+
+
 @dataclass(frozen=True)
 class TerminalDownloadAudit:
     """One mandatory ``download_log`` row in a terminal outcome bundle."""
@@ -109,6 +147,7 @@ class ImportTerminalOutcome:
     post_audit_transitions: tuple[RequestTransition, ...] = ()
     denylists: tuple[TerminalDenylist, ...] = ()
     cooldowns: tuple[TerminalCooldown, ...] = ()
+    preserve_operator_search_stop: bool = False
 
 
 @dataclass(frozen=True)
@@ -122,6 +161,7 @@ class PendingImportTerminalOutcome:
     post_audit_transitions: tuple[RequestTransition, ...] = ()
     denylists: tuple[TerminalDenylist, ...] = ()
     cooldowns: tuple[TerminalCooldown, ...] = ()
+    preserve_operator_search_stop: bool = False
 
     def with_job(self, job: ImportJobTerminal) -> ImportTerminalOutcome:
         return ImportTerminalOutcome(
@@ -133,6 +173,7 @@ class PendingImportTerminalOutcome:
             post_audit_transitions=self.post_audit_transitions,
             denylists=self.denylists,
             cooldowns=self.cooldowns,
+            preserve_operator_search_stop=self.preserve_operator_search_stop,
         )
 
     def append_transitions(
@@ -163,6 +204,7 @@ class PreviewTerminalOutcome:
     message: str
     error: str
     denylists: tuple[TerminalDenylist, ...] = ()
+    preserve_operator_search_stop: bool = False
 
 
 @dataclass(frozen=True)

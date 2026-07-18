@@ -2,8 +2,8 @@
 
 One owner for what follows a successful retained import: the canonical
 decision->(status, override, denylist) resolution, peer attribution, and gate
-staging. Quality/search policy is mode-blind; lifecycle application preserves
-an operator-owned search stop captured before the import.
+staging. Quality/search policy is mode-blind; terminal persistence arbitrates
+operator-owned search state against the request row current at commit time.
 
 ``finalize_request`` is the module-local DI seam, same shape as its
 siblings (``lib.dispatch.outcome_actions``, ``harness.import_one``).
@@ -73,10 +73,9 @@ def _run_or_stage_quality_gate(
     *,
     db: "PipelineDB",
     request_id: int,
-    operator_stop_status: str | None = None,
     **kwargs: object,
 ) -> PendingImportTerminalOutcome | None:
-    if pending is None and operator_stop_status is None:
+    if pending is None:
         quality_gate_fn(db=db, request_id=request_id, **kwargs)
         return None
     plan = quality_gate_fn(
@@ -87,38 +86,9 @@ def _run_or_stage_quality_gate(
     )
     if not isinstance(plan, QualityGatePlan):
         return pending
-    gate_transitions = (plan.transition,)
-    if (
-        operator_stop_status is not None
-        and plan.transition.target_status == "wanted"
-    ):
-        if operator_stop_status != "manual":
-            raise ValueError(
-                f"unsupported operator stop status: {operator_stop_status!r}"
-            )
-        gate_transitions = (
-            transitions.RequestTransition.to_imported_fields(
-                from_status="imported",
-                fields=plan.transition.fields,
-            ),
-            transitions.RequestTransition.to_manual(from_status="imported"),
-        )
-    for transition in gate_transitions:
-        pending = _apply_or_stage_transition(
-            db,
-            request_id,
-            pending,
-            transition,
-        )
-    if pending is not None:
-        return pending.append_denylists(*plan.denylists)
-    for entry in plan.denylists:
-        db.add_denylist(
-            request_id,
-            entry.username,
-            entry.reason,
-        )
-    return None
+    return pending.append_transitions(plan.transition).append_denylists(
+        *plan.denylists
+    )
 
 
 def _resolve_post_import_search_policy(
@@ -131,8 +101,8 @@ def _resolve_post_import_search_policy(
     """Resolve post-import search policy and its peer attribution once.
 
     Decision 19: force imports resolve through the same canonical quality and
-    search mapping as automatic imports. Lifecycle ownership is applied later:
-    an operator stop is restored after recording that mapping.
+    search mapping as automatic imports. Terminal persistence applies that
+    mapping without overwriting current operator-owned search state.
     """
 
     search_action = post_import_search_action_if_known(decision)
@@ -157,9 +127,8 @@ def _apply_post_import_search_action(
     search_action: PostImportSearchAction | None,
     mark_done: bool,
     new_bitrate: int | None,
-    operator_stop_status: str | None = None,
 ) -> PendingImportTerminalOutcome | None:
-    """Apply search policy without clearing an operator-owned stop."""
+    """Apply or stage the canonical retained-import search policy."""
 
     if search_action is None:
         return pending
@@ -173,26 +142,8 @@ def _apply_post_import_search_action(
     }
     if mark_done and new_bitrate is not None:
         fields["min_bitrate"] = new_bitrate
-    request_transitions = (
-        transitions.RequestTransition.to_wanted_fields(
-            from_status="imported",
-            fields=fields,
-        ),
+    transition = transitions.RequestTransition.to_wanted_fields(
+        from_status="imported",
+        fields=fields,
     )
-    if operator_stop_status is not None:
-        if operator_stop_status != "manual":
-            raise ValueError(
-                f"unsupported operator stop status: {operator_stop_status!r}"
-            )
-        request_transitions = (
-            transitions.RequestTransition.to_imported_fields(
-                from_status="imported",
-                fields=fields,
-            ),
-            transitions.RequestTransition.to_manual(from_status="imported"),
-        )
-    for transition in request_transitions:
-        pending = _apply_or_stage_transition(
-            db, request_id, pending, transition,
-        )
-    return pending
+    return _apply_or_stage_transition(db, request_id, pending, transition)

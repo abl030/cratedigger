@@ -18,6 +18,8 @@ from lib.terminal_outcomes import (
     TerminalDenylist,
     TerminalDownloadAudit,
     TerminalOutcomeResult,
+    operator_search_stop_is_current,
+    preserve_operator_stop_post_transitions,
 )
 from lib.validation_envelope import derive_validation_log_columns
 
@@ -330,6 +332,15 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
 
         return emit
 
+    def _lock_terminal_request_status(self, request_id: int) -> str | None:
+        """Lock and return lifecycle state used by a terminal policy bundle."""
+        cur = self._execute(
+            "SELECT status FROM album_requests WHERE id = %s FOR UPDATE",
+            (request_id,),
+        )
+        row = cur.fetchone()
+        return str(row["status"]) if row is not None else None
+
     def _insert_terminal_download_audit(
         self,
         request_id: int,
@@ -510,6 +521,11 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
         cooled: set[str] = set()
         with self._atomic():
             transition_db = _TransactionalTransitionsDB(self, boundary)
+            current_status = (
+                self._lock_terminal_request_status(command.request_id)
+                if command.preserve_operator_search_stop
+                else None
+            )
             if command.initial_transition is not None:
                 applied.append(transitions.require_transition_applied(
                     transitions.finalize_request(
@@ -524,13 +540,18 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 boundary,
             )
             for transition in command.post_audit_transitions:
-                applied.append(transitions.require_transition_applied(
-                    transitions.finalize_request(
-                        transition_db,
-                        command.request_id,
-                        transition,
-                    )
-                ))
+                effective = preserve_operator_stop_post_transitions(
+                    current_status,
+                    transition,
+                ) if command.preserve_operator_search_stop else (transition,)
+                for item in effective:
+                    applied.append(transitions.require_transition_applied(
+                        transitions.finalize_request(
+                            transition_db,
+                            command.request_id,
+                            item,
+                        )
+                    ))
             for entry in command.denylists:
                 if self._persist_terminal_denylist(
                     command.request_id,
@@ -560,7 +581,17 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
         with self._atomic():
             transition_db = _TransactionalTransitionsDB(self, boundary)
             applied = []
-            if command.request_transition is not None:
+            current_status = (
+                self._lock_terminal_request_status(command.request_id)
+                if command.preserve_operator_search_stop
+                else None
+            )
+            preserve_current = (
+                command.request_transition is not None
+                and command.request_transition.target_status == "wanted"
+                and operator_search_stop_is_current(current_status)
+            )
+            if command.request_transition is not None and not preserve_current:
                 applied.append(transitions.require_transition_applied(
                     transitions.finalize_request(
                         transition_db,

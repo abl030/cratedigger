@@ -47,6 +47,8 @@ _MODE_NAMES = frozenset({
     "requeue_to_wanted",
     "allow_request_requeue",
     "operator_stop_status",
+    "preserve_operator_search_stop",
+    "IMPORT_JOB_AUTOMATION",
     "IMPORT_JOB_FORCE",
     "IMPORT_JOB_MANUAL",
     "FORCE_IMPORT_SCENARIOS",
@@ -54,6 +56,13 @@ _MODE_NAMES = frozenset({
     "preserve_source",
     "source_is_disposable",
 })
+_LIFECYCLE_REQUEUE_KEYWORDS = frozenset({
+    "requeue",
+    "requeue_on_failure",
+    "requeue_to_wanted",
+    "allow_request_requeue",
+})
+_MODE_ASSIGNMENT_GRANTS = frozenset({"operator_stop_status"})
 _MODE_LITERALS = frozenset({
     "auto_import",
     "automation_import",
@@ -136,7 +145,10 @@ _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT = ModeGateAuthority(
         "Only the operator may set or clear `unsearchable`; the pipeline must "
         "never assign it automatically."
     ),
-    reason="A rejected force attempt must not rewrite operator-owned request state.",
+    reason=(
+        "No pipeline attempt, failed or successful, may rewrite current "
+        "operator-owned search state."
+    ),
 )
 _HISTORICAL_MANUAL_READS = ModeGateAuthority(
     link="https://github.com/abl030/cratedigger/issues/737#issuecomment-5010653922",
@@ -170,37 +182,33 @@ MODE_GATE_REGISTRY: dict[
      "54723607d5081ee1"): _PRESERVE_FORCE_SOURCE,
     ("harness/import_one.py", "main", 2129,
      "preserve_source=args.preserve_source", "833a2f1fee949dce"): _PRESERVE_FORCE_SOURCE,
-    ("lib/dispatch/core.py", "dispatch_import_core", 129,
+    ("lib/dispatch/core.py", "dispatch_import_core", 121,
      "force", "ecd75225e973c696"): _AUDITED_MODE_SET,
-    ("lib/dispatch/core.py", "dispatch_import_core", 427,
+    ("lib/dispatch/core.py", "dispatch_import_core", 419,
      "scenario not in FORCE_IMPORT_SCENARIOS", "77666a53867810de"): _AUDITED_MODE_SET,
-    ("lib/dispatch/core.py", "dispatch_import_core", 274,
-     "requeue_on_failure", "3992c39583766481"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/core.py", "dispatch_import_core", 460,
-     "force=force", "ecd75225e973c696"): _DISTANCE_ONLY,
-    ("lib/dispatch/core.py", "dispatch_import_core", 461,
-     "preserve_source=scenario in FORCE_IMPORT_SCENARIOS", "f0bd2ce87c0656c5"): _PRESERVE_FORCE_SOURCE,
     ("lib/dispatch/core.py", "dispatch_import_core", 266,
+     "requeue_on_failure", "3992c39583766481"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
+    ("lib/dispatch/core.py", "dispatch_import_core", 452,
+     "force=force", "ecd75225e973c696"): _DISTANCE_ONLY,
+    ("lib/dispatch/core.py", "dispatch_import_core", 453,
+     "preserve_source=scenario in FORCE_IMPORT_SCENARIOS", "f0bd2ce87c0656c5"): _PRESERVE_FORCE_SOURCE,
+    ("lib/dispatch/core.py", "dispatch_import_core", 258,
      "requeue_to_wanted=requeue_on_failure", "3992c39583766481"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/core.py", "dispatch_import_core", 271,
+    ("lib/dispatch/core.py", "dispatch_import_core", 263,
      "message='Installed HAVE analysis failed; ' + ('request returned to wanted for a future retry' if requeue_on_failure else 'request lifecycle was preserved')",
      "578796b8e26d1267"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/core.py", "dispatch_import_core", 461,
+    ("lib/dispatch/core.py", "dispatch_import_core", 453,
      "scenario in FORCE_IMPORT_SCENARIOS", "f0bd2ce87c0656c5"): _PRESERVE_FORCE_SOURCE,
-    ("lib/dispatch/core.py", "dispatch_import_core", 490,
+    ("lib/dispatch/core.py", "dispatch_import_core", 482,
      "requeue=requeue_on_failure", "3992c39583766481"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/core.py", "dispatch_import_core", 930,
+    ("lib/dispatch/core.py", "dispatch_import_core", 920,
      "requeue=requeue_on_failure", "3992c39583766481"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/core.py", "dispatch_import_core", 950,
+    ("lib/dispatch/core.py", "dispatch_import_core", 940,
      "requeue=requeue_on_failure", "3992c39583766481"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/core.py", "dispatch_import_core", 397,
+    ("lib/dispatch/core.py", "dispatch_import_core", 389,
      "requeue_on_failure=requeue_on_failure", "3992c39583766481"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/core.py", "dispatch_import_core", 756,
+    ("lib/dispatch/core.py", "dispatch_import_core", 748,
      "requeue=requeue_on_failure", "3992c39583766481"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/core.py", "dispatch_import_core", 824,
-     "operator_stop_status=operator_stop_status", "a103aeeafcc220c8"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/core.py", "dispatch_import_core", 841,
-     "operator_stop_status=operator_stop_status", "a103aeeafcc220c8"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
     ("lib/dispatch/entry_points.py", "_dispatch_import_from_db_locked", 214,
      "force=True", "fc49e3ff31db631b"): _DISTANCE_ONLY,
     ("lib/dispatch/entry_points.py", "_dispatch_import_from_db_locked", 224,
@@ -211,30 +219,25 @@ MODE_GATE_REGISTRY: dict[
      "requeue_on_failure=False", "bfdbc42f821a1db3"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
     ("lib/dispatch/helpers.py", "_should_cleanup_path", 47,
      "scenario not in FORCE_IMPORT_SCENARIOS", "77666a53867810de"): _FORCE_CLEANUP_BOUNDARY,
-    ("lib/dispatch/outcome_actions.py", "_finalize_request_and_log_rejection", 385,
+    ("lib/dispatch/manifest_guard.py", "_guard_reject", 113,
+     "requeue=False", "bfdbc42f821a1db3"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
+    ("lib/dispatch/outcome_actions.py", "_finalize_request_and_log_rejection", 386,
      "requeue_to_wanted and request_id is not None", "e2bfed59bcd70346"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/outcome_actions.py", "_record_have_analysis_error", 648,
+    ("lib/dispatch/outcome_actions.py", "_record_have_analysis_error", 650,
      "requeue_to_wanted", "6779ab3f329c7d06"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/outcome_actions.py", "_record_preview_measurement_failed", 575,
+    ("lib/dispatch/outcome_actions.py", "_record_preview_measurement_failed", 576,
      "requeue_to_wanted", "6779ab3f329c7d06"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/outcome_actions.py", "_record_have_analysis_error", 669,
+    ("lib/dispatch/outcome_actions.py", "_record_have_analysis_error", 671,
      "requeue_to_wanted=requeue_to_wanted", "6779ab3f329c7d06"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/outcome_actions.py", "_record_have_analysis_error", 670,
+    ("lib/dispatch/outcome_actions.py", "_record_have_analysis_error", 672,
      "record_validation_attempt=requeue_to_wanted", "6779ab3f329c7d06"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/outcome_actions.py", "_record_preview_measurement_failed", 574,
+    ("lib/dispatch/outcome_actions.py", "_do_mark_done", 315,
+     "preserve_operator_search_stop=True", "fc49e3ff31db631b"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
+    ("lib/dispatch/outcome_actions.py", "_record_preview_measurement_failed", 575,
      "request_transition=transitions.RequestTransition.to_wanted() if requeue_to_wanted else None",
      "d3781a96bd337810"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/post_import.py", "_run_or_stage_quality_gate", 79,
-     "pending is None and operator_stop_status is None", "2459cf69276fda4e"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/post_import.py", "_run_or_stage_quality_gate", 92,
-     "operator_stop_status is not None and plan.transition.target_status == 'wanted'",
-     "24fc6d9382e8b3a7"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/post_import.py", "_apply_post_import_search_action", 182,
-     "operator_stop_status is not None", "8885d281623f057c"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/post_import.py", "_run_or_stage_quality_gate", 95,
-     "operator_stop_status != 'manual'", "748f5ba45d08801c"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
-    ("lib/dispatch/post_import.py", "_apply_post_import_search_action", 183,
-     "operator_stop_status != 'manual'", "748f5ba45d08801c"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
+    ("lib/dispatch/outcome_actions.py", "_record_preview_measurement_failed", 598,
+     "preserve_operator_search_stop=requeue_to_wanted", "6779ab3f329c7d06"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
     ("lib/dispatch/subprocess_runner.py", "build_import_one_command", 54,
      "force", "ecd75225e973c696"): _DISTANCE_ONLY,
     ("lib/dispatch/subprocess_runner.py", "build_import_one_command", 56,
@@ -259,16 +262,36 @@ MODE_GATE_REGISTRY: dict[
      "preserve_source=True", "fc49e3ff31db631b"): _PRESERVE_FORCE_SOURCE,
     ("lib/import_queue.py", "validate_payload", 264,
      "job_type == IMPORT_JOB_FORCE", "6a090b8735c2ff6a"): _FORCE_ONLY_ACTIVE_MODE,
+    ("lib/pipeline_db/terminal_outcomes.py", "persist_import_terminal_outcome", 526,
+     "command.preserve_operator_search_stop", "29cc3c24f990f6ea"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
+    ("lib/pipeline_db/terminal_outcomes.py", "persist_preview_terminal_outcome", 586,
+     "command.preserve_operator_search_stop", "29cc3c24f990f6ea"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
+    ("lib/pipeline_db/terminal_outcomes.py", "persist_import_terminal_outcome", 546,
+     "command.preserve_operator_search_stop", "29cc3c24f990f6ea"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
+    ("lib/terminal_outcomes.py", "with_job", 176,
+     "preserve_operator_search_stop=self.preserve_operator_search_stop",
+     "3248914b98b5c940"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
     ("scripts/import_preview_worker.py", "_front_gate_source_path", 183,
      "job.job_type == IMPORT_JOB_FORCE", "e45cab5ab5498692"): _FORCE_ONLY_ACTIVE_MODE,
+    ("scripts/import_preview_worker.py", "_front_gate_source_path", 203,
+     "job.job_type == IMPORT_JOB_AUTOMATION", "c9ff5a21646b597c"): _FORCE_ONLY_ACTIVE_MODE,
     ("scripts/import_preview_worker.py", "_preview_input", 298,
      "job.job_type == IMPORT_JOB_FORCE", "e45cab5ab5498692"): _FORCE_ONLY_ACTIVE_MODE,
+    ("scripts/import_preview_worker.py", "_preview_input", 314,
+     "job.job_type == IMPORT_JOB_AUTOMATION", "c9ff5a21646b597c"): _FORCE_ONLY_ACTIVE_MODE,
     ("scripts/import_preview_worker.py", "_preview_input", 306,
      "'force': True", "fc49e3ff31db631b"): _DISTANCE_ONLY,
+    ("scripts/import_preview_worker.py", "_handle_measurement_failed", 406,
+     "requeue_to_wanted=job.job_type == IMPORT_JOB_AUTOMATION",
+     "c9ff5a21646b597c"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
+    ("scripts/import_preview_worker.py", "_handle_measurement_failed", 406,
+     "job.job_type == IMPORT_JOB_AUTOMATION", "c9ff5a21646b597c"): _OPERATOR_OWNS_SEARCH_SHORT_CIRCUIT,
     ("scripts/importer.py", "_force_job_wrong_match_payload", 67,
      "job.job_type != IMPORT_JOB_FORCE", "33db16a2e07e50e3"): _FORCE_ONLY_ACTIVE_MODE,
     ("scripts/importer.py", "execute_import_job", 177,
      "job.job_type == IMPORT_JOB_FORCE", "e45cab5ab5498692"): _FORCE_ONLY_ACTIVE_MODE,
+    ("scripts/importer.py", "execute_import_job", 218,
+     "job.job_type == IMPORT_JOB_AUTOMATION", "c9ff5a21646b597c"): _FORCE_ONLY_ACTIVE_MODE,
     ("scripts/pipeline_cli/imports.py", "cmd_import_preview", 219,
      "force=not args.no_force", "6c3f26a9499a61f6"): _DISTANCE_ONLY,
     ("web/classify.py", "_classify", 875,
@@ -320,8 +343,12 @@ def _is_mode_grant(
         return True
     if keyword in {"force", "preserve_source"}:
         return not (isinstance(value, ast.Constant) and value.value is False)
-    if keyword == "requeue_on_failure":
+    if keyword in _LIFECYCLE_REQUEUE_KEYWORDS:
         return isinstance(value, ast.Constant) and value.value is False
+    if keyword == "preserve_operator_search_stop":
+        return not (isinstance(value, ast.Constant) and value.value is False)
+    if keyword in _MODE_ASSIGNMENT_GRANTS:
+        return not (isinstance(value, ast.Constant) and value.value is None)
     return False
 
 
@@ -360,49 +387,61 @@ def _is_simple_mode_alias(
     return False
 
 
-def _mode_aliases_by_scope(
+def _mode_alias_events_by_scope(
     tree: ast.AST,
     parents: dict[ast.AST, ast.AST],
-) -> dict[ast.AST, frozenset[str]]:
-    """Propagate simple assignment aliases within one lexical function."""
+) -> dict[ast.AST, tuple[tuple[tuple[int, int], frozenset[str]], ...]]:
+    """Track simple aliases in source order, killing them on overwrite."""
 
     scopes = {
         _scope_owner(node, parents)
         for node in ast.walk(tree)
     }
-    aliases: dict[ast.AST, frozenset[str]] = {}
+    events: dict[
+        ast.AST,
+        tuple[tuple[tuple[int, int], frozenset[str]], ...],
+    ] = {}
     for scope in scopes:
         names = set(_MODE_NAMES)
-        changed = True
-        while changed:
-            changed = False
-            for node in ast.walk(scope):
-                if _scope_owner(node, parents) is not scope:
-                    continue
-                targets: list[ast.AST] = []
-                value: ast.expr | None = None
-                if isinstance(node, ast.Assign):
-                    targets = list(node.targets)
-                    value = node.value
-                elif isinstance(node, ast.AnnAssign):
-                    targets = [node.target]
-                    value = node.value
-                elif isinstance(node, ast.NamedExpr):
-                    targets = [node.target]
-                    value = node.value
-                if value is None or not _is_simple_mode_alias(
-                    value,
-                    mode_names=frozenset(names),
-                ):
-                    continue
-                discovered = set().union(*(
-                    _assigned_names(target) for target in targets
-                ))
-                if not discovered <= names:
-                    names.update(discovered)
-                    changed = True
-        aliases[scope] = frozenset(names)
-    return aliases
+        scope_events: list[tuple[tuple[int, int], frozenset[str]]] = []
+        assignments = sorted(
+            (
+                node for node in ast.walk(scope)
+                if _scope_owner(node, parents) is scope
+                and isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr))
+            ),
+            key=lambda node: (
+                int(getattr(node, "lineno", 0)),
+                int(getattr(node, "col_offset", 0)),
+            ),
+        )
+        for node in assignments:
+            targets: list[ast.AST]
+            value: ast.expr | None
+            if isinstance(node, ast.Assign):
+                targets = list(node.targets)
+                value = node.value
+            else:
+                targets = [node.target]
+                value = node.value
+            if value is None:
+                continue
+            assigned = set().union(*(
+                _assigned_names(target) for target in targets
+            ))
+            if _is_simple_mode_alias(value, mode_names=frozenset(names)):
+                names.update(assigned)
+            else:
+                names.difference_update(assigned - _MODE_NAMES)
+            scope_events.append((
+                (
+                    int(getattr(node, "end_lineno", node.lineno)),
+                    int(getattr(node, "end_col_offset", node.col_offset)),
+                ),
+                frozenset(names),
+            ))
+        events[scope] = tuple(scope_events)
+    return events
 
 
 def mode_gates_in_source(source: str, *, path: str) -> list[ModeGate]:
@@ -412,10 +451,21 @@ def mode_gates_in_source(source: str, *, path: str) -> list[ModeGate]:
         for parent in ast.walk(tree)
         for child in ast.iter_child_nodes(parent)
     }
-    aliases_by_scope = _mode_aliases_by_scope(tree, parents)
+    alias_events = _mode_alias_events_by_scope(tree, parents)
 
     def names_for(node: ast.AST) -> frozenset[str]:
-        return aliases_by_scope[_scope_owner(node, parents)]
+        names = frozenset(_MODE_NAMES)
+        position = (
+            int(getattr(node, "lineno", 0)),
+            int(getattr(node, "col_offset", 0)),
+        )
+        for event_position, event_names in alias_events[
+            _scope_owner(node, parents)
+        ]:
+            if event_position > position:
+                break
+            names = event_names
+        return names
     conditions: list[tuple[ast.AST, ast.expr, str]] = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.If, ast.IfExp, ast.While)):
@@ -425,8 +475,21 @@ def mode_gates_in_source(source: str, *, path: str) -> list[ModeGate]:
                 (node, condition, ast.unparse(condition))
                 for condition in node.ifs
             )
-        elif isinstance(node, ast.match_case) and node.guard is not None:
-            conditions.append((node, node.guard, ast.unparse(node.guard)))
+        elif isinstance(node, ast.match_case):
+            if node.guard is not None:
+                conditions.append((node, node.guard, ast.unparse(node.guard)))
+            if (
+                isinstance(node.pattern, ast.MatchValue)
+                and _is_import_mode_condition(
+                    node.pattern.value,
+                    mode_names=names_for(node.pattern),
+                )
+            ):
+                conditions.append((
+                    node.pattern,
+                    node.pattern.value,
+                    f"case {ast.unparse(node.pattern)}",
+                ))
 
     condition_nodes = {condition for _, condition, _ in conditions}
     for node in ast.walk(tree):
@@ -443,6 +506,24 @@ def mode_gates_in_source(source: str, *, path: str) -> list[ModeGate]:
                     break
             if not covered:
                 conditions.append((node, node, ast.unparse(node)))
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            targets = (
+                list(node.targets)
+                if isinstance(node, ast.Assign)
+                else [node.target]
+            )
+            value = node.value
+            if value is None:
+                continue
+            assigned = set().union(*(
+                _assigned_names(target) for target in targets
+            ))
+            for target_name in sorted(assigned & _MODE_ASSIGNMENT_GRANTS):
+                conditions.append((
+                    node,
+                    value,
+                    f"{target_name}={ast.unparse(value)}",
+                ))
         elif (
             isinstance(node, ast.keyword)
             and node.arg is not None
@@ -687,6 +768,71 @@ class TestImportModeAuditGenerated(unittest.TestCase):
             with self.subTest(label=label):
                 findings = mode_gates_in_source(source, path="mutant.py")
                 self.assertEqual(len(findings), 1)
+
+    def test_detector_recognizes_lifecycle_grants(self):
+        mutants = {
+            "literal requeue stop": (
+                "def mutant(target):\n"
+                "    target(requeue=False)\n"
+            ),
+            "automation-only requeue": (
+                "def mutant(job, target):\n"
+                "    target(requeue_to_wanted="
+                "job.job_type == IMPORT_JOB_AUTOMATION)\n"
+            ),
+            "operator-stop assignment": (
+                "def mutant(row):\n"
+                "    operator_stop_status = (\n"
+                "        'manual' if row.get('status') == 'manual' else None\n"
+                "    )\n"
+            ),
+        }
+        for label, source in mutants.items():
+            with self.subTest(label=label):
+                findings = mode_gates_in_source(source, path="mutant.py")
+                expected = 2 if label == "automation-only requeue" else 1
+                self.assertEqual(len(findings), expected)
+
+    def test_detector_recognizes_match_case_mode_gate(self):
+        findings = mode_gates_in_source(
+            "def mutant(mode):\n"
+            "    match mode:\n"
+            "        case 'force_import':\n"
+            "            return 1\n",
+            path="mutant.py",
+        )
+        self.assertEqual(len(findings), 1)
+
+    def test_alias_taint_respects_assignment_order_and_overwrite(self):
+        sources = {
+            "before assignment": (
+                "def mutant(force):\n"
+                "    if alias:\n"
+                "        return 0\n"
+                "    alias = force\n"
+            ),
+            "after overwrite": (
+                "def mutant(force):\n"
+                "    alias = force\n"
+                "    alias = False\n"
+                "    if alias:\n"
+                "        return 0\n"
+            ),
+        }
+        for label, source in sources.items():
+            with self.subTest(label=label):
+                self.assertEqual(
+                    mode_gates_in_source(source, path="mutant.py"),
+                    [],
+                )
+        live = mode_gates_in_source(
+            "def mutant(force):\n"
+            "    alias = force\n"
+            "    if alias:\n"
+            "        return 1\n",
+            path="mutant.py",
+        )
+        self.assertEqual(len(live), 1)
 
 
 if __name__ == "__main__":

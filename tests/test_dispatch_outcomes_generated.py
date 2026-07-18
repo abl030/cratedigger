@@ -178,6 +178,7 @@ def _run_dispatch(
     *,
     initial_status: str = "downloading",
     force: bool = False,
+    queued: bool = False,
 ) -> dict:
     """Established recipe (mirrors
     ``tests/test_dispatch_core.py::TestDispatchCoreOrchestration._dispatch``)
@@ -211,6 +212,37 @@ def _run_dispatch(
 
     tmpdir = tempfile.mkdtemp()
     try:
+        import_job_id = None
+        candidate_result = None
+        if queued:
+            from lib.import_evidence import (
+                ActionEvidenceProvenance,
+                CandidateEvidenceActionResult,
+            )
+            from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
+
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
+                request_id=42,
+                payload={"failed_path": tmpdir} if force else {},
+            )
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+            )
+            claimed = db.claim_next_import_job(worker_id="generated-dispatch")
+            assert claimed is not None
+            import_job_id = claimed.id
+            candidate_result = CandidateEvidenceActionResult(
+                evidence=make_album_quality_evidence(
+                    mb_release_id="mbid-generated",
+                    source_path=tmpdir,
+                ),
+                provenance=ActionEvidenceProvenance(
+                    candidate_status="reused",
+                    snapshot_guard="matched",
+                ),
+            )
         with patch_dispatch_externals(), \
              patch("lib.dispatch.subprocess_runner.parse_import_result",
                    return_value=ir):
@@ -230,6 +262,19 @@ def _run_dispatch(
                 cfg=cfg,
                 requeue_on_failure=world.requeue_on_failure,
                 quality_gate_fn=noop_quality_gate,
+                candidate_import_job_id=import_job_id,
+                prevalidated_candidate_result=candidate_result,
+            )
+        if result.terminal_outcome is not None:
+            from lib.terminal_outcomes import ImportJobTerminal
+
+            db.persist_import_terminal_outcome(
+                result.terminal_outcome.with_job(ImportJobTerminal(
+                    status="completed" if result.success else "failed",
+                    result={"success": result.success},
+                    message=result.message,
+                    error=None if result.success else result.message,
+                ))
             )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -1013,6 +1058,7 @@ class TestGeneratedOperatorRetainedLifecycle(unittest.TestCase):
             world,
             initial_status=initial_status,
             force=True,
+            queued=True,
         )
         assert_operator_retained_lifecycle(
             outcome["db"],

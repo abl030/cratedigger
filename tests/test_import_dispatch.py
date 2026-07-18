@@ -1068,6 +1068,7 @@ class TestDispatchImport(unittest.TestCase):
         scenario="strong_match",
         force=False,
         initial_status="downloading",
+        queued=False,
     ):
         from lib.dispatch import dispatch_import_core
         if ir is self._SENTINEL:
@@ -1088,9 +1089,43 @@ class TestDispatchImport(unittest.TestCase):
         mock_gate = RecordingQualityGate()
         tmpdir = tempfile.mkdtemp()
         try:
+            import_job_id = None
+            candidate_result = None
+            if queued:
+                from lib.import_evidence import (
+                    ActionEvidenceProvenance,
+                    CandidateEvidenceActionResult,
+                )
+                from lib.import_queue import (
+                    IMPORT_JOB_AUTOMATION,
+                    IMPORT_JOB_FORCE,
+                )
+
+                job = db.enqueue_import_job(
+                    IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
+                    request_id=42,
+                    payload={"failed_path": tmpdir} if force else {},
+                )
+                db.mark_import_job_preview_importable(
+                    job.id,
+                    preview_result={"ready": True},
+                )
+                claimed = db.claim_next_import_job(worker_id="dispatch-test")
+                assert claimed is not None
+                import_job_id = claimed.id
+                candidate_result = CandidateEvidenceActionResult(
+                    evidence=make_album_quality_evidence(
+                        mb_release_id="test-mbid",
+                        source_path=tmpdir,
+                    ),
+                    provenance=ActionEvidenceProvenance(
+                        candidate_status="reused",
+                        snapshot_guard="matched",
+                    ),
+                )
             with patch_dispatch_externals() as ext, \
                  patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
-                dispatch_import_core(
+                outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="test-mbid",
                     request_id=42,
@@ -1106,6 +1141,19 @@ class TestDispatchImport(unittest.TestCase):
                     quality_gate_fn=mock_gate,
                     force=force,
                     requeue_on_failure=not force,
+                    candidate_import_job_id=import_job_id,
+                    prevalidated_candidate_result=candidate_result,
+                )
+            if outcome.terminal_outcome is not None:
+                from lib.terminal_outcomes import ImportJobTerminal
+
+                db.persist_import_terminal_outcome(
+                    outcome.terminal_outcome.with_job(ImportJobTerminal(
+                        status="completed" if outcome.success else "failed",
+                        result={"success": outcome.success},
+                        message=outcome.message,
+                        error=None if outcome.success else outcome.message,
+                    ))
                 )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -1120,7 +1168,7 @@ class TestDispatchImport(unittest.TestCase):
     def test_operator_retained_import_decisions_record_policy_without_reopening(self):
         # Force imports resolve through the same quality/search mapping as
         # automatic imports, but only the operator may clear the search stop.
-        # The quality fields are recorded and the operator stop is restored.
+        # The quality fields are recorded and the current operator stop holds.
         decisions = (
             ("provisional_lossless_upgrade", "lossless"),
             ("transcode_upgrade", None),
@@ -1135,6 +1183,7 @@ class TestDispatchImport(unittest.TestCase):
                         scenario=scenario,
                         force=force,
                         initial_status="manual",
+                        queued=True,
                     )
                     row = result["db"].request(42)
                     self.assertEqual(row["status"], "manual")
@@ -1151,6 +1200,7 @@ class TestDispatchImport(unittest.TestCase):
             scenario="force_import",
             force=True,
             initial_status="wanted",
+            queued=True,
         )
         row = result["db"].request(42)
         self.assertEqual(row["status"], "wanted")
@@ -2004,7 +2054,6 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         linked_spectral_bitrate: int | None = None,
         linked_spectral_subject: EvidenceSubject | None = None,
         linked_spectral_provenance: EvidenceProvenance | None = None,
-        operator_stop_status: str | None = None,
         **extra_req_fields,
     ):
         """Drive ``_check_quality_gate_core`` with a real ``AlbumInfo`` and the
@@ -2057,26 +2106,12 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         assert persisted is not None and persisted.id is not None
         db.set_request_current_evidence(42, persisted.id)
 
-        if operator_stop_status is None:
-            _check_quality_gate_core(
-                mb_id="test-mbid", label="Test Artist - Test Album",
-                request_id=42,
-                files=[make_download_file(username="user1", filename="01.mp3")],
-                db=db,  # type: ignore[arg-type]
-            )
-        else:
-            from lib.dispatch.post_import import _run_or_stage_quality_gate
-
-            _run_or_stage_quality_gate(
-                _check_quality_gate_core,
-                None,
-                db=db,  # type: ignore[arg-type]
-                request_id=42,
-                operator_stop_status=operator_stop_status,
-                mb_id="test-mbid",
-                label="Test Artist - Test Album",
-                files=[make_download_file(username="user1", filename="01.mp3")],
-            )
+        _check_quality_gate_core(
+            mb_id="test-mbid", label="Test Artist - Test Album",
+            request_id=42,
+            files=[make_download_file(username="user1", filename="01.mp3")],
+            db=db,  # type: ignore[arg-type]
+        )
 
         return db
 
@@ -2223,25 +2258,6 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         self.assertEqual(row["status"], "wanted")
         self.assertEqual(row["search_filetype_override"], QUALITY_FLAC_ONLY)
         self.assertEqual(len(db.denylist), 1)
-
-    def test_operator_stop_survives_nonterminal_quality_gate(self):
-        db = self._run_quality_gate(
-            info=self._cbr_320_unverified(),
-            linked_spectral_grade="genuine",
-            operator_stop_status="manual",
-        )
-        row = db.request(42)
-        self.assertEqual(row["status"], "manual")
-        self.assertEqual(row["search_filetype_override"], QUALITY_FLAC_ONLY)
-        self.assertEqual(len(db.denylist), 1)
-
-    def test_operator_stop_yields_to_terminal_quality_acceptance(self):
-        db = self._run_quality_gate(
-            info=self._bare_mp3_vbr_low(),
-            verified_lossless_proof=True,
-            operator_stop_status="manual",
-        )
-        self.assertEqual(db.request(42)["status"], "imported")
 
     def test_transparent_carried_source_grade_also_narrows(self):
         # Decision 17: narrowing keys on the genuine grade, never the

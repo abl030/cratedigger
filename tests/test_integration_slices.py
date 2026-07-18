@@ -1902,8 +1902,8 @@ class TestForceImportSlice(unittest.TestCase):
 
         self.assertTrue(result.success)
         row = db.request(42)
-        # Decision 19 keeps the quality/search policy identical; lifecycle
-        # application restores the operator-owned search stop.
+        # Decision 19 keeps the quality/search policy identical; terminal
+        # persistence preserves the current operator-owned search stop.
         self.assertEqual(row["status"], "manual")
         # #550 defect #4: force import bypasses the beets distance check —
         # no measurement exists, so the write is NULL (was a fabricated

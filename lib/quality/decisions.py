@@ -79,10 +79,11 @@ class MeasurementFailure(msgspec.Struct, frozen=True):
 
 # ---------------------------------------------------------------------------
 # U11: ``preimport_decide`` and ``PreimportDecision`` have been folded into
-# ``full_pipeline_decision_from_evidence``. The four folder/audio-integrity
+# ``full_pipeline_decision_from_evidence``. The five folder/audio-integrity
 # facts (``audio_corrupt``, ``bad_audio_hash``, ``nested_layout``,
-# ``empty_fileset``) are now early-exit reject branches at the top of that
-# function. There is exactly one decision function for the importer.
+# ``empty_fileset``, ``mixed_source``) are now early-exit reject branches at
+# the top of that function. There is exactly one decision function for the
+# importer.
 #
 # See CLAUDE.md § "Quality decisions live in ONE place" and the U11 entry in
 # ``docs/plans/2026-05-16-002-refactor-evidence-canonical-cleanup-plan.md``.

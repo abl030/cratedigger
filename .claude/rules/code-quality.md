@@ -4,8 +4,9 @@
 
 **`full_pipeline_decision_from_evidence`** in `lib/quality/pipeline.py` (and its
 flat-kwargs simulator twin `full_pipeline_decision`) is the single source of
-truth for every importer decision: the four folder/audio-integrity facts
-(`audio_corrupt`, `bad_audio_hash`, `nested_layout`, `empty_fileset`) AND
+truth for every importer decision: the five folder/audio-integrity facts
+(`audio_corrupt`, `bad_audio_hash`, `nested_layout`, `empty_fileset`,
+`mixed_source`) AND
 quality (spectral, codec rank, V0 probe, provisional lossless, verified
 lossless, transcode detection, quality gate). **Never re-create import
 decisions elsewhere.** If a code path needs to know "should this be
@@ -16,7 +17,7 @@ This bit us twice. First (PR #257): a parallel `preimport_decide` spectral
 branch fell back to existing container bitrate when spectral evidence was
 missing on one side, rejecting legitimate FLAC provisional-lossless upgrades
 (request 4514). Second (evidence-canonical-cleanup, U11): `preimport_decide`
-still owned four folder/audio-integrity branches alongside the full
+still owned five folder/audio-integrity branches alongside the full
 pipeline. That asterisk on "quality decisions live in ONE place" was
 hair-splitting; the branches were folded into
 `full_pipeline_decision_from_evidence` as early exits.
@@ -34,11 +35,11 @@ hair-splitting; the branches were folded into
   All rejects route through one helper
   (`_reject_import_from_evidence_decision` in `lib/dispatch/outcome_actions.py`)
   with one denylist policy. The
-  four folder/audio-integrity reject reasons are listed in
-  `_PREIMPORT_FACT_REJECT_DECISIONS`; that frozenset makes automation
-  requeue them to `wanted` even when a narrower reject path would otherwise
-  retain the row. Operator-started jobs preserve the captured operator search
-  stop while recording the same reject facts, audit, and denylist effects.
+  five folder/audio-integrity reject reasons are listed in
+  `_PREIMPORT_FACT_REJECT_DECISIONS`; that frozenset is the shared generated-
+  test taxonomy, not a production router. The dispatch caller owns requeue
+  policy. Terminal persistence applies the common quality/search policy while
+  preserving operator search state current when the request row is locked.
 
 **The album test set is the contract.** Live-bug scenarios go in
 `tests/test_quality_classification.py::TestLiveBugReproductions` (one test

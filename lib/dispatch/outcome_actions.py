@@ -312,6 +312,7 @@ def _do_mark_done(
             import_job_id=import_job_id,
             initial_transition=transition,
             audit=audit,
+            preserve_operator_search_stop=True,
         )
     transitions.require_transition_applied(finalize_request(
         db,
@@ -594,6 +595,7 @@ def _record_preview_measurement_failed(
         message=payload.detail,
         error=payload.reason,
         denylists=denylists,
+        preserve_operator_search_stop=requeue_to_wanted,
     ))
     return result.download_log_id
 

@@ -1853,7 +1853,7 @@ def preview_import_from_path(
     ``measure_and_persist_candidate_evidence``.
 
     Contract: preview only measures. Facts come from
-    ``measure_preimport_state``; the four folder/audio-integrity facts are
+    ``measure_preimport_state``; the five folder/audio-integrity facts are
     inlined as a confident_reject verdict for CLI/triage UI. Spectral /
     codec rank / V0 / quality-gate decisions belong to the importer's
     ``full_pipeline_decision_from_evidence``.
@@ -1968,7 +1968,7 @@ def preview_import_from_path(
 
         # Preview measures; never decides. Mirror the measure-and-persist
         # pattern: collect facts via ``measure_preimport_state`` (no denylist
-        # writes, no decision branches), then surface the four folder/audio-
+        # writes, no decision branches), then surface the five folder/audio-
         # integrity facts as a confident reject for the CLI/triage UI.
         # ``db=None`` / ``request_id=None`` / ``propagate_download_to_existing=False``:
         # spectral propagation belongs to the persisted ``AlbumQualityEvidence``
