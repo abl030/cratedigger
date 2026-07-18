@@ -250,9 +250,10 @@ class _DownloadLogMixin(_PipelineDBBase):
         """Fetch mutating successors for an explicit set of audit rows.
 
         Recents filters select the rows which are displayed, but a kept
-        wrong-match row still needs the force/manual import which explicitly
-        links back to it. Fetch those companions independently so changing a
-        filter cannot change the displayed evidence.
+        wrong-match row still needs its mutating successor. Active force-import
+        rows and historical manual-import rows explicitly link back to it.
+        Fetch those companions independently so changing a filter cannot
+        change the displayed evidence.
         """
         if not source_log_ids:
             return []
@@ -716,7 +717,7 @@ class _DownloadLogMixin(_PipelineDBBase):
 
         Issue #113: one row per actionable folder, not one per request.
         ``download_log`` accumulates multiple rejected rows for the same
-        ``failed_path`` whenever a folder is retried (force/manual paths log
+        ``failed_path`` whenever a folder is retried (force-import logs
         the same ``failed_path`` on every retry), so we collapse to the newest
         row per ``(request_id, failed_path)`` pair — each surviving row
         represents a distinct on-disk directory the user can act on.

@@ -60,12 +60,12 @@ def _requeue_import_job_to_preview(
 ) -> "DispatchOutcome":
     """Shared requeue helper for the two outer evidence-required branches.
 
-    Called from ``_dispatch_import_from_db_locked`` (force/manual) and from
+    Called from ``_dispatch_import_from_db_locked`` (force-import) and from
     ``lib.download_validation._process_beets_validation`` (automation) when
     ``ensure_candidate_evidence_for_action`` reports the candidate row is
     missing, stale, or incomplete.
 
-    Lock context differs by caller. The force/manual call site holds the
+    Lock context differs by caller. The force-import call site holds the
     per-request IMPORT advisory lock; the automation call site holds the
     RELEASE lock. Either way the evidence-check + state-flip pair sits
     inside whatever lock the caller already has, which is sufficient for
@@ -150,7 +150,7 @@ def _download_info_from_candidate_evidence(
     *,
     username: str | None,
 ) -> DownloadInfo:
-    """Build the force/manual audit info without remeasuring the candidate."""
+    """Build force-import audit info without remeasuring the candidate."""
 
     measurement = candidate.measurement
     bitrate = (

@@ -263,7 +263,7 @@ def cleanup_wrong_match_source(
 ) -> WrongMatchCleanupResult:
     """Delete one wrong-match source and clear its actionable DB pointers.
 
-    The import dispatcher intentionally preserves force/manual source folders
+    The import dispatcher intentionally preserves force-import source folders
     on rejection. This helper is for queue-owned force-import failures where the
     operator already chose a specific Wrong Matches candidate and a terminal
     rejection means that candidate should leave the review queue.

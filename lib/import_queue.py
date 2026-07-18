@@ -8,7 +8,6 @@ from datetime import datetime
 from typing import Any
 
 IMPORT_JOB_FORCE = "force_import"
-IMPORT_JOB_MANUAL = "manual_import"
 IMPORT_JOB_AUTOMATION = "automation_import"
 # YouTube rescue ingest (U2 of the YT rescue plan). The YT worker stages
 # audio to the configured ``auto-import/<artist>-<album>/`` directory and
@@ -22,7 +21,6 @@ IMPORT_JOB_YOUTUBE = "youtube_import"
 
 IMPORT_JOB_TYPES = frozenset({
     IMPORT_JOB_FORCE,
-    IMPORT_JOB_MANUAL,
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_YOUTUBE,
 })
@@ -263,7 +261,7 @@ def validate_preview_failure_status(status: str) -> str:
 def validate_payload(job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
     validate_job_type(job_type)
     payload = _json_dict(payload)
-    if job_type in (IMPORT_JOB_FORCE, IMPORT_JOB_MANUAL):
+    if job_type == IMPORT_JOB_FORCE:
         failed_path = payload.get("failed_path")
         if not isinstance(failed_path, str) or not failed_path:
             raise ValueError(f"{job_type} payload requires failed_path")
@@ -287,10 +285,6 @@ def validate_payload(job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 def force_import_dedupe_key(download_log_id: int) -> str:
     return f"{IMPORT_JOB_FORCE}:download_log:{int(download_log_id)}"
-
-
-def manual_import_dedupe_key(request_id: int, path: str) -> str:
-    return f"{IMPORT_JOB_MANUAL}:request:{int(request_id)}:path:{path}"
 
 
 def automation_import_dedupe_key(request_id: int) -> str:
@@ -325,10 +319,6 @@ def force_import_payload(
     if source_dirs:
         payload["source_dirs"] = [str(source_dir) for source_dir in source_dirs]
     return payload
-
-
-def manual_import_payload(*, failed_path: str) -> dict[str, Any]:
-    return {"failed_path": failed_path}
 
 
 def automation_import_payload() -> dict[str, Any]:

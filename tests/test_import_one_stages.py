@@ -739,7 +739,7 @@ class TestShouldRunTargetConversion(unittest.TestCase):
 class TestTargetCleanupDecision(unittest.TestCase):
     """When a target was configured but skipped (transcode), source files must be cleaned up.
 
-    Extended for issue #111 with ``preserve_source`` — when force/manual import
+    Extended for issue #111 with ``preserve_source`` — when force-import
     asked the V0 pass to preserve originals until the quality decision, and the
     decision was non-terminal (import going ahead), we must still clean up before
     beets sees FLAC+MP3 and tries to catalog both.
@@ -765,10 +765,10 @@ class TestTargetCleanupDecision(unittest.TestCase):
         self.assertFalse(target_cleanup_decision(
             target_achieved=False, target_was_configured=True, sources_kept=0))
 
-    # --- Issue #111: preserve_source case (force/manual import) ---
+    # --- Issue #111: preserve_source case (force-import) ---
 
     def test_preserve_source_no_target_needs_cleanup(self):
-        """Force/manual import held sources past V0; decision was non-terminal
+        """Force-import held sources past V0; decision was non-terminal
         so beets is about to run — clean FLACs so beets sees only V0 MP3s."""
         from harness.import_one import target_cleanup_decision
         self.assertTrue(target_cleanup_decision(
@@ -777,7 +777,7 @@ class TestTargetCleanupDecision(unittest.TestCase):
 
     def test_preserve_source_retry_without_converted_still_cleans(self):
         """PR #112 Codex round 1 P2: on a retry of a previously-rejected
-        force/manual attempt the V0 MP3s already exist, so
+        force-import attempt the V0 MP3s already exist, so
         ``convert_lossless`` skips and reports ``converted == 0``. The
         lossless originals from the prior run are still on disk and must
         still be cleaned before beets runs — otherwise beets sees a mixed
@@ -1034,7 +1034,7 @@ class TestConvertLosslessNonUtf8Stderr(unittest.TestCase):
 
 class TestPreserveSourceFlag(unittest.TestCase):
     """The --preserve-source flag tells the V0 conversion to keep FLACs on
-    disk until the quality decision. Force/manual-import sets this so a
+    disk until the quality decision. Force-import sets this so a
     downgrade verdict does not silently destroy the user's source FLACs in
     failed_imports/.
 

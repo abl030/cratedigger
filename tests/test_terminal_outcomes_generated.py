@@ -8,7 +8,7 @@ import unittest
 from hypothesis import example, given, settings, strategies as st
 
 from lib import transitions
-from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+from lib.import_queue import IMPORT_JOB_FORCE
 from lib.pipeline_db import PipelineDB
 from lib.terminal_outcomes import (
     ImportJobTerminal,
@@ -152,9 +152,9 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
             active_download_state={"files": []},
         ))
         job = db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=42,
-            payload=manual_import_payload(failed_path="/tmp/generated"),
+            payload={"failed_path": "/tmp/generated"},
         )
         db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
         claimed = db.claim_next_import_job(worker_id="generated")

@@ -355,7 +355,7 @@ class TestImportPreviewValues(unittest.TestCase):
         self.assertEqual(
             preview.stage_chain,
             [
-                "preimport_nested:skipped_auto",
+                "preimport_nested:pass",
                 "preimport_audio:pass",
                 "stage0_spectral_gate:would_run",
                 "stage2_import:import",
@@ -1497,9 +1497,9 @@ class TestImportPreviewPath(unittest.TestCase):
         """
         db = self._db()
         job = db.enqueue_import_job(
-            "manual_import",
+            "force_import",
             request_id=42,
-            dedupe_key="manual:42:/tmp/source",
+            dedupe_key="force:42:/tmp/source",
             payload={"failed_path": "/tmp/source"},
         )
         source = self._source_dir()
@@ -1856,9 +1856,9 @@ class TestImportPreviewPath(unittest.TestCase):
     def test_source_change_during_preview_does_not_persist_candidate_evidence(self):
         db = self._db()
         job = db.enqueue_import_job(
-            "manual_import",
+            "force_import",
             request_id=42,
-            dedupe_key="manual:42:/tmp/source",
+            dedupe_key="force:42:/tmp/source",
             payload={"failed_path": "/tmp/source"},
         )
         source = self._source_dir()

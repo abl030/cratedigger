@@ -43,7 +43,6 @@ Browser → https://music.ablz.au
 | `/api/pipeline/status` | GET | Pipeline DB status counts + wanted list |
 | `/api/pipeline/<id>` | GET | Single request details |
 | `/api/pipeline/force-import` | POST | Queue force-import for a rejected download `{"download_log_id": N}`; returns `202` + job id |
-| `/api/manual-import/import` | POST | Queue manual import for a matched folder |
 | `/api/wrong-matches` | GET | Group rejected downloads by release for triage |
 | `/api/wrong-matches/explorer` | GET | List files for one wrong-match candidate, including extracted tags and audio-preview URLs |
 | `/api/wrong-matches/audio` | GET | Stream an individual wrong-match audio file with byte-range support |
@@ -161,7 +160,7 @@ Browser → https://music.ablz.au
   request Queue subview was removed in #575 PR5: request state and actions live
   on Browse's unified artist/release rows, while diagnostic API/CLI routes
   remain available.
-- **Wrong Matches tab** — the old Complete-folder manual-import page is gone;
+- **Wrong Matches tab** — the obsolete Complete-folder/manual-import page is gone;
   the tab now opens straight into Wrong Matches. Import actions queue work and
   poll `import_jobs`, so long beets imports do not block the web request.
   Failed queued force-imports remove the reviewed wrong-match source from the
@@ -335,7 +334,7 @@ homelab.services.cratedigger.enable = true;
 What this creates on doc2:
 - `cratedigger-web.service` — simple type, restart on failure, ExecStart wraps `web/server.py` with the python env from `nix/package.nix`
 - `cratedigger-importer.service` — long-lived worker that drains queued
-  force/manual/automation imports after DB migrations have run
+  force/automation imports after DB migrations have run
 - `cratedigger-import-preview-worker.service` — long-lived async preview worker
   that prepares queued jobs for the serial importer when
   `services.cratedigger.importer.preview.enable = true`; defaults to two worker

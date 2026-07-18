@@ -1,4 +1,4 @@
-"""Force / manual import entry-point adapters.
+"""Force-import entry-point adapter.
 
 ``dispatch_import_from_db`` takes the per-request IMPORT advisory lock,
 validates preconditions + the audio manifest, loads candidate evidence, and
@@ -18,7 +18,7 @@ from lib.import_evidence import ensure_candidate_evidence_for_action
 
 from lib.dispatch.types import (DISPATCH_CODE_BAD_REQUEST, DispatchOutcome,
                                 ImportAttemptResult)
-from lib.dispatch.manifest_guard import _guard_force_manual_audio_manifest
+from lib.dispatch.manifest_guard import _guard_force_import_audio_manifest
 from lib.dispatch.evidence_gate import (_download_info_from_candidate_evidence,
                                         _requeue_import_job_to_preview)
 from lib.dispatch.core import dispatch_import_core
@@ -26,7 +26,7 @@ from lib.dispatch.quality_gate import _check_quality_gate_core
 from lib.terminal_outcomes import ImportJobTerminal
 
 if TYPE_CHECKING:
-    from lib.pipeline_db import DownloadLogOutcome, PipelineDB
+    from lib.pipeline_db import PipelineDB
     from lib.dispatch.types import QualityGateFn
 
 logger = logging.getLogger("cratedigger")
@@ -37,15 +37,13 @@ def dispatch_import_from_db(
     request_id: int,
     failed_path: str,
     *,
-    force: bool = False,
-    outcome_label: DownloadLogOutcome = "force_import",
     source_username: str | None = None,
     source_dirs: list[str] | None = None,
     import_job_id: int | None = None,
     download_log_id: int | None = None,
     quality_gate_fn: "QualityGateFn | None" = None,
 ) -> "DispatchOutcome":
-    """Run a force-import or manual-import through the full dispatch pipeline.
+    """Run a force-import through the full dispatch pipeline.
 
     Requires pre-recorded candidate evidence: the caller supplies either
     ``import_job_id`` or ``download_log_id`` (or both), and dispatch loads
@@ -58,11 +56,10 @@ def dispatch_import_from_db(
     ``DISPATCH_CODE_REQUEUED_FOR_PREVIEW``); the actual measurement happens
     on the preview worker's next claim. Quality decisions (downgrade
     prevention, quality gate, media-server scans, denylist) still run identically
-    to auto-import — only the beets *distance* check is skipped when
-    ``force=True``.
+    to auto-import — only the beets *distance* check is skipped.
 
     Concurrency (issue #92): a per-``request_id`` advisory lock (IMPORT
-    namespace) is taken up front. Two concurrent force/manual imports
+    namespace) is taken up front. Two concurrent force imports
     on the same request (double-click in the UI, racing CLI
     invocations) would otherwise each run the full pipeline and write
     duplicate ``download_log`` rows. The second caller fast-fails
@@ -75,8 +72,6 @@ def dispatch_import_from_db(
         db: PipelineDB instance
         request_id: Album request ID
         failed_path: Path to the files on disk
-        force: Pass --force to import_one.py (bypass distance check)
-        outcome_label: download_log outcome label for successful imports
         source_username: Soulseek peer who supplied the source files
         source_dirs: Remote directories the source was downloaded from
         import_job_id: Import-job row this dispatch belongs to. Required
@@ -90,9 +85,8 @@ def dispatch_import_from_db(
 
     with db.advisory_lock(ADVISORY_LOCK_NAMESPACE_IMPORT, request_id) as acquired:
         if not acquired:
-            mode = "FORCE-IMPORT" if force else "MANUAL-IMPORT"
             logger.warning(
-                f"{mode} SKIPPED: request {request_id} — "
+                f"FORCE-IMPORT SKIPPED: request {request_id} — "
                 f"another import is already in progress")
             return DispatchOutcome(
                 success=False,
@@ -100,8 +94,6 @@ def dispatch_import_from_db(
             )
         return _dispatch_import_from_db_locked(
             db, request_id, failed_path,
-            force=force,
-            outcome_label=outcome_label,
             source_username=source_username,
             source_dirs=source_dirs,
             import_job_id=import_job_id,
@@ -115,8 +107,6 @@ def _dispatch_import_from_db_locked(
     request_id: int,
     failed_path: str,
     *,
-    force: bool,
-    outcome_label: DownloadLogOutcome,
     source_username: str | None,
     source_dirs: list[str] | None,
     import_job_id: int | None,
@@ -161,7 +151,7 @@ def _dispatch_import_from_db_locked(
         return DispatchOutcome(success=False, message=f"Path not found: {failed_path}")
 
     attempt_result = ImportAttemptResult.from_import_job(db, import_job_id)
-    manifest_reject = _guard_force_manual_audio_manifest(
+    manifest_reject = _guard_force_import_audio_manifest(
         db,
         request_id=request_id,
         failed_path=failed_path,
@@ -221,20 +211,20 @@ def _dispatch_import_from_db_locked(
         mb_release_id=mbid,
         request_id=request_id,
         label=label,
-        force=force,
+        force=True,
         override_min_bitrate=None,
         target_format=req.get("target_format"),
         verified_lossless_target=cfg.verified_lossless_target,
         beets_harness_path=cfg.beets_harness_path,
         db=db,
         dl_info=dl_info,
-        # Force/manual import explicitly bypasses the beets distance
+        # Force-import explicitly bypasses the beets distance
         # check — no measurement exists to report (#550 defect #4).
         distance=None,
-        scenario="force_import" if force else "manual_import",
+        scenario="force_import",
         files=files,
         cfg=cfg,
-        outcome_label=outcome_label,
+        outcome_label="force_import",
         requeue_on_failure=False,
         source_dirs=source_dirs,
         candidate_import_job_id=import_job_id,

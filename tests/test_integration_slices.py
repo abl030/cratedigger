@@ -600,7 +600,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
 
         return db
 
-    def test_force_and_manual_imports_run_the_same_post_import_gate(self):
+    def test_force_import_runs_the_same_post_import_gate(self):
         """Decision 19: force-import overrides the beets distance and
         nothing else — operator imports run the identical post-import
         search-policy gate as automatic imports (never silently terminal).
@@ -611,25 +611,20 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
             avg_bitrate_kbps=180, format="MP3", is_cbr=False,
             album_path="/Beets/Test")
 
-        for force, scenario in (
-            (True, "force_import"),
-            (False, "manual_import"),
-        ):
-            with self.subTest(scenario=scenario):
-                gate = RecordingQualityGate()
-                db = self._run_dispatch(
-                    ir,
-                    beets_info,
-                    force=force,
-                    scenario=scenario,
-                    quality_gate_fn=gate,
-                )
-                gate.assert_called_once()
-                self.assertEqual(db.request(42)["status"], "imported")
+        gate = RecordingQualityGate()
+        db = self._run_dispatch(
+            ir,
+            beets_info,
+            force=True,
+            scenario="force_import",
+            quality_gate_fn=gate,
+        )
+        gate.assert_called_once()
+        self.assertEqual(db.request(42)["status"], "imported")
 
     def test_import_with_unmeasured_distance_records_null(self):
         """#550 defect #4: dispatch with distance=None (the production
-        force/manual hot path since entry_points passes None) runs the full
+        force-import hot path since entry_points passes None) runs the full
         slice — including the 'unmeasured' log-label guard in
         dispatch_import_core — and persists NULL, not a fabricated 0.0, in
         both sinks (album_requests.beets_distance via _do_mark_done and the
@@ -1050,7 +1045,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
     """Integration slice: measure_preimport_state updates spectral state.
 
     Exercises the pre-import measurement pipeline that both the auto-import
-    path (lib.download_processing.process_completed_album) and the force/manual-import
+    path (lib.download_processing.process_completed_album) and the force-import
     path (lib.dispatch.dispatch_import_from_db) delegate to. Proves
     the measurement helper persists existing-album spectral state
     consistently regardless of caller. Quality decisions (and any denylist
@@ -1822,7 +1817,7 @@ class TestForceImportSlice(unittest.TestCase):
     def test_force_import_success(self):
         """Force-import → imported, download_log outcome=force_import."""
         from lib.dispatch import dispatch_import_from_db
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
         from lib.quality import AudioQualityMeasurement
         from lib.quality_evidence import snapshot_audio_files
 
@@ -1835,7 +1830,7 @@ class TestForceImportSlice(unittest.TestCase):
             # exists) must overwrite this with NULL (#550 defect #4).
             beets_distance=0.31,
         ))
-        # Track rows satisfy the force/manual untracked-audio guard.
+        # Track rows satisfy the force-import untracked-audio guard.
         db.set_tracks(42, [{"track_number": 1, "title": "Track"}])
 
         ir = make_import_result(decision="import", new_min_bitrate=320)
@@ -1855,9 +1850,9 @@ class TestForceImportSlice(unittest.TestCase):
             with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=42,
-                payload=manual_import_payload(failed_path=tmpdir),
+                payload={"failed_path": tmpdir},
             )
             _seed_candidate_for_import_job(
                 db, job.id,
@@ -1898,7 +1893,7 @@ class TestForceImportSlice(unittest.TestCase):
                     returncode=0, stdout=stdout, stderr="")
                 result = dispatch_import_from_db(
                     db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
-                    force=True, source_username="user1",
+                    source_username="user1",
                     import_job_id=job.id,
                 )
         finally:
@@ -1931,7 +1926,7 @@ class TestForceImportSlice(unittest.TestCase):
         which covers the auto path.
         """
         from lib.dispatch import dispatch_import_from_db
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
         from lib.quality import AudioQualityMeasurement
         from lib.quality_evidence import snapshot_audio_files
 
@@ -1940,7 +1935,7 @@ class TestForceImportSlice(unittest.TestCase):
             id=833, status="manual", mb_release_id="mbid-go-team",
             imported_path="/mnt/virtio/music/slskd/failed_imports/stale-source",
         ))
-        # Track rows satisfy the force/manual untracked-audio guard.
+        # Track rows satisfy the force-import untracked-audio guard.
         db.set_tracks(833, [{"track_number": 1, "title": "Track"}])
 
         # The beets destination lives in ir.postflight.imported_path.
@@ -1963,9 +1958,9 @@ class TestForceImportSlice(unittest.TestCase):
             with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=833,
-                payload=manual_import_payload(failed_path=tmpdir),
+                payload={"failed_path": tmpdir},
             )
             _seed_candidate_for_import_job(
                 db, job.id,
@@ -2000,7 +1995,7 @@ class TestForceImportSlice(unittest.TestCase):
                     returncode=0, stdout=stdout, stderr="")
                 dispatch_import_from_db(
                     db, request_id=833, failed_path=tmpdir,  # type: ignore[arg-type]
-                    force=True, source_username="ttttsv",
+                    source_username="ttttsv",
                     import_job_id=job.id,
                 )
         finally:
@@ -2016,7 +2011,7 @@ class TestForceImportSlice(unittest.TestCase):
 
 
 class TestPreserveSourceSlice(unittest.TestCase):
-    """Integration slice for issue #111 — force/manual import holds lossless
+    """Integration slice for issue #111 — force-import holds lossless
     originals across the V0 conversion until the quality decision has
     returned a non-terminal verdict.
 
@@ -2091,7 +2086,7 @@ class TestPreserveSourceSlice(unittest.TestCase):
                             "V0 MP3 must survive cleanup")
 
     def test_keep_lossless_mode_does_not_strip_normalized_flac(self):
-        """PR #112 Codex round 1 P1: force/manual import with
+        """PR #112 Codex round 1 P1: force-import with
         ``target_format=flac`` (or "lossless") runs the normalization
         branch (ALAC→FLAC) but never runs the V0 pass. The
         preserve-source cleanup must NOT fire in that branch — otherwise
@@ -2121,7 +2116,7 @@ class TestPreserveSourceSlice(unittest.TestCase):
             del preserve_source  # unused, kept for scenario clarity
 
     def test_terminal_exit_removes_v0_artifacts_for_next_retry(self):
-        """PR #112 Codex round 2 P1: when a force/manual import rejects
+        """PR #112 Codex round 2 P1: when a force-import rejects
         on downgrade/transcode_downgrade, the harness must remove the
         temporary V0 MP3s before exiting so the next retry sees a clean
         FLAC-only folder. Leaving mixed FLAC+MP3 in place would cause the
@@ -2158,7 +2153,7 @@ class TestPreserveSourceSlice(unittest.TestCase):
                              "retry sees a clean FLAC-only folder")
 
     def test_retry_flow_without_conversion_still_cleans_leftover_flac(self):
-        """PR #112 Codex round 1 P2: on a second force/manual attempt the
+        """PR #112 Codex round 1 P2: on a second force-import attempt the
         V0 MP3s from the first attempt already exist, so
         ``convert_lossless`` skips and reports ``converted == 0``. The
         lossless originals from the prior run are still on disk and must
@@ -2614,7 +2609,7 @@ class TestReleaseLockContention(unittest.TestCase):
 
         This is the complement of ``test_auto_contention_resets_request_to_wanted``:
         the status-reset branch is gated on scenario NOT in
-        FORCE_MANUAL_SCENARIOS, so force/manual leave the row alone.
+        FORCE_IMPORT_SCENARIOS, so force-import leaves the row alone.
         """
         from lib.dispatch import dispatch_import_core
         from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
@@ -2654,9 +2649,9 @@ class TestReleaseLockContention(unittest.TestCase):
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-        # Status untouched — force/manual caller surfaces the message.
+        # Status untouched — the force-import caller surfaces the message.
         self.assertEqual(db.request(42)["status"], "imported")
-        # Staging cleanup MUST NOT run for force/manual — the path is
+        # Staging cleanup MUST NOT run for force-import — the path is
         # the user's failed_imports/ copy of the source, not a
         # disposable /Incoming dir. Deleting it would destroy the
         # user's only copy (issue #89 equivalent).
@@ -5779,7 +5774,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
     ``measure_and_persist_candidate_evidence`` / ``measure_preimport_state`` / spectral
     analysis or, for automation jobs, the materialization helper.
 
-    Covers AE4 for both force/manual and automation job types via the
+    Covers AE4 for both force-import and automation job types via the
     same code path used in production.
     """
 
@@ -5919,7 +5914,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                     beets_harness_path=_HARNESS, pipeline_db_enabled=True),
             ):
                 outcome = dispatch_import_from_db(
-                    cast(Any, db), 42, source, force=True,
+                    cast(Any, db), 42, source,
                     source_username="alice", import_job_id=claimed.id,
                     download_log_id=log_id,
                     quality_gate_fn=noop_quality_gate,
@@ -6059,8 +6054,7 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
             dispatch_import_from_db,
         )
         from lib.import_queue import (
-            IMPORT_JOB_MANUAL,
-            manual_import_payload,
+            IMPORT_JOB_FORCE,
         )
         from lib.quality_evidence import snapshot_audio_files
 
@@ -6075,13 +6069,13 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
                 artist_name="A",
                 album_title="B",
             ))
-            # Track rows satisfy the force/manual untracked-audio guard.
+            # Track rows satisfy the force-import untracked-audio guard.
             db.set_tracks(42, [{"track_number": 1, "title": "Track"}])
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=42,
-                dedupe_key="manual:slice",
-                payload=manual_import_payload(failed_path=source),
+                dedupe_key="force:slice",
+                payload={"failed_path": source},
             )
             # Step 1: simulate an importer-importable state without evidence
             # (the lossy real-world starting point: preview marked ready in a
@@ -6107,8 +6101,6 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
                     cast(Any, db),
                     request_id=42,
                     failed_path=source,
-                    force=False,
-                    outcome_label="manual_import",
                     import_job_id=job.id,
                 )
 
@@ -6658,11 +6650,11 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         candidate_evidence,
         current_evidence=None,
     ):
-        """Seed a manual import_job + candidate evidence + (opt) current.
+        """Seed a force import_job + candidate evidence + (opt) current.
 
         Returns (import_job_id, download_log_id=None).
         """
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
 
         db.seed_request(make_request_row(
             id=request_id,
@@ -6672,9 +6664,9 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             album_title="Test Album",
         ))
         job = db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=request_id,
-            payload=manual_import_payload(failed_path=tmpdir),
+            payload={"failed_path": tmpdir},
         )
         db.upsert_album_quality_evidence(candidate_evidence)
         if current_evidence is not None:
@@ -6810,10 +6802,8 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
                 db,  # type: ignore[arg-type]
                 request_id=request_id,
                 failed_path=tmpdir,
-                force=False,
                 source_username="alice",
                 import_job_id=import_job_id,
-                outcome_label="manual_import",
             )
         return result, ext
 
@@ -6853,16 +6843,16 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
                 for f in snap
             ]
             # Need to enqueue first to get the job id for owner_id
-            from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+            from lib.import_queue import IMPORT_JOB_FORCE
             db.seed_request(make_request_row(
                 id=42, status="manual", mb_release_id="mbid-u6-corrupt",
             ))
-            # Track rows satisfy the force/manual untracked-audio guard.
+            # Track rows satisfy the force-import untracked-audio guard.
             db.set_tracks(42, [{"track_number": 1, "title": "Track"}])
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=42,
-                payload=manual_import_payload(failed_path=tmpdir),
+                payload={"failed_path": tmpdir},
             )
             self._wire_candidate(
                 db, job.id,
@@ -6926,16 +6916,16 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             with open(os.path.join(cd1, "01 - Track.mp3"), "wb") as h:
                 h.write(b"audio")
             files = snapshot_audio_files(tmpdir)
-            from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+            from lib.import_queue import IMPORT_JOB_FORCE
             db.seed_request(make_request_row(
                 id=43, status="manual", mb_release_id="mbid-u6-nested",
             ))
-            # Track rows satisfy the force/manual untracked-audio guard.
+            # Track rows satisfy the force-import untracked-audio guard.
             db.set_tracks(43, [{"track_number": 1, "title": "Track"}])
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=43,
-                payload=manual_import_payload(failed_path=tmpdir),
+                payload={"failed_path": tmpdir},
             )
             self._wire_candidate(
                 db, job.id,
@@ -6976,14 +6966,14 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         db = FakePipelineDB()
         cfg = self._common_cfg()
         with tempfile.TemporaryDirectory() as tmpdir:
-            from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+            from lib.import_queue import IMPORT_JOB_FORCE
             db.seed_request(make_request_row(
                 id=44, status="manual", mb_release_id="mbid-u6-empty",
             ))
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=44,
-                payload=manual_import_payload(failed_path=tmpdir),
+                payload={"failed_path": tmpdir},
             )
             self._wire_candidate(
                 db, job.id,
@@ -7024,15 +7014,15 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         db = FakePipelineDB()
         cfg = self._common_cfg()
         with tempfile.TemporaryDirectory() as tmpdir:
-            from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+            from lib.import_queue import IMPORT_JOB_FORCE
             db.seed_request(make_request_row(
                 id=46, status="manual", mb_release_id="mbid-u6-empty-tracks",
             ))
             db.set_tracks(46, [{"track_number": 1, "title": "Track"}])
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=46,
-                payload=manual_import_payload(failed_path=tmpdir),
+                payload={"failed_path": tmpdir},
             )
             self._wire_candidate(
                 db, job.id,
@@ -7085,18 +7075,18 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
                     codec="mp3",
                 ),
             ]
-            from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+            from lib.import_queue import IMPORT_JOB_FORCE
             db.seed_request(make_request_row(
                 id=45, status="manual", mb_release_id="mbid-u6-spectral",
                 current_spectral_grade="likely_transcode",
                 current_spectral_bitrate=128,
             ))
-            # Track rows satisfy the force/manual untracked-audio guard.
+            # Track rows satisfy the force-import untracked-audio guard.
             db.set_tracks(45, [{"track_number": 1, "title": "Track"}])
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=45,
-                payload=manual_import_payload(failed_path=tmpdir),
+                payload={"failed_path": tmpdir},
             )
             self._wire_candidate(
                 db, job.id,
@@ -7607,7 +7597,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             claimed, download_log_id = self._seed_force_job(
                 db, request_id=42, source_path=source,
             )
-            # Track rows satisfy the force/manual untracked-audio guard.
+            # Track rows satisfy the force-import untracked-audio guard.
             db.set_tracks(42, [{"track_number": 1, "title": "Track"}])
             # Existing album in beets at 192kbps; the importer compares
             # download_spectral (suspect@96) against this and rejects.
@@ -7701,11 +7691,9 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     db,  # type: ignore[arg-type]
                     request_id=42,
                     failed_path=source,
-                    force=True,
                     source_username="alice",
                     import_job_id=updated_job.id,
                     download_log_id=download_log_id,
-                    outcome_label="force_import",
                 )
 
             self.assertFalse(result.success)
@@ -7813,7 +7801,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             claimed, download_log_id = self._seed_force_job(
                 db, request_id=44, source_path=source,
             )
-            # Track rows satisfy the force/manual untracked-audio guard.
+            # Track rows satisfy the force-import untracked-audio guard.
             db.set_tracks(44, [{"track_number": 1, "title": "Track"}])
             self._seed_current_evidence(
                 db, request_id=44, min_bitrate_kbps=192,
@@ -7884,11 +7872,9 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     db,  # type: ignore[arg-type]
                     request_id=44,
                     failed_path=source,
-                    force=True,
                     source_username="alice",
                     import_job_id=updated_job.id,
                     download_log_id=download_log_id,
-                    outcome_label="force_import",
                 )
 
             self.assertFalse(result.success)

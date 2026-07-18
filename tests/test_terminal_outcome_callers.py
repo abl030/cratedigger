@@ -9,8 +9,7 @@ from lib import transitions
 from lib.dispatch import DispatchOutcome
 from lib.import_preview import ImportPreviewResult
 from lib.import_queue import (
-    IMPORT_JOB_MANUAL,
-    manual_import_payload,
+    IMPORT_JOB_FORCE,
 )
 from lib.quality import MeasurementFailure
 from lib.terminal_outcomes import (
@@ -35,9 +34,9 @@ class TestTerminalOutcomeCallers(unittest.TestCase):
         db = FakePipelineDB()
         _seed_request(db)
         job = db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=42,
-            payload=manual_import_payload(failed_path="/tmp/atomic"),
+            payload={"failed_path": "/tmp/atomic"},
         )
         db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
         claimed = db.claim_next_import_job(worker_id="atomic")
@@ -77,9 +76,9 @@ class TestTerminalOutcomeCallers(unittest.TestCase):
         db = FakePipelineDB()
         _seed_request(db)
         job = db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=42,
-            payload=manual_import_payload(failed_path="/tmp/atomic"),
+            payload={"failed_path": "/tmp/atomic"},
         )
         claimed = db.claim_next_import_preview_job(worker_id="atomic-preview")
         assert claimed is not None

@@ -292,7 +292,7 @@ def validate_audio(folder_path: str, mode: str = "normal") -> AudioValidationRes
 
     Walks subdirectories so multi-disc layouts (``Album/CD1/*.mp3``) are
     validated too. The auto-import path always passes a flattened folder
-    so recursion is a no-op there; force/manual-import paths can point at
+    so recursion is a no-op there; force-import paths can point at
     user folders with nested discs.
     """
     if mode == "off":

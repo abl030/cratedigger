@@ -95,7 +95,7 @@ def _reject_import_from_evidence_decision(
     mutation and upstream of any operator intent — the album is still
     desired, only this specific source is bad — so the parent request must
     always self-heal back to ``wanted``. Quality-side rejects continue to
-    honour ``requeue_on_failure`` (force/manual paths pass ``False``
+    honour ``requeue_on_failure`` (force-import passes ``False``
     because the operator already chose to act on this source).
     """
 
@@ -223,7 +223,7 @@ def _do_mark_done(
     ``imported_path`` is the beets destination (from
     ``ImportResult.postflight.imported_path``) — what shows up in the UI's
     "Imported to" label. ``dest_path`` is the source/staging path passed to
-    the importer. When callers have both (auto/force/manual paths that ran
+    the importer. When callers have both (automation/force paths that ran
     beets), they pass ``imported_path`` so ``album_requests.imported_path``
     reflects the actual on-disk location. Callers that only stage for manual
     review (``album_source.mark_done``) leave ``imported_path=None``; it
@@ -464,7 +464,7 @@ def _record_rejection_and_maybe_requeue(
     ``scripts/importer.py`` handles it on the outer return).
 
     When ``requeue=True`` (auto-import): transitions to "wanted", records
-    attempt. When ``requeue=False`` (force/manual import): only logs to
+    attempt. When ``requeue=False`` (force-import): only logs to
     download_log. ``preserve_imported=True`` is the proof-lock exception:
     it transitions back to terminal "imported" without an attempt bump.
 

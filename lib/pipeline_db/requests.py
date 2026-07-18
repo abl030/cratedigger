@@ -1266,7 +1266,7 @@ class _RequestsMixin(_PipelineDBBase):
         auto-import path so the resume guard can later distinguish
         "subprocess never launched" (safe to retry) from "subprocess
         may have written to beets" (manual recovery required). No-op
-        when ``active_download_state`` is NULL — force/manual paths
+        when ``active_download_state`` is NULL — force-import paths
         operate on a different ownership boundary
         (``failed_imports/...``) and don't carry this state.
         See ``docs/advisory-locks.md``.

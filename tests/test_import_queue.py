@@ -20,13 +20,10 @@ from lib.download_processing import Completed, CompletionDispatched
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
-    IMPORT_JOB_MANUAL,
     IMPORT_JOB_YOUTUBE,
     automation_import_dedupe_key,
     force_import_dedupe_key,
     force_import_payload,
-    manual_import_dedupe_key,
-    manual_import_payload,
 )
 from lib.import_preview import ImportPreviewResult
 from lib.quality import (
@@ -440,8 +437,6 @@ class TestImporterWorker(unittest.TestCase):
             db,
             request_id=42,
             failed_path="/tmp/failed",
-            force=True,
-            outcome_label=IMPORT_JOB_FORCE,
             source_username="alice",
             source_dirs=None,
             import_job_id=claimed.id,
@@ -481,8 +476,6 @@ class TestImporterWorker(unittest.TestCase):
             db,
             request_id=42,
             failed_path="/tmp/failed",
-            force=True,
-            outcome_label=IMPORT_JOB_FORCE,
             source_username="alice",
             source_dirs=["alice\\Artist\\Album", "alice\\Artist\\Album\\CD2"],
             import_job_id=claimed.id,
@@ -576,31 +569,6 @@ class TestImporterWorker(unittest.TestCase):
             "Stored preview ImportResult is audit/evidence input only; force "
             "import must recompute the action decision against current evidence.",
         )
-
-    def test_manual_import_failure_marks_job_failed(self):
-        from scripts import importer
-
-        db = FakePipelineDB()
-        job = db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
-            request_id=42,
-            dedupe_key=manual_import_dedupe_key(42, "/tmp/manual"),
-            payload=manual_import_payload(failed_path="/tmp/manual"),
-        )
-        self._mark_importable(db, job)
-        claimed = db.claim_next_import_job(worker_id="worker")
-        assert claimed is not None
-
-        with patch(
-            "lib.dispatch.dispatch_import_from_db",
-            return_value=DispatchOutcome(False, "quality gate rejected"),
-        ):
-            updated = importer.process_claimed_job(cast(Any, db), claimed)
-
-        assert updated is not None
-        self.assertEqual(updated.status, "failed")
-        self.assertEqual(updated.error, "quality gate rejected")
-        self.assertEqual(self._result(updated)["success"], False)
 
     def test_failed_force_import_quality_pipeline_reject_cleans_without_redeciding(self):
         from scripts import importer
@@ -1052,10 +1020,10 @@ class TestImporterWorker(unittest.TestCase):
             claimed = db.claim_next_import_job(worker_id="worker")
             assert claimed is not None
             db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=42,
-                dedupe_key=manual_import_dedupe_key(42, source),
-                payload=manual_import_payload(failed_path=source),
+                dedupe_key="force_import:other-active-job",
+                payload={"failed_path": source},
             )
 
             with patch(
@@ -1075,37 +1043,6 @@ class TestImporterWorker(unittest.TestCase):
             cleanup = self._result(updated)["cleanup"]
             self.assertTrue(cleanup["skipped"])
             self.assertEqual(cleanup["outcome"], "skipped_active_job")
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-
-    def test_manual_import_failure_preserves_source_and_wrong_match(self):
-        from scripts import importer
-
-        db = FakePipelineDB()
-        root, source = _make_failed_import_source()
-        try:
-            self._log_wrong_match(db, failed_path=source)
-            job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
-                request_id=42,
-                dedupe_key=manual_import_dedupe_key(42, source),
-                payload=manual_import_payload(failed_path=source),
-            )
-            self._mark_importable(db, job)
-            claimed = db.claim_next_import_job(worker_id="worker")
-            assert claimed is not None
-
-            with patch(
-                "lib.dispatch.dispatch_import_from_db",
-                return_value=DispatchOutcome(False, "manual import failed"),
-            ):
-                updated = importer.process_claimed_job(cast(Any, db), claimed)
-
-            assert updated is not None
-            self.assertEqual(updated.status, "failed")
-            self.assertTrue(os.path.isdir(source))
-            self.assertEqual(len(db.get_wrong_matches()), 1)
-            self.assertNotIn("cleanup", self._result(updated))
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -1152,10 +1089,10 @@ class TestImporterWorker(unittest.TestCase):
 
         db = FakePipelineDB()
         job = db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=42,
-            dedupe_key=manual_import_dedupe_key(42, "/tmp/manual"),
-            payload=manual_import_payload(failed_path="/tmp/manual"),
+            dedupe_key="force_import:startup-recovery",
+            payload={"failed_path": "/tmp/force"},
         )
         self._mark_importable(db, job)
         claimed = db.claim_next_import_job(worker_id="old-worker")
@@ -1185,10 +1122,10 @@ class TestImporterWorker(unittest.TestCase):
 
         db = FakePipelineDB()
         db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=42,
-            dedupe_key=manual_import_dedupe_key(42, "/tmp/manual"),
-            payload=manual_import_payload(failed_path="/tmp/manual"),
+            dedupe_key="force_import:waiting-preview",
+            payload={"failed_path": "/tmp/force"},
         )
 
         self.assertIsNone(importer.run_once(cast(Any, db), worker_id="worker"))
@@ -1542,52 +1479,6 @@ class TestImportPreviewWorker(unittest.TestCase):
         self.assertEqual(updated.preview_result["verdict"], "evidence_ready")
         self.assertIsNotNone(updated.importable_at)
 
-    def test_manual_job_preview_uses_non_force_semantics(self):
-        from scripts import import_preview_worker
-
-        with tempfile.TemporaryDirectory() as source:
-            with open(os.path.join(source, "01.mp3"), "wb") as handle:
-                handle.write(b"audio")
-            db = FakePipelineDB()
-            db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
-                request_id=42,
-                dedupe_key=manual_import_dedupe_key(42, source),
-                payload=manual_import_payload(failed_path=source),
-            )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
-            assert claimed is not None
-
-            preview_result = self._preview(
-                "would_import",
-                reason="import",
-                source_path=source,
-            )
-
-            def fake_preview(*args: Any, **kwargs: Any) -> ImportPreviewResult:
-                self._seed_job_candidate_evidence(db, claimed.id, source)
-                return preview_result
-
-            with patch(
-                "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
-                side_effect=fake_preview,
-            ) as preview:
-                updated = import_preview_worker.process_claimed_preview_job(
-                    db,
-                    claimed,
-                )
-
-        preview.assert_called_once_with(
-            db,
-            request_id=42,
-            path=source,
-            force=False,
-            download_log_id=None,
-            import_job_id=claimed.id,
-        )
-        assert updated is not None
-        self.assertEqual(updated.preview_status, "evidence_ready")
-
     def test_automation_job_preview_uses_active_download_current_path(self):
         from scripts import import_preview_worker
 
@@ -1710,10 +1601,10 @@ class TestImportPreviewWorker(unittest.TestCase):
             db = FakePipelineDB()
             db.seed_request(make_request_row(id=42, status="downloading"))
             db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=42,
-                dedupe_key=manual_import_dedupe_key(42, source),
-                payload=manual_import_payload(failed_path=source),
+                dedupe_key="force_import:evidence-readiness-fallback",
+                payload={"failed_path": source},
             )
             claimed = db.claim_next_import_preview_job(worker_id="preview")
             assert claimed is not None
@@ -2090,7 +1981,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
     already passes the snapshot guard.
 
     Covers AE4 (re-claim of valid evidence skips measurement) for both
-    force/manual and automation job types.
+    force and automation job types.
     """
 
     def _seed_evidence_for_job(
@@ -2138,7 +2029,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         )
 
     def test_force_job_valid_evidence_skips_measurement(self):
-        """AE4 force/manual: matching snapshot + valid evidence → no measurement."""
+        """AE4 force: matching snapshot + valid evidence → no measurement."""
         from scripts import import_preview_worker
         from lib.quality import SpectralAnalysisDetail
 
@@ -2176,7 +2067,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             )
             claimed = db.claim_next_import_preview_job(worker_id="preview")
             assert claimed is not None
-            # Seed download_log_candidate evidence — force/manual path uses it.
+            # Seed download_log_candidate evidence — force path uses it.
             self._seed_evidence_for_download_log(db, download_log_id, source)
 
             audit_calls: list[str] = []
@@ -2564,46 +2455,6 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         )
         self.assertFalse(result.spectral.existing.attempted)
         self.assertIsNone(result.spectral.existing.error)
-
-    def test_manual_job_valid_evidence_skips_measurement(self):
-        """AE4 manual: matching snapshot + valid evidence → no measurement."""
-        from scripts import import_preview_worker
-
-        with tempfile.TemporaryDirectory() as source:
-            with open(os.path.join(source, "01.mp3"), "wb") as handle:
-                handle.write(b"audio")
-            db = FakePipelineDB()
-            db.seed_request(make_request_row(id=42))
-            db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
-                request_id=42,
-                dedupe_key=manual_import_dedupe_key(42, source),
-                payload=manual_import_payload(failed_path=source),
-            )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
-            assert claimed is not None
-            # Manual jobs have no download_log; seed import_job_candidate.
-            self._seed_evidence_for_job(db, claimed.id, source)
-
-            with patch(
-                "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
-            ) as preview, patch(
-                "lib.measurement.measure_preimport_state",
-            ) as preimport:
-                updated = import_preview_worker.process_claimed_preview_job(
-                    db,
-                    claimed,
-                )
-
-        preview.assert_not_called()
-        preimport.assert_not_called()
-        assert updated is not None
-        self.assertEqual(updated.preview_status, "evidence_ready")
-        assert updated.preview_result is not None
-        self.assertEqual(
-            updated.preview_result.get("candidate_status"),
-            "reused",
-        )
 
     def test_automation_job_valid_evidence_skips_measurement_and_materialization(self):
         """AE4 automation: matching snapshot + valid evidence → no measurement.

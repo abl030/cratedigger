@@ -47,8 +47,8 @@ MeasurementFailureReason = Literal[
     "evidence_persist_failed", # DB write failed after measurement completed
     "request_not_found",       # parent album_request gone (no-finalize subcase)
     "missing_release_id",      # request has no mb_release_id
-    "download_log_not_found",  # force/manual UI: download_log row gone
-    "missing_failed_path",     # force/manual UI: download_log lacks failed_path
+    "download_log_not_found",  # force-import UI: download_log row gone
+    "missing_failed_path",     # force-import UI: download_log lacks failed_path
 ]
 
 

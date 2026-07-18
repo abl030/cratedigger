@@ -13,7 +13,7 @@ import msgspec
 
 from lib.beets_db import AlbumInfo
 from lib.config import CratediggerConfig
-from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+from lib.import_queue import IMPORT_JOB_FORCE
 from lib.pipeline_db import DownloadLogOutcome
 from lib.quality import (
     AlbumQualityV0Metric,
@@ -267,9 +267,9 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         ))
         log_id = db.log_download(request_id=42, outcome="rejected")
         job = db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=42,
-            payload=manual_import_payload(failed_path="/tmp/pending"),
+            payload={"failed_path": "/tmp/pending"},
         )
 
         tmpdir = tempfile.mkdtemp()
@@ -391,9 +391,9 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             with open(f"{current_dir}/01.mp3", "wb") as handle:
                 handle.write(b"current")
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=42,
-                payload=manual_import_payload(failed_path=tmpdir),
+                payload={"failed_path": tmpdir},
             )
             import_job_id = job.id
             files = snapshot_audio_files(tmpdir)
@@ -550,9 +550,9 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             with open(f"{tmpdir}/01.mp3", "wb") as handle:
                 handle.write(b"audio")
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=42,
-                payload=manual_import_payload(failed_path=tmpdir),
+                payload={"failed_path": tmpdir},
             )
             _seed_candidate_for_import_job(
                 db, job.id,
@@ -629,9 +629,9 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             with open(f"{current_dir}/01.mp3", "ab") as handle:
                 handle.write(b" changed")
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=42,
-                payload=manual_import_payload(failed_path=tmpdir),
+                payload={"failed_path": tmpdir},
             )
             _seed_candidate_for_import_job(
                 db, job.id,
@@ -716,9 +716,9 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             with open(f"{tmpdir}/01.mp3", "wb") as handle:
                 handle.write(b"candidate")
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=42,
-                payload=manual_import_payload(failed_path=tmpdir),
+                payload={"failed_path": tmpdir},
             )
             _seed_candidate_for_import_job(
                 db, job.id,
@@ -776,9 +776,9 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             with open(f"{tmpdir}/01.mp3", "wb") as handle:
                 handle.write(b"audio")
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=42,
-                payload=manual_import_payload(failed_path=tmpdir),
+                payload={"failed_path": tmpdir},
             )
             _seed_candidate_for_import_job(
                 db, job.id,

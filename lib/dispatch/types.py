@@ -57,7 +57,7 @@ DISPATCH_CODE_IMPORT_MANIFEST_REJECTED = "import_manifest_rejected"
 # bv_result.scenario values like ``strong_match`` / ``weak_match`` /
 # ``auto_import``, none of which appear here — their staging dir under
 # ``/Incoming`` is always safe to remove (see issue #89).
-FORCE_MANUAL_SCENARIOS: frozenset[str] = frozenset({"force_import", "manual_import"})
+FORCE_IMPORT_SCENARIOS: frozenset[str] = frozenset({"force_import"})
 
 
 @dataclass(frozen=True)
@@ -227,7 +227,7 @@ class EvidenceImportGate:
 # unified reject helper forces ``requeue=True`` for these regardless of the
 # caller's ``requeue_on_failure`` flag — the candidate failed *upstream* of
 # any beets mutation, so the parent request must always self-heal back to
-# ``wanted`` even when the operator chose force/manual import.
+# ``wanted`` even when the operator chose force-import.
 _PREIMPORT_FACT_REJECT_DECISIONS = PREIMPORT_FACT_REJECTION_SCENARIOS
 
 

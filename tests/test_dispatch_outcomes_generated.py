@@ -477,7 +477,6 @@ def _run_have_analysis_abort(
     from lib.import_queue import (
         IMPORT_JOB_AUTOMATION,
         IMPORT_JOB_FORCE,
-        IMPORT_JOB_MANUAL,
     )
     from lib.terminal_outcomes import ImportJobTerminal
 
@@ -512,12 +511,10 @@ def _run_have_analysis_abort(
     job_type = {
         "auto": IMPORT_JOB_AUTOMATION,
         "force": IMPORT_JOB_FORCE,
-        "manual": IMPORT_JOB_MANUAL,
     }[mode]
     scenario = {
         "auto": "strong_match",
         "force": "force_import",
-        "manual": "manual_import",
     }[mode]
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -663,7 +660,7 @@ def assert_preimport_fact_always_self_heals(
     """U11 invariant: folder/audio-integrity facts fire upstream of any
     beets mutation and upstream of any operator intent — the parent request
     must always self-heal back to 'wanted', regardless of the caller's
-    ``requeue_on_failure`` flag (force/manual paths pass False)."""
+    ``requeue_on_failure`` flag (force-import passes False)."""
     status = db.request(42)["status"]
     if status != "wanted":
         raise AssertionError(
@@ -722,7 +719,7 @@ def assert_quality_side_reject_honors_caller_flag(
     """Quality-side rejects (downgrade, transcode_downgrade, suspect
     lossless, lossless_source_locked) are NOT in
     ``_PREIMPORT_FACT_REJECT_DECISIONS`` — they honor the caller's
-    ``requeue_on_failure`` flag normally (force/manual paths that pass
+    ``requeue_on_failure`` flag normally (force-import, which passes
     False stay put; the operator already chose to act on this source)."""
     status = db.request(42)["status"]
     expected = "wanted" if requeue_on_failure else "downloading"
@@ -933,10 +930,10 @@ class TestGeneratedEveryRejectionWriterProjection(unittest.TestCase):
 
 
 class TestGeneratedHaveAnalysisAbortLifecycle(unittest.TestCase):
-    """The non-quality abort invariant across auto/force/manual lifecycles."""
+    """The non-quality abort invariant across auto/force lifecycles."""
 
     @given(
-        mode=st.sampled_from(("auto", "force", "manual")),
+        mode=st.sampled_from(("auto", "force")),
         raw_error=st.sampled_from(_HAVE_ANALYSIS_FAILURES),
         search_override=st.sampled_from((None, "lossless", "lossless,mp3 v0")),
         username=st.sampled_from((None, "user1", "user2")),

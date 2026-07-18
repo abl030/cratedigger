@@ -145,10 +145,11 @@ def _project_linked_import_evidence(
 ) -> None:
     """Attach a successor import's measurements to its source audit row.
 
-    Force/manual import rows explicitly point back through
-    ``source_download_log_id``. That is the authoritative bridge from a kept
-    wrong-match card to the conversion which later materialized those bytes;
-    do not infer the relationship from matching albums or measurements.
+    Active force-import rows and historical manual-import rows explicitly
+    point back through ``source_download_log_id``. That is the authoritative
+    bridge from a kept wrong-match card to the conversion which later
+    materialized those bytes; do not infer the relationship from matching
+    albums or measurements.
     """
     by_id = {
         item.get("id"): item

@@ -13,7 +13,7 @@ from lib.import_manifest import (
     move_failed_import_curated,
     tracked_audio_paths_for_downloads,
 )
-from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+from lib.import_queue import IMPORT_JOB_FORCE
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
@@ -106,9 +106,9 @@ class TestForceImportManifestGuard(unittest.TestCase):
     @staticmethod
     def _queued_job(db: FakePipelineDB, failed_path: str) -> int:
         return db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=42,
-            payload=manual_import_payload(failed_path=failed_path),
+            payload={"failed_path": failed_path},
         ).id
 
     def test_force_import_rejects_audio_not_in_origin_manifest(self):
@@ -267,7 +267,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
         self.assertIn(("rejected", "untracked_audio"), outcomes)
         self.assertEqual(len(db.denylist), 0)
 
-    def test_manual_import_without_manifest_or_tracks_keeps_wm_and_self_heals(self):
+    def test_force_import_without_manifest_or_tracks_keeps_wm_and_self_heals(self):
         """No manifest and no track rows for a non-empty source: we can't
         verify the folder, so it fails closed against beets AND keeps the
         Wrong Matches entry for review — but the request still self-heals to

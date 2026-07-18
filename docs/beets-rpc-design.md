@@ -171,8 +171,8 @@ Typed helpers return `msgspec.Struct` types, decoded via
   currently takes a path and spawns a subprocess takes
   `ctx.beets_rpc` instead. The context manager guarantees shutdown
   on both normal exit and crash.
-- `cratedigger-web`: one per pipeline endpoint call. Force-import,
-  manual-import, ban-source all instantiate their own for the
+- `cratedigger-web`: one per pipeline endpoint call. Force-import and
+  ban-source instantiate their own for the
   duration of the call. Alternatively, a pool — see Open questions.
 - `pipeline-cli` commands that touch beets: same as web.
 

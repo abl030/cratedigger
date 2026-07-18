@@ -3,7 +3,7 @@
 One owner for what follows a successful retained import: the canonical
 decision->(status, override, denylist) resolution, the requeue transition,
 peer attribution, and gate staging. Decisions 17-19 make this policy
-identical for automatic and operator (force/manual) imports.
+identical for automatic and force-import callers.
 
 ``finalize_request`` is the module-local DI seam, same shape as its
 siblings (``lib.dispatch.outcome_actions``, ``harness.import_one``).
@@ -95,7 +95,7 @@ def _resolve_post_import_search_policy(
 ) -> tuple[PostImportSearchAction | None, bool, set[str], list[object]]:
     """Resolve post-import search policy and its peer attribution once.
 
-    Decision 19: force/manual imports resolve through the same canonical
+    Decision 19: force-imports resolve through the same canonical
     mapping as automatic imports — a force-imported provisional lossless
     copy gets the identical wanted + lossless-only requeue, never a
     silently terminal parking spot.

@@ -187,9 +187,9 @@ in a single staging directory under `/Incoming/auto-import/` with
 filenames like `Disk 1 - 01 - Pi.flac`, `Disk 1 - 02 - Bertie.flac`,
 …, `Disk 2 - 01 - Prelude.flac`, …. This is the auto-import flatten
 that the `preimport_nested` gate (`lib/quality/gates.py`) is
-expected to find pre-flattened. Force-import and manual-import paths
-go to `/Incoming/post-validation/` and would trip the `nested_layout`
-gate if presented with raw subfolders.
+expected to find pre-flattened. Force-import accepts an existing rejected
+folder and trips the shared `nested_layout` gate if it contains raw
+subfolders.
 
 The beets harness sees a flat staging dir with disk-numbered prefixes
 and does its match against the full multi-disc release on MB. Beets'

@@ -354,7 +354,7 @@ def _run_dispatch_finalization_world(
 
     if mode == "manifest_rejection":
         from lib.dispatch import dispatch_import_from_db
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
 
         db.set_tracks(42, [{"track_number": 1, "title": "One"}])
         with tempfile.TemporaryDirectory() as source:
@@ -362,9 +362,9 @@ def _run_dispatch_finalization_world(
                 with open(os.path.join(source, filename), "wb") as handle:
                     handle.write(b"audio")
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=42,
-                payload=manual_import_payload(failed_path=source),
+                payload={"failed_path": source},
             )
             preview_result: dict[str, Any] = {}
             if audit is not None:

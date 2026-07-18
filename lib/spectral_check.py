@@ -343,7 +343,7 @@ def analyze_album(folder_path, trim_seconds=30):
 
     Walks subdirectories so multi-disc layouts (``Album/CD1/*.flac``) are
     analyzed as one album. The auto-import path always passes a flattened
-    folder so recursion is a no-op there; force/manual-import and
+    folder so recursion is a no-op there; force-import and
     post-conversion callers can point at user folders with nested discs.
     """
     files = []

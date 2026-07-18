@@ -2,8 +2,8 @@
 
 Preview answers the operator's "would this import?" question without beets,
 pipeline DB, queue, denylist, or source-folder mutation. Real-folder preview
-uses the same preimport gates and import_one.py harness protocol as force/manual
-import, but runs both against isolated temporary copies.
+uses the same preimport gates and import_one.py harness protocol as force-import,
+but runs both against isolated temporary copies.
 """
 
 from __future__ import annotations
@@ -980,7 +980,6 @@ class ImportPreviewValues(msgspec.Struct, frozen=True):
     new_format: str | None = None
     audio_check_mode: str = "normal"
     audio_corrupt: bool = False
-    import_mode: str = "auto"
     has_nested_audio: bool = False
     candidate_v0_probe_avg: int | None = None
     candidate_v0_probe_min: int | None = None
@@ -1260,7 +1259,6 @@ def preview_import_from_values(
         new_format=values.new_format,
         audio_check_mode=values.audio_check_mode,
         audio_corrupt=values.audio_corrupt,
-        import_mode=values.import_mode,
         has_nested_audio=values.has_nested_audio,
         candidate_v0_probe_avg=values.candidate_v0_probe_avg,
         candidate_v0_probe_min=values.candidate_v0_probe_min,

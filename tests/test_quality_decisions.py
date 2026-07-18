@@ -981,8 +981,7 @@ EXPECTED_PARAMS = {
     "supported_lossless_source",
     # Preimport gate inputs (issue #91) — keep the simulator's picture of the
     # pipeline in sync with lib.measurement.measure_preimport_state + preimport_decide.
-    "audio_check_mode", "audio_corrupt",
-    "import_mode", "has_nested_audio",
+    "audio_check_mode", "audio_corrupt", "has_nested_audio",
     # U7 proof-bearing HAVE lock: an explicit simulator input, not a
     # request-scalar inference.
     "current_verified_lossless_proof",
@@ -1184,7 +1183,6 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
             candidate,
             None,
             facts=AlbumQualityEvidenceDecisionFacts(
-                import_mode="force",
                 verified_lossless_target="opus 128",
             ),
         )
@@ -1192,7 +1190,6 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
             candidate,
             self._current_with_v0_lineage("lossless_source"),
             facts=AlbumQualityEvidenceDecisionFacts(
-                import_mode="force",
                 verified_lossless_target="opus 128",
             ),
         )
@@ -1206,36 +1203,6 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
         self.assertEqual(
             fresh_action["stage2_import"],
             DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
-        )
-
-    def test_force_distance_bypass_context_does_not_change_quality_decision(self):
-        candidate = self._suspect_lossless_candidate()
-        current = self._current_with_v0_lineage("lossless_source")
-
-        normal = full_pipeline_decision_from_evidence(candidate, current)
-        forced = full_pipeline_decision_from_evidence(
-            candidate,
-            current,
-            facts=AlbumQualityEvidenceDecisionFacts(
-                import_mode="force",
-            ),
-        )
-
-        quality_keys = (
-            "stage0_spectral_gate",
-            "stage1_spectral",
-            "stage2_import",
-            "stage3_quality_gate",
-            "final_status",
-            "imported",
-            "denylisted",
-            "keep_searching",
-            "target_final_format",
-            "verified_lossless",
-        )
-        self.assertEqual(
-            {key: normal[key] for key in quality_keys},
-            {key: forced[key] for key in quality_keys},
         )
 
     def test_v0_policy_comparability_derives_from_neutral_source_lineage(self):
@@ -1355,27 +1322,22 @@ class TestPreimportAudioGate(unittest.TestCase):
 class TestPreimportNestedGate(unittest.TestCase):
     """Pure decision tests for the preimport nested-layout gate (issue #91).
 
-    Only the force/manual path rejects nested-audio layouts — the auto path
-    always flattens before import_dispatch runs. This matches
-    ``lib.dispatch.dispatch_import_from_db``.
+    Automation normally flattens before dispatch. Caller identity is absent
+    from the reducer, so any nested folder that reaches it is rejected.
     """
 
-    # (desc, import_mode, has_nested_audio, expected)
+    # (desc, has_nested_audio, expected)
     CASES = [
-        ("auto never applies",                  "auto",   True,  "skipped_auto"),
-        ("auto passes when flat",               "auto",   False, "skipped_auto"),
-        ("force + flat passes",                 "force",  False, "pass"),
-        ("force + nested rejects",              "force",  True,  "reject_nested"),
-        ("manual + flat passes",                "manual", False, "pass"),
-        ("manual + nested rejects",             "manual", True,  "reject_nested"),
+        ("flat passes", False, "pass"),
+        ("nested rejects", True, "reject_nested"),
     ]
 
     def test_preimport_nested_gate_cases(self):
         from lib.quality import preimport_nested_gate
-        for desc, mode, nested, expected in self.CASES:
+        for desc, nested, expected in self.CASES:
             with self.subTest(desc=desc):
                 self.assertEqual(
-                    preimport_nested_gate(mode, nested),
+                    preimport_nested_gate(nested),
                     expected)
 
 
@@ -1383,23 +1345,18 @@ class TestFullPipelinePreimportGates(unittest.TestCase):
     """``full_pipeline_decision`` must model preimport gates end-to-end (#91).
 
     Audio or nested rejects must short-circuit before stage 0/1/2/3 run and
-    mirror the two live paths' post-reject state:
-
-    * Auto path → `reject_and_requeue` transitions to "wanted" and bumps the
-      validation counter → ``final_status='wanted'``, ``keep_searching=True``.
-    * Force/manual path → `_record_rejection_and_maybe_requeue(requeue=False)`
-      logs but does NOT transition → ``final_status=None`` (unchanged),
-      ``keep_searching=False``.
+    report the shared self-healing quality outcome. Request-state application
+    lives outside this mode-blind reducer.
     """
 
-    def test_audio_corrupt_rejects_before_stages_auto(self):
+    def test_audio_corrupt_rejects_before_stages(self):
         r = full_pipeline_decision(
             is_flac=False, min_bitrate=256, is_cbr=False,
             audio_check_mode="normal", audio_corrupt=True)
         self.assertEqual(r["preimport_audio"], "reject_corrupt")
         self.assertFalse(r["imported"])
-        # Auto path transitions back to "wanted" and denylists the source
-        # (reject_and_requeue calls db.add_denylist for every username).
+        # The shared reducer reports the self-healing outcome; lifecycle
+        # application remains outside this function.
         self.assertEqual(r["final_status"], "wanted")
         self.assertTrue(r["keep_searching"])
         self.assertTrue(r["denylisted"])
@@ -1408,39 +1365,6 @@ class TestFullPipelinePreimportGates(unittest.TestCase):
         self.assertIsNone(r["stage1_spectral"])
         self.assertIsNone(r["stage2_import"])
         self.assertIsNone(r["stage3_quality_gate"])
-
-    def test_audio_corrupt_rejects_force_does_not_denylist(self):
-        # Force/manual uses _record_rejection_and_maybe_requeue with
-        # requeue=False; that helper does not denylist (comment: "denylisting
-        # is handled by the caller via action.denylist"). No such action is
-        # set for preimport audio rejects, so denylisted must be False.
-        r = full_pipeline_decision(
-            is_flac=False, min_bitrate=256, is_cbr=False,
-            audio_check_mode="normal", audio_corrupt=True,
-            import_mode="force")
-        self.assertEqual(r["preimport_audio"], "reject_corrupt")
-        self.assertFalse(r["denylisted"])
-
-    def test_audio_corrupt_rejects_force_preserves_status(self):
-        # Force-import path uses requeue=False — the request's status is not
-        # touched by the reject, so the simulator must report final_status=None.
-        r = full_pipeline_decision(
-            is_flac=False, min_bitrate=256, is_cbr=False,
-            audio_check_mode="normal", audio_corrupt=True,
-            import_mode="force")
-        self.assertEqual(r["preimport_audio"], "reject_corrupt")
-        self.assertFalse(r["imported"])
-        self.assertIsNone(r["final_status"])
-        self.assertFalse(r["keep_searching"])
-
-    def test_audio_corrupt_rejects_manual_preserves_status(self):
-        r = full_pipeline_decision(
-            is_flac=False, min_bitrate=256, is_cbr=False,
-            audio_check_mode="normal", audio_corrupt=True,
-            import_mode="manual")
-        self.assertEqual(r["preimport_audio"], "reject_corrupt")
-        self.assertIsNone(r["final_status"])
-        self.assertFalse(r["keep_searching"])
 
     def test_audio_check_off_skips_gate(self):
         r = full_pipeline_decision(
@@ -1456,37 +1380,17 @@ class TestFullPipelinePreimportGates(unittest.TestCase):
         self.assertEqual(r["preimport_audio"], "pass")
         self.assertTrue(r["imported"])
 
-    def test_nested_layout_rejects_force_path(self):
+    def test_nested_layout_rejects(self):
         r = full_pipeline_decision(
             is_flac=False, min_bitrate=256, is_cbr=False,
-            import_mode="force", has_nested_audio=True)
+            has_nested_audio=True)
         self.assertEqual(r["preimport_nested"], "reject_nested")
         self.assertFalse(r["imported"])
-        # Force-import uses requeue=False — status stays as-is in the live DB.
-        self.assertIsNone(r["final_status"])
-        self.assertFalse(r["keep_searching"])
+        self.assertEqual(r["final_status"], "wanted")
+        self.assertTrue(r["keep_searching"])
         self.assertIsNone(r["stage2_import"])
 
-    def test_nested_layout_rejects_manual_path(self):
-        r = full_pipeline_decision(
-            is_flac=False, min_bitrate=256, is_cbr=False,
-            import_mode="manual", has_nested_audio=True)
-        self.assertEqual(r["preimport_nested"], "reject_nested")
-        self.assertFalse(r["imported"])
-        self.assertIsNone(r["final_status"])
-        self.assertFalse(r["keep_searching"])
-
-    def test_nested_layout_irrelevant_on_auto_path(self):
-        # Nested audio on auto path is impossible in production (flattened
-        # upstream) — simulator must report "skipped_auto" so the Decisions
-        # tab can't mislead operators into thinking auto rejects on nesting.
-        r = full_pipeline_decision(
-            is_flac=False, min_bitrate=256, is_cbr=False,
-            import_mode="auto", has_nested_audio=True)
-        self.assertEqual(r["preimport_nested"], "skipped_auto")
-        self.assertTrue(r["imported"])
-
-    def test_nested_wins_over_audio_in_force_mode(self):
+    def test_nested_wins_over_audio(self):
         # Live ordering (dispatch_import_from_db): nested check runs *before*
         # measure_preimport_state is even called, so a corrupt-AND-nested
         # folder is reported as nested_layout, not audio_corrupt. The simulator
@@ -1495,12 +1399,12 @@ class TestFullPipelinePreimportGates(unittest.TestCase):
         r = full_pipeline_decision(
             is_flac=False, min_bitrate=256, is_cbr=False,
             audio_check_mode="normal", audio_corrupt=True,
-            import_mode="force", has_nested_audio=True)
+            has_nested_audio=True)
         self.assertEqual(r["preimport_nested"], "reject_nested")
         # Audio gate never ran.
         self.assertIsNone(r["preimport_audio"])
         self.assertFalse(r["imported"])
-        self.assertIsNone(r["final_status"])
+        self.assertEqual(r["final_status"], "wanted")
 
 
 class TestFullPipelineContract(unittest.TestCase):
@@ -1560,7 +1464,6 @@ class TestFullPipelineContract(unittest.TestCase):
             "MP3",  # new_format
             "auto",  # audio_check_mode
             False,  # audio_corrupt
-            "auto",  # import_mode
             False,  # has_nested_audio
             cfg,  # cfg
         ]

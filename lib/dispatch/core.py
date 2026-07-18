@@ -31,7 +31,7 @@ from lib.quality_evidence import EvidenceBuildResult, audit_v0_probe_from_metric
 from lib.util import cleanup_disambiguation_orphans
 
 from lib.dispatch.types import (DispatchOutcome, EvidenceImportGate,
-                                FORCE_MANUAL_SCENARIOS, ImportAttemptResult,
+                                FORCE_IMPORT_SCENARIOS, ImportAttemptResult,
                                 ImportOneRun, QualityGateFn)
 from lib.dispatch.subprocess_runner import run_import_one
 from lib.dispatch.helpers import (_cleanup_staged_dir, _guard_failure_detail,
@@ -109,18 +109,14 @@ def dispatch_import_core(
     denylist, quality gate, media server notifiers, cleanup). Returns DispatchOutcome.
 
     Used by the auto-import flow in ``lib.download`` and by
-    ``dispatch_import_from_db()`` (force/manual import).
+    ``dispatch_import_from_db()`` (force-import).
     """
     from lib.util import trigger_plex_scan as _trigger_plex
     from lib.util import trigger_jellyfin_scan as _trigger_jellyfin
 
     source_dirs = normalize_source_dirs(source_dirs or [])
 
-    mode = (
-        "FORCE-IMPORT" if force
-        else "MANUAL-IMPORT" if scenario == "manual_import"
-        else "AUTO-IMPORT"
-    )
+    mode = outcome_label.replace("_", "-").upper()
     dist_label = f"{distance:.4f}" if distance is not None else "unmeasured"
     logger.info(f"{mode}: {label} "
                 f"(source=request, dist={dist_label})")
@@ -201,7 +197,7 @@ def dispatch_import_core(
             #   audit data; linked evidence and fresh attempt analysis own
             #   subsequent decisions.
             #
-            # Force/manual paths (scenario in FORCE_MANUAL_SCENARIOS)
+            # Force-import paths (scenario in FORCE_IMPORT_SCENARIOS)
             # surface the message to the user via
             # ``dispatch_import_from_db``; no state change needed
             # because the request wasn't ``downloading`` to begin
@@ -322,13 +318,6 @@ def dispatch_import_core(
                 # via ``_PREIMPORT_FACT_REJECT_DECISIONS`` and forces
                 # ``requeue=True`` so the parent request self-heals.
                 facts = AlbumQualityEvidenceDecisionFacts(
-                    import_mode=(
-                        "force"
-                        if force
-                        else "manual"
-                        if scenario == "manual_import"
-                        else "auto"
-                    ),
                     verified_lossless_target=verified_lossless_target or None,
                     target_format=target_format,
                 )
@@ -414,12 +403,12 @@ def dispatch_import_core(
             # so the resume guard can distinguish "never started" from
             # "may have written to beets" if this process crashes
             # before recording the result. The DB-side method is a
-            # no-op when ``active_download_state`` is NULL (force /
-            # manual paths), so calling unconditionally would also be
+            # no-op when ``active_download_state`` is NULL (force-import
+            # path), so calling unconditionally would also be
             # safe — we still gate to make the intent explicit.
             # See ``docs/advisory-locks.md`` and
             # ``lib/download.py::_import_subprocess_already_started``.
-            if scenario not in FORCE_MANUAL_SCENARIOS:
+            if scenario not in FORCE_IMPORT_SCENARIOS:
                 try:
                     stamped = db.mark_import_subprocess_started(
                         request_id,
@@ -442,7 +431,7 @@ def dispatch_import_core(
                         message="Request state changed before import launch",
                         deferred=True,
                     )
-            # Force/manual import operates on the user's only copy of the source
+            # Force-import operates on the user's only copy of the source
             # material (typically failed_imports/…). Tell the harness to keep
             # lossless originals intact until the quality decision — on
             # downgrade/transcode_downgrade verdicts we exit before deletion so
@@ -453,7 +442,7 @@ def dispatch_import_core(
                 mb_release_id=mb_release_id,
                 request_id=request_id,
                 force=force,
-                preserve_source=scenario in FORCE_MANUAL_SCENARIOS,
+                preserve_source=scenario in FORCE_IMPORT_SCENARIOS,
                 override_min_bitrate=override_min_bitrate,
                 target_format=target_format,
                 verified_lossless_target=verified_lossless_target,
@@ -896,12 +885,12 @@ def dispatch_import_core(
                             "JELLYFIN PIN: capture wiring failed (non-fatal)")
                     _trigger_jellyfin(cfg, ir.postflight.imported_path)
                 if action.cleanup and _should_cleanup_path(scenario, action):
-                    # Issue #89: force/manual paths pass the user's
+                    # Issue #89: force-import passes the user's
                     # ``failed_imports/…`` folder as ``path`` — cleanup is
                     # data loss on a ``downgrade`` / ``transcode_downgrade``
                     # decision where beets never moved the files.
-                    # ``_should_cleanup_path`` only allows cleanup on force/
-                    # manual when the decision actually imported (mark_done=
+                    # ``_should_cleanup_path`` only allows cleanup on force
+                    # when the decision actually imported (mark_done=
                     # True, i.e. beets has moved the files and the source
                     # directory is now empty), which keeps the wrong-matches
                     # tab honest and prevents duplicate re-imports of an

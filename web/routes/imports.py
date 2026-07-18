@@ -12,11 +12,8 @@ from web.routes._pydantic import parse_body
 from lib.quality import _is_explicit_label
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
-    IMPORT_JOB_MANUAL,
     force_import_dedupe_key,
     force_import_payload,
-    manual_import_dedupe_key,
-    manual_import_payload,
 )
 from lib.util import resolve_failed_path
 from lib.wrong_match_cleanup_service import (
@@ -122,53 +119,6 @@ def _entry_sort_key(entry: dict[str, object]) -> tuple:
     return (-rank_value, distance_sort, -log_id_int)
 
 
-class ManualImportRequest(BaseModel):
-    request_id: int = Field(gt=0)
-    path: str = Field(min_length=1)
-
-
-def post_manual_import(h, body: dict) -> None:
-    req_body = parse_body(h, body, ManualImportRequest)
-    if req_body is None:
-        return
-    srv = _server()
-    request_id = req_body.request_id
-    path = req_body.path
-
-    req = srv._db().get_request(int(request_id))
-    if not req:
-        h._error(f"Request {request_id} not found", 404)
-        return
-    mbid = req["mb_release_id"]
-    if not mbid:
-        h._error("Request has no MusicBrainz release ID")
-        return
-
-    resolved_path = resolve_failed_path(str(path))
-    if resolved_path is None:
-        h._error(f"Files not found at: {path}")
-        return
-
-    job = srv._db().enqueue_import_job(
-        IMPORT_JOB_MANUAL,
-        request_id=int(request_id),
-        dedupe_key=manual_import_dedupe_key(int(request_id), resolved_path),
-        payload=manual_import_payload(failed_path=resolved_path),
-        message=f"Manual import queued for {req['artist_name']} - {req['album_title']}",
-    )
-
-    h._json({
-        "status": "queued",
-        "message": "Import queued",
-        "job_id": job.id,
-        "job": _serialize_import_job(job),
-        "deduped": bool(getattr(job, "deduped", False)),
-        "request_id": request_id,
-        "artist": req["artist_name"],
-        "album": req["album_title"],
-    }, status=202)
-
-
 def _quality_summary(row: dict[str, object],
                      beets_info: dict[str, dict[str, object]],
                      presence: str,
@@ -251,7 +201,8 @@ def _latest_import_summary(rows: list[dict[str, object]]
     recent attempt. A rejection that happened after a successful import
     doesn't change what beets has — the earlier success is still the
     authoritative picture. Scan the newest-first history for the first
-    success/force_import/manual_import row and surface its metadata.
+    active success/force_import row or historical manual_import row and
+    surface its metadata.
 
     Returns ``None`` when the release has never been successfully imported.
     """
@@ -436,7 +387,8 @@ def _build_wrong_match_groups(
 
     # Enrich each group with a summary of the last successful import for the
     # request. Reuses the existing batch helper — returns newest-first per
-    # request — and filters for success/force_import/manual_import so the
+    # request — and filters for active success/force_import plus historical
+    # manual_import so the
     # header describes what's on disk rather than the latest attempt.
     if order:
         history = pdb.get_download_history_batch(order)
@@ -970,12 +922,6 @@ ROUTES: list[RouteRegistration] = [
     route(
         "GET", "/api/wrong-matches/explorer", get_wrong_match_explorer,
         "Filesystem-backed file/tag explorer payload for one wrong match.",
-        classified=True,
-    ),
-    route(
-        "POST", "/api/manual-import/import", post_manual_import,
-        "Enqueue a manual-import job for an on-disk folder against a "
-        "pipeline request.",
         classified=True,
     ),
     route(

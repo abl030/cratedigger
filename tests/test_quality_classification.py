@@ -200,9 +200,8 @@ class TestLiveBugReproductions(unittest.TestCase):
         library row was produced from a comparable lossless source (likely_transcode
         FLAC, spectral=128, V0 probe avg=215 min=184) and rejects the new
         candidate as a same-source duplicate via the provisional-lossless
-        gate (``lossless_source_not_better``). ``import_mode="force"``
-        mirrors what ``cleanup_wrong_match`` actually calls
-        (lib/wrong_match_cleanup_service.py:330-343).
+        gate (``lossless_source_not_better``). This is the same reducer
+        ``cleanup_wrong_match`` calls (lib/wrong_match_cleanup_service.py).
 
         This is the simulator side of the parity contract — the sibling
         ``test_lil_wayne_da_drought_3_transcoded_flac_rejects_duplicate_via_evidence``
@@ -230,7 +229,6 @@ class TestLiveBugReproductions(unittest.TestCase):
             existing_spectral_grade="likely_transcode",
             existing_spectral_bitrate=128,
             existing_v0_probe_avg=215,
-            import_mode="force",
         )
 
         # Provisional-lossless gate: same-source comparable evidence on both
@@ -431,7 +429,6 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
 
         r = full_pipeline_decision_from_evidence(
             candidate, current,
-            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
         )
 
         self.assertEqual(r["stage2_import"], "provisional_lossless_upgrade",
@@ -464,7 +461,6 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         r = full_pipeline_decision_from_evidence(
             candidate, current,
             facts=AlbumQualityEvidenceDecisionFacts(
-                import_mode="auto",
                 verified_lossless_target="opus 128",
             ),
         )
@@ -492,7 +488,6 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
 
         r = full_pipeline_decision_from_evidence(
             candidate, current,
-            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
         )
 
         self.assertEqual(r["stage2_import"], "downgrade")
@@ -556,7 +551,6 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
 
         r = full_pipeline_decision_from_evidence(
             candidate, current,
-            facts=AlbumQualityEvidenceDecisionFacts(import_mode="force"),
         )
 
         # --- Parity contract -------------------------------------------------
@@ -584,7 +578,6 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
             existing_spectral_grade="likely_transcode",
             existing_spectral_bitrate=128,
             existing_v0_probe_avg=215,
-            import_mode="force",
         )
         self.assertEqual(
             r["stage2_import"], sim["stage2_import"],
@@ -643,7 +636,6 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
 
         r = full_pipeline_decision_from_evidence(
             candidate, current,
-            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
         )
 
         self.assertEqual(r["stage2_import"], "import",
@@ -682,7 +674,6 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
 
         r = full_pipeline_decision_from_evidence(
             candidate, current,
-            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
         )
 
         self.assertNotEqual(r["stage2_import"], "import")
@@ -723,7 +714,6 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         r = full_pipeline_decision_from_evidence(
             candidate, current,
             facts=AlbumQualityEvidenceDecisionFacts(
-                import_mode="auto",
                 verified_lossless_target="opus 128",
             ),
         )
@@ -784,7 +774,6 @@ class TestPreimportFactRejects(unittest.TestCase):
 
         r = full_pipeline_decision_from_evidence(
             candidate, None,
-            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
         )
 
         self.assertEqual(r["preimport_audio"], "reject_corrupt")
@@ -814,7 +803,6 @@ class TestPreimportFactRejects(unittest.TestCase):
 
         r = full_pipeline_decision_from_evidence(
             candidate, None,
-            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
         )
 
         self.assertEqual(r["preimport_bad_hash"], "reject_bad_hash")
@@ -843,7 +831,6 @@ class TestPreimportFactRejects(unittest.TestCase):
 
         r = full_pipeline_decision_from_evidence(
             candidate, None,
-            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
         )
 
         self.assertEqual(r["preimport_nested"], "reject_nested")
@@ -879,7 +866,6 @@ class TestPreimportFactRejects(unittest.TestCase):
 
         r = full_pipeline_decision_from_evidence(
             candidate, None,
-            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
         )
 
         self.assertEqual(r["preimport_empty_fileset"], "reject_empty")
@@ -964,7 +950,6 @@ class TestPreimportFactRejects(unittest.TestCase):
 
         r = full_pipeline_decision_from_evidence(
             candidate, None,
-            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
         )
 
         self.assertEqual(r["preimport_mixed_source"], "reject_mixed_source")
@@ -1029,7 +1014,6 @@ class TestPreimportFactRejects(unittest.TestCase):
 
         r = full_pipeline_decision_from_evidence(
             candidate, None,
-            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
         )
 
         self.assertIsNone(r["preimport_mixed_source"])
@@ -1053,7 +1037,6 @@ class TestPreimportFactRejects(unittest.TestCase):
 
         r = full_pipeline_decision_from_evidence(
             candidate, None,
-            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
         )
 
         self.assertEqual(r["preimport_audio"], "reject_corrupt")
@@ -1061,16 +1044,9 @@ class TestPreimportFactRejects(unittest.TestCase):
         self.assertIsNone(r["preimport_nested"])
         self.assertEqual(evidence_decision_name(r), "audio_corrupt")
 
-    def test_force_mode_does_not_set_keep_searching(self):
-        """The preimport-fact reject dict reflects the auto-path requeue
-        invariant; force/manual leaves the parent request alone
-        (the unified reject helper independently forces requeue=True via
-        ``_PREIMPORT_FACT_REJECT_DECISIONS`` — that's tested in
-        tests/test_import_dispatch_evidence.py)."""
-        from lib.quality import (
-            AlbumQualityEvidenceDecisionFacts,
-            full_pipeline_decision_from_evidence,
-        )
+    def test_preimport_fact_reject_keeps_searching(self):
+        """The mode-blind reducer reports the shared self-healing outcome."""
+        from lib.quality import full_pipeline_decision_from_evidence
 
         candidate = self._build_candidate(
             is_flac=False, min_bitrate=245, is_cbr=False,
@@ -1079,13 +1055,12 @@ class TestPreimportFactRejects(unittest.TestCase):
 
         r = full_pipeline_decision_from_evidence(
             candidate, None,
-            facts=AlbumQualityEvidenceDecisionFacts(import_mode="force"),
         )
 
         self.assertEqual(r["preimport_audio"], "reject_corrupt")
-        self.assertIsNone(r["final_status"])
-        self.assertFalse(r["denylisted"])
-        self.assertFalse(r["keep_searching"])
+        self.assertEqual(r["final_status"], "wanted")
+        self.assertTrue(r["denylisted"])
+        self.assertTrue(r["keep_searching"])
 
 
 if __name__ == "__main__":

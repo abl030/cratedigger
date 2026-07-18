@@ -1,8 +1,8 @@
-"""Shared pre-import quality gates for auto-import, force-import, and manual-import.
+"""Shared pre-import quality gates for automation and force-import.
 
 The auto-import path (lib.download_processing.process_completed_album), the force-import
-path (lib.dispatch.dispatch_import_from_db), and the manual-import path
-all MUST run the same quality gates: audio integrity and spectral transcode
+path (lib.dispatch.dispatch_import_from_db), all MUST run the same quality gates:
+audio integrity and spectral transcode
 detection. The only gate that differs between paths is the beets *distance*
 check — that is what --force on import_one.py overrides. Every other gate is
 shared, so it lives here in a single function.
@@ -284,10 +284,10 @@ AUDIO_EXTS = ("mp3", "flac", "alac", "m4a", "ogg", "opus", "wav", "aac")
 
 @dataclass
 class LocalFileInspection:
-    """Result of inspecting audio files on disk at a force/manual import path.
+    """Result of inspecting audio files on disk at a force-import path.
 
     Populated by ``inspect_local_files`` so callers of ``measure_preimport_state``
-    that have no DownloadFile metadata (force/manual paths) can still supply
+    that have no DownloadFile metadata (force-import paths) can still supply
     filetype / bitrate / vbr hints.
 
     ``has_nested_audio`` reports whether any audio files were found below the
@@ -295,7 +295,7 @@ class LocalFileInspection:
     preimport gates (validate_audio / analyze_album) recurse, but the
     downstream beets harness (``harness/import_one.py``) still uses
     ``os.listdir`` for bitrate measurement and conversion, so a nested
-    force/manual import would pass gates and then produce a misclassified/
+    force-import would pass gates and then produce a misclassified/
     empty measurement in the harness.
 
     ``avg_bitrate_bps`` is the mean bitrate across all readable MP3 files —
@@ -314,7 +314,7 @@ def inspect_local_files(path: str) -> LocalFileInspection:
 
     Walks subdirectories so multi-disc layouts (e.g. ``Album/CD1/*.mp3``)
     classify correctly — otherwise the spectral gate silently skips nested
-    manual/force imports because ``download_filetype`` comes back empty.
+    force-imports because ``download_filetype`` comes back empty.
 
     Uses mutagen for MP3 VBR detection; all other bitrate/filetype info comes
     from extensions and file headers. Exceptions are swallowed so a corrupt or
@@ -513,7 +513,7 @@ def _persist_spectral_state(
     subsequent imports — the download and on-disk characterize the same
     quality tier, so reusing the download's spectral is a reasonable proxy.
 
-    Pass ``propagate_download_to_existing=False`` from the force/manual
+    Pass ``propagate_download_to_existing=False`` from the force-import
     import path: that path evaluates the gate *before* the subprocess import
     runs, so propagating a download's spectral into on-disk state would be
     speculative. If the downstream import fails (downgrade, no JSON,
@@ -811,7 +811,7 @@ def measure_preimport_state(
                 )
 
     # --- Resolve VBR / min_bitrate / avg bitrate / layout via filesystem inspection ---
-    # ``precomputed_inspection`` lets the force/manual path (which already
+    # ``precomputed_inspection`` lets the force-import path (which already
     # inspected to decide the nested-layout gate) avoid a second mutagen
     # walk. Auto path passes None and does the walk here.
     inspection: LocalFileInspection | None = None

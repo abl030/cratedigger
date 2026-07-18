@@ -1,4 +1,4 @@
-"""Force/manual-import audio-manifest guard.
+"""Force-import audio-manifest guard.
 
 Reconciles a staged source folder against its validated audio reference
 before beets can run, self-healing the request to ``wanted`` on any
@@ -68,7 +68,7 @@ def _guard_reject(
     import_job_id: int | None = None,
     source_download_log_id: int | None = None,
 ) -> DispatchOutcome:
-    """Reject a force/manual import at the manifest guard.
+    """Reject a force-import at the manifest guard.
 
     The request self-heals back to ``wanted`` (R20): the *album* is still
     wanted — only this particular source folder is unimportable. Writes the
@@ -132,7 +132,7 @@ def _guard_reject(
     )
 
 
-def _guard_force_manual_audio_manifest(
+def _guard_force_import_audio_manifest(
     db: "PipelineDB",
     *,
     request_id: int,
@@ -201,7 +201,7 @@ def _guard_force_manual_audio_manifest(
                 return extra(
                     "Origin validation manifest has "
                     f"{len(manifest)} audio files but the request expects "
-                    f"{expected_count}; refusing force/manual import")
+                    f"{expected_count}; refusing force import")
             return incomplete(
                 "Origin validation manifest has "
                 f"{len(manifest)} audio files but the request expects "
@@ -211,11 +211,11 @@ def _guard_force_manual_audio_manifest(
             return None
         if check.extra_audio:
             return extra(
-                "Force/manual import source does not match the original "
+                "Force import source does not match the original "
                 f"selected audio manifest: {check.detail()}")
         # Only missing audio — the source is a strict subset of the manifest.
         return incomplete(
-            "Force/manual import source is missing validated audio: "
+            "Force import source is missing validated audio: "
             f"{check.detail()}")
 
     if expected_count is None:
@@ -223,14 +223,14 @@ def _guard_force_manual_audio_manifest(
         # verify the folder is owned, so fail closed against beets and keep
         # it for review.
         return extra(
-            "Force/manual import requires either an origin audio manifest or "
+            "Force import requires either an origin audio manifest or "
             "request track rows; refusing to pass an unowned folder to beets",
             scenario="unverifiable_source")
 
     if len(actual_audio) == expected_count:
         return None
     detail = (
-        "Force/manual import source has "
+        "Force import source has "
         f"{len(actual_audio)} audio files but the request expects "
         f"{expected_count}; source audio: {', '.join(actual_audio)}"
     )

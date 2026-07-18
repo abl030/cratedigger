@@ -36,7 +36,6 @@ from lib.download_processing import (
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
-    IMPORT_JOB_MANUAL,
     IMPORT_JOB_YOUTUBE,
     ImportJob,
 )
@@ -175,8 +174,8 @@ def execute_import_job(
             message="Import job has no request_id",
         )
 
-    if job.job_type in (IMPORT_JOB_FORCE, IMPORT_JOB_MANUAL):
-        # FORCE/MANUAL delegate straight to dispatch_import_from_db, which
+    if job.job_type == IMPORT_JOB_FORCE:
+        # FORCE delegates straight to dispatch_import_from_db, which
         # already returns a terminal DispatchOutcome from its own decision
         # tree — no CompletionResult in the middle, so nothing here is
         # parallel to _dispatch_outcome_from_completion below. See that
@@ -198,8 +197,6 @@ def execute_import_job(
             db,
             request_id=job.request_id,
             failed_path=failed_path,
-            force=job.job_type == IMPORT_JOB_FORCE,
-            outcome_label=job.job_type,
             source_username=(
                 str(source_username)
                 if source_username is not None

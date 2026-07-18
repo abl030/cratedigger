@@ -977,7 +977,6 @@ def _parity_evidence_result(world: ParityWorld) -> dict:
             ),
         )
     facts = AlbumQualityEvidenceDecisionFacts(
-        import_mode="auto",
         verified_lossless_target=world.verified_lossless_target,
         target_format=world.target_format,
         converted_count=world.converted_count,
@@ -1308,13 +1307,9 @@ def assert_classification_coherent(
 class TestGeneratedEvidenceDecider(unittest.TestCase):
     """Properties of the production decider the simulator can't reach."""
 
-    @given(candidate=wild_ready_candidate_evidence(),
-           import_mode=st.sampled_from(("auto", "force")))
-    def test_integrity_facts_always_reject_in_priority_order(
-            self, candidate, import_mode):
-        facts = AlbumQualityEvidenceDecisionFacts(import_mode=import_mode)
-        result = full_pipeline_decision_from_evidence(
-            candidate, None, facts=facts)
+    @given(candidate=wild_ready_candidate_evidence())
+    def test_integrity_facts_always_reject_in_priority_order(self, candidate):
+        result = full_pipeline_decision_from_evidence(candidate, None)
 
         self.assertIsInstance(result["imported"], bool)
         expected_key = _expected_early_exit_key(candidate)
@@ -1335,18 +1330,14 @@ class TestGeneratedEvidenceDecider(unittest.TestCase):
                 self.assertNotEqual(
                     result[key], reject_value,
                     f"{key} fired alongside higher-priority {expected_key}")
-        if import_mode == "auto":
-            self.assertEqual(result["final_status"], "wanted")
-            self.assertTrue(result["keep_searching"])
-        else:
-            self.assertIsNone(result["final_status"])
-            self.assertFalse(result["keep_searching"])
+        self.assertEqual(result["final_status"], "wanted")
+        self.assertTrue(result["keep_searching"])
 
     @given(
         candidate=wild_ready_candidate_evidence(),
         integrity_fact=st.sampled_from(_INTEGRITY_FACTS),
     )
-    def test_current_proof_precedes_integrity_for_every_import_mode(
+    def test_current_proof_precedes_integrity_before_any_import(
         self,
         candidate,
         integrity_fact,
@@ -1367,28 +1358,16 @@ class TestGeneratedEvidenceDecider(unittest.TestCase):
             ),
         )
 
-        automatic = full_pipeline_decision_from_evidence(candidate, current)
-        assert_evidence_proof_lock_preserves_imported(automatic)
-
-        # Decision 21: the proof lock is absolute — force mode hits it the
-        # same way, before any integrity reject can fire.
-        forced = full_pipeline_decision_from_evidence(
-            candidate,
-            current,
-            facts=AlbumQualityEvidenceDecisionFacts(import_mode="force"),
-        )
-        assert_evidence_proof_lock_preserves_imported(forced)
+        decision = full_pipeline_decision_from_evidence(candidate, current)
+        assert_evidence_proof_lock_preserves_imported(decision)
         self.assertEqual(
-            forced["stage2_import"],
+            decision["stage2_import"],
             "verified_lossless_locked",
         )
 
-    @given(candidate=wild_ready_candidate_evidence(),
-           import_mode=st.sampled_from(("auto", "force")))
-    def test_decision_classification_is_coherent(self, candidate, import_mode):
-        facts = AlbumQualityEvidenceDecisionFacts(import_mode=import_mode)
-        result = full_pipeline_decision_from_evidence(
-            candidate, None, facts=facts)
+    @given(candidate=wild_ready_candidate_evidence())
+    def test_decision_classification_is_coherent(self, candidate):
+        result = full_pipeline_decision_from_evidence(candidate, None)
         assert_classification_coherent(
             result, _expected_early_exit_key(candidate))
 
@@ -1415,10 +1394,9 @@ class TestGeneratedEvidenceDecider(unittest.TestCase):
         with self.assertRaises(ValueError):
             full_pipeline_decision_from_evidence(no_bitrates, None)
 
-    def test_force_import_respects_current_proof(self):
-        """Decision 21: force-import bypasses only the beets distance —
-        the verified-lossless proof lock is absolute for every import
-        mode; Replace/re-request is the operator's way back in.
+    def test_current_proof_is_absolute_without_mode_input(self):
+        """Decision 21: the verified-lossless proof lock is inside the
+        mode-blind reducer; Replace/re-request is the operator's way back in.
         """
         candidate = build_parity_candidate_evidence(
             is_flac=False,
@@ -1444,7 +1422,6 @@ class TestGeneratedEvidenceDecider(unittest.TestCase):
         result = full_pipeline_decision_from_evidence(
             candidate,
             current,
-            facts=AlbumQualityEvidenceDecisionFacts(import_mode="force"),
         )
         self.assertEqual(
             result["stage2_import"],

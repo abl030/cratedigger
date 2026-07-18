@@ -40,7 +40,6 @@ from lib.import_evidence import (
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
-    IMPORT_JOB_MANUAL,
     IMPORT_JOB_YOUTUBE,
     ImportJob,
 )
@@ -181,7 +180,7 @@ def _front_gate_source_path(db: Any, job: ImportJob) -> str | None:
     to the existing measurement codepath.
     """
     payload = job.payload or {}
-    if job.job_type in (IMPORT_JOB_FORCE, IMPORT_JOB_MANUAL):
+    if job.job_type == IMPORT_JOB_FORCE:
         failed_path = payload.get("failed_path")
         if isinstance(failed_path, str) and failed_path:
             return failed_path
@@ -310,17 +309,6 @@ def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
                 if isinstance(download_log_id, int)
                 else None
             ),
-        }
-
-    if job.job_type == IMPORT_JOB_MANUAL:
-        failed_path = payload.get("failed_path")
-        if not isinstance(failed_path, str) or not failed_path:
-            raise ValueError("Manual import preview job is missing failed_path")
-        return {
-            "request_id": job.request_id,
-            "path": failed_path,
-            "force": False,
-            "download_log_id": None,
         }
 
     if job.job_type == IMPORT_JOB_AUTOMATION:

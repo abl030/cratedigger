@@ -1750,7 +1750,7 @@ class FakePipelineDB:
     ) -> bool:
         """Stamp ``import_subprocess_started_at`` on the active download
         state. No-op when the row has no ``active_download_state``
-        (force/manual paths). See ``docs/advisory-locks.md``.
+        (force-import path). See ``docs/advisory-locks.md``.
         """
         self.mark_import_subprocess_started_calls.append(
             (request_id, timestamp),

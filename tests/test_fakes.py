@@ -3197,20 +3197,20 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertTrue(db.closed)
 
     def test_import_job_queue_methods_mirror_core_lifecycle(self):
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
 
         db = FakePipelineDB()
         first = db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="manual:42",
-            payload=manual_import_payload(failed_path="/tmp/manual"),
+            payload={"failed_path": "/tmp/manual"},
         )
         duplicate = db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="manual:42",
-            payload=manual_import_payload(failed_path="/tmp/manual"),
+            payload={"failed_path": "/tmp/manual"},
         )
         self.assertEqual(first.id, duplicate.id)
         self.assertTrue(duplicate.deduped)
@@ -3247,10 +3247,10 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(completed.status, "completed")
 
         later = db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="manual:42",
-            payload=manual_import_payload(failed_path="/tmp/manual"),
+            payload={"failed_path": "/tmp/manual"},
         )
         self.assertNotEqual(first.id, later.id)
         failed = db.mark_import_job_failed(
@@ -3262,14 +3262,14 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(failed.status, "failed")
 
     def test_requeue_import_job_for_preview_flips_running_back_to_waiting(self):
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
 
         db = FakePipelineDB()
         job = db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="manual:requeue-fake",
-            payload=manual_import_payload(failed_path="/tmp/manual"),
+            payload={"failed_path": "/tmp/manual"},
         )
         db.mark_import_job_preview_importable(
             job.id,
@@ -3306,14 +3306,14 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(preview.id, claimed.id)
 
     def test_requeue_import_job_for_preview_idempotent_when_not_running(self):
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
 
         db = FakePipelineDB()
         job = db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="manual:requeue-fake-idem",
-            payload=manual_import_payload(failed_path="/tmp/manual"),
+            payload={"failed_path": "/tmp/manual"},
         )
         # Not yet claimed by importer (preview_status='waiting', status='queued').
         result = db.requeue_import_job_for_preview(
@@ -3323,14 +3323,14 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_import_job_queue_defaults_to_preview_waiting(self):
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
 
         db = FakePipelineDB()
         queued = db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="manual:fresh",
-            payload=manual_import_payload(failed_path="/tmp/manual"),
+            payload={"failed_path": "/tmp/manual"},
         )
 
         self.assertEqual(queued.preview_status, "waiting")
@@ -3516,14 +3516,14 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             dashboard["coverage"]["wanted_trend"]["current_wanted"], 0)
 
     def test_import_job_preview_methods_mirror_core_lifecycle(self):
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
 
         db = FakePipelineDB()
         queued = db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="manual:preview",
-            payload=manual_import_payload(failed_path="/tmp/manual"),
+            payload={"failed_path": "/tmp/manual"},
         )
         self.assertEqual(queued.preview_status, "waiting")
 
@@ -3546,10 +3546,10 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertIsNotNone(importable.importable_at)
 
         rejected = db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=43,
             dedupe_key="manual:preview-reject",
-            payload=manual_import_payload(failed_path="/tmp/reject"),
+            payload={"failed_path": "/tmp/reject"},
         )
         failed = db.mark_import_job_preview_failed(
             rejected.id,
@@ -4452,12 +4452,12 @@ class TestFakeActiveImportJobForRequest(unittest.TestCase):
     """Self-tests for FakePipelineDB.get_active_import_job_for_request (plan U2)."""
 
     def _enqueue(self, db: FakePipelineDB, *, request_id: int, dedupe_key: str):
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
         return db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=request_id,
             dedupe_key=dedupe_key,
-            payload=manual_import_payload(failed_path="/tmp/x"),
+            payload={"failed_path": "/tmp/x"},
         )
 
     def test_returns_none_when_no_jobs(self):

@@ -646,7 +646,7 @@ class TestRejectImportFromEvidenceDecisionForcedRequeue(unittest.TestCase):
     fold-in, ``_reject_import_from_evidence_decision`` is the single helper
     for all rejects and must preserve the old "always requeue on four-fact
     reject" rule — even when the caller passes ``requeue_on_failure=False``
-    (force/manual paths). Spectral/quality-side rejects (e.g., ``downgrade``)
+    (force-import path). Spectral/quality-side rejects (e.g., ``downgrade``)
     honor the caller's flag normally; only the four-fact reasons override.
     """
 
@@ -766,7 +766,7 @@ class TestRejectImportFromEvidenceDecisionForcedRequeue(unittest.TestCase):
         self.assertEqual(db.download_logs[-1].outcome, "rejected")
 
     def test_verified_lossless_lock_holds_for_force_imports(self) -> None:
-        """Decision 21: a force/manual import against a proof-bearing
+        """Decision 21: a force import against a proof-bearing
         request is declined by the same lock (requeue_on_failure=False is
         the operator paths' setting) — force bypasses only the beets
         distance; Replace/re-request is the way back in.
@@ -813,7 +813,7 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
             ActionEvidenceProvenance,
             CandidateEvidenceActionResult,
         )
-        from lib.import_queue import IMPORT_JOB_FORCE, IMPORT_JOB_MANUAL
+        from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
 
         if db is None:
             db = FakePipelineDB()
@@ -838,9 +838,9 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             job = db.enqueue_import_job(
-                IMPORT_JOB_FORCE if force else IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
                 request_id=42,
-                payload={"failed_path": tmpdir},
+                payload={"failed_path": tmpdir} if force else {},
             )
             with patch_dispatch_externals() as ext, patch(
                 "lib.dispatch.subprocess_runner.parse_import_result",
@@ -855,9 +855,9 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
                     beets_harness_path=_HARNESS,
                     db=db,  # type: ignore[arg-type]
                     dl_info=DownloadInfo(filetype="flac", username="bad-peer"),
-                    scenario="force_import" if force else "manual_import",
+                    scenario="force_import" if force else "strong_match",
                     cfg=_full_dispatch_config(),
-                    requeue_on_failure=False,
+                    requeue_on_failure=not force,
                     candidate_import_job_id=job.id,
                     prevalidated_candidate_result=candidate_result,
                     quality_gate_fn=noop_quality_gate,
@@ -935,7 +935,7 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
         self.assertIn("bad-peer", db.user_cooldowns)
         ext.run.assert_not_called()
 
-    def test_manual_import_gets_the_same_non_quality_abort(self) -> None:
+    def test_automatic_import_gets_the_same_non_quality_abort(self) -> None:
         db, outcome, ext = self._dispatch_with_current_result(
             self._failed_current_result("FileNotFoundError: path not found"),
             force=False,
@@ -1122,7 +1122,7 @@ class TestDispatchImport(unittest.TestCase):
         }
 
     def test_operator_retained_import_decisions_requeue_like_automatic(self):
-        # Decision 19: force/manual imports resolve through the same
+        # Decision 19: force imports resolve through the same
         # canonical retained-import mapping as automatic imports — the
         # provisional lane narrows to lossless-only, transcode lanes stay on
         # full tiers, every retained lossy source is denylisted, and nothing
@@ -1133,10 +1133,7 @@ class TestDispatchImport(unittest.TestCase):
             ("transcode_upgrade", None),
             ("transcode_first", None),
         )
-        operator_modes = (
-            ("force", "force_import", True),
-            ("manual", "manual_import", False),
-        )
+        operator_modes = (("force", "force_import", True),)
         for mode, scenario, force in operator_modes:
             for decision, expected_override in decisions:
                 with self.subTest(mode=mode, decision=decision):

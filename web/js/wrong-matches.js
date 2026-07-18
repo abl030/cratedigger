@@ -892,7 +892,7 @@ function fmtTs(iso) {
 
 /**
  * Render the "Last import" header inside an expanded group. Shows the most
- * recent success/force_import/manual_import for the release — i.e. what's
+ * recent success/force_import or historical manual_import for the release — i.e. what's
  * actually on disk — not the newest attempt. A later rejection doesn't
  * change what beets has.
  *

@@ -452,7 +452,7 @@ def target_cleanup_decision(target_achieved: bool,
        detected → not verified lossless), originals must be removed so beets
        only sees V0 MP3s. Gated on ``sources_kept > 0`` because without a
        kept source there is nothing to clean.
-    2. ``--preserve-source`` was set (force/manual import, issue #111) — we
+    2. ``--preserve-source`` was set (force-import, issue #111) — we
        held originals back in case the quality decision rejected the import,
        so the user's source FLACs in ``failed_imports/`` would not be
        destroyed on downgrade/transcode_downgrade. If we reach this call
@@ -460,7 +460,7 @@ def target_cleanup_decision(target_achieved: bool,
        run — originals must be removed so beets only sees V0 MP3s.
 
        Unlike case 1 we deliberately do NOT gate on ``sources_kept > 0``:
-       on a retry of a previously-rejected force/manual attempt the V0
+       on a retry of a previously-rejected force-import attempt the V0
        MP3s already exist, so ``convert_lossless`` skips and reports
        ``converted == 0`` — but the lossless originals from the prior run
        are still on disk and still must be cleaned before beets runs
@@ -1549,7 +1549,7 @@ def main():
     parser.add_argument("--preserve-source", action="store_true",
                         help="Preserve lossless source files (FLAC/ALAC/WAV) "
                              "during V0 conversion until the quality decision "
-                             "has approved the import. Used by force/manual "
+                             "has approved the import. Used by force-import "
                              "import so a downgrade verdict does not destroy "
                              "the user's only copy in failed_imports/ (#111).")
     parser.add_argument("--dry-run", action="store_true")
@@ -2114,7 +2114,7 @@ def main():
             _log_timing("target_conversion", stage_start)
 
     # --- Clean up kept source files if target was skipped OR preserve-source
-    # is active (force/manual import, issue #111). The quality decision has
+    # is active (force-import, issue #111). The quality decision has
     # already returned non-terminal at this point — beets is about to run,
     # so remaining lossless originals must be removed so only V0 MP3s are
     # cataloged. On terminal verdicts we exit at line 997 above and the

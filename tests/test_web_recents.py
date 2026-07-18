@@ -985,7 +985,7 @@ class TestClassifyVerdict(unittest.TestCase):
         self.assertIn("name mismatch", result.verdict.lower())
 
     def test_nested_layout_verdict(self):
-        """Gate-rejected force/manual import of a nested folder layout must
+        """Gate-rejected force-import of a nested folder layout must
         render a friendly label in the Recents tab, not the raw scenario
         string. Otherwise operators see the literal "nested_layout" and have
         to go grepping for what it means.
