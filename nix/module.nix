@@ -88,13 +88,25 @@
         item = ["artist" "title"];
       };
     };
+    # %aunique disambiguates same-key (albumartist+album) sibling pressings
+    # into distinct folders. It picks the first disambiguator field whose
+    # values are all-distinct across the set, then renders each album's OWN
+    # value — an album whose value is EMPTY renders NO bracket and lands on
+    # the plain path, straight inside the sibling's sticky folder (the
+    # Passenger collision, 2026-07-18: old pressing label='ATO Records',
+    # new pressing label='' → label "won", new bracket empty). The fix is a
+    # single computed disambiguator that is never empty by construction
+    # (falling through pretty fields to $year); when siblings tie on it,
+    # beets' built-in album-id fallback still yields a non-empty bracket.
+    # Contract: tests/test_harness_beets2_contract.py
+    # (TestAuniqueCollisionContract) sweeps this exact shipped config
+    # against real beets.
     paths = {
-      default = "$albumartist/$year - $album%aunique{albumartist album,albumtype year label catalognum albumdisambig releasegroupdisambig short_mbid}/$track $title";
+      default = "$albumartist/$year - $album%aunique{albumartist album,path_disambig}/$track $title";
       singleton = "Non-Album/$artist/$title";
-      comp = "Compilations/$album%aunique{albumartist album,albumtype year label catalognum albumdisambig releasegroupdisambig short_mbid}/$track $title";
+      comp = "Compilations/$album%aunique{albumartist album,path_disambig}/$track $title";
     };
-    item_fields.short_mbid = "mb_albumid[:8] if mb_albumid else ''";
-    album_fields.short_mbid = "mb_albumid[:8] if mb_albumid else ''";
+    album_fields.path_disambig = "albumdisambig or releasegroupdisambig or catalognum or label or str(year)";
     musicbrainz = {
       host = bc.musicbrainz.host;
       https = bc.musicbrainz.https;
