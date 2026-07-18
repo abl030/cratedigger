@@ -132,22 +132,48 @@ def _persist_known_bad_split_outcome(
 class TestTerminalOutcomeGenerated(unittest.TestCase):
     @example(
         attempt_type="validation",
+        existing_min_bitrate=320,
         min_bitrate=245,
         explicit_previous=False,
         search_override="lossless",
+    )
+    @example(
+        attempt_type=None,
+        existing_min_bitrate=0,
+        min_bitrate=245,
+        explicit_previous=False,
+        search_override=None,
+    )
+    @example(
+        attempt_type=None,
+        existing_min_bitrate=None,
+        min_bitrate=245,
+        explicit_previous=False,
+        search_override=None,
     )
     @given(
         attempt_type=st.one_of(
             st.none(),
             st.sampled_from(("search", "download", "validation")),
         ),
-        min_bitrate=st.one_of(st.none(), st.integers(min_value=32, max_value=1500)),
+        existing_min_bitrate=st.one_of(
+            st.none(),
+            st.integers(min_value=0, max_value=1500),
+        ),
+        min_bitrate=st.one_of(
+            st.none(),
+            st.integers(min_value=0, max_value=1500),
+        ),
         explicit_previous=st.booleans(),
-        search_override=st.one_of(st.none(), st.sampled_from(("lossless", "flac,mp3 v0"))),
+        search_override=st.one_of(
+            st.none(),
+            st.sampled_from(("lossless", "flac,mp3 v0")),
+        ),
     )
     def test_operator_stop_retains_generated_wanted_policy_effects(
         self,
         attempt_type: str | None,
+        existing_min_bitrate: int | None,
         min_bitrate: int | None,
         explicit_previous: bool,
         search_override: str | None,
@@ -156,7 +182,7 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             status="manual",
-            min_bitrate=320,
+            min_bitrate=existing_min_bitrate,
             prev_min_bitrate=192,
             manual_reason="operator_stop",
         ))
@@ -205,7 +231,13 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
             self.assertEqual(row["min_bitrate"], min_bitrate)
         self.assertEqual(
             row["prev_min_bitrate"],
-            256 if explicit_previous else (320 if min_bitrate is not None else 192),
+            256
+            if explicit_previous
+            else (
+                existing_min_bitrate
+                if min_bitrate is not None and existing_min_bitrate is not None
+                else 192
+            ),
         )
 
     @given(fail_after=st.one_of(st.none(), st.integers(min_value=1, max_value=5)))

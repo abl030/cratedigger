@@ -170,8 +170,11 @@ class _FakeTerminalTransitionsDB:
             return False
         updates = dict(fields)
         if "min_bitrate" in updates and "prev_min_bitrate" not in updates:
+            current_min_bitrate = row.get("min_bitrate")
             updates["prev_min_bitrate"] = (
-                row.get("min_bitrate") or row.get("prev_min_bitrate")
+                current_min_bitrate
+                if current_min_bitrate is not None
+                else row.get("prev_min_bitrate")
             )
         if updates:
             applied = self._db.update_request_fields(
