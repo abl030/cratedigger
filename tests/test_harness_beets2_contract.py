@@ -201,11 +201,7 @@ ALBUM_FIELDS = shipped["album_fields"]
 
 # The pre-2026-07-18 poisoned template — the planted known-bad the sweep
 # must detect, proving the checker catches the class.
-OLD_TEMPLATE = (
-    "$albumartist/$year - $album%aunique{albumartist album,"
-    "albumtype year label catalognum albumdisambig releasegroupdisambig "
-    "short_mbid}/$track $title"
-)
+OLD_TEMPLATE = shipped["historical_passenger_template"]
 
 FIELD_STATES = [("", ""), ("X", ""), ("X", "X"), ("X", "Y")]
 SWEEP_FIELDS = ("albumdisambig", "releasegroupdisambig", "catalognum", "label")
@@ -283,12 +279,16 @@ with tempfile.TemporaryDirectory() as d:
 def _shipped_aunique_config() -> dict:
     """Extract the shipped beets path template + inline album_fields from
     nix/module.nix — the test patrols what production actually renders."""
-    from tests.beets_world import extract_shipped_beets_world_config
+    from tests.beets_world import (
+        HISTORICAL_PASSENGER_PATH_TEMPLATE,
+        extract_shipped_beets_world_config,
+    )
 
     shipped = extract_shipped_beets_world_config(_REPO)
     return {
         "template": shipped.default_path_template,
         "album_fields": dict(shipped.album_fields),
+        "historical_passenger_template": HISTORICAL_PASSENGER_PATH_TEMPLATE,
     }
 
 
