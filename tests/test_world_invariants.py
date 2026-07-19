@@ -6,6 +6,9 @@ import os
 import tempfile
 import unittest
 
+import msgspec
+
+from lib.quality import ValidationResult
 from lib.world_invariants import (
     DenylistAuthoritySnapshot,
     EvidenceDiskSnapshot,
@@ -121,6 +124,70 @@ class TestWorldInvariantPins(unittest.TestCase):
                 history=[],
             ),
             ("requeue_lossless",),
+        )
+
+    def test_invalid_validation_authorizes_only_its_exact_source_peer(self) -> None:
+        validation = msgspec.to_builtins(ValidationResult(
+            valid=False,
+            scenario="high_distance",
+            soulseek_username="validation-peer",
+        ))
+        assert isinstance(validation, dict)
+        history = [{
+            "outcome": "rejected",
+            "soulseek_username": "validation-peer",
+            "validation_result": validation,
+        }]
+
+        self.assertEqual(
+            derive_denylist_authorities(
+                username="validation-peer",
+                reason="beets validation rejected",
+                history=history,
+            ),
+            ("validation_reject",),
+        )
+        self.assertEqual(
+            derive_denylist_authorities(
+                username="different-peer",
+                reason="beets validation rejected",
+                history=history,
+            ),
+            (),
+        )
+        self.assertEqual(
+            derive_denylist_authorities(
+                username="validation-peer",
+                reason="curator ban",
+                history=[{
+                    **history[0],
+                    "validation_result": {"scenario": "curator_ban"},
+                }],
+            ),
+            (),
+        )
+        self.assertEqual(
+            derive_denylist_authorities(
+                username="validation-peer",
+                reason="transport failed",
+                history=[{**history[0], "outcome": "failed"}],
+            ),
+            (),
+        )
+        valid_history = [{
+            **history[0],
+            "validation_result": msgspec.to_builtins(ValidationResult(
+                valid=True,
+                scenario="strong_match",
+            )),
+        }]
+        self.assertEqual(
+            derive_denylist_authorities(
+                username="validation-peer",
+                reason="manual note",
+                history=valid_history,
+            ),
+            (),
         )
 
 

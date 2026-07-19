@@ -11,6 +11,7 @@ import msgspec
 
 from lib.quality import ImportResult, dispatch_action
 from lib.quality.decisions import post_import_search_action_if_known
+from lib.validation_envelope import decode_validation_envelope
 
 
 class LibraryAlbumSnapshot(msgspec.Struct, frozen=True):
@@ -448,6 +449,23 @@ def derive_denylist_authorities(
     for entry in history:
         if entry.get("soulseek_username") != username:
             continue
+        try:
+            validation = decode_validation_envelope(
+                entry.get("validation_result")
+            )
+        except (
+            ValueError,
+            TypeError,
+            msgspec.ValidationError,
+        ):
+            validation = None
+        if (
+            entry.get("outcome") == "rejected"
+            and validation is not None
+            and validation.valid is False
+        ):
+            decisions.add("validation_reject")
+
         raw_result = entry.get("import_result")
         if isinstance(raw_result, str):
             encoded_result = raw_result
