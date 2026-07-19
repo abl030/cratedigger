@@ -4010,6 +4010,210 @@ class TestUnsearchableRequestStatusMigration(unittest.TestCase):
 
 
 @requires_postgres
+class TestLosslessLineageSpectralSubjectMigration(unittest.TestCase):
+    """Migration 057 makes the full R19 lineage rule a DB invariant."""
+
+    _CONSTRAINT = "album_quality_evidence_lossless_lineage_spectral_subject"
+
+    def _copy_through(self, target: str, version: int) -> None:
+        for migration in discover_migrations(DEFAULT_MIGRATIONS_DIR):
+            if migration.version <= version:
+                shutil.copy2(migration.path, target)
+
+    @staticmethod
+    def _insert_v4_evidence(
+        cur,
+        *,
+        mbid: str,
+        spectral_subject: str,
+        v0_subject: str | None = None,
+        verified_lossless: bool = False,
+        was_converted_from: str | None = None,
+    ) -> None:
+        cur.execute(
+            """
+            INSERT INTO album_quality_evidence (
+                mb_release_id, snapshot_fingerprint, source_path,
+                measured_at, lineage_version,
+                spectral_grade, spectral_subject, spectral_provenance,
+                v0_avg_bitrate_kbps, v0_subject, v0_provenance,
+                verified_lossless, verified_lossless_provenance,
+                verified_lossless_source, verified_lossless_classifier,
+                was_converted_from
+            ) VALUES (
+                %s, %s, '/evidence', NOW(), 4,
+                'genuine', %s, 'measured',
+                %s, %s, %s,
+                %s, %s, %s, %s, %s
+            )
+            """,
+            (
+                mbid,
+                f"fp-{mbid}",
+                spectral_subject,
+                220 if v0_subject is not None else None,
+                v0_subject,
+                "measured" if v0_subject is not None else None,
+                verified_lossless,
+                "measured" if verified_lossless else None,
+                "flac" if verified_lossless else None,
+                "spectral_verified_lossless" if verified_lossless else None,
+                was_converted_from,
+            ),
+        )
+
+    def test_enforces_every_r19_anchor_and_keeps_legacy_gate(self) -> None:
+        name = "cratedigger_test_lossless_lineage_057"
+        dsn = _create_fresh_database(name)
+        try:
+            with tempfile.TemporaryDirectory() as migrations_dir:
+                self._copy_through(migrations_dir, 56)
+                apply_migrations(dsn, migrations_dir)
+                self._copy_through(migrations_dir, 57)
+                applied = apply_migrations(dsn, migrations_dir)
+                self.assertEqual([migration.version for migration in applied], [57])
+
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT name FROM schema_migrations WHERE version = 57"
+                        )
+                        self.assertEqual(
+                            cur.fetchone(),
+                            ("lossless_lineage_spectral_subject_check",),
+                        )
+                        cur.execute(
+                            """
+                            SELECT convalidated
+                            FROM pg_constraint
+                            WHERE conrelid = 'album_quality_evidence'::regclass
+                              AND conname = %s
+                            """,
+                            (self._CONSTRAINT,),
+                        )
+                        self.assertEqual(cur.fetchone(), (True,))
+
+                        self._insert_v4_evidence(
+                            cur,
+                            mbid="native-installed",
+                            spectral_subject="installed",
+                        )
+                        self._insert_v4_evidence(
+                            cur,
+                            mbid="m4a-container-only",
+                            spectral_subject="installed",
+                            was_converted_from="m4a",
+                        )
+                        self._insert_v4_evidence(
+                            cur,
+                            mbid="source-fact",
+                            spectral_subject="source",
+                            v0_subject="source",
+                            verified_lossless=True,
+                            was_converted_from="flac",
+                        )
+                        anchors: tuple[
+                            tuple[str, str | None, bool, str | None], ...
+                        ] = (
+                            ("source-v0", "source", False, None),
+                            ("proof", None, True, None),
+                            ("flac", None, False, "flac"),
+                            ("alac", None, False, "alac"),
+                            ("wav", None, False, "wav"),
+                            ("normalised-flac", None, False, "FLAC"),
+                        )
+                        for anchor, v0_subject, proof, converted_from in anchors:
+                            with self.subTest(anchor=anchor):
+                                with self.assertRaises(
+                                    psycopg2.errors.CheckViolation
+                                ) as raised:
+                                    self._insert_v4_evidence(
+                                        cur,
+                                        mbid=f"invalid-{anchor}",
+                                        spectral_subject="installed",
+                                        v0_subject=v0_subject,
+                                        verified_lossless=proof,
+                                        was_converted_from=converted_from,
+                                    )
+                                self.assertEqual(
+                                    raised.exception.diag.constraint_name,
+                                    self._CONSTRAINT,
+                                )
+
+                        # Historical rows remain version-gated for rebuild on
+                        # touch rather than blocking the migration.
+                        cur.execute(
+                            """
+                            INSERT INTO album_quality_evidence (
+                                mb_release_id, snapshot_fingerprint,
+                                source_path, measured_at, lineage_version,
+                                spectral_grade, spectral_subject,
+                                spectral_provenance,
+                                v0_avg_bitrate_kbps, v0_subject, v0_provenance
+                            ) VALUES (
+                                'legacy-v3-installed-source',
+                                'fp-legacy-v3-installed-source', '/legacy',
+                                NOW(), 3, 'genuine', 'installed', 'measured',
+                                220, 'source', 'measured'
+                            )
+                            """
+                        )
+                finally:
+                    conn.close()
+        finally:
+            _drop_database(name)
+
+    def test_existing_v4_violation_aborts_migration(self) -> None:
+        name = "cratedigger_test_lossless_lineage_057_violation"
+        dsn = _create_fresh_database(name)
+        try:
+            with tempfile.TemporaryDirectory() as migrations_dir:
+                self._copy_through(migrations_dir, 56)
+                apply_migrations(dsn, migrations_dir)
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        self._insert_v4_evidence(
+                            cur,
+                            mbid="preexisting-invalid-source-v0",
+                            spectral_subject="installed",
+                            v0_subject="source",
+                        )
+                finally:
+                    conn.close()
+
+                self._copy_through(migrations_dir, 57)
+                with self.assertRaises(psycopg2.errors.CheckViolation):
+                    apply_migrations(dsn, migrations_dir)
+
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT 1 FROM schema_migrations WHERE version = 57"
+                        )
+                        self.assertIsNone(cur.fetchone())
+                        cur.execute(
+                            """
+                            SELECT 1
+                            FROM pg_constraint
+                            WHERE conrelid = 'album_quality_evidence'::regclass
+                              AND conname = %s
+                            """,
+                            (self._CONSTRAINT,),
+                        )
+                        self.assertIsNone(cur.fetchone())
+                finally:
+                    conn.close()
+        finally:
+            _drop_database(name)
+
+
+@requires_postgres
 class TestSimplifySlskdTransferOwnershipMigration(unittest.TestCase):
     """Migration 051 drops attempt-local IDs without losing ownership rows."""
 

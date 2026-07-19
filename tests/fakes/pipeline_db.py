@@ -72,6 +72,7 @@ from lib.quality import (
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
+    LOSSLESS_CODECS,
     V0_PROBE_LOSSLESS_SOURCE,
     V0_PROBE_NATIVE_LOSSY_RESEARCH,
 )
@@ -2726,13 +2727,31 @@ class FakePipelineDB:
             raise ValueError("; ".join(errors))
         key = (evidence.mb_release_id, evidence.snapshot_fingerprint)
         existing = self.album_quality_evidence.get(key)
+        incoming_lossless_lineage = (
+            (
+                evidence.v0_metric is not None
+                and evidence.v0_metric.subject == EVIDENCE_SUBJECT_SOURCE
+            )
+            or evidence.verified_lossless_proof is not None
+            or (
+                evidence.measurement.was_converted_from or ""
+            ).lower() in LOSSLESS_CODECS
+        )
         # Spectral is an atomic pair. A stale writer without a grade cannot
         # erase a successful attempt-time scan on the same audio snapshot.
+        # R19 is the exception: new lossless lineage clears a stored
+        # installed-subject tuple because those derivative bytes are not an
+        # authoritative spectral subject.
         if (
             existing is not None
             and existing.lineage_version >= 4
             and existing.measurement.spectral_grade is not None
             and evidence.measurement.spectral_grade is None
+            and not (
+                incoming_lossless_lineage
+                and existing.measurement.spectral_subject
+                    == EVIDENCE_SUBJECT_INSTALLED
+            )
         ):
             evidence = msgspec.structs.replace(
                 evidence,
@@ -2768,6 +2787,27 @@ class FakePipelineDB:
             evidence = msgspec.structs.replace(
                 evidence,
                 on_disk_v0_research_attempted=True,
+            )
+        merged_lossless_lineage = (
+            (
+                evidence.v0_metric is not None
+                and evidence.v0_metric.subject == EVIDENCE_SUBJECT_SOURCE
+            )
+            or evidence.verified_lossless_proof is not None
+            or (
+                evidence.measurement.was_converted_from or ""
+            ).lower() in LOSSLESS_CODECS
+        )
+        if (
+            evidence.lineage_version >= 4
+            and evidence.measurement.spectral_subject
+                == EVIDENCE_SUBJECT_INSTALLED
+            and merged_lossless_lineage
+        ):
+            import psycopg2.errors
+            raise psycopg2.errors.CheckViolation(
+                "violates check constraint "
+                '"album_quality_evidence_lossless_lineage_spectral_subject"'
             )
         if existing is not None and existing.id is not None:
             evidence_id = existing.id

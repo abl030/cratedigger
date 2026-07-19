@@ -107,26 +107,73 @@ class _EvidenceMixin(_PipelineDBBase):
                     -- pair valid (genuine legitimately has no bitrate); an
                     -- empty or bitrate-only v4 stale writer preserves the
                     -- whole stored pair so it cannot erase an attempt-time
-                    -- scan. A legacy row is replaced wholesale during its
-                    -- v4 rebuild, including when the new fact is absent.
+                    -- scan. When the incoming row establishes lossless
+                    -- lineage, however, an installed-subject stored tuple is
+                    -- stale by definition and is cleared atomically. A
+                    -- legacy row is replaced wholesale during its v4 rebuild,
+                    -- including when the new fact is absent.
                     spectral_grade = CASE WHEN
                         album_quality_evidence.lineage_version < 4 OR
-                        EXCLUDED.spectral_grade IS NOT NULL
+                        EXCLUDED.spectral_grade IS NOT NULL OR
+                        (
+                            album_quality_evidence.spectral_subject =
+                                'installed' AND
+                            (
+                                EXCLUDED.v0_subject = 'source' OR
+                                EXCLUDED.verified_lossless IS TRUE OR
+                                LOWER(COALESCE(
+                                    EXCLUDED.was_converted_from, ''))
+                                    IN ('flac', 'alac', 'wav')
+                            )
+                        )
                         THEN EXCLUDED.spectral_grade
                         ELSE album_quality_evidence.spectral_grade END,
                     spectral_bitrate_kbps = CASE WHEN
                         album_quality_evidence.lineage_version < 4 OR
-                        EXCLUDED.spectral_grade IS NOT NULL
+                        EXCLUDED.spectral_grade IS NOT NULL OR
+                        (
+                            album_quality_evidence.spectral_subject =
+                                'installed' AND
+                            (
+                                EXCLUDED.v0_subject = 'source' OR
+                                EXCLUDED.verified_lossless IS TRUE OR
+                                LOWER(COALESCE(
+                                    EXCLUDED.was_converted_from, ''))
+                                    IN ('flac', 'alac', 'wav')
+                            )
+                        )
                         THEN EXCLUDED.spectral_bitrate_kbps
                         ELSE album_quality_evidence.spectral_bitrate_kbps END,
                     spectral_subject = CASE WHEN
                         album_quality_evidence.lineage_version < 4 OR
-                        EXCLUDED.spectral_grade IS NOT NULL
+                        EXCLUDED.spectral_grade IS NOT NULL OR
+                        (
+                            album_quality_evidence.spectral_subject =
+                                'installed' AND
+                            (
+                                EXCLUDED.v0_subject = 'source' OR
+                                EXCLUDED.verified_lossless IS TRUE OR
+                                LOWER(COALESCE(
+                                    EXCLUDED.was_converted_from, ''))
+                                    IN ('flac', 'alac', 'wav')
+                            )
+                        )
                         THEN EXCLUDED.spectral_subject
                         ELSE album_quality_evidence.spectral_subject END,
                     spectral_provenance = CASE WHEN
                         album_quality_evidence.lineage_version < 4 OR
-                        EXCLUDED.spectral_grade IS NOT NULL
+                        EXCLUDED.spectral_grade IS NOT NULL OR
+                        (
+                            album_quality_evidence.spectral_subject =
+                                'installed' AND
+                            (
+                                EXCLUDED.v0_subject = 'source' OR
+                                EXCLUDED.verified_lossless IS TRUE OR
+                                LOWER(COALESCE(
+                                    EXCLUDED.was_converted_from, ''))
+                                    IN ('flac', 'alac', 'wav')
+                            )
+                        )
                         THEN EXCLUDED.spectral_provenance
                         ELSE album_quality_evidence.spectral_provenance END,
                     verified_lossless = EXCLUDED.verified_lossless,
