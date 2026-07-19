@@ -86,6 +86,7 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
     }
     BAN_SOURCE_REQUIRED_FIELDS = {
         "status", "username", "beets_removed", "hashes_recorded",
+        "request_status",
     }
     FORCE_IMPORT_REQUIRED_FIELDS = {
         "status", "request_id", "artist", "album", "message",
@@ -863,6 +864,29 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.BAN_SOURCE_REQUIRED_FIELDS,
                                 "pipeline ban-source response")
+        self.assertEqual(data["request_status"], "wanted")
+
+    @patch("web.routes.pipeline_mutations.finalize_request")
+    def test_pipeline_ban_source_reports_preserved_search_stop(
+        self, _mock_transition,
+    ):
+        import web.server as srv
+        release_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        self.db.seed_request(make_request_row(
+            id=102, status="unsearchable", mb_release_id=release_id,
+        ))
+        old_beets = srv._beets
+        srv._beets = FakeBeetsDB()
+        try:
+            status, data = self._post(
+                "/api/pipeline/ban-source",
+                {"request_id": 102, "confirm": "BAN", "mb_release_id": release_id},
+            )
+        finally:
+            srv._beets = old_beets
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["request_status"], "unsearchable")
 
     def test_pipeline_ban_source_requires_confirmation(self):
         status, data = self._post(

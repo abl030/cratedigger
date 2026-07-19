@@ -172,6 +172,7 @@ class BanSourceRequest:
 class BanSourceSuccess:
     request_id: int
     release_id: str
+    request_status: Literal["wanted", "unsearchable"]
     username: str | None
     beets_removed: bool
     hashes_recorded: int
@@ -258,6 +259,9 @@ def _ban_source_locked(
     if current.get("min_bitrate") is not None:
         fields["min_bitrate"] = current["min_bitrate"]
     current_status = str(current["status"])
+    request_status: Literal["wanted", "unsearchable"] = (
+        "unsearchable" if current_status == "unsearchable" else "wanted"
+    )
     transition = (
         transitions.RequestTransition.to_unsearchable_fields(
             from_status=current_status,
@@ -348,6 +352,7 @@ def _ban_source_locked(
     return BanSourceSuccess(
         request_id=request.request_id,
         release_id=release_id,
+        request_status=request_status,
         username=reported_username,
         beets_removed=cleanup.beets_removed,
         hashes_recorded=hashes_recorded,

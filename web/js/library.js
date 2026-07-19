@@ -180,9 +180,7 @@ export function renderLibraryDetailBody(data, id) {
       const pStatus = data.pipeline_status || '';
       html += `<div class="p-actions" style="margin-top:10px;">
         <span class="p-detail-label" style="line-height:28px;">Status:</span>
-        <button class="p-btn ${pStatus === 'wanted' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'wanted', null)">wanted</button>
-        <button class="p-btn ${pStatus === 'imported' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'imported', null)">imported</button>
-        <button class="p-btn ${pStatus === 'unsearchable' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'unsearchable', null)">unsearchable</button>
+        ${renderLibraryStatusButtons(releaseArg, pStatus)}
       </div>`;
       html += `<div class="p-actions" style="margin-top:6px;">
         <span class="p-detail-label" style="line-height:28px;">Min bitrate:</span>
@@ -238,17 +236,64 @@ export function renderLibraryDetailBody(data, id) {
 }
 
 /**
+ * Render lifecycle actions without offering an invalid search-stop edge.
+ * @param {string} releaseArg - HTML-safe JavaScript string literal.
+ * @param {string} status
+ * @returns {string}
+ */
+function renderLibraryStatusButtons(releaseArg, status) {
+  const downloading = status === 'downloading'
+    ? '<button class="p-btn active-status" disabled aria-disabled="true">downloading</button>'
+    : '';
+  const canSetUnsearchable = status === 'wanted' || status === 'unsearchable';
+  const unsearchable = canSetUnsearchable
+    ? `<button class="p-btn ${status === 'unsearchable' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'unsearchable', null)">unsearchable</button>`
+    : '<button class="p-btn" disabled aria-disabled="true">unsearchable</button>';
+  return `${downloading}
+        <button class="p-btn ${status === 'wanted' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'wanted', null)">wanted</button>
+        <button class="p-btn ${status === 'imported' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'imported', null)">imported</button>
+        ${unsearchable}`;
+}
+
+export function banSourceConfirmationMessage() {
+  return 'Mark this album as a bad rip?\n'
+    + 'The album will be removed from beets and any recorded uploader denylisted. '
+    + 'If the request is unsearchable, it will remain unsearchable; otherwise it will be reset to wanted.';
+}
+
+/**
+ * @param {{request_status: string, username?: string|null,
+ *   beets_removed?: boolean, hashes_recorded?: number}} data
+ * @returns {string}
+ */
+export function describeBanSourceSuccess(data) {
+  if (data.request_status !== 'wanted' && data.request_status !== 'unsearchable') {
+    throw new Error(`Unexpected Bad Rip request status: ${data.request_status}`);
+  }
+  const removed = data.beets_removed ? 'removed from beets' : 'not in beets';
+  const hashCount = data.hashes_recorded ?? 0;
+  const hashes = `${hashCount} hash${hashCount === 1 ? '' : 'es'} recorded`;
+  const lifecycle = data.request_status === 'unsearchable'
+    ? 'request remains unsearchable'
+    : 'request requeued as wanted';
+  return data.username
+    ? `Banned ${data.username}: ${removed}, ${hashes}, ${lifecycle}.`
+    : `Album ${removed} (no Soulseek user on record), ${hashes}, ${lifecycle}.`;
+}
+
+/**
  * Mark an imported album as a bad rip (issue #188).
  * The route resolves the supplying user from download_log, hashes the
  * imported tracks (tag-stripped), persists known-bad hashes, denylists
- * the user, removes from beets, and requeues. The frontend does not
- * need to know the username.
+ * the user, and removes from beets. An existing unsearchable stop is
+ * preserved; every other supported state is reset to wanted. The frontend
+ * does not need to know the username.
  *
  * @param {number} requestId
  * @param {string} mbid
  */
 export async function banSource(requestId, mbid) {
-  if (!confirm('Mark this album as a bad rip?\nThe most recent uploader will be denylisted, the album removed from beets, and the request requeued.')) return;
+  if (!confirm(banSourceConfirmationMessage())) return;
   try {
     const r = await fetch(`${API}/api/pipeline/ban-source`, {
       method: 'POST',
@@ -267,12 +312,7 @@ export async function banSource(requestId, mbid) {
     const partial = data.partial_failures || {};
     const cleanupErrs = partial.cleanup_errors || [];
     const hashErrs = partial.hash_capture_errors || [];
-    const removed = data.beets_removed ? 'removed from beets' : 'not in beets';
-    const hashCount = data.hashes_recorded ?? 0;
-    const hashes = `${hashCount} hash${hashCount === 1 ? '' : 'es'} recorded`;
-    const head = data.username
-      ? `Banned ${data.username}: ${removed}, ${hashes}, requeued.`
-      : `Album ${removed} (no Soulseek user on record), ${hashes}, requeued.`;
+    const head = describeBanSourceSuccess(data);
     if (cleanupErrs.length > 0 || hashErrs.length > 0) {
       const warnings = [];
       if (cleanupErrs.length) warnings.push(`${cleanupErrs.length} beet remove failure(s)`);

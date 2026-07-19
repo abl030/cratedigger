@@ -312,7 +312,7 @@ class TestSearchPlanServiceRegenerate(unittest.TestCase):
         self.assertEqual(len(latest_failed), 1)
 
     def test_regeneration_works_for_non_wanted_status(self):
-        """Imported / manual / downloading requests can still regenerate."""
+        """Imported / unsearchable / downloading requests can regenerate."""
         self._seed_with_active_plan(11)
         self.db.request(11)["status"] = "imported"
         result = self.svc.generate_for_request(11, regenerate=True)

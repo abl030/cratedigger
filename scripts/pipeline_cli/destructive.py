@@ -40,7 +40,7 @@ def _open_beets(path: str) -> BeetsDB:
 
 
 def cmd_ban_source(db, args) -> int:
-    """Ban one request's exact release and requeue it."""
+    """Ban an exact source; preserve unsearchable or requeue as wanted."""
     try:
         beets = _open_beets(args.beets_db)
     except FileNotFoundError as exc:
@@ -60,6 +60,7 @@ def cmd_ban_source(db, args) -> int:
             "status": "ok",
             "request_id": result.request_id,
             "release_id": result.release_id,
+            "request_status": result.request_status,
             "username": result.username,
             "beets_removed": result.beets_removed,
             "hashes_recorded": result.hashes_recorded,
@@ -216,7 +217,8 @@ def add_destructive_subparsers(sub: argparse._SubParsersAction) -> None:
     ban = sub.add_parser(
         "ban-source",
         help="Mark a request's server-resolved exact release as a bad rip, "
-             "remove it from beets, and requeue it.",
+             "remove it from beets, preserve an unsearchable stop, or "
+             "otherwise requeue it as wanted.",
     )
     ban.add_argument("request_id", type=int)
     ban.add_argument("--confirm", choices=("BAN",), required=True)

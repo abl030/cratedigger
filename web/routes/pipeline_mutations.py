@@ -924,6 +924,7 @@ def post_pipeline_ban_source(h, body: dict) -> None:
         partial_failures["hash_capture_errors"] = hash_capture_errors
     payload: dict[str, object] = {
         "status": "ok",
+        "request_status": result.request_status,
         "username": result.username,
         "beets_removed": result.beets_removed,
         "hashes_recorded": result.hashes_recorded,
@@ -1087,7 +1088,8 @@ ROUTES: list[RouteRegistration] = [
     route(
         "POST", "/api/pipeline/ban-source", post_pipeline_ban_source,
         "Mark a server-resolved rip as bad: denylist, hash + bad-byte "
-        "ripple-stop, and remove from beets. Requires confirm='BAN'.",
+        "ripple-stop, remove from beets, and preserve unsearchable or reset "
+        "wanted. Requires confirm='BAN'.",
         classified=True,
     ),
     route(

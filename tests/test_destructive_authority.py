@@ -19,6 +19,7 @@ from lib.destructive_release_service import (
     BanSourceLockContended,
     BanSourceReleaseMismatch,
     BanSourceRequest,
+    BanSourceSuccess,
     BanSourceTransitionConflict,
     DeleteImporterBusy,
     DeleteLockContended,
@@ -227,6 +228,8 @@ class TestBanSourceAuthority(unittest.TestCase):
         )
 
         self.assertNotIsInstance(result, BanSourceTransitionConflict)
+        assert isinstance(result, BanSourceSuccess)
+        self.assertEqual(result.request_status, "unsearchable")
         row = self.db.request(41)
         self.assertEqual(row["status"], "unsearchable")
         self.assertIsNone(row["imported_path"])

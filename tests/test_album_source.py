@@ -98,7 +98,7 @@ class TestDatabaseSourceRejectAndRequeueSeam(unittest.TestCase):
         """``reject_and_requeue`` lets the shared transition seam look up
         ``from_status`` from the DB instead of pinning it at the call site.
 
-        End-to-end: seed a row in ``manual``, call ``reject_and_requeue``
+        End-to-end: seed a row in ``unsearchable``, call ``reject_and_requeue``
         without any ``from_status`` argument, observe the row land in
         ``wanted``. If the source had hard-coded ``from_status="wanted"``
         (or any other non-current value), the transition guard would have

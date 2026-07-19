@@ -315,6 +315,8 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
         )
 
         self.assertIsInstance(result, BanSourceSuccess)
+        assert isinstance(result, BanSourceSuccess)
+        self.assertEqual(result.request_status, db.request(41)["status"])
         assert_ban_searchability_preserved(
             initial_status=initial_status,
             final_status=str(db.request(41)["status"]),

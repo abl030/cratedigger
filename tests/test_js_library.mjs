@@ -4,7 +4,9 @@
  */
 
 import {
+  banSourceConfirmationMessage,
   buildDeleteConfirmHtml,
+  describeBanSourceSuccess,
   describeBeetsDeletion,
   renderLibraryDetailBody,
 } from '../web/js/library.js';
@@ -130,16 +132,39 @@ function expectedJsArg(value) {
     .replace(/\\/g, '&#92;');
 }
 
-function libraryDetail(releaseId) {
+function libraryDetail(releaseId, pipelineStatus = 'wanted') {
   return renderLibraryDetailBody({
     mb_albumid: releaseId,
     pipeline_id: 1712,
-    pipeline_status: 'wanted',
+    pipeline_status: pipelineStatus,
     pipeline_source: 'request',
     artist: 'Artist',
     album: 'Album',
     tracks: [],
   }, 42);
+}
+
+console.log('Bad Rip copy distinguishes requeue from preserved search stop');
+{
+  const confirmation = banSourceConfirmationMessage();
+  assertContains(confirmation, 'remain unsearchable', 'confirmation explains preserved stop');
+  assertContains(confirmation, 'reset to wanted', 'confirmation explains ordinary requeue');
+  assertContains(
+    describeBanSourceSuccess({
+      request_status: 'unsearchable', username: 'bad-peer',
+      beets_removed: true, hashes_recorded: 2,
+    }),
+    'remains unsearchable',
+    'success copy reports the preserved search stop',
+  );
+  assertContains(
+    describeBanSourceSuccess({
+      request_status: 'wanted', username: null,
+      beets_removed: false, hashes_recorded: 0,
+    }),
+    'requeued as wanted',
+    'success copy reports the ordinary requeue',
+  );
 }
 
 console.log('Library quality controls — adversarial deterministic release-id pin');
@@ -179,6 +204,26 @@ console.log('Library quality controls — generated critical-character property 
   try { new Function('window', oldHandler); } catch (_) { oldCompiles = false; }
   if (!oldCompiles) passed++;
   else { failed++; console.error('  FAIL: known-bad raw library interpolation unexpectedly compiles'); }
+}
+
+console.log('Library status controls disable invalid unsearchable transitions');
+{
+  const imported = libraryDetail('release-id', 'imported');
+  assertContains(imported, "class=\"p-btn active-status\" onclick=\"event.stopPropagation(); window.setLibQuality(&quot;release-id&quot;, 'imported', null)\">imported</button>", 'imported remains visibly current');
+  assertExcludes(imported, "window.setLibQuality(&quot;release-id&quot;, 'unsearchable'", 'imported cannot invoke unsearchable');
+  assertContains(imported, 'disabled aria-disabled="true">unsearchable</button>', 'invalid imported stop is disabled');
+
+  const downloading = libraryDetail('release-id', 'downloading');
+  assertContains(downloading, 'disabled aria-disabled="true">downloading</button>', 'downloading remains visibly current');
+  assertExcludes(downloading, "window.setLibQuality(&quot;release-id&quot;, 'unsearchable'", 'downloading cannot invoke unsearchable');
+  assertContains(downloading, 'disabled aria-disabled="true">unsearchable</button>', 'invalid downloading stop is disabled');
+
+  const wanted = libraryDetail('release-id', 'wanted');
+  assertContains(wanted, "window.setLibQuality(&quot;release-id&quot;, 'unsearchable', null)", 'wanted may become unsearchable');
+
+  const stopped = libraryDetail('release-id', 'unsearchable');
+  assertContains(stopped, "window.setLibQuality(&quot;release-id&quot;, 'unsearchable', null)", 'current unsearchable state remains an active control');
+  assertContains(stopped, 'class="p-btn active-status"', 'unsearchable remains visibly current');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
