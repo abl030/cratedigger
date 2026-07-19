@@ -3049,6 +3049,7 @@ class FakePipelineDB:
         row["current_lossless_source_v0_probe_min_bitrate"] = None
         row["current_lossless_source_v0_probe_avg_bitrate"] = None
         row["current_lossless_source_v0_probe_median_bitrate"] = None
+        row["current_evidence_id"] = None
         row["imported_path"] = None
         row["updated_at"] = _utcnow()
 

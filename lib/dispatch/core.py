@@ -245,6 +245,7 @@ def dispatch_import_core(
                     else None
                 ),
                 attempt_have_audit_available=attempt_result.audit is not None,
+                beets_library_db_path=beets_library_db_path,
                 beets_library_root=effective_beets_library_root,
                 **evidence_gate_kwargs,
             )

@@ -250,7 +250,18 @@ class BeetsWorld:
         *,
         source_dir: str | os.PathLike[str] | None = None,
     ) -> LibraryAlbumSnapshot:
-        """Perform the real Beets add/remove/move sequence without network."""
+        """Stage real audio, then perform the Beets add/remove/move sequence."""
+
+        source_path = self.stage_release(release, source_dir=source_dir)
+        return self.import_staged_release(release, source_path)
+
+    def stage_release(
+        self,
+        release: BeetsWorldRelease,
+        *,
+        source_dir: str | os.PathLike[str] | None = None,
+    ) -> Path:
+        """Create a tagged real-audio candidate without touching Beets."""
 
         if release.track_count < 1:
             raise ValueError("track_count must be positive")
@@ -263,8 +274,6 @@ class BeetsWorld:
             source_path = Path(source_dir)
         source_path.mkdir(parents=True)
 
-        items: list[beets_library.Item] = []
-        identity_values = self._release_identity_values(release.release_id)
         extension = release.codec.casefold()
         for track in range(1, release.track_count + 1):
             path = source_path / f"{track:02d} Track {track}.{extension}"
@@ -274,6 +283,23 @@ class BeetsWorld:
                 frequency=300 + (self._import_counter * 20) + track,
             )
             self._tag_audio(path, release, track=track)
+        return source_path
+
+    def import_staged_release(
+        self,
+        release: BeetsWorldRelease,
+        source_dir: str | os.PathLike[str],
+    ) -> LibraryAlbumSnapshot:
+        """Import an already-staged candidate through real Beets models."""
+
+        source_path = Path(source_dir)
+        identity_values = self._release_identity_values(release.release_id)
+        items: list[beets_library.Item] = []
+        extension = release.codec.casefold()
+        for track in range(1, release.track_count + 1):
+            path = source_path / f"{track:02d} Track {track}.{extension}"
+            if not path.is_file():
+                raise FileNotFoundError(path)
             item = beets_library.Item.from_path(str(path))
             item.update({
                 "artist": release.artist,
@@ -303,6 +329,18 @@ class BeetsWorld:
             duplicate.remove(delete=True)
         album.move(MoveOperation.MOVE)
         return self.snapshot_album(album)
+
+    def remove_release(self, release_id: str) -> int:
+        """Delete every exact-release album through Beets' real model API."""
+
+        matches = [
+            album
+            for album in self.library.albums()
+            if self._album_release_id(album) == release_id
+        ]
+        for album in matches:
+            album.remove(delete=True)
+        return len(matches)
 
     def snapshot_album(self, album: object) -> LibraryAlbumSnapshot:
         raw_items = list(album.items())  # type: ignore[attr-defined]

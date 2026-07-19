@@ -961,6 +961,7 @@ class _RequestsMixin(_PipelineDBBase):
         - ``verified_lossless`` (set only after a genuine FLAC→V0 chain)
         - ``current_spectral_*`` (spectral grade of files currently in
           beets)
+        - ``current_evidence_id`` (content-addressed snapshot of those files)
         - ``imported_path`` (beets filesystem path for the release, shown
           directly by the web UI — leaving it populated after a remove
           means the pipeline tab still claims the album is imported at a
@@ -981,6 +982,7 @@ class _RequestsMixin(_PipelineDBBase):
                    current_lossless_source_v0_probe_min_bitrate = NULL,
                    current_lossless_source_v0_probe_avg_bitrate = NULL,
                    current_lossless_source_v0_probe_median_bitrate = NULL,
+                   current_evidence_id = NULL,
                    imported_path = NULL,
                    updated_at = %s
                WHERE id = %s AND status != 'replaced'""",

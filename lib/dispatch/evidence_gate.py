@@ -238,6 +238,7 @@ def _load_evidence_import_gate(
     prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
     attempt_existing_spectral: SpectralAnalysisDetail | None = None,
     attempt_have_audit_available: bool = False,
+    beets_library_db_path: str | None = None,
     beets_library_root: str = "",
     current_evidence_loader: Callable[
         ..., CurrentEvidenceActionResult | None
@@ -269,6 +270,7 @@ def _load_evidence_import_gate(
         request_id=request_id,
         mb_release_id=mb_release_id,
         quality_ranks=quality_ranks,
+        beets_library_db_path=beets_library_db_path,
         beets_library_root=beets_library_root,
     )
     if current_result is None:
