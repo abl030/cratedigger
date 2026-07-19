@@ -6294,6 +6294,8 @@ class TestGetWrongMatches(unittest.TestCase):
                 format="FLAC",
                 spectral_grade="suspect",
                 spectral_bitrate_kbps=18,
+                spectral_subject="source",
+                spectral_provenance="measured",
             ),
             files=[
                 AlbumQualityEvidenceFile(
@@ -10173,6 +10175,12 @@ class TestGetPipelineOverlay(unittest.TestCase):
             evidence = make_album_quality_evidence(
                 mb_release_id=mbid,
                 source_path=f"/library/{mbid}",
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    avg_bitrate_kbps=256,
+                    median_bitrate_kbps=252,
+                    format="MP3",
+                ),
                 v0_metric=AlbumQualityV0Metric(
                     subject="source", provenance="carried",
                     avg_bitrate_kbps=251, min_bitrate_kbps=228,

@@ -325,6 +325,20 @@ def _run_blank_path_world(
                     96 if world.spectral_grade == "likely_transcode" else None
                 ),
                 was_converted_from=world.was_converted_from,
+                spectral_subject=(
+                    "source"
+                    if world.spectral_grade is not None
+                    and (world.was_converted_from or "").lower()
+                    in {"flac", "alac", "wav"}
+                    else None
+                ),
+                spectral_provenance=(
+                    "carried"
+                    if world.spectral_grade is not None
+                    and (world.was_converted_from or "").lower()
+                    in {"flac", "alac", "wav"}
+                    else None
+                ),
             ),
             v0_metric=None,
         )

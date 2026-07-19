@@ -1513,6 +1513,8 @@ class TestCmdRepairSpectral(unittest.TestCase):
                     format="MP3",
                     is_cbr=False,
                     spectral_grade="genuine",
+                    spectral_subject="source",
+                    spectral_provenance="carried",
                 ),
                 verified_lossless_proof=VerifiedLosslessProof(
                     provenance="carried",

@@ -3385,7 +3385,7 @@ class TestPinStatusDomainMigration(unittest.TestCase):
         dsn = _create_fresh_database(name)
         try:
             applied = apply_migrations(dsn, DEFAULT_MIGRATIONS_DIR)
-            self.assertEqual(applied[-1].version, 56)
+            self.assertEqual(applied[-1].version, 57)
             self.assertEqual(
                 self._query(
                     dsn,
