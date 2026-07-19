@@ -351,7 +351,8 @@ def check_proof_lock_terminality(
         ):
             continue
         unchanged = (
-            transition.after_status == "imported"
+            transition.before_status == "imported"
+            and transition.after_status == "imported"
             and transition.after_release_id == transition.before_release_id
             and transition.after_album_fingerprint
             == transition.before_album_fingerprint
