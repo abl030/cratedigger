@@ -9,6 +9,7 @@ import unittest
 from hypothesis import given, strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads active profile)
+from lib.quality import ValidationResult
 from lib.world_invariants import (
     DenylistAuthoritySnapshot,
     EvidenceDiskSnapshot,
@@ -22,6 +23,7 @@ from lib.world_invariants import (
     check_no_lossy_tier_widening,
     check_proof_lock_terminality,
     check_status_membership,
+    derive_denylist_authorities,
 )
 
 
@@ -240,6 +242,43 @@ class TestWorldInvariantGenerated(unittest.TestCase):
         ),))
 
         self.assertIn("denylist_without_authority", {v.code for v in violations})
+
+    @given(
+        username=_SEGMENT,
+        reason=_SEGMENT,
+        scenario=_SEGMENT,
+        as_jsonb=st.booleans(),
+        valid=st.booleans(),
+    )
+    def test_only_exact_peer_invalid_validation_authorizes_the_denylist(
+        self,
+        username: str,
+        reason: str,
+        scenario: str,
+        as_jsonb: bool,
+        valid: bool,
+    ) -> None:
+        result = ValidationResult(valid=valid, scenario=scenario)
+        validation_result: object = (
+            result.to_json()
+            if not as_jsonb
+            else {
+                "valid": valid,
+                "scenario": scenario,
+            }
+        )
+
+        authorities = derive_denylist_authorities(
+            username=username,
+            reason=reason,
+            history=[{
+                "outcome": "rejected",
+                "soulseek_username": username,
+                "validation_result": validation_result,
+            }],
+        )
+
+        self.assertEqual("validation_reject" in authorities, not valid)
 
 
 if __name__ == "__main__":

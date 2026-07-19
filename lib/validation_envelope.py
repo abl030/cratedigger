@@ -78,7 +78,9 @@ class ValidationResultEnvelope(msgspec.Struct, frozen=True):
     would reject valid historical audit rows.
     """
 
-    valid: bool = False
+    # ``None`` distinguishes curator-ban/legacy envelopes that omit the key
+    # from a real ValidationResult verdict, whose writer always emits a bool.
+    valid: bool | None = None
     scenario: str | None = None
     detail: str | None = None
     distance: float | None = None

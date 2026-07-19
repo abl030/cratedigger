@@ -88,6 +88,16 @@ wrong-match deletion, and reset. After every rule it checks the shared
 status/membership, evidence/disk coherence, proof-lock terminality, search-tier
 monotonicity, and denylist authority.
 
+Every generated world is initialized from the anonymized categorical corpus in
+`tests/world_model/census_seeds.py`. The corpus was captured read-only from
+doc2 on 2026-07-19 and retains only row-shape facts and capture-time counts:
+status, MusicBrainz/dual identity shape, null/presence patterns, evidence
+lineage, legacy search overrides, format casing, spectral provenance, and V0
+presence. It contains no request/release IDs, artist/title metadata, peer names,
+or paths. A deterministic pin proves that touching an installed lineage-1 seed
+through the production import path rebuilds current lineage-4 evidence; the
+state machine samples the coherent subset as its real initial state.
+
 It is intentionally named outside unittest's `test*.py` discovery pattern.
 Run the deterministic pin and generated state machine directly:
 
@@ -98,7 +108,7 @@ nix-shell --run "python3 -m unittest tests.world_model.state_machine -v"
 The temporary PostgreSQL, Beets SQLite database, library tree, and generated
 audio are local and disposable; this runner never reads or mutates production.
 The deterministic direct budget is six examples of eight stateful steps. On
-doc1 on 2026-07-19, the full six-test lifecycle module reported 8.796
+doc1 on 2026-07-19, the census-seeded seven-test lifecycle module reported 10.431
 test-seconds (excluding dev-shell startup). That is a baseline, not a placement
 decision. Override the deterministic budget for a one-off run without changing
 code:
@@ -138,12 +148,31 @@ wrapper wall time). That measured depth remains operator-only and is not part of
 `scripts/run_tests.sh`; suite/nightly placement is still the explicit follow-up
 decision recorded on issue #743.
 
-The current hammer uses the in-process production adapter that performs real
+The default hammer uses the in-process production adapter that performs real
 Beets model/database/filesystem mutations beneath the real dispatch services.
-The mirror-backed `run_beets_harness.sh` subprocess variant described in issue
-#743 needs a catalogue of real release identities and metadata. It remains a
-dependency of the census-seed slice rather than silently substituting generated
-nonexistent MBIDs or touching the deployed library.
+An opt-in profile crosses the real `import_one.py` →
+`run_beets_harness.sh` subprocess boundary and performs exact-ID lookup against
+an explicitly supplied MusicBrainz mirror origin:
+
+```bash
+nix-shell --run "scripts/world_model_burst.sh \
+  --engine mirror-harness \
+  --mirror-url http://192.168.1.35:5200 \
+  --examples 2 --steps 5"
+```
+
+The mirror fixture is public catalogue metadata selected independently of the
+production collection. `BEETSDIR` and `BEETS_DB` are both forced to the
+per-world scratch tree for each synchronous subprocess, the deployed runtime
+config is masked so it cannot override them, and all three environment values
+are restored afterward; the pipeline database is still ephemeral. Only the
+mirror is read. The profile
+loads the shipped path template, exact-ID duplicate keys, inline field, match
+policy, and MusicBrainz plugin; unrelated production fetchart/lyrics/scrub hooks
+stay disabled so the boundary test cannot make external content requests. A
+2-world × 5-step mirror smoke completed cleanly in 5 seconds on doc1 on
+2026-07-19. It remains operator-only: neither this profile nor the in-process
+hammer has been added to standard discovery or a schedule.
 
 When the hammer finds a defect:
 

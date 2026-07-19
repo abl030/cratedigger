@@ -20,6 +20,7 @@ from hypothesis.database import DirectoryBasedExampleDatabase
 from hypothesis import strategies as st
 from hypothesis.stateful import (
     RuleBasedStateMachine,
+    initialize,
     invariant,
     precondition,
     rule,
@@ -32,6 +33,10 @@ import conftest  # noqa: E402, F401
 
 from tests.beets_world import BeetsWorldRelease  # noqa: E402
 from tests.world_model.support import LifecycleWorld, repository_root  # noqa: E402
+from tests.world_model.census_seeds import (  # noqa: E402
+    STATEFUL_WORLD_CENSUS_SEEDS,
+    WorldCensusSeed,
+)
 
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
@@ -193,6 +198,33 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
             self.assertFalse(world.force_import_request(request_id, codec="mp3"))
             world.assert_invariants()
 
+    def test_census_seed_rebuilds_legacy_evidence_on_touch(self) -> None:
+        seed = next(
+            seed
+            for seed in STATEFUL_WORLD_CENSUS_SEEDS
+            if seed.name == "wanted_mb_full_legacy_ladder_lineage1"
+        )
+        assert TEST_DSN is not None
+        with LifecycleWorld(TEST_DSN, repository_root()) as world:
+            request_id = world.seed_census_release(BeetsWorldRelease(
+                release_id="40000000-0000-4000-8000-000000000743",
+                artist="Census Archive",
+                album="Legacy Ladder",
+                year=2004,
+                codec="mp3",
+            ), seed)
+            before_id = world.db.get_request_current_evidence_id(request_id)
+            before = world.db.load_album_quality_evidence_by_id(before_id)
+            assert before is not None
+            self.assertEqual(before.lineage_version, 1)
+
+            self.assertTrue(world.import_request(request_id, codec="flac"))
+            after_id = world.db.get_request_current_evidence_id(request_id)
+            after = world.db.load_album_quality_evidence_by_id(after_id)
+            assert after is not None
+            self.assertEqual(after.lineage_version, 4)
+            world.assert_invariants()
+
 
 class LifecycleWorldMachine(RuleBasedStateMachine):
     """Generate operator lifecycles and check after every real mutation."""
@@ -205,6 +237,19 @@ class LifecycleWorldMachine(RuleBasedStateMachine):
 
     def teardown(self) -> None:
         self.world.close()
+
+    @initialize(seed=st.sampled_from(STATEFUL_WORLD_CENSUS_SEEDS))
+    def initialize_from_production_census(self, seed: WorldCensusSeed) -> None:
+        self._release_counter += 1
+        self.world.seed_census_release(BeetsWorldRelease(
+            release_id=_mb_release_id(self._release_counter),
+            artist="Census Artist",
+            album=f"Census Shape {seed.name}",
+            year=2000,
+            codec="flac" if seed.verified_lossless else "mp3",
+            label="Census Label",
+            catalognum=f"CENSUS-{self._release_counter}",
+        ), seed)
 
     @rule(
         identity_source=st.sampled_from(("musicbrainz", "discogs")),

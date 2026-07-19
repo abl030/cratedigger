@@ -13,10 +13,15 @@ from lib.beets_db import BeetsDB
 from lib.config import CratediggerConfig
 from lib.destructive_release_service import (
     BanSourceRequest,
+    BanSourceReleaseMismatch,
     BanSourceSuccess,
     ban_source,
 )
-from lib.dispatch import dispatch_import_core, dispatch_import_from_db
+from lib.dispatch import (
+    dispatch_import_core,
+    dispatch_import_from_db,
+    run_import_one,
+)
 from lib.dispatch.types import ImportOneRun
 from lib.import_evidence import (
     ActionEvidenceProvenance,
@@ -69,26 +74,52 @@ from tests.helpers import (
     make_import_result,
 )
 from tests.test_pipeline_db import TEST_DSN, make_db
+from tests.world_model.census_seeds import (
+    STATEFUL_WORLD_CENSUS_SEEDS,
+    WorldCensusSeed,
+)
 
 
 class LifecycleWorld:
     """One disposable pipeline DB slate coupled to one Beets library."""
 
-    def __init__(self, dsn: str, repo_root: str | os.PathLike[str]) -> None:
+    def __init__(
+        self,
+        dsn: str,
+        repo_root: str | os.PathLike[str],
+        *,
+        import_engine: str = "in-process",
+        mirror_url: str | None = None,
+    ) -> None:
         if TEST_DSN != dsn:
             raise ValueError(
                 "world model must use tests.test_pipeline_db.make_db() "
                 "against its ephemeral TEST_DB_DSN"
             )
+        if import_engine not in {"in-process", "mirror-harness"}:
+            raise ValueError(f"unsupported world import engine: {import_engine!r}")
+        if import_engine == "mirror-harness" and not mirror_url:
+            raise ValueError("mirror-harness world requires a mirror URL")
+        self._import_engine = import_engine
+        self._repo_root = Path(repo_root)
+        self._beets_harness_path = str(
+            self._repo_root / "harness" / "run_beets_harness.sh"
+        )
         self.db = make_db()
         try:
-            self.beets = BeetsWorld(repo_root)
+            self.beets = BeetsWorld(
+                repo_root,
+                subprocess_mirror_url=(
+                    mirror_url if import_engine == "mirror-harness" else None
+                ),
+            )
         except BaseException:
             self.db.close()
             raise
         self._release_by_request: dict[int, BeetsWorldRelease] = {}
         self._dispatch_counter = 0
         self._operator_counter = 0
+        self._last_subprocess_run: ImportOneRun | None = None
         self._replaced_snapshots: dict[int, dict[str, object]] = {}
         self._transitions: list[LifecycleTransitionSnapshot] = []
 
@@ -131,11 +162,130 @@ class LifecycleWorld:
             {
                 "disc_number": 1,
                 "track_number": track,
-                "title": f"Track {track}",
+                "title": release.track_title(track),
             }
             for track in range(1, release.track_count + 1)
         ])
         self._release_by_request[request_id] = release
+        return request_id
+
+    def seed_census_release(
+        self,
+        release: BeetsWorldRelease,
+        seed: WorldCensusSeed,
+    ) -> int:
+        """Materialize one anonymized live row shape in disposable stores."""
+
+        if seed not in STATEFUL_WORLD_CENSUS_SEEDS:
+            raise ValueError(f"census seed is not stateful-safe: {seed.name}")
+
+        request_id = self.add_release(release)
+        album: LibraryAlbumSnapshot | None = None
+        if seed.has_current_evidence:
+            codec = seed.codec or release.codec
+            if not self.import_request(
+                request_id,
+                codec=codec,
+                verified_lossless=seed.verified_lossless,
+            ):
+                raise AssertionError(
+                    f"census seed import was rejected: {seed.name}"
+                )
+            album = self._album_for_release(release.release_id)
+            if album is None:
+                raise AssertionError(
+                    f"census seed did not create a Beets album: {seed.name}"
+                )
+
+        row = self._require_request(request_id)
+        if seed.status == "imported" and row["status"] != "imported":
+            if album is None:
+                raise AssertionError("imported census seed requires a Beets album")
+            require_transition_applied(finalize_request(
+                self.db,
+                request_id,
+                RequestTransition.to_imported(
+                    from_status=str(row["status"]),
+                    imported_path=album.album_path,
+                ),
+            ))
+        elif seed.status == "wanted" and row["status"] != "wanted":
+            self.reset_to_wanted(request_id)
+
+        imported_path: str | None
+        if seed.has_imported_path:
+            imported_path = (
+                album.album_path
+                if album is not None
+                else str(
+                    self.beets.library_root
+                    / f"legacy-installed-marker-{request_id}"
+                )
+            )
+        else:
+            imported_path = None
+        if not self.db.update_request_fields(
+            request_id,
+            expected_status=seed.status,
+            search_filetype_override=seed.search_override,
+            imported_path=imported_path,
+            final_format=seed.final_format,
+            current_spectral_grade=seed.spectral_grade,
+            verified_lossless=seed.verified_lossless,
+        ):
+            raise AssertionError(f"failed to apply census metadata: {seed.name}")
+
+        if seed.identity_shape == "both":
+            self.db._execute(
+                "UPDATE album_requests SET discogs_release_id = %s WHERE id = %s",
+                (str(8_000_000 + request_id), request_id),
+            )
+            self.db.conn.commit()
+
+        evidence_id = self.db.get_request_current_evidence_id(request_id)
+        if seed.has_current_evidence and evidence_id is None:
+            raise AssertionError(f"census evidence link missing: {seed.name}")
+        if evidence_id is not None:
+            self.db._execute(
+                """
+                UPDATE album_quality_evidence
+                SET lineage_version = %s,
+                    codec = %s,
+                    storage_format = %s,
+                    format = %s,
+                    spectral_grade = %s,
+                    spectral_subject = %s,
+                    spectral_provenance = %s,
+                    v0_min_bitrate_kbps = %s,
+                    v0_avg_bitrate_kbps = %s,
+                    v0_median_bitrate_kbps = %s,
+                    v0_subject = %s,
+                    v0_provenance = %s
+                WHERE id = %s
+                """,
+                (
+                    seed.lineage_version,
+                    seed.codec,
+                    seed.storage_format,
+                    seed.measured_format,
+                    seed.spectral_grade,
+                    seed.spectral_subject,
+                    seed.spectral_provenance,
+                    192 if seed.has_v0_metrics else None,
+                    205 if seed.has_v0_metrics else None,
+                    198 if seed.has_v0_metrics else None,
+                    seed.v0_subject,
+                    seed.v0_provenance,
+                    evidence_id,
+                ),
+            )
+            self.db.conn.commit()
+
+        row = self._require_request(request_id)
+        if row["status"] != seed.status:
+            raise AssertionError(
+                f"census seed status drifted: {row['status']!r} != {seed.status!r}"
+            )
         return request_id
 
     def import_request(
@@ -280,12 +430,20 @@ class LifecycleWorld:
             mb_release_id=release.release_id,
             request_id=request_id,
             label=f"{release.artist} - {release.album}",
-            beets_harness_path="in-process-beets-world",
+            beets_harness_path=(
+                self._beets_harness_path
+                if self._import_engine == "mirror-harness"
+                else "in-process-beets-world"
+            ),
             db=self.db,
             dl_info=DownloadInfo(filetype=attempt.codec),
             scenario="auto_import",
             force=False,
-            run_import_fn=run_real_beets_import,
+            run_import_fn=(
+                self._run_beets_subprocess
+                if self._import_engine == "mirror-harness"
+                else run_real_beets_import
+            ),
             candidate_download_log_id=origin_download_log_id,
             prevalidated_candidate_result=candidate_result,
             requeue_on_failure=True,
@@ -316,9 +474,11 @@ class LifecycleWorld:
             before_verified_lossless=before_verified_proof,
         ))
         if not outcome.success and outcome.code != "quality_pipeline_rejected":
+            subprocess_detail = self._subprocess_failure_detail()
             raise AssertionError(
                 "production dispatch rejected world import for request "
                 f"{request_id}: code={outcome.code!r} message={outcome.message!r} "
+                f"{subprocess_detail}"
             )
         if staged_path.exists() and outcome.success:
             raise AssertionError(
@@ -440,9 +600,17 @@ class LifecycleWorld:
             source_username=f"force-peer-{self._dispatch_counter}",
             download_log_id=download_log_id,
             cfg=CratediggerConfig(
-                beets_harness_path="in-process-force-beets-world",
+                beets_harness_path=(
+                    self._beets_harness_path
+                    if self._import_engine == "mirror-harness"
+                    else "in-process-force-beets-world"
+                ),
             ),
-            run_import_fn=run_real_beets_import,
+            run_import_fn=(
+                self._run_beets_subprocess
+                if self._import_engine == "mirror-harness"
+                else run_real_beets_import
+            ),
             beets_library_db_path=str(self.beets.library_db),
             beets_library_root=str(self.beets.library_root),
         )
@@ -466,9 +634,11 @@ class LifecycleWorld:
             before_verified_lossless=before_verified_proof,
         ))
         if not outcome.success and outcome.code != "quality_pipeline_rejected":
+            subprocess_detail = self._subprocess_failure_detail()
             raise AssertionError(
                 "production force import failed operationally: "
-                f"code={outcome.code!r} message={outcome.message!r}"
+                f"code={outcome.code!r} message={outcome.message!r} "
+                f"{subprocess_detail}"
             )
         return outcome.success
 
@@ -599,6 +769,21 @@ class LifecycleWorld:
                 ),
                 cleanup_release_fn=self._remove_release,
             )
+        if isinstance(result, BanSourceReleaseMismatch):
+            if not (
+                before.get("mb_release_id")
+                and before.get("discogs_release_id")
+            ):
+                raise AssertionError(
+                    f"single-identity ban-source mismatch: {result!r}"
+                )
+            if self._require_request(request_id) != before:
+                raise AssertionError("failed-closed dual-identity ban mutated request")
+            if self._album_fingerprint(
+                self._album_for_release(release.release_id)
+            ) != self._album_fingerprint(before_album):
+                raise AssertionError("failed-closed dual-identity ban mutated Beets")
+            return
         if not isinstance(result, BanSourceSuccess):
             raise AssertionError(f"production ban-source failed: {result!r}")
         after = self._require_request(request_id)
@@ -896,6 +1081,28 @@ class LifecycleWorld:
             beets_removed=removed > 0 and absent_after,
             absent_after=absent_after,
             selector_failures=(),
+        )
+
+    def _run_beets_subprocess(self, **kwargs: Any) -> ImportOneRun:
+        """Run the production subprocess boundary against scratch Beets only."""
+
+        subprocess_kwargs = dict(kwargs)
+        # The outer dispatch owns the ephemeral PG transition. Production's
+        # import_one compatibility write would duplicate it; omitting the ID
+        # keeps this profile focused on the real Beets/harness boundary.
+        subprocess_kwargs["request_id"] = None
+        with self.beets.subprocess_environment():
+            run = run_import_one(**subprocess_kwargs)
+        self._last_subprocess_run = run
+        return run
+
+    def _subprocess_failure_detail(self) -> str:
+        run = self._last_subprocess_run
+        if run is None:
+            return ""
+        stderr_tail = run.stderr[-4000:].strip()
+        return (
+            f"subprocess_rc={run.returncode} stderr_tail={stderr_tail!r}"
         )
 
     def _request_has_verified_proof(self, request_id: int) -> bool:

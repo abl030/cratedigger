@@ -23,6 +23,7 @@ class TestDecodeValidationEnvelope(unittest.TestCase):
 
     def test_none_decodes_to_empty_envelope(self) -> None:
         env = decode_validation_envelope(None)
+        self.assertIsNone(env.valid)
         self.assertIsNone(env.failed_path)
         self.assertEqual(env.source_dirs, [])
         self.assertIsNone(env.wrong_match_triage)
@@ -58,6 +59,7 @@ class TestDecodeValidationEnvelope(unittest.TestCase):
             "cleanup_errors": [],
         })
         self.assertEqual(env.scenario, "curator_ban")
+        self.assertIsNone(env.valid)
         self.assertIsNone(env.failed_path)
         self.assertIsNone(env.wrong_match_triage)
 

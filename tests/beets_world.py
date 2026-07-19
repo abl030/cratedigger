@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+import json
 import os
 import re
 import shutil
@@ -9,6 +12,8 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
 
 from beets import config as beets_config
 from beets import library as beets_library
@@ -39,6 +44,16 @@ class BeetsWorldRelease:
     catalognum: str = ""
     albumdisambig: str = ""
     releasegroupdisambig: str = ""
+    track_titles: tuple[str, ...] = ()
+
+    def track_title(self, track: int) -> str:
+        if self.track_titles:
+            if len(self.track_titles) != self.track_count:
+                raise ValueError(
+                    "track_titles length must equal track_count in scratch world"
+                )
+            return self.track_titles[track - 1]
+        return f"Track {track}"
 
 
 def extract_shipped_beets_world_config(
@@ -90,16 +105,103 @@ def extract_shipped_beets_world_config(
     )
 
 
+def build_subprocess_beets_config(
+    shipped: ShippedBeetsWorldConfig,
+    *,
+    library_root: Path,
+    library_db: Path,
+    import_log: Path,
+    mirror_url: str,
+) -> dict[str, Any]:
+    """Render the load-bearing shipped contract for a disposable harness."""
+
+    parsed = urlsplit(mirror_url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ValueError("mirror URL must be an http(s) origin without credentials")
+    return {
+        "directory": str(library_root),
+        "library": str(library_db),
+        "asciify_paths": True,
+        "clutter": [
+            "Thumbs.DB",
+            "Thumbs.db",
+            ".DS_Store",
+            "*.jpg",
+            "*.png",
+            "AlbumArt*",
+            "Folder.*",
+            "desktop.ini",
+            "cratedigger.json",
+        ],
+        "import": {
+            "copy": False,
+            "write": True,
+            "move": True,
+            "timid": False,
+            "incremental": False,
+            "log": str(import_log),
+            "languages": ["en"],
+            "duplicate_keys": {
+                "album": list(shipped.duplicate_album_keys),
+                "item": ["artist", "title"],
+            },
+        },
+        "paths": {
+            "default": shipped.default_path_template,
+            "singleton": "Non-Album/$artist/$title",
+            "comp": (
+                "Compilations/$album%aunique{albumartist album,path_disambig}/"
+                "$track $title"
+            ),
+        },
+        "album_fields": dict(shipped.album_fields),
+        "musicbrainz": {
+            "host": parsed.netloc,
+            "https": parsed.scheme == "https",
+            "ratelimit": 100,
+        },
+        "match": {
+            "ignore_video_tracks": False,
+            "strong_rec_thresh": 0.10,
+            "medium_rec_thresh": 0.25,
+            "preferred": {
+                "countries": ["AU", "US", "GB|UK"],
+                "media": ["Digital Media|File", "CD"],
+                "original_year": True,
+            },
+        },
+        # The scratch profile intentionally loads only lookup + path plugins.
+        # Production fetchart/lyrics/scrub hooks would add unrelated external
+        # writes/network effects to an exact-ID mirror contract test.
+        "plugins": ["musicbrainz", "inline"],
+        "chroma": {"auto": False},
+    }
+
+
 class BeetsWorld:
     """One isolated Beets SQLite database plus real tagged audio files."""
 
-    def __init__(self, repo_root: str | os.PathLike[str]) -> None:
+    def __init__(
+        self,
+        repo_root: str | os.PathLike[str],
+        *,
+        subprocess_mirror_url: str | None = None,
+    ) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="cratedigger_beets_world_")
         self._closed = False
         self.root = Path(self._tmp.name)
         self.library_root = self.root / "library"
         self.incoming_root = self.root / "incoming"
         self.library_db = self.root / "beets-library.db"
+        self.beets_config_dir = self.root / "beets-config"
         self.library_root.mkdir()
         self.incoming_root.mkdir()
         self.shipped = extract_shipped_beets_world_config(repo_root)
@@ -110,6 +212,8 @@ class BeetsWorld:
                 str(self.library_db),
                 str(self.library_root),
             )
+            if subprocess_mirror_url is not None:
+                self._configure_subprocess(subprocess_mirror_url)
         except BaseException:
             self._closed = True
             self._tmp.cleanup()
@@ -146,6 +250,54 @@ class BeetsWorld:
                 "real Beets inline plugin did not load shipped path_disambig; "
                 "run the world model in a fresh interpreter"
             )
+
+    def _configure_subprocess(self, mirror_url: str) -> None:
+        self.beets_config_dir.mkdir()
+        config = build_subprocess_beets_config(
+            self.shipped,
+            library_root=self.library_root,
+            library_db=self.library_db,
+            import_log=self.root / "beets-import.log",
+            mirror_url=mirror_url,
+        )
+        (self.beets_config_dir / "config.yaml").write_text(
+            json.dumps(config, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    @contextmanager
+    def subprocess_environment(self) -> Iterator[None]:
+        """Point one synchronous harness call at this scratch Beets world."""
+
+        if not self.beets_config_dir.is_dir():
+            raise RuntimeError("scratch subprocess Beets config is not enabled")
+        prior = os.environ.get("BEETSDIR")
+        prior_db = os.environ.get("BEETS_DB")
+        prior_runtime = os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
+        os.environ["BEETSDIR"] = str(self.beets_config_dir)
+        os.environ["BEETS_DB"] = str(self.library_db)
+        # lib.util.beets_subprocess_env deliberately gives the deployed
+        # runtime config precedence over BEETSDIR. Mask that config while the
+        # test subprocess runs, otherwise invoking this profile on doc2 could
+        # select the deployed Beets config despite the scratch override.
+        os.environ["CRATEDIGGER_RUNTIME_CONFIG"] = str(
+            self.beets_config_dir / "runtime-config-disabled.ini"
+        )
+        try:
+            yield
+        finally:
+            if prior is None:
+                os.environ.pop("BEETSDIR", None)
+            else:
+                os.environ["BEETSDIR"] = prior
+            if prior_db is None:
+                os.environ.pop("BEETS_DB", None)
+            else:
+                os.environ["BEETS_DB"] = prior_db
+            if prior_runtime is None:
+                os.environ.pop("CRATEDIGGER_RUNTIME_CONFIG", None)
+            else:
+                os.environ["CRATEDIGGER_RUNTIME_CONFIG"] = prior_runtime
 
     def close(self) -> None:
         if self._closed:
@@ -189,6 +341,8 @@ class BeetsWorld:
             encoder_args = ["-c:a", "flac"]
         elif codec_key == "mp3":
             encoder_args = ["-c:a", "libmp3lame", "-b:a", "192k"]
+        elif codec_key == "opus":
+            encoder_args = ["-c:a", "libopus", "-b:a", "128k"]
         else:
             raise ValueError(f"unsupported scratch-world codec {codec!r}")
         subprocess.run(
@@ -219,7 +373,7 @@ class BeetsWorld:
         media.artist = release.artist
         media.albumartist = release.artist
         media.album = release.album
-        media.title = f"Track {track}"
+        media.title = release.track_title(track)
         media.track = track
         media.tracktotal = release.track_count
         media.disc = 1
@@ -305,7 +459,7 @@ class BeetsWorld:
                 "artist": release.artist,
                 "albumartist": release.artist,
                 "album": release.album,
-                "title": f"Track {track}",
+                "title": release.track_title(track),
                 "track": track,
                 "tracktotal": release.track_count,
                 "disc": 1,
@@ -367,5 +521,6 @@ __all__ = [
     "BeetsWorld",
     "BeetsWorldRelease",
     "ShippedBeetsWorldConfig",
+    "build_subprocess_beets_config",
     "extract_shipped_beets_world_config",
 ]

@@ -63,6 +63,22 @@ class TestWorldModelBurstScript(unittest.TestCase):
         self.assertIn("examples=7", result.stdout)
         self.assertIn("steps=19", result.stdout)
 
+    def test_mirror_engine_requires_and_reports_explicit_read_only_origin(self) -> None:
+        missing = self._run("--engine", "mirror-harness", "--print-config")
+        self.assertEqual(missing.returncode, 2)
+        self.assertIn("--mirror-url", missing.stderr)
+
+        configured = self._run(
+            "--engine",
+            "mirror-harness",
+            "--mirror-url",
+            "http://mirror.invalid:5200",
+            "--print-config",
+        )
+        self.assertEqual(configured.returncode, 0, configured.stderr)
+        self.assertIn("engine=mirror-harness", configured.stdout)
+        self.assertIn("mirror_url=http://mirror.invalid:5200", configured.stdout)
+
     def test_non_positive_budget_is_rejected_before_world_start(self) -> None:
         result = self._run("--examples", "0", "--print-config")
 
