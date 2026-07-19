@@ -333,7 +333,7 @@
   # Issue #117: secrets live at the *File paths referenced here. The cratedigger
   # Python code reads them on demand via CratediggerConfig.resolved_*() accessors,
   # so nothing sensitive is ever embedded in config.ini and the file can be
-  # world-readable (see absence of chmod/chgrp in preStartScript).
+  # world-readable (see absence of chmod/chgrp in renderConfigScript).
   configTemplate = pkgs.writeText "cratedigger-config.ini" ''
     [Slskd]
     api_key_file = ${toString cfg.slskd.apiKeyFile}
@@ -433,7 +433,7 @@
   # no chmod dance, no sed substitution, and no group-ownership hack. The
   # secrets themselves still need to be readable by cfg.user at whatever paths
   # slskd.apiKeyFile / notifiers.*.tokenFile point to.
-  preStartScript = pkgs.writeShellScript "cratedigger-prestart" ''
+  renderConfigScript = pkgs.writeShellScript "cratedigger-render-config" ''
     set -euo pipefail
     config_dir="${cfg.stateDir}"
     mkdir -p "$config_dir"
@@ -443,8 +443,6 @@
     ${pkgs.coreutils}/bin/chmod 0644 "$tmp"
     ${pkgs.coreutils}/bin/mv -f "$tmp" "$config_dir/config.ini"
     trap - EXIT
-    rm -f "$config_dir/.cratedigger.lock"
-
     # Beets config (tier-2 plan U4): atomic render into BEETSDIR, same
     # temp-file-and-rename dance as config.ini because the importer,
     # preview worker and timer-driven oneshot can start concurrently.
@@ -483,6 +481,16 @@
       ${pkgs.coreutils}/bin/mv -f "$tmp_secrets" "$beets_dir/secrets.yaml"
       trap - EXIT
     ''}
+  '';
+
+  # Only the main pipeline owns this singleton lock. Its start retains an
+  # idempotent render fallback, then clears a stale lock left by a crashed
+  # predecessor. Workers and deployment-time rendering must never remove it:
+  # either can start while a timer-owned pipeline cycle is active.
+  pipelinePreStartScript = pkgs.writeShellScript "cratedigger-pipeline-prestart" ''
+    set -euo pipefail
+    ${renderConfigScript}
+    rm -f "${cfg.stateDir}/.cratedigger.lock"
   '';
 
   # Optional health check for a stuck slskd reconnect loop. Generic — the
@@ -1454,6 +1462,23 @@ in {
       };
     };
 
+    # Materialise declarative runtime configuration independently of every
+    # application unit. A downstream ExecCondition is evaluated before an
+    # application's ExecStartPre, so app-owned rendering alone leaves stale
+    # mutable config throughout an intentional dependency hold.
+    systemd.services.cratedigger-config-render = {
+      description = "Render Cratedigger runtime configuration";
+      wantedBy = ["multi-user.target"];
+      restartIfChanged = true;
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        User = cfg.user;
+        Group = cfg.group;
+        ExecStart = renderConfigScript;
+      };
+    };
+
     systemd.services.cratedigger = {
       description = "Cratedigger — Soulseek download pipeline";
       after = ["cratedigger-db-migrate.service"] ++ redisServiceUnits;
@@ -1475,10 +1500,10 @@ in {
         # regardless of cfg.user: its onFailureCommand (e.g. `systemctl
         # restart slskd.service`) needs root, and once cfg.user is
         # non-root a bare ExecStartPre would run as that user and be
-        # unable to restart slskd. preStartScript must NOT get "+" — it
+        # unable to restart slskd. pipelinePreStartScript must NOT get "+" — it
         # renders config as cfg.user so ownership on the rendered files
         # matches the service that reads them.
-        ExecStartPre = lib.optional cfg.healthCheck.enable "+${slskdHealthCheck}" ++ [preStartScript];
+        ExecStartPre = lib.optional cfg.healthCheck.enable "+${slskdHealthCheck}" ++ [pipelinePreStartScript];
         Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${cratediggerPkg}/bin/cratedigger";
         WorkingDirectory = cfg.stateDir;
@@ -1529,14 +1554,15 @@ in {
         User = cfg.user;
         Group = cfg.group;
         UMask = "0000";
-        # Same ExecStartPre shape as cratedigger.service (including the
-        # "+" root-escalation prefix on slskdHealthCheck — see the comment
-        # there): gate on slskd reachability when the operator has
-        # health-check enabled, then render the config. The detection job
-        # hits slskd just as much as the main loop does, so a slskd
+        # Same health-check shape as cratedigger.service (including the "+"
+        # root-escalation prefix — see the comment there), followed by a
+        # render-only fallback. The detection job never owns the main pipeline
+        # lock, so it must not clear that lock while a cycle is active. It
+        # gates on slskd reachability when the operator has health-check enabled
+        # and hits slskd just as much as the main loop does, so a slskd
         # outage should fail the unit fast rather than write garbage
         # probe-failed rows for every cohort member.
-        ExecStartPre = lib.optional cfg.healthCheck.enable "+${slskdHealthCheck}" ++ [preStartScript];
+        ExecStartPre = lib.optional cfg.healthCheck.enable "+${slskdHealthCheck}" ++ [renderConfigScript];
         Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${unfindableDetectionPkg}/bin/cratedigger-unfindable";
         WorkingDirectory = cfg.stateDir;
@@ -1583,7 +1609,7 @@ in {
         User = cfg.user;
         Group = cfg.group;
         UMask = "0000";
-        ExecStartPre = [preStartScript];
+        ExecStartPre = [renderConfigScript];
         Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${importerPkg}/bin/cratedigger-importer";
         WorkingDirectory = cfg.stateDir;
@@ -1608,7 +1634,7 @@ in {
         User = cfg.user;
         Group = cfg.group;
         UMask = "0000";
-        ExecStartPre = [preStartScript];
+        ExecStartPre = [renderConfigScript];
         Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${previewWorkerPkg}/bin/cratedigger-import-preview-worker";
         WorkingDirectory = cfg.stateDir;
@@ -1653,6 +1679,7 @@ in {
         User = cfg.user;
         Group = cfg.group;
         UMask = "0000";
+        ExecStartPre = [renderConfigScript];
         Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${youtubeIngestWorkerPkg}/bin/cratedigger-youtube-ingest";
         WorkingDirectory = cfg.stateDir;
@@ -1671,6 +1698,7 @@ in {
         Type = "simple";
         User = cfg.user;
         Group = cfg.group;
+        ExecStartPre = [renderConfigScript];
         ExecStart = "${webPkg}/bin/cratedigger-web";
         Restart = "on-failure";
         RestartSec = 5;
