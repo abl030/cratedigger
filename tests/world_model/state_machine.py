@@ -15,6 +15,7 @@ import os
 import sys
 import unittest
 
+from beets import config as beets_config
 from hypothesis import HealthCheck, settings
 from hypothesis.database import DirectoryBasedExampleDatabase
 from hypothesis import strategies as st
@@ -31,7 +32,10 @@ from hypothesis.stateful import (
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 import conftest  # noqa: E402, F401
 
-from tests.beets_world import BeetsWorldRelease  # noqa: E402
+from tests.beets_world import (  # noqa: E402
+    BeetsWorldRelease,
+    HISTORICAL_PASSENGER_PATH_TEMPLATE,
+)
 from tests.world_model.support import LifecycleWorld, repository_root  # noqa: E402
 from tests.world_model.census_seeds import (  # noqa: E402
     STATEFUL_WORLD_CENSUS_SEEDS,
@@ -57,27 +61,32 @@ def _discogs_release_id(counter: int) -> str:
 class TestPinnedLifecycleWorld(unittest.TestCase):
     """Concrete pins promoted from incidents and generated counterexamples."""
 
-    def test_two_pressings_then_upgrade_preserve_exact_membership(self) -> None:
+    @staticmethod
+    def _add_passenger_pressings(world: LifecycleWorld) -> tuple[int, int]:
+        """Recreate the exact same-key label shape from the live incident."""
+
+        first_id = world.add_release(BeetsWorldRelease(
+            release_id="dd578a59-ef6d-46fa-9f28-1e19c456dac8",
+            artist="Lisa Hannigan",
+            album="Passenger",
+            year=2011,
+            codec="mp3",
+            label="ATO Records",
+        ))
+        second_id = world.add_release(BeetsWorldRelease(
+            release_id="5e7a6000-ce08-4e7b-9773-22a26e0a2980",
+            artist="Lisa Hannigan",
+            album="Passenger",
+            year=2011,
+            codec="mp3",
+            label="",
+        ))
+        return first_id, second_id
+
+    def test_passenger_pressings_stay_disambiguated_through_upgrade(self) -> None:
         assert TEST_DSN is not None
         with LifecycleWorld(TEST_DSN, repository_root()) as world:
-            first_id = world.add_release(BeetsWorldRelease(
-                release_id="10000000-0000-4000-8000-000000000001",
-                artist="Passenger",
-                album="Collision Course",
-                year=2008,
-                codec="mp3",
-                label="Archive One",
-                catalognum="A-1",
-            ))
-            second_id = world.add_release(BeetsWorldRelease(
-                release_id="7000002",
-                artist="Passenger",
-                album="Collision Course",
-                year=2008,
-                codec="mp3",
-                label="Archive Two",
-                catalognum="B-2",
-            ))
+            first_id, second_id = self._add_passenger_pressings(world)
 
             world.import_request(first_id)
             world.import_request(second_id)
@@ -89,13 +98,42 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
             self.assertEqual(
                 {album.release_id for album in albums},
                 {
-                    "10000000-0000-4000-8000-000000000001",
-                    "7000002",
+                    "dd578a59-ef6d-46fa-9f28-1e19c456dac8",
+                    "5e7a6000-ce08-4e7b-9773-22a26e0a2980",
                 },
             )
             self.assertEqual(
                 len({album.album_path for album in albums}),
                 2,
+            )
+
+    def test_passenger_historical_template_poison_is_caught(self) -> None:
+        """The real lifecycle invariant must kill the pre-fix path policy."""
+
+        assert TEST_DSN is not None
+        with LifecycleWorld(TEST_DSN, repository_root()) as world:
+            beets_config["paths"]["default"].set(
+                HISTORICAL_PASSENGER_PATH_TEMPLATE
+            )
+            violation_codes: set[str] = set()
+            try:
+                first_id, second_id = self._add_passenger_pressings(world)
+
+                world.import_request(first_id)
+                world.import_request(second_id)
+                violation_codes = {
+                    violation.code for violation in world.violations()
+                }
+            finally:
+                beets_config["paths"]["default"].set(
+                    world.beets.shipped.default_path_template
+                )
+
+            self.assertIn(
+                "folder_shared",
+                violation_codes,
+                "the world model did not detect the historical Passenger "
+                "folder collision",
             )
 
     def test_rejected_identical_retry_rebinds_current_evidence_path(self) -> None:

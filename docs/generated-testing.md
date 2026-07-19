@@ -88,6 +88,14 @@ wrong-match deletion, and reset. After every rule it checks the shared
 status/membership, evidence/disk coherence, proof-lock terminality, search-tier
 monotonicity, and denylist authority.
 
+The canonical folder-exclusivity pin is the real Lisa Hannigan `Passenger`
+shape from 2026-07-18: the existing ATO Records pressing is imported before a
+same-key sibling whose label is empty, then the first pressing is upgraded. A
+known-bad companion injects the exact historical `%aunique` template recovered
+from commit `76ad5a0d`; the lifecycle must report `folder_shared`. The current
+never-empty `path_disambig` policy must keep both exact pressings in distinct
+folders through the upgrade.
+
 Every generated world is initialized from the anonymized categorical corpus in
 `tests/world_model/census_seeds.py`. The corpus was captured read-only from
 doc2 on 2026-07-19 and retains only row-shape facts and capture-time counts:

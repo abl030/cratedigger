@@ -25,6 +25,16 @@ from lib.release_identity import detect_release_source
 from lib.world_invariants import LibraryAlbumSnapshot
 
 
+# Exact pre-2026-07-18 path policy recovered from commit 76ad5a0d. With an
+# already-sticky plain Passenger folder, ``label='ATO Records'`` versus an
+# empty sibling label lets the new pressing render the same plain directory.
+HISTORICAL_PASSENGER_PATH_TEMPLATE = (
+    "$albumartist/$year - $album%aunique{albumartist album,"
+    "albumtype year label catalognum albumdisambig releasegroupdisambig "
+    "short_mbid}/$track $title"
+)
+
+
 @dataclass(frozen=True)
 class ShippedBeetsWorldConfig:
     default_path_template: str
@@ -520,6 +530,7 @@ class BeetsWorld:
 __all__ = [
     "BeetsWorld",
     "BeetsWorldRelease",
+    "HISTORICAL_PASSENGER_PATH_TEMPLATE",
     "ShippedBeetsWorldConfig",
     "build_subprocess_beets_config",
     "extract_shipped_beets_world_config",
