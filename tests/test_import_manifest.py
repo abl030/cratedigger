@@ -120,7 +120,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             mb_release_id="mbid-123",
-            status="manual",
+            status="unsearchable",
             artist_name="Bon Iver",
             album_title="Bon Iver",
         ))
@@ -173,7 +173,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
         self.assertIn("12 Wash.opus", outcome.message)
         # The candidate fact is recorded, but the operator-owned search stop
         # and the Wrong Matches entry are both preserved.
-        self.assertEqual(db.request(42)["status"], "manual")
+        self.assertEqual(db.request(42)["status"], "unsearchable")
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
         self.assertIn(("rejected", "untracked_audio"), outcomes)
         rejection = next(
@@ -194,7 +194,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             mb_release_id="mbid-123",
-            status="manual",
+            status="unsearchable",
         ))
         db.set_tracks(42, [{"track_number": 1, "title": "One"}])
 
@@ -225,7 +225,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
         self.assertFalse(outcome.success)
         self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
         self.assertIn("manifest has 2 audio files", outcome.message)
-        self.assertEqual(db.request(42)["status"], "manual")
+        self.assertEqual(db.request(42)["status"], "unsearchable")
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
         self.assertIn(("rejected", "untracked_audio"), outcomes)
         self.assertEqual(len(db.denylist), 0)
@@ -235,7 +235,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             mb_release_id="mbid-123",
-            status="manual",
+            status="unsearchable",
         ))
         db.set_tracks(42, [
             {"track_number": 1, "title": "One"},
@@ -258,7 +258,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
         self.assertFalse(outcome.success)
         self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
         self.assertIn("3 audio files", outcome.message)
-        self.assertEqual(db.request(42)["status"], "manual")
+        self.assertEqual(db.request(42)["status"], "unsearchable")
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
         self.assertIn(("rejected", "untracked_audio"), outcomes)
         self.assertEqual(len(db.denylist), 0)
@@ -271,7 +271,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             mb_release_id="mbid-123",
-            status="manual",
+            status="unsearchable",
         ))
 
         with tempfile.TemporaryDirectory() as root:
@@ -288,7 +288,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
         self.assertFalse(outcome.success)
         self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
         self.assertIn("requires either an origin audio manifest", outcome.message)
-        self.assertEqual(db.request(42)["status"], "manual")
+        self.assertEqual(db.request(42)["status"], "unsearchable")
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
         self.assertIn(("rejected", "unverifiable_source"), outcomes)
         self.assertEqual(len(db.denylist), 0)
@@ -304,7 +304,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             mb_release_id="mbid-123",
-            status="manual",
+            status="unsearchable",
         ))
         db.set_tracks(42, [
             {"track_number": 1, "title": "One"},
@@ -326,7 +326,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
         # Preserve-folder code (importer skips deletion) — a non-empty source
         # must never route through the rmtree-ing QUALITY_PIPELINE_REJECTED.
         self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
-        self.assertEqual(db.request(42)["status"], "manual")
+        self.assertEqual(db.request(42)["status"], "unsearchable")
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
         self.assertIn(("rejected", "incomplete_fileset"), outcomes)
         # Missing audio is not the peer's fault — never denylist.
@@ -341,7 +341,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             mb_release_id="mbid-123",
-            status="manual",
+            status="unsearchable",
         ))
         db.set_tracks(42, [
             {"track_number": 1, "title": "One"},
@@ -373,7 +373,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
 
         self.assertFalse(outcome.success)
         self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
-        self.assertEqual(db.request(42)["status"], "manual")
+        self.assertEqual(db.request(42)["status"], "unsearchable")
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
         self.assertIn(("rejected", "incomplete_fileset"), outcomes)
         self.assertEqual(len(db.denylist), 0)

@@ -100,16 +100,19 @@ that audit trail.
 ## `album_requests` — quality-tracking fields
 
 - `status TEXT` — active vocabulary: `wanted`, `downloading`, `imported`,
-  `manual`; terminal audit vocabulary: `replaced`. Ordinary transitions are
-  fail-closed and use SQL compare-and-set against the exact observed/declared
-  source status. `replaced` has no outgoing edge and is created only by the
-  one-way `supersede_request_mbid` transaction.
+  `unsearchable`; terminal audit vocabulary: `replaced`. `unsearchable` is an
+  explicit operator-owned search stop and is independent of source cleanup.
+  Ordinary transitions are fail-closed and use SQL compare-and-set against the
+  exact observed/declared source status. `replaced` has no outgoing edge and is
+  created only by the one-way `supersede_request_mbid` transaction.
 
-  The explicit transition graph has 13 edges: `wanted → downloading/manual/
-  imported`; `downloading → wanted/manual/imported`; `imported → wanted/manual/
-  imported`; `manual → wanted/manual/imported`; and `wanted → wanted`.
-  Status-only self-transitions for `wanted`, `imported`, and `manual` are true
-  no-ops: they do not change `updated_at` or any other byte. There is no
+  The explicit transition graph has 11 edges: `wanted → downloading/
+  unsearchable/imported/wanted`; `downloading → wanted/imported`; `imported →
+  wanted/imported`; and `unsearchable → wanted/imported/unsearchable`.
+  `downloading → unsearchable` cannot abandon an active transfer, and
+  `imported → unsearchable` cannot retroactively stop a completed request.
+  Status-only self-transitions for `wanted`, `imported`, and `unsearchable` are
+  true no-ops: they do not change `updated_at` or any other byte. There is no
   `downloading → downloading` edge because acquiring download ownership must
   remain an explicit compare-and-set operation.
 
@@ -614,10 +617,6 @@ existing `idx_search_log_request_created_at` composite index.
 
 The 14-day window is intentional — triage windows that need older
 data should query `search_log` directly. (R29)
-
-## `album_requests.manual_reason`
-
-A free-form `TEXT` column populated by system flips that move a request to `status='manual'`. Currently unused — the persisted-search-plans cutover replaced the legacy variant ladder's `exhausted` flow with cursor wrap (no manual flip). The column stays for future operator-hold workflows that need a structured reason without overloading the human-authored `reasoning` field. Cleared (`NULL`) on every `reset_to_wanted` so re-queue starts with a clean slate.
 
 ## Wrong Matches and Force-Import
 

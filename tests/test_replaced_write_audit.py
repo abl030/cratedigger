@@ -66,7 +66,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/terminal_outcomes.py", 89, "741f55b2f7eee516"): (
         "terminal metadata keys use the existing validated request-field vocabulary"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 289, "6cfaff9c6507c211"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 304, "6cfaff9c6507c211"): (
         "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
     ),
     ("lib/beets_db.py", 339, "8f86dc625b889913"): (
@@ -84,16 +84,16 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/dashboard.py", 481, "5e3b8177198ccbed"): (
         "dashboard WHERE and ORDER fragments come from closed enum branches"
     ),
-    ("lib/pipeline_db/download_log.py", 737, "d21a8be0a38ad4f3"): (
+    ("lib/pipeline_db/download_log.py", 736, "d21a8be0a38ad4f3"): (
         "validation key is selected from a closed server-owned vocabulary"
     ),
-    ("lib/pipeline_db/download_log.py", 795, "e0154e89026dc8ef"): (
+    ("lib/pipeline_db/download_log.py", 794, "e0154e89026dc8ef"): (
         "validation key is selected from a closed server-owned vocabulary"
     ),
-    ("lib/pipeline_db/download_log.py", 813, "1ca75e0c21fa6d7e"): (
+    ("lib/pipeline_db/download_log.py", 812, "1ca75e0c21fa6d7e"): (
         "validation key is closed vocabulary and IN list is value placeholders"
     ),
-    ("lib/pipeline_db/download_log.py", 830, "d87a36ba1d1768e7"): (
+    ("lib/pipeline_db/download_log.py", 829, "d87a36ba1d1768e7"): (
         "JSON path key is selected from a closed server-owned vocabulary"
     ),
     ("lib/pipeline_db/import_jobs.py", 105, "ecf3d1844c67f653"): (
@@ -129,13 +129,13 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "metadata keys are validated identifiers, lifecycle fields are reserved, "
         "and values use one typed JSONB record parameter"
     ),
-    ("lib/pipeline_db/requests.py", 1343, "0e292421052b4282"): (
+    ("lib/pipeline_db/requests.py", 1339, "0e292421052b4282"): (
         "optional LIMIT is normalized through int before interpolation"
     ),
-    ("lib/pipeline_db/requests.py", 1358, "f027e891f4828e53"): (
+    ("lib/pipeline_db/requests.py", 1354, "f027e891f4828e53"): (
         "ORDER is selected from two literals and LIMIT remains a value placeholder"
     ),
-    ("lib/pipeline_db/requests.py", 1543, "714da98640ff84f0"): (
+    ("lib/pipeline_db/requests.py", 1539, "714da98640ff84f0"): (
         "attempt kind is validated against the fixed retry-counter vocabulary"
     ),
     ("lib/pipeline_db/search_plan.py", 949, "3df0db818cab2f3c"): (
@@ -150,19 +150,19 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
 # beside the implementation they review; movement or SQL-shape drift fails the
 # ratchet just like the dynamic-SQL exceptions above.
 _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/terminal_outcomes.py", 131, "72791581d0b54266"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 131, "e0057766c732179a"): (
         "atomic terminal transition mirrors typed wanted CAS inside one transaction"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 190, "9ab1fc9fb20fb77b"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 190, "6d280a5c4dbb4e32"): (
         "atomic preview recovery accepts only downloading as its exact source"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 330, "786d2b82f14ac409"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 345, "786d2b82f14ac409"): (
         "atomic terminal import CASes status with rescue audit in the same transaction"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 370, "0a9c4396d1185b94"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 385, "0a9c4396d1185b94"): (
         "atomic terminal typed transition CASes the source status selected by the DAG"
     ),
-    ("lib/pipeline_db/download_log.py", 403, "b04c5ae9eb3423c1"): (
+    ("lib/pipeline_db/download_log.py", 403, "6c7d7519e8c91827"): (
         "atomic abandoned-import recovery performs downloading-to-wanted CAS"
     ),
     ("lib/pipeline_db/requests.py", 288, "558917722283199d"): (
@@ -177,16 +177,16 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/requests.py", 904, "c99b75cd27718b63"): (
         "typed imported transition CASes status with rescue audit atomically"
     ),
-    ("lib/pipeline_db/requests.py", 1044, "624291485d30cd9b"): (
+    ("lib/pipeline_db/requests.py", 1040, "0e937f9ab5227f21"): (
         "typed reset-to-wanted transition CASes its captured source status"
     ),
-    ("lib/pipeline_db/requests.py", 1113, "96c221e77f54ca60"): (
+    ("lib/pipeline_db/requests.py", 1109, "cfedc69363af13f0"): (
         "automatic recovery accepts only downloading as its exact source"
     ),
-    ("lib/pipeline_db/requests.py", 1158, "2b2c27302b2ab78e"): (
+    ("lib/pipeline_db/requests.py", 1154, "2b2c27302b2ab78e"): (
         "typed download claim accepts only the explicit wanted source status"
     ),
-    ("lib/pipeline_db/requests.py", 1194, "186e1c3ba3188478"): (
+    ("lib/pipeline_db/requests.py", 1190, "186e1c3ba3188478"): (
         "plan-aware download claim uses an exact wanted source predicate"
     ),
 }
@@ -400,7 +400,7 @@ def _execute_params_argument(node: ast.Call) -> ast.expr | None:
 
 
 _ACTIVE_REQUEST_STATUSES = frozenset({
-    "wanted", "downloading", "imported", "manual",
+    "wanted", "downloading", "imported", "unsearchable",
 })
 
 
@@ -560,7 +560,7 @@ def _target_status_predicates(
     scope: ast.AST,
 ) -> tuple[bool, bool, bool]:
     """Return terminal guard, exact-source CAS, and invalid status CAS."""
-    active_values = {"'wanted'", "'downloading'", "'imported'", "'manual'"}
+    active_values = {"'wanted'", "'downloading'", "'imported'", "'unsearchable'"}
     if any(
         token_depth == depth and token.lower() == "or"
         for token, token_depth in tokens[start:end]
@@ -1342,7 +1342,7 @@ def thaw(cur, request_id):
         source = """
 def thaw(cur, request_id):
     cur.execute(
-        "UPDATE album_requests SET status = 'manual' "
+        "UPDATE album_requests SET status = 'unsearchable' "
         "WHERE id = %s AND status != 'replaced'",
         (request_id,),
     )
@@ -1356,7 +1356,7 @@ def thaw(cur, request_id):
         source = """
 def thaw(cur, request_id, source_status):
     cur.execute(
-        "UPDATE album_requests SET status = 'manual' "
+        "UPDATE album_requests SET status = 'unsearchable' "
         "WHERE id = %s AND status = %s",
         (request_id, source_status),
     )

@@ -1,6 +1,6 @@
 // @ts-check
 import { state, API, toast } from './state.js';
-import { esc, qualityLabel, manualReasonLabel, renderForensicBlock } from './util.js';
+import { esc, qualityLabel, renderForensicBlock } from './util.js';
 import { renderDownloadHistoryItem } from './history.js';
 import {
   renderBeetsTrackRow, renderExpectedTrackRow, renderDetailRow, renderExternalLinkRow, toggleExpand,
@@ -193,6 +193,26 @@ function renderPipelineNav() {
 }
 
 /**
+ * Render lifecycle actions without offering an invalid search-stop edge.
+ * @param {string|number} requestId
+ * @param {string} status
+ * @returns {string}
+ */
+function renderPipelineStatusButtons(requestId, status) {
+  const downloading = status === 'downloading'
+    ? '<button class="p-btn active-status" disabled aria-disabled="true">downloading</button>'
+    : '';
+  const canSetUnsearchable = status === 'wanted' || status === 'unsearchable';
+  const unsearchable = canSetUnsearchable
+    ? `<button class="p-btn ${status === 'unsearchable' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.updateStatus(${requestId}, 'unsearchable')">unsearchable</button>`
+    : '<button class="p-btn" disabled aria-disabled="true">unsearchable</button>';
+  return `${downloading}
+      <button class="p-btn ${status === 'wanted' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.updateStatus(${requestId}, 'wanted')">wanted</button>
+      <button class="p-btn ${status === 'imported' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.updateStatus(${requestId}, 'imported')">imported</button>
+      ${unsearchable}`;
+}
+
+/**
  * Toggle detail panel for a pipeline or recents item.
  * @param {string|number} elId - DOM id for the detail panel
  * @param {number} [requestId] - album_requests.id (defaults to elId for pipeline tab)
@@ -212,13 +232,6 @@ export async function toggleDetail(elId, requestId) {
     const history = data.history || [];
 
     let html = '';
-    // Manual-reason chip (e.g. search_exhausted) — surfaces the reason a
-    // request landed in `manual` so the operator does not have to query
-    // JSONB. Hidden when null (manually-set or pre-U7 rows).
-    const reasonLabel = manualReasonLabel(data.manual_reason);
-    if (reasonLabel) {
-      html += renderDetailRow('Manual reason', `<span class="p-manual-chip">${esc(reasonLabel)}</span>`);
-    }
     // External link (MB or Discogs)
     html += renderExternalLinkRow(req.mb_release_id || '');
     if (req.imported_path) {
@@ -237,9 +250,7 @@ export async function toggleDetail(elId, requestId) {
     // Status change buttons
     html += `<div class="p-actions">
       <span class="p-detail-label" style="line-height:28px;">Status:</span>
-      <button class="p-btn ${req.status === 'wanted' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.updateStatus(${id}, 'wanted')">wanted</button>
-      <button class="p-btn ${req.status === 'imported' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.updateStatus(${id}, 'imported')">imported</button>
-      <button class="p-btn ${req.status === 'manual' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.updateStatus(${id}, 'manual')">manual</button>`;
+      ${renderPipelineStatusButtons(id, req.status)}`;
     // Bad-rip reuses the library renderer — pipelineId + releaseId are all
     // it needs from state. Hidden when either is absent (issue #188).
     html += renderBadRipButton(/** @type {any} */ ({pipelineId: id, releaseId: req.mb_release_id}), {
@@ -359,6 +370,7 @@ export async function updateStatus(id, newStatus) {
 
 export const __test__ = {
   renderPipelineNav,
+  renderPipelineStatusButtons,
   renderCurrentQualityRow,
   renderRequestEvidenceSections,
 };

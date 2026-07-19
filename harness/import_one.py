@@ -1061,8 +1061,10 @@ def run_import(path, mb_release_id):
 # Pipeline DB updates
 # ---------------------------------------------------------------------------
 
-def update_pipeline_db(request_id, status, imported_path=None, distance=None, scenario=None):
-    """Update pipeline DB via the shared finalization seam.
+def update_pipeline_db(
+    request_id, imported_path=None, distance=None, scenario=None,
+):
+    """Record a successful imported outcome through the finalization seam.
 
     Best-effort — failures are logged but do not block the import harness.
     """
@@ -1078,20 +1080,8 @@ def update_pipeline_db(request_id, status, imported_path=None, distance=None, sc
         if scenario:
             extra["beets_scenario"] = scenario
         try:
-            if status == "imported":
-                transition = transitions.RequestTransition.to_imported_fields(
-                    fields=extra)
-            elif status == "wanted":
-                transition = transitions.RequestTransition.to_wanted_fields(
-                    fields=extra)
-            elif status == "manual":
-                if extra:
-                    names = ", ".join(sorted(extra))
-                    raise ValueError(
-                        f"manual transitions do not accept fields: {names}")
-                transition = transitions.RequestTransition.to_manual()
-            else:
-                transition = transitions.RequestTransition.status_only(status)
+            transition = transitions.RequestTransition.to_imported_fields(
+                fields=extra)
             transitions.require_transition_applied(
                 finalize_request(
                     db,
@@ -1500,7 +1490,7 @@ def _run_quality_evidence_authorized_import(
 
     if request_id:
         stage_start = time.monotonic()
-        update_pipeline_db(request_id, "imported", imported_path=album_path)
+        update_pipeline_db(request_id, imported_path=album_path)
         _log_timing("pipeline_db_update", stage_start)
 
     beets.close()
@@ -1611,7 +1601,7 @@ def main():
                         beets_id=info.album_id,
                         track_count=info.track_count,
                         imported_path=info.album_path)
-                    update_pipeline_db(request_id, "imported",
+                    update_pipeline_db(request_id,
                                        imported_path=info.album_path)
         else:
             _log(f"[ERROR] {r.error}")
@@ -2237,7 +2227,7 @@ def main():
     # --- Pipeline DB: imported ---
     if request_id:
         stage_start = time.monotonic()
-        update_pipeline_db(request_id, "imported", imported_path=album_path)
+        update_pipeline_db(request_id, imported_path=album_path)
         _log_timing("pipeline_db_update", stage_start)
 
     # --- Final exit ---

@@ -86,6 +86,7 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
     }
     BAN_SOURCE_REQUIRED_FIELDS = {
         "status", "username", "beets_removed", "hashes_recorded",
+        "request_status",
     }
     FORCE_IMPORT_REQUIRED_FIELDS = {
         "status", "request_id", "artist", "album", "message",
@@ -629,7 +630,7 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
 
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_pipeline_update_contract(self, _mock_transition):
-        status, data = self._post("/api/pipeline/update", {"id": 100, "status": "manual"})
+        status, data = self._post("/api/pipeline/update", {"id": 100, "status": "unsearchable"})
 
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.UPDATE_REQUIRED_FIELDS,
@@ -637,7 +638,7 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
 
     def test_pipeline_update_same_status_is_idempotent_for_operator_statuses(self):
         for index, request_status in enumerate(
-            ("wanted", "imported", "manual"),
+            ("wanted", "imported", "unsearchable"),
             start=601,
         ):
             with self.subTest(status=request_status):
@@ -657,21 +658,21 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
                 self.assertEqual(data["new_status"], request_status)
                 self.assertEqual(self.db.get_request(index), before)
 
-    def test_pipeline_update_imported_to_manual(self):
+    def test_pipeline_update_imported_to_unsearchable_is_rejected(self):
         self.db.seed_request(make_request_row(
             id=604,
             status="imported",
-            mb_release_id="imported-to-manual",
+            mb_release_id="imported-to-unsearchable",
         ))
 
         status, data = self._post(
             "/api/pipeline/update",
-            {"id": 604, "status": "manual"},
+            {"id": 604, "status": "unsearchable"},
         )
 
-        self.assertEqual(status, 200)
-        self.assertEqual(data["new_status"], "manual")
-        self.assertEqual(self.db.request(604)["status"], "manual")
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "transition_conflict")
+        self.assertEqual(self.db.request(604)["status"], "imported")
 
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_pipeline_update_maps_stale_transition_to_409_without_success(
@@ -679,14 +680,14 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
     ):
         mock_transition.return_value = TransitionConflict(
             request_id=100,
-            target_status="manual",
+            target_status="unsearchable",
             kind=TransitionConflictKind.stale_source,
             expected_status="imported",
             actual_status="replaced",
         )
 
         status, data = self._post(
-            "/api/pipeline/update", {"id": 100, "status": "manual"})
+            "/api/pipeline/update", {"id": 100, "status": "unsearchable"})
 
         self.assertEqual(status, 409)
         self.assertEqual(data["error"], "transition_conflict")
@@ -736,9 +737,10 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_pipeline_set_quality_contract(self, mock_transition):
         mock_transition.side_effect = transitions.finalize_request
+        self.db.request(100)["status"] = "wanted"
         status, data = self._post(
             "/api/pipeline/set-quality",
-            {"mb_release_id": "abc-123", "status": "manual", "min_bitrate": 245},
+            {"mb_release_id": "abc-123", "status": "unsearchable", "min_bitrate": 245},
         )
 
         self.assertEqual(status, 200)
@@ -752,14 +754,14 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         mock_transition.side_effect = transitions.finalize_request
         self.db.seed_request(make_request_row(
             id=100,
-            status="imported",
+            status="wanted",
             mb_release_id="12856590",
             discogs_release_id=None,
         ))
 
         status, data = self._post(
             "/api/pipeline/set-quality",
-            {"mb_release_id": " 0012856590 ", "status": "manual", "min_bitrate": 245},
+            {"mb_release_id": " 0012856590 ", "status": "unsearchable", "min_bitrate": 245},
         )
 
         self.assertEqual(status, 200)
@@ -862,6 +864,29 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.BAN_SOURCE_REQUIRED_FIELDS,
                                 "pipeline ban-source response")
+        self.assertEqual(data["request_status"], "wanted")
+
+    @patch("web.routes.pipeline_mutations.finalize_request")
+    def test_pipeline_ban_source_reports_preserved_search_stop(
+        self, _mock_transition,
+    ):
+        import web.server as srv
+        release_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        self.db.seed_request(make_request_row(
+            id=102, status="unsearchable", mb_release_id=release_id,
+        ))
+        old_beets = srv._beets
+        srv._beets = FakeBeetsDB()
+        try:
+            status, data = self._post(
+                "/api/pipeline/ban-source",
+                {"request_id": 102, "confirm": "BAN", "mb_release_id": release_id},
+            )
+        finally:
+            srv._beets = old_beets
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["request_status"], "unsearchable")
 
     def test_pipeline_ban_source_requires_confirmation(self):
         status, data = self._post(

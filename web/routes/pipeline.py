@@ -312,7 +312,8 @@ def get_pipeline_all(h, params: dict[str, list[str]]) -> None:
     all_data: dict[str, object] = {"counts": counts}
     status_items: dict[str, list[dict]] = {}
     all_ids: list[int] = []
-    statuses: tuple[str, ...] = ("wanted", "downloading", "imported", "manual")
+    statuses: tuple[str, ...] = (
+        "wanted", "downloading", "imported", "unsearchable")
     # ``?include_replaced=true`` opt-in surfaces the frozen audit rows
     # for operators reviewing past Replace actions (R30). Default off so
     # the standard view stays focused on active work.
@@ -440,7 +441,6 @@ def get_pipeline_detail(h, params: dict[str, list[str]], req_id_str: str) -> Non
         "request": s._serialize_row(req),
         "tracks": tracks,
         "history": history_items,
-        "manual_reason": req.get("manual_reason"),
         "last_search": last_search,
     }
     mbid = req.get("mb_release_id")

@@ -19,6 +19,7 @@ from lib.destructive_release_service import (
     BanSourceLockContended,
     BanSourceReleaseMismatch,
     BanSourceRequest,
+    BanSourceSuccess,
     BanSourceTransitionConflict,
     DeleteImporterBusy,
     DeleteLockContended,
@@ -205,6 +206,38 @@ class TestBanSourceAuthority(unittest.TestCase):
 
         self.assertIsInstance(result, BanSourceTransitionConflict)
         self._assert_no_mutation()
+
+    def test_unsearchable_bad_rip_preserves_search_stop(self) -> None:
+        """Bad Rip bans the source and removes the copy without searching."""
+        self.db.seed_request(make_request_row(
+            id=41,
+            status="unsearchable",
+            mb_release_id=RELEASE_A,
+            imported_path="/Beets/Artist/Album",
+        ))
+        self.db.log_download(
+            request_id=41,
+            soulseek_username="bad-peer",
+            outcome="success",
+        )
+
+        result = ban_source(
+            pipeline_db=self.db,
+            beets_db=self.beets,
+            request=BanSourceRequest(request_id=41),
+        )
+
+        self.assertNotIsInstance(result, BanSourceTransitionConflict)
+        assert isinstance(result, BanSourceSuccess)
+        self.assertEqual(result.request_status, "unsearchable")
+        row = self.db.request(41)
+        self.assertEqual(row["status"], "unsearchable")
+        self.assertIsNone(row["imported_path"])
+        self.assertEqual(
+            [(entry.request_id, entry.username) for entry in self.db.denylist],
+            [(41, "bad-peer")],
+        )
+        self.assertEqual(self.db.download_logs[-1].outcome, "curator_ban")
 
 
 class TestLibraryDeleteAuthority(unittest.TestCase):

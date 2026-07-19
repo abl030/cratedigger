@@ -487,7 +487,7 @@ class TestImportPreviewPath(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             mb_release_id="mbid-42",
-            status="manual",
+            status="unsearchable",
             min_bitrate=180,
             current_lossless_source_v0_probe_min_bitrate=128,
             current_lossless_source_v0_probe_avg_bitrate=171,

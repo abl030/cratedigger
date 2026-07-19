@@ -44,6 +44,25 @@ console.log('renderPipelineNav() refreshes the dashboard subtab');
   assertContains(html, 'window.loadPipelineDashboard()', 'dashboard refresh reloads dashboard metrics');
   assertContains(html, 'subtab-refresh', 'refresh uses shared subtab layout');
 }
+console.log('pipeline status controls disable invalid unsearchable transitions');
+{
+  const imported = __test__.renderPipelineStatusButtons(42, 'imported');
+  assertContains(imported, "class=\"p-btn active-status\" onclick=\"event.stopPropagation(); window.updateStatus(42, 'imported')\">imported</button>", 'imported remains visibly current');
+  assertExcludes(imported, "window.updateStatus(42, 'unsearchable')", 'imported cannot invoke unsearchable');
+  assertContains(imported, 'disabled aria-disabled="true">unsearchable</button>', 'invalid imported stop is disabled');
+
+  const downloading = __test__.renderPipelineStatusButtons(42, 'downloading');
+  assertContains(downloading, 'disabled aria-disabled="true">downloading</button>', 'downloading remains visibly current');
+  assertExcludes(downloading, "window.updateStatus(42, 'unsearchable')", 'downloading cannot invoke unsearchable');
+  assertContains(downloading, 'disabled aria-disabled="true">unsearchable</button>', 'invalid downloading stop is disabled');
+
+  const wanted = __test__.renderPipelineStatusButtons(42, 'wanted');
+  assertContains(wanted, "window.updateStatus(42, 'unsearchable')", 'wanted may become unsearchable');
+
+  const stopped = __test__.renderPipelineStatusButtons(42, 'unsearchable');
+  assertContains(stopped, "window.updateStatus(42, 'unsearchable')", 'current unsearchable state remains an active control');
+  assertContains(stopped, 'class="p-btn active-status"', 'unsearchable remains visibly current');
+}
 console.log('request detail caps history and collapses tracks');
 {
   const history = Array.from({ length: 12 }, (_, id) => ({

@@ -89,7 +89,7 @@ def _reject_import_from_evidence_decision(
 
     Every reject honours ``requeue_on_failure``. Automatic imports pass True
     because a rejected candidate should self-heal to ``wanted``. Force imports
-    pass False because their ``manual`` (next-step ``unsearchable``) request
+    pass False because their ``unsearchable`` request
     status is operator-owned and a candidate fact must not clear it.
     """
 

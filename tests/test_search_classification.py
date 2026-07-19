@@ -97,9 +97,9 @@ class TestClassifyFailureClass(unittest.TestCase):
             FAILURE_CLASS_RESOLVED,
         ),
         (
-            "resolved: status=manual overrides A-dominant pattern",
+            "resolved: status=unsearchable overrides A-dominant pattern",
             _no_results(10),
-            "manual",
+            "unsearchable",
             FAILURE_CLASS_RESOLVED,
         ),
         # 7. Edge: zero searches in cycle with status=wanted → None.

@@ -141,6 +141,9 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
         self.db.seed_request(make_request_row(
             id=9104, status="downloading", mb_release_id="dash-in-flight",
         ))
+        self.db.seed_request(make_request_row(
+            id=9105, status="unsearchable", mb_release_id="dash-stopped",
+        ))
         beets = FakeBeetsDB()
         beets.set_album_exists("dash-on-disk", True)
         # The class setUp baseline (id=100, imported) must read as
@@ -159,8 +162,8 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
             self, dc["counts"], self.DISK_COVERAGE_COUNT_FIELDS,
             "pipeline dashboard disk coverage counts")
         # Only off-disk `imported` rows are drift — wanted (not yet
-        # acquired), downloading (in flight), and manual (staged for
-        # review) are all expected to be absent from beets.
+        # acquired), downloading (in flight), and unsearchable (operator
+        # search stop) are all expected to be absent from beets.
         self.assertEqual([r["id"] for r in dc["drift_rows"]], [9102])
         _assert_required_fields(
             self, dc["drift_rows"][0], self.DISK_COVERAGE_ROW_FIELDS,

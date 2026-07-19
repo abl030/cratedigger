@@ -130,7 +130,7 @@ console.log('splitPressings() — partition + hoist invariants over the status/o
     { in_library: false, pipeline_status: 'downloading' },
     { in_library: true, pipeline_status: 'wanted' },
     { in_library: false, pipeline_status: 'imported' },
-    { in_library: false, pipeline_status: 'manual' },
+    { in_library: false, pipeline_status: 'unsearchable' },
     { in_library: false, pipeline_status: 'replaced' },
     { in_library: true, pipeline_status: 'replaced' },
   ];

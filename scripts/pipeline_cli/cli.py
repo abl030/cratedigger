@@ -23,10 +23,8 @@ from scripts.pipeline_cli.quality import cmd_quality, cmd_repair_spectral
 from scripts.pipeline_cli.replace import cmd_replace
 from scripts.pipeline_cli.album_requests import (
     cmd_add,
-    cmd_cancel,
     cmd_disk_coverage,
     cmd_list,
-    cmd_retry,
     cmd_set,
     cmd_set_intent,
     cmd_status,
@@ -111,8 +109,6 @@ def main():
         "query": cmd_query,
         "status": cmd_status,
         "disk-coverage": cmd_disk_coverage,
-        "retry": cmd_retry,
-        "cancel": cmd_cancel,
         "set": cmd_set,
         "set-intent": cmd_set_intent,
         "show": cmd_show,

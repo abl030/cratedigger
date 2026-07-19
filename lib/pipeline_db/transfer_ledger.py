@@ -40,8 +40,8 @@ from lib.pipeline_db._shared import TransferLedgerRow
 # reaper/convergence paths may still need their ownership evidence while the
 # request is being retried. Pending intents have no ownership value and are
 # bounded solely by the retention window. Accepted rows for everything else
-# (imported, manual, replaced, or a missing request) are also fair game once
-# past that window.
+# (imported, unsearchable, replaced, or a missing request) are also fair game
+# once past that window.
 _ACTIVE_REQUEST_STATUSES = ("wanted", "downloading")
 
 

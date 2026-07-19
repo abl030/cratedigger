@@ -158,7 +158,7 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         status, data = self._get("/api/pipeline/all")
         self.assertEqual(status, 200)
         self.assertIn("counts", data)
-        for key in ("wanted", "downloading", "imported", "manual"):
+        for key in ("wanted", "downloading", "imported", "unsearchable"):
             self.assertIn(key, data)
 
     def test_pipeline_status_includes_downloading(self):

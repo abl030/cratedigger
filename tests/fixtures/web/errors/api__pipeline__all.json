@@ -3,10 +3,10 @@
     "wanted": 9,
     "downloading": 1,
     "imported": 418,
-    "manual": 12
+    "unsearchable": 12
   },
   "wanted": [],
   "downloading": [],
   "imported": [],
-  "manual": []
+  "unsearchable": []
 }

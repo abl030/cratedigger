@@ -1003,15 +1003,11 @@ class _RequestsMixin(_PipelineDBBase):
         preserved.  Pass ``search_filetype_override=None`` to clear the column;
         omitting it leaves the existing value untouched.
 
-        ``clear_retry_counters`` is for operator/manual requeues that should get
+        ``clear_retry_counters`` is for operator requeues that should get
         a clean slate. Automatic downloading → wanted failure paths preserve the
         counters so backoff can keep growing and the picker does not treat the
         row as brand new.
 
-        Always clears ``manual_reason`` — re-queueing past a manual flip
-        means the operator wants a clean slate. Per U6: every re-queue path
-        funnels through this method, so a single ``manual_reason = NULL``
-        write here covers web UI, CLI, and importer requeue paths.
         """
         unknown = sorted(
             set(fields) - {
@@ -1044,7 +1040,7 @@ class _RequestsMixin(_PipelineDBBase):
         cur = self._execute(
             "UPDATE album_requests "
             "SET status = 'wanted', active_download_state = NULL, "
-            "manual_reason = NULL, updated_at = %s, "
+            "updated_at = %s, "
             "search_attempts = CASE WHEN %s THEN 0 ELSE search_attempts END, "
             "download_attempts = CASE WHEN %s THEN 0 ELSE download_attempts END, "
             "validation_attempts = CASE WHEN %s THEN 0 ELSE validation_attempts END, "
@@ -1113,7 +1109,7 @@ class _RequestsMixin(_PipelineDBBase):
         cur = self._execute(
             "UPDATE album_requests "
             "SET status = 'wanted', active_download_state = NULL, "
-            "manual_reason = NULL, updated_at = %s, "
+            "updated_at = %s, "
             "prev_min_bitrate = CASE WHEN %s THEN %s "
             "WHEN %s THEN COALESCE(min_bitrate, prev_min_bitrate) "
             "ELSE prev_min_bitrate END, "
@@ -1320,7 +1316,7 @@ class _RequestsMixin(_PipelineDBBase):
 
     def get_wanted(self, limit=None):
         now = datetime.now(timezone.utc)
-        # New/manual-requeued albums go first, then random.
+        # New/operator-requeued albums go first, then random.
         # This ensures freshly added or upgrade-requeued albums get picked
         # up on the next cycle instead of waiting for random selection, while
         # automatic failed-download requeues stay in the normal random pool.
@@ -1454,7 +1450,7 @@ class _RequestsMixin(_PipelineDBBase):
 
         One Postgres query regardless of cohort size. Banding happens
         downstream in the service (beets-only, batched). Ordered by id ASC for
-        stable rendering. ``replaced`` / ``imported`` / ``manual`` /
+        stable rendering. ``replaced`` / ``imported`` / ``unsearchable`` /
         ``downloading`` rows are correctly excluded (R2 — worklist is the
         ``wanted`` set only).
         """

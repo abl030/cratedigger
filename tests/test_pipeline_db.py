@@ -1614,7 +1614,7 @@ class TestUpdateStatus(unittest.TestCase):
         self.db.close()
 
     def test_status_transitions(self):
-        for s in ["wanted", "imported", "manual"]:
+        for s in ["wanted", "imported", "unsearchable"]:
             self.db.update_status(self.req_id, s)
             req = self.db.get_request(self.req_id)
             assert req is not None
@@ -1758,7 +1758,7 @@ class TestTrackManagement(unittest.TestCase):
             self.req_id, expected_status="wanted",
         ))
         self.assertFalse(self.db.update_request_fields(
-            self.req_id, expected_status="manual",
+            self.req_id, expected_status="unsearchable",
         ))
         self.assertFalse(self.db.update_request_fields(replaced_id))
         self.assertFalse(self.db.update_request_fields(
@@ -1799,7 +1799,7 @@ class TestTrackManagement(unittest.TestCase):
                 self.assertEqual(self.db.get_request(self.req_id), before)
 
         with self.assertRaises(ValueError):
-            self.db.update_request_fields(self.req_id, status="manual")
+            self.db.update_request_fields(self.req_id, status="unsearchable")
         self.assertEqual(self.db.get_request(self.req_id), before)
 
     def test_metadata_update_rejects_malformed_identifier(self):
@@ -2047,7 +2047,7 @@ class TestTrackManagement(unittest.TestCase):
         self.assertEqual(applied, [False])
         self.assertEqual(self.db.get_request(self.req_id), frozen_row)
 
-    def test_field_resolver_snapshot_loses_to_wanted_manual_transition(self):
+    def test_field_resolver_snapshot_loses_to_unsearchable_transition(self):
         """Real PG barrier: stale resolver output cannot touch parent/child."""
         from lib.field_resolver_service import (
             ResolveAllResult,
@@ -2083,21 +2083,21 @@ class TestTrackManagement(unittest.TestCase):
         worker.start()
         self.assertTrue(entered.wait(timeout=10))
         self.assertTrue(self.db.update_status(
-            self.req_id, "manual", expected_status="wanted",
+            self.req_id, "unsearchable", expected_status="wanted",
         ))
-        manual_row = self.db.get_request(self.req_id)
-        manual_tracks = self.db.get_tracks(self.req_id)
-        assert manual_row is not None
+        stopped_row = self.db.get_request(self.req_id)
+        stopped_tracks = self.db.get_tracks(self.req_id)
+        assert stopped_row is not None
         release.set()
         worker.join(timeout=10)
 
         self.assertFalse(worker.is_alive())
         self.assertEqual(applied, [False])
-        self.assertEqual(self.db.get_request(self.req_id), manual_row)
-        self.assertEqual(self.db.get_tracks(self.req_id), manual_tracks)
-        self.assertIsNone(manual_row["release_group_year"])
-        self.assertFalse(manual_row["is_va_compilation"])
-        self.assertIsNone(manual_tracks[0]["track_artist"])
+        self.assertEqual(self.db.get_request(self.req_id), stopped_row)
+        self.assertEqual(self.db.get_tracks(self.req_id), stopped_tracks)
+        self.assertIsNone(stopped_row["release_group_year"])
+        self.assertFalse(stopped_row["is_va_compilation"])
+        self.assertIsNone(stopped_tracks[0]["track_artist"])
 
 
 @requires_postgres
@@ -3806,29 +3806,6 @@ class TestResetToWanted(unittest.TestCase):
         self.assertEqual(req["min_bitrate"], 320)
         self.assertEqual(req["prev_min_bitrate"], 256)
 
-    def test_clears_manual_reason(self):
-        """U6: re-queue clears ``manual_reason`` alongside attempt counters.
-
-        Single-seam reset: every re-queue path funnels through
-        ``reset_to_wanted``, so this one assertion covers web UI button,
-        ``pipeline-cli`` requeue, and importer requeue transparently.
-        """
-        req_id = self._make_request("clear-mr")
-        # Bump search_attempts and populate manual_reason as if the
-        # variant ladder had exhausted earlier.
-        self.db._execute(
-            "UPDATE album_requests SET search_attempts = 7, manual_reason = %s "
-            "WHERE id = %s",
-            ("search_exhausted", req_id),
-        )
-        self.db.conn.commit()
-        self.db.reset_to_wanted(req_id)
-        req = self.db.get_request(req_id)
-        assert req is not None
-        self.assertEqual(req["search_attempts"], 0)
-        self.assertIsNone(req["manual_reason"])
-
-
 @requires_postgres
 class TestClearOnDiskQualityFields(unittest.TestCase):
     """``clear_on_disk_quality_fields`` is the write-side half of the
@@ -4014,7 +3991,7 @@ class TestApplyTransitionDB(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=2) as pool:
                 results = list(pool.map(
                     lambda pair: race(*pair),
-                    ((self.db, "manual"), (db_two, "imported")),
+                    ((self.db, "unsearchable"), (db_two, "imported")),
                 ))
         finally:
             db_two.close()
@@ -4025,7 +4002,7 @@ class TestApplyTransitionDB(unittest.TestCase):
             sum(isinstance(result, TransitionConflict) for result in results), 1)
         row = self.db.get_request(req_id)
         assert row is not None
-        self.assertIn(row["status"], {"manual", "imported"})
+        self.assertIn(row["status"], {"unsearchable", "imported"})
 
     def test_replaced_row_is_frozen_across_every_status_writer(self):
         from lib.transitions import TransitionConflict, apply_transition
@@ -5229,18 +5206,18 @@ class TestDownloadingStatus(unittest.TestCase):
         ads = req["active_download_state"]
         self.assertEqual(ads["filetype"], "flac")
 
-    def test_set_downloading_noop_from_manual(self):
-        """set_downloading() returns False when status is manual."""
+    def test_set_downloading_noop_from_unsearchable(self):
+        """set_downloading() returns False when status is unsearchable."""
         req_id = self.db.add_request(
             mb_release_id="guard-man", artist_name="A", album_title="B",
             source="request")
-        self.db.update_status(req_id, "manual")
+        self.db.update_status(req_id, "unsearchable")
         state_json = json.dumps({"filetype": "flac", "enqueued_at": "t", "files": []})
         result = self.db.set_downloading(req_id, state_json)
         self.assertFalse(result)
         req = self.db.get_request(req_id)
         assert req is not None
-        self.assertEqual(req["status"], "manual")
+        self.assertEqual(req["status"], "unsearchable")
 
     def test_update_download_state(self):
         """update_download_state() rewrites JSONB without changing status."""
@@ -9830,7 +9807,7 @@ class TestSearchRequests(unittest.TestCase):
             source="request", mb_release_id="sr-2", status="wanted")
         self.db.add_request(
             artist_name="100% Wool", album_title="Felt",
-            source="request", mb_release_id="sr-3", status="manual")
+            source="request", mb_release_id="sr-3", status="unsearchable")
 
     def tearDown(self):
         self.db.close()
@@ -10161,7 +10138,7 @@ class TestGetPipelineOverlay(unittest.TestCase):
             db.update_request_fields(rid, min_bitrate=320)
             db.add_request(
                 mb_release_id="overlay-parity-2", artist_name="C",
-                album_title="D", source="request", status="manual")
+                album_title="D", source="request", status="unsearchable")
             rids[id(db)] = rid
         mbids = ["overlay-parity-1", "overlay-parity-2", "nope"]
         real = self.db.get_pipeline_overlay(mbids)

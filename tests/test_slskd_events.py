@@ -231,7 +231,7 @@ class TestIngestStamping(SlskdEventIngestCase):
         self.assertIsNone(self.file_local_path())
 
     def test_non_downloading_row_is_not_updated(self):
-        self.seed_downloading(status="manual")
+        self.seed_downloading(status="unsearchable")
         self.slskd.events.set_events([
             self.event(
                 id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",

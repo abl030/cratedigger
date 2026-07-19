@@ -271,7 +271,7 @@ clearStore();
   const state = buildReleaseActionState({
     id: 'rel-14',
     in_library: false,
-    pipeline_status: 'manual',
+    pipeline_status: 'unsearchable',
     pipeline_id: 600,
   });
   const html = renderAcquireActionButton(state, { hideDisabled: true });
@@ -308,7 +308,7 @@ clearStore();
     { in_library: false, beets_album_id: null, pipeline_status: 'wanted', pipeline_id: 101 },
     { in_library: false, beets_album_id: null, pipeline_status: 'downloading', pipeline_id: 102 },
     { in_library: false, beets_album_id: null, pipeline_status: 'imported', pipeline_id: 103 },
-    { in_library: false, beets_album_id: null, pipeline_status: 'manual', pipeline_id: 104 },
+    { in_library: false, beets_album_id: null, pipeline_status: 'unsearchable', pipeline_id: 104 },
     { in_library: true, beets_album_id: null, pipeline_status: null, pipeline_id: null },
     { in_library: true, beets_album_id: 42, pipeline_status: null, pipeline_id: null },
     { in_library: true, beets_album_id: 43, pipeline_status: 'wanted', pipeline_id: 105 },
@@ -338,19 +338,19 @@ clearStore();
   }
 }
 
-console.log('Acquire button — manual review → disabled Add request');
+console.log('Acquire button — unsearchable → disabled Add request');
 clearStore();
 {
   const state = buildReleaseActionState({
     id: 'rel-8',
     in_library: false,
-    pipeline_status: 'manual',
+    pipeline_status: 'unsearchable',
     pipeline_id: 600,
   });
   const html = renderActionToolbar(state);
-  assertContains(html, '>Add request</button>', 'manual falls through to disabled Add request');
-  assertExcludes(html, 'window.addRelease', 'Add disabled in manual state');
-  assertExcludes(html, 'window.disambRemove', 'no Remove handler in manual state');
+  assertContains(html, '>Add request</button>', 'unsearchable falls through to disabled Add request');
+  assertExcludes(html, 'window.addRelease', 'Add disabled in unsearchable state');
+  assertExcludes(html, 'window.disambRemove', 'no Remove handler in unsearchable state');
 }
 
 console.log('Acquire button — minimal input never crashes');

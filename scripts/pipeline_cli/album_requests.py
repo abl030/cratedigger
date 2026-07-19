@@ -1,6 +1,6 @@
 """pipeline-cli request-lifecycle commands (#495 carve).
 
-``list`` / ``add`` / ``status`` / ``retry`` / ``cancel`` / ``set`` /
+``list`` / ``add`` / ``status`` / ``set`` /
 ``set-intent`` / ``disk-coverage`` — the core CRUD-ish surface over
 ``album_requests``, plus the MusicBrainz-fetch helpers the ``add`` path
 needs.
@@ -65,7 +65,7 @@ def _request_fields_applied_or_report(
         actual_status=None if row is None else str(row["status"]),
     ))
 
-VALID_STATUSES = ["wanted", "imported", "manual"]
+VALID_STATUSES = ["wanted", "imported", "unsearchable"]
 
 
 def _mb_api() -> str:
@@ -450,42 +450,10 @@ def cmd_status(db, args):
         return
     total = sum(counts.values())
     print(f"  Pipeline DB status ({total} total):\n")
-    for status in ["wanted", "downloading", "imported", "manual"]:
+    for status in ["wanted", "downloading", "imported", "unsearchable"]:
         c = counts.get(status, 0)
         if c > 0:
             print(f"    {status:15s} {c:4d}")
-
-
-def cmd_retry(db, args):
-    req = db.get_request(args.id)
-    if not req:
-        print(f"  Request {args.id} not found.")
-        return 2
-    result = finalize_request(
-        db,
-        args.id,
-        transitions.RequestTransition.to_wanted(from_status=req["status"]),
-    )
-    if not _transition_applied_or_report(result):
-        return 4
-    print(f"  Reset to wanted: [{args.id}] {req['artist_name']} - {req['album_title']}")
-    return 0
-
-
-def cmd_cancel(db, args):
-    req = db.get_request(args.id)
-    if not req:
-        print(f"  Request {args.id} not found.")
-        return 2
-    result = finalize_request(
-        db,
-        args.id,
-        transitions.RequestTransition.to_manual(from_status=req["status"]),
-    )
-    if not _transition_applied_or_report(result):
-        return 4
-    print(f"  Marked for manual download: [{args.id}] {req['artist_name']} - {req['album_title']}")
-    return 0
 
 
 def cmd_set(db, args):
@@ -590,8 +558,8 @@ def cmd_set_intent(db, args):
 
 
 def add_album_requests_subparsers(sub: argparse._SubParsersAction) -> None:
-    """Add ``list`` / ``add`` / ``status`` / ``disk-coverage`` / ``retry`` /
-    ``cancel`` / ``set`` / ``set-intent`` (#521 carve out of
+    """Add ``list`` / ``add`` / ``status`` / ``disk-coverage`` / ``set`` /
+    ``set-intent`` (#521 carve out of
     ``routes_meta._build_parser``, verbatim argument definitions)."""
     # list
     p_list = sub.add_parser("list", help="List album requests")
@@ -631,14 +599,6 @@ def add_album_requests_subparsers(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Also include beets albums with no active pipeline row",
     )
-
-    # retry
-    p_retry = sub.add_parser("retry", help="Reset a failed request to wanted")
-    p_retry.add_argument("id", type=int, help="Request ID")
-
-    # cancel
-    p_cancel = sub.add_parser("cancel", help="Cancel a request (set to skipped)")
-    p_cancel.add_argument("id", type=int, help="Request ID")
 
     # set
     p_set = sub.add_parser("set", help="Change the status of a request")

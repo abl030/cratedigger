@@ -73,7 +73,8 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
 
 # Badge priority when several requests map to one release group — show
 # the most active state.
-_PIPELINE_BADGE_PRIORITY = {"downloading": 0, "wanted": 1, "manual": 2, "imported": 3}
+_PIPELINE_BADGE_PRIORITY = {
+    "downloading": 0, "wanted": 1, "unsearchable": 2, "imported": 3}
 
 
 ArtistPipelineKey = tuple[str, str, str]

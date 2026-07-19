@@ -31,11 +31,11 @@ class TestValidateTransition(unittest.TestCase):
     def test_downloading_to_wanted(self):
         self.assertTrue(validate_transition("downloading", "wanted"))
 
-    def test_downloading_to_manual(self):
-        self.assertTrue(validate_transition("downloading", "manual"))
+    def test_downloading_to_unsearchable_is_invalid(self):
+        self.assertFalse(validate_transition("downloading", "unsearchable"))
 
-    def test_wanted_to_manual(self):
-        self.assertTrue(validate_transition("wanted", "manual"))
+    def test_wanted_to_unsearchable(self):
+        self.assertTrue(validate_transition("wanted", "unsearchable"))
 
     def test_imported_to_wanted(self):
         self.assertTrue(validate_transition("imported", "wanted"))
@@ -43,27 +43,27 @@ class TestValidateTransition(unittest.TestCase):
     def test_imported_to_imported(self):
         self.assertTrue(validate_transition("imported", "imported"))
 
-    def test_imported_to_manual(self):
-        self.assertTrue(validate_transition("imported", "manual"))
+    def test_imported_to_unsearchable_is_invalid(self):
+        self.assertFalse(validate_transition("imported", "unsearchable"))
 
-    def test_manual_to_wanted(self):
-        self.assertTrue(validate_transition("manual", "wanted"))
+    def test_unsearchable_to_wanted(self):
+        self.assertTrue(validate_transition("unsearchable", "wanted"))
 
-    def test_manual_to_manual(self):
-        self.assertTrue(validate_transition("manual", "manual"))
+    def test_unsearchable_to_unsearchable(self):
+        self.assertTrue(validate_transition("unsearchable", "unsearchable"))
 
     # Invalid transitions
     def test_imported_to_downloading_invalid(self):
         self.assertFalse(validate_transition("imported", "downloading"))
 
-    def test_manual_to_downloading_invalid(self):
-        self.assertFalse(validate_transition("manual", "downloading"))
+    def test_unsearchable_to_downloading_invalid(self):
+        self.assertFalse(validate_transition("unsearchable", "downloading"))
 
     def test_wanted_to_imported(self):
         self.assertTrue(validate_transition("wanted", "imported"))
 
-    def test_manual_to_imported(self):
-        self.assertTrue(validate_transition("manual", "imported"))
+    def test_unsearchable_to_imported(self):
+        self.assertTrue(validate_transition("unsearchable", "imported"))
 
     def test_downloading_to_downloading_invalid(self):
         self.assertFalse(validate_transition("downloading", "downloading"))
@@ -96,12 +96,12 @@ class TestTransitionSideEffects(unittest.TestCase):
         self.assertTrue(fx.clear_retry_counters)
         self.assertFalse(fx.record_attempt)
 
-    def test_manual_to_wanted_clears_retry_counters(self):
-        fx = VALID_TRANSITIONS[("manual", "wanted")]
+    def test_unsearchable_to_wanted_clears_retry_counters(self):
+        fx = VALID_TRANSITIONS[("unsearchable", "wanted")]
         self.assertTrue(fx.clear_retry_counters)
 
-    def test_wanted_to_manual_no_effects(self):
-        fx = VALID_TRANSITIONS[("wanted", "manual")]
+    def test_wanted_to_unsearchable_no_effects(self):
+        fx = VALID_TRANSITIONS[("wanted", "unsearchable")]
         self.assertFalse(fx.record_attempt)
         self.assertFalse(fx.clear_retry_counters)
 
@@ -118,13 +118,14 @@ class TestTransitionTable(unittest.TestCase):
             self.assertIsInstance(fx, TransitionSideEffects,
                                  f"({from_s}, {to_s}) is not TransitionSideEffects")
 
-    def test_exactly_13_transitions(self):
-        self.assertEqual(len(VALID_TRANSITIONS), 13)
+    def test_exactly_11_transitions(self):
+        self.assertEqual(len(VALID_TRANSITIONS), 11)
 
     def test_all_statuses_reachable(self):
         """Every status appears as a target at least once."""
         targets = {to_s for _, to_s in VALID_TRANSITIONS}
-        self.assertEqual(targets, {"wanted", "downloading", "imported", "manual"})
+        self.assertEqual(
+            targets, {"wanted", "downloading", "imported", "unsearchable"})
 
 
 class TestApplyTransition(unittest.TestCase):
@@ -222,10 +223,10 @@ class TestApplyTransition(unittest.TestCase):
 
     def test_invalid_transition_fails_closed_before_any_mutation_seam(self):
         """An invalid edge is a typed conflict and never reaches a writer."""
-        db = self._make_db("manual")
+        db = self._make_db("unsearchable")
         before_history = list(db.status_history)
         result = apply_transition(
-            cast(Any, db), 1, "downloading", from_status="manual",
+            cast(Any, db), 1, "downloading", from_status="unsearchable",
             state_json='{}',
         )
 
@@ -233,7 +234,7 @@ class TestApplyTransition(unittest.TestCase):
         assert isinstance(result, TransitionConflict)
         self.assertEqual(result.kind, TransitionConflictKind.invalid_edge)
         self.assertEqual(db.status_history, before_history)
-        self.assertEqual(db.request(1)["status"], "manual")
+        self.assertEqual(db.request(1)["status"], "unsearchable")
 
     def test_downloading_guard_logs_when_set_downloading_refuses(self):
         """When ``set_downloading`` returns False (row no longer wanted),
@@ -272,22 +273,24 @@ class TestApplyTransition(unittest.TestCase):
         self.assertEqual(result.kind, TransitionConflictKind.not_found)
         self.assertIsNone(db._requests.get(999))
 
-    def test_wanted_to_manual_sets_status(self):
+    def test_wanted_to_unsearchable_sets_status(self):
         db = self._make_db("wanted")
         result = apply_transition(
-            cast(Any, db), 1, "manual", from_status="wanted")
+            cast(Any, db), 1, "unsearchable", from_status="wanted")
         self.assertIsInstance(result, TransitionApplied)
-        self.assertEqual(db.request(1)["status"], "manual")
+        self.assertEqual(db.request(1)["status"], "unsearchable")
 
-    def test_imported_to_manual_sets_status(self):
+    def test_imported_to_unsearchable_is_a_conflict(self):
         db = self._make_db("imported")
         result = apply_transition(
-            cast(Any, db), 1, "manual", from_status="imported")
-        self.assertIsInstance(result, TransitionApplied)
-        self.assertEqual(db.request(1)["status"], "manual")
+            cast(Any, db), 1, "unsearchable", from_status="imported")
+        self.assertIsInstance(result, TransitionConflict)
+        assert isinstance(result, TransitionConflict)
+        self.assertEqual(result.kind, TransitionConflictKind.invalid_edge)
+        self.assertEqual(db.request(1)["status"], "imported")
 
     def test_operator_same_status_is_byte_identical_success(self):
-        for status in ("wanted", "imported", "manual"):
+        for status in ("wanted", "imported", "unsearchable"):
             with self.subTest(status=status):
                 db = self._make_db(status)
                 before = db.request(1)
@@ -301,7 +304,7 @@ class TestApplyTransition(unittest.TestCase):
         before = db.request(1)
 
         result = apply_transition(
-            cast(Any, db), 1, "manual", from_status="wanted")
+            cast(Any, db), 1, "unsearchable", from_status="wanted")
 
         self.assertIsInstance(result, TransitionConflict)
         assert isinstance(result, TransitionConflict)
@@ -313,7 +316,7 @@ class TestApplyTransition(unittest.TestCase):
         db = self._make_db("replaced")
         before = db.request(1)
 
-        for target in ("wanted", "manual", "imported", "downloading"):
+        for target in ("wanted", "unsearchable", "imported", "downloading"):
             kwargs = {"state_json": "{}"} if target == "downloading" else {}
             result = apply_transition(
                 cast(Any, db), 1, target, from_status="replaced", **kwargs)
@@ -376,7 +379,7 @@ class TestRequestTransition(unittest.TestCase):
             RequestTransition.to_imported_fields(fields={"state_json": "{}"})
 
     def test_transition_fields_are_immutable(self):
-        transition = RequestTransition.to_manual(from_status="wanted")
+        transition = RequestTransition.to_unsearchable(from_status="wanted")
 
         with self.assertRaises(TypeError):
             cast(Any, transition.fields)["imported_path"] = "/Beets/Artist/Album"
@@ -421,7 +424,7 @@ class TestFinalizeRequest(unittest.TestCase):
         self.assertEqual(row["prev_min_bitrate"], 320)
         self.assertEqual(row["download_attempts"], 1)
 
-    def test_operator_command_rebases_once_after_a_terminal_cas_wins(self):
+    def test_operator_stop_rebases_to_conflict_after_terminal_import_wins(self):
         class RacingFakePipelineDB(FakePipelineDB):
             terminal_won = False
 
@@ -435,7 +438,7 @@ class TestFinalizeRequest(unittest.TestCase):
             ) -> bool:
                 if not self.terminal_won:
                     self.terminal_won = True
-                    self._requests[request_id]["status"] = "wanted"
+                    self._requests[request_id]["status"] = "imported"
                     return False
                 return super().update_status(
                     request_id,
@@ -445,24 +448,26 @@ class TestFinalizeRequest(unittest.TestCase):
                 )
 
         db = RacingFakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(id=42, status="wanted"))
 
         result = finalize_operator_request(
             cast(Any, db),
             42,
-            RequestTransition.to_manual(from_status="downloading"),
+            RequestTransition.to_unsearchable(from_status="wanted"),
         )
 
-        self.assertIsInstance(result, TransitionApplied)
-        self.assertEqual(db.request(42)["status"], "manual")
+        self.assertIsInstance(result, TransitionConflict)
+        assert isinstance(result, TransitionConflict)
+        self.assertEqual(result.kind, TransitionConflictKind.invalid_edge)
+        self.assertEqual(db.request(42)["status"], "imported")
 
-    def test_explicit_previous_bitrate_survives_manual_requeue(self):
+    def test_explicit_previous_bitrate_survives_operator_requeue(self):
         """The typed wanted command's public fields reach the reset CAS."""
         db = FakePipelineDB()
         db.seed_request(
             make_request_row(
                 id=42,
-                status="manual",
+                status="unsearchable",
                 min_bitrate=320,
                 prev_min_bitrate=192,
             ),
@@ -472,7 +477,7 @@ class TestFinalizeRequest(unittest.TestCase):
             cast(Any, db),
             42,
             RequestTransition.to_wanted(
-                from_status="manual",
+                from_status="unsearchable",
                 min_bitrate=245,
                 prev_min_bitrate=256,
             ),
@@ -488,12 +493,12 @@ class TestFinalizeRequest(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="wanted"))
         transition = RequestTransition(
-            "manual",
+            "unsearchable",
             from_status="wanted",
             fields={"imported_path": "/Beets/Artist/Album"},
         )
 
-        with self.assertRaisesRegex(ValueError, "manual transitions"):
+        with self.assertRaisesRegex(ValueError, "unsearchable transitions"):
             finalize_request(cast(Any, db), 42, transition)
 
         # ValueError fires upstream of any DB mutation — row unchanged.

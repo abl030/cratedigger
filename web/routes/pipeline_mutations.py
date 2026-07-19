@@ -421,7 +421,7 @@ def post_pipeline_add(h, body: dict) -> None:
 
 class PipelineUpdateRequest(BaseModel):
     id: int = Field(gt=0)
-    status: Literal["wanted", "imported", "manual"]
+    status: Literal["wanted", "imported", "unsearchable"]
 
 
 def post_pipeline_update(h, body: dict) -> None:
@@ -619,7 +619,7 @@ def post_pipeline_upgrade(h, body: dict) -> None:
 
 class PipelineSetQualityRequest(BaseModel):
     mb_release_id: str = Field(min_length=1)
-    status: Literal["", "wanted", "imported", "manual"] = ""
+    status: Literal["", "wanted", "imported", "unsearchable"] = ""
     min_bitrate: int | None = None
 
 
@@ -647,7 +647,7 @@ def post_pipeline_set_quality(h, body: dict) -> None:
         min_bitrate = int(min_bitrate)
 
     if new_status:
-        if new_status not in ("wanted", "imported", "manual"):
+        if new_status not in ("wanted", "imported", "unsearchable"):
             h._error(f"Invalid status: {new_status}")
             return
         if new_status == "imported":
@@ -680,31 +680,22 @@ def post_pipeline_set_quality(h, body: dict) -> None:
                     fields=wanted_fields,
                 ),
             )
-        else:
+        elif new_status == "unsearchable":
+            unsearchable_fields: dict[str, object] = {}
+            if min_bitrate is not None:
+                unsearchable_fields["min_bitrate"] = min_bitrate
             result = finalize_request(
                 s._db(),
                 req_id,
-                transitions.RequestTransition.status_only(
-                    new_status,
+                transitions.RequestTransition.to_unsearchable_fields(
                     from_status=existing["status"],
+                    fields=unsearchable_fields,
                 ),
             )
+        else:
+            raise AssertionError(f"unhandled pipeline status {new_status!r}")
         if not _transition_applied_or_respond(h, result):
             return
-        if min_bitrate is not None and new_status == "manual":
-            applied = s._db().update_request_fields(
-                req_id,
-                expected_status="manual",
-                min_bitrate=min_bitrate,
-            )
-            if not _request_fields_applied_or_respond(
-                h,
-                s._db(),
-                req_id,
-                expected_status="manual",
-                applied=applied,
-            ):
-                return
     elif min_bitrate is not None:
         if existing["status"] == "replaced":
             result = finalize_request(
@@ -826,7 +817,7 @@ def post_pipeline_set_intent(h, body: dict) -> None:
             "requeued": True,
         })
     else:
-        # Just update the persistent intent for next search (wanted or manual)
+        # Just update the persistent intent for the next search or resume.
         update_fields = {"target_format": target_format}
         if should_clear_lossless_search_override(
             new_target_format=target_format,
@@ -933,6 +924,7 @@ def post_pipeline_ban_source(h, body: dict) -> None:
         partial_failures["hash_capture_errors"] = hash_capture_errors
     payload: dict[str, object] = {
         "status": "ok",
+        "request_status": result.request_status,
         "username": result.username,
         "beets_removed": result.beets_removed,
         "hashes_recorded": result.hashes_recorded,
@@ -1096,7 +1088,8 @@ ROUTES: list[RouteRegistration] = [
     route(
         "POST", "/api/pipeline/ban-source", post_pipeline_ban_source,
         "Mark a server-resolved rip as bad: denylist, hash + bad-byte "
-        "ripple-stop, and remove from beets. Requires confirm='BAN'.",
+        "ripple-stop, remove from beets, and preserve unsearchable or reset "
+        "wanted. Requires confirm='BAN'.",
         classified=True,
     ),
     route(

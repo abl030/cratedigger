@@ -101,6 +101,22 @@ class ObservedOperatorPipelineDB(PipelineDB):
             expected_status=expected_status,
         )
 
+    def reset_to_wanted(
+        self,
+        request_id: int,
+        *,
+        expected_status: str | None = None,
+        clear_retry_counters: bool = True,
+        **extra: Any,
+    ) -> bool:
+        self.cas_started.set()
+        return super().reset_to_wanted(
+            request_id,
+            expected_status=expected_status,
+            clear_retry_counters=clear_retry_counters,
+            **extra,
+        )
+
 
 def _snapshot(db: PipelineDB, request_id: int, job_id: int) -> dict[str, object]:
     request_cur = db._execute(
@@ -500,7 +516,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         db, request_id, job_id = _seed_running_preview()
         self.addCleanup(db.close)
         db._execute(
-            "UPDATE album_requests SET status = 'manual' WHERE id = %s",
+            "UPDATE album_requests SET status = 'unsearchable' WHERE id = %s",
             (request_id,),
         )
         result = db.persist_preview_terminal_outcome(PreviewTerminalOutcome(
@@ -523,14 +539,14 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
 
         request = db.get_request(request_id)
         assert request is not None
-        self.assertEqual(request["status"], "manual")
+        self.assertEqual(request["status"], "unsearchable")
         self.assertEqual(result.transitions, ())
 
     def test_import_rejection_preserves_operator_stop_and_policy_effects(self):
         db, request_id, job_id = _seed_running_import()
         self.addCleanup(db.close)
         db._execute(
-            "UPDATE album_requests SET status = 'manual', min_bitrate = 320 "
+            "UPDATE album_requests SET status = 'unsearchable', min_bitrate = 320 "
             "WHERE id = %s",
             (request_id,),
         )
@@ -538,7 +554,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             request_id=request_id,
             import_job_id=job_id,
             initial_transition=transitions.RequestTransition.to_wanted(
-                from_status="downloading",
+                from_status="unsearchable",
                 attempt_type="validation",
                 search_filetype_override="lossless",
                 min_bitrate=245,
@@ -557,19 +573,23 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
 
         request = db.get_request(request_id)
         assert request is not None
-        self.assertEqual(request["status"], "manual")
+        self.assertEqual(request["status"], "unsearchable")
         self.assertEqual(request["validation_attempts"], 1)
         self.assertEqual(request["search_filetype_override"], "lossless")
         self.assertEqual(request["min_bitrate"], 245)
         self.assertEqual(request["prev_min_bitrate"], 320)
         self.assertEqual(
             tuple(item.target_status for item in result.transitions),
-            ("manual",),
+            ("unsearchable",),
         )
 
     def test_operator_action_waiting_behind_terminal_lock_retries(self):
         assert TEST_DSN is not None
         seed, request_id, job_id = _seed_running_import()
+        seed._execute(
+            "UPDATE album_requests SET status = 'unsearchable' WHERE id = %s",
+            (request_id,),
+        )
         seed.close()
         locked = threading.Event()
         release = threading.Event()
@@ -592,7 +612,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             request_id=request_id,
             import_job_id=job_id,
             initial_transition=transitions.RequestTransition.to_wanted(
-                from_status="downloading",
+                from_status="unsearchable",
                 attempt_type="validation",
             ),
             audit=TerminalDownloadAudit(
@@ -613,17 +633,17 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             except BaseException as exc:
                 terminal_errors.append(exc)
 
-        def apply_operator_stop() -> None:
+        def clear_operator_stop() -> None:
             operator_results.append(transitions.finalize_operator_request(
                 operator_db,
                 request_id,
-                transitions.RequestTransition.to_manual(
-                    from_status="downloading",
+                transitions.RequestTransition.to_wanted(
+                    from_status="unsearchable",
                 ),
             ))
 
         terminal_thread = threading.Thread(target=persist_terminal)
-        operator_thread = threading.Thread(target=apply_operator_stop)
+        operator_thread = threading.Thread(target=clear_operator_stop)
         terminal_thread.start()
         self.assertTrue(locked.wait(timeout=10))
         operator_thread.start()
@@ -643,14 +663,14 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         self.addCleanup(observer.close)
         request = observer.get_request(request_id)
         assert request is not None
-        self.assertEqual(request["status"], "manual")
-        self.assertEqual(request["validation_attempts"], 1)
+        self.assertEqual(request["status"], "wanted")
+        self.assertEqual(request["validation_attempts"], 0)
 
     def test_same_status_operator_action_still_serializes_behind_lock(self):
         assert TEST_DSN is not None
         seed, request_id, job_id = _seed_running_import()
         seed._execute(
-            "UPDATE album_requests SET status = 'manual' WHERE id = %s",
+            "UPDATE album_requests SET status = 'unsearchable' WHERE id = %s",
             (request_id,),
         )
         seed.close()
@@ -674,7 +694,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             request_id=request_id,
             import_job_id=job_id,
             initial_transition=transitions.RequestTransition.to_imported(
-                from_status="manual",
+                from_status="unsearchable",
                 imported_path="/music/Atomic/Outcome",
             ),
             audit=TerminalDownloadAudit(outcome="success"),
@@ -695,8 +715,8 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             operator_results.append(transitions.finalize_operator_request(
                 operator_db,
                 request_id,
-                transitions.RequestTransition.to_manual(
-                    from_status="manual",
+                transitions.RequestTransition.to_unsearchable(
+                    from_status="unsearchable",
                 ),
             ))
 
@@ -721,13 +741,13 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         self.addCleanup(observer.close)
         request = observer.get_request(request_id)
         assert request is not None
-        self.assertEqual(request["status"], "manual")
+        self.assertEqual(request["status"], "unsearchable")
 
     def test_import_terminal_policy_preserves_current_operator_stop(self):
         db, request_id, job_id = _seed_running_import()
         self.addCleanup(db.close)
         db._execute(
-            "UPDATE album_requests SET status = 'manual' WHERE id = %s",
+            "UPDATE album_requests SET status = 'unsearchable' WHERE id = %s",
             (request_id,),
         )
 
@@ -737,19 +757,19 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
 
         request = db.get_request(request_id)
         assert request is not None
-        self.assertEqual(request["status"], "manual")
+        self.assertEqual(request["status"], "unsearchable")
         self.assertEqual(request["search_filetype_override"], "lossless")
         self.assertEqual(request["min_bitrate"], 320)
         self.assertEqual(
             tuple(item.target_status for item in result.transitions),
-            ("imported", "imported", "manual"),
+            ("unsearchable", "unsearchable"),
         )
 
     def test_import_terminal_policy_does_not_restore_cleared_stop(self):
         db, request_id, job_id = _seed_running_import()
         self.addCleanup(db.close)
         db._execute(
-            "UPDATE album_requests SET status = 'manual' WHERE id = %s",
+            "UPDATE album_requests SET status = 'unsearchable' WHERE id = %s",
             (request_id,),
         )
         command = _searching_import_outcome(request_id, job_id)
@@ -773,7 +793,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         db, request_id, job_id = _seed_running_import()
         self.addCleanup(db.close)
         db._execute(
-            "UPDATE album_requests SET status = 'manual' WHERE id = %s",
+            "UPDATE album_requests SET status = 'unsearchable' WHERE id = %s",
             (request_id,),
         )
         command = _searching_import_outcome(request_id, job_id)
@@ -807,7 +827,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         db, request_id, job_id = _seed_running_import()
         self.addCleanup(db.close)
         db._execute(
-            "UPDATE album_requests SET status = 'manual' WHERE id = %s",
+            "UPDATE album_requests SET status = 'unsearchable' WHERE id = %s",
             (request_id,),
         )
 
@@ -826,7 +846,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
 
         request = db.get_request(request_id)
         assert request is not None
-        self.assertEqual(request["status"], "manual")
+        self.assertEqual(request["status"], "unsearchable")
 
     def test_import_success_round_trip_returns_complete_bundle(self):
         db, request_id, job_id = _seed_running_import(unfindable=True)
@@ -1014,7 +1034,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         db, request_id, job_id = _seed_running_import()
         self.addCleanup(db.close)
         db._execute(
-            "UPDATE album_requests SET status = 'manual' WHERE id = %s",
+            "UPDATE album_requests SET status = 'unsearchable' WHERE id = %s",
             (request_id,),
         )
         before = _snapshot(db, request_id, job_id)

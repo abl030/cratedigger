@@ -14,7 +14,7 @@ searches that ran during that cycle into one of five buckets:
 * ``E_mixed`` — fits none of A/B/D cleanly.
 * ``resolved`` — the request moved past ``wanted`` during the cycle (we
   see this when the request status is, e.g., ``imported``, ``downloading``,
-  or ``manual``).
+  or ``unsearchable``).
 
 The classifier is a pure function so the wrap-time DB writer can reuse it
 and any future triage / dry-run surface (e.g. a PR4 inspector) can
@@ -118,7 +118,7 @@ def classify_failure_class(
     Decision order (intentional — earlier branches dominate):
 
     1. ``current_status != 'wanted'``  → ``resolved`` (the cycle was
-       overtaken by an import / manual review / download).
+       overtaken by an import / operator search stop / download).
     2. Empty ``searches``               → ``None`` (no signal).
     3. ``found`` count >= 1 (and still ``wanted``)
                                         → ``D_found_but_no_import``.

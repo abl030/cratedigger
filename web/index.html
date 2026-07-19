@@ -95,7 +95,8 @@
   .badge-wanted { background: #5a3a1a; color: #fa6; }
   .badge-downloading { background: #1a3a5a; color: #6cf; }
   .badge-imported { background: #1a4a2a; color: #6d6; }
-  .badge-manual { background: #3a3a3a; color: #aaa; }
+  .badge-muted { background: #3a3a3a; color: #aaa; }
+  .badge-unsearchable { background: #3a3a3a; color: #aaa; }
   .badge-sublabel { background: #2a2a3a; color: #9ac; font-style: italic; }
   .status-card { background: #1a1a1a; padding: 16px; border-radius: 8px; margin-bottom: 12px; }
   .status-counts { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
@@ -383,10 +384,6 @@
      it to two lines; the full text stays in the hover title. */
   .r-summary { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-align: left; }
   .p-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-  /* Manual-reason chip — small inline tag near the request title or status.
-     Currently used for `search_exhausted` (red/amber) flips written by the
-     variant ladder when all variants exhaust without finding a candidate. */
-  .p-manual-chip { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.7em; font-weight: 600; margin-left: 6px; background: #4a2a1a; color: #d96; }
   /* Forensic block — collapsed by default summary of the most recent search
      row (variant + final_state + top-3 candidates). Click toggles open. */
   .p-forensic { margin-top: 8px; font-size: 0.78em; color: #888; }
@@ -399,7 +396,8 @@
   .p-forensic-table th { color: #666; text-align: left; font-weight: 500; padding: 2px 6px 2px 0; }
   .p-forensic-table td { color: #aaa; padding: 1px 6px 1px 0; }
   .p-btn { padding: 4px 12px; border: 1px solid #444; background: #222; color: #aaa; border-radius: 4px; cursor: pointer; font-size: 0.78em; }
-  .p-btn:hover { background: #333; color: #eee; }
+  .p-btn:hover:not(:disabled) { background: #333; color: #eee; }
+  .p-btn:disabled { opacity: 0.5; cursor: default; }
   .p-btn.active-status { border-color: #6a9; color: #6a9; background: #2a3a2a; }
   /* Browse search bar: one wrapping flex row. On narrow screens the
      input claims a full-width row of its own so it stays typeable —

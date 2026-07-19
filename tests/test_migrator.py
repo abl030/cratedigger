@@ -3385,7 +3385,7 @@ class TestPinStatusDomainMigration(unittest.TestCase):
         dsn = _create_fresh_database(name)
         try:
             applied = apply_migrations(dsn, DEFAULT_MIGRATIONS_DIR)
-            self.assertEqual(applied[-1].version, 55)
+            self.assertEqual(applied[-1].version, 56)
             self.assertEqual(
                 self._query(
                     dsn,
@@ -3928,6 +3928,80 @@ class TestEvidenceTwoAxisVocabularyMigration(unittest.TestCase):
                                     'fp-invalid-version-055',
                                     '/invalid-version', NOW(), 2
                                 )
+                            """)
+                finally:
+                    conn.close()
+        finally:
+            _drop_database(name)
+
+
+@requires_postgres
+class TestUnsearchableRequestStatusMigration(unittest.TestCase):
+    """Migration 056 renames lifecycle state without rewriting timestamps."""
+
+    def _copy_through(self, target: str, version: int) -> None:
+        for migration in discover_migrations(DEFAULT_MIGRATIONS_DIR):
+            if migration.version <= version:
+                shutil.copy2(migration.path, target)
+
+    def test_renames_manual_rows_drops_dead_reason_and_closes_domain(self) -> None:
+        name = "cratedigger_test_unsearchable_status_056"
+        dsn = _create_fresh_database(name)
+        try:
+            with tempfile.TemporaryDirectory() as migrations_dir:
+                self._copy_through(migrations_dir, 55)
+                apply_migrations(dsn, migrations_dir)
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO album_requests (
+                                mb_release_id, artist_name, album_title,
+                                source, status, manual_reason, updated_at
+                            ) VALUES (
+                                'manual-before-056', 'Artist', 'Album',
+                                'request', 'manual', 'obsolete',
+                                '2000-01-02T03:04:05Z'
+                            )
+                        """)
+                finally:
+                    conn.close()
+
+                self._copy_through(migrations_dir, 56)
+                applied = apply_migrations(dsn, migrations_dir)
+                self.assertEqual([migration.version for migration in applied], [56])
+
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT status,
+                                   updated_at =
+                                       '2000-01-02T03:04:05Z'::timestamptz
+                            FROM album_requests
+                            WHERE mb_release_id = 'manual-before-056'
+                        """)
+                        row = cur.fetchone()
+                        self.assertIsNotNone(row)
+                        assert row is not None
+                        status, timestamp_preserved = row
+                        self.assertEqual(status, "unsearchable")
+                        self.assertTrue(timestamp_preserved)
+                        cur.execute("""
+                            SELECT column_name
+                            FROM information_schema.columns
+                            WHERE table_schema = 'public'
+                              AND table_name = 'album_requests'
+                              AND column_name = 'manual_reason'
+                        """)
+                        self.assertIsNone(cur.fetchone())
+                        with self.assertRaises(psycopg2.errors.CheckViolation):
+                            cur.execute("""
+                                INSERT INTO album_requests (
+                                    artist_name, album_title, source, status
+                                ) VALUES ('A', 'B', 'request', 'manual')
                             """)
                 finally:
                     conn.close()

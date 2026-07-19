@@ -188,19 +188,6 @@ export function youtubeBrowseUrl(browseId) {
 }
 
 /**
- * Map a `manual_reason` enum value to a short, human-friendly label for the
- * inline chip on the request-detail view. Returns the empty string for
- * NULL / unknown reasons so the caller can branch on truthiness.
- * @param {string|null|undefined} reason
- * @returns {string}
- */
-export function manualReasonLabel(reason) {
-  if (!reason) return '';
-  if (reason === 'search_exhausted') return 'search exhausted';
-  return reason;
-}
-
-/**
  * @typedef {Object} CandidateScore
  * @property {string} username
  * @property {string} dir

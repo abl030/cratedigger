@@ -45,7 +45,7 @@ def _build_parser() -> tuple[
     parser.add_argument("--dsn", default=DEFAULT_DSN, help="PostgreSQL connection string")
     sub = parser.add_subparsers(dest="command")
 
-    # list / add / status / disk-coverage / retry / cancel / set / set-intent
+    # list / add / status / disk-coverage / set / set-intent
     add_album_requests_subparsers(sub)
 
     # query

@@ -11,9 +11,11 @@ paths:
 
 - Connection: `postgresql://cratedigger@10.20.0.11:5432/cratedigger`
 - **MUST use `autocommit=True`** in `PipelineDB` — prevents idle-in-transaction deadlocks
-- Active statuses: `wanted`, `downloading`, `imported`, `manual`; terminal audit
-  status: `replaced`. `replaced` rows are frozen and have no outgoing ordinary
-  lifecycle transition; only `supersede_request_mbid` may create that status.
+- Active statuses: `wanted`, `downloading`, `imported`, `unsearchable`; terminal
+  audit status: `replaced`. `unsearchable` is the reversible operator-owned
+  search stop, not a source-cleanup state. `replaced` rows are frozen and have
+  no outgoing ordinary lifecycle transition; only `supersede_request_mbid` may
+  create that status.
 - JSONB columns: use for structured audit data (`import_result`, `validation_result`)
 
 ## Schema migrations are versioned files, NOT runtime DDL

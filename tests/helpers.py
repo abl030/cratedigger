@@ -92,7 +92,6 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         "current_lossless_source_v0_probe_avg_bitrate": None,
         "current_lossless_source_v0_probe_median_bitrate": None,
         "active_download_state": None,
-        "manual_reason": None,
         # U1 persisted-search-plans cursor fields (migration 014).
         "active_plan_id": None,
         "next_plan_ordinal": 0,

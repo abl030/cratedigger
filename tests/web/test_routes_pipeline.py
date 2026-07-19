@@ -250,7 +250,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
     def test_have_analysis_error_copy_respects_operator_stop(self):
         classified = classify_log_entry(LogEntry(
             outcome="have_analysis_error",
-            request_status="manual",
+            request_status="unsearchable",
         ))
 
         self.assertIn("Operator search stop remains in place", classified.verdict)
@@ -945,7 +945,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         status, data = self._get("/api/pipeline/all")
 
         self.assertEqual(status, 200)
-        _assert_required_fields(self, data, {"counts", "wanted", "downloading", "imported", "manual",
+        _assert_required_fields(self, data, {"counts", "wanted", "downloading", "imported", "unsearchable",
                                              "imported_total", "imported_truncated"},
                                 "pipeline all response")
         _assert_required_fields(self, data["wanted"][0], self.PIPELINE_ITEM_REQUIRED_FIELDS,
@@ -1002,7 +1002,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["items"], [])
 
     DETAIL_RESPONSE_REQUIRED_FIELDS = {
-        "request", "history", "tracks", "manual_reason", "last_search",
+        "request", "history", "tracks", "last_search",
     }
     LAST_SEARCH_REQUIRED_FIELDS = {
         "variant", "final_state", "outcome", "top_candidates",
@@ -1022,10 +1022,8 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
                                 "pipeline detail request")
         _assert_required_fields(self, data["history"][0], self.HISTORY_REQUIRED_FIELDS,
                                 "pipeline detail history item")
-        # Default mock state: no search history → last_search is None and
-        # manual_reason is None. Both keys are still present.
+        # Default mock state: no search history → last_search is None.
         self.assertIsNone(data["last_search"])
-        self.assertIsNone(data["manual_reason"])
 
     def test_pipeline_detail_surfaces_last_search_top_candidates(self):
         """When the latest search_log row has candidates, the route emits the
@@ -1147,20 +1145,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["last_search"]["top_candidates"], [])
         self.assertEqual(data["last_search"]["variant"],
                          "v2_artist_album_no_year")
-
-    def test_pipeline_detail_surfaces_manual_reason(self):
-        """manual_reason='search_exhausted' is exposed on the detail response."""
-        row = self.db.get_request(100)
-        assert row is not None
-        self.db.seed_request({
-            **row,
-            "status": "manual",
-            "manual_reason": "search_exhausted",
-        })
-        status, data = self._get("/api/pipeline/100")
-
-        self.assertEqual(status, 200)
-        self.assertEqual(data["manual_reason"], "search_exhausted")
 
     def test_pipeline_detail_history_surfaces_wrong_match_triage_audit(self):
         self.db.log_download(

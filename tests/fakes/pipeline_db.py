@@ -193,6 +193,27 @@ class _FakeTerminalTransitionsDB:
             )
         return True
 
+    def apply_terminal_metadata_without_transition(
+        self,
+        request_id: int,
+        *,
+        expected_status: str,
+        fields: dict[str, object],
+    ) -> bool:
+        row = self._db._requests.get(request_id)
+        if row is None or row.get("status") != expected_status:
+            return False
+        if not fields:
+            return True
+        applied = self._db.update_request_fields(
+            request_id,
+            expected_status=expected_status,
+            **fields,
+        )
+        if applied:
+            self._boundary("request.metadata")
+        return applied
+
     def record_attempt(
         self,
         request_id: int,
@@ -1312,11 +1333,13 @@ class FakePipelineDB:
         transition: transitions.RequestTransition,
         *,
         operator_stop_was_current: bool,
+        successful_terminal_acceptance: bool,
     ) -> tuple[transitions.TransitionApplied, ...]:
-        if not (
+        preserve_stop = (
             operator_stop_was_current
-            and transition.target_status == "wanted"
-        ):
+            and not successful_terminal_acceptance
+        )
+        if not preserve_stop:
             return (transitions.require_transition_applied(
                 transitions.finalize_request(
                     transition_db,
@@ -1335,10 +1358,12 @@ class FakePipelineDB:
             ),)
         current_status = str(row["status"])
         applied: list[transitions.TransitionApplied] = []
-        has_policy_effect = bool(transition.fields) or (
-            transition.attempt_type is not None
-        )
-        if has_policy_effect:
+        if transition.target_status == "wanted":
+            has_policy_effect = bool(transition.fields) or (
+                transition.attempt_type is not None
+            )
+            if not has_policy_effect:
+                return ()
             if not transition_db.apply_wanted_policy_without_requeue(
                 request_id,
                 expected_status=current_status,
@@ -1353,17 +1378,34 @@ class FakePipelineDB:
                 from_status=current_status,
                 target_status=current_status,
             ))
-        if current_status != "manual":
-            applied.append(transitions.require_transition_applied(
-                transitions.finalize_request(
-                    transition_db,
-                    request_id,
-                    transitions.RequestTransition.to_manual(
-                        from_status=current_status,
-                    ),
+            return tuple(applied)
+        if transition.attempt_type is not None:
+            raise ValueError(
+                f"{transition.target_status} transition cannot record an attempt"
+            )
+        if transition.target_status in {"imported", "unsearchable"}:
+            if not transition.fields:
+                return ()
+            if not transition_db.apply_terminal_metadata_without_transition(
+                request_id,
+                expected_status=current_status,
+                fields=dict(transition.fields),
+            ):
+                raise RuntimeError(
+                    "locked operator-stop row changed during terminal metadata"
                 )
-            ))
-        return tuple(applied)
+            return (transitions.TransitionApplied(
+                request_id=request_id,
+                from_status=current_status,
+                target_status=current_status,
+            ),)
+        return (transitions.require_transition_applied(
+            transitions.finalize_request(
+                transition_db,
+                request_id,
+                transition,
+            )
+        ),)
 
     def persist_import_terminal_outcome(
         self,
@@ -1380,17 +1422,36 @@ class FakePipelineDB:
         try:
             transition_db = _FakeTerminalTransitionsDB(self, boundary)
             applied = []
-            operator_stop_was_current = operator_search_stop_is_current(
+            locked_status = (
                 str(self._requests[command.request_id]["status"])
                 if command.request_id in self._requests
                 else None
             )
+            operator_stop_was_current = operator_search_stop_is_current(
+                locked_status
+            )
             if command.initial_transition is not None:
+                if (
+                    operator_stop_was_current
+                    and not command.successful_terminal_acceptance
+                    and command.initial_transition.from_status is not None
+                    and command.initial_transition.from_status != locked_status
+                ):
+                    transitions.require_transition_applied(
+                        transitions.finalize_request(
+                            transition_db,
+                            command.request_id,
+                            command.initial_transition,
+                        )
+                    )
                 applied.extend(self._apply_terminal_request_transition(
                     transition_db,
                     command.request_id,
                     command.initial_transition,
                     operator_stop_was_current=operator_stop_was_current,
+                    successful_terminal_acceptance=(
+                        command.successful_terminal_acceptance
+                    ),
                 ))
             download_log_id = cast(Any, self.log_download)(
                 request_id=command.request_id,
@@ -1403,27 +1464,10 @@ class FakePipelineDB:
                     command.request_id,
                     transition,
                     operator_stop_was_current=operator_stop_was_current,
+                    successful_terminal_acceptance=(
+                        command.successful_terminal_acceptance
+                    ),
                 ))
-            if (
-                operator_stop_was_current
-                and not command.successful_terminal_acceptance
-            ):
-                row = transition_db.get_request(command.request_id)
-                if row is None:
-                    raise RuntimeError(
-                        "locked operator-stop row vanished during terminal outcome"
-                    )
-                current_status = str(row["status"])
-                if not operator_search_stop_is_current(current_status):
-                    applied.append(transitions.require_transition_applied(
-                        transitions.finalize_request(
-                            transition_db,
-                            command.request_id,
-                            transitions.RequestTransition.to_manual(
-                                from_status=current_status,
-                            ),
-                        )
-                    ))
             cooled: set[str] = set()
             for entry in command.denylists:
                 denied_before = len(self.denylist)
@@ -1715,7 +1759,6 @@ class FakePipelineDB:
             row["next_retry_after"] = None
             row["last_attempt_at"] = None
         row["active_download_state"] = None
-        row["manual_reason"] = None
         row["updated_at"] = now
         if "search_filetype_override" in fields:
             row["search_filetype_override"] = fields["search_filetype_override"]
@@ -1761,7 +1804,6 @@ class FakePipelineDB:
         now = _utcnow()
         row["status"] = "wanted"
         row["active_download_state"] = None
-        row["manual_reason"] = None
         row["updated_at"] = now
         if "search_filetype_override" in fields:
             row["search_filetype_override"] = fields["search_filetype_override"]
@@ -2237,7 +2279,6 @@ class FakePipelineDB:
         now = _utcnow()
         row["status"] = "wanted"
         row["active_download_state"] = None
-        row["manual_reason"] = None
         row["updated_at"] = now
         self.status_history.append((request_id, "wanted"))
         self.record_attempt(
@@ -3352,7 +3393,6 @@ class FakePipelineDB:
             "current_lossless_source_v0_probe_avg_bitrate": None,
             "current_lossless_source_v0_probe_median_bitrate": None,
             "active_download_state": None,
-            "manual_reason": None,
             # U1 persisted-search-plans cursor fields.
             "active_plan_id": None,
             "next_plan_ordinal": 0,

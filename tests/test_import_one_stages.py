@@ -104,7 +104,6 @@ class TestPipelineDbUpdate(unittest.TestCase):
 
         import_one.update_pipeline_db(
             42,
-            "imported",
             imported_path="/Beets/Artist/Album",
             distance=0.12,
             scenario="preflight_existing",
@@ -139,56 +138,10 @@ class TestPipelineDbUpdate(unittest.TestCase):
         stderr = io.StringIO()
 
         with patch("sys.stderr", stderr):
-            import_one.update_pipeline_db(42, "imported")
+            import_one.update_pipeline_db(42)
 
         self.assertEqual(db.close_calls, 1)
         self.assertIn("Pipeline DB update failed", stderr.getvalue())
-
-    @patch("harness.import_one.finalize_request")
-    @patch("lib.pipeline_db.PipelineDB")
-    def test_update_pipeline_db_distinguishes_transition_whitelist_errors(
-        self,
-        mock_db_cls,
-        mock_finalize,
-    ) -> None:
-        from harness import import_one
-
-        db = FakePipelineDB()
-        mock_db_cls.return_value = db
-        stderr = io.StringIO()
-
-        with patch("sys.stderr", stderr):
-            import_one.update_pipeline_db(
-                42,
-                "wanted",
-                imported_path="/Beets/Artist/Album",
-            )
-
-        mock_finalize.assert_not_called()
-        self.assertEqual(db.close_calls, 1)
-        self.assertIn("Pipeline DB transition rejected", stderr.getvalue())
-        self.assertIn("imported_path", stderr.getvalue())
-
-    @patch("harness.import_one.finalize_request")
-    @patch("lib.pipeline_db.PipelineDB")
-    def test_update_pipeline_db_rejects_unknown_status_and_closes_db(
-        self,
-        mock_db_cls,
-        mock_finalize,
-    ) -> None:
-        from harness import import_one
-
-        db = FakePipelineDB()
-        mock_db_cls.return_value = db
-        stderr = io.StringIO()
-
-        with patch("sys.stderr", stderr):
-            import_one.update_pipeline_db(42, "queued")
-
-        mock_finalize.assert_not_called()
-        self.assertEqual(db.close_calls, 1)
-        self.assertIn("Pipeline DB transition rejected", stderr.getvalue())
-        self.assertIn("queued", stderr.getvalue())
 
 
 # ============================================================================

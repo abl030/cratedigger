@@ -1196,7 +1196,7 @@ class TestReplaceHappyPath(_ServiceCase):
         self.assertEqual(kwargs.get("clear_pipeline_state"), False)
 
     @given(old_status=st.sampled_from(
-        ["wanted", "downloading", "manual", "imported"]))
+        ["wanted", "downloading", "unsearchable", "imported"]))
     def test_replace_displaces_old_install_for_every_source_status(
         self, old_status,
     ):
@@ -1231,7 +1231,7 @@ class TestReplaceHappyPath(_ServiceCase):
 
     def test_happy_path_manual(self):
         self._patch_externals()
-        db, _, svc = self._replace(old_status="manual")
+        db, _, svc = self._replace(old_status="unsearchable")
         result = svc.replace_request_mbid(
             42, target_mb_release_id=NEW_MBID,
         )

@@ -122,8 +122,7 @@ export function classifyArtistRows({
   }
 
   const inFlight = (libraryAlbums || []).filter(
-    album => album.pipeline_status === 'downloading'
-      || album.pipeline_status === 'manual');
+    album => album.pipeline_status === 'downloading');
 
   // Suppress the library-feed fallback only through exact identities from
   // the displayed row or its associated counterpart. A counterpart can

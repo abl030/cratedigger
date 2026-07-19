@@ -4,7 +4,7 @@ Split from the 3,810-line ``scripts/pipeline_cli.py`` monolith into one
 module per command family, mirroring the ``web/routes/`` layout (same
 mechanical pattern as the ``lib/quality/`` split, issue #477):
 
-    album_requests.py   list / add / status / retry / cancel / set /
+    album_requests.py   list / add / status / set /
                        set-intent / disk-coverage + the MB-fetch helpers
                        (named album_requests, not requests, to avoid
                        shadowing the third-party ``requests`` package —
@@ -35,7 +35,7 @@ modules; tests and patch sites import those owners directly.
 
 Note on ``finalize_request``: it's a module-level DI seam
 (``finalize_request = transitions.finalize_request``) bound
-independently in BOTH ``album_requests.py`` (retry/cancel/set/set-intent)
+independently in BOTH ``album_requests.py`` (set/set-intent)
 and ``quality.py`` (repair-spectral) — same pattern as
 ``web.routes.pipeline_mutations.finalize_request`` / ``harness.import_one.finalize_request``.
 Patches targeting a specific command's test must patch the module that
@@ -60,10 +60,8 @@ logging.basicConfig(
 from scripts.pipeline_cli.album_requests import (
     VALID_STATUSES,
     cmd_add,
-    cmd_cancel,
     cmd_disk_coverage,
     cmd_list,
-    cmd_retry,
     cmd_set,
     cmd_set_intent,
     cmd_status,
@@ -124,7 +122,6 @@ __all__ = [
     "cmd_add",
     "cmd_beets_distance",
     "cmd_ban_source",
-    "cmd_cancel",
     "cmd_disk_coverage",
     "cmd_force_import",
     "cmd_import_jobs",
@@ -136,7 +133,6 @@ __all__ = [
     "cmd_query",
     "cmd_repair_spectral",
     "cmd_replace",
-    "cmd_retry",
     "cmd_routes",
     "cmd_search_plan_advance",
     "cmd_search_plan_dry_run",

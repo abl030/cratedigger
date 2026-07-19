@@ -502,7 +502,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             mb_release_id="mbid-123",
-            status="manual",
+            status="unsearchable",
             verified_lossless=False,
         ))
         proof = VerifiedLosslessProof(

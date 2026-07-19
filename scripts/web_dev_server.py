@@ -33,14 +33,20 @@ sys.path.insert(0, str(REPO_ROOT))
 
 FALLBACK_FIXTURES: dict[str, dict[str, Any]] = {
     "/api/pipeline/all": {
-        "counts": {"wanted": 0, "downloading": 0, "imported": 0, "manual": 0},
+        "counts": {
+            "wanted": 0, "downloading": 0, "imported": 0,
+            "unsearchable": 0,
+        },
         "wanted": [],
         "downloading": [],
         "imported": [],
-        "manual": [],
+        "unsearchable": [],
     },
     "/api/pipeline/status": {
-        "counts": {"wanted": 0, "downloading": 0, "imported": 0, "manual": 0},
+        "counts": {
+            "wanted": 0, "downloading": 0, "imported": 0,
+            "unsearchable": 0,
+        },
         "wanted": [],
     },
     "/api/pipeline/log": {

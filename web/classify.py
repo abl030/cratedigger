@@ -817,7 +817,7 @@ def _classify(
         )
         if entry.request_status == "wanted":
             lifecycle = "Search remains open; a future download will retry."
-        elif entry.request_status in {"manual", "unsearchable"}:
+        elif entry.request_status == "unsearchable":
             lifecycle = "Operator search stop remains in place."
         else:
             lifecycle = "The request lifecycle was preserved."

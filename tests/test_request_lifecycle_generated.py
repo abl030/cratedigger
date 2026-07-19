@@ -74,7 +74,7 @@ from tests.fakes import FakePipelineDB
 from tests.helpers import make_active_download_state_json
 
 LEGAL_STATUSES = frozenset(
-    {"wanted", "downloading", "imported", "manual", "replaced"})
+    {"wanted", "downloading", "imported", "unsearchable", "replaced"})
 
 _IDENTITY_FIELDS = ("mb_release_id", "source", "created_at")
 
@@ -213,13 +213,13 @@ class TestReadOnlyMetadataCasGenerated(unittest.TestCase):
         exists=True,
         status="wanted",
         include_expected_status=False,
-        expected_status="manual",
+        expected_status="unsearchable",
     )
     @example(
         exists=True,
         status="wanted",
         include_expected_status=True,
-        expected_status="manual",
+        expected_status="unsearchable",
     )
     @example(
         exists=True,
@@ -278,7 +278,7 @@ class TestReadOnlyMetadataCasGenerated(unittest.TestCase):
         value=st.one_of(st.none(), st.integers(), st.text(max_size=24)),
     )
     @example(field="status", value="replaced")
-    @example(field="status", value="manual")
+    @example(field="status", value="unsearchable")
     @example(field="mb_release_id", value="different-pressing")
     def test_reserved_lifecycle_and_identity_fields_cannot_be_smuggled(
         self,
@@ -303,14 +303,14 @@ class TestReadOnlyMetadataCasGenerated(unittest.TestCase):
 
 class TestWantedQualityFieldsGenerated(unittest.TestCase):
     @given(
-        source_status=st.sampled_from(["downloading", "imported", "manual"]),
+        source_status=st.sampled_from(["downloading", "imported", "unsearchable"]),
         current_min_bitrate=st.one_of(st.none(), st.integers(1, 2000)),
         current_prev_min_bitrate=st.one_of(st.none(), st.integers(1, 2000)),
         next_min_bitrate=st.one_of(st.none(), st.integers(1, 2000)),
         explicit_prev_min_bitrate=st.one_of(st.none(), st.integers(1, 2000)),
     )
     @example(
-        source_status="manual",
+        source_status="unsearchable",
         current_min_bitrate=320,
         current_prev_min_bitrate=192,
         next_min_bitrate=245,
@@ -366,13 +366,13 @@ class TestResolverSourceStatusGenerated(unittest.TestCase):
     @given(
         exists=st.booleans(),
         status=st.sampled_from(
-            ["wanted", "downloading", "imported", "manual"],
+            ["wanted", "downloading", "imported", "unsearchable"],
         ),
         expected_status=st.sampled_from(
-            ["wanted", "downloading", "imported", "manual"],
+            ["wanted", "downloading", "imported", "unsearchable"],
         ),
     )
-    @example(exists=True, status="manual", expected_status="wanted")
+    @example(exists=True, status="unsearchable", expected_status="wanted")
     @example(exists=True, status="wanted", expected_status="wanted")
     @example(exists=False, status="wanted", expected_status="wanted")
     def test_stale_source_cannot_mutate_ancestor_or_children(
@@ -542,25 +542,33 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
 
     @precondition(lambda self: self._ids_with_status("wanted", "downloading"))
     @rule(data=st.data())
-    def flag_manual(self, data) -> None:
+    def apply_operator_search_stop(self, data) -> None:
         rid = data.draw(
             st.sampled_from(self._ids_with_status("wanted", "downloading")),
-            label="manual target")
+            label="search-stop target")
+        before = copy.deepcopy(self._row(rid))
         from_status = self._row(rid)["status"]
         ok = finalize_request(
-            self.db, rid, RequestTransition.to_manual(from_status=from_status))
+            self.db, rid, RequestTransition.to_unsearchable(from_status=from_status))
         row = self._row(rid)
-        if not isinstance(ok, TransitionApplied) or row["status"] != "manual":
+        if from_status == "wanted":
+            if (
+                not isinstance(ok, TransitionApplied)
+                or row["status"] != "unsearchable"
+            ):
+                raise AssertionError(
+                    f"wanted->unsearchable failed: ok={ok}, "
+                    f"status={row['status']!r}")
+        elif not isinstance(ok, TransitionConflict) or row != before:
             raise AssertionError(
-                f"{from_status}->manual failed: ok={ok}, "
-                f"status={row['status']!r}")
+                f"downloading->unsearchable must be a no-op conflict: {ok}")
 
-    @precondition(lambda self: self._ids_with_status("imported", "manual"))
+    @precondition(lambda self: self._ids_with_status("imported", "unsearchable"))
     @rule(data=st.data())
     def requeue_from_terminal(self, data) -> None:
-        """Operator requeue (upgrade / retry-from-manual): clears counters."""
+        """Operator requeue (upgrade / resume search): clears counters."""
         rid = data.draw(
-            st.sampled_from(self._ids_with_status("imported", "manual")),
+            st.sampled_from(self._ids_with_status("imported", "unsearchable")),
             label="requeue-from-terminal target")
         from_status = self._row(rid)["status"]
         ok = finalize_request(
@@ -579,7 +587,7 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
     @rule(
         data=st.data(),
         target_status=st.sampled_from(
-            ("wanted", "downloading", "imported", "manual")),
+            ("wanted", "downloading", "imported", "unsearchable")),
         explicit_source=st.booleans(),
     )
     def attempt_any_transition(
@@ -599,7 +607,7 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
         actual = str(before["status"])
         claimed_source = actual if explicit_source else None
         if explicit_source and data.draw(st.booleans(), label="stale snapshot"):
-            claimed_source = "wanted" if actual != "wanted" else "manual"
+            claimed_source = "wanted" if actual != "wanted" else "unsearchable"
 
         if target_status == "wanted":
             command = RequestTransition.to_wanted(from_status=claimed_source)
@@ -611,7 +619,7 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
         elif target_status == "imported":
             command = RequestTransition.to_imported(from_status=claimed_source)
         else:
-            command = RequestTransition.to_manual(from_status=claimed_source)
+            command = RequestTransition.to_unsearchable(from_status=claimed_source)
 
         result = finalize_request(self.db, rid, command)
         after = self._row(rid)
@@ -628,7 +636,7 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
         assert_transition_result_matches(before, after, target_status, result)
 
     @precondition(lambda self: self._ids_with_status(
-        "wanted", "downloading", "imported", "manual"))
+        "wanted", "downloading", "imported", "unsearchable"))
     @rule(data=st.data())
     def replace(self, data) -> None:
         """Replace (issue-#282 shape): the old row flips to 'replaced' and
@@ -637,7 +645,7 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
         rid = data.draw(
             st.sampled_from(
                 self._ids_with_status(
-                    "wanted", "downloading", "imported", "manual")),
+                    "wanted", "downloading", "imported", "unsearchable")),
             label="replace target")
         if self._row(rid).get("active_plan_id") is None:
             self.db.create_successful_search_plan(
@@ -911,9 +919,9 @@ class TestLifecycleCheckersTripOnViolations(unittest.TestCase):
 
     def test_trips_when_applied_target_did_not_land(self):
         row = {"id": 1, "status": "wanted"}
-        applied = TransitionApplied(1, "wanted", "manual")
+        applied = TransitionApplied(1, "wanted", "unsearchable")
         with self.assertRaises(AssertionError):
-            assert_transition_result_matches(row, row, "manual", applied)
+            assert_transition_result_matches(row, row, "unsearchable", applied)
 
     def test_read_only_cas_checker_trips_on_false_success_and_mutation(self):
         with self.assertRaises(AssertionError):

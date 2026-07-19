@@ -3,7 +3,7 @@
  * Run with: node tests/test_js_util.mjs
  */
 
-import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel, youtubeBrowseUrl, manualReasonLabel, renderForensicBlock, parsePastedId, youtubeSectionState, consoleEmphasis } from '../web/js/util.js';
+import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel, youtubeBrowseUrl, renderForensicBlock, parsePastedId, youtubeSectionState, consoleEmphasis } from '../web/js/util.js';
 import { state } from '../web/js/state.js';
 import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, buildLabelDetailUrl, loadLabelReleases, parseYear, renderLabelLinks, distinctFormats, renderPaginationControls, renderLabelRows } from '../web/js/labels.js';
 import { __test__ as longTailTest } from '../web/js/long_tail.js';
@@ -487,16 +487,6 @@ assertEqual(nanBoth.length, 3, 'both NaN bounds → no filter');
 const mixedNan = applyLabelFilters(NAN_ROWS, { yearMin: NaN, yearMax: 2005 });
 assertEqual(mixedNan.map(r => r.id).join(','), '1',
   'valid yearMax with NaN yearMin still filters correctly');
-
-// --- manualReasonLabel tests ---
-console.log('manualReasonLabel()');
-assertEqual(manualReasonLabel(null), '', 'null → empty string');
-assertEqual(manualReasonLabel(undefined), '', 'undefined → empty string');
-assertEqual(manualReasonLabel(''), '', 'empty string → empty string');
-assertEqual(manualReasonLabel('search_exhausted'), 'search exhausted',
-  'search_exhausted → friendly label');
-assertEqual(manualReasonLabel('custom_reason'), 'custom_reason',
-  'unknown reason passes through unchanged');
 
 // --- renderForensicBlock tests ---
 console.log('renderForensicBlock()');

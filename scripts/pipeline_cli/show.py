@@ -120,8 +120,7 @@ def _render_search_forensics_summary(
     """Build the U7 forensic summary block printed above search history.
 
     Inputs:
-    - ``request_row``: the row dict from ``PipelineDB.get_request``. Used
-      for ``manual_reason`` (None when not exhausted / pre-U7).
+    - ``request_row``: the row dict from ``PipelineDB.get_request``.
     - ``latest_search``: the most recent ``search_log`` row dict (already
       ordered newest-first by ``get_search_history``). The candidates
       JSONB blob is decoded here via ``msgspec.convert(blob,
@@ -137,18 +136,13 @@ def _render_search_forensics_summary(
     lines: list[str] = ["", "  Search Forensics:"]
     variant = latest_search.get("variant")
     final_state = latest_search.get("final_state")
-    manual_reason = request_row.get("manual_reason")
-
     if variant:
         lines.append(f"    variant:        {variant}")
     if final_state:
         lines.append(f"    final_state:    {final_state}")
-    if manual_reason:
-        lines.append(f"    manual_reason:  {manual_reason}")
-
     raw_candidates = latest_search.get("candidates")
     if raw_candidates is None:
-        if not (variant or final_state or manual_reason):
+        if not (variant or final_state):
             lines.append("    (no forensic data yet)")
         else:
             lines.append("    candidates:     (none captured)")
@@ -311,8 +305,8 @@ def cmd_show(db, args):
     searches = db.get_search_history(req['id'])
     if searches:
         # U7: print a forensic summary above the row table — the most
-        # recent variant + final_state, the request's manual_reason if
-        # populated, and the top-3 candidates from the latest search_log
+        # recent variant + final_state and the top-3 candidates from the
+        # latest search_log
         # row's JSONB blob. The blob is decoded once via msgspec.convert
         # per single-decode-site discipline (code-quality.md § Wire-
         # boundary types). Older rows / NULL blobs render gracefully.
