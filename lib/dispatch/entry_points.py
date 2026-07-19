@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -26,8 +27,9 @@ from lib.dispatch.quality_gate import _check_quality_gate_core
 from lib.terminal_outcomes import ImportJobTerminal
 
 if TYPE_CHECKING:
+    from lib.config import CratediggerConfig
     from lib.pipeline_db import PipelineDB
-    from lib.dispatch.types import QualityGateFn
+    from lib.dispatch.types import ImportOneRun, QualityGateFn
 
 logger = logging.getLogger("cratedigger")
 
@@ -42,6 +44,10 @@ def dispatch_import_from_db(
     import_job_id: int | None = None,
     download_log_id: int | None = None,
     quality_gate_fn: "QualityGateFn | None" = None,
+    cfg: "CratediggerConfig | None" = None,
+    run_import_fn: "Callable[..., ImportOneRun] | None" = None,
+    beets_library_db_path: str | None = None,
+    beets_library_root: str | None = None,
 ) -> "DispatchOutcome":
     """Run a force-import through the full dispatch pipeline.
 
@@ -80,6 +86,9 @@ def dispatch_import_from_db(
         download_log_id: Originating download_log row for Wrong Matches
             force-imports; scopes candidate-evidence lookup to that
             owner. Optional but typically supplied for force-imports.
+        cfg/run_import_fn/beets_library_*: explicit isolation seams used by
+            the real-storage world model. Production callers omit them and
+            retain runtime config, subprocess import, and deployed Beets.
     """
     from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
 
@@ -99,6 +108,10 @@ def dispatch_import_from_db(
             import_job_id=import_job_id,
             download_log_id=download_log_id,
             quality_gate_fn=quality_gate_fn,
+            cfg=cfg,
+            run_import_fn=run_import_fn,
+            beets_library_db_path=beets_library_db_path,
+            beets_library_root=beets_library_root,
         )
 
 
@@ -112,6 +125,10 @@ def _dispatch_import_from_db_locked(
     import_job_id: int | None,
     download_log_id: int | None,
     quality_gate_fn: "QualityGateFn | None" = None,
+    cfg: "CratediggerConfig | None" = None,
+    run_import_fn: "Callable[..., ImportOneRun] | None" = None,
+    beets_library_db_path: str | None = None,
+    beets_library_root: str | None = None,
 ) -> "DispatchOutcome":
     """Body of dispatch_import_from_db, called once the advisory lock is held.
 
@@ -169,7 +186,7 @@ def _dispatch_import_from_db_locked(
 
     from lib.config import read_runtime_config
 
-    cfg = read_runtime_config()
+    resolved_cfg = cfg or read_runtime_config()
 
     files: list[DownloadFile] = []
     if source_username:
@@ -214,8 +231,8 @@ def _dispatch_import_from_db_locked(
         force=True,
         override_min_bitrate=None,
         target_format=req.get("target_format"),
-        verified_lossless_target=cfg.verified_lossless_target,
-        beets_harness_path=cfg.beets_harness_path,
+        verified_lossless_target=resolved_cfg.verified_lossless_target,
+        beets_harness_path=resolved_cfg.beets_harness_path,
         db=db,
         dl_info=dl_info,
         # Force-import explicitly bypasses the beets distance
@@ -223,7 +240,7 @@ def _dispatch_import_from_db_locked(
         distance=None,
         scenario="force_import",
         files=files,
-        cfg=cfg,
+        cfg=resolved_cfg,
         outcome_label="force_import",
         requeue_on_failure=False,
         source_dirs=source_dirs,
@@ -232,6 +249,9 @@ def _dispatch_import_from_db_locked(
         candidate_download_log_id=download_log_id,
         prevalidated_candidate_result=candidate_result,
         quality_gate_fn=resolved_quality_gate_fn,
+        run_import_fn=run_import_fn,
+        beets_library_db_path=beets_library_db_path,
+        beets_library_root=beets_library_root,
     )
     return _persist_terminal_dispatch_outcome(
         db,

@@ -225,6 +225,7 @@ class _ServiceCase(unittest.TestCase):
         discogs_lookup=None,
         search_plan_service=None,
         beets_db_factory=None,
+        remove_release_fn=None,
         cfg: CratediggerConfig | None = None,
     ) -> MbidReplaceService:
         if mb_lookup is None:
@@ -245,6 +246,7 @@ class _ServiceCase(unittest.TestCase):
             mb_lookup=mb_lookup,
             discogs_lookup=discogs_lookup,
             search_plan_service=search_plan_service,
+            remove_release_fn=remove_release_fn,
         )
 
     def _patch_externals(self):
@@ -1172,6 +1174,31 @@ class TestReplaceHappyPath(_ServiceCase):
         self.assertEqual(kwargs.get("clear_pipeline_state"), False)
         self.assertEqual(kwargs.get("request_id"), 42)
         self.assertEqual(kwargs.get("release_id"), OLD_MBID)
+
+    def test_injected_release_cleanup_runs_at_the_real_service_boundary(self):
+        self._patch_externals()
+        calls: list[dict[str, object]] = []
+
+        def remove_release(**kwargs):
+            calls.append(kwargs)
+            return ReleaseCleanupResult(
+                beets_removed=True,
+                absent_after=True,
+                selector_failures=(),
+            )
+
+        _db, _, svc = self._replace(
+            old_status="imported",
+            remove_release_fn=remove_release,
+        )
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_MBID,
+        )
+
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["release_id"], OLD_MBID)
+        self.assertFalse(calls[0]["clear_pipeline_state"])
 
     def test_replace_removes_preexisting_install_on_wanted_backfill_row(self):
         """The Passenger regression (2026-07-18): a library-backfill row is

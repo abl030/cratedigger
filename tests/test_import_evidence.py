@@ -67,6 +67,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
     def _persist_current(self) -> int:
         evidence = make_album_quality_evidence(
             mb_release_id="release-1",
+            source_path=self.root,
             files=snapshot_audio_files(self.root),
         )
         self.db.upsert_album_quality_evidence(evidence)
@@ -167,6 +168,39 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         self.assertTrue(result.available)
         self.assertEqual(result.provenance.current_status, "loaded")
         self.assertEqual(result.provenance.snapshot_guard, "matched")
+
+    def test_matching_candidate_path_is_rebound_to_installed_path(self):
+        evidence = make_album_quality_evidence(
+            mb_release_id="release-1",
+            source_path="/tmp/disposable-candidate",
+            files=snapshot_audio_files(self.root),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.db.set_request_current_evidence(42, persisted.id)
+
+        def backfill(*_args, **_kwargs):
+            raise AssertionError("matching content must not be remeasured")
+
+        result = ensure_current_evidence_for_action(
+            self.db,
+            request_id=42,
+            mb_release_id="release-1",
+            current_album_path=self.root,
+            backfill_builder=backfill,
+        )
+
+        self.assertTrue(result.available)
+        self.assertEqual(result.provenance.current_status, "loaded")
+        assert result.evidence is not None
+        self.assertEqual(result.evidence.source_path, self.root)
+        linked = self.db.load_album_quality_evidence_by_id(persisted.id)
+        assert linked is not None
+        self.assertEqual(linked.source_path, self.root)
 
     def test_matching_v1_current_evidence_rebuilds_as_v3(self):
         evidence = make_album_quality_evidence(
@@ -613,6 +647,23 @@ class TestLoadCurrentEvidenceForAction(unittest.TestCase):
 
         self.assertIsNone(result)
         ensure.assert_not_called()
+
+    def test_explicit_beets_library_path_is_forwarded(self):
+        with patch("lib.beets_db.BeetsDB") as beets_cls:
+            beets_cls.return_value.__enter__.return_value.get_album_info.return_value = None
+
+            load_current_evidence_for_action(
+                self.db,
+                request_id=42,
+                mb_release_id="release-1",
+                beets_library_db_path="/tmp/world/beets-library.db",
+                beets_library_root="/tmp/world/library",
+            )
+
+        beets_cls.assert_called_once_with(
+            "/tmp/world/beets-library.db",
+            library_root="/tmp/world/library",
+        )
 
     def test_ensure_raises_returns_fail_closed_result(self):
         with patch("lib.beets_db.BeetsDB") as beets_cls, patch(

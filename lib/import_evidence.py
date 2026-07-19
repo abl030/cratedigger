@@ -9,6 +9,7 @@ columns as mutation authority.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Callable, Literal
 
 import msgspec
@@ -207,6 +208,22 @@ def ensure_current_evidence_for_action(
             or audio_snapshot_matches(current_album_path, existing.files)
         )
         if not errors and snapshot_matches:
+            # Candidate and installed snapshots can have the same content
+            # address.  A later candidate upsert then reuses the installed
+            # row and writes its disposable staging path into ``source_path``.
+            # The linked current row must prefer the durable Beets path: all
+            # enrichment helpers use this field as their read boundary after
+            # the candidate directory has been cleaned up.
+            if (
+                current_album_path is not None
+                and os.path.realpath(existing.source_path)
+                != os.path.realpath(current_album_path)
+            ):
+                existing = msgspec.structs.replace(
+                    existing,
+                    source_path=current_album_path,
+                )
+                db.upsert_album_quality_evidence(existing)
             return CurrentEvidenceActionResult(
                 evidence=existing,
                 provenance=ActionEvidenceProvenance(
@@ -426,6 +443,7 @@ def load_current_evidence_for_action(
     request_id: int,
     mb_release_id: str,
     quality_ranks: QualityRankConfig | None = None,
+    beets_library_db_path: str | None = None,
     beets_library_root: str = "",
 ) -> CurrentEvidenceActionResult | None:
     """Look Beets up by MBID then load/backfill; return None if no album, fail-closed on error."""
@@ -434,7 +452,14 @@ def load_current_evidence_for_action(
     try:
         from lib.beets_db import BeetsDB
 
-        with BeetsDB(library_root=beets_library_root) as beets:
+        if beets_library_db_path is None:
+            beets_handle = BeetsDB(library_root=beets_library_root)
+        else:
+            beets_handle = BeetsDB(
+                beets_library_db_path,
+                library_root=beets_library_root,
+            )
+        with beets_handle as beets:
             album_info = beets.get_album_info(mb_release_id, cfg)
         if album_info is None:
             return None

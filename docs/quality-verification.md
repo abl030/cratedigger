@@ -377,6 +377,11 @@ them via `import_jobs.candidate_evidence_id`,
 cross-walk via `request_id` → measure as last resort). Evidence is never
 deleted unless the files actually change.
 
+When an exact release leaves Beets, `clear_on_disk_quality_fields` unlinks
+`album_requests.current_evidence_id` together with the other installed-state
+fields. The content-addressed evidence row remains as audit history; only its
+claim to describe the request's current files is removed.
+
 **Evidence survives the candidate → library transition by explicit markers.**
 After a successful import, `propagate_candidate_evidence_to_current` builds a
 new row from the installed library snapshot. Installed bitrate, format,

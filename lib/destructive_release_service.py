@@ -33,7 +33,7 @@ from lib.pipeline_db import (
     release_id_to_lock_key,
 )
 from lib.quality import resolve_user_requeue_override
-from lib.release_cleanup import remove_and_reset_release
+from lib.release_cleanup import ReleaseCleanupResult, remove_and_reset_release
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 
 
@@ -102,6 +102,9 @@ class FinalizeRequestFn(Protocol):
         request_id: int,
         transition: transitions.RequestTransition,
     ) -> transitions.TransitionResult: ...
+
+
+CleanupReleaseFn = Callable[..., ReleaseCleanupResult]
 
 
 def _distinct_identities(
@@ -233,6 +236,7 @@ def _ban_source_locked(
     request: BanSourceRequest,
     identity: ReleaseIdentity,
     finalize_request_fn: FinalizeRequestFn,
+    cleanup_release_fn: CleanupReleaseFn,
 ) -> BanSourceResult:
     """Run every bad-rip effect while IMPORT and RELEASE are both held."""
     current = pipeline_db.get_request(request.request_id)
@@ -315,11 +319,12 @@ def _ban_source_locked(
     if reported_username:
         pipeline_db.add_denylist(request.request_id, reported_username, reason)
 
-    cleanup = remove_and_reset_release(
+    cleanup = cleanup_release_fn(
         beets_db=beets_db,  # type: ignore[arg-type] -- structural BeetsDB surface
         pipeline_db=pipeline_db,
         release_id=release_id,
         request_id=request.request_id,
+        clear_pipeline_state=True,
     )
 
     cleanup_errors = tuple(cleanup.selector_failures)
@@ -367,6 +372,7 @@ def ban_source(
     beets_db: SupportsDestructiveBeetsDB,
     request: BanSourceRequest,
     finalize_request_fn: FinalizeRequestFn = transitions.finalize_request,
+    cleanup_release_fn: CleanupReleaseFn | None = None,
 ) -> BanSourceResult:
     """Mark one request's exact server-owned release as a bad rip."""
     # IMPORT is always outer when both namespaces are held.
@@ -401,6 +407,9 @@ def ban_source(
                 request=request,
                 identity=identity,
                 finalize_request_fn=finalize_request_fn,
+                cleanup_release_fn=(
+                    cleanup_release_fn or remove_and_reset_release
+                ),
             )
 
 

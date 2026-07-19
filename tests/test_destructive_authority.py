@@ -35,6 +35,7 @@ from lib.beets_delete import (
     BeetsDeleteRequest,
     run_beets_delete,
 )
+from lib.release_cleanup import ReleaseCleanupResult
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
     ADVISORY_LOCK_NAMESPACE_RELEASE,
@@ -238,6 +239,29 @@ class TestBanSourceAuthority(unittest.TestCase):
             [(41, "bad-peer")],
         )
         self.assertEqual(self.db.download_logs[-1].outcome, "curator_ban")
+
+    def test_injected_release_cleanup_runs_at_the_real_service_boundary(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        def remove_release(**kwargs):
+            calls.append(kwargs)
+            return ReleaseCleanupResult(
+                beets_removed=True,
+                absent_after=True,
+                selector_failures=(),
+            )
+
+        result = ban_source(
+            pipeline_db=self.db,
+            beets_db=self.beets,
+            request=BanSourceRequest(request_id=41),
+            cleanup_release_fn=remove_release,
+        )
+
+        self.assertIsInstance(result, BanSourceSuccess)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["release_id"], RELEASE_A)
+        self.assertTrue(calls[0]["clear_pipeline_state"])
 
 
 class TestLibraryDeleteAuthority(unittest.TestCase):

@@ -78,7 +78,11 @@ from lib.pipeline_db import (
     SupersedeRaceError,
 )
 from lib.processing_paths import stage_to_ai_path
-from lib.release_cleanup import ReleaseCleanupDB, remove_and_reset_release
+from lib.release_cleanup import (
+    ReleaseCleanupDB,
+    ReleaseCleanupResult,
+    remove_and_reset_release,
+)
 from lib.search_plan_service import SearchPlanDB, SearchPlanService
 from lib.util import (
     trigger_jellyfin_scan,
@@ -183,6 +187,9 @@ BeetsDBFactory = Callable[[], Any]
 """Zero-arg callable returning a ``BeetsDB`` instance. Default uses
 ``lib.beets_db.BeetsDB`` against the configured library path."""
 
+ReleaseCleanupFn = Callable[..., ReleaseCleanupResult]
+"""Injectable exact-release cleanup at the service's filesystem boundary."""
+
 
 def _default_mb_lookup(mbid: str, *, fresh: bool = False) -> dict[str, Any]:
     """Default MB-mirror lookup. Imported lazily so the service module
@@ -223,6 +230,7 @@ class MbidReplaceService:
         mb_lookup: MBLookup | None = None,
         discogs_lookup: DiscogsLookup | None = None,
         search_plan_service: SearchPlanService | None = None,
+        remove_release_fn: ReleaseCleanupFn | None = None,
     ) -> None:
         self.db = db
         self.config = config
@@ -236,6 +244,7 @@ class MbidReplaceService:
         self.search_plan_service = (
             search_plan_service or SearchPlanService(db, config)
         )
+        self.remove_release_fn = remove_release_fn or remove_and_reset_release
 
     def replace_request_mbid(
         self,
@@ -872,7 +881,7 @@ class MbidReplaceService:
             if old_release_id:
                 try:
                     beets_db = self.beets_db_factory()
-                    result = remove_and_reset_release(
+                    result = self.remove_release_fn(
                         beets_db=beets_db,
                         pipeline_db=self.db,
                         release_id=old_release_id,

@@ -725,7 +725,7 @@ class TestFakePipelineDB(unittest.TestCase):
 
     def test_clear_on_disk_quality_fields_matches_real_db(self):
         """FakePipelineDB must mirror PipelineDB.clear_on_disk_quality_fields:
-        zero the on-disk spectral + verified_lossless + imported_path,
+        zero current evidence + on-disk spectral + verified_lossless + path,
         preserve min_bitrate and last_download_spectral_* (those aren't
         on-disk state).
         """
@@ -738,6 +738,7 @@ class TestFakePipelineDB(unittest.TestCase):
             current_spectral_bitrate=160,
             last_download_spectral_grade="suspect",
             last_download_spectral_bitrate=192,
+            current_evidence_id=743,
             imported_path="/mnt/virtio/Music/Beets/Stale/Path",
         ))
 
@@ -747,6 +748,7 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertFalse(row["verified_lossless"])
         self.assertIsNone(row["current_spectral_grade"])
         self.assertIsNone(row["current_spectral_bitrate"])
+        self.assertIsNone(row["current_evidence_id"])
         self.assertIsNone(row["imported_path"],
                           "imported_path must clear — the web UI renders it "
                           "directly and a stale path after beet rm is worse "

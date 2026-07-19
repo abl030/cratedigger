@@ -3874,6 +3874,27 @@ class TestClearOnDiskQualityFields(unittest.TestCase):
         assert req is not None
         self.assertIsNone(req["imported_path"])
 
+    def test_clears_current_evidence_link_but_preserves_audit_row(self):
+        req_id = self._make_request("evidence")
+        evidence = make_album_quality_evidence(
+            mb_release_id="clear-od-evidence-uuid",
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.db.set_request_current_evidence(req_id, persisted.id)
+
+        self.db.clear_on_disk_quality_fields(req_id)
+
+        self.assertIsNone(self.db.get_request_current_evidence_id(req_id))
+        self.assertIsNotNone(
+            self.db.load_album_quality_evidence_by_id(persisted.id),
+            "unlinked content evidence remains immutable audit data",
+        )
+
     def test_preserves_min_bitrate(self):
         """min_bitrate is a baseline for the NEXT gate, not on-disk state."""
         req_id = self._make_request("preserve-min")

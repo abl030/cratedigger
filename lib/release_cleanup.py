@@ -22,8 +22,8 @@ the point — do not collapse or route around it:
 
 - ``remove_and_reset_release(beets_db, pipeline_db, release_id,
   request_id)`` wraps the primitive and adds one extra step:
-  clearing ``current_spectral_*`` / ``imported_path`` /
-  ``verified_lossless`` via
+  clearing ``current_spectral_*`` / ``current_evidence_id`` /
+  ``imported_path`` / ``verified_lossless`` via
   ``PipelineDB.clear_on_disk_quality_fields`` iff the album is
   absent afterwards. That's what the ban-source web route and other
   pipeline-aware callers need.
@@ -195,7 +195,7 @@ def remove_and_reset_release(
     clear_pipeline_state: bool = True,
 ) -> ReleaseCleanupResult:
     """Atomically remove a release from beets and (optionally) clear
-    pipeline ghost state.
+    pipeline ghost state, including the current-evidence pointer.
 
     Thin wrapper around ``remove_album_by_selectors`` that adds the
     pipeline-DB cleanup: iff the album is absent afterwards AND

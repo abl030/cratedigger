@@ -28,6 +28,46 @@ class RequestMembershipSnapshot(msgspec.Struct, frozen=True):
     imported_path: str | None
 
 
+class EvidenceDiskSnapshot(msgspec.Struct, frozen=True):
+    """One request's linked evidence beside its exact Beets snapshot."""
+
+    request_id: int
+    release_id: str
+    status: str
+    album_path: str | None
+    current_evidence_id: int | None
+    evidence_id: int | None
+    evidence_release_id: str | None
+    evidence_source_path: str | None
+    evidence_fingerprint: str | None
+    actual_fingerprint: str | None
+
+
+class LifecycleTransitionSnapshot(msgspec.Struct, frozen=True):
+    """Before/after facts for a world operation with temporal policy."""
+
+    request_id: int
+    operation: str
+    before_status: str
+    after_status: str
+    before_release_id: str
+    after_release_id: str
+    before_override: str | None
+    after_override: str | None
+    before_album_fingerprint: str | None
+    after_album_fingerprint: str | None
+    before_verified_lossless: bool = False
+    descendant_request_id: int | None = None
+
+
+class DenylistAuthoritySnapshot(msgspec.Struct, frozen=True):
+    """One denylist row and the decisions capable of authorizing it."""
+
+    request_id: int
+    username: str
+    authorizing_decisions: tuple[str, ...] = ()
+
+
 class WorldViolation(msgspec.Struct, frozen=True):
     """One deterministic invariant violation suitable for CLI/API output."""
 
@@ -212,12 +252,183 @@ def check_status_membership(
     return tuple(violations)
 
 
+def check_evidence_disk_coherence(
+    snapshots: Sequence[EvidenceDiskSnapshot],
+) -> tuple[WorldViolation, ...]:
+    """Require each active installed request to link its exact disk evidence."""
+
+    violations: list[WorldViolation] = []
+    for snapshot in snapshots:
+        if snapshot.status == "replaced":
+            continue
+        if snapshot.album_path is None:
+            if snapshot.current_evidence_id is not None:
+                violations.append(WorldViolation(
+                    code="evidence_link_without_album",
+                    detail=(
+                        f"request {snapshot.request_id} links evidence "
+                        f"{snapshot.current_evidence_id} without an exact "
+                        "Beets album"
+                    ),
+                    request_id=snapshot.request_id,
+                    release_id=snapshot.release_id,
+                ))
+            continue
+        if snapshot.current_evidence_id is None:
+            violations.append(WorldViolation(
+                code="current_evidence_missing",
+                detail=(
+                    f"request {snapshot.request_id} has an exact Beets album "
+                    "but no current_evidence_id"
+                ),
+                request_id=snapshot.request_id,
+                release_id=snapshot.release_id,
+            ))
+            continue
+        if snapshot.evidence_id != snapshot.current_evidence_id:
+            violations.append(WorldViolation(
+                code="current_evidence_dangling",
+                detail=(
+                    f"request {snapshot.request_id} links evidence "
+                    f"{snapshot.current_evidence_id}, resolved row is "
+                    f"{snapshot.evidence_id}"
+                ),
+                request_id=snapshot.request_id,
+                release_id=snapshot.release_id,
+            ))
+            continue
+        if snapshot.evidence_release_id != snapshot.release_id:
+            violations.append(WorldViolation(
+                code="evidence_release_mismatch",
+                detail=(
+                    f"request {snapshot.request_id} release "
+                    f"{snapshot.release_id!r} links evidence for "
+                    f"{snapshot.evidence_release_id!r}"
+                ),
+                request_id=snapshot.request_id,
+                release_id=snapshot.release_id,
+            ))
+        if (
+            snapshot.evidence_source_path is None
+            or _normal_path(snapshot.evidence_source_path)
+            != _normal_path(snapshot.album_path)
+        ):
+            violations.append(WorldViolation(
+                code="evidence_path_mismatch",
+                detail=(
+                    f"request {snapshot.request_id} evidence path "
+                    f"{snapshot.evidence_source_path!r} does not match "
+                    f"Beets path {snapshot.album_path!r}"
+                ),
+                request_id=snapshot.request_id,
+                release_id=snapshot.release_id,
+            ))
+        if snapshot.evidence_fingerprint != snapshot.actual_fingerprint:
+            violations.append(WorldViolation(
+                code="evidence_fingerprint_mismatch",
+                detail=(
+                    f"request {snapshot.request_id} evidence fingerprint "
+                    f"{snapshot.evidence_fingerprint!r} does not match disk "
+                    f"{snapshot.actual_fingerprint!r}"
+                ),
+                request_id=snapshot.request_id,
+                release_id=snapshot.release_id,
+            ))
+    return tuple(violations)
+
+
+def check_proof_lock_terminality(
+    transitions: Sequence[LifecycleTransitionSnapshot],
+) -> tuple[WorldViolation, ...]:
+    """Automated import attempts must not disturb a proof-bearing install."""
+
+    protected_operations = {"upgrade_import", "force_import"}
+    violations: list[WorldViolation] = []
+    for transition in transitions:
+        if (
+            not transition.before_verified_lossless
+            or transition.operation not in protected_operations
+        ):
+            continue
+        unchanged = (
+            transition.after_status == "imported"
+            and transition.after_release_id == transition.before_release_id
+            and transition.after_album_fingerprint
+            == transition.before_album_fingerprint
+            and transition.descendant_request_id is None
+        )
+        if unchanged:
+            continue
+        violations.append(WorldViolation(
+            code="proof_lock_broken",
+            detail=(
+                f"{transition.operation} disturbed proof-bearing request "
+                f"{transition.request_id}"
+            ),
+            request_id=transition.request_id,
+            release_id=transition.before_release_id,
+        ))
+    return tuple(violations)
+
+
+def check_no_lossy_tier_widening(
+    transitions: Sequence[LifecycleTransitionSnapshot],
+) -> tuple[WorldViolation, ...]:
+    """Lossless-only rows that remain searchable must stay lossless-only."""
+
+    violations: list[WorldViolation] = []
+    for transition in transitions:
+        if (
+            transition.before_override != "lossless"
+            or transition.after_status not in {"wanted", "unsearchable"}
+            or transition.after_override == "lossless"
+        ):
+            continue
+        violations.append(WorldViolation(
+            code="lossy_tier_widened",
+            detail=(
+                f"{transition.operation} widened request "
+                f"{transition.request_id} from lossless-only to "
+                f"{transition.after_override!r}"
+            ),
+            request_id=transition.request_id,
+            release_id=transition.after_release_id,
+        ))
+    return tuple(violations)
+
+
+def check_denylist_authority(
+    rows: Sequence[DenylistAuthoritySnapshot],
+) -> tuple[WorldViolation, ...]:
+    """Every source exclusion must trace to a decision that owns exclusion."""
+
+    return tuple(
+        WorldViolation(
+            code="denylist_without_authority",
+            detail=(
+                f"request {row.request_id} user {row.username!r} has no "
+                "authorizing decision"
+            ),
+            request_id=row.request_id,
+        )
+        for row in rows
+        if not row.authorizing_decisions
+    )
+
+
 __all__ = [
     "LibraryAlbumSnapshot",
+    "DenylistAuthoritySnapshot",
+    "EvidenceDiskSnapshot",
+    "LifecycleTransitionSnapshot",
     "RequestMembershipSnapshot",
     "WorldViolation",
     "assert_replaced_row_frozen",
+    "check_denylist_authority",
+    "check_evidence_disk_coherence",
     "check_folder_exclusivity",
     "check_library_filesystem",
+    "check_no_lossy_tier_widening",
+    "check_proof_lock_terminality",
     "check_status_membership",
 ]
