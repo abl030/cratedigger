@@ -72,6 +72,8 @@ def run_full_dead_code_gate(
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         source_list = _write_source_world(root, sources)
+        whitelist = root / "vulture-whitelist.py"
+        whitelist.write_text("", encoding="utf-8")
         runner = REPO_ROOT / "scripts/find_dead_code.sh"
         if runner_source is not None:
             runner = root / "find_dead_code.sh"
@@ -79,6 +81,7 @@ def run_full_dead_code_gate(
         env = dict(os.environ)
         env["CRATEDIGGER_REPO_ROOT"] = str(REPO_ROOT)
         env["CRATEDIGGER_PRODUCTION_PYTHON_SOURCES_FILE"] = str(source_list)
+        env["CRATEDIGGER_VULTURE_WHITELIST_FILE"] = str(whitelist)
         return subprocess.run(
             ["bash", str(runner)],
             cwd=REPO_ROOT,
@@ -87,6 +90,66 @@ def run_full_dead_code_gate(
             capture_output=True,
             check=False,
         )
+
+
+def _raw_vulture_whitelist(source_list: Path) -> str:
+    sources = source_list.read_text(encoding="utf-8").splitlines()
+    result = subprocess.run(
+        [
+            "vulture",
+            "--make-whitelist",
+            "--min-confidence",
+            "60",
+            *sources,
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode not in {0, 3}:
+        raise AssertionError(result.stderr or result.stdout)
+    return result.stdout
+
+
+def run_vulture_freshness_world(
+    baseline_sources: dict[str, str],
+    current_sources: dict[str, str],
+    *,
+    flags: tuple[str, ...] = (),
+    runner_source: str | None = None,
+) -> tuple[subprocess.CompletedProcess[str], tuple[str, ...]]:
+    """Run the real dead-code wrapper against one synthetic baseline/current world."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source_list = _write_source_world(root, baseline_sources)
+        whitelist = root / "vulture-whitelist.py"
+        whitelist.write_text(
+            _raw_vulture_whitelist(source_list),
+            encoding="utf-8",
+        )
+        source_list = _write_source_world(root, current_sources)
+        cleanup_dir = root / "cleanup"
+        cleanup_dir.mkdir()
+        runner = REPO_ROOT / "scripts/find_dead_code.sh"
+        if runner_source is not None:
+            runner = root / "find_dead_code.sh"
+            runner.write_text(runner_source, encoding="utf-8")
+        env = dict(os.environ)
+        env["CRATEDIGGER_REPO_ROOT"] = str(REPO_ROOT)
+        env["CRATEDIGGER_PRODUCTION_PYTHON_SOURCES_FILE"] = str(source_list)
+        env["CRATEDIGGER_VULTURE_WHITELIST_FILE"] = str(whitelist)
+        env["TMPDIR"] = str(cleanup_dir)
+        result = subprocess.run(
+            ["bash", str(runner), *flags],
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        leftovers = tuple(sorted(path.name for path in cleanup_dir.iterdir()))
+        return result, leftovers
 
 
 def assert_import_liveness(
@@ -321,6 +384,151 @@ class TestUnusedImportAudit(unittest.TestCase):
         self.assertIn("tools/production_python_sources.txt", script)
         self.assertIn('bash scripts/find_unused_imports.sh "$SOURCE_LIST"', script)
         self.assertIn('vulture "${VULTURE_ARGS[@]}" "${SOURCES[@]}"', script)
+
+    def test_exact_vulture_whitelist_is_fresh_and_gate_passes(self) -> None:
+        world = {"lib/orphan.py": "def orphan():\n    return 1\n"}
+
+        result, leftovers = run_vulture_freshness_world(world, world)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(leftovers, ())
+
+    def test_same_symbol_moved_location_names_stale_exact_entry(self) -> None:
+        baseline = {"lib/orphan.py": "def orphan():\n    return 1\n"}
+        current = {"lib/orphan.py": "\n\ndef orphan():\n    return 1\n"}
+
+        result, leftovers = run_vulture_freshness_world(baseline, current)
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn(
+            "not the exact confidence-60 candidate baseline",
+            result.stderr,
+        )
+        self.assertIn("orphan", result.stderr)
+        self.assertIn("orphan.py:1", result.stderr)
+        self.assertEqual(leftovers, ())
+
+    def test_deleted_or_renamed_candidate_fails_freshness(self) -> None:
+        baseline = {"lib/orphan.py": "def orphan():\n    return 1\n"}
+        cases = {
+            "deleted": {"lib/orphan.py": "VALUE = 1\nprint(VALUE)\n"},
+            "renamed": {"lib/orphan.py": "def replacement():\n    return 1\n"},
+        }
+
+        for label, current in cases.items():
+            with self.subTest(label=label):
+                result, _ = run_vulture_freshness_world(baseline, current)
+
+                self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+                self.assertIn(
+                    "not the exact confidence-60 candidate baseline",
+                    result.stderr,
+                )
+                self.assertIn("orphan", result.stderr)
+
+    def test_additional_same_name_candidate_cannot_hide_behind_baseline(self) -> None:
+        baseline = {"lib/orphan.py": "def orphan():\n    return 1\n"}
+        current = {
+            **baseline,
+            "lib/other.py": "def orphan():\n    return 2\n",
+        }
+
+        result, leftovers = run_vulture_freshness_world(baseline, current)
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn(
+            "not the exact confidence-60 candidate baseline",
+            result.stderr,
+        )
+        self.assertIn("lib/other.py:1", result.stderr)
+        self.assertEqual(leftovers, ())
+
+    def test_baseline_mode_deliberately_bypasses_freshness(self) -> None:
+        baseline = {"lib/orphan.py": "def orphan():\n    return 1\n"}
+        current = {"lib/orphan.py": "VALUE = 1\nprint(VALUE)\n"}
+
+        result, leftovers = run_vulture_freshness_world(
+            baseline,
+            current,
+            flags=("--baseline",),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn(
+            "not the exact confidence-60 candidate baseline",
+            result.stderr,
+        )
+        self.assertEqual(leftovers, ())
+
+    def test_confidence_flag_does_not_redefine_freshness_confidence(self) -> None:
+        baseline = {"lib/orphan.py": "def orphan():\n    return 1\n"}
+        current = {"lib/orphan.py": "VALUE = 1\nprint(VALUE)\n"}
+
+        result, _ = run_vulture_freshness_world(
+            baseline,
+            current,
+            flags=("--confidence", "100"),
+        )
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("exact confidence-60 candidate baseline", result.stderr)
+
+    def test_freshness_wiring_mutant_is_killed(self) -> None:
+        runner_source = Path("scripts/find_dead_code.sh").read_text(encoding="utf-8")
+        enforcing_call = "  check_vulture_whitelist_freshness\n"
+        self.assertIn(enforcing_call, runner_source)
+        mutant = runner_source.replace(enforcing_call, "  true # mutant\n", 1)
+        baseline = {"lib/orphan.py": "def orphan():\n    return 1\n"}
+        current = {"lib/orphan.py": "VALUE = 1\nprint(VALUE)\n"}
+
+        result, _ = run_vulture_freshness_world(
+            baseline,
+            current,
+            runner_source=mutant,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with self.assertRaises(AssertionError):
+            self.assertEqual(result.returncode, 3)
+
+    def test_new_candidate_makes_exact_baseline_incomplete(self) -> None:
+        baseline = {"lib/live.py": "def live():\n    return 1\nprint(live())\n"}
+        current = {
+            "lib/live.py": "def live():\n    return 1\nprint(live())\n",
+            "lib/orphan.py": "def orphan():\n    return 1\n",
+        }
+
+        result, leftovers = run_vulture_freshness_world(baseline, current)
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn(
+            "not the exact confidence-60 candidate baseline",
+            result.stderr,
+        )
+        self.assertIn("orphan", result.stderr)
+        self.assertEqual(leftovers, ())
+
+    def test_raw_whitelist_generation_accepts_only_vulture_zero_or_three(self) -> None:
+        runner_source = Path("scripts/find_dead_code.sh").read_text(encoding="utf-8")
+        real_command = (
+            'vulture \\\n'
+            '    --make-whitelist \\\n'
+            '    --min-confidence "$VULTURE_FRESHNESS_CONFIDENCE" \\\n'
+            '    "${SOURCES[@]}"'
+        )
+        self.assertIn(real_command, runner_source)
+        mutant = runner_source.replace(real_command, "bash -c 'exit 7'", 1)
+        world = {"lib/orphan.py": "def orphan():\n    return 1\n"}
+
+        result, leftovers = run_vulture_freshness_world(
+            world,
+            world,
+            runner_source=mutant,
+        )
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("raw Vulture whitelist generation failed with exit 7", result.stderr)
+        self.assertEqual(leftovers, ())
 
 
 if __name__ == "__main__":

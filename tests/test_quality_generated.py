@@ -34,7 +34,6 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Never
-from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -674,7 +673,7 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
             del current, cfg, target_contract, verified_lossless_proof
             raise error_type(error_message)
 
-        with patch("lib.dispatch.quality_gate.logger.exception"):
+        with self.assertLogs("cratedigger", level="ERROR") as captured:
             plan = _check_quality_gate_core(
                 mb_id="generated-mbid",
                 label="Generated Decision Failure",
@@ -685,6 +684,7 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
                 state_loader=lambda **_kwargs: state,
                 quality_decision_fn=raise_decision,
             )
+        self.assertIn("reopening full-tier search", "\n".join(captured.output))
         assert_quality_decision_failure_reopens_full_tier(plan)
 
     @given(subject=st.sampled_from((

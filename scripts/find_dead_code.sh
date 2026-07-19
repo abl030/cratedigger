@@ -20,6 +20,16 @@ cd "$REPO_ROOT"
 
 USE_WHITELIST=1
 CONFIDENCE=60
+VULTURE_FRESHNESS_CONFIDENCE=60
+VULTURE_WHITELIST_FILE=${CRATEDIGGER_VULTURE_WHITELIST_FILE:-tools/vulture/whitelist.py}
+VULTURE_FRESHNESS_TMP=""
+
+cleanup_vulture_freshness_tmp() {
+  if [[ -n "$VULTURE_FRESHNESS_TMP" ]]; then
+    rm -f -- "$VULTURE_FRESHNESS_TMP"
+  fi
+}
+trap cleanup_vulture_freshness_tmp EXIT
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -42,14 +52,42 @@ if [[ "$SOURCE_LIST" != /* ]]; then
 fi
 mapfile -t SOURCES < <(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$SOURCE_LIST")
 
+check_vulture_whitelist_freshness() {
+  VULTURE_FRESHNESS_TMP=$(mktemp "${TMPDIR:-/tmp}/cratedigger-vulture-whitelist.XXXXXX")
+  set +e
+  vulture \
+    --make-whitelist \
+    --min-confidence "$VULTURE_FRESHNESS_CONFIDENCE" \
+    "${SOURCES[@]}" > "$VULTURE_FRESHNESS_TMP"
+  local raw_status=$?
+  set -e
+  if [[ "$raw_status" -ne 0 && "$raw_status" -ne 3 ]]; then
+    echo "raw Vulture whitelist generation failed with exit $raw_status" >&2
+    return 2
+  fi
+
+  if ! diff -u \
+    --label committed-vulture-whitelist \
+    --label generated-vulture-whitelist \
+    <(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$VULTURE_WHITELIST_FILE") \
+    "$VULTURE_FRESHNESS_TMP" >&2; then
+    echo "Vulture whitelist is not the exact confidence-60 candidate baseline" >&2
+    return 3
+  fi
+}
+
 VULTURE_ARGS=(--min-confidence "$CONFIDENCE")
 if [[ "$USE_WHITELIST" == 1 ]]; then
-  VULTURE_ARGS+=(tools/vulture/whitelist.py)
+  VULTURE_ARGS+=("$VULTURE_WHITELIST_FILE")
 fi
 
 echo "=== ruff source-local unused imports: ${SOURCES[*]} ==="
 echo
 bash scripts/find_unused_imports.sh "$SOURCE_LIST"
+
+if [[ "$USE_WHITELIST" == 1 ]]; then
+  check_vulture_whitelist_freshness
+fi
 
 echo
 echo "=== vulture ${VULTURE_ARGS[*]} ${SOURCES[*]} ==="
