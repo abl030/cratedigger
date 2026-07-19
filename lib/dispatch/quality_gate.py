@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Callable, Sequence, TYPE_CHECKING
+from typing import Callable, Protocol, Sequence, TYPE_CHECKING
 
 import msgspec
 
@@ -63,7 +63,22 @@ def _evidence_unavailable_plan() -> QualityGatePlan:
 
 if TYPE_CHECKING:
     from lib.pipeline_db import PipelineDB
-    from lib.quality import QualityRankConfig
+    from lib.quality import (AudioQualityMeasurement, QualityRankConfig,
+                             TargetQualityContract)
+    from lib.quality.decisions import QualityGateDecision
+
+
+class _QualityGateDecisionFn(Protocol):
+    """Exact callable contract for the pure post-import decision seam."""
+
+    def __call__(
+        self,
+        current: "AudioQualityMeasurement",
+        cfg: "QualityRankConfig | None" = None,
+        *,
+        target_contract: "TargetQualityContract | None" = None,
+        verified_lossless_proof: bool = False,
+    ) -> "QualityGateDecision": ...
 
 logger = logging.getLogger("cratedigger")
 
@@ -154,6 +169,7 @@ def _check_quality_gate_core(
     expected_current_evidence_id: int | None = None,
     apply: bool = True,
     state_loader: Callable[..., QualityGateState | None] = load_quality_gate_state,
+    quality_decision_fn: _QualityGateDecisionFn = quality_gate_decision,
 ) -> QualityGatePlan | None:
     """Apply the post-import policy to linked current evidence."""
     from lib.quality import QualityRankConfig
@@ -188,7 +204,7 @@ def _check_quality_gate_core(
                 logger.info(f"QUALITY GATE: using current_spectral={spectral_br}kbps "
                             f"(lower than linked min_bitrate={min_br_kbps}kbps, "
                             f"grade={spectral_grade})")
-            decision = quality_gate_decision(
+            decision = quality_decision_fn(
                 current,
                 cfg=quality_ranks,
                 verified_lossless_proof=state.verified_lossless_proof,

@@ -14,6 +14,7 @@ import shutil
 import subprocess as sp
 import tempfile
 import unittest
+from typing import Never
 from unittest.mock import MagicMock, patch
 
 from lib.config import CratediggerConfig
@@ -22,6 +23,7 @@ from lib.quality import (DownloadInfo, ImportResult, ConversionInfo,
                          AlbumQualityV0Metric, AudioQualityMeasurement,
                          EvidenceProvenance, EvidenceSubject,
                          PostflightInfo, SpectralMeasurement,
+                         QualityRankConfig, TargetQualityContract,
                          QUALITY_UPGRADE_TIERS, QUALITY_FLAC_ONLY,
                          V0_PROBE_LOSSLESS_SOURCE, V0ProbeEvidence,
                          ValidationResult, VerifiedLosslessProof)
@@ -949,6 +951,7 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
             self._failed_current_result("FileNotFoundError: path not found"),
             force=False,
         )
+        db.set_cooldown_result(True)
         self._persist_failed_outcome(db, outcome)
 
         self.assertEqual(db.request(42)["status"], "wanted")
@@ -956,6 +959,8 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
         payload = json.loads(db.download_logs[-1].validation_result)
         self.assertEqual(payload["failure_category"], "path_missing")
         self.assertEqual(db.denylist, [])
+        self.assertEqual(db.cooldowns_applied, ["bad-peer"])
+        self.assertIn("bad-peer", db.user_cooldowns)
         ext.run.assert_not_called()
 
     def test_missing_have_is_not_an_analysis_failure(self) -> None:
@@ -2224,6 +2229,64 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         self.assertEqual(db.request(42)["status"], "wanted")
         self.assertIsNone(db.request(42)["search_filetype_override"])
         # Decision 18: adapter errors reopen without blaming the peer.
+        self.assertEqual(db.denylist, [])
+
+    def test_quality_decision_error_reopens_even_with_terminal_proof(self):
+        """A decider crash cannot turn proof into a terminal acceptance."""
+        from lib.dispatch import _check_quality_gate_core
+        from lib.dispatch.types import QualityGateState
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="imported",
+            min_bitrate=777,
+            search_filetype_override="lossless",
+        ))
+        state = QualityGateState(
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=900,
+                avg_bitrate_kbps=900,
+                median_bitrate_kbps=900,
+                format="FLAC",
+            ),
+            verified_lossless_proof=True,
+        )
+
+        def exploding_decision(
+            current: AudioQualityMeasurement,
+            cfg: QualityRankConfig | None = None,
+            *,
+            target_contract: TargetQualityContract | None = None,
+            verified_lossless_proof: bool = False,
+        ) -> Never:
+            self.assertIs(current, state.measurement)
+            self.assertIsNotNone(cfg)
+            self.assertIsNone(target_contract)
+            self.assertTrue(verified_lossless_proof)
+            raise RuntimeError("decision engine unavailable")
+
+        plan = _check_quality_gate_core(
+            mb_id="test-mbid",
+            label="Decision Failure",
+            request_id=42,
+            files=[make_download_file(username="winner", filename="01.flac")],
+            db=db,  # type: ignore[arg-type]
+            state_loader=lambda **_kwargs: state,
+            quality_decision_fn=exploding_decision,
+        )
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.transition.target_status, "wanted")
+        self.assertIsNone(
+            plan.transition.fields.get("search_filetype_override")
+        )
+        self.assertEqual(plan.denylists, ())
+        self.assertFalse(plan.successful_terminal_acceptance)
+        self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertEqual(db.request(42)["min_bitrate"], 777)
+        self.assertIsNone(db.request(42)["search_filetype_override"])
         self.assertEqual(db.denylist, [])
 
     def test_requeue_upgrade_uses_intent(self):

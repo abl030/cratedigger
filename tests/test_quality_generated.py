@@ -33,6 +33,7 @@ import unittest
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from typing import Never
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -53,6 +54,8 @@ from lib.quality import (
     QUALITY_UPGRADE_TIERS,
     EVIDENCE_SUBJECT_SOURCE,
     EVIDENCE_SUBJECT_INSTALLED,
+    QualityRankConfig,
+    TargetQualityContract,
     VerifiedLosslessProof,
     classify_full_pipeline_decision,
     compute_effective_override_bitrate,
@@ -61,7 +64,7 @@ from lib.quality import (
     full_pipeline_decision_from_evidence,
     quality_gate_decision,
 )
-from lib.dispatch.quality_gate import _check_quality_gate_core
+from lib.dispatch.quality_gate import QualityGatePlan, _check_quality_gate_core
 from lib.dispatch.types import QualityGateState
 from lib.quality.filetypes import has_mixed_lossless_and_lossy
 from tests.helpers import (
@@ -173,6 +176,27 @@ def assert_post_import_action_matches(
     if actual != expected:
         raise AssertionError(
             f"post-import mapping drift for {decision}: {actual!r} != {expected!r}"
+        )
+
+
+def assert_quality_decision_failure_reopens_full_tier(
+    plan: QualityGatePlan | None,
+) -> None:
+    """A post-import decider failure keeps acquisition open without blame."""
+
+    if plan is None:
+        raise AssertionError("quality decision failure returned no recovery plan")
+    actual = (
+        plan.transition.target_status,
+        plan.transition.fields.get("search_filetype_override"),
+        bool(plan.denylists),
+        plan.successful_terminal_acceptance,
+    )
+    expected = ("wanted", None, False, False)
+    if actual != expected:
+        raise AssertionError(
+            "quality decision failure did not reopen full tiers: "
+            f"{actual!r} != {expected!r}"
         )
 
 
@@ -610,6 +634,58 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
             search_filetype_override=raw_override,
             denylist=bool(plan.denylists),
         )
+
+    @given(
+        verified_lossless_proof=st.booleans(),
+        min_bitrate_kbps=_bitrates(),
+        avg_bitrate_kbps=_bitrates(),
+        format_name=st.sampled_from(_CURRENT_FORMATS),
+        is_cbr=st.booleans(),
+        error_type=st.sampled_from((RuntimeError, ValueError, LookupError)),
+        error_message=st.text(min_size=0, max_size=80),
+    )
+    def test_quality_decision_errors_always_reopen_full_tiers(
+        self,
+        verified_lossless_proof,
+        min_bitrate_kbps,
+        avg_bitrate_kbps,
+        format_name,
+        is_cbr,
+        error_type,
+        error_message,
+    ):
+        state = QualityGateState(
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=min_bitrate_kbps,
+                avg_bitrate_kbps=avg_bitrate_kbps,
+                format=format_name,
+                is_cbr=is_cbr,
+            ),
+            verified_lossless_proof=verified_lossless_proof,
+        )
+
+        def raise_decision(
+            current: AudioQualityMeasurement,
+            cfg: QualityRankConfig | None = None,
+            *,
+            target_contract: TargetQualityContract | None = None,
+            verified_lossless_proof: bool = False,
+        ) -> Never:
+            del current, cfg, target_contract, verified_lossless_proof
+            raise error_type(error_message)
+
+        with patch("lib.dispatch.quality_gate.logger.exception"):
+            plan = _check_quality_gate_core(
+                mb_id="generated-mbid",
+                label="Generated Decision Failure",
+                request_id=42,
+                files=[SimpleNamespace(username="peer")],
+                db=SimpleNamespace(),  # type: ignore[arg-type]
+                apply=False,
+                state_loader=lambda **_kwargs: state,
+                quality_decision_fn=raise_decision,
+            )
+        assert_quality_decision_failure_reopens_full_tier(plan)
 
     @given(subject=st.sampled_from((
         EVIDENCE_SUBJECT_SOURCE,
@@ -1536,6 +1612,18 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             }
             with self.subTest(field=field), self.assertRaises(AssertionError):
                 assert_post_import_action_matches(**kwargs)
+
+    def test_quality_failure_checker_trips_on_terminal_acceptance(self):
+        from lib import transitions
+
+        bad = QualityGatePlan(
+            transition=transitions.RequestTransition.to_imported(
+                from_status="imported",
+            ),
+            successful_terminal_acceptance=True,
+        )
+        with self.assertRaises(AssertionError):
+            assert_quality_decision_failure_reopens_full_tier(bad)
 
     def test_affirmative_verification_checker_trips_on_absent_evidence(self):
         with self.assertRaises(AssertionError):
