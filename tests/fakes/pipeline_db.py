@@ -2317,6 +2317,20 @@ class FakePipelineDB:
             for e in self.denylist if e.request_id == request_id
         ]
 
+    def list_denylist_rows(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "request_id": entry.request_id,
+                "username": entry.username,
+                "reason": entry.reason,
+                "created_at": None,
+            }
+            for entry in sorted(
+                self.denylist,
+                key=lambda row: (row.request_id, row.username),
+            )
+        ]
+
     # --- bad_audio_hashes ---
 
     def add_bad_audio_hashes(

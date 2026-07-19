@@ -69,6 +69,7 @@ from web.routes import release_identity_routes as _release_identity_routes
 from web.routes import search_plan as _search_plan_routes
 from web.routes import triage as _triage_routes
 from web.routes import youtube as _youtube_routes
+from web.routes import world_audit as _world_audit_routes
 from web.routes._registry import (
     RouteRegistration,
     build_get_patterns,
@@ -98,6 +99,7 @@ ALL_ROUTES: list[RouteRegistration] = merge_registries(
     _search_plan_routes,
     _triage_routes,
     _youtube_routes,
+    _world_audit_routes,
 )
 
 _db_dsn = None

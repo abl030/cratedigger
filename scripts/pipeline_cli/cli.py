@@ -11,6 +11,7 @@ import sys
 
 from lib.pipeline_db import PipelineDB
 
+from scripts.pipeline_cli.audit import cmd_audit_world
 from scripts.pipeline_cli.beets_distance import cmd_beets_distance
 from scripts.pipeline_cli.destructive import cmd_ban_source, cmd_library_delete
 from scripts.pipeline_cli.imports import (
@@ -141,11 +142,16 @@ def main():
         "list": cmd_triage_list,
         "quarantine": cmd_triage_quarantine,
     }
+    audit_commands = {
+        "world": cmd_audit_world,
+    }
     try:
         if args.command == "search-plan":
             rc = search_plan_commands[args.search_plan_command](db, args)
         elif args.command == "triage":
             rc = triage_commands[args.triage_command](db, args)
+        elif args.command == "audit":
+            rc = audit_commands[args.audit_command](db, args)
         else:
             rc = commands[args.command](db, args)
     finally:

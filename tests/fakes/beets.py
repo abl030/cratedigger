@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from lib.beets_db import ReleaseLocation
+from lib.beets_db import BeetsWorldAlbum, ReleaseLocation
 from lib.release_identity import detect_release_source, normalize_release_id
 
 
@@ -42,6 +42,7 @@ class FakeBeetsDB:
         self._album_info: dict[str, Any] = {}
         self._item_paths: dict[str, list[tuple[int, str]]] = {}
         self._release_identities: list[dict[str, Any]] = []
+        self._world_albums: list[BeetsWorldAlbum] = []
         # Default return values for unseeded keys — match the real
         # BeetsDB's "no row" shapes so tests don't crash on missing
         # explicit seeds.
@@ -100,6 +101,9 @@ class FakeBeetsDB:
 
     def set_release_identities(self, rows: list[dict[str, Any]]) -> None:
         self._release_identities = [copy.deepcopy(r) for r in rows]
+
+    def set_world_albums(self, rows: list[BeetsWorldAlbum]) -> None:
+        self._world_albums = list(rows)
 
     def set_tracks_for_release(
         self, release_id: str, tracks: list[dict[str, Any]],
@@ -214,6 +218,9 @@ class FakeBeetsDB:
     def list_release_identities(self) -> list[dict[str, Any]]:
         self.list_release_identities_calls += 1
         return [copy.deepcopy(r) for r in self._release_identities]
+
+    def list_world_albums(self) -> list[BeetsWorldAlbum]:
+        return list(self._world_albums)
 
     def get_all_album_ids_for_release(self, release_id: str) -> list[int]:
         self.get_all_album_ids_for_release_calls.append(release_id)

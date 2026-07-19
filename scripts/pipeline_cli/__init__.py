@@ -69,6 +69,7 @@ from scripts.pipeline_cli.album_requests import (
     finalize_request,
     tracks_from_mb_release,
 )
+from scripts.pipeline_cli.audit import cmd_audit_world
 from scripts.pipeline_cli.query import cmd_query
 from scripts.pipeline_cli.show import cmd_show
 from scripts.pipeline_cli.quality import (
@@ -120,6 +121,7 @@ __all__ = [
     "SPECTRAL_GRADE_CHOICES",
     "VALID_STATUSES",
     "cmd_add",
+    "cmd_audit_world",
     "cmd_beets_distance",
     "cmd_ban_source",
     "cmd_disk_coverage",
