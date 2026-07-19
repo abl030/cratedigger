@@ -1,9 +1,11 @@
 # Generated (property-based) testing
 
 Issue #548. Hypothesis-driven generated tests assert **policy invariants**
-over large generated state spaces instead of hand-picked examples. They are
-ordinary members of the unittest suite — no separate runner, no seed
-bookkeeping, no standing service.
+over large generated state spaces instead of hand-picked examples. The normal
+pure/fake-backed modules are ordinary members of the unittest suite — no seed
+bookkeeping or standing service. The heavyweight cross-engine world model has
+its own direct runner while issue #743 measures its cost; suite and scheduled
+placement are deliberately separate follow-up decisions.
 
 ## Bug hunting — the house method
 
@@ -72,6 +74,38 @@ presence-probe worlds, and notifier
 target/observation worlds are generated in the two Python modules above; a
 second JavaScript property stack would duplicate those policies rather than
 exercise a new invariant.
+
+## Heavy cross-engine world model
+
+`tests/world_model/state_machine.py` drives real production request transitions
+against a throwaway PostgreSQL database while a real pinned-Beets library adds,
+removes, and moves generated tagged audio. It checks the shared
+`lib/world_invariants.py` bank after every rule. Its first rule tranche covers
+request creation, initial import, same-pressing upgrade/re-import, exact-release
+membership, imported-path coherence, and exclusive physical album folders.
+
+It is intentionally named outside unittest's `test*.py` discovery pattern.
+Run the deterministic pin and generated state machine directly:
+
+```bash
+nix-shell --run "python3 -m unittest tests.world_model.state_machine -v"
+```
+
+The temporary PostgreSQL, Beets SQLite database, library tree, and generated
+audio are local and disposable; this runner never reads or mutates production.
+The initial measured budget is six examples of eight stateful steps. On doc1
+on 2026-07-19, the direct two-test module reported 7.0 test-seconds (excluding
+dev-shell startup). That is a baseline, not a placement decision. Override the
+budget for exploration without changing code:
+
+```bash
+CRATEDIGGER_WORLD_EXAMPLES=20 CRATEDIGGER_WORLD_STEPS=20 \
+  nix-shell --run "python3 -m unittest tests.world_model.state_machine -v"
+```
+
+Do not add this runner to `scripts/run_tests.sh` or schedule it merely because
+the core exists. Issue #743 records runtime and fault-injection evidence first;
+standard-suite and scheduled-depth choices belong to a follow-up PR.
 
 ## Two tiers, one knob
 

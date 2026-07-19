@@ -335,6 +335,7 @@ def _refresh_current_evidence_after_import(
     quality_ranks: "QualityRankConfig | None",
     source_candidate: AlbumQualityEvidence | None = None,
     import_result: ImportResult | None = None,
+    beets_library_db_path: str | None = None,
     beets_library_root: str = "",
 ) -> EvidenceBuildResult:
     """Persist current evidence for the just-imported Beets album.
@@ -354,6 +355,10 @@ def _refresh_current_evidence_after_import(
     forward ``verified_lossless_proof`` and is preserved for non-post-import
     callers (e.g., wrong-match triage backfilling library evidence for
     pre-refactor albums).
+
+    ``beets_library_db_path`` selects an isolated real Beets database for
+    world-model runs. Normal production callers omit it and retain the
+    module-configured read-only library path.
     """
 
     from lib.beets_db import BeetsDB
@@ -366,7 +371,14 @@ def _refresh_current_evidence_after_import(
     # BeetsDB docstring. Both the U10 propagation path and the legacy
     # ``backfill_current_evidence_from_album_info`` path depend on an
     # absolute ``album_info.album_path`` to read the just-imported files.
-    with BeetsDB(library_root=beets_library_root) as beets:
+    if beets_library_db_path is None:
+        beets_handle = BeetsDB(library_root=beets_library_root)
+    else:
+        beets_handle = BeetsDB(
+            beets_library_db_path,
+            library_root=beets_library_root,
+        )
+    with beets_handle as beets:
         album_info = beets.get_album_info(mb_release_id, cfg)
     if album_info is None:
         return EvidenceBuildResult(None, "empty_current", "album not in beets")

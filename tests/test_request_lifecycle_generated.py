@@ -70,6 +70,7 @@ from lib.search_plan_service import (
     RESULT_REQUEST_REPLACED,
     SearchPlanService,
 )
+from lib.world_invariants import assert_replaced_row_frozen
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_active_download_state_json
 
@@ -91,18 +92,6 @@ def assert_statuses_legal(rows: list[dict]) -> None:
         if row["status"] not in LEGAL_STATUSES:
             raise AssertionError(
                 f"request {row['id']} has illegal status {row['status']!r}")
-
-
-def assert_replaced_row_frozen(snapshot: dict, row: dict) -> None:
-    """A replaced row is a frozen audit record — byte-identical forever."""
-    if row != snapshot:
-        diffs = {
-            key: (snapshot.get(key), row.get(key))
-            for key in set(snapshot) | set(row)
-            if snapshot.get(key) != row.get(key)
-        }
-        raise AssertionError(
-            f"replaced request {snapshot['id']} mutated after supersede: {diffs}")
 
 
 def assert_replaced_tracks_frozen(

@@ -1,0 +1,223 @@
+"""Cross-engine world invariants shared by fuzzing and live audit (#743)."""
+
+from __future__ import annotations
+
+import os
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+import msgspec
+
+
+class LibraryAlbumSnapshot(msgspec.Struct, frozen=True):
+    """The exact release identity and paths represented by one Beets album."""
+
+    album_id: int
+    release_id: str
+    album_path: str
+    item_paths: tuple[str, ...]
+
+
+class RequestMembershipSnapshot(msgspec.Struct, frozen=True):
+    """The request fields needed to compare pipeline state with Beets."""
+
+    request_id: int
+    release_id: str
+    status: str
+    imported_path: str | None
+
+
+class WorldViolation(msgspec.Struct, frozen=True):
+    """One deterministic invariant violation suitable for CLI/API output."""
+
+    code: str
+    detail: str
+    request_id: int | None = None
+    release_id: str | None = None
+    album_ids: tuple[int, ...] = ()
+
+
+def _normal_path(path: str) -> str:
+    return os.path.normcase(os.path.abspath(os.path.normpath(path)))
+
+
+def check_folder_exclusivity(
+    albums: Sequence[LibraryAlbumSnapshot],
+) -> tuple[WorldViolation, ...]:
+    """Require one album per folder and every item directly in that folder."""
+
+    violations: list[WorldViolation] = []
+    folder_owners: dict[str, list[LibraryAlbumSnapshot]] = defaultdict(list)
+
+    for album in albums:
+        if not album.item_paths:
+            violations.append(WorldViolation(
+                code="album_empty",
+                detail=(
+                    f"beets album {album.album_id} for release "
+                    f"{album.release_id!r} has no items"
+                ),
+                release_id=album.release_id,
+                album_ids=(album.album_id,),
+            ))
+            continue
+        folder = _normal_path(album.album_path)
+        folder_owners[folder].append(album)
+        for item_path in album.item_paths:
+            item_folder = _normal_path(os.path.dirname(item_path))
+            if item_folder != folder:
+                violations.append(WorldViolation(
+                    code="item_outside_album_folder",
+                    detail=(
+                        f"beets album {album.album_id} item {item_path!r} "
+                        f"is outside album folder {album.album_path!r}"
+                    ),
+                    release_id=album.release_id,
+                    album_ids=(album.album_id,),
+                ))
+
+    for folder, owners in sorted(folder_owners.items()):
+        if len(owners) < 2:
+            continue
+        album_ids = tuple(sorted(album.album_id for album in owners))
+        release_ids = tuple(sorted(album.release_id for album in owners))
+        violations.append(WorldViolation(
+            code="folder_shared",
+            detail=(
+                f"beets albums {album_ids!r} for releases {release_ids!r} "
+                f"share folder {folder!r}"
+            ),
+            album_ids=album_ids,
+        ))
+
+    return tuple(violations)
+
+
+def check_library_filesystem(
+    albums: Sequence[LibraryAlbumSnapshot],
+) -> tuple[WorldViolation, ...]:
+    """Require every snapshot path to name the physical library state."""
+
+    violations: list[WorldViolation] = []
+    for album in albums:
+        if not os.path.isdir(album.album_path):
+            violations.append(WorldViolation(
+                code="album_folder_missing",
+                detail=(
+                    f"beets album {album.album_id} folder "
+                    f"{album.album_path!r} is absent"
+                ),
+                release_id=album.release_id,
+                album_ids=(album.album_id,),
+            ))
+        for item_path in album.item_paths:
+            if os.path.isfile(item_path):
+                continue
+            violations.append(WorldViolation(
+                code="album_item_missing",
+                detail=(
+                    f"beets album {album.album_id} item "
+                    f"{item_path!r} is absent"
+                ),
+                release_id=album.release_id,
+                album_ids=(album.album_id,),
+            ))
+    return tuple(violations)
+
+
+def assert_replaced_row_frozen(
+    snapshot: Mapping[str, Any],
+    row: Mapping[str, Any],
+) -> None:
+    """A superseded request is a byte-frozen historical audit record."""
+
+    if row == snapshot:
+        return
+    diffs = {
+        key: (snapshot.get(key), row.get(key))
+        for key in set(snapshot) | set(row)
+        if snapshot.get(key) != row.get(key)
+    }
+    request_id = snapshot.get("id", "unknown")
+    raise AssertionError(
+        f"replaced request {request_id} mutated after supersede: {diffs}"
+    )
+
+
+def check_status_membership(
+    requests: Sequence[RequestMembershipSnapshot],
+    albums: Sequence[LibraryAlbumSnapshot],
+) -> tuple[WorldViolation, ...]:
+    """Require every imported request to resolve to one exact Beets pressing."""
+
+    by_release: dict[str, list[LibraryAlbumSnapshot]] = defaultdict(list)
+    for album in albums:
+        by_release[album.release_id].append(album)
+
+    violations: list[WorldViolation] = []
+    for request in requests:
+        if request.status != "imported":
+            continue
+        matches = by_release.get(request.release_id, [])
+        if not matches:
+            violations.append(WorldViolation(
+                code="imported_release_missing",
+                detail=(
+                    f"imported request {request.request_id} release "
+                    f"{request.release_id!r} is absent from Beets"
+                ),
+                request_id=request.request_id,
+                release_id=request.release_id,
+            ))
+            continue
+        if len(matches) > 1:
+            album_ids = tuple(sorted(album.album_id for album in matches))
+            violations.append(WorldViolation(
+                code="imported_release_duplicate",
+                detail=(
+                    f"imported request {request.request_id} release "
+                    f"{request.release_id!r} resolves to Beets albums "
+                    f"{album_ids!r}"
+                ),
+                request_id=request.request_id,
+                release_id=request.release_id,
+                album_ids=album_ids,
+            ))
+            continue
+        if not request.imported_path:
+            violations.append(WorldViolation(
+                code="imported_path_missing",
+                detail=f"imported request {request.request_id} has no imported_path",
+                request_id=request.request_id,
+                release_id=request.release_id,
+                album_ids=(matches[0].album_id,),
+            ))
+            continue
+        actual = _normal_path(matches[0].album_path)
+        expected = _normal_path(request.imported_path)
+        if actual != expected:
+            violations.append(WorldViolation(
+                code="imported_path_mismatch",
+                detail=(
+                    f"imported request {request.request_id} points at "
+                    f"{request.imported_path!r}; Beets uses "
+                    f"{matches[0].album_path!r}"
+                ),
+                request_id=request.request_id,
+                release_id=request.release_id,
+                album_ids=(matches[0].album_id,),
+            ))
+
+    return tuple(violations)
+
+
+__all__ = [
+    "LibraryAlbumSnapshot",
+    "RequestMembershipSnapshot",
+    "WorldViolation",
+    "assert_replaced_row_frozen",
+    "check_folder_exclusivity",
+    "check_library_filesystem",
+    "check_status_membership",
+]

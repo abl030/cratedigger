@@ -9743,6 +9743,41 @@ class TestRefreshCurrentEvidenceUsesBeetsLibraryRoot(unittest.TestCase):
             "propagation silently no-ops.",
         )
 
+    def test_refresh_constructs_beets_db_with_explicit_library_path(self) -> None:
+        from lib.dispatch import _refresh_current_evidence_after_import
+
+        captured: list[tuple[str, str]] = []
+
+        class FakeBeetsDB:
+            def __init__(self, db_path: str = "", *, library_root: str = "") -> None:
+                captured.append((db_path, library_root))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def get_album_info(self, mb_release_id, cfg):
+                return None
+
+        with patch("lib.beets_db.BeetsDB", FakeBeetsDB):
+            _refresh_current_evidence_after_import(
+                db=None,  # type: ignore[arg-type]
+                request_id=1,
+                mb_release_id="mbid-test",
+                quality_ranks=None,
+                source_candidate=None,
+                import_result=None,
+                beets_library_db_path="/tmp/world/beets-library.db",
+                beets_library_root="/tmp/world/library",
+            )
+
+        self.assertEqual(
+            captured,
+            [("/tmp/world/beets-library.db", "/tmp/world/library")],
+        )
+
     def test_dispatch_passes_cfg_beets_directory_to_refresh(self) -> None:
         # Inspect the call site source to confirm cfg.beets_directory
         # is wired to beets_library_root. Static check is sufficient and
@@ -9754,14 +9789,18 @@ class TestRefreshCurrentEvidenceUsesBeetsLibraryRoot(unittest.TestCase):
         # The call must include the beets_library_root kwarg sourced
         # from cfg.beets_directory (with a None-safe fallback).
         self.assertIn("_refresh_current_evidence_after_import(", src)
-        # Look for the wiring after the function call. Pattern:
-        #   beets_library_root=(... cfg.beets_directory ...)
+        # Look for the resolved wiring after the function call. The explicit
+        # world-model root may override cfg, but production still derives the
+        # default from cfg.beets_directory.
         refresh_block_start = src.index(
             "_refresh_current_evidence_after_import("
         )
         refresh_block = src[refresh_block_start:refresh_block_start + 1500]
-        self.assertIn("beets_library_root=", refresh_block)
-        self.assertIn("cfg.beets_directory", refresh_block)
+        self.assertIn(
+            "beets_library_root=effective_beets_library_root",
+            refresh_block,
+        )
+        self.assertIn('getattr(cfg, "beets_directory", "")', src)
 
 
 class TestReplaceFullPath(unittest.TestCase):
