@@ -3983,7 +3983,10 @@ class TestUnsearchableRequestStatusMigration(unittest.TestCase):
                             FROM album_requests
                             WHERE mb_release_id = 'manual-before-056'
                         """)
-                        status, timestamp_preserved = cur.fetchone()
+                        row = cur.fetchone()
+                        self.assertIsNotNone(row)
+                        assert row is not None
+                        status, timestamp_preserved = row
                         self.assertEqual(status, "unsearchable")
                         self.assertTrue(timestamp_preserved)
                         cur.execute("""
