@@ -102,11 +102,17 @@ def dispatch_import_core(
     current_evidence_loader: Callable[
         ..., "CurrentEvidenceActionResult | None"
     ] | None = None,
+    beets_library_db_path: str | None = None,
+    beets_library_root: str | None = None,
 ) -> "DispatchOutcome":
     """Core import dispatch — takes plain params + PipelineDB directly.
 
     Runs import_one.py, parses result, dispatches on decision (mark_done/failed,
     denylist, quality gate, media server notifiers, cleanup). Returns DispatchOutcome.
+
+    ``beets_library_db_path`` / ``beets_library_root`` are explicit storage
+    seams for isolated real-Beets worlds. Production leaves the DB path unset
+    and derives the root from ``cfg.beets_directory`` as before.
 
     Used by the auto-import flow in ``lib.download`` and by
     ``dispatch_import_from_db()`` (force-import).
@@ -115,6 +121,12 @@ def dispatch_import_core(
     from lib.util import trigger_jellyfin_scan as _trigger_jellyfin
 
     source_dirs = normalize_source_dirs(source_dirs or [])
+    if beets_library_root is not None:
+        effective_beets_library_root = beets_library_root
+    elif cfg is not None:
+        effective_beets_library_root = getattr(cfg, "beets_directory", "")
+    else:
+        effective_beets_library_root = ""
 
     # Operation identity is distinct from the eventual download-log outcome:
     # an automatic attempt can still reject or fail after this start message.
@@ -233,7 +245,7 @@ def dispatch_import_core(
                     else None
                 ),
                 attempt_have_audit_available=attempt_result.audit is not None,
-                beets_library_root=getattr(cfg, "beets_directory", "") if cfg is not None else "",
+                beets_library_root=effective_beets_library_root,
                 **evidence_gate_kwargs,
             )
             if (
@@ -558,9 +570,8 @@ def dispatch_import_core(
                             ),
                             source_candidate=evidence_gate.candidate,
                             import_result=ir,
-                            beets_library_root=(
-                                cfg.beets_directory if cfg is not None else ""
-                            ),
+                            beets_library_db_path=beets_library_db_path,
+                            beets_library_root=effective_beets_library_root,
                         )
                     except Exception as exc:
                         logger.exception(

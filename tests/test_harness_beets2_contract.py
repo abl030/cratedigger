@@ -283,20 +283,13 @@ with tempfile.TemporaryDirectory() as d:
 def _shipped_aunique_config() -> dict:
     """Extract the shipped beets path template + inline album_fields from
     nix/module.nix — the test patrols what production actually renders."""
-    import re
+    from tests.beets_world import extract_shipped_beets_world_config
 
-    src = open(os.path.join(_REPO, "nix", "module.nix")).read()
-    m = re.search(r'default = "(\$albumartist[^"]+)";', src)
-    assert m, "paths.default template not found in nix/module.nix"
-    fields = dict(re.findall(r'album_fields\.(\w+) = "([^"]+)";', src))
-    # Fail loudly if a nix restyle stops the regex from seeing the shipped
-    # disambiguator — a vacuous sweep would keep passing while no longer
-    # exercising the production expression (review nit, PR #742).
-    assert "path_disambig" in fields, (
-        f"album_fields.path_disambig not extracted from nix/module.nix "
-        f"(got {sorted(fields)}); update the extraction regex"
-    )
-    return {"template": m.group(1), "album_fields": fields}
+    shipped = extract_shipped_beets_world_config(_REPO)
+    return {
+        "template": shipped.default_path_template,
+        "album_fields": dict(shipped.album_fields),
+    }
 
 
 class TestAuniqueCollisionContract(unittest.TestCase):
