@@ -17,7 +17,7 @@ entry points over ``FakePipelineDB`` with the Jellyfin client seams injected:
    same-path Audio row without changing its id. An ABSENT album is a wait
    signal, not a terminal one: after a path-changing upgrade the pinned
    (new) path only exists in Jellyfin once the rescan lands.
-3. **P3 (terminal-state correctness)** — done ⟹ the rescan landed, every
+3. **P3 (terminal-state correctness)** — done ⟺ the rescan landed, every
    drifted item (album + audio children) was written, and no write failed;
    skipped ⟺ the album was still absent at TTL; a failed write or an
    erroring client always leaves the pin pending.
@@ -50,7 +50,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 from lib.config import CratediggerConfig
@@ -67,13 +67,31 @@ NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
 GRACE_SECONDS = 180
 TTL_HOURS = 48
 
-_DATES = [
-    "2025-01-01T00:00:00Z",
-    "2025-06-01T00:00:00Z",
-    "2026-01-01T00:00:00Z",
-    "2026-07-15T00:00:00Z",
+_DATE_INSTANTS = [
+    "2025-01-01T00:00:00",
+    "2025-06-01T00:00:00",
+    "2026-01-01T00:00:00",
+    "2026-07-15T00:00:00",
 ]
+# Pipeline floors are seconds-only; Jellyfin emits seven fractional digits.
+# The zero-fraction values deliberately spell the same instants two ways.
+_SECONDS_DATES = [f"{instant}Z" for instant in _DATE_INSTANTS]
+_JELLYFIN_DATES = [
+    date
+    for instant in _DATE_INSTANTS
+    for date in (f"{instant}.0000000Z", f"{instant}.5000000Z")
+]
+_DATES = _SECONDS_DATES + _JELLYFIN_DATES
 _CHILD_POOL = ["c1", "c2", "c3", "n1", "n2"]
+
+
+def _parse_iso_date(value: str) -> datetime:
+    """Parse a generated ISO date independently of production code."""
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _date_newer(a: str, b: str) -> bool:
+    return _parse_iso_date(a) > _parse_iso_date(b)
 
 
 def _cfg() -> CratediggerConfig:
@@ -106,7 +124,8 @@ class World:
         return (self.snapshot_album_is_none
                 or self.live_album_recreated
                 or {i for i, _ in self.live_children} != set(self.snapshot_children)
-                or any(date > self.original for _, date in self.live_children))
+                or any(_date_newer(date, self.original)
+                       for _, date in self.live_children))
 
     @property
     def settled(self) -> bool:
@@ -123,8 +142,9 @@ class World:
 
     @property
     def drifted_ids(self) -> set[str]:
-        out = {i for i, d in self.live_children if d > self.original}
-        if self.live_album_date > self.original:
+        out = {i for i, d in self.live_children
+               if _date_newer(d, self.original)}
+        if _date_newer(self.live_album_date, self.original):
             out.add(self.live_album_id)
         return out
 
@@ -145,9 +165,12 @@ worlds = st.builds(
     find_outcome=st.sampled_from(["present", "present", "absent", "raises"]),
     children_raises=st.booleans(),
     live_album_recreated=st.booleans(),
-    live_album_date=st.sampled_from(_DATES),
+    live_album_date=st.sampled_from(_JELLYFIN_DATES),
     live_children=st.lists(
-        st.tuples(st.sampled_from(_CHILD_POOL), st.sampled_from(_DATES)),
+        st.tuples(
+            st.sampled_from(_CHILD_POOL),
+            st.sampled_from(_JELLYFIN_DATES),
+        ),
         unique_by=lambda t: t[0], max_size=4),
     set_fail_ids=st.sets(st.sampled_from(_CHILD_POOL + ["alb-same", "alb-new"])),
     snapshot_album_is_none=st.booleans(),
@@ -250,6 +273,12 @@ def assert_terminal_state_correct(res: RunResult) -> None:
         written = {i for i, _, _ in res.set_calls}
         assert written == w.drifted_ids, (
             f"done but wrote {written} while drifted set is {w.drifted_ids}")
+    if (w.find_outcome == "present" and not w.children_raises and w.settled):
+        expected = (
+            "pending" if any(not ok for _, _, ok in res.set_calls) else "done"
+        )
+        assert res.status == expected, (
+            f"settled rescan must be {expected}, got {res.status}")
     if w.find_outcome == "raises" or (w.find_outcome == "present"
                                       and w.children_raises):
         assert res.status == "pending", "client errors must leave the pin pending"
@@ -267,6 +296,17 @@ class TestReconcileProperties(unittest.TestCase):
         assert_unsettled_never_finalized(_run_reconcile(world))
 
     @given(worlds)
+    @example(World(
+        original="2026-07-15T00:00:00Z",
+        snapshot_children=["c1"],
+        age_minutes=10,
+        find_outcome="present",
+        children_raises=False,
+        live_album_recreated=False,
+        live_album_date="2026-07-15T00:00:00.0000000Z",
+        live_children=[("c1", "2026-07-15T00:00:00.5000000Z")],
+        set_fail_ids=set(),
+    ))
     def test_terminal_state_correct(self, world: World):
         assert_terminal_state_correct(_run_reconcile(world))
 
@@ -274,13 +314,17 @@ class TestReconcileProperties(unittest.TestCase):
 class TestCaptureProperty(unittest.TestCase):
     @given(
         found=st.booleans(),
-        album_date=st.sampled_from(_DATES),
+        album_date=st.sampled_from(_JELLYFIN_DATES),
         children=st.lists(
-            st.tuples(st.sampled_from(_CHILD_POOL), st.sampled_from(_DATES)),
+            st.tuples(
+                st.sampled_from(_CHILD_POOL),
+                st.sampled_from(_JELLYFIN_DATES),
+            ),
             unique_by=lambda pair: pair[0],
             max_size=4,
         ),
-        historical_date=st.one_of(st.none(), st.sampled_from(_DATES)),
+        historical_date=st.one_of(
+            st.none(), st.sampled_from(_SECONDS_DATES)),
     )
     def test_capture_snapshot_mirrors_finder_or_writes_nothing(
             self, found: bool, album_date: str,
@@ -309,9 +353,13 @@ class TestCaptureProperty(unittest.TestCase):
         self.assertEqual(res.outcome, "captured")
         pin = db.jellyfin_date_created_pins[0]
         expected_date = max(
-            (date for _, date in children), default=album_date)
-        if historical_date is not None:
-            expected_date = min(expected_date, historical_date)
+            (date for _, date in children),
+            default=album_date,
+            key=_parse_iso_date,
+        )
+        if (historical_date is not None
+                and _date_newer(expected_date, historical_date)):
+            expected_date = historical_date
         self.assertEqual(pin["original_date_created"], expected_date)
         self.assertEqual(pin["album_item_id"], "alb-1")
         self.assertEqual(
@@ -341,11 +389,14 @@ capture_worlds = st.builds(
     album_at_new=st.booleans(),
     album_at_old=st.booleans(),
     has_replaced=st.booleans(),
-    chain_created=st.one_of(st.none(), st.sampled_from(_DATES)),
-    historical=st.one_of(st.none(), st.sampled_from(_DATES)),
-    album_date=st.sampled_from(_DATES),
+    chain_created=st.one_of(st.none(), st.sampled_from(_SECONDS_DATES)),
+    historical=st.one_of(st.none(), st.sampled_from(_SECONDS_DATES)),
+    album_date=st.sampled_from(_JELLYFIN_DATES),
     children=st.lists(
-        st.tuples(st.sampled_from(_CHILD_POOL), st.sampled_from(_DATES)),
+        st.tuples(
+            st.sampled_from(_CHILD_POOL),
+            st.sampled_from(_JELLYFIN_DATES),
+        ),
         unique_by=lambda t: t[0], max_size=4),
 )
 
@@ -387,16 +438,20 @@ def _run_capture_fallback(
 def assert_capture_fallback_correct(
         w: CaptureWorld, db: FakePipelineDB, res: CaptureResult) -> None:
     """P5: replaced albums ⇒ a pin whenever any date source exists, with the
-    correct value for the source that won. (_DATES share one ISO shape, so
-    string min/max is chronological.)"""
+    correct value for the source that won."""
     found = w.album_at_new or (w.has_replaced and w.album_at_old)
     if found:
         assert res.outcome == "captured", (
             f"pre-upgrade item findable but outcome={res.outcome}")
         pin = db.jellyfin_date_created_pins[0]
-        expected = max((d for _, d in w.children), default=w.album_date)
-        if w.historical is not None:
-            expected = min(expected, w.historical)
+        expected = max(
+            (d for _, d in w.children),
+            default=w.album_date,
+            key=_parse_iso_date,
+        )
+        if (w.historical is not None
+                and _date_newer(expected, w.historical)):
+            expected = w.historical
         assert pin["original_date_created"] == expected
         assert pin["album_item_id"] == (
             "alb-live" if w.album_at_new else "alb-old")
@@ -413,7 +468,8 @@ def assert_capture_fallback_correct(
         pin = db.jellyfin_date_created_pins[0]
         assert pin["album_item_id"] is None
         assert pin["children_item_ids"] == []
-        assert pin["original_date_created"] == min(floor_sources)
+        assert pin["original_date_created"] == min(
+            floor_sources, key=_parse_iso_date)
         assert pin["imported_path"] == "New/Path"
         return
     assert res.outcome == "no_album"
@@ -478,6 +534,21 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 set_fail_ids={"n1"}),
             status="done",
             set_calls=[("n1", "2026-01-01T00:00:00Z", False)])
+        with self.assertRaises(AssertionError):
+            assert_terminal_state_correct(res)
+
+    def test_terminal_checker_trips_on_lexically_missed_subsecond_bump(self):
+        # Planted lexical-comparison result: '.5' sorts before 'Z', so the
+        # reconciler stayed pending even though the child is newer in time.
+        res = RunResult(
+            world=self._world(
+                original="2026-07-15T00:00:00Z",
+                live_album_date="2026-07-15T00:00:00.0000000Z",
+                live_children=[("c1", "2026-07-15T00:00:00.5000000Z")],
+            ),
+            status="pending",
+            set_calls=[],
+        )
         with self.assertRaises(AssertionError):
             assert_terminal_state_correct(res)
 
