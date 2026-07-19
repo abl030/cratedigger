@@ -433,6 +433,8 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
                 format="Opus",
                 spectral_grade="likely_transcode",
                 spectral_bitrate_kbps=96,
+                spectral_subject="source",
+                spectral_provenance="carried",
             ),
             v0_metric=AlbumQualityV0Metric(
                 min_bitrate_kbps=246,
@@ -546,6 +548,8 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
                 format="Opus",
                 spectral_grade="suspect",
                 spectral_bitrate_kbps=96,
+                spectral_subject="source",
+                spectral_provenance="carried",
             ),
             v0_metric=AlbumQualityV0Metric(
                 min_bitrate_kbps=193,

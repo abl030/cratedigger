@@ -2457,6 +2457,15 @@ class TestQualityGatePreservesTargetFormat(unittest.TestCase):
         ))
         evidence = make_album_quality_evidence(
             mb_release_id="test-mbid",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=252,
+                format="MP3",
+                spectral_grade="genuine",
+                spectral_subject="source",
+                spectral_provenance="carried",
+            ),
             verified_lossless_proof=VerifiedLosslessProof(
                 provenance="carried",
                 source="flac",
