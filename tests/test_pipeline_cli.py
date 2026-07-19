@@ -25,7 +25,6 @@ import scripts.pipeline_cli.long_tail as pipeline_cli_long_tail
 from scripts import pipeline_cli
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
-from lib.destructive_release_service import BanSourceSuccess
 from lib.transitions import TransitionConflict, TransitionConflictKind
 from tests.test_beets_db import _create_test_db, _insert_album
 
@@ -4532,37 +4531,35 @@ class TestDestructiveCliAdapters(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())["error"], "release_mismatch")
         self.assertEqual(db.denylist, [])
 
-    @patch("scripts.pipeline_cli.destructive.ban_source")
-    def test_ban_source_success_reports_resulting_searchability(
-        self, mock_ban_source,
-    ) -> None:
-        db = FakePipelineDB()
+    def test_ban_source_success_reports_resulting_searchability(self) -> None:
         args = SimpleNamespace(
             request_id=41,
             release_id=RELEASE_A,
             beets_db=self.beets_path,
         )
-        for request_status in ("wanted", "unsearchable"):
-            with self.subTest(request_status=request_status):
-                mock_ban_source.return_value = BanSourceSuccess(
-                    request_id=41,
-                    release_id=RELEASE_A,
-                    request_status=request_status,
-                    username="bad-peer",
-                    beets_removed=True,
-                    hashes_recorded=2,
-                    cleanup_errors=(),
-                    hash_capture_errors=(),
-                )
-                output = io.StringIO()
-                with self._env(), redirect_stdout(output):
-                    rc = pipeline_cli.cmd_ban_source(db, args)
+        with patch("lib.beets_album_op.sp.run") as mock_beet:
+            mock_beet.return_value = SimpleNamespace(
+                returncode=1,
+                stderr="isolated test: album retained",
+            )
+            for request_status in ("wanted", "unsearchable"):
+                with self.subTest(request_status=request_status):
+                    db = FakePipelineDB()
+                    db.seed_request(make_request_row(
+                        id=41,
+                        status=request_status,
+                        mb_release_id=RELEASE_A,
+                    ))
+                    output = io.StringIO()
+                    with self._env(), redirect_stdout(output):
+                        rc = pipeline_cli.cmd_ban_source(db, args)
 
-                self.assertEqual(rc, 0)
-                self.assertEqual(
-                    json.loads(output.getvalue())["request_status"],
-                    request_status,
-                )
+                    self.assertEqual(rc, 0)
+                    self.assertEqual(
+                        json.loads(output.getvalue())["request_status"],
+                        request_status,
+                    )
+            self.assertEqual(mock_beet.call_count, 2)
 
     def test_library_delete_lock_contention_returns_state_exit_4(self) -> None:
         db = FakePipelineDB()
