@@ -1499,16 +1499,8 @@ def _run_quality_evidence_authorized_import(
     _emit_and_exit(r)
 
 
-def main():
-    global _import_total_start  # noqa: PLW0603
-    _import_total_start = time.monotonic()
-
-    # Belt-and-suspenders for the group-writable import boundary (umask 0o002) —
-    # see lib/permissions.py / GH #84. Done in main() (not at module import) so
-    # importing this module for tests doesn't leak the process umask into the
-    # test process.
-    reset_umask()
-
+def build_parser() -> argparse.ArgumentParser:
+    """Build the bounded command-line contract consumed by ``main``."""
     parser = argparse.ArgumentParser(description="One-shot beets import for a single album")
     parser.add_argument("path", help="Path to staged album directory")
     parser.add_argument("mb_release_id", help="MusicBrainz release ID")
@@ -1543,7 +1535,20 @@ def main():
                              "import so a downgrade verdict does not destroy "
                              "the user's only copy in failed_imports/ (#111).")
     parser.add_argument("--dry-run", action="store_true")
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    global _import_total_start  # noqa: PLW0603
+    _import_total_start = time.monotonic()
+
+    # Belt-and-suspenders for the group-writable import boundary (umask 0o002) —
+    # see lib/permissions.py / GH #84. Done in main() (not at module import) so
+    # importing this module for tests doesn't leak the process umask into the
+    # test process.
+    reset_umask()
+
+    args = build_parser().parse_args()
 
     mbid = args.mb_release_id
     request_id = args.request_id

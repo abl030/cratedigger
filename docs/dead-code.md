@@ -21,11 +21,20 @@ nix-shell --run "bash scripts/find_dead_code.sh --baseline"  # all candidates (i
 
 The whitelist at `tools/vulture/whitelist.py` masks the known aggregate
 false positives on main (msgspec Struct fields, beets ImportSession overrides,
-route handler dispatch, SQL DictRow attribute access). After deleting
-genuinely-dead code, regenerate the aggregate baseline:
+route handler dispatch, SQL DictRow attribute access). The default command
+regenerates Vulture's raw whitelist at a fixed confidence of 60 and requires
+the committed non-comment lines to match that output exactly. A deleted,
+renamed, moved, or additional candidate therefore makes the baseline stale;
+this also prevents a same-name candidate elsewhere from hiding behind an old
+name-based Vulture exception.
+`--confidence` changes only the ordinary new-candidate scan; `--baseline`
+deliberately omits both the committed whitelist and this freshness check.
+
+After deleting genuinely-dead code, regenerate the aggregate baseline
+mechanically at the same fixed confidence:
 
 ```bash
-nix-shell --run 'mapfile -t sources < <(sed "/^[[:space:]]*#/d; /^[[:space:]]*$/d" tools/production_python_sources.txt); vulture --make-whitelist "${sources[@]}" > tools/vulture/whitelist.py'
+nix-shell --run 'mapfile -t sources < <(sed "/^[[:space:]]*#/d; /^[[:space:]]*$/d" tools/production_python_sources.txt); vulture --make-whitelist --min-confidence 60 "${sources[@]}" > tools/vulture/whitelist.py'
 ```
 
 Both scans are intentionally **production-only**. Tests are evidence that a
@@ -38,6 +47,14 @@ unused imports use an explicit redundant alias at that import, never a
 whole-file ignore; this keeps every module ratcheted against new F401 debt.
 The suite pins this boundary in `tests/test_issue_573_boundaries.py` and
 `tests/test_unused_import_audit.py`; do not add `tests/` to the source roots.
+
+The same small-grammar approach protects `harness/import_one.py`'s standalone
+CLI. `build_parser()` is the one parser constructor, and
+`tests/test_import_one_argparse_audit.py` compares its real argparse action
+destinations with direct AST `Load` reads of `args.<attribute>` in that file
+only. Subparsers and `argparse.SUPPRESS` defaults fail closed because they fall
+outside the bounded grammar. This intentionally does not scan `pipeline-cli`
+or attempt Python data-flow inference.
 
 **Why no runtime coverage?** We tried it (issue #352): production-instrumented coverage.py on the long-running services, diffed against test coverage to surface "tested but never run in prod." It was removed 2026-07-01. It never produced an actionable signal — collection silently broke three times on Nix store-path renames, and once fixed the diff was dominated by noise it can't see past: `pipeline-cli` / the beets-interpreter harness / the deploy-time migrator aren't instrumented at all (so they always look dead), and a branch not hit in a bounded window is a "rare operator path" (Replace, YouTube-rescue, ban-source), not dead. For a single-operator system the CPU overhead bought nothing that vulture plus judgement didn't already give. Don't re-add it without a fundamentally different design.
 

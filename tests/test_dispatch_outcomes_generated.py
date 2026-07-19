@@ -44,6 +44,7 @@ import sys
 import tempfile
 import unittest
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 from unittest.mock import MagicMock, mock_open, patch
 
@@ -516,6 +517,7 @@ def _run_have_analysis_abort(
     raw_error: str,
     search_override: str | None,
     username: str | None,
+    cooldown_verdict: bool,
 ) -> FakePipelineDB:
     """Drive the real current-evidence gate through its terminal DB bundle."""
 
@@ -597,6 +599,7 @@ def _run_have_analysis_abort(
             )
     if outcome.terminal_outcome is None:
         raise AssertionError("HAVE-analysis abort did not build a terminal outcome")
+    db.set_cooldown_result(cooldown_verdict)
     db.persist_import_terminal_outcome(outcome.terminal_outcome.with_job(
         ImportJobTerminal(
             status="failed",
@@ -834,6 +837,33 @@ def assert_have_analysis_abort_is_non_quality(
         )
 
 
+def assert_have_analysis_abort_cooldown_policy(
+    db: FakePipelineDB,
+    *,
+    username: str | None,
+    cooldown_verdict: bool,
+) -> None:
+    """Both caller modes evaluate and persist cooldowns identically."""
+
+    expected_evaluations = [] if username is None else [username]
+    if db.cooldowns_applied != expected_evaluations:
+        raise AssertionError(
+            "HAVE-analysis cooldown evaluations drifted: "
+            f"{db.cooldowns_applied!r} != {expected_evaluations!r}"
+        )
+    expected_usernames = (
+        {username}
+        if username is not None and cooldown_verdict
+        else set()
+    )
+    actual_usernames = set(db.user_cooldowns)
+    if actual_usernames != expected_usernames:
+        raise AssertionError(
+            "HAVE-analysis cooldown persistence drifted: "
+            f"written={actual_usernames!r} != expected={expected_usernames!r}"
+        )
+
+
 def assert_operator_retained_lifecycle(
     db: FakePipelineDB,
     *,
@@ -1009,6 +1039,7 @@ class TestGeneratedHaveAnalysisAbortLifecycle(unittest.TestCase):
         raw_error=st.sampled_from(_HAVE_ANALYSIS_FAILURES),
         search_override=st.sampled_from((None, "lossless", "lossless,mp3 v0")),
         username=st.sampled_from((None, "user1", "user2")),
+        cooldown_verdict=st.booleans(),
     )
     def test_abort_preserves_caller_lifecycle_never_denylisted_or_narrowed(
         self,
@@ -1016,17 +1047,24 @@ class TestGeneratedHaveAnalysisAbortLifecycle(unittest.TestCase):
         raw_error,
         search_override,
         username,
+        cooldown_verdict,
     ):
         db = _run_have_analysis_abort(
             mode=mode,
             raw_error=raw_error,
             search_override=search_override,
             username=username,
+            cooldown_verdict=cooldown_verdict,
         )
         assert_have_analysis_abort_is_non_quality(
             db,
             mode=mode,
             expected_search_override=search_override,
+        )
+        assert_have_analysis_abort_cooldown_policy(
+            db,
+            username=username,
+            cooldown_verdict=cooldown_verdict,
         )
 
 
@@ -1164,6 +1202,55 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 db,
                 mode="auto",
                 expected_search_override=None,
+            )
+
+    def test_have_analysis_cooldown_checker_trips_on_double_evaluation(self):
+        db = FakePipelineDB()
+        db.cooldowns_applied.extend(("peer", "peer"))
+        with self.assertRaises(AssertionError):
+            assert_have_analysis_abort_cooldown_policy(
+                db,
+                username="peer",
+                cooldown_verdict=False,
+            )
+
+    def test_have_analysis_cooldown_checker_trips_on_missing_write(self):
+        db = FakePipelineDB()
+        db.cooldowns_applied.append("peer")
+        with self.assertRaises(AssertionError):
+            assert_have_analysis_abort_cooldown_policy(
+                db,
+                username="peer",
+                cooldown_verdict=True,
+            )
+
+    def test_have_analysis_cooldown_checker_trips_without_username(self):
+        db = FakePipelineDB()
+        db.add_cooldown(
+            "ghost",
+            datetime.now(timezone.utc) + timedelta(days=1),
+            "planted mutant",
+        )
+        with self.assertRaises(AssertionError):
+            assert_have_analysis_abort_cooldown_policy(
+                db,
+                username=None,
+                cooldown_verdict=False,
+            )
+
+    def test_have_analysis_cooldown_checker_trips_on_false_verdict_write(self):
+        db = FakePipelineDB()
+        db.cooldowns_applied.append("peer")
+        db.add_cooldown(
+            "peer",
+            datetime.now(timezone.utc) + timedelta(days=1),
+            "planted mutant",
+        )
+        with self.assertRaises(AssertionError):
+            assert_have_analysis_abort_cooldown_policy(
+                db,
+                username="peer",
+                cooldown_verdict=False,
             )
 
     def test_operator_retained_checker_trips_when_stop_is_cleared(self):

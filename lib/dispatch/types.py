@@ -208,7 +208,6 @@ class EvidenceImportGate:
     current_reason: str | None = None
     current_path: str | None = None
     current_snapshot_guard: str | None = None
-    current_fail_closed: bool = False
     snapshot_guard: str | None = None
 
 

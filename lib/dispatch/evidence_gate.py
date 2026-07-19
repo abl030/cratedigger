@@ -130,15 +130,6 @@ def _import_allowed_by_evidence_pipeline(result: dict[str, object]) -> bool:
     return bool(result.get("imported"))
 
 
-def _current_evidence_allows_action(gate: EvidenceImportGate) -> bool:
-    """Current evidence may be absent only when Beets has no current album."""
-
-    return (
-        not gate.current_fail_closed
-        or gate.current_status == CURRENT_STATUS_MISSING
-    )
-
-
 def _current_evidence_analysis_failed(gate: EvidenceImportGate) -> bool:
     """Only a failed HAVE analysis aborts; a genuinely absent HAVE proceeds."""
 
@@ -281,7 +272,6 @@ def _load_evidence_import_gate(
             candidate_reason=candidate_result.provenance.fallback_reason,
             current_status=CURRENT_STATUS_MISSING,
             current_reason="album not in beets",
-            current_fail_closed=False,
             snapshot_guard=candidate_result.provenance.snapshot_guard,
         )
 
@@ -311,7 +301,6 @@ def _load_evidence_import_gate(
                 or (current.source_path if current is not None else None)
             ),
             current_snapshot_guard=current_result.provenance.snapshot_guard,
-            current_fail_closed=True,
             snapshot_guard=candidate_result.provenance.snapshot_guard,
         )
 
@@ -324,7 +313,6 @@ def _load_evidence_import_gate(
         current_reason=current_result.provenance.fallback_reason,
         current_path=current_result.provenance.installed_path,
         current_snapshot_guard=current_result.provenance.snapshot_guard,
-        current_fail_closed=current_result.provenance.fail_closed,
         snapshot_guard=candidate_result.provenance.snapshot_guard,
     )
 
