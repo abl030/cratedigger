@@ -80,10 +80,12 @@ exercise a new invariant.
 
 `tests/world_model/state_machine.py` drives real production request transitions
 against a throwaway PostgreSQL database while a real pinned-Beets library adds,
-removes, and moves generated tagged audio. It checks the shared
-`lib/world_invariants.py` bank after every rule. Its first rule tranche covers
-request creation, initial import, same-pressing upgrade/re-import, exact-release
-membership, imported-path coherence, and exclusive physical album folders.
+removes, and moves generated tagged audio. Its rules cover request creation,
+ordinary and force import, same-pressing upgrade/re-import, Replace, ban-source,
+wrong-match deletion, and reset. After every rule it checks the shared
+`lib/world_invariants.py` bank: folder exclusivity, replaced-row freezing,
+status/membership, evidence/disk coherence, proof-lock terminality, search-tier
+monotonicity, and denylist authority.
 
 It is intentionally named outside unittest's `test*.py` discovery pattern.
 Run the deterministic pin and generated state machine directly:
@@ -94,10 +96,11 @@ nix-shell --run "python3 -m unittest tests.world_model.state_machine -v"
 
 The temporary PostgreSQL, Beets SQLite database, library tree, and generated
 audio are local and disposable; this runner never reads or mutates production.
-The initial measured budget is six examples of eight stateful steps. On doc1
-on 2026-07-19, the direct two-test module reported 7.0 test-seconds (excluding
-dev-shell startup). That is a baseline, not a placement decision. Override the
-budget for exploration without changing code:
+The deterministic direct budget is six examples of eight stateful steps. On
+doc1 on 2026-07-19, the full six-test lifecycle module reported 8.796
+test-seconds (excluding dev-shell startup). That is a baseline, not a placement
+decision. Override the deterministic budget for a one-off run without changing
+code:
 
 ```bash
 CRATEDIGGER_WORLD_EXAMPLES=20 CRATEDIGGER_WORLD_STEPS=20 \
@@ -107,6 +110,49 @@ CRATEDIGGER_WORLD_EXAMPLES=20 CRATEDIGGER_WORLD_STEPS=20 \
 Do not add this runner to `scripts/run_tests.sh` or schedule it merely because
 the core exists. Issue #743 records runtime and fault-injection evidence first;
 standard-suite and scheduled-depth choices belong to a follow-up PR.
+
+### Randomized lifecycle hammer
+
+The operator burst wrapper runs the same real-storage state machine with fresh
+Hypothesis entropy, a persistent replay database, and a default budget of 25
+worlds × 100 steps:
+
+```bash
+nix-shell --run "scripts/world_model_burst.sh"
+nix-shell --run "scripts/world_model_burst.sh --examples 10 --steps 50"
+nix-shell --run "scripts/world_model_burst.sh --print-config"
+```
+
+Every invocation unsets an ambient `TEST_DB_DSN` before importing the test
+fixture, forcing a new ephemeral PostgreSQL instance. Beets SQLite, generated
+audio, and the library tree remain per-world temporary state. The Hypothesis
+database defaults to `.hypothesis/world-model` (gitignored): it replays a found
+failure first on the next run, but is never a committed artifact. Randomized
+failures print a reproduction blob and shrink to a minimal operation sequence.
+
+On doc1 on 2026-07-19, the initial 3-world × 20-step randomized smoke completed
+all six module tests in 8.470 test-seconds (10 seconds wrapper wall time). The
+default 25 × 100 profile completed cleanly in 449.930 test-seconds (451 seconds
+wrapper wall time). That measured depth remains operator-only and is not part of
+`scripts/run_tests.sh`; suite/nightly placement is still the explicit follow-up
+decision recorded on issue #743.
+
+The current hammer uses the in-process production adapter that performs real
+Beets model/database/filesystem mutations beneath the real dispatch services.
+The mirror-backed `run_beets_harness.sh` subprocess variant described in issue
+#743 needs a catalogue of real release identities and metadata. It remains a
+dependency of the census-seed slice rather than silently substituting generated
+nonexistent MBIDs or touching the deployed library.
+
+When the hammer finds a defect:
+
+1. Keep the replay database local and reproduce the shrunk operation sequence.
+2. Fix the production boundary or the world mapping, stating which was wrong.
+3. Promote the sequence to a named method on `TestPinnedLifecycleWorld`.
+4. Run that named pin directly, then rerun the randomized profile that found it.
+
+Never commit the Hypothesis database, a seed log, or an opaque JSON snapshot.
+The readable named lifecycle is the durable regression artifact.
 
 ## Two tiers, one knob
 

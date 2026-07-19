@@ -4,9 +4,9 @@ This module is intentionally outside unittest discovery. Run it directly:
 
     nix-shell --run "python3 -m unittest tests.world_model.state_machine -v"
 
-Its default generated budget is deliberately small while issue #743 measures
-the real runtime. ``CRATEDIGGER_WORLD_EXAMPLES`` and
-``CRATEDIGGER_WORLD_STEPS`` can increase that budget without changing code.
+Direct invocation uses a small deterministic budget. The operator-only
+``scripts/world_model_burst.sh`` switches the same machine to randomized
+generation with a replay database and a much deeper lifecycle budget.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import sys
 import unittest
 
 from hypothesis import HealthCheck, settings
+from hypothesis.database import DirectoryBasedExampleDatabase
 from hypothesis import strategies as st
 from hypothesis.stateful import (
     RuleBasedStateMachine,
@@ -316,12 +317,24 @@ class LifecycleWorldMachine(RuleBasedStateMachine):
 
 
 TestGeneratedLifecycleWorld = LifecycleWorldMachine.TestCase
+_RANDOMIZED = os.environ.get("CRATEDIGGER_WORLD_RANDOMIZED") == "1"
+_DATABASE = (
+    DirectoryBasedExampleDatabase(
+        os.environ.get(
+            "CRATEDIGGER_WORLD_DATABASE",
+            ".hypothesis/world-model",
+        )
+    )
+    if _RANDOMIZED
+    else None
+)
 TestGeneratedLifecycleWorld.settings = settings(
     max_examples=int(os.environ.get("CRATEDIGGER_WORLD_EXAMPLES", "6")),
     stateful_step_count=int(os.environ.get("CRATEDIGGER_WORLD_STEPS", "8")),
     deadline=None,
-    derandomize=True,
-    database=None,
+    derandomize=not _RANDOMIZED,
+    database=_DATABASE,
+    print_blob=_RANDOMIZED,
     suppress_health_check=(HealthCheck.too_slow,),
 )
 
