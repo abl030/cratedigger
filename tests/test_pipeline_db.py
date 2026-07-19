@@ -3472,6 +3472,23 @@ class TestDenylist(unittest.TestCase):
         denied = self.db.get_denylisted_users(self.req_id)
         self.assertEqual(len(denied), 1)
 
+    def test_world_audit_read_lists_rows_across_requests(self):
+        second_id = self.db.add_request(
+            mb_release_id="deny-uuid-2",
+            artist_name="B",
+            album_title="B",
+            source="request",
+        )
+        self.db.add_denylist(self.req_id, "user-a", "reason-a")
+        self.db.add_denylist(second_id, "user-b", "reason-b")
+
+        rows = self.db.list_denylist_rows()
+
+        self.assertEqual(
+            [(row["request_id"], row["username"]) for row in rows],
+            [(self.req_id, "user-a"), (second_id, "user-b")],
+        )
+
 
 @requires_postgres
 class TestRetryLogic(unittest.TestCase):

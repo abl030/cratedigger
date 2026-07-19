@@ -9,6 +9,9 @@ from typing import Any
 
 import msgspec
 
+from lib.quality import ImportResult, dispatch_action
+from lib.quality.decisions import post_import_search_action_if_known
+
 
 class LibraryAlbumSnapshot(msgspec.Struct, frozen=True):
     """The exact release identity and paths represented by one Beets album."""
@@ -417,6 +420,56 @@ def check_denylist_authority(
     )
 
 
+def derive_denylist_authorities(
+    *,
+    username: str,
+    reason: str,
+    history: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Find persisted decisions that authorize one source-denylist row."""
+    decisions: set[str] = set()
+    if any(
+        entry.get("outcome") == "curator_ban"
+        and entry.get("soulseek_username") == username
+        for entry in history
+    ):
+        decisions.add("curator_ban")
+
+    if reason.startswith("quality gate:"):
+        decision = (
+            "requeue_lossless"
+            if "lossless-only" in reason
+            else "requeue_upgrade"
+        )
+        action = post_import_search_action_if_known(decision)
+        if action is not None and action.denylist:
+            decisions.add(decision)
+
+    for entry in history:
+        if entry.get("soulseek_username") != username:
+            continue
+        raw_result = entry.get("import_result")
+        if isinstance(raw_result, str):
+            encoded_result = raw_result
+        elif isinstance(raw_result, Mapping):
+            encoded_result = msgspec.json.encode(dict(raw_result)).decode()
+        else:
+            continue
+        try:
+            decision = ImportResult.from_json(encoded_result).decision
+        except (ValueError, TypeError, msgspec.DecodeError):
+            continue
+        if decision is None:
+            continue
+        search_action = post_import_search_action_if_known(decision)
+        if (
+            (search_action is not None and search_action.denylist)
+            or dispatch_action(decision).denylist
+        ):
+            decisions.add(decision)
+    return tuple(sorted(decisions))
+
+
 __all__ = [
     "LibraryAlbumSnapshot",
     "DenylistAuthoritySnapshot",
@@ -432,4 +485,5 @@ __all__ = [
     "check_no_lossy_tier_widening",
     "check_proof_lock_terminality",
     "check_status_membership",
+    "derive_denylist_authorities",
 ]

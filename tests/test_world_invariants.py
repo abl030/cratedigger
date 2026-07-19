@@ -20,6 +20,7 @@ from lib.world_invariants import (
     check_no_lossy_tier_widening,
     check_proof_lock_terminality,
     check_status_membership,
+    derive_denylist_authorities,
 )
 
 
@@ -100,6 +101,27 @@ class TestWorldInvariantPins(unittest.TestCase):
         self.assertEqual(check_proof_lock_terminality((transition,)), ())
         self.assertEqual(check_no_lossy_tier_widening((transition,)), ())
         self.assertEqual(check_denylist_authority((authority,)), ())
+
+    def test_denylist_authority_is_derived_from_persisted_decisions(self) -> None:
+        self.assertEqual(
+            derive_denylist_authorities(
+                username="peer",
+                reason="manual curator action",
+                history=[{
+                    "outcome": "curator_ban",
+                    "soulseek_username": "peer",
+                }],
+            ),
+            ("curator_ban",),
+        )
+        self.assertEqual(
+            derive_denylist_authorities(
+                username="quality-peer",
+                reason="quality gate: lossless-only candidate rejected",
+                history=[],
+            ),
+            ("requeue_lossless",),
+        )
 
 
 class TestWorldInvariantCheckersTripOnKnownBad(unittest.TestCase):

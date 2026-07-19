@@ -739,6 +739,53 @@ class BeetsDB:
             return None
         return int(avg_row[0] / 1000)
 
+    def list_world_albums(self) -> list["BeetsWorldAlbum"]:
+        """Return every Beets album with exact identities and resolved paths.
+
+        Unlike :meth:`list_release_identities`, albums with no usable release
+        identity are retained so the world audit can report them instead of
+        silently treating them as out of scope.
+        """
+        rows = self._conn.execute(
+            "SELECT a.id, a.mb_albumid, a.discogs_albumid, i.path "
+            "FROM albums a "
+            "LEFT JOIN items i ON i.album_id = a.id "
+            "ORDER BY a.id ASC, i.id ASC"
+        ).fetchall()
+        grouped: dict[int, dict[str, object]] = {}
+        for album_id, mb_albumid, discogs_albumid, raw_path in rows:
+            entry = grouped.setdefault(int(album_id), {
+                "mb_albumid": mb_albumid,
+                "discogs_albumid": discogs_albumid,
+                "paths": [],
+            })
+            if raw_path is not None:
+                paths = entry["paths"]
+                assert isinstance(paths, list)
+                paths.append(self._resolve_path(raw_path))
+
+        albums: list[BeetsWorldAlbum] = []
+        for album_id, entry in grouped.items():
+            identities = {
+                identity.release_id
+                for raw in (
+                    entry["mb_albumid"],
+                    entry["discogs_albumid"],
+                )
+                if (identity := ReleaseIdentity.from_id(raw)) is not None
+            }
+            raw_paths = entry["paths"]
+            assert isinstance(raw_paths, list)
+            item_paths = tuple(str(path) for path in raw_paths)
+            album_path = os.path.dirname(item_paths[0]) if item_paths else ""
+            albums.append(BeetsWorldAlbum(
+                album_id=album_id,
+                release_ids=tuple(sorted(identities)),
+                album_path=album_path,
+                item_paths=item_paths,
+            ))
+        return albums
+
     @staticmethod
     def _album_row_to_dict(r: tuple[object, ...]) -> dict[str, object]:
         """Convert a standard album query row to dict.
@@ -763,3 +810,18 @@ class BeetsDB:
                 else None
             ),
         }
+
+
+@dataclass(frozen=True)
+class BeetsWorldAlbum:
+    """One physical Beets album for cross-engine world auditing.
+
+    ``release_ids`` contains every exact identity Beets stores for the album.
+    Keeping both columns is important: MusicBrainz and Discogs are independent
+    source identities, and the audit must not silently discard either one.
+    """
+
+    album_id: int
+    release_ids: tuple[str, ...]
+    album_path: str
+    item_paths: tuple[str, ...]

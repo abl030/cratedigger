@@ -215,6 +215,14 @@ def _seed_get_denylisted_users(db: Any) -> "list[dict[str, Any]]":
     return list(db.get_denylisted_users(rid))
 
 
+def _seed_list_denylist_rows(db: Any) -> "list[dict[str, Any]]":
+    rid = db.add_request(
+        "Parity Artist", "Parity Album", "request",
+        mb_release_id="denylist-world-parity")
+    db.add_denylist(rid, "peer", "reason")
+    return list(db.list_denylist_rows())
+
+
 def _seed_get_field_resolution(db: Any) -> "list[dict[str, Any]]":
     rid = db.add_request(
         "Parity Artist", "Parity Album", "request",
@@ -456,6 +464,7 @@ PARITY_REGISTRY: "dict[str, Seeder]" = {
     "get_tracks": _seed_get_tracks,
     "get_downloading": _seed_get_downloading,
     "get_denylisted_users": _seed_get_denylisted_users,
+    "list_denylist_rows": _seed_list_denylist_rows,
     "get_field_resolution": _seed_get_field_resolution,
     # download_log projections.
     "get_download_log_entry": _seed_get_download_log_entry,

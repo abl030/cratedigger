@@ -6,6 +6,7 @@ pipeline-cli quality <request_id>            # simulate gate for genuine FLAC / 
 pipeline-cli debug-download <download_log_id>  # raw JSONB audit for one attempt
 pipeline-cli search-plan show <request_id>   # active plan + cursor + per-slot usefulness stats (--json for machine output)
 pipeline-cli triage quarantine --json       # unreferenced immediate failed_imports album folders (read-only)
+pipeline-cli audit world --json             # read-only PipelineDB/Beets/disk invariant audit
 pipeline-cli ban-source <request_id> --confirm BAN  # bad-rip removal; optional --release-id is confirmation-only
 pipeline-cli library-delete <album_id> --confirm DELETE --purge-pipeline  # exact beets album delete
 pipeline-cli search-plan regenerate <request_id>  # operator repair path; resets cursor on success, preserves old plan on failure
@@ -45,6 +46,7 @@ Every top-level `pipeline-cli` subcommand, one line each. Run `pipeline-cli rout
 | Subcommand | Purpose |
 |---|---|
 | `add` | Add a new request by MBID or Discogs ID |
+| `audit` | Run read-only cross-engine audits; `audit world` checks current PipelineDB, Beets, evidence, denylist, and disk coherence |
 | `beets-distance` | Real beets-distance between a download_log's audio and an MBID (refuses if MBID is outside the request's release group) |
 | `ban-source` | Mark a request's server-resolved exact release as a bad rip and remove it from beets; an `unsearchable` stop is preserved, otherwise the request is requeued as `wanted` (requires `--confirm BAN`) |
 | `disk-coverage` | Show which active pipeline rows are actually present in beets |
@@ -86,3 +88,17 @@ the named PostgreSQL row remains after a purge failure.
 | `youtube-rescue` | Submit a YouTube Music rescue ingest for one request (requires a resolver mapping; emits a `youtube_running` download_log row) |
 
 `tests/test_docs_audit.py` enforces that every top-level subcommand from `_build_parser()` has a mention somewhere in this file — adding a subcommand without a row here fails the suite.
+
+## World audit scope
+
+`pipeline-cli audit world` and `GET /api/audit/world` are thin adapters over
+the same read-only service and return the same report shape. The audit checks
+folder exclusivity, physical library files, imported-request membership,
+current evidence addressing, and source-denylist authority. It never changes
+PostgreSQL, Beets, or library files.
+
+The report separately names temporal invariants it cannot establish from one
+current-state snapshot: whether a replaced row stayed frozen after supersede,
+whether an earlier operation respected a proof lock, and whether an earlier
+operation widened a lossless-only search tier. Those properties remain owned
+by the stateful world model; a clean live audit does not claim to prove them.

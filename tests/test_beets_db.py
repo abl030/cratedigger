@@ -1528,5 +1528,42 @@ class TestListReleaseIdentities(unittest.TestCase):
         self.assertEqual(rows[1]["discogs_albumid"], 67890)
 
 
+class TestListWorldAlbums(unittest.TestCase):
+    def test_retains_all_exact_ids_resolved_paths_and_identityless_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            library_root = os.path.join(tmpdir, "library")
+            _create_test_db(db_path)
+            _insert_album(
+                db_path,
+                1,
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                [(320000, "Artist/Album/01.flac")],
+                discogs_albumid=12856590,
+            )
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "INSERT INTO albums (id, mb_albumid, discogs_albumid) "
+                "VALUES (2, '', 0)"
+            )
+            conn.commit()
+            conn.close()
+
+            with BeetsDB(db_path, library_root=library_root) as db:
+                rows = db.list_world_albums()
+
+        self.assertEqual([row.album_id for row in rows], [1, 2])
+        self.assertEqual(rows[0].release_ids, (
+            "12856590",
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        ))
+        self.assertEqual(
+            rows[0].album_path,
+            os.path.join(library_root, "Artist", "Album"),
+        )
+        self.assertEqual(rows[1].release_ids, ())
+        self.assertEqual(rows[1].item_paths, ())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -28,12 +28,9 @@ from lib.quality import (
     EVIDENCE_SUBJECT_SOURCE,
     AudioQualityMeasurement,
     DownloadInfo,
-    ImportResult,
     VerifiedLosslessProof,
-    dispatch_action,
     resolve_user_requeue_override,
 )
-from lib.quality.decisions import post_import_search_action_if_known
 from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
 from lib.mbid_replace_service import MbidReplaceService, RESULT_REPLACED
 from lib.release_cleanup import ReleaseCleanupResult
@@ -59,6 +56,7 @@ from lib.world_invariants import (
     check_no_lossy_tier_widening,
     check_proof_lock_terminality,
     check_status_membership,
+    derive_denylist_authorities,
 )
 from lib.validation_envelope import decode_validation_envelope
 from lib.wrong_match_delete_service import (
@@ -812,7 +810,7 @@ class LifecycleWorld:
             )
             for denylist_row in denylist:
                 username = str(denylist_row.get("username") or "")
-                decisions = self._denylist_authorities(
+                decisions = derive_denylist_authorities(
                     username=username,
                     reason=str(denylist_row.get("reason") or ""),
                     history=history,
@@ -907,56 +905,6 @@ class LifecycleWorld:
             evidence is not None
             and evidence.verified_lossless_proof is not None
         )
-
-    @staticmethod
-    def _denylist_authorities(
-        *,
-        username: str,
-        reason: str,
-        history: list[dict[str, Any]],
-    ) -> tuple[str, ...]:
-        decisions: set[str] = set()
-        if any(
-            entry.get("outcome") == "curator_ban"
-            and entry.get("soulseek_username") == username
-            for entry in history
-        ):
-            decisions.add("curator_ban")
-
-        if reason.startswith("quality gate:"):
-            decision = (
-                "requeue_lossless"
-                if "lossless-only" in reason
-                else "requeue_upgrade"
-            )
-            action = post_import_search_action_if_known(decision)
-            if action is not None and action.denylist:
-                decisions.add(decision)
-
-        for entry in history:
-            if entry.get("soulseek_username") != username:
-                continue
-            raw_result = entry.get("import_result")
-            if isinstance(raw_result, str):
-                encoded_result = raw_result
-            elif isinstance(raw_result, dict):
-                encoded_result = msgspec.json.encode(raw_result).decode()
-            else:
-                continue
-            try:
-                decision = ImportResult.from_json(encoded_result).decision
-            except (ValueError, TypeError, msgspec.DecodeError):
-                continue
-            if decision is None:
-                continue
-            search_action = post_import_search_action_if_known(decision)
-            if (
-                (search_action is not None and search_action.denylist)
-                or dispatch_action(decision).denylist
-            ):
-                decisions.add(decision)
-        return tuple(sorted(decisions))
-
 
 def repository_root() -> Path:
     return Path(__file__).resolve().parents[2]

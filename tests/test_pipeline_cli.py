@@ -1,5 +1,6 @@
 """Tests for scripts/pipeline_cli.py — Pipeline CLI commands."""
 
+import argparse
 import io
 import json
 import os
@@ -4707,6 +4708,46 @@ class TestDestructiveCliAdapters(unittest.TestCase):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
             parser.parse_args(["ban-source", "41"])
         self.assertEqual(cm.exception.code, 2)
+
+
+class TestWorldAuditCLI(unittest.TestCase):
+    def test_json_uses_shared_report_and_violation_exit_code(self) -> None:
+        import scripts.pipeline_cli.audit as audit_cli
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=743,
+            mb_release_id=RELEASE_A,
+            status="imported",
+            imported_path="/missing/world-audit-cli",
+        ))
+        output = io.StringIO()
+        with (
+            patch.object(audit_cli, "_open_beets", return_value=FakeBeetsDB()),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_audit_world(
+                db,
+                argparse.Namespace(beets_db="unused.db", json=True),
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertEqual(payload["status"], "violations")
+        self.assertIn(
+            "imported_release_missing",
+            {row["code"] for row in payload["violations"]},
+        )
+
+    def test_parser_exposes_nested_audit_world_command(self) -> None:
+        from scripts.pipeline_cli.routes_meta import _build_parser
+
+        parser, _, _ = _build_parser()
+        args = parser.parse_args(["audit", "world", "--json"])
+
+        self.assertEqual(args.command, "audit")
+        self.assertEqual(args.audit_command, "world")
+        self.assertTrue(args.json)
 
 
 if __name__ == "__main__":

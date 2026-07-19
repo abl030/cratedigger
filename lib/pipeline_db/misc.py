@@ -602,3 +602,15 @@ class _MiscMixin(_PipelineDBBase):
             rid = int(row["request_id"])
             out.setdefault(rid, []).append(dict(row))
         return out
+
+
+    def list_denylist_rows(self) -> list[dict[str, Any]]:
+        """Return every source exclusion for world-wide invariant audits."""
+        cur = self._execute(
+            """
+            SELECT request_id, username, reason, created_at
+            FROM source_denylist
+            ORDER BY request_id ASC, created_at ASC, username ASC
+            """
+        )
+        return [dict(row) for row in cur.fetchall()]
