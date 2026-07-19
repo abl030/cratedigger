@@ -1,4 +1,4 @@
-"""Generated qualification of the source-local Ruff gate."""
+"""Generated qualification of the production dead-code gates."""
 
 from __future__ import annotations
 
@@ -42,6 +42,29 @@ def _aggregate_name_fault(
     if imported_name in peer_source:
         return ()
     return findings
+
+
+def assert_exact_whitelist_fresh(
+    committed_lines: tuple[str, ...],
+    generated_lines: tuple[str, ...],
+) -> None:
+    """Committed and generated candidates must match byte-for-byte."""
+    assert committed_lines == generated_lines, (
+        "stale or incomplete exact Vulture baseline: "
+        f"{committed_lines!r} != {generated_lines!r}"
+    )
+
+
+def assert_name_only_whitelist_fresh(
+    committed_lines: tuple[str, ...],
+    generated_lines: tuple[str, ...],
+) -> None:
+    """Known-bad mutant that ignores source locations and descriptions."""
+    generated_names = {line.split()[0] for line in generated_lines}
+    missing = tuple(
+        line for line in committed_lines if line.split()[0] not in generated_names
+    )
+    assert not missing, f"stale name-only Vulture entries: {missing!r}"
 
 
 class TestGeneratedUnusedImportAudit(unittest.TestCase):
@@ -194,6 +217,70 @@ class TestGeneratedUnusedImportAudit(unittest.TestCase):
                 relative_path="lib/importing.py",
                 import_is_live=False,
             )
+
+
+_VULTURE_SYMBOL = st.from_regex(r"[a-z][a-z0-9_]{0,12}", fullmatch=True)
+_VULTURE_LINE_NUMBER = st.integers(min_value=1, max_value=10_000)
+
+
+def _vulture_entry(symbol: str, line_number: int) -> str:
+    return f"{symbol}  # unused function (lib/generated.py:{line_number})"
+
+
+class TestGeneratedVultureWhitelistFreshness(unittest.TestCase):
+    @given(symbol=_VULTURE_SYMBOL, line_number=_VULTURE_LINE_NUMBER)
+    def test_unchanged_exact_entries_are_fresh(
+        self,
+        symbol: str,
+        line_number: int,
+    ) -> None:
+        entry = _vulture_entry(symbol, line_number)
+
+        assert_exact_whitelist_fresh((entry,), (entry,))
+
+    @example(symbol="orphan", old_line=1, new_line=3)
+    @given(
+        symbol=_VULTURE_SYMBOL,
+        old_line=_VULTURE_LINE_NUMBER,
+        new_line=_VULTURE_LINE_NUMBER,
+    )
+    def test_moved_exact_entries_are_stale(
+        self,
+        symbol: str,
+        old_line: int,
+        new_line: int,
+    ) -> None:
+        if old_line == new_line:
+            return
+        committed = (_vulture_entry(symbol, old_line),)
+        generated = (_vulture_entry(symbol, new_line),)
+
+        with self.assertRaisesRegex(AssertionError, "exact Vulture baseline"):
+            assert_exact_whitelist_fresh(committed, generated)
+
+    @given(symbol=_VULTURE_SYMBOL, line_number=_VULTURE_LINE_NUMBER)
+    def test_additional_same_name_candidate_is_not_masked(
+        self,
+        symbol: str,
+        line_number: int,
+    ) -> None:
+        committed = (_vulture_entry(symbol, line_number),)
+        generated = (
+            *committed,
+            f"{symbol}  # unused function (lib/other.py:{line_number})",
+        )
+
+        with self.assertRaisesRegex(AssertionError, "exact Vulture baseline"):
+            assert_exact_whitelist_fresh(committed, generated)
+        assert_name_only_whitelist_fresh(committed, generated)
+
+    def test_known_bad_name_only_checker_does_not_constrain_locations(self) -> None:
+        committed = (_vulture_entry("orphan", 1),)
+        generated = (_vulture_entry("orphan", 3),)
+
+        assert_name_only_whitelist_fresh(committed, generated)
+        with self.assertRaises(AssertionError):
+            assert_exact_whitelist_fresh(committed, generated)
 
 
 if __name__ == "__main__":

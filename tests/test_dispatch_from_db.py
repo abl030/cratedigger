@@ -1003,7 +1003,7 @@ class TestLoadEvidenceImportGateDelegation(unittest.TestCase):
         )
 
     def test_helper_returns_none_marks_current_missing(self):
-        """Beets has no album → current_status='missing', not fail-closed."""
+        """Beets has no album → current_status='missing'."""
         from lib.dispatch import _load_evidence_import_gate
 
         db = FakePipelineDB()
@@ -1024,13 +1024,12 @@ class TestLoadEvidenceImportGateDelegation(unittest.TestCase):
         mock_helper.assert_called_once()
         self.assertIsNone(gate.current)
         self.assertEqual(gate.current_status, "missing")
-        self.assertFalse(gate.current_fail_closed)
         self.assertEqual(gate.current_reason, "album not in beets")
         self.assertEqual(gate.snapshot_guard, "matched")
         self.assertIs(gate.candidate, candidate_result.evidence)
 
-    def test_helper_fail_closed_propagates_to_gate(self):
-        """Helper fail-closed result → gate current_fail_closed=True."""
+    def test_helper_failed_status_propagates_to_gate(self):
+        """A fail-closed helper result reaches the canonical failed status."""
         from lib.import_evidence import CurrentEvidenceActionResult
         from lib.dispatch import _load_evidence_import_gate
 
@@ -1059,7 +1058,6 @@ class TestLoadEvidenceImportGateDelegation(unittest.TestCase):
 
         self.assertIsNone(gate.current)
         self.assertEqual(gate.current_status, "failed")
-        self.assertTrue(gate.current_fail_closed)
         self.assertEqual(gate.current_reason, "RuntimeError: boom")
         # snapshot_guard always sourced from the candidate side.
         self.assertEqual(gate.snapshot_guard, "matched")

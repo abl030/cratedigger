@@ -39,8 +39,7 @@ from lib.dispatch.helpers import (_cleanup_staged_dir, _guard_failure_detail,
                                   _populate_dl_info_from_import_result,
                                   _quarantine_duplicate_remove_guard_source,
                                   _should_cleanup_path)
-from lib.dispatch.evidence_gate import (_current_evidence_allows_action,
-                                        _current_evidence_analysis_failed,
+from lib.dispatch.evidence_gate import (_current_evidence_analysis_failed,
                                         _import_allowed_by_evidence_pipeline,
                                         _load_evidence_import_gate,
                                         _refresh_current_evidence_after_import,
@@ -317,18 +316,6 @@ def dispatch_import_core(
                     import_job_id=candidate_import_job_id,
                     reason=reason or "missing",
                 )
-            if evidence_gate.candidate is not None and not _current_evidence_allows_action(
-                evidence_gate
-            ):
-                reason = evidence_gate.current_reason or evidence_gate.current_status
-                return DispatchOutcome(
-                    success=False,
-                    message=(
-                        "Current quality evidence unavailable at import "
-                        f"time: {reason or 'missing'}"
-                    ),
-                )
-
             if evidence_gate.candidate is not None:
                 # U11: ``full_pipeline_decision_from_evidence`` is the single
                 # decision function. Folder/audio-integrity facts
