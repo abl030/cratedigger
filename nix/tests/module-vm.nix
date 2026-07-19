@@ -66,7 +66,11 @@ in
 pkgs.testers.nixosTest {
   name = "cratedigger-module-vm";
 
-  nodes.machine = { config, lib, pkgs, ... }: {
+  nodes.machine = { config, lib, pkgs, ... }: let
+    configHoldGate = pkgs.writeShellScript "cratedigger-test-config-hold" ''
+      test ! -e /run/cratedigger-test-config-hold
+    '';
+  in {
     imports = [ cratediggerModule ];
 
     # Fake slskd API key — never actually called because healthCheck is off.
@@ -86,6 +90,7 @@ pkgs.testers.nixosTest {
       src = cratediggerSrc;
       slskd = {
         apiKeyFile = "/etc/cratedigger/slskd-api-key";
+        hostUrl = "http://192.0.2.21:5030";
         downloadDir = "/var/lib/cratedigger-downloads";
       };
       # Stranger posture (U7/R10): the module provisions PostgreSQL —
@@ -131,6 +136,21 @@ pkgs.testers.nixosTest {
       healthCheck.enable = false;
     };
 
+    # Simulate a downstream metadata gate holding every application unit.
+    # Only the independent renderer may materialise runtime configuration on
+    # first boot; the test removes this hold before exercising the apps.
+    systemd.tmpfiles.rules = ["f /run/cratedigger-test-config-hold 0644 root root - held"];
+    systemd.services = lib.genAttrs [
+      "cratedigger"
+      "cratedigger-unfindable"
+      "cratedigger-importer"
+      "cratedigger-import-preview-worker"
+      "cratedigger-youtube-ingest"
+      "cratedigger-web"
+    ] (_: {
+      serviceConfig.ExecCondition = [configHoldGate];
+    });
+
     # NO manual postgres ordering: the module owns
     # cratedigger-db-migrate's after/requires on postgresql.service when
     # createLocally is set, and every app unit requires the migrate unit —
@@ -151,18 +171,53 @@ pkgs.testers.nixosTest {
     state = machine.succeed("systemctl is-active cratedigger-db-migrate.service").strip()
     assert state == "active", f"migrator unit not active: {state}"
 
+    # A deploy must materialise the new runtime config independently of every
+    # application unit. Downstream consumers can intentionally gate those
+    # units with ExecCondition; systemd evaluates that before ExecStartPre, so
+    # an app-owned renderer leaves stale mutable config throughout an outage.
+    machine.wait_for_unit("cratedigger-config-render.service")
+    state = machine.succeed("systemctl is-active cratedigger-config-render.service").strip()
+    assert state == "active", f"config renderer unit not active: {state}"
+    machine.succeed("test -f /var/lib/cratedigger/config.ini")
+    machine.succeed("grep -q '^host_url = http://192.0.2.21:5030$' /var/lib/cratedigger/config.ini")
+
+    # Re-rendering on a config-only deploy must neither remove nor recreate the
+    # main pipeline's active singleton lock. Pin both the fresh config and lock
+    # preservation across an explicit renderer restart.
+    machine.succeed("printf 'active-cycle\\n' > /var/lib/cratedigger/.cratedigger.lock")
+    machine.succeed("sed -i 's#http://192.0.2.21:5030#http://stale.invalid#' /var/lib/cratedigger/config.ini")
+    machine.succeed("before=$(stat -c '%d:%i' /var/lib/cratedigger/.cratedigger.lock); systemctl restart cratedigger-config-render.service; after=$(stat -c '%d:%i' /var/lib/cratedigger/.cratedigger.lock); test \"$before\" = \"$after\"")
+    machine.succeed("grep -q '^host_url = http://192.0.2.21:5030$' /var/lib/cratedigger/config.ini")
+    machine.succeed("grep -qx 'active-cycle' /var/lib/cratedigger/.cratedigger.lock")
+    # Long-running workers may restart when their unit changes, but their
+    # fallback is render-only. Only the timer-owned main service may clear the
+    # pipeline lock.
+    machine.succeed("systemctl cat cratedigger-importer.service | grep -q cratedigger-render-config")
+    machine.succeed("systemctl cat cratedigger-import-preview-worker.service | grep -q cratedigger-render-config")
+    machine.succeed("systemctl cat cratedigger-unfindable.service | grep -q cratedigger-render-config")
+    machine.succeed("systemctl cat cratedigger-youtube-ingest.service | grep -q cratedigger-render-config")
+    machine.succeed("systemctl cat cratedigger-web.service | grep -q cratedigger-render-config")
+    machine.fail("systemctl cat cratedigger-importer.service | grep -q cratedigger-pipeline-prestart")
+    machine.fail("systemctl cat cratedigger-import-preview-worker.service | grep -q cratedigger-pipeline-prestart")
+    machine.fail("systemctl cat cratedigger-unfindable.service | grep -q cratedigger-pipeline-prestart")
+    machine.fail("systemctl cat cratedigger-youtube-ingest.service | grep -q cratedigger-pipeline-prestart")
+    machine.fail("systemctl cat cratedigger-web.service | grep -q cratedigger-pipeline-prestart")
+    machine.succeed("systemctl cat cratedigger.service | grep -q cratedigger-pipeline-prestart")
+
     # Migrations recorded
     out = machine.succeed("sudo -u postgres psql root -At -c 'SELECT version FROM schema_migrations ORDER BY version'")
     versions = [v.strip() for v in out.strip().split() if v.strip()]
     assert "1" in versions, f"baseline migration missing, got {versions}"
     assert "2" in versions, f"002 migration missing, got {versions}"
 
-    # config.ini rendered with api_key_file pointing at the out-of-band secret,
-    # not the plaintext key itself (issue #117). The cratedigger ExecStart will
-    # fail because there's no real slskd, but ExecStartPre (preStartScript)
-    # runs first and writes the config — that's all we need to assert here.
+    # Starting the main service remains safe: its idempotent pre-start render is
+    # retained as a fallback and clears the test's deliberately stale lock. It
+    # will fail because there is no real slskd.
+    machine.succeed("rm /run/cratedigger-test-config-hold")
     machine.succeed("systemctl start cratedigger.service || true")
-    machine.succeed("test -f /var/lib/cratedigger/config.ini")
+    machine.fail("test -f /var/lib/cratedigger/.cratedigger.lock")
+    machine.succeed("systemctl start cratedigger-importer.service cratedigger-import-preview-worker.service cratedigger-youtube-ingest.service cratedigger-web.service")
+    # config.ini points at the out-of-band secret, never its plaintext value.
     machine.succeed("grep -q 'api_key_file = /etc/cratedigger/slskd-api-key' /var/lib/cratedigger/config.ini")
     # The secret itself must NEVER appear in config.ini — that's the whole fix.
     machine.fail("grep -q 'test-api-key-do-not-use' /var/lib/cratedigger/config.ini")
