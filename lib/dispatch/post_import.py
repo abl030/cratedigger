@@ -1,9 +1,9 @@
 """Post-import search-policy application.
 
 One owner for what follows a successful retained import: the canonical
-decision->(status, override, denylist) resolution, the requeue transition,
-peer attribution, and gate staging. Decisions 17-19 make this policy
-identical for automatic and operator (force/manual) imports.
+decision->(status, override, denylist) resolution, peer attribution, and gate
+staging. Quality/search policy is mode-blind; terminal persistence arbitrates
+operator-owned search state against the request row current at commit time.
 
 ``finalize_request`` is the module-local DI seam, same shape as its
 siblings (``lib.dispatch.outcome_actions``, ``harness.import_one``).
@@ -70,20 +70,28 @@ def _apply_or_stage_denylists(
 def _run_or_stage_quality_gate(
     quality_gate_fn: QualityGateFn,
     pending: PendingImportTerminalOutcome | None,
+    *,
+    db: "PipelineDB",
+    request_id: int,
     **kwargs: object,
 ) -> PendingImportTerminalOutcome | None:
     if pending is None:
-        quality_gate_fn(**kwargs)
+        quality_gate_fn(db=db, request_id=request_id, **kwargs)
         return None
     plan = quality_gate_fn(
+        db=db,
+        request_id=request_id,
         **kwargs,
         apply=False,
     )
     if not isinstance(plan, QualityGatePlan):
         return pending
-    return pending.append_transitions(plan.transition).append_denylists(
+    pending = pending.append_transitions(plan.transition).append_denylists(
         *plan.denylists
     )
+    if plan.successful_terminal_acceptance:
+        pending = pending.mark_successful_terminal_acceptance()
+    return pending
 
 
 def _resolve_post_import_search_policy(
@@ -95,10 +103,9 @@ def _resolve_post_import_search_policy(
 ) -> tuple[PostImportSearchAction | None, bool, set[str], list[object]]:
     """Resolve post-import search policy and its peer attribution once.
 
-    Decision 19: force/manual imports resolve through the same canonical
-    mapping as automatic imports — a force-imported provisional lossless
-    copy gets the identical wanted + lossless-only requeue, never a
-    silently terminal parking spot.
+    Decision 19: force imports resolve through the same canonical quality and
+    search mapping as automatic imports. Terminal persistence applies that
+    mapping without overwriting current operator-owned search state.
     """
 
     search_action = post_import_search_action_if_known(decision)
@@ -124,7 +131,7 @@ def _apply_post_import_search_action(
     mark_done: bool,
     new_bitrate: int | None,
 ) -> PendingImportTerminalOutcome | None:
-    """Apply the canonical retained-import requeue, when one is requested."""
+    """Apply or stage the canonical retained-import search policy."""
 
     if search_action is None:
         return pending

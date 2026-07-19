@@ -11,6 +11,7 @@ from lib.transitions import (
     TransitionConflictKind,
     TransitionSideEffects,
     apply_transition,
+    finalize_operator_request,
     finalize_request,
     validate_transition,
 )
@@ -419,6 +420,41 @@ class TestFinalizeRequest(unittest.TestCase):
         self.assertEqual(row["min_bitrate"], 245)
         self.assertEqual(row["prev_min_bitrate"], 320)
         self.assertEqual(row["download_attempts"], 1)
+
+    def test_operator_command_rebases_once_after_a_terminal_cas_wins(self):
+        class RacingFakePipelineDB(FakePipelineDB):
+            terminal_won = False
+
+            def update_status(
+                self,
+                request_id: int,
+                status: str,
+                *,
+                expected_status: str | None = None,
+                **extra: Any,
+            ) -> bool:
+                if not self.terminal_won:
+                    self.terminal_won = True
+                    self._requests[request_id]["status"] = "wanted"
+                    return False
+                return super().update_status(
+                    request_id,
+                    status,
+                    expected_status=expected_status,
+                    **extra,
+                )
+
+        db = RacingFakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+
+        result = finalize_operator_request(
+            cast(Any, db),
+            42,
+            RequestTransition.to_manual(from_status="downloading"),
+        )
+
+        self.assertIsInstance(result, TransitionApplied)
+        self.assertEqual(db.request(42)["status"], "manual")
 
     def test_explicit_previous_bitrate_survives_manual_requeue(self):
         """The typed wanted command's public fields reach the reset CAS."""

@@ -14,7 +14,7 @@ from typing import TypedDict, TYPE_CHECKING
 
 from lib.quality import DownloadInfo, SpectralMeasurement
 
-from lib.dispatch.types import FORCE_MANUAL_SCENARIOS
+from lib.dispatch.types import FORCE_IMPORT_SCENARIOS
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
@@ -29,22 +29,22 @@ def _should_cleanup_path(scenario: str, action: "DispatchAction") -> bool:
 
     Issue #89 rules:
 
-    * Auto-import (scenario not in ``FORCE_MANUAL_SCENARIOS``) always
+    * Auto-import (scenario not in ``FORCE_IMPORT_SCENARIOS``) always
       cleans its disposable ``/Incoming`` staging dir.
-    * Force/manual-import paths pass the user's ``failed_imports/…``
+    * Force-import paths pass the user's ``failed_imports/…``
       folder — cleanup is only safe on a successful import
       (``action.mark_done=True``, meaning beets has moved the files out
       and the source directory is now empty). On a ``downgrade`` /
       ``transcode_downgrade`` decision (mark_done=False) the files are
       still in the source folder, so cleanup would delete the user's
       data.
-    * Successful force/manual import MUST clean so the wrong-matches tab
+    * Successful force import MUST clean so the wrong-matches tab
       (``lib.pipeline_db.get_wrong_matches``) stops treating the
       still-existing folder as an active pending entry — otherwise the
       album would show up as re-importable even though beets already
       has it.
     """
-    if scenario not in FORCE_MANUAL_SCENARIOS:
+    if scenario not in FORCE_IMPORT_SCENARIOS:
         return True
     return action.mark_done
 

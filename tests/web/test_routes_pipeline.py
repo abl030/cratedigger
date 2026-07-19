@@ -215,8 +215,8 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(item["installed_path"], installed_path)
         self.assertEqual(item["candidate_reference"], candidate_reference)
         self.assertEqual(item["request_status"], "wanted")
-        self.assertIn("remains wanted", item["summary"])
-        self.assertIn("future download will retry normally", item["summary"])
+        self.assertIn("Search remains open", item["summary"])
+        self.assertIn("future download will retry", item["summary"])
 
         detail_status, detail = self._get("/api/pipeline/101")
         self.assertEqual(detail_status, 200)
@@ -245,7 +245,16 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(classified.analysis_error, "analyser exited 9")
         self.assertEqual(classified.installed_path, "/library/current")
         self.assertEqual(classified.candidate_reference, "/incoming/candidate")
-        self.assertIn("remains wanted", classified.verdict)
+        self.assertIn("request lifecycle was preserved", classified.verdict)
+
+    def test_have_analysis_error_copy_respects_operator_stop(self):
+        classified = classify_log_entry(LogEntry(
+            outcome="have_analysis_error",
+            request_status="manual",
+        ))
+
+        self.assertIn("Operator search stop remains in place", classified.verdict)
+        self.assertNotIn("future download", classified.verdict)
 
     def test_have_analysis_branch_does_not_change_existing_outcomes(self):
         expected = {

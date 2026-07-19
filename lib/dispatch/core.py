@@ -1,7 +1,7 @@
 """Core import dispatch — the import_one.py orchestration state machine.
 
-``dispatch_import_core`` is the funnel every import path (auto / force /
-manual) runs through: acquire the RELEASE advisory lock, load evidence,
+``dispatch_import_core`` is the funnel every import path (automatic and
+force) runs through: acquire the RELEASE advisory lock, load evidence,
 run the subprocess, and dispatch on the decision.
 ``cleanup_disambiguation_orphans`` and ``_cleanup_staged_dir`` are looked
 up here (tests patch them on this module). The post-import search-policy
@@ -31,7 +31,7 @@ from lib.quality_evidence import EvidenceBuildResult, audit_v0_probe_from_metric
 from lib.util import cleanup_disambiguation_orphans
 
 from lib.dispatch.types import (DispatchOutcome, EvidenceImportGate,
-                                FORCE_MANUAL_SCENARIOS, ImportAttemptResult,
+                                FORCE_IMPORT_SCENARIOS, ImportAttemptResult,
                                 ImportOneRun, QualityGateFn)
 from lib.dispatch.subprocess_runner import run_import_one
 from lib.dispatch.helpers import (_cleanup_staged_dir, _guard_failure_detail,
@@ -109,18 +109,16 @@ def dispatch_import_core(
     denylist, quality gate, media server notifiers, cleanup). Returns DispatchOutcome.
 
     Used by the auto-import flow in ``lib.download`` and by
-    ``dispatch_import_from_db()`` (force/manual import).
+    ``dispatch_import_from_db()`` (force-import).
     """
     from lib.util import trigger_plex_scan as _trigger_plex
     from lib.util import trigger_jellyfin_scan as _trigger_jellyfin
 
     source_dirs = normalize_source_dirs(source_dirs or [])
 
-    mode = (
-        "FORCE-IMPORT" if force
-        else "MANUAL-IMPORT" if scenario == "manual_import"
-        else "AUTO-IMPORT"
-    )
+    # Operation identity is distinct from the eventual download-log outcome:
+    # an automatic attempt can still reject or fail after this start message.
+    mode = "FORCE-IMPORT" if force else "AUTO-IMPORT"
     dist_label = f"{distance:.4f}" if distance is not None else "unmeasured"
     logger.info(f"{mode}: {label} "
                 f"(source=request, dist={dist_label})")
@@ -138,15 +136,15 @@ def dispatch_import_core(
 
     # Acquire the RELEASE (per-MBID) advisory lock for the duration of
     # the ``import_one.py`` subprocess. This is the funnel every path
-    # goes through (auto, force, manual), so the lock here closes the
+    # goes through (automatic and force), so the lock here closes the
     # cross-process race that could produce Palo Santo-*class* data loss
     # (issues #132 P1 / #133) for every entry point. The actual 04-20
     # Palo Santo incident had a different proximate cause (YAML misconfig —
     # see CLAUDE.md § Resolved canonical RCs); this lock defends against
     # an independent race vector the original fix left open.
     # Auto path: ``_handle_valid_result`` has already acquired RELEASE
-    # outer — this acquisition is a session-reentrant no-op. Force/
-    # manual path: this is the first RELEASE acquisition, nested inside
+    # outer — this acquisition is a session-reentrant no-op. Force path:
+    # this is the first RELEASE acquisition, nested inside
     # the IMPORT lock held by ``dispatch_import_from_db``.
     # See ``docs/advisory-locks.md`` for the full rationale, the
     # ordering rules, and the call-site index.
@@ -201,7 +199,7 @@ def dispatch_import_core(
             #   audit data; linked evidence and fresh attempt analysis own
             #   subsequent decisions.
             #
-            # Force/manual paths (scenario in FORCE_MANUAL_SCENARIOS)
+            # Force-import paths (scenario in FORCE_IMPORT_SCENARIOS)
             # surface the message to the user via
             # ``dispatch_import_from_db``; no state change needed
             # because the request wasn't ``downloading`` to begin
@@ -257,12 +255,17 @@ def dispatch_import_core(
                     import_job_id=candidate_import_job_id,
                     source_download_log_id=candidate_download_log_id,
                     cooled_down_users=cooled_down_users,
+                    requeue_to_wanted=requeue_on_failure,
                 )
                 return DispatchOutcome(
                     success=False,
                     message=(
-                        "Installed HAVE analysis failed; request remains "
-                        "wanted and a future attempt will retry"
+                        "Installed HAVE analysis failed; "
+                        + (
+                            "request returned to wanted for a future retry"
+                            if requeue_on_failure
+                            else "request lifecycle was preserved"
+                        )
                     ),
                     code="have_analysis_error",
                     terminal_outcome=(
@@ -317,18 +320,12 @@ def dispatch_import_core(
                 # U11: ``full_pipeline_decision_from_evidence`` is the single
                 # decision function. Folder/audio-integrity facts
                 # (audio_corrupt / bad_audio_hash / nested_layout /
-                # empty_fileset) are early-exit rejects at the top of that
-                # function — the unified reject helper below recognises them
-                # via ``_PREIMPORT_FACT_REJECT_DECISIONS`` and forces
-                # ``requeue=True`` so the parent request self-heals.
+                # empty_fileset / mixed_source) are early-exit rejects at the
+                # top of that function. They still use the unified reject
+                # helper below, which honours caller lifecycle authority:
+                # automation self-heals; force imports preserve operator
+                # status.
                 facts = AlbumQualityEvidenceDecisionFacts(
-                    import_mode=(
-                        "force"
-                        if force
-                        else "manual"
-                        if scenario == "manual_import"
-                        else "auto"
-                    ),
                     verified_lossless_target=verified_lossless_target or None,
                     target_format=target_format,
                 )
@@ -414,12 +411,12 @@ def dispatch_import_core(
             # so the resume guard can distinguish "never started" from
             # "may have written to beets" if this process crashes
             # before recording the result. The DB-side method is a
-            # no-op when ``active_download_state`` is NULL (force /
-            # manual paths), so calling unconditionally would also be
+            # no-op when ``active_download_state`` is NULL (force-import
+            # path), so calling unconditionally would also be
             # safe — we still gate to make the intent explicit.
             # See ``docs/advisory-locks.md`` and
             # ``lib/download.py::_import_subprocess_already_started``.
-            if scenario not in FORCE_MANUAL_SCENARIOS:
+            if scenario not in FORCE_IMPORT_SCENARIOS:
                 try:
                     stamped = db.mark_import_subprocess_started(
                         request_id,
@@ -442,7 +439,7 @@ def dispatch_import_core(
                         message="Request state changed before import launch",
                         deferred=True,
                     )
-            # Force/manual import operates on the user's only copy of the source
+            # Force-import operates on the user's only copy of the source
             # material (typically failed_imports/…). Tell the harness to keep
             # lossless originals intact until the quality decision — on
             # downgrade/transcode_downgrade verdicts we exit before deletion so
@@ -453,7 +450,7 @@ def dispatch_import_core(
                 mb_release_id=mb_release_id,
                 request_id=request_id,
                 force=force,
-                preserve_source=scenario in FORCE_MANUAL_SCENARIOS,
+                preserve_source=scenario in FORCE_IMPORT_SCENARIOS,
                 override_min_bitrate=override_min_bitrate,
                 target_format=target_format,
                 verified_lossless_target=verified_lossless_target,
@@ -824,9 +821,10 @@ def dispatch_import_core(
                 # Authority: "The verified-lossless proof lock is absolute
                 # for every import mode."
                 # https://github.com/abl030/cratedigger/issues/711#issuecomment-5000425284
-                # Operator imports therefore run the identical post-import
-                # policy path as automatic imports; Replace/re-request is the
-                # only way back in once proof exists.
+                # Operator imports run the identical quality/search policy.
+                # The quality-gate plan explicitly distinguishes successful
+                # terminal acceptance from every non-accepting outcome; the
+                # terminal DB transaction owns search-stop arbitration.
                 if action.run_quality_gate:
                     terminal_outcome = _run_or_stage_quality_gate(
                         quality_gate_fn,
@@ -896,12 +894,12 @@ def dispatch_import_core(
                             "JELLYFIN PIN: capture wiring failed (non-fatal)")
                     _trigger_jellyfin(cfg, ir.postflight.imported_path)
                 if action.cleanup and _should_cleanup_path(scenario, action):
-                    # Issue #89: force/manual paths pass the user's
+                    # Issue #89: force-import passes the user's
                     # ``failed_imports/…`` folder as ``path`` — cleanup is
                     # data loss on a ``downgrade`` / ``transcode_downgrade``
                     # decision where beets never moved the files.
-                    # ``_should_cleanup_path`` only allows cleanup on force/
-                    # manual when the decision actually imported (mark_done=
+                    # ``_should_cleanup_path`` only allows cleanup on force
+                    # when the decision actually imported (mark_done=
                     # True, i.e. beets has moved the files and the source
                     # directory is now empty), which keeps the wrong-matches
                     # tab honest and prevents duplicate re-imports of an

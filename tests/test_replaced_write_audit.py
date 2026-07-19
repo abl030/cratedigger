@@ -63,10 +63,10 @@ class _AlbumRequestUpdate:
 # The ratchet does not infer parameter dataflow: transition SQL must use the
 # canonical direct call grammar below.
 _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/terminal_outcomes.py", 79, "741f55b2f7eee516"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 89, "741f55b2f7eee516"): (
         "terminal metadata keys use the existing validated request-field vocabulary"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 218, "6cfaff9c6507c211"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 289, "6cfaff9c6507c211"): (
         "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
     ),
     ("lib/beets_db.py", 339, "8f86dc625b889913"): (
@@ -84,7 +84,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/dashboard.py", 481, "5e3b8177198ccbed"): (
         "dashboard WHERE and ORDER fragments come from closed enum branches"
     ),
-    ("lib/pipeline_db/download_log.py", 737, "554f509613ff1b04"): (
+    ("lib/pipeline_db/download_log.py", 737, "d21a8be0a38ad4f3"): (
         "validation key is selected from a closed server-owned vocabulary"
     ),
     ("lib/pipeline_db/download_log.py", 795, "e0154e89026dc8ef"): (
@@ -129,13 +129,13 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "metadata keys are validated identifiers, lifecycle fields are reserved, "
         "and values use one typed JSONB record parameter"
     ),
-    ("lib/pipeline_db/requests.py", 1325, "0e292421052b4282"): (
+    ("lib/pipeline_db/requests.py", 1343, "0e292421052b4282"): (
         "optional LIMIT is normalized through int before interpolation"
     ),
-    ("lib/pipeline_db/requests.py", 1340, "f027e891f4828e53"): (
+    ("lib/pipeline_db/requests.py", 1358, "f027e891f4828e53"): (
         "ORDER is selected from two literals and LIMIT remains a value placeholder"
     ),
-    ("lib/pipeline_db/requests.py", 1525, "714da98640ff84f0"): (
+    ("lib/pipeline_db/requests.py", 1543, "714da98640ff84f0"): (
         "attempt kind is validated against the fixed retry-counter vocabulary"
     ),
     ("lib/pipeline_db/search_plan.py", 949, "3df0db818cab2f3c"): (
@@ -150,16 +150,16 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
 # beside the implementation they review; movement or SQL-shape drift fails the
 # ratchet just like the dynamic-SQL exceptions above.
 _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/terminal_outcomes.py", 121, "72791581d0b54266"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 131, "72791581d0b54266"): (
         "atomic terminal transition mirrors typed wanted CAS inside one transaction"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 180, "9ab1fc9fb20fb77b"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 190, "9ab1fc9fb20fb77b"): (
         "atomic preview recovery accepts only downloading as its exact source"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 259, "786d2b82f14ac409"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 330, "786d2b82f14ac409"): (
         "atomic terminal import CASes status with rescue audit in the same transaction"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 299, "0a9c4396d1185b94"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 370, "0a9c4396d1185b94"): (
         "atomic terminal typed transition CASes the source status selected by the DAG"
     ),
     ("lib/pipeline_db/download_log.py", 403, "b04c5ae9eb3423c1"): (
@@ -168,22 +168,25 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/requests.py", 288, "558917722283199d"): (
         "Replace holds the row lock and CASes the captured active source status"
     ),
-    ("lib/pipeline_db/requests.py", 788, "cb4bc190bb194188"): (
+    ("lib/pipeline_db/requests.py", 771, "3c900d15e8bfd2b2"): (
+        "operator idempotence uses a no-op CAS against the observed status"
+    ),
+    ("lib/pipeline_db/requests.py", 806, "cb4bc190bb194188"): (
         "ordinary typed transitions CAS the source status selected by the DAG"
     ),
-    ("lib/pipeline_db/requests.py", 886, "c99b75cd27718b63"): (
+    ("lib/pipeline_db/requests.py", 904, "c99b75cd27718b63"): (
         "typed imported transition CASes status with rescue audit atomically"
     ),
-    ("lib/pipeline_db/requests.py", 1026, "624291485d30cd9b"): (
+    ("lib/pipeline_db/requests.py", 1044, "624291485d30cd9b"): (
         "typed reset-to-wanted transition CASes its captured source status"
     ),
-    ("lib/pipeline_db/requests.py", 1095, "96c221e77f54ca60"): (
+    ("lib/pipeline_db/requests.py", 1113, "96c221e77f54ca60"): (
         "automatic recovery accepts only downloading as its exact source"
     ),
-    ("lib/pipeline_db/requests.py", 1140, "2b2c27302b2ab78e"): (
+    ("lib/pipeline_db/requests.py", 1158, "2b2c27302b2ab78e"): (
         "typed download claim accepts only the explicit wanted source status"
     ),
-    ("lib/pipeline_db/requests.py", 1176, "186e1c3ba3188478"): (
+    ("lib/pipeline_db/requests.py", 1194, "186e1c3ba3188478"): (
         "plan-aware download claim uses an exact wanted source predicate"
     ),
 }

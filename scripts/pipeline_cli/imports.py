@@ -1,8 +1,8 @@
-"""pipeline-cli imports/force-import commands (#495 carve).
+"""pipeline-cli import commands (#495 carve).
 
-``force-import`` / ``manual-import`` / ``import-jobs`` / ``import-preview``
+``force-import`` / ``import-jobs`` / ``import-preview``
 — the import-queue operator surface: force a rejected download through,
-stage a local folder as a request, list recent queue jobs, and preview
+list recent queue jobs, and preview
 whether an import would pass without actually running one.
 """
 
@@ -16,11 +16,8 @@ import msgspec
 from lib.import_preview import ImportPreviewValues
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
-    IMPORT_JOB_MANUAL,
     force_import_dedupe_key,
     force_import_payload,
-    manual_import_dedupe_key,
-    manual_import_payload,
 )
 from lib.util import (
     resolve_failed_path as _shared_resolve_failed_path,
@@ -110,48 +107,6 @@ def cmd_force_import(db, args):
     print(f"  [OK] Queued{deduped} import job #{job.id} ({job.status}).")
 
 
-def cmd_manual_import(db, args):
-    """Import a local folder as a pipeline request."""
-    request_id = args.id
-    path = args.path
-
-    # 1. Look up request
-    req = db.get_request(request_id)
-    if not req:
-        print(f"  Request {request_id} not found.")
-        return
-
-    mbid = req["mb_release_id"]
-    if not mbid:
-        print(f"  Request {request_id} has no MusicBrainz release ID.")
-        return
-
-    # 2. Resolve and verify the path — matches cmd_force_import so a
-    # manual-import can accept the same relative paths (e.g.
-    # "failed_imports/Foo") without requiring the user to pre-absolutize.
-    resolved_path = _resolve_failed_path(path)
-    if not resolved_path:
-        print(f"  Files not found at: {path}")
-        if not os.path.isabs(path):
-            print(f"  (also tried: {', '.join(os.path.join(b, path) for b in SLSKD_DOWNLOAD_DIRS)})")
-        return
-    path = resolved_path
-
-    print(f"  Manual import: {req['artist_name']} - {req['album_title']}")
-    print(f"  Path: {path}")
-    print(f"  MBID: {mbid}")
-
-    job = db.enqueue_import_job(
-        IMPORT_JOB_MANUAL,
-        request_id=request_id,
-        dedupe_key=manual_import_dedupe_key(request_id, path),
-        payload=manual_import_payload(failed_path=path),
-        message=f"Manual import queued for {req['artist_name']} - {req['album_title']}",
-    )
-    deduped = " existing" if job.deduped else ""
-    print(f"  [OK] Queued{deduped} import job #{job.id} ({job.status}).")
-
-
 def cmd_import_jobs(db, args):
     """List recent import queue jobs."""
     jobs = db.list_import_jobs(status=args.status, limit=args.limit)
@@ -198,7 +153,6 @@ def _preview_values_from_args(args) -> ImportPreviewValues:
         "new_format",
         "audio_check_mode",
         "audio_corrupt",
-        "import_mode",
         "has_nested_audio",
     ):
         value = getattr(args, attr, None)
@@ -278,7 +232,7 @@ def cmd_import_preview(db, args):
 
 
 def add_imports_subparsers(sub: argparse._SubParsersAction) -> None:
-    """Add ``force-import`` / ``manual-import`` / ``import-jobs`` /
+    """Add ``force-import`` / ``import-jobs`` /
     ``import-preview`` (#521 carve out of ``routes_meta._build_parser``,
     verbatim argument definitions)."""
     # force-import
@@ -286,13 +240,6 @@ def add_imports_subparsers(sub: argparse._SubParsersAction) -> None:
     p_force.add_argument("download_log_id", type=int, help="Download log ID")
     p_force.add_argument("--verified-lossless-target",
                          help="Override the runtime verified-lossless target for this import")
-
-    # manual-import
-    p_manual = sub.add_parser("manual-import", help="Import a local folder as a pipeline request")
-    p_manual.add_argument("id", type=int, help="Pipeline request ID")
-    p_manual.add_argument("path", help="Path to album folder")
-    p_manual.add_argument("--verified-lossless-target",
-                          help="Override the runtime verified-lossless target for this import")
 
     # import-jobs
     p_jobs = sub.add_parser("import-jobs", help="List recent import queue jobs")
@@ -336,5 +283,4 @@ def add_imports_subparsers(sub: argparse._SubParsersAction) -> None:
     p_preview.add_argument("--new-format")
     p_preview.add_argument("--audio-check-mode")
     p_preview.add_argument("--audio-corrupt", action="store_true", default=None)
-    p_preview.add_argument("--import-mode")
     p_preview.add_argument("--has-nested-audio", action="store_true", default=None)

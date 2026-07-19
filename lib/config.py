@@ -369,7 +369,7 @@ def _runtime_config_path(config_path: str | None = None) -> str:
 def read_runtime_config(config_path: str | None = None) -> CratediggerConfig:
     """Read the active runtime config.ini into a full CratediggerConfig.
 
-    Manual-import, force-import, the CLI, and web simulator all need the same
+    Force-import, the CLI, and web simulator all need the same
     runtime config the main cratedigger process reads.
 
     Missing config (file does not exist) is a soft failure — return a default
@@ -417,8 +417,8 @@ def read_runtime_rank_config(config_path: str | None = None) -> QualityRankConfi
 def read_verified_lossless_target(config_path: str | None = None) -> str:
     """Read verified_lossless_target from the runtime config file.
 
-    Manual-import and force-import run outside the main cratedigger process, so they
-    need a small helper to discover the same runtime setting. Callers may pass an
+    Force-import runs outside the main cratedigger process, so it needs a
+    small helper to discover the same runtime setting. Callers may pass an
     explicit path, otherwise the standard doc2 runtime config is used.
     """
     return read_runtime_config(config_path).verified_lossless_target

@@ -72,24 +72,21 @@ def preimport_audio_gate(audio_check_mode: str, audio_corrupt: bool) -> str:
     return "reject_corrupt" if audio_corrupt else "pass"
 
 
-def preimport_nested_gate(import_mode: str, has_nested_audio: bool) -> str:
+def preimport_nested_gate(has_nested_audio: bool) -> str:
     """Decide the outcome of the preimport nested-folder gate.
 
     Mirrors ``lib.dispatch.dispatch_import_from_db``'s fail-fast
-    rejection of nested force/manual imports: the preimport gates recurse,
+    rejection of nested imports: the preimport gates recurse,
     but the downstream ``harness/import_one.py`` still uses ``os.listdir``
-    for bitrate measurement and conversion. A nested force/manual import
+    for bitrate measurement and conversion. A nested import
     would pass the gates and then produce an empty/misclassified measurement.
 
     The auto path is already flattened by ``process_completed_album`` before
-    dispatch runs, so the gate is only relevant for ``import_mode`` of
-    ``"force"`` or ``"manual"``.
+    dispatch runs. If a nested folder nevertheless reaches this shared
+    decision boundary, caller identity does not make it safe.
 
     Returns one of:
-        "skipped_auto"   — auto path; nested detection doesn't run here
-        "reject_nested"  — force/manual path, nested audio files present
-        "pass"           — force/manual path, flat layout
+        "reject_nested"  — nested audio files present
+        "pass"           — flat layout
     """
-    if import_mode == "auto":
-        return "skipped_auto"
     return "reject_nested" if has_nested_audio else "pass"

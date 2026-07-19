@@ -1,4 +1,4 @@
-"""Tests for dispatch_import_from_db — force/manual import through the real pipeline.
+"""Tests for dispatch_import_from_db — force-import through the real pipeline.
 
 Orchestration tests use FakePipelineDB to assert domain state (request status,
 log rows, denylist). Seam tests verify argv/config wiring.
@@ -11,12 +11,14 @@ from unittest.mock import MagicMock, patch
 
 import msgspec
 
+from lib import transitions
 from lib.config import CratediggerConfig
+from lib.dispatch.quality_gate import QualityGatePlan
 from lib.import_evidence import (
     ActionEvidenceProvenance,
     CandidateEvidenceActionResult,
 )
-from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+from lib.import_queue import IMPORT_JOB_FORCE
 from lib.quality import AudioQualityMeasurement, ImportResult
 from lib.quality_evidence import snapshot_audio_files
 from tests.helpers import (
@@ -103,12 +105,13 @@ def _seed_single_track(db: FakePipelineDB, request_id: int = 42) -> None:
 
 
 class TestDispatchFromDbOrchestration(unittest.TestCase):
-    """Orchestration tests — assert domain state after force/manual import."""
+    """Orchestration tests — assert domain state after force-import."""
 
-    def _dispatch(self, force=True, ir=None, outcome_label=None,
-                  source_username=None, source_download_log_id=None,
+    def _dispatch(self, ir=None, source_username=None,
+                  source_download_log_id=None,
+                  quality_gate_plan: QualityGatePlan | None = None,
                   **req_overrides):
-        """Drive a force/manual import through the evidence-gated dispatch path.
+        """Drive a force-import through the evidence-gated dispatch path.
 
         After U4 the importer never measures: ``dispatch_import_from_db``
         requires ``import_job_id`` and consults pre-recorded candidate +
@@ -144,9 +147,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
 
         if ir is None:
             ir = make_import_result(decision="import", new_min_bitrate=320)
-        if outcome_label is None:
-            outcome_label = "force_import" if force else "manual_import"
-
         tmpdir = tempfile.mkdtemp()
         try:
             # Realistic candidate file so snapshot_audio_files produces a
@@ -157,9 +157,9 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             # Enqueue an import_job — the importer-supplied ID is now
             # mandatory at the dispatch boundary.
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=42,
-                payload=manual_import_payload(failed_path=tmpdir),
+                payload={"failed_path": tmpdir},
             )
             import_job_id = job.id
             from lib.quality import SpectralAnalysisDetail, SpectralDetail
@@ -212,7 +212,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 storage_format="mp3",
             )
 
-            mock_gate = RecordingQualityGate()
+            mock_gate = RecordingQualityGate(result=quality_gate_plan)
             with patch_dispatch_externals() as ext, \
                  patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db_for_dispatch()), \
@@ -223,8 +223,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                        )):
                 result = dispatch_import_from_db(
                     db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
-                    force=force, source_username=source_username,
-                    outcome_label=outcome_label,
+                    source_username=source_username,
                     import_job_id=import_job_id,
                     download_log_id=source_download_log_id,
                     quality_gate_fn=mock_gate,
@@ -246,8 +245,18 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
 
     # --- Success path ---
 
-    def test_successful_force_import_marks_imported(self):
+    def test_successful_force_import_preserves_stop_without_terminal_acceptance(self):
         r = self._dispatch()
+        self.assertTrue(r["result"].success)
+        self.assertEqual(r["db"].request(42)["status"], "manual")
+
+    def test_terminally_accepted_force_import_marks_imported(self):
+        r = self._dispatch(quality_gate_plan=QualityGatePlan(
+            transition=transitions.RequestTransition.to_imported(
+                from_status="imported",
+            ),
+            successful_terminal_acceptance=True,
+        ))
         self.assertTrue(r["result"].success)
         self.assertEqual(r["db"].request(42)["status"], "imported")
 
@@ -262,14 +271,12 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         logs = r["db"].download_logs
         self.assertEqual(logs[-1].source_download_log_id, logs[0].id)
 
-    def test_successful_force_and_manual_imports_run_post_import_pipeline(self):
+    def test_successful_force_import_runs_post_import_pipeline(self):
         # Decision 19: force-import overrides the beets distance and nothing
-        # else — operator imports run the identical post-import gate.
-        for force in (True, False):
-            with self.subTest(force=force):
-                r = self._dispatch(force=force)
-                r["mock_gate"].assert_called_once()
-                r["mock_jellyfin"].assert_called_once()
+        # else — it runs the identical post-import gate.
+        r = self._dispatch()
+        r["mock_gate"].assert_called_once()
+        r["mock_jellyfin"].assert_called_once()
 
     def test_no_double_download_log(self):
         r = self._dispatch()
@@ -333,16 +340,11 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
     # --- Seam: force flag ---
 
     def test_force_flag_passed(self):
-        r = self._dispatch(force=True)
+        r = self._dispatch()
         self.assertIn("--force", r["cmd"])
-
-    def test_no_force_for_manual_import(self):
-        r = self._dispatch(force=False)
-        self.assertNotIn("--force", r["cmd"])
 
     def test_force_import_command_has_no_preview_import_result_channel(self):
         r = self._dispatch(
-            force=True,
             min_bitrate=116,
             current_spectral_grade="likely_transcode",
             current_lossless_source_v0_probe_avg_bitrate=260,
@@ -419,7 +421,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                     db,  # type: ignore[arg-type]
                     request_id=42,
                     failed_path=tmpdir,  # type: ignore[arg-type]
-                    force=True,
                     source_username="alice",
                     download_log_id=download_log_id,
                     quality_gate_fn=noop_quality_gate,
@@ -428,103 +429,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             self.assertTrue(result.success)
             cmd = ext.run.call_args[0][0]
             self.assertIn("--quality-evidence-action-file", cmd)
-        finally:
-            import shutil
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_manual_import_with_valid_candidate_evidence_skips_preimport_measurement(self):
-        from lib.dispatch import dispatch_import_from_db
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42,
-            mb_release_id="mbid-123",
-            status="manual",
-            artist_name="Son Ambulance",
-            album_title="Someone Else's Deja Vu",
-        ))
-        _seed_single_track(db)
-        ir = make_import_result(decision="import", new_min_bitrate=245)
-        tmpdir = tempfile.mkdtemp()
-        try:
-            with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
-                handle.write(b"audio")
-            job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
-                request_id=42,
-                payload=manual_import_payload(failed_path=tmpdir),
-            )
-            import_job_id = job.id
-            from lib.quality import SpectralAnalysisDetail, SpectralDetail
-            preview_ir = ImportResult(spectral=SpectralDetail(
-                candidate=SpectralAnalysisDetail(
-                    attempted=True, grade="suspect", bitrate_kbps=160),
-                existing=SpectralAnalysisDetail(
-                    attempted=True, grade="genuine", bitrate_kbps=None),
-            ))
-            db.mark_import_job_preview_importable(
-                import_job_id,
-                preview_result={"import_result": msgspec.to_builtins(preview_ir)},
-                message="two-sided spectral audit ready",
-            )
-            files = snapshot_audio_files(tmpdir)
-            _seed_candidate_for_import_job(
-                db, import_job_id,
-                mb_release_id="mbid-candidate",
-                files=files,
-                measurement=AudioQualityMeasurement(
-                    min_bitrate_kbps=245,
-                    avg_bitrate_kbps=256,
-                    median_bitrate_kbps=252,
-                    format="MP3",
-                    spectral_grade="genuine",
-                ),
-                codec="mp3",
-                container="mp3",
-                storage_format="MP3",
-            )
-            _seed_current_for_request(
-                db, 42,
-                mb_release_id="mbid-current",
-                measurement=AudioQualityMeasurement(
-                    min_bitrate_kbps=128,
-                    avg_bitrate_kbps=128,
-                    median_bitrate_kbps=128,
-                    format="MP3",
-                    spectral_grade="genuine",
-                ),
-                codec="mp3",
-                container="mp3",
-                storage_format="MP3",
-            )
-            with patch_dispatch_externals() as ext, \
-                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
-                 patch("lib.beets_db.BeetsDB", _mock_beets_db_for_dispatch()), \
-                 patch("lib.config.read_runtime_config",
-                       return_value=CratediggerConfig(
-                           beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
-                           pipeline_db_enabled=True,
-                       )):
-                result = dispatch_import_from_db(
-                    db,  # type: ignore[arg-type]
-                    request_id=42,
-                    failed_path=tmpdir,  # type: ignore[arg-type]
-                    force=False,
-                    source_username="alice",
-                    import_job_id=import_job_id,
-                    outcome_label="manual_import",
-                    quality_gate_fn=noop_quality_gate,
-                )
-
-            self.assertTrue(result.success)
-            cmd = ext.run.call_args[0][0]
-            self.assertIn("--quality-evidence-action-file", cmd)
-            self.assertNotIn("--force", cmd)
-            logged_ir = ImportResult.from_json(db.download_logs[-1].import_result)
-            assert logged_ir.spectral.candidate is not None
-            assert logged_ir.spectral.existing is not None
-            self.assertEqual(logged_ir.spectral.candidate.grade, "suspect")
-            self.assertEqual(logged_ir.spectral.existing.grade, "genuine")
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -552,9 +456,9 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             with open(track, "wb") as handle:
                 handle.write(b"audio")
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=42,
-                payload=manual_import_payload(failed_path=tmpdir),
+                payload={"failed_path": tmpdir},
                 dedupe_key="manual:requeue-stale",
             )
             db.mark_import_job_preview_importable(
@@ -593,7 +497,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                     db,  # type: ignore[arg-type]
                     request_id=42,
                     failed_path=tmpdir,  # type: ignore[arg-type]
-                    force=True,
                     source_username="alice",
                     import_job_id=job.id,
                 )
@@ -634,9 +537,9 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=42,
-                payload=manual_import_payload(failed_path=tmpdir),
+                payload={"failed_path": tmpdir},
                 dedupe_key="manual:requeue-missing",
             )
             db.mark_import_job_preview_importable(
@@ -658,7 +561,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                     db,  # type: ignore[arg-type]
                     request_id=42,
                     failed_path=tmpdir,  # type: ignore[arg-type]
-                    force=True,
                     source_username="alice",
                     import_job_id=job.id,
                 )
@@ -698,9 +600,9 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=42,
-                payload=manual_import_payload(failed_path=tmpdir),
+                payload={"failed_path": tmpdir},
                 dedupe_key="manual:requeue-fail",
             )
             db.mark_import_job_preview_importable(
@@ -727,7 +629,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                     db,  # type: ignore[arg-type]
                     request_id=42,
                     failed_path=tmpdir,  # type: ignore[arg-type]
-                    force=True,
                     source_username="alice",
                     import_job_id=job.id,
                 )
@@ -773,9 +674,9 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=42,
-                payload=manual_import_payload(failed_path=tmpdir),
+                payload={"failed_path": tmpdir},
                 dedupe_key="manual:zero-rows",
             )
 
@@ -796,7 +697,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                     db,  # type: ignore[arg-type]
                     request_id=42,
                     failed_path=tmpdir,  # type: ignore[arg-type]
-                    force=True,
                     source_username="alice",
                     import_job_id=job.id,
                 )
@@ -815,13 +715,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         """Force-import must preserve user's source FLACs until the quality
         decision — downgrade/transcode_downgrade verdicts must NOT destroy
         originals in failed_imports/."""
-        r = self._dispatch(force=True)
-        self.assertIn("--preserve-source", r["cmd"])
-
-    def test_preserve_source_flag_passed_on_manual(self):
-        """Manual-import uses the same failed_imports/ source path as force —
-        both need source preservation."""
-        r = self._dispatch(force=False)
+        r = self._dispatch()
         self.assertIn("--preserve-source", r["cmd"])
 
     # --- Typed result ---
@@ -831,10 +725,10 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         self.assertTrue(hasattr(r["result"], "success"))
         self.assertTrue(hasattr(r["result"], "message"))
 
-    # --- Issue #89: force/manual rejections must NOT delete source files ---
+    # --- Issue #89: force-import rejections must NOT delete source files ---
     #
     # Auto-import passes a disposable /Incoming staging directory — cleanup
-    # on `downgrade` / `transcode_downgrade` is correct. Force/manual pass
+    # on `downgrade` / `transcode_downgrade` is correct. Force-import passes
     # the user's `failed_imports/…` directory, which IS the only copy of
     # the source material. A cleanup there would delete the user's data
     # when the harness decides against importing.
@@ -844,29 +738,14 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         the failed_imports source directory."""
         ir = make_import_result(decision="downgrade",
                                 new_min_bitrate=128, prev_min_bitrate=180)
-        r = self._dispatch(force=True, ir=ir)
-        r["mock_cleanup"].assert_not_called()
-
-    def test_manual_downgrade_does_not_delete_source(self):
-        """Issue #89: downgrade decision on manual-import must not rmtree
-        the failed_imports source directory."""
-        ir = make_import_result(decision="downgrade",
-                                new_min_bitrate=128, prev_min_bitrate=180)
-        r = self._dispatch(force=False, ir=ir)
+        r = self._dispatch(ir=ir)
         r["mock_cleanup"].assert_not_called()
 
     def test_force_transcode_downgrade_does_not_delete_source(self):
         """Issue #89: transcode_downgrade on force-import must not rmtree."""
         ir = make_import_result(decision="transcode_downgrade",
                                 new_min_bitrate=190, prev_min_bitrate=320)
-        r = self._dispatch(force=True, ir=ir)
-        r["mock_cleanup"].assert_not_called()
-
-    def test_manual_transcode_downgrade_does_not_delete_source(self):
-        """Issue #89: transcode_downgrade on manual-import must not rmtree."""
-        ir = make_import_result(decision="transcode_downgrade",
-                                new_min_bitrate=190, prev_min_bitrate=320)
-        r = self._dispatch(force=False, ir=ir)
+        r = self._dispatch(ir=ir)
         r["mock_cleanup"].assert_not_called()
 
     def test_force_import_success_cleans_empty_source(self):
@@ -878,21 +757,12 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         re-force-imported even though beets already has it. Cleanup on
         mark_done=True is what makes the wrong-matches tab honest.
         """
-        r = self._dispatch(force=True)  # default decision="import"
+        r = self._dispatch()  # default decision="import"
         self.assertTrue(r["result"].success)
         r["mock_cleanup"].assert_called_once_with(r["path"])
-
-    def test_manual_import_success_cleans_empty_source(self):
-        """Same invariant for manual-import: successful import cleans the
-        now-empty source folder so the wrong-matches tab reflects reality.
-        """
-        r = self._dispatch(force=False)
-        self.assertTrue(r["result"].success)
-        r["mock_cleanup"].assert_called_once_with(r["path"])
-
 
 class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
-    """Issue #92: concurrent force/manual-import on the same request_id
+    """Issue #92: concurrent force-import on the same request_id
     must not write duplicate download_log rows. dispatch_import_from_db
     takes a per-request advisory lock; if another session holds it, the
     call fast-fails without running any gates, subprocesses, or log writes.
@@ -913,9 +783,9 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
         tmpdir = tempfile.mkdtemp()
         try:
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=42,
-                payload=manual_import_payload(failed_path=tmpdir),
+                payload={"failed_path": tmpdir},
             )
             with patch_dispatch_externals() as ext, \
                  patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
@@ -926,7 +796,6 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
                        )):
                 result = dispatch_import_from_db(
                     db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
-                    force=True,
                     import_job_id=job.id,
                     quality_gate_fn=noop_quality_gate,
                 )
@@ -973,9 +842,9 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
         try:
             from lib.dispatch import dispatch_import_from_db
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=42,
-                payload=manual_import_payload(failed_path=tmpdir),
+                payload={"failed_path": tmpdir},
             )
             with patch(
                 "lib.dispatch.entry_points.ensure_candidate_evidence_for_action"
@@ -987,7 +856,6 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
                        )):
                 result = dispatch_import_from_db(
                     db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
-                    force=True,
                     import_job_id=job.id,
                 )
             self.assertFalse(result.success)
@@ -1021,9 +889,9 @@ class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
             with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             job = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=42,
-                payload=manual_import_payload(failed_path=tmpdir),
+                payload={"failed_path": tmpdir},
             )
             _seed_candidate_for_import_job(
                 db, job.id,
@@ -1047,7 +915,6 @@ class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
                     db,  # type: ignore[arg-type]
                     request_id=42,
                     failed_path=tmpdir,
-                    force=True,
                     import_job_id=job.id,
                     quality_gate_fn=noop_quality_gate,
                 )
@@ -1104,7 +971,6 @@ class TestDispatchFromDbPrecondition(unittest.TestCase):
                     db,  # type: ignore[arg-type]
                     request_id=42,
                     failed_path=tmpdir,
-                    force=True,
                     # NOTE: deliberately omit import_job_id and download_log_id.
                 )
             self.assertFalse(result.success)

@@ -441,7 +441,7 @@ _LEAF_SEAM_PATTERNS = [
 MULTILINE_PATCH_BASELINE: dict[str, int] = {
     'lib.beets_distance.compute_beets_distance': 3,
     'lib.convergence.import_module': 1,
-    'lib.dispatch.dispatch_import_from_db': 14,
+    'lib.dispatch.dispatch_import_from_db': 12,
     'lib.dispatch.entry_points.ensure_candidate_evidence_for_action': 3,
     'lib.download._run_completed_processing': 3,
     'lib.download_validation._handle_valid_result': 1,
@@ -462,7 +462,7 @@ MULTILINE_PATCH_BASELINE: dict[str, int] = {
     'lib.wrong_match_delete_service.delete_wrong_match': 6,
     'lib.wrong_match_delete_service.delete_wrong_match_group': 4,
     'scripts.import_preview_worker.derive_canonical_import_folder': 1,
-    'scripts.import_preview_worker.measure_and_persist_candidate_evidence': 18,
+    'scripts.import_preview_worker.measure_and_persist_candidate_evidence': 16,
     'scripts.pipeline_cli.youtube._RedisYoutubeCache': 2,
     'scripts.pipeline_cli.youtube._build_youtube_client': 2,
     'scripts.pipeline_cli.youtube.resolve_youtube_album': 2,

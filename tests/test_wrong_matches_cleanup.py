@@ -353,7 +353,7 @@ class TestWrongMatchDeleteService(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
     def test_delete_skips_when_another_active_job_owns_same_source(self):
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
         from lib.wrong_match_delete_service import (
             OUTCOME_SKIPPED_ACTIVE_JOB,
             delete_wrong_match,
@@ -366,9 +366,9 @@ class TestWrongMatchDeleteService(unittest.TestCase):
                 f.write(b"audio")
             log_id = self._log_download(db, failed_path=source)
             db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=1,
-                payload=manual_import_payload(failed_path=source),
+                payload={"failed_path": source},
             )
 
             result = delete_wrong_match(db, log_id, require_visible=True)

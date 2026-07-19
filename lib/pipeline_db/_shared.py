@@ -137,7 +137,7 @@ def _peer_hash(username: str) -> str:
 # rules covering namespace values, key derivation, ordering, and call
 # sites. Every acquire site links back there.
 
-# Per-request lock — force/manual-import double-click protection
+# Per-request lock — force-import double-click protection
 # (issue #92). Key = ``request_id``. ``0x46494D50`` = ASCII "FIMP",
 # recognisable in ``pg_locks`` during debugging.
 ADVISORY_LOCK_NAMESPACE_IMPORT = 0x46494D50

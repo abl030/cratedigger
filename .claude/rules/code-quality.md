@@ -4,8 +4,9 @@
 
 **`full_pipeline_decision_from_evidence`** in `lib/quality/pipeline.py` (and its
 flat-kwargs simulator twin `full_pipeline_decision`) is the single source of
-truth for every importer decision: the four folder/audio-integrity facts
-(`audio_corrupt`, `bad_audio_hash`, `nested_layout`, `empty_fileset`) AND
+truth for every importer decision: the five folder/audio-integrity facts
+(`audio_corrupt`, `bad_audio_hash`, `nested_layout`, `empty_fileset`,
+`mixed_source`) AND
 quality (spectral, codec rank, V0 probe, provisional lossless, verified
 lossless, transcode detection, quality gate). **Never re-create import
 decisions elsewhere.** If a code path needs to know "should this be
@@ -16,7 +17,7 @@ This bit us twice. First (PR #257): a parallel `preimport_decide` spectral
 branch fell back to existing container bitrate when spectral evidence was
 missing on one side, rejecting legitimate FLAC provisional-lossless upgrades
 (request 4514). Second (evidence-canonical-cleanup, U11): `preimport_decide`
-still owned four folder/audio-integrity branches alongside the full
+still owned five folder/audio-integrity branches alongside the full
 pipeline. That asterisk on "quality decisions live in ONE place" was
 hair-splitting; the branches were folded into
 `full_pipeline_decision_from_evidence` as early exits.
@@ -34,10 +35,22 @@ hair-splitting; the branches were folded into
   All rejects route through one helper
   (`_reject_import_from_evidence_decision` in `lib/dispatch/outcome_actions.py`)
   with one denylist policy. The
-  four folder/audio-integrity reject reasons are listed in
-  `_PREIMPORT_FACT_REJECT_DECISIONS`; that frozenset gives them the
-  "always self-heal back to wanted" invariant (force/manual paths normally
-  pass `requeue_on_failure=False`, but the four facts override).
+  five folder/audio-integrity reject reasons are listed in
+  `_PREIMPORT_FACT_REJECT_DECISIONS`; that frozenset is the shared generated-
+  test taxonomy, not a production router. The dispatch caller owns requeue
+  policy. Terminal persistence applies the common quality/search policy while
+  preserving operator search state on every non-accepting outcome when that
+  state is current as the request row is locked. Every terminal ``wanted``
+  transition uses that arbitration, including rejection and local-completion
+  bundles; policy fields and attempt/backoff accounting still apply without
+  clearing the stop. A successful exact-release terminal acceptance instead
+  records ``imported``.
+  Authority: "A successful exact-release terminal import acceptance supersedes
+  an operator-owned `unsearchable` search stop and records the request as
+  `imported`." — https://github.com/abl030/cratedigger/issues/737#issuecomment-5013436918
+  CLI/API lifecycle actions retry a stale compare-and-set against the
+  post-terminal status so an operator command queued behind the row lock is not
+  lost.
 
 **The album test set is the contract.** Live-bug scenarios go in
 `tests/test_quality_classification.py::TestLiveBugReproductions` (one test
@@ -191,23 +204,36 @@ verified-lossless proof-lock bypass without a thread decision. Decision 21
 reversed that planning-time grant; the plausible rationale did not make the
 grant authoritative. This rule records issue #737 item 5's process guard.
 
-## Prefer canonical contracts over semantic scanners
+## Semantic source scanners are prohibited
 
 When an invariant can be enforced by narrowing the production contract, make
 the allowed code shape small and explicit. Prefer one typed owner, one
 canonical call or SQL form, and a fail-closed audit that rejects everything
 outside that grammar.
 
-Do not grow a home-made AST, data-flow, SQL, or control-flow analyzer one
-syntax case at a time in an attempt to reproduce Python or database execution
-semantics. Static audits are appropriate for local structural facts; they are
-not substitutes for a language runtime or SQL parser. If adversarial review
-keeps finding equivalent spellings that bypass an audit, stop extending the
-scanner and simplify the permitted production form instead.
+Do not add repository-wide AST, data-flow, SQL, or control-flow analyzers that
+attempt to infer runtime semantics from arbitrary source. Registries of
+conditions or call sites, alias tracking, and scanners extended syntax case by
+syntax case are prohibited. Static audits may enforce a local syntactic fact
+with a deliberately bounded grammar; they must not substitute for Python or a
+database parser.
+
+**Good enough is a valid stopping condition.** When the production code states
+the boundary plainly, removes the dangerous input from the decision surface,
+and direct behavior tests pin the known failure modes, stop unless review can
+name a concrete remaining counterexample. Do not replace a rejected semantic
+scanner with a speculative typed policy layer or other abstraction whose only
+purpose is to make hypothetical future misunderstanding impossible. Clear code,
+behavior tests, and review are real guardrails; an issue must not stay open
+solely because the code could theoretically be made harder to misuse. Further
+centralization must identify a current failure or bypass that it would prevent.
 
 Qualify the narrow contract with known-bad variants and at least one real
 production-path test. Any non-canonical or unresolved construction must fail
-closed unless it is an explicitly reviewed, tightly bounded seam.
+closed unless it is an explicitly reviewed, tightly bounded seam. If a real
+risk cannot be enforced at a typed/API/schema boundary plus concrete behavior
+tests, record that unsolved risk in a GitHub issue instead of building a
+semantic source scanner.
 
 ## API Contract Tests
 - Every API endpoint consumed by the frontend must have a contract test in `tests/web/` — one `test_*.py` per `web/routes/*.py` module (e.g. `tests/web/test_routes_pipeline.py` for `web/routes/pipeline.py`)

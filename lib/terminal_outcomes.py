@@ -16,6 +16,14 @@ if TYPE_CHECKING:
     from lib.pipeline_db.download_log import DownloadLogOutcome
 
 
+OPERATOR_SEARCH_STOP_STATUS = "manual"
+
+
+def operator_search_stop_is_current(status: str | None) -> bool:
+    """Return whether the request currently carries the operator stop."""
+    return status == OPERATOR_SEARCH_STOP_STATUS
+
+
 @dataclass(frozen=True)
 class TerminalDownloadAudit:
     """One mandatory ``download_log`` row in a terminal outcome bundle."""
@@ -109,6 +117,26 @@ class ImportTerminalOutcome:
     post_audit_transitions: tuple[RequestTransition, ...] = ()
     denylists: tuple[TerminalDenylist, ...] = ()
     cooldowns: tuple[TerminalCooldown, ...] = ()
+    successful_terminal_acceptance: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.successful_terminal_acceptance:
+            return
+        final_transition = (
+            self.post_audit_transitions[-1]
+            if self.post_audit_transitions
+            else self.initial_transition
+        )
+        if (
+            self.job.status != "completed"
+            or self.audit.outcome not in ("success", "force_import")
+            or final_transition is None
+            or final_transition.target_status != "imported"
+        ):
+            raise ValueError(
+                "successful terminal acceptance requires a completed import, "
+                "a success audit, and a final imported transition"
+            )
 
 
 @dataclass(frozen=True)
@@ -122,6 +150,7 @@ class PendingImportTerminalOutcome:
     post_audit_transitions: tuple[RequestTransition, ...] = ()
     denylists: tuple[TerminalDenylist, ...] = ()
     cooldowns: tuple[TerminalCooldown, ...] = ()
+    successful_terminal_acceptance: bool = False
 
     def with_job(self, job: ImportJobTerminal) -> ImportTerminalOutcome:
         return ImportTerminalOutcome(
@@ -133,6 +162,9 @@ class PendingImportTerminalOutcome:
             post_audit_transitions=self.post_audit_transitions,
             denylists=self.denylists,
             cooldowns=self.cooldowns,
+            successful_terminal_acceptance=(
+                self.successful_terminal_acceptance
+            ),
         )
 
     def append_transitions(
@@ -150,13 +182,19 @@ class PendingImportTerminalOutcome:
     ) -> "PendingImportTerminalOutcome":
         return replace(self, denylists=self.denylists + entries)
 
+    def mark_successful_terminal_acceptance(
+        self,
+    ) -> "PendingImportTerminalOutcome":
+        """Authorize the successful-import stop-supersession exception."""
+        return replace(self, successful_terminal_acceptance=True)
+
 @dataclass(frozen=True)
 class PreviewTerminalOutcome:
     """Complete PostgreSQL-owned preview measurement-failure outcome."""
 
     request_id: int
     import_job_id: int
-    request_transition: RequestTransition
+    request_transition: RequestTransition | None
     audit: TerminalDownloadAudit
     preview_status: str
     preview_result: dict[str, object]

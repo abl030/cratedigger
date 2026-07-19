@@ -66,7 +66,7 @@ def _build_parser() -> tuple[
     # quality / repair-spectral
     add_quality_subparsers(sub)
 
-    # force-import / manual-import / import-jobs / import-preview
+    # force-import / import-jobs / import-preview
     add_imports_subparsers(sub)
 
     # wrong-match-triage / wrong-match-delete / wrong-match-delete-group

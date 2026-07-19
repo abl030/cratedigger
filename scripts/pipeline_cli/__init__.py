@@ -12,7 +12,7 @@ mechanical pattern as the ``lib/quality/`` split, issue #477):
     query.py            query (read-only SQL escape hatch)
     show.py             show (full per-request detail dump)
     quality.py           quality / repair-spectral (quality-gate debug)
-    imports.py           force-import / manual-import / import-jobs /
+    imports.py           force-import / import-jobs /
                        import-preview
     wrong_match.py       wrong-match-triage / -delete / -delete-group
     search_plan.py       search-plan show / regenerate / dry-run /
@@ -48,7 +48,7 @@ import logging
 import sys
 
 # Surface INFO-level log lines (e.g. the [import] stderr passthrough from
-# dispatch_import_core) so force-import / manual-import failures are visible to
+# dispatch_import_core) so force-import failures are visible to
 # the user instead of silently swallowed by Python's default WARNING-only
 # logger configuration.
 logging.basicConfig(
@@ -83,7 +83,6 @@ from scripts.pipeline_cli.imports import (
     cmd_force_import,
     cmd_import_jobs,
     cmd_import_preview,
-    cmd_manual_import,
 )
 from scripts.pipeline_cli.wrong_match import (
     cmd_wrong_match_delete,
@@ -133,7 +132,6 @@ __all__ = [
     "cmd_list",
     "cmd_library_delete",
     "cmd_long_tail",
-    "cmd_manual_import",
     "cmd_quality",
     "cmd_query",
     "cmd_repair_spectral",

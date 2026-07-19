@@ -120,7 +120,7 @@ that audit trail.
   forensic `search_log` row (`stale_reason='request_replaced'`), but it cannot
   advance the ancestor cursor or backoff. Search-plan generation, supersession,
   and manual cursor advance reject the replaced ancestor.
-- `search_filetype_override TEXT` — transient CSV filetype list (e.g. `"lossless,mp3 v0,mp3 320"` or just `"lossless"`). Overrides global `allowed_filetypes` for search. The post-import policy — identical for automatic and operator force/manual imports (decision 19) — writes `"lossless"` only for a transparent, spectrally genuine copy (decision 17: the grade's subject label does not gate narrowing) and for the provisional lossless-source lane; other unverified retained copies return to the full search surface. Only a proof-bearing copy completes acquisition. The `"lossless"` virtual tier matches FLAC, ALAC, and WAV.
+- `search_filetype_override TEXT` — transient CSV filetype list (e.g. `"lossless,mp3 v0,mp3 320"` or just `"lossless"`). Overrides global `allowed_filetypes` for search. The post-import policy — identical for automatic and force-import callers (decision 19) — writes `"lossless"` only for a transparent, spectrally genuine copy (decision 17: the grade's subject label does not gate narrowing) and for the provisional lossless-source lane; other unverified retained copies return to the full search surface. Only a proof-bearing copy completes acquisition. The `"lossless"` virtual tier matches FLAC, ALAC, and WAV.
 - `target_format TEXT` — persistent user intent for desired format on disk (`"lossless"` or NULL). Set only by user action (CLI/web set-intent toggle). Never cleared by quality gate. When set, keeps lossless on disk (normalizes ALAC/WAV → FLAC) instead of converting to V0/target.
 - `min_bitrate INTEGER` — current min track bitrate in kbps (from beets).
 - `prev_min_bitrate INTEGER` — previous min_bitrate before last upgrade. Shows delta in UI.
@@ -145,7 +145,7 @@ that audit trail.
 - `v0_probe_min_bitrate INTEGER`, `v0_probe_avg_bitrate INTEGER`, `v0_probe_median_bitrate INTEGER` — min/avg/median track bitrates for this attempt's probe.
 - `existing_v0_probe_kind TEXT` — lineage of the comparable probe state used before this attempt, when present.
 - `existing_v0_probe_min_bitrate INTEGER`, `existing_v0_probe_avg_bitrate INTEGER`, `existing_v0_probe_median_bitrate INTEGER` — point-in-time baseline probe values used for history rendering and audit.
-- `outcome TEXT` — CHECK-constrained vocabulary: `success`, `rejected`, `failed`, `timeout`, `force_import`, `manual_import`, `curator_ban`, `measurement_failed`, `user_offline`, `have_analysis_error`, `youtube_running`, `youtube_success`, `youtube_failed`. `measurement_failed` is a candidate-preview environment failure; `have_analysis_error` is a failed fresh analysis of the installed HAVE. Both leave the request wanted without minting a quality verdict, denylist entry, or narrowing decision.
+- `outcome TEXT` — CHECK-constrained vocabulary: `success`, `rejected`, `failed`, `timeout`, `force_import`, historical `manual_import`, `curator_ban`, `measurement_failed`, `user_offline`, `have_analysis_error`, `youtube_running`, `youtube_success`, `youtube_failed`. New manual imports cannot be submitted; the value remains readable for existing audit rows. `measurement_failed` is a candidate-preview environment failure; `have_analysis_error` is a failed fresh analysis of the installed HAVE. Automation returns to `wanted`; operator jobs preserve their current lifecycle state. Neither failure mints a quality verdict, denylist entry, or narrowing decision.
 - `source TEXT NOT NULL DEFAULT 'slskd'` — sourcing-channel discriminator added by migration 037. CHECK constraint admits `'slskd'` and `'youtube'`. The default backfilled every pre-037 row to `'slskd'` in one ALTER (no separate backfill script per the single-operator no-backfill-script rule). Consumers rendering `download_log` rows (`pipeline-cli show`, web routes' "recent attempts") use this column to distinguish channels.
 - `youtube_metadata JSONB` — YT-specific audit payload added by migration 037. Nullable; populated only for `source='youtube'` rows. Typed at the read seam as `lib.youtube_ingest_service.YoutubeIngestMetadata: msgspec.Struct`. Carries `yt_url`, `browse_id`, `audio_playlist_id`, optional `expected_track_count`, `resolver_mapping_id`, `per_track_video_ids`, and terminal-state fields (`reason`, `stderr_excerpt`, `observed_track_count`).
 - **Partial unique index `one_youtube_running_per_request` ON `download_log (request_id) WHERE source = 'youtube' AND outcome = 'youtube_running'`** — added by migration 037. Enforces idempotency at the DB layer: at most one in-flight YT rescue per `request_id` at any time. Application-level pre-insert checks would race; this index is atomic. Once the row transitions to a terminal `youtube_success` / `youtube_failed`, the index admits the next submission.
@@ -161,18 +161,18 @@ the request still owns the same `active_download_state.current_path`.
 ## `import_jobs` — shared importer queue
 
 All beets-mutating import work is submitted to `import_jobs` and drained by
-`cratedigger-importer`. Web force-import, web/manual import, automation
-completed-download processing, and CLI force/manual import all share this table.
+`cratedigger-importer`. Web/CLI force-import, automation completed-download
+processing, and YouTube rescue all share this table.
 
 Key fields:
 
-- `job_type TEXT` — `force_import`, `manual_import`, `automation_import`, or `youtube_import`.
+- `job_type TEXT` — active values are `force_import`, `automation_import`, and `youtube_import`. Historical `manual_import` rows remain readable but cannot be enqueued.
 - `status TEXT` — `queued`, `running`, `completed`, or `failed`.
 - `request_id INTEGER` — the related `album_requests.id`.
 - `dedupe_key TEXT` — active queue dedupe key. A partial unique index prevents
   duplicate queued/running jobs while allowing a later job after completion.
-- `payload JSONB` — typed job input. Force/manual jobs carry `failed_path`;
-  force jobs also carry `download_log_id` and optional `source_username`.
+- `payload JSONB` — typed job input. Force jobs carry `failed_path`,
+  `download_log_id`, and optional `source_username`.
   YouTube jobs carry `staged_path`, `request_id`, `browse_id`, and
   `download_log_id`.
 - `result JSONB`, `message`, `error` — terminal worker result visible to web
@@ -212,7 +212,7 @@ runs, so an accidentally-started second worker exits instead of requeueing a
 live worker's job.
 
 Covered job-backed terminal outcomes cross one DB transaction boundary. This
-includes force/manual and validated automation dispatch outcomes, automation's
+includes force-import and validated automation dispatch outcomes, automation's
 local `Completed` / `CompletionFailed` fallbacks, and request-backed preview
 measurement failures. Their request transition (including retry-attempt
 accounting), mandatory `download_log` audit, source denylist/cooldown writes,

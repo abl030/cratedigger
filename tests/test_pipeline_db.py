@@ -871,8 +871,8 @@ class TestSchemaCreation(unittest.TestCase):
         cur = db._execute("""
             INSERT INTO import_jobs (job_type, request_id, payload)
             VALUES (
-                'manual_import', %s,
-                '{"failed_path": "/tmp/manual"}'::jsonb
+                'force_import', %s,
+                '{"failed_path": "/tmp/force"}'::jsonb
             )
             RETURNING preview_status, preview_message, preview_attempts,
                       preview_completed_at, importable_at
@@ -891,8 +891,8 @@ class TestSchemaCreation(unittest.TestCase):
                     job_type, request_id, payload, preview_status
                 )
                 VALUES (
-                    'manual_import', %s,
-                    '{"failed_path": "/tmp/manual"}'::jsonb,
+                    'force_import', %s,
+                    '{"failed_path": "/tmp/force"}'::jsonb,
                     'not-a-preview-state'
                 )
             """, (req_id,))
@@ -1101,13 +1101,13 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertEqual(job.payload["browse_id"], "MPREb_pg_constraint")
 
     def test_claim_complete_and_fail_lifecycle(self):
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
 
         job = self.db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:1",
-            payload=manual_import_payload(failed_path="/tmp/manual"),
+            payload={"failed_path": "/tmp/manual"},
         )
         self.db.mark_import_job_preview_importable(
             job.id,
@@ -1138,14 +1138,14 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertIsNone(missing)
 
     def test_two_sessions_cannot_claim_same_job(self):
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
         from lib import pipeline_db
 
         job = self.db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:claim-once",
-            payload=manual_import_payload(failed_path="/tmp/manual"),
+            payload={"failed_path": "/tmp/manual"},
         )
         self.db.mark_import_job_preview_importable(
             job.id,
@@ -1162,13 +1162,13 @@ class TestImportJobQueueAPI(unittest.TestCase):
             other.close()
 
     def test_running_jobs_can_be_requeued_immediately_after_worker_restart(self):
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
 
         job = self.db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:restart-retry",
-            payload=manual_import_payload(failed_path="/tmp/manual"),
+            payload={"failed_path": "/tmp/manual"},
         )
         self.db.mark_import_job_preview_importable(
             job.id,
@@ -1195,13 +1195,13 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertEqual(retried.worker_id, "new-worker")
 
     def test_import_claim_requires_preview_importable(self):
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
 
         job = self.db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:preview-gate",
-            payload=manual_import_payload(failed_path="/tmp/manual"),
+            payload={"failed_path": "/tmp/manual"},
         )
         self.assertIsNone(self.db.claim_next_import_job(worker_id="too-early"))
 
@@ -1216,19 +1216,19 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertEqual(claimed.status, "running")
 
     def test_import_job_timeline_orders_importable_before_waiting(self):
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
 
         waiting = self.db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:timeline-waiting",
-            payload=manual_import_payload(failed_path="/tmp/waiting"),
+            payload={"failed_path": "/tmp/waiting"},
         )
         importable = self.db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:timeline-importable",
-            payload=manual_import_payload(failed_path="/tmp/importable"),
+            payload={"failed_path": "/tmp/importable"},
         )
         self.db.mark_import_job_preview_importable(
             importable.id,
@@ -1242,13 +1242,13 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertEqual(timeline[0].preview_status, "evidence_ready")
 
     def test_import_job_timeline_excludes_terminal_jobs(self):
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
 
         importable = self.db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:timeline-active",
-            payload=manual_import_payload(failed_path="/tmp/active"),
+            payload={"failed_path": "/tmp/active"},
         )
         self.db.mark_import_job_preview_importable(
             importable.id,
@@ -1256,16 +1256,16 @@ class TestImportJobQueueAPI(unittest.TestCase):
             message="ready",
         )
         older = self.db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:timeline-old-terminal",
-            payload=manual_import_payload(failed_path="/tmp/old"),
+            payload={"failed_path": "/tmp/old"},
         )
         newer = self.db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:timeline-new-terminal",
-            payload=manual_import_payload(failed_path="/tmp/new"),
+            payload={"failed_path": "/tmp/new"},
         )
         self.db.mark_import_job_failed(
             older.id,
@@ -1283,13 +1283,13 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertEqual([job.id for job in timeline], [importable.id])
 
     def test_preview_claim_and_importable_lifecycle(self):
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
 
         queued = self.db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:preview",
-            payload=manual_import_payload(failed_path="/tmp/manual"),
+            payload={"failed_path": "/tmp/manual"},
         )
         self.assertEqual(queued.preview_status, "waiting")
         self.assertEqual(queued.preview_attempts, 0)
@@ -1331,13 +1331,13 @@ class TestImportJobQueueAPI(unittest.TestCase):
         production code writes ``'measurement_failed'`` via the U4 self-healing
         helper.
         """
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
 
         queued = self.db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:preview-reject",
-            payload=manual_import_payload(failed_path="/tmp/manual"),
+            payload={"failed_path": "/tmp/manual"},
         )
 
         failed = self.db.mark_import_job_preview_failed(
@@ -1359,14 +1359,14 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertIsNotNone(failed.completed_at)
 
     def test_two_sessions_cannot_claim_same_preview_job(self):
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
         from lib import pipeline_db
 
         self.db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:preview-claim-once",
-            payload=manual_import_payload(failed_path="/tmp/manual"),
+            payload={"failed_path": "/tmp/manual"},
         )
         other = pipeline_db.PipelineDB(TEST_DSN)
         try:
@@ -1396,13 +1396,13 @@ class TestRequeueImportJobForPreview(unittest.TestCase):
 
     def _enqueue_claimed_job(self):
         """Enqueue a manual job, advance it through preview, and have the importer claim it."""
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
 
         job = self.db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:requeue-for-preview",
-            payload=manual_import_payload(failed_path="/tmp/manual"),
+            payload={"failed_path": "/tmp/manual"},
         )
         self.db.mark_import_job_preview_importable(
             job.id,
@@ -1485,13 +1485,13 @@ class TestRequeueImportJobForPreview(unittest.TestCase):
 
     def test_does_not_touch_unrelated_jobs(self):
         claimed = self._enqueue_claimed_job()
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
 
         other = self.db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:unrelated",
-            payload=manual_import_payload(failed_path="/tmp/other"),
+            payload={"failed_path": "/tmp/other"},
         )
 
         self.db.requeue_import_job_for_preview(claimed.id, reason="x")
@@ -1532,13 +1532,13 @@ class TestRequeueRunningImportPreviewJobs(unittest.TestCase):
         self.db.close()
 
     def _enqueue_running_preview_job(self) -> int:
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
 
         job = self.db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:requeue-running-preview",
-            payload=manual_import_payload(failed_path="/tmp/manual"),
+            payload={"failed_path": "/tmp/manual"},
         )
         claimed = self.db.claim_next_import_preview_job(worker_id="preview-old")
         assert claimed is not None
@@ -1577,15 +1577,15 @@ class TestRequeueRunningImportPreviewJobs(unittest.TestCase):
         self.assertEqual(reclaim.preview_worker_id, "preview-new")
 
     def test_does_not_touch_waiting_or_already_imported_jobs(self):
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
 
         # Claim-and-leave-running first so the second enqueue stays waiting.
         running_id = self._enqueue_running_preview_job()
         waiting = self.db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:waiting",
-            payload=manual_import_payload(failed_path="/tmp/waiting"),
+            payload={"failed_path": "/tmp/waiting"},
         )
 
         result = self.db.requeue_running_import_preview_jobs(message="restart")
@@ -2358,7 +2358,7 @@ class TestDownloadLog(unittest.TestCase):
         """Contract guard: only truly-imported rows count as "imported".
 
         ``get_log(outcome_filter='imported')`` filters on ``outcome IN
-        ('success', 'force_import')``. Gate-rejected force/manual imports
+        ('success', 'force_import')``. Gate-rejected force-imports
         must NOT write ``outcome='force_import'`` or they'd leak into the UI's
         imported counter and the /api/pipeline/log imported view. Regression
         guard for the audit that caught this: a gate-rejected force import
@@ -4652,7 +4652,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
 
     def test_fk_chain_resolves_import_job_candidate_evidence(self):
         job = self.db.enqueue_import_job(
-            "manual_import",
+            "force_import",
             request_id=self.req_id,
             payload={"failed_path": "/tmp/candidate"},
         )
@@ -5674,7 +5674,7 @@ class TestAdvisoryLock(unittest.TestCase):
 
     A second session trying the same ``(namespace, key)`` must see ``False``
     while the first session holds the lock, and must succeed once the first
-    session releases. This guards the force/manual-import concurrency fix
+    session releases. This guards the force-import concurrency fix
     in ``dispatch_import_from_db``.
     """
 
@@ -6603,12 +6603,12 @@ class TestActiveImportJobForRequest(unittest.TestCase):
         self.db.close()
 
     def _enqueue(self, *, request_id: int, dedupe_key: str):
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
         return self.db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=request_id,
             dedupe_key=dedupe_key,
-            payload=manual_import_payload(failed_path="/tmp/x"),
+            payload={"failed_path": "/tmp/x"},
         )
 
     def test_returns_none_when_no_jobs(self):
@@ -6718,9 +6718,7 @@ class TestActiveImportJobsForWrongMatch(unittest.TestCase):
     def test_matches_active_jobs_by_row_request_path_and_source_dirs(self):
         from lib.import_queue import (
             IMPORT_JOB_FORCE,
-            IMPORT_JOB_MANUAL,
             force_import_payload,
-            manual_import_payload,
         )
 
         path = "/tmp/failed/Artist - Album"
@@ -6733,16 +6731,16 @@ class TestActiveImportJobsForWrongMatch(unittest.TestCase):
             payload=force_import_payload(download_log_id=77, failed_path="/tmp/other"),
         )
         by_request = self.db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="wm:request",
-            payload=manual_import_payload(failed_path="/tmp/unrelated"),
+            payload={"failed_path": "/tmp/unrelated"},
         )
         by_path = self.db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=self.other_req_id,
             dedupe_key="wm:path",
-            payload=manual_import_payload(failed_path=path),
+            payload={"failed_path": path},
         )
         by_source_dir = self.db.enqueue_import_job(
             IMPORT_JOB_FORCE,

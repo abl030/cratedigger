@@ -316,9 +316,9 @@ def cmd_quality(db, args):
         ("PREIMPORT: Audio corrupt (ffmpeg fail)", dict(
             is_flac=False, min_bitrate=256, is_cbr=False,
             audio_corrupt=True)),
-        ("PREIMPORT: Force-import with nested folders", dict(
+        ("PREIMPORT: Nested folders", dict(
             is_flac=False, min_bitrate=320, is_cbr=True,
-            import_mode="force", has_nested_audio=True)),
+            has_nested_audio=True)),
     ])
 
     print(f"\n  What would happen if we downloaded:")

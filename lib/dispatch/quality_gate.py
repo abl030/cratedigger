@@ -32,6 +32,7 @@ class QualityGatePlan:
 
     transition: transitions.RequestTransition
     denylists: tuple[TerminalDenylist, ...] = ()
+    successful_terminal_acceptance: bool = False
 
 
 def _evidence_unavailable_plan() -> QualityGatePlan:
@@ -218,6 +219,7 @@ def _check_quality_gate_core(
                     f"min_bitrate={min_br_kbps}kbps{spectral_note}, "
                     f"decision={decision}, denylisted {usernames}, "
                     f"search_override={action.search_filetype_override!r}")
+                successful_terminal_acceptance = False
             else:  # verified-lossless proof accepts terminally
                 transition = transitions.RequestTransition.to_imported(
                     from_status="imported",
@@ -229,7 +231,18 @@ def _check_quality_gate_core(
                     f"QUALITY GATE: {label} min_bitrate={min_br_kbps}kbps "
                     "— verified-lossless proof accepts"
                 )
-            plan = QualityGatePlan(transition=transition, denylists=denylists)
+                # Authority: "A successful exact-release terminal import
+                # acceptance supersedes an operator-owned `unsearchable`
+                # search stop and records the request as `imported`." —
+                # https://github.com/abl030/cratedigger/issues/737#issuecomment-5013436918
+                successful_terminal_acceptance = True
+            plan = QualityGatePlan(
+                transition=transition,
+                denylists=denylists,
+                successful_terminal_acceptance=(
+                    successful_terminal_acceptance
+                ),
+            )
     except Exception:
         logger.exception(
             "QUALITY GATE: failed to load or decide linked quality; "

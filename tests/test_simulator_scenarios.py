@@ -311,7 +311,6 @@ def simulate(
     verified_lossless_target: str | None = None,
     *,
     current_verified_lossless_proof: bool | None = None,
-    import_mode: str = "auto",
 ) -> SimResult:
     """Run full_pipeline_decision + rejection backfill."""
     # Derive existing state params (same logic as cmd_quality)
@@ -342,7 +341,6 @@ def simulate(
         ),
         verified_lossless_target=verified_lossless_target,
         target_format=album.target_format,
-        import_mode=import_mode,
         existing_v0_probe_avg=album.existing_v0_probe_avg,
         **download.dl_params(),
     )
@@ -651,7 +649,6 @@ class TestNamedRegressions(unittest.TestCase):
             existing_format=None,
             existing_is_cbr=False,
             existing_v0_probe_avg=None,
-            import_mode="force",
         )
         fresh_action = full_pipeline_decision(
             is_flac=True,
@@ -669,7 +666,6 @@ class TestNamedRegressions(unittest.TestCase):
             existing_is_cbr=False,
             existing_spectral_grade="likely_transcode",
             existing_v0_probe_avg=260,
-            import_mode="force",
         )
 
         self.assertTrue(stale_preview["imported"])
@@ -1514,12 +1510,11 @@ class TestCBR320NoSpectralMatrix(unittest.TestCase):
 class TestVerifiedLosslessMatrix(unittest.TestCase):
     """Verified lossless albums: quality gate accepted, most downloads downgrade."""
 
-    def _sim(self, album_name, dl_name, *, current_proof=False, import_mode="auto"):
+    def _sim(self, album_name, dl_name, *, current_proof=False):
         return simulate(
             ALBUM_MAP[album_name],
             DL_MAP[dl_name],
             current_verified_lossless_proof=current_proof,
-            import_mode=import_mode,
         )
 
     def test_genuine_flac_reimports_verified(self):
@@ -1556,22 +1551,6 @@ class TestVerifiedLosslessMatrix(unittest.TestCase):
         self.assertEqual(r.final_status, "imported")
         self.assertFalse(r.keep_searching)
         self.assertFalse(r.denylisted)
-
-    def test_force_import_respects_verified_lossless_lock(self):
-        """Decision 21: force-import bypasses only the beets distance —
-        the proof lock is absolute for every import mode. Replace or
-        re-request is the operator's way back in."""
-        r = self._sim(
-            "verified_lossless_lofi",
-            "mp3_v0_240",
-            current_proof=True,
-            import_mode="force",
-        )
-        self.assertFalse(r.imported)
-        self.assertEqual(r.stage2_import, "verified_lossless_locked")
-        self.assertEqual(r.final_status, "imported")
-        self.assertFalse(r.denylisted)
-
 
 # ============================================================================
 # Backfill propagation tests

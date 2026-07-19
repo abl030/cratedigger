@@ -4,7 +4,7 @@ Tests _build_download_info, cancel_and_delete, poll_active_downloads,
 and grab_most_wanted.
 
 Pre-import measurement behavior (audio integrity + spectral analysis) is
-shared with the force/manual import paths and tested directly against
+shared with the force-import path and tested directly against
 ``lib.measurement.measure_preimport_state`` in ``tests/test_measurement.py``
 and end-to-end through
 ``tests/test_integration_slices.py::TestSpectralPropagationSlice``.
@@ -4969,7 +4969,7 @@ class TestPollActiveDownloads(unittest.TestCase):
     def test_poll_subprocess_started_auto_import_waits_for_active_manual_job(self):
         """Any active import job owns the request, not just automation jobs."""
         from lib.download import poll_active_downloads
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+        from lib.import_queue import IMPORT_JOB_FORCE
         from lib.processing_paths import stage_to_ai_path
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -5000,10 +5000,10 @@ class TestPollActiveDownloads(unittest.TestCase):
             cfg = cast(Any, ctx.cfg)
             cfg.beets_staging_dir = staging_root
             fake_db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
+                IMPORT_JOB_FORCE,
                 request_id=1,
                 dedupe_key="manual:1",
-                payload=manual_import_payload(failed_path=resumed_path),
+                payload={"failed_path": resumed_path},
             )
 
             poll_active_downloads(ctx)

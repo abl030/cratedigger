@@ -70,7 +70,10 @@ Policy:
 Provisional imports are deliberately not verified lossless. They may still use
 the configured lossless-source storage target, but `verified_lossless` remains
 false, the source is denylisted, normal post-import notifications run, and the
-request remains wanted so acquisition continues.
+search policy keeps acquisition open. Automation returns the request to
+`wanted`; terminal persistence retains an operator search stop current when
+the request row is locked, while recording the same quality decision and
+narrowing fields.
 
 Exception: a comparable `lossless_source_v0` probe at avg ≥230kbps and min
 ≥200kbps is treated as stronger evidence than a suspect/`likely_transcode`
@@ -410,7 +413,7 @@ genuine grade may still participate in the documented narrowing policy, but it
 is weak spectral evidence, never proof of bitrate or verified-lossless
 acquisition.
 
-**Missing or incomplete current evidence self-heals at the failure point.** A
+**Missing or incomplete current evidence converges at the failure point.** A
 current-evidence row's spectral scan and on-disk V0 research normally
 complete during import preview — but a request whose downloads always
 fail never reaches preview, so its HAVE snapshot (and therefore the
@@ -429,7 +432,14 @@ re-probing an attempted snapshot, and refusing stale on-disk state. Adapter
 or backfill failures and actual measurement work consume the per-cycle
 `CratediggerContext.evidence_enrichment_budget`; complete or authoritatively
 absent library copies cost nothing. Over time the failed-download cohort's
-evidence converges without delaying or bypassing download cleanup.
+evidence converges without delaying or bypassing download cleanup. Automation
+failure finalizers also reset the request to `wanted`. Terminal persistence
+checks the operator search stop under its request-row lock for every `wanted`
+transition, including rejection, HAVE-abort, and local-completion bundles. It
+retains policy fields plus attempt/backoff accounting without clearing the
+stop. An operator lifecycle command already waiting behind that lock retries
+against the committed status, so neither concurrency ordering loses the
+operator action.
 
 **A blank `source_path` is policy-incomplete.** Every enrichment
 helper verifies the scanned path against the row's recorded

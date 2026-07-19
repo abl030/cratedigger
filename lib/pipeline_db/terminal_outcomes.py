@@ -18,6 +18,7 @@ from lib.terminal_outcomes import (
     TerminalDenylist,
     TerminalDownloadAudit,
     TerminalOutcomeResult,
+    operator_search_stop_is_current,
 )
 from lib.validation_envelope import derive_validation_log_columns
 
@@ -61,6 +62,15 @@ class _TransactionalTransitionsDB:
     ) -> bool:
         del request_id, state_json, expected_status
         raise ValueError("terminal outcomes cannot transition to downloading")
+
+    def compare_request_status(
+        self,
+        request_id: int,
+        *,
+        expected_status: str,
+    ) -> bool:
+        row = self.get_request(request_id)
+        return bool(row is not None and row["status"] == expected_status)
 
     def _update_metadata(
         self,
@@ -204,6 +214,67 @@ class _TransactionalTransitionsDB:
         self._boundary("request.wanted")
         return cur.rowcount > 0
 
+    def apply_wanted_policy_without_requeue(
+        self,
+        request_id: int,
+        *,
+        expected_status: str,
+        fields: dict[str, object],
+        attempt_type: str | None,
+    ) -> bool:
+        """Apply wanted-policy facts while retaining the locked lifecycle.
+
+        This is the terminal operator-stop path. It deliberately preserves
+        status, retry counters, and ``manual_reason`` while retaining the
+        ordinary wanted transition's field and attempt/backoff effects.
+        """
+        unknown = sorted(
+            set(fields)
+            - {"search_filetype_override", "min_bitrate", "prev_min_bitrate"}
+        )
+        if unknown:
+            raise ValueError(
+                "wanted policy does not accept fields: " + ", ".join(unknown)
+            )
+        if fields:
+            now = datetime.now(timezone.utc)
+            override_present = "search_filetype_override" in fields
+            min_bitrate_present = "min_bitrate" in fields
+            prev_min_bitrate_present = "prev_min_bitrate" in fields
+            cur = self._db._execute(
+                "UPDATE album_requests "
+                "SET updated_at = %s, "
+                "prev_min_bitrate = CASE WHEN %s THEN %s "
+                "WHEN %s THEN COALESCE(min_bitrate, prev_min_bitrate) "
+                "ELSE prev_min_bitrate END, "
+                "min_bitrate = CASE WHEN %s THEN %s ELSE min_bitrate END, "
+                "search_filetype_override = CASE WHEN %s THEN %s "
+                "ELSE search_filetype_override END "
+                "WHERE id = %s AND status = %s AND status != 'replaced'",
+                (
+                    now,
+                    prev_min_bitrate_present,
+                    fields.get("prev_min_bitrate"),
+                    min_bitrate_present,
+                    min_bitrate_present,
+                    fields.get("min_bitrate"),
+                    override_present,
+                    fields.get("search_filetype_override"),
+                    request_id,
+                    expected_status,
+                ),
+            )
+            self._boundary("request.wanted_policy")
+            if cur.rowcount <= 0:
+                return False
+        if attempt_type is not None:
+            return self.record_attempt(
+                request_id,
+                attempt_type,
+                expected_status=expected_status,
+            )
+        return True
+
     def record_attempt(
         self,
         request_id: int,
@@ -329,6 +400,84 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
             self._terminal_outcome_write_boundary(index, label)
 
         return emit
+
+    def _lock_terminal_request_status(self, request_id: int) -> str | None:
+        """Lock and return lifecycle state used by a terminal policy bundle."""
+        cur = self._execute(
+            "SELECT status FROM album_requests WHERE id = %s FOR UPDATE",
+            (request_id,),
+        )
+        row = cur.fetchone()
+        return str(row["status"]) if row is not None else None
+
+    def _apply_terminal_request_transition(
+        self,
+        transition_db: _TransactionalTransitionsDB,
+        request_id: int,
+        transition: transitions.RequestTransition,
+        *,
+        operator_stop_was_current: bool,
+    ) -> tuple[transitions.TransitionApplied, ...]:
+        """Apply one transition without letting automation clear a stop.
+
+        Every terminal ``wanted`` command passes here, regardless of whether
+        it is the bundle's initial transition or a post-import policy action.
+        When the row carried the operator stop at lock time, retain its wanted
+        policy fields and attempt/backoff accounting in place, then restore the
+        stop if an earlier transition in this same bundle proved an import.
+        """
+        if not (
+            operator_stop_was_current
+            and transition.target_status == "wanted"
+        ):
+            return (transitions.require_transition_applied(
+                transitions.finalize_request(
+                    transition_db,
+                    request_id,
+                    transition,
+                )
+            ),)
+
+        row = transition_db.get_request(request_id)
+        if row is None:
+            return (transitions.require_transition_applied(
+                transitions.finalize_request(
+                    transition_db,
+                    request_id,
+                    transition,
+                )
+            ),)
+        current_status = str(row["status"])
+        applied: list[transitions.TransitionApplied] = []
+        has_policy_effect = bool(transition.fields) or (
+            transition.attempt_type is not None
+        )
+        if has_policy_effect:
+            if not transition_db.apply_wanted_policy_without_requeue(
+                request_id,
+                expected_status=current_status,
+                fields=dict(transition.fields),
+                attempt_type=transition.attempt_type,
+            ):
+                raise RuntimeError(
+                    "locked operator-stop row changed during terminal policy"
+                )
+            applied.append(transitions.TransitionApplied(
+                request_id=request_id,
+                from_status=current_status,
+                target_status=current_status,
+            ))
+        if current_status != "manual":
+            applied.append(transitions.require_transition_applied(
+                transitions.finalize_request(
+                    transition_db,
+                    request_id,
+                    transitions.RequestTransition.to_manual(
+                        from_status=current_status,
+                    ),
+                )
+            ))
+        return tuple(applied)
 
     def _insert_terminal_download_audit(
         self,
@@ -510,13 +659,15 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
         cooled: set[str] = set()
         with self._atomic():
             transition_db = _TransactionalTransitionsDB(self, boundary)
+            operator_stop_was_current = operator_search_stop_is_current(
+                self._lock_terminal_request_status(command.request_id)
+            )
             if command.initial_transition is not None:
-                applied.append(transitions.require_transition_applied(
-                    transitions.finalize_request(
-                        transition_db,
-                        command.request_id,
-                        command.initial_transition,
-                    )
+                applied.extend(self._apply_terminal_request_transition(
+                    transition_db,
+                    command.request_id,
+                    command.initial_transition,
+                    operator_stop_was_current=operator_stop_was_current,
                 ))
             download_log_id = self._insert_terminal_download_audit(
                 command.request_id,
@@ -524,13 +675,36 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 boundary,
             )
             for transition in command.post_audit_transitions:
-                applied.append(transitions.require_transition_applied(
-                    transitions.finalize_request(
-                        transition_db,
-                        command.request_id,
-                        transition,
-                    )
+                applied.extend(self._apply_terminal_request_transition(
+                    transition_db,
+                    command.request_id,
+                    transition,
+                    operator_stop_was_current=operator_stop_was_current,
                 ))
+            # Authority: "A successful exact-release terminal import
+            # acceptance supersedes an operator-owned `unsearchable` search
+            # stop and records the request as `imported`." —
+            # https://github.com/abl030/cratedigger/issues/737#issuecomment-5013436918
+            if (
+                operator_stop_was_current
+                and not command.successful_terminal_acceptance
+            ):
+                row = transition_db.get_request(command.request_id)
+                if row is None:
+                    raise RuntimeError(
+                        "locked operator-stop row vanished during terminal outcome"
+                    )
+                current_status = str(row["status"])
+                if not operator_search_stop_is_current(current_status):
+                    applied.append(transitions.require_transition_applied(
+                        transitions.finalize_request(
+                            transition_db,
+                            command.request_id,
+                            transitions.RequestTransition.to_manual(
+                                from_status=current_status,
+                            ),
+                        )
+                    ))
             for entry in command.denylists:
                 if self._persist_terminal_denylist(
                     command.request_id,
@@ -559,13 +733,23 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
         cooled: set[str] = set()
         with self._atomic():
             transition_db = _TransactionalTransitionsDB(self, boundary)
-            applied = transitions.require_transition_applied(
-                transitions.finalize_request(
-                    transition_db,
-                    command.request_id,
-                    command.request_transition,
-                )
+            applied = []
+            current_status = self._lock_terminal_request_status(
+                command.request_id
             )
+            preserve_current = (
+                command.request_transition is not None
+                and command.request_transition.target_status == "wanted"
+                and operator_search_stop_is_current(current_status)
+            )
+            if command.request_transition is not None and not preserve_current:
+                applied.append(transitions.require_transition_applied(
+                    transitions.finalize_request(
+                        transition_db,
+                        command.request_id,
+                        command.request_transition,
+                    )
+                ))
             download_log_id = self._insert_terminal_download_audit(
                 command.request_id,
                 command.audit,
@@ -624,6 +808,6 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
         return TerminalOutcomeResult(
             download_log_id=download_log_id,
             job=job,
-            transitions=(applied,),
+            transitions=tuple(applied),
             cooled_down_users=frozenset(cooled),
         )

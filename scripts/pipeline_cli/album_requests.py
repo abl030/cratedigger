@@ -19,11 +19,11 @@ from lib import transitions
 from lib.disk_coverage_service import disk_coverage
 from lib.release_identity import detect_release_source, normalize_release_id
 
-# Module-level DI seam for ``transitions.finalize_request`` — see
+# Module-level DI seam for the operator transition service — see
 # ``lib.dispatch.outcome_actions.finalize_request`` for the rationale.
 # Each module that calls it binds its own copy (same pattern as
 # ``web.routes.pipeline_mutations.finalize_request`` / ``harness.import_one.finalize_request``).
-finalize_request = transitions.finalize_request
+finalize_request = transitions.finalize_operator_request
 
 
 def _transition_applied_or_report(
@@ -494,9 +494,6 @@ def cmd_set(db, args):
         print(f"  Request {args.id} not found.")
         return 2
     old_status = req["status"]
-    if old_status == args.status:
-        print(f"  [{args.id}] already has status '{args.status}'.")
-        return 0
     result = finalize_request(
         db,
         args.id,

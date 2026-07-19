@@ -336,16 +336,16 @@ def _seed_search_requests(db: Any) -> "list[dict[str, Any]]":
 # --- import_jobs projection ------------------------------------------------
 
 def _seed_get_active_import_job_for_request(db: Any) -> "list[dict[str, Any]]":
-    from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+    from lib.import_queue import IMPORT_JOB_FORCE
 
     rid = db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="activejob-parity")
     db.enqueue_import_job(
-        IMPORT_JOB_MANUAL,
+        IMPORT_JOB_FORCE,
         request_id=rid,
         dedupe_key=f"manual:{rid}",
-        payload=manual_import_payload(failed_path="/tmp/parity"),
+        payload={"failed_path": "/tmp/parity"},
     )
     job = db.get_active_import_job_for_request(rid)
     return _one(job.to_dict() if job is not None else None)

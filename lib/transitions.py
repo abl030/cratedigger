@@ -10,7 +10,7 @@ Terminal audit status: replaced (no outgoing lifecycle transitions).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from types import MappingProxyType
 from typing import Any, Literal, Mapping, Protocol, TypeAlias, runtime_checkable
@@ -72,6 +72,13 @@ class TransitionsDB(Protocol):
         *,
         expected_status: str | None = None,
         **extra: Any,
+    ) -> bool: ...
+
+    def compare_request_status(
+        self,
+        request_id: int,
+        *,
+        expected_status: str,
     ) -> bool: ...
 
 
@@ -413,6 +420,85 @@ def finalize_request(
         transition.target_status,
         **transition_kwargs,
     )
+
+
+def finalize_operator_request(
+    db: TransitionsDB,
+    request_id: int,
+    transition: RequestTransition,
+    *,
+    stale_retries: int = 3,
+) -> TransitionResult:
+    """Linearize an operator lifecycle command behind terminal writers.
+
+    Operator adapters necessarily read a row before constructing their
+    command. If a terminal transaction already owns the row lock, that
+    snapshot can become stale while the compare-and-set waits. Rebase only
+    operator intent onto the committed status and retry; automation continues
+    to use ``finalize_request`` and treats the same conflict as a hard stop.
+    """
+    current = transition
+    if current.from_status is None:
+        row = db.get_request(request_id)
+        if row is None:
+            return TransitionConflict(
+                request_id=request_id,
+                target_status=current.target_status,
+                kind=TransitionConflictKind.not_found,
+                expected_status=None,
+                actual_status=None,
+            )
+        current = replace(current, from_status=str(row["status"]))
+    for retry in range(stale_retries + 1):
+        is_status_only_same_source = (
+            current.from_status == current.target_status
+            and not current.fields
+            and current.attempt_type is None
+        )
+        if is_status_only_same_source:
+            assert current.from_status is not None
+            _validate_transition_fields(
+                current.target_status,
+                current.fields,
+            )
+            applied = db.compare_request_status(
+                request_id,
+                expected_status=current.from_status,
+            )
+            if applied:
+                result: TransitionResult = TransitionApplied(
+                    request_id=request_id,
+                    from_status=current.from_status,
+                    target_status=current.target_status,
+                )
+            else:
+                refreshed = db.get_request(request_id)
+                result = TransitionConflict(
+                    request_id=request_id,
+                    target_status=current.target_status,
+                    kind=(
+                        TransitionConflictKind.not_found
+                        if refreshed is None
+                        else TransitionConflictKind.stale_source
+                    ),
+                    expected_status=current.from_status,
+                    actual_status=(
+                        str(refreshed["status"])
+                        if refreshed is not None
+                        else None
+                    ),
+                )
+        else:
+            result = finalize_request(db, request_id, current)
+        if not (
+            isinstance(result, TransitionConflict)
+            and result.kind is TransitionConflictKind.stale_source
+            and result.actual_status is not None
+            and retry < stale_retries
+        ):
+            return result
+        current = replace(current, from_status=result.actual_status)
+    raise AssertionError("operator transition retry loop did not return")
 
 
 @dataclass(frozen=True)

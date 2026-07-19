@@ -432,7 +432,6 @@ def _cleanup_wrong_match(
         candidate.evidence,
         current_evidence,
         facts=AlbumQualityEvidenceDecisionFacts(
-            import_mode="force",
             verified_lossless_target=getattr(
                 runtime_cfg,
                 "verified_lossless_target",

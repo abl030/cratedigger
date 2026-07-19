@@ -1,8 +1,8 @@
-"""Force/manual-import audio-manifest guard.
+"""Force-import audio-manifest guard.
 
 Reconciles a staged source folder against its validated audio reference
-before beets can run, self-healing the request to ``wanted`` on any
-mismatch while preserving the operator's source folder. See ``_guard_reject``.
+before beets can run, preserving both the operator-owned request status and
+source folder on any mismatch. See ``_guard_reject``.
 """
 
 from __future__ import annotations
@@ -68,15 +68,12 @@ def _guard_reject(
     import_job_id: int | None = None,
     source_download_log_id: int | None = None,
 ) -> DispatchOutcome:
-    """Reject a force/manual import at the manifest guard.
+    """Reject a force-import at the manifest guard.
 
-    The request self-heals back to ``wanted`` (R20): the *album* is still
-    wanted — only this particular source folder is unimportable. Writes the
-    mandatory ``download_log`` audit row and bumps the validation attempt
-    counter via the shared importer rejection writer
-    (``_record_rejection_and_maybe_requeue``). The flip is idempotent when
-    the request is already ``wanted`` (the common case for a Wrong Matches
-    force-import) and recovers a ``downloading``/``manual`` row otherwise.
+    Writes the mandatory ``download_log`` audit row without changing the
+    request lifecycle or retry counters. A force attempt may inspect a
+    ``wanted`` request, or one whose search was explicitly stopped by the
+    operator; neither state belongs to this guard to rewrite.
 
     The audit row carries no ``validation_result.failed_path``, so it never
     becomes a *new* Wrong Matches entry (``get_wrong_matches`` keys on that
@@ -89,8 +86,8 @@ def _guard_reject(
     ``QUALITY_PIPELINE_REJECTED`` runs ``delete_wrong_match`` →
     ``shutil.rmtree`` (``lib/wrong_matches.py``). The guard only ever sees a
     *non-empty* folder (an empty source returns ``None`` from the caller and
-    self-heals through the evidence pipeline's ``empty_fileset`` early-exit
-    instead), so deleting here would always destroy real audio the operator
+    reaches the evidence pipeline's ``empty_fileset`` early-exit instead), so
+    deleting here would always destroy real audio the operator
     chose to import — the irreversible auto-decision the archivist frame
     forbids. Wrong-match-folder deletion is reserved for the genuinely-empty
     (0-file) case, which routes through the evidence pipeline, not this guard.
@@ -113,7 +110,7 @@ def _guard_reject(
             detail=detail,
             failed_path=failed_path,
         ).to_json(),
-        requeue=True,
+        requeue=False,
         outcome_label="rejected",
         staged_path=failed_path,
         attempt_result=attempt_result,
@@ -132,7 +129,7 @@ def _guard_reject(
     )
 
 
-def _guard_force_manual_audio_manifest(
+def _guard_force_import_audio_manifest(
     db: "PipelineDB",
     *,
     request_id: int,
@@ -146,24 +143,24 @@ def _guard_force_manual_audio_manifest(
 
     Outcomes, keyed on whether the source has *extra*, *matching*, or
     *missing* audio relative to the reference (origin manifest, else request
-    track count). Every reject self-heals the request to ``wanted`` (R20) and
-    PRESERVES the operator's source folder (see ``_guard_reject``); they
+    track count). Every reject preserves the request status and the operator's
+    source folder (see ``_guard_reject``); they
     differ only in the audit ``scenario`` label.
 
     * **PROCEED** (``None``) — on-disk audio matches the reference, OR the
       source is empty (0 audio files). An empty source flows through to the
       canonical ``empty_fileset`` early-exit in
       ``full_pipeline_decision_from_evidence`` (or a requeue-to-preview when
-      evidence isn't ready) — either way the request keeps searching, and the
+      evidence isn't ready); caller lifecycle authority determines status, and the
       (empty) folder cleanup is owned there. The guard does NOT own the
       ``empty_fileset`` decision; that lives in ONE place (see CLAUDE.md
       § "Quality decisions live in ONE place").
     * **INCOMPLETE** (``incomplete_fileset``) — the source is *missing* audio
       (under-count or manifest subset, no extras) but still has real files on
-      disk. Self-heal + keep the folder for review.
+      disk. Preserve status + keep the folder for review.
     * **EXTRA / UNVERIFIABLE** (``untracked_audio`` / ``unverifiable_source``)
       — the source carries *extra* untracked audio, or there is no reference
-      at all for a non-empty source. Self-heal + keep the folder; passing it
+      at all for a non-empty source. Preserve status + keep the folder; passing it
       to beets would import unowned files, so the operator must review it.
     """
     expected_count = _expected_request_track_count(db, request_id)
@@ -191,7 +188,7 @@ def _guard_force_manual_audio_manifest(
             source_download_log_id=download_log_id)
 
     # Empty source: the canonical empty_fileset early-exit in the evidence
-    # pipeline self-heals this. Returning None lets the import flow reach it.
+    # pipeline owns the verdict. Returning None lets the import flow reach it.
     if not actual_audio:
         return None
 
@@ -201,7 +198,7 @@ def _guard_force_manual_audio_manifest(
                 return extra(
                     "Origin validation manifest has "
                     f"{len(manifest)} audio files but the request expects "
-                    f"{expected_count}; refusing force/manual import")
+                    f"{expected_count}; refusing force import")
             return incomplete(
                 "Origin validation manifest has "
                 f"{len(manifest)} audio files but the request expects "
@@ -211,11 +208,11 @@ def _guard_force_manual_audio_manifest(
             return None
         if check.extra_audio:
             return extra(
-                "Force/manual import source does not match the original "
+                "Force import source does not match the original "
                 f"selected audio manifest: {check.detail()}")
         # Only missing audio — the source is a strict subset of the manifest.
         return incomplete(
-            "Force/manual import source is missing validated audio: "
+            "Force import source is missing validated audio: "
             f"{check.detail()}")
 
     if expected_count is None:
@@ -223,14 +220,14 @@ def _guard_force_manual_audio_manifest(
         # verify the folder is owned, so fail closed against beets and keep
         # it for review.
         return extra(
-            "Force/manual import requires either an origin audio manifest or "
+            "Force import requires either an origin audio manifest or "
             "request track rows; refusing to pass an unowned folder to beets",
             scenario="unverifiable_source")
 
     if len(actual_audio) == expected_count:
         return None
     detail = (
-        "Force/manual import source has "
+        "Force import source has "
         f"{len(actual_audio)} audio files but the request expects "
         f"{expected_count}; source audio: {', '.join(actual_audio)}"
     )

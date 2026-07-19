@@ -7,13 +7,15 @@ from typing import Any, cast
 
 from lib import transitions
 from lib.dispatch import DispatchOutcome
+from lib.dispatch.post_import import _run_or_stage_quality_gate
+from lib.dispatch.quality_gate import QualityGatePlan
 from lib.import_preview import ImportPreviewResult
 from lib.import_queue import (
-    IMPORT_JOB_MANUAL,
-    manual_import_payload,
+    IMPORT_JOB_FORCE,
 )
 from lib.quality import MeasurementFailure
 from lib.terminal_outcomes import (
+    ImportJobTerminal,
     PendingImportTerminalOutcome,
     TerminalDownloadAudit,
 )
@@ -31,13 +33,59 @@ def _seed_request(db: FakePipelineDB) -> None:
 
 
 class TestTerminalOutcomeCallers(unittest.TestCase):
+    def test_rejection_cannot_claim_successful_terminal_acceptance(self) -> None:
+        pending = PendingImportTerminalOutcome(
+            request_id=42,
+            import_job_id=7,
+            initial_transition=transitions.RequestTransition.to_imported(),
+            audit=TerminalDownloadAudit(outcome="rejected"),
+        ).mark_successful_terminal_acceptance()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "successful terminal acceptance requires",
+        ):
+            pending.with_job(ImportJobTerminal(
+                status="failed",
+                error="rejected",
+                result={"success": False},
+                message="rejected",
+            ))
+
+    def test_quality_gate_acceptance_marks_pending_terminal_bundle(self) -> None:
+        pending = PendingImportTerminalOutcome(
+            request_id=42,
+            import_job_id=7,
+            initial_transition=transitions.RequestTransition.to_imported(),
+            audit=TerminalDownloadAudit(outcome="success"),
+        )
+
+        def accepted_plan(**_kwargs: object) -> QualityGatePlan:
+            return QualityGatePlan(
+                transition=transitions.RequestTransition.to_imported(
+                    from_status="imported",
+                ),
+                successful_terminal_acceptance=True,
+            )
+
+        result = _run_or_stage_quality_gate(
+            accepted_plan,
+            pending,
+            db=cast(Any, FakePipelineDB()),
+            request_id=42,
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertTrue(result.successful_terminal_acceptance)
+
     def test_importer_consumes_pending_bundle_without_double_finalization(self) -> None:
         db = FakePipelineDB()
         _seed_request(db)
         job = db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=42,
-            payload=manual_import_payload(failed_path="/tmp/atomic"),
+            payload={"failed_path": "/tmp/atomic"},
         )
         db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
         claimed = db.claim_next_import_job(worker_id="atomic")
@@ -75,11 +123,11 @@ class TestTerminalOutcomeCallers(unittest.TestCase):
 
     def test_preview_worker_uses_one_terminal_persistence_call(self) -> None:
         db = FakePipelineDB()
-        _seed_request(db)
+        db.seed_request(make_request_row(id=42, status="manual"))
         job = db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=42,
-            payload=manual_import_payload(failed_path="/tmp/atomic"),
+            payload={"failed_path": "/tmp/atomic"},
         )
         claimed = db.claim_next_import_preview_job(worker_id="atomic-preview")
         assert claimed is not None
@@ -107,7 +155,9 @@ class TestTerminalOutcomeCallers(unittest.TestCase):
         self.assertEqual(updated.status, "failed")
         self.assertEqual(len(db.persist_preview_terminal_outcome_calls), 1)
         self.assertEqual(len(db.download_logs), 1)
-        self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertEqual(db.request(42)["status"], "manual")
+        command = db.persist_preview_terminal_outcome_calls[0]
+        self.assertIsNone(command.request_transition)
 
 
 if __name__ == "__main__":

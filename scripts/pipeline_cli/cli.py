@@ -17,7 +17,6 @@ from scripts.pipeline_cli.imports import (
     cmd_force_import,
     cmd_import_jobs,
     cmd_import_preview,
-    cmd_manual_import,
 )
 from scripts.pipeline_cli.long_tail import cmd_long_tail
 from scripts.pipeline_cli.quality import cmd_quality, cmd_repair_spectral
@@ -119,7 +118,6 @@ def main():
         "show": cmd_show,
         "quality": cmd_quality,
         "force-import": cmd_force_import,
-        "manual-import": cmd_manual_import,
         "import-jobs": cmd_import_jobs,
         "import-preview": cmd_import_preview,
         "wrong-match-triage": cmd_wrong_match_triage,

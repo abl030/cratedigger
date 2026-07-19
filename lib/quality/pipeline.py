@@ -92,11 +92,9 @@ def full_pipeline_decision(
     target_format=None,
     # New download format label (codec-aware, passed through to measurements)
     new_format: str | None = None,
-    # Preimport gates (issue #91). Default to a passing audio check + the auto
-    # path so legacy simulator calls don't change behavior.
+    # Preimport gates (issue #91). Default to a passing audio check.
     audio_check_mode: str = "normal",
     audio_corrupt: bool = False,
-    import_mode: str = "auto",
     has_nested_audio: bool = False,
     # Rank-model config (defaults() for legacy callers)
     cfg: "QualityRankConfig | None" = None,
@@ -170,7 +168,7 @@ def full_pipeline_decision(
     }
 
     # A proof-bearing installed HAVE is the absolute acquisition ceiling
-    # (decision 21): no import — automatic OR force/manual — crosses it.
+    # (decision 21): no import — automatic OR force-import — crosses it.
     # Force-import bypasses only the beets distance; Replace/re-request is
     # the operator's way back in. The guard deliberately precedes every
     # candidate-derived reject, including folder/audio-integrity and
@@ -183,47 +181,24 @@ def full_pipeline_decision(
     # --- Preimport gates (issue #91) ---
     # Ordering mirrors the live flow: lib.dispatch.dispatch_import_from_db
     # checks inspection.has_nested_audio *before* calling
-    # measure_preimport_state, so a force/manual import of a nested corrupt
+    # measure_preimport_state, so a nested corrupt
     # folder is rejected as nested_layout (not audio_corrupt). The nested
-    # gate returns "skipped_auto"
-    # on the auto path, which is a no-op — the auto pipeline flattens
-    # downloads upstream in process_completed_album, so audio integrity is
-    # the first real reject.
-    #
-    # Post-reject state also mirrors the two live paths:
-    #   * Auto-import rejects call reject_and_requeue() which transitions
-    #     the request back to "wanted" and bumps the validation attempt
-    #     counter → final_status="wanted", keep_searching=True.
-    #   * Force/manual-import rejects call _record_rejection_and_maybe_requeue
-    #     with requeue=False — the request's current status (often "manual"
-    #     or "imported") is left untouched → final_status=None (unchanged),
-    #     keep_searching=False.
-    nested_outcome = preimport_nested_gate(import_mode, has_nested_audio)
+    # gate is normally unreachable for automation because that path flattens
+    # downloads upstream in process_completed_album. Caller identity does not
+    # change the verdict if nested evidence reaches the reducer.
+    nested_outcome = preimport_nested_gate(has_nested_audio)
     result["preimport_nested"] = nested_outcome
     if nested_outcome == "reject_nested":
-        # Force/manual-only reject — status stays whatever it was.
-        result["final_status"] = None
-        result["keep_searching"] = False
+        result["final_status"] = "wanted"
+        result["keep_searching"] = True
         return result
 
     audio_outcome = preimport_audio_gate(audio_check_mode, audio_corrupt)
     result["preimport_audio"] = audio_outcome
     if audio_outcome == "reject_corrupt":
-        if import_mode == "auto":
-            # Auto-path rejects call reject_and_requeue(), which denylists
-            # every source username (album_source.py:280). Mirror that side
-            # effect in the simulator so the Decisions tab and
-            # pipeline-cli quality don't underreport what the live pipeline
-            # actually does on an audio_corrupt reject.
-            result["final_status"] = "wanted"
-            result["keep_searching"] = True
-            result["denylisted"] = True
-        else:
-            # Force/manual: no status transition, no denylist (live helper
-            # _record_rejection_and_maybe_requeue leaves denylisting to the
-            # caller's action.denylist, which audio_corrupt rejects don't set).
-            result["final_status"] = None
-            result["keep_searching"] = False
+        result["final_status"] = "wanted"
+        result["keep_searching"] = True
+        result["denylisted"] = True
         return result
 
     # --- Stage 0: Spectral gate trigger (issue #93) ---
@@ -705,13 +680,12 @@ def full_pipeline_decision(
 class AlbumQualityEvidenceDecisionFacts(msgspec.Struct, frozen=True):
     """Action-time facts that are not intrinsic album-quality evidence.
 
-    Force/manual callers use ``import_mode`` for provenance only. Beets
-    distance bypass is intentionally outside this quality comparison.
+    Beets distance bypass is intentionally outside this quality comparison;
+    caller identity is not an input to this Struct.
     """
 
     audio_check_mode: str = "normal"
     audio_corrupt: bool = False
-    import_mode: str = "auto"
     has_nested_audio: bool = False
     verified_lossless_target: str | None = None
     target_format: str | None = None
@@ -1118,15 +1092,9 @@ def full_pipeline_decision_from_evidence(
         preimport_mixed_source: str | None = None,
         denylisted: bool,
     ) -> dict[str, Any]:
-        # Mirror the live preimport-fact reject side effects: auto-import
-        # rejects re-queue to ``wanted``; force/manual leaves the
-        # request alone (the unified reject helper forces ``requeue=True``
-        # for these decisions regardless, but the dict's ``final_status``
-        # / ``keep_searching`` reflect the auto path the simulator
-        # describes, matching the existing ``preimport_nested`` /
-        # ``preimport_audio`` early-exit shape produced by
-        # ``full_pipeline_decision``).
-        auto = facts.import_mode == "auto"
+        # The acquisition verdict remains wanted. Caller identity is absent
+        # from this reducer; the dispatch boundary decides whether that verdict
+        # may mutate an operator-owned request status.
         return {
             "preimport_audio": preimport_audio,
             "preimport_nested": preimport_nested,
@@ -1137,10 +1105,10 @@ def full_pipeline_decision_from_evidence(
             "stage1_spectral": None,
             "stage2_import": None,
             "stage3_quality_gate": None,
-            "final_status": "wanted" if auto else None,
+            "final_status": "wanted",
             "imported": False,
-            "denylisted": bool(denylisted and auto),
-            "keep_searching": bool(auto),
+            "denylisted": bool(denylisted),
+            "keep_searching": True,
             "target_final_format": None,
             "verified_lossless": False,
             "comparison_basis": None,
@@ -1272,7 +1240,6 @@ def full_pipeline_decision_from_evidence(
         ),
         audio_check_mode=facts.audio_check_mode,
         audio_corrupt=facts.audio_corrupt,
-        import_mode=facts.import_mode,
         has_nested_audio=facts.has_nested_audio,
         cfg=cfg,
         candidate_v0_probe_avg=(

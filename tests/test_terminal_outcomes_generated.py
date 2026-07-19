@@ -8,7 +8,7 @@ import unittest
 from hypothesis import example, given, settings, strategies as st
 
 from lib import transitions
-from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+from lib.import_queue import IMPORT_JOB_FORCE
 from lib.pipeline_db import PipelineDB
 from lib.terminal_outcomes import (
     ImportJobTerminal,
@@ -51,6 +51,20 @@ def assert_terminal_snapshot_all_or_none(
     )
     if after != expected:
         raise AssertionError(f"partial terminal outcome: {after!r}")
+
+
+def assert_operator_stop_matches_terminal_acceptance(
+    status: str,
+    *,
+    successful_terminal_acceptance: bool,
+) -> None:
+    """Only explicit successful acceptance may supersede the search stop."""
+    expected = "imported" if successful_terminal_acceptance else "manual"
+    if status != expected:
+        raise AssertionError(
+            f"terminal_acceptance={successful_terminal_acceptance!r} left "
+            f"operator-stop row {status!r}, want {expected!r}"
+        )
 
 
 def _terminal_command(request_id: int, job_id: int) -> ImportTerminalOutcome:
@@ -130,6 +144,205 @@ def _persist_known_bad_split_outcome(
 
 
 class TestTerminalOutcomeGenerated(unittest.TestCase):
+    @given(
+        successful_terminal_acceptance=st.booleans(),
+        min_bitrate=st.one_of(
+            st.none(),
+            st.integers(min_value=0, max_value=1500),
+        ),
+    )
+    def test_only_successful_terminal_acceptance_supersedes_operator_stop(
+        self,
+        successful_terminal_acceptance: bool,
+        min_bitrate: int | None,
+    ) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="manual",
+            manual_reason="operator_stop",
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            payload={"failed_path": "/tmp/generated"},
+        )
+        db.mark_import_job_preview_importable(job.id, preview_result={})
+        claimed = db.claim_next_import_job(worker_id="generated-stop")
+        assert claimed is not None
+        db.persist_import_terminal_outcome(ImportTerminalOutcome(
+            request_id=42,
+            import_job_id=claimed.id,
+            initial_transition=transitions.RequestTransition.to_imported(
+                min_bitrate=min_bitrate,
+            ),
+            audit=TerminalDownloadAudit(
+                outcome=(
+                    "success"
+                    if successful_terminal_acceptance
+                    else "rejected"
+                ),
+            ),
+            job=ImportJobTerminal(
+                status=(
+                    "completed"
+                    if successful_terminal_acceptance
+                    else "failed"
+                ),
+                error=(
+                    None
+                    if successful_terminal_acceptance
+                    else "rejected"
+                ),
+                result={"success": successful_terminal_acceptance},
+                message="generated terminal outcome",
+            ),
+            successful_terminal_acceptance=(
+                successful_terminal_acceptance
+            ),
+        ))
+
+        row = db.request(42)
+        assert_operator_stop_matches_terminal_acceptance(
+            row["status"],
+            successful_terminal_acceptance=(
+                successful_terminal_acceptance
+            ),
+        )
+        self.assertEqual(row["min_bitrate"], min_bitrate)
+
+    def test_terminal_acceptance_checker_trips_on_wrong_status(self) -> None:
+        for successful_terminal_acceptance, status in (
+            (False, "imported"),
+            (True, "manual"),
+        ):
+            with self.subTest(
+                successful_terminal_acceptance=(
+                    successful_terminal_acceptance
+                ),
+            ), self.assertRaises(AssertionError):
+                assert_operator_stop_matches_terminal_acceptance(
+                    status,
+                    successful_terminal_acceptance=(
+                        successful_terminal_acceptance
+                    ),
+                )
+
+    @example(
+        attempt_type="validation",
+        existing_min_bitrate=320,
+        min_bitrate_present=True,
+        min_bitrate=245,
+        explicit_previous=False,
+        search_override="lossless",
+    )
+    @example(
+        attempt_type=None,
+        existing_min_bitrate=0,
+        min_bitrate_present=True,
+        min_bitrate=245,
+        explicit_previous=False,
+        search_override=None,
+    )
+    @example(
+        attempt_type=None,
+        existing_min_bitrate=None,
+        min_bitrate_present=True,
+        min_bitrate=None,
+        explicit_previous=False,
+        search_override=None,
+    )
+    @given(
+        attempt_type=st.one_of(
+            st.none(),
+            st.sampled_from(("search", "download", "validation")),
+        ),
+        existing_min_bitrate=st.one_of(
+            st.none(),
+            st.integers(min_value=0, max_value=1500),
+        ),
+        min_bitrate_present=st.booleans(),
+        min_bitrate=st.one_of(
+            st.none(),
+            st.integers(min_value=0, max_value=1500),
+        ),
+        explicit_previous=st.booleans(),
+        search_override=st.one_of(
+            st.none(),
+            st.sampled_from(("lossless", "flac,mp3 v0")),
+        ),
+    )
+    def test_operator_stop_retains_generated_wanted_policy_effects(
+        self,
+        attempt_type: str | None,
+        existing_min_bitrate: int | None,
+        min_bitrate_present: bool,
+        min_bitrate: int | None,
+        explicit_previous: bool,
+        search_override: str | None,
+    ) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="manual",
+            min_bitrate=existing_min_bitrate,
+            prev_min_bitrate=192,
+            manual_reason="operator_stop",
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            payload={"failed_path": "/tmp/generated"},
+        )
+        db.mark_import_job_preview_importable(job.id, preview_result={})
+        claimed = db.claim_next_import_job(worker_id="generated-stop")
+        assert claimed is not None
+        fields: dict[str, object] = {
+            "search_filetype_override": search_override,
+        }
+        if min_bitrate_present:
+            fields["min_bitrate"] = min_bitrate
+        if explicit_previous:
+            fields["prev_min_bitrate"] = 256
+
+        db.persist_import_terminal_outcome(ImportTerminalOutcome(
+            request_id=42,
+            import_job_id=claimed.id,
+            initial_transition=transitions.RequestTransition.to_wanted_fields(
+                from_status="downloading",
+                attempt_type=attempt_type,
+                fields=fields,
+            ),
+            audit=TerminalDownloadAudit(outcome="rejected"),
+            job=ImportJobTerminal(
+                status="failed",
+                error="rejected",
+                result={"success": False},
+                message="rejected",
+            ),
+        ))
+
+        row = db.request(42)
+        self.assertEqual(row["status"], "manual")
+        self.assertEqual(row["manual_reason"], "operator_stop")
+        self.assertEqual(row["search_filetype_override"], search_override)
+        self.assertEqual(
+            row[f"{attempt_type}_attempts"] if attempt_type else 0,
+            1 if attempt_type else 0,
+        )
+        if min_bitrate_present:
+            self.assertEqual(row["min_bitrate"], min_bitrate)
+        self.assertEqual(
+            row["prev_min_bitrate"],
+            256
+            if explicit_previous
+            else (
+                existing_min_bitrate
+                if min_bitrate_present and existing_min_bitrate is not None
+                else 192
+            ),
+        )
+
     @given(fail_after=st.one_of(st.none(), st.integers(min_value=1, max_value=5)))
     def test_fake_transaction_is_unchanged_or_complete(
         self,
@@ -152,9 +365,9 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
             active_download_state={"files": []},
         ))
         job = db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
+            IMPORT_JOB_FORCE,
             request_id=42,
-            payload=manual_import_payload(failed_path="/tmp/generated"),
+            payload={"failed_path": "/tmp/generated"},
         )
         db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
         claimed = db.claim_next_import_job(worker_id="generated")

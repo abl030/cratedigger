@@ -7,7 +7,7 @@ longer measures: preview owns candidate-evidence production, dispatch
 trusts the evidence row, and the legacy direct-measurement branch in
 ``_dispatch_import_from_db_locked`` was deleted.
 
-The behavioral contract those tests defended (force/manual imports get
+The behavioral contract those tests defended (force-import gets
 spectral-gated) still holds — preview now enforces it. Coverage for the
 preview/importer pipeline shape lives in ``tests/test_import_queue.py``
 and ``tests/test_integration_slices.py``. After U8 the legacy
@@ -208,7 +208,7 @@ class TestNeedsSpectralCheckDecisions(unittest.TestCase):
 class TestInspectLocalFilesRecursive(unittest.TestCase):
     """inspect_local_files() must walk subdirectories so multi-disc layouts
     (``Album/CD1/*.mp3``) classify correctly — otherwise the spectral gate
-    silently skips nested manual/force imports.
+    silently skips nested force-imports.
     """
 
     def test_multi_disc_layout_detects_mp3(self):
@@ -294,7 +294,7 @@ class TestInspectLocalFilesRecursive(unittest.TestCase):
     def test_validate_audio_recurses_into_subdirs(self):
         """validate_audio must walk subdirectories so nested discs are decoded.
 
-        Auto path always passes flat folders, but force/manual-import can point
+        Auto path always passes flat folders, but force-import can point
         at user folders with ``Album/CD1/*.mp3``. If validate_audio only lists
         the root, no nested file is decoded and corrupt audio silently passes.
         """
@@ -323,7 +323,7 @@ class TestInspectLocalFilesRecursive(unittest.TestCase):
 
         Without recursion, a multi-disc folder returns an empty result that
         looks like 'genuine' (no tracks = no cliffs), and the spectral gate
-        silently passes a potential transcode on force/manual-import.
+        silently passes a potential transcode on force-import.
         """
         import os
         from unittest.mock import patch

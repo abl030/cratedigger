@@ -55,7 +55,7 @@ namespace, second is the per-lock key.
 
 | Namespace | Constant | Hex | ASCII | Key | Scope |
 |---|---|---|---|---|---|
-| Per-request import | `ADVISORY_LOCK_NAMESPACE_IMPORT` | `0x46494D50` | "FIMP" | `request_id` | Force/manual-import double-click protection |
+| Per-request import | `ADVISORY_LOCK_NAMESPACE_IMPORT` | `0x46494D50` | "FIMP" | `request_id` | Force-import double-click protection |
 | Per-release pipeline | `ADVISORY_LOCK_NAMESPACE_RELEASE` | `0x52454C45` | "RELE" | `release_id_to_lock_key(mb_release_id)` | Cross-process same-MBID serialisation |
 | Importer worker | `ADVISORY_LOCK_NAMESPACE_IMPORTER` | `0x51554555` | "QUEU" | `1` | One importer process drains the beets-mutating lane |
 | Per-request plan | `ADVISORY_LOCK_NAMESPACE_PLAN` | `0x504C414E` | "PLAN" | `request_id` | Search-plan generation / supersession serialisation |
@@ -67,7 +67,7 @@ during debugging:
 
 ```sql
 SELECT classid, objid FROM pg_locks WHERE locktype = 'advisory';
--- classid=0x46494D50 → force/manual-import lock
+-- classid=0x46494D50 → force-import lock
 -- classid=0x52454C45 → release-level lock
 -- classid=0x51554555 → importer-worker singleton lock
 -- classid=0x574D434C → wrong-match cleanup lock
@@ -82,7 +82,7 @@ running `import_one.py` twice against the same files. The second caller
 would crash or produce bogus state.
 
 **Scope**: Held by `dispatch_import_from_db` inside the importer worker.
-Web and CLI force/manual paths no longer call this directly; they dedupe at
+Web and CLI force-import paths no longer call this directly; they dedupe at
 `import_jobs` enqueue time. Keep this lock until a follow-up cleanup proves the
 queue invariant fully replaces the old double-click protection.
 
@@ -107,7 +107,7 @@ album's files vanish.
 
 **Scope**: Held for the duration of every `import_one.py` subprocess
 — that is, in every path that runs the harness. `dispatch_import_core`
-is the funnel; both the auto path and the force/manual path go through
+is the funnel; both the auto path and the force-import path go through
 it.
 
 **Key**: `release_id_to_lock_key(mb_release_id)` — a 31-bit
@@ -168,7 +168,7 @@ queue.
 
 ## Acquisition order
 
-Force/manual paths hold both locks at once. **IMPORT is outer, RELEASE
+Force-import paths hold both locks at once. **IMPORT is outer, RELEASE
 is inner.** Always. A reverse nesting would risk a cross-process
 deadlock if two flows acquire in opposite order, but because RELEASE is
 taken by the same session further down the call graph and no other
@@ -185,7 +185,7 @@ the locks across hashing, beets/filesystem deletion, pipeline cleanup and
 audit writes. Contention is a 409 / CLI exit 4 with zero mutation.
 
 ```
-FORCE/MANUAL (dispatch_import_from_db)
+FORCE (dispatch_import_from_db)
   └─ acquire IMPORT(request_id)                                ← outer
       └─ _dispatch_import_from_db_locked
           └─ dispatch_import_core
@@ -293,7 +293,7 @@ WHERE status = 'downloading'
 All acquires are non-blocking via `pg_try_advisory_lock`. On
 contention:
 
-- **IMPORT contention** (force/manual): log `SKIPPED: request N —
+- **IMPORT contention** (force-import): log `SKIPPED: request N —
   another import is already in progress` and return a
   `DispatchOutcome(success=False, message=...)` so the UI surfaces a
   "try again shortly" toast. The second caller writes nothing.
@@ -303,8 +303,8 @@ contention:
   its `active_download_state` intact — the next cycle idempotently
   re-enters `process_completed_album` and retries exactly where we
   stopped. Codex PR #136 R3 P2/P3.
-- **RELEASE contention** (force/manual): log `FORCE-IMPORT SKIPPED` /
-  `MANUAL-IMPORT SKIPPED`, return `DispatchOutcome(success=False,
+- **RELEASE contention** (force-import): log `FORCE-IMPORT SKIPPED`,
+  return `DispatchOutcome(success=False,
   deferred=False)`, no state mutated. Same UI message as IMPORT
   contention.
 
@@ -324,7 +324,7 @@ Cratedigger exploits this in the auto path: `_handle_valid_result`
 acquires RELEASE, `dispatch_import_core` acquires it again
 (reentrantly), the inner release is a no-op, the outer release is the
 real one. The design keeps `dispatch_import_core`'s lock scope correct
-for the force/manual path (where it IS the first acquisition) without
+for the force-import path (where it IS the first acquisition) without
 double-gating the auto path.
 
 **Scope**: reentrancy is per-session, not per-process. A single
@@ -334,7 +334,7 @@ each owning their own session, `album_source.py` lazily opens another,
 and the web server opens yet one more. Every `advisory_lock()` call
 must go through the same `PipelineDB` instance as its matching outer
 acquire for the reentrant no-op to apply. The auto path and the
-force/manual path both thread the same
+force-import path both thread the same
 `ctx.pipeline_db_source._get_db()` / `db` reference from the outer
 acquire down into `dispatch_import_core`, so they stay within one
 session. If a future change opens a fresh `PipelineDB` for the inner
@@ -346,8 +346,8 @@ session and returns False — revisit the ordering rules.
 | Path | File | Function | Namespace | Key expression |
 |---|---|---|---|---|
 | Auto-import outer | `lib/download_validation.py` | `_handle_valid_result` | RELEASE | `release_id_to_lock_key(album_data.mb_release_id)` |
-| Auto + force/manual inner | `lib/dispatch/core.py` | `dispatch_import_core` | RELEASE | `release_id_to_lock_key(mb_release_id)` |
-| Force/manual outer | `lib/dispatch/entry_points.py` | `dispatch_import_from_db` | IMPORT | `request_id` |
+| Auto + force-import inner | `lib/dispatch/core.py` | `dispatch_import_core` | RELEASE | `release_id_to_lock_key(mb_release_id)` |
+| Force-import outer | `lib/dispatch/entry_points.py` | `dispatch_import_from_db` | IMPORT | `request_id` |
 | Ban-source destructive action | `lib/destructive_release_service.py` | `ban_source` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(server release id)` |
 | Library-delete destructive action | `lib/destructive_release_service.py` | `delete_release_from_library` | IMPORT then RELEASE, or RELEASE only without a pipeline row; ambiguous dual or malformed-nonempty album identity rejects before locks | server-derived pipeline request id; `release_id_to_lock_key(server release id)` |
 | Replace operator action | `lib/mbid_replace_service.py` | `MbidReplaceService.replace_request_mbid` | IMPORT | `request_id` |

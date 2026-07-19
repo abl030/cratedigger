@@ -53,7 +53,7 @@ against that reality, not against a hypothetical public exposure.
 |----|----------|-------|------------------|
 | CD-SEC-01 | High | Historical credentials committed to a public repo | deleted notifier docs, git history |
 | CD-SEC-02 | High | No auth + wildcard CORS on file-destructive endpoints | `web/server.py` |
-| CD-SEC-03 | Medium | Manual-import / import-preview accept an arbitrary absolute path (+ in-place `mp3val -f`) | `web/routes/imports.py`, `lib/util.py` |
+| CD-SEC-03 | Medium | Import-preview accepts an arbitrary absolute path (+ in-place `mp3val -f`) | `web/routes/imports.py`, `lib/util.py` |
 | CD-SEC-04 | Medium | No systemd sandboxing on services that process attacker-controlled bytes | `nix/module.nix` |
 | CD-SEC-05 | Low | Internal exception strings reflected in HTTP 500 bodies | `web/server.py` |
 | CD-SEC-06 | Medium | TLS verification disabled on the Plex/Jellyfin fallback path | `lib/util.py` |
@@ -274,22 +274,23 @@ before writing the mandatory download audit.
 
 ## Priority 2
 
-### CD-SEC-03 — Arbitrary absolute path in manual-import / import-preview (Medium)
+### CD-SEC-03 — Arbitrary absolute path in import-preview (Medium)
 
-`web/routes/imports.py` (`post_manual_import`, `post_import_preview`) forwards an
-operator-supplied `path` to the resolver in `lib/util.py`, which returns
+`web/routes/imports.py` (`post_import_preview`) forwards an operator-supplied
+`path` to the resolver in `lib/util.py`, which returns
 `os.path.abspath` of **any** existing directory with no staging-root
 confinement (the slskd root is only a fallback base for *relative* inputs). The
-resolved path is enqueued as an import job or measured directly. `import-preview`
-additionally runs `mp3val -f` **in place** on any `.mp3` under the supplied
+resolved path is measured directly. `import-preview` runs `mp3val -f` **in
+place** on any `.mp3` under the supplied
 directory (an integrity mutation of arbitrary on-host files) and reads audio
 tags from arbitrary directories (info disclosure / existence oracle).
-`post_import_preview` also reads the raw body instead of going through the
-pydantic `parse_body` seam. The sibling streaming route in
+The removed `manual-import` endpoint previously shared this finding; it is no
+longer an active surface. `post_import_preview` also reads the raw body instead
+of going through the pydantic `parse_body` seam. The sibling streaming route in
 `web/wrong_match_file_service.py` already enforces a within-root containment
-check — these two endpoints simply omit it.
+check — this endpoint omits it.
 
-- **Remediation:** confine both endpoints to the configured Incoming /
+- **Remediation:** confine the endpoint to the configured Incoming /
   `failed_imports` roots with the same within-root check the wrong-match service
   uses, and route import-preview through `parse_body`.
 
@@ -332,7 +333,7 @@ successful path.
 
 `ImportJob` is a dataclass containing `dict[str, Any]` payload/result fields,
 and `from_row` manually coerces outer scalars rather than decoding job-specific
-wire contracts. Force/manual consumers then use permissive `.get()` checks. A
+wire contracts. Force-import consumers then use permissive `.get()` checks. A
 drifted `download_log_id: "42"`, for example, silently becomes `None`; the job
 continues without its wrong-match/audit ancestor instead of failing at the DB
 boundary. This violates the repository's `msgspec.Struct` policy for JSONB and
@@ -557,7 +558,7 @@ write preserves every field and failure boundary through real PostgreSQL.
   which permits unrestricted writes via `psql` anyway. It is a footgun label, not
   a privilege boundary.
 - **`failed_imports` rmtree fallback.** The fallback that approves a directory
-  with a `failed_imports` ancestor is deliberate (force/manual quarantine folders
+  with a `failed_imports` ancestor is deliberate (force-import quarantine folders
   live outside the strict slskd-root branch), every path reaching the delete
   originates from a cratedigger-written DB value, and no *delete* route/CLI
   accepts a free path. (CD-SEC-03 is a separate import/preview path-input bug.)

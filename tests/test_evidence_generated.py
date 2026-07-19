@@ -453,15 +453,17 @@ LosslessSpectralFailureKind = Literal[
 def assert_lossless_spectral_failure_lifecycle(
     *,
     request_status: str,
+    expected_request_status: str,
     job_status: str,
     preview_status: str | None,
     harness_calls: int,
 ) -> None:
     """Unusable lossless spectral evidence always fails before the harness."""
 
-    if request_status != "wanted":
+    if request_status != expected_request_status:
         raise AssertionError(
-            f"lossless spectral failure left request {request_status!r}"
+            "lossless spectral failure changed the force-import request from "
+            f"{expected_request_status!r} to {request_status!r}"
         )
     if job_status != "failed" or preview_status != "measurement_failed":
         raise AssertionError(
@@ -599,6 +601,7 @@ class TestGeneratedLosslessSpectralFailureLifecycle(unittest.TestCase):
         )
         assert_lossless_spectral_failure_lifecycle(
             request_status=request_status,
+            expected_request_status="downloading",
             job_status=job_status,
             preview_status=preview_status,
             harness_calls=harness_calls,
@@ -606,10 +609,11 @@ class TestGeneratedLosslessSpectralFailureLifecycle(unittest.TestCase):
 
 
 class TestLosslessSpectralFailureCheckerTripsOnViolations(unittest.TestCase):
-    def test_trips_when_failed_preview_leaves_request_imported(self):
+    def test_trips_when_failed_preview_changes_force_request_status(self):
         with self.assertRaises(AssertionError):
             assert_lossless_spectral_failure_lifecycle(
                 request_status="imported",
+                expected_request_status="downloading",
                 job_status="failed",
                 preview_status="measurement_failed",
                 harness_calls=0,
@@ -619,6 +623,7 @@ class TestLosslessSpectralFailureCheckerTripsOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_lossless_spectral_failure_lifecycle(
                 request_status="wanted",
+                expected_request_status="wanted",
                 job_status="failed",
                 preview_status="measurement_failed",
                 harness_calls=1,

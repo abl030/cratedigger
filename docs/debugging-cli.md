@@ -69,7 +69,6 @@ Beets metadata may be gone; deletion counts are `null` because no result was
 acknowledged. Do not infer success from metadata absence.
 `status=partial` with `album_deleted=true` means Beets deletion completed but
 the named PostgreSQL row remains after a purge failure.
-| `manual-import` | Import a local folder as a pipeline request |
 | `quality` | Show quality state and simulate decisions |
 | `query` | Run a read-only SQL query for debugging |
 | `repair-spectral` | Fix albums stuck by stale `current_spectral_bitrate` (#18) |

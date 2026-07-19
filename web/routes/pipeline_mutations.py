@@ -21,12 +21,12 @@ logger = logging.getLogger(__name__)
 
 from lib import transitions
 
-# Module-level DI seam for ``transitions.finalize_request``. Routes call
-# this name (not ``transitions.finalize_request`` directly) so tests can
+# Module-level DI seam for the operator transition service. Routes call
+# this name (not ``transitions.finalize_operator_request`` directly) so tests can
 # swap it via ``patch.object(routes.pipeline_mutations, "finalize_request",
 # new=...)`` at the same module-level scope as ``web.server.db``. See the
 # leaf-seam allowlist in ``tests/_mock_audit_scanner.py``.
-finalize_request = transitions.finalize_request
+finalize_request = transitions.finalize_operator_request
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
     force_import_dedupe_key,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Contract tests for web/routes/imports.py: manual import + wrong matches.
+"""Contract tests for web/routes/imports.py wrong-match surfaces.
 
 Split from tests/test_web_server.py (#408). Shared harness in
 tests/web/_harness.py.
@@ -26,31 +26,6 @@ from tests.web._harness import (
 )
 
 from tests.helpers import make_request_row
-
-
-class TestManualImportRouteContracts(_FakeDbWebServerCase):
-    """Contract tests for manual import routes."""
-
-    IMPORT_REQUIRED_FIELDS = {"status", "message", "request_id", "artist", "album"}
-
-    def setUp(self) -> None:
-        super().setUp()
-        self.db.seed_request(make_request_row(
-            id=100, status="wanted", mb_release_id="abc-123",
-            artist_name="Test Artist", album_title="Test Album",
-        ))
-
-    @patch("web.routes.imports.resolve_failed_path",
-           return_value="/complete/Test Artist - Test Album")
-    def test_manual_import_post_contract(self, _mock_resolve):
-        status, data = self._post(
-            "/api/manual-import/import",
-            {"request_id": 100, "path": "/complete/Test Artist - Test Album"},
-        )
-
-        self.assertEqual(status, 202)
-        _assert_required_fields(self, data, self.IMPORT_REQUIRED_FIELDS,
-                                "manual import response")
 
 
 class TestWrongMatchesContract(_FakeDbWebServerCase):
@@ -993,7 +968,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         latest = group["latest_import"]
         self.assertIsNotNone(latest)
         self.assertEqual(latest["id"], forced_id,
-                         "Must pick the most recent success/force/manual import, "
+                         "Must pick the most recent active or historical import, "
                          "not the newest rejection.")
         self.assertEqual(latest["outcome"], "force_import")
         self.assertEqual(latest["soulseek_username"], "forceuser")

@@ -30,8 +30,7 @@ from lib.quality import (DownloadInfo, QualityRankConfig, ValidationResult,
                          resolve_rejection_search_override)
 
 from lib.dispatch.types import (DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
-                                DispatchOutcome, ImportAttemptResult,
-                                _PREIMPORT_FACT_REJECT_DECISIONS)
+                                DispatchOutcome, ImportAttemptResult)
 from lib.dispatch.helpers import (_cleanup_staged_dir,
                                   _populate_dl_info_from_import_result,
                                   _should_cleanup_path, _v0_probe_log_fields)
@@ -88,15 +87,10 @@ def _reject_import_from_evidence_decision(
     as just ``"downgrade · username"`` because every quality column
     came back NULL — see ``TestRejectImportFromEvidenceDecision``.
 
-    **U11 forced-requeue invariant.** When ``decision`` names a
-    folder/audio-integrity fact (``_PREIMPORT_FACT_REJECT_DECISIONS``), the
-    helper forces ``requeue=True`` regardless of the caller's
-    ``requeue_on_failure`` flag. These rejects fire upstream of any beets
-    mutation and upstream of any operator intent — the album is still
-    desired, only this specific source is bad — so the parent request must
-    always self-heal back to ``wanted``. Quality-side rejects continue to
-    honour ``requeue_on_failure`` (force/manual paths pass ``False``
-    because the operator already chose to act on this source).
+    Every reject honours ``requeue_on_failure``. Automatic imports pass True
+    because a rejected candidate should self-heal to ``wanted``. Force imports
+    pass False because their ``manual`` (next-step ``unsearchable``) request
+    status is operator-owned and a candidate fact must not clear it.
     """
 
     import_result = attempt_result.result
@@ -104,11 +98,6 @@ def _reject_import_from_evidence_decision(
         raise RuntimeError("persisted-evidence rejection requires an import result")
     _populate_dl_info_from_import_result(dl_info, import_result)
     action = dispatch_action(decision)
-    # U11: force requeue on folder/audio-integrity rejects (formerly the
-    # invariant enforced by the deleted ``_route_preimport_decision_reject``).
-    effective_requeue = (
-        requeue_on_failure or decision in _PREIMPORT_FACT_REJECT_DECISIONS
-    ) and not action.preserve_imported
     rejection_validation = validation_result or ValidationResult(
         distance=distance,
         scenario=decision or scenario,
@@ -141,7 +130,7 @@ def _reject_import_from_evidence_decision(
         dl_info,
         detail=detail,
         error=None,
-        requeue=effective_requeue,
+        requeue=requeue_on_failure and not action.preserve_imported,
         outcome_label="rejected",
         search_filetype_override=search_filetype_override,
         validation_result=rejection_validation,
@@ -223,7 +212,7 @@ def _do_mark_done(
     ``imported_path`` is the beets destination (from
     ``ImportResult.postflight.imported_path``) — what shows up in the UI's
     "Imported to" label. ``dest_path`` is the source/staging path passed to
-    the importer. When callers have both (auto/force/manual paths that ran
+    the importer. When callers have both (automation/force paths that ran
     beets), they pass ``imported_path`` so ``album_requests.imported_path``
     reflects the actual on-disk location. Callers that only stage for manual
     review (``album_source.mark_done``) leave ``imported_path=None``; it
@@ -350,14 +339,13 @@ def _finalize_request_and_log_rejection(
     denylist_reason: str | None = None,
     preserve_imported: bool = False,
 ) -> int:
-    """Sole writer of the four self-healing rejection side effects (U4).
+    """Write an imperative rejection audit and optional lifecycle transition.
 
     The single source of truth for "a candidate was rejected; clean up
     state so the parent request can advance." Both the importer-side
     ``_record_rejection_and_maybe_requeue`` (with full ``DownloadInfo``
-    context) and the preview-side ``_record_preview_measurement_failed``
-    (without slskd context) delegate here. Grep for this function name to
-    find every call site — there should be exactly two production callers.
+    context) and the direct installed-HAVE abort use this boundary. Queued
+    preview/import outcomes use their atomic terminal command objects instead.
 
     Side effects, in order:
 
@@ -384,7 +372,7 @@ def _finalize_request_and_log_rejection(
     subcase (``request_id is None``) raises instead — the audit row
     cannot be written because ``download_log.request_id`` is NOT NULL
     (this was always true; the INSERT used to raise NotNullViolation).
-    The preview worker's self-heal try/except absorbs it and the job is
+    The preview worker's lifecycle try/except absorbs it and the job is
     already ``failed`` from its step 1, so the queue still converges.
     """
     if preserve_imported and request_id is not None:
@@ -412,7 +400,7 @@ def _finalize_request_and_log_rejection(
         # the INSERT — download_log.request_id is NOT NULL — but with an
         # honest message (#409 typing exposed the documented-but-impossible
         # "request_not_found writes the log" subcase). The preview worker's
-        # self-heal try/except catches it; the job is already failed.
+        # lifecycle try/except catches it; the job is already failed.
         raise ValueError(
             "cannot write download_log rejection audit: request_id is None "
             "and download_log.request_id is NOT NULL"
@@ -464,7 +452,7 @@ def _record_rejection_and_maybe_requeue(
     ``scripts/importer.py`` handles it on the outer return).
 
     When ``requeue=True`` (auto-import): transitions to "wanted", records
-    attempt. When ``requeue=False`` (force/manual import): only logs to
+    attempt. When ``requeue=False`` (force-import): only logs to
     download_log. ``preserve_imported=True`` is the proof-lock exception:
     it transitions back to terminal "imported" without an attempt bump.
 
@@ -538,6 +526,7 @@ def _record_preview_measurement_failed(
     denylist_reason: str | None = None,
     import_result: ImportResult | None = None,
     preview_result: dict[str, object] | None = None,
+    requeue_to_wanted: bool = True,
 ) -> int:
     """Preview-side measurement_failed entry point (U4).
 
@@ -549,13 +538,14 @@ def _record_preview_measurement_failed(
     columns and the typed ``MeasurementFailure`` payload as its
     ``validation_result`` JSONB.
 
-    Delegates to ``persist_preview_terminal_outcome`` for the four
-    self-healing effects in one explicit transaction:
+    Delegates to ``persist_preview_terminal_outcome`` for the terminal effects
+    in one explicit transaction. Automation reopens ``wanted``; operator jobs
+    omit the transition and preserve the request's current lifecycle state.
 
       * ``download_log`` row written with ``outcome='measurement_failed'``,
         ``beets_scenario='measurement_failed'``, and the
         ``MeasurementFailure`` JSON as ``validation_result``.
-      * Parent request → ``wanted`` via ``transitions.finalize_request``.
+      * Parent request → ``wanted`` for automation, otherwise unchanged.
       * Optional denylist write when ``denylist_username`` is supplied.
       * ``import_jobs.status='failed'`` via ``mark_import_job_failed`` so
         the poll loop's active-import-job guard releases on the next tick.
@@ -579,7 +569,11 @@ def _record_preview_measurement_failed(
     result = db.persist_preview_terminal_outcome(PreviewTerminalOutcome(
         request_id=request_id,
         import_job_id=import_job_id,
-        request_transition=transitions.RequestTransition.to_wanted(),
+        request_transition=(
+            transitions.RequestTransition.to_wanted()
+            if requeue_to_wanted
+            else None
+        ),
         audit=TerminalDownloadAudit(
             soulseek_username=None,
             filetype=None,
@@ -615,8 +609,9 @@ def _record_have_analysis_error(
     import_job_id: int | None,
     source_download_log_id: int | None = None,
     cooled_down_users: set[str] | None = None,
+    requeue_to_wanted: bool = True,
 ) -> int | PendingImportTerminalOutcome:
-    """Persist the non-quality abort for a failed installed-HAVE analysis."""
+    """Persist a non-quality abort while honoring caller lifecycle authority."""
 
     failure = HaveAnalysisFailure(
         failure_category=classify_have_analysis_failure(
@@ -644,9 +639,13 @@ def _record_have_analysis_error(
         validation_result=validation_json,
         source_download_log_id=source_download_log_id,
     )
-    transition = transitions.RequestTransition.to_wanted_fields(
-        attempt_type="validation",
-        fields={},
+    transition = (
+        transitions.RequestTransition.to_wanted_fields(
+            attempt_type="validation",
+            fields={},
+        )
+        if requeue_to_wanted
+        else None
     )
     cooldowns = (
         (TerminalCooldown(dl_info.username),)
@@ -666,8 +665,8 @@ def _record_have_analysis_error(
         db,
         request_id,
         audit.as_log_kwargs(),
-        requeue_to_wanted=True,
-        record_validation_attempt=True,
+        requeue_to_wanted=requeue_to_wanted,
+        record_validation_attempt=requeue_to_wanted,
     )
     if dl_info.username and db.check_and_apply_cooldown(dl_info.username):
         if cooled_down_users is not None:
