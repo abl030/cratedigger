@@ -534,7 +534,7 @@ def _run_have_analysis_abort(
     db = FakePipelineDB()
     db.seed_request(make_request_row(
         id=42,
-        status="manual" if mode == "force" else "downloading",
+        status="unsearchable" if mode == "force" else "downloading",
         search_filetype_override=search_override,
         active_download_state={"files": [], "filetype": "flac"},
     ))
@@ -802,7 +802,7 @@ def assert_have_analysis_abort_is_non_quality(
 
     assert_download_log_row_created(db)
     row = db.request(42)
-    expected_status = "wanted" if mode == "auto" else "manual"
+    expected_status = "wanted" if mode == "auto" else "unsearchable"
     if row["status"] != expected_status:
         raise AssertionError(
             f"HAVE-analysis abort left status={row['status']!r}, "
@@ -1035,7 +1035,7 @@ class TestGeneratedOperatorRetainedLifecycle(unittest.TestCase):
 
     @given(
         decision=st.sampled_from(tuple(sorted(_AUTOMATIC_RETAINED_ACTIONS))),
-        initial_status=st.sampled_from(("wanted", "manual")),
+        initial_status=st.sampled_from(("wanted", "unsearchable")),
     )
     def test_retained_policy_preserves_starting_search_lifecycle(
         self,
@@ -1176,7 +1176,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_operator_retained_lifecycle(
                 db,
-                initial_status="manual",
+                initial_status="unsearchable",
                 expected_override="lossless",
             )
 

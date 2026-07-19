@@ -239,10 +239,10 @@ class TestSubmitHappyPath(unittest.TestCase):
             [f"vid-{i + 1}" for i in range(EXPECTED_TRACKS)],
         )
 
-    def test_manual_request_accepted_covers_ae9(self) -> None:
-        """AE9: rescue from ``manual`` status is identical to wanted."""
+    def test_unsearchable_request_accepted_covers_ae9(self) -> None:
+        """AE9: rescue from ``unsearchable`` is identical to wanted."""
         pdb = FakePipelineDB()
-        _seed_wanted_request(pdb, request_id=99, status="manual")
+        _seed_wanted_request(pdb, request_id=99, status="unsearchable")
         _seed_resolver_row(pdb)
         svc = _make_service(pdb)
 
@@ -315,7 +315,7 @@ class TestSubmitWrongState(unittest.TestCase):
             [e for e in pdb.download_logs if e.source == "youtube"], [])
 
     def test_forbidden_statuses_subtest_table(self) -> None:
-        """Every non-{wanted, manual} status rejects with ``wrong_state``."""
+        """Every non-{wanted, unsearchable} status rejects as wrong-state."""
         forbidden_statuses = ("downloading", "imported", "replaced")
         for status in forbidden_statuses:
             with self.subTest(status=status):

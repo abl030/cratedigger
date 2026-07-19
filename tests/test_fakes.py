@@ -650,7 +650,7 @@ class TestFakePipelineDB(unittest.TestCase):
             41, expected_status="wanted",
         ))
         self.assertFalse(db.update_request_fields(
-            41, expected_status="manual",
+            41, expected_status="unsearchable",
         ))
         self.assertFalse(db.update_request_fields(42))
         self.assertFalse(db.update_request_fields(
@@ -681,7 +681,7 @@ class TestFakePipelineDB(unittest.TestCase):
                 self.assertEqual(db.request(41), before)
 
         with self.assertRaises(ValueError):
-            db.update_request_fields(41, status="manual")
+            db.update_request_fields(41, status="unsearchable")
         self.assertEqual(db.request(41), before)
 
     def test_metadata_writers_reject_malformed_and_lifecycle_fields(self):
@@ -1054,27 +1054,12 @@ class TestFakePipelineDB(unittest.TestCase):
             self.assertFalse(acquired)
         self.assertEqual(db.advisory_lock_calls, [(0x1234, 42)])
 
-    def test_reset_to_wanted_clears_manual_reason(self):
-        """U6 fake parity: re-queue clears ``manual_reason`` and counters."""
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42, status="manual", manual_reason="search_exhausted",
-            search_attempts=7,
-        ))
-
-        db.reset_to_wanted(42)
-
-        row = db.request(42)
-        self.assertEqual(row["status"], "wanted")
-        self.assertEqual(row["search_attempts"], 0)
-        self.assertIsNone(row["manual_reason"])
-
     def test_wanted_resets_accept_explicit_previous_bitrate(self):
         """Fake parity: explicit history wins over derived old-min capture."""
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42,
-            status="manual",
+            status="unsearchable",
             min_bitrate=320,
             prev_min_bitrate=192,
         ))
@@ -1087,7 +1072,7 @@ class TestFakePipelineDB(unittest.TestCase):
 
         self.assertTrue(db.reset_to_wanted(
             42,
-            expected_status="manual",
+            expected_status="unsearchable",
             min_bitrate=224,
             prev_min_bitrate=256,
         ))
@@ -6135,8 +6120,8 @@ class TestFakeRequestUniqueMbReleaseId(unittest.TestCase):
         db.seed_request(make_request_row(
             id=1, mb_release_id="mbid-x", status="wanted"))
         db.seed_request(make_request_row(
-            id=1, mb_release_id="mbid-x", status="manual"))
-        self.assertEqual(db.request(1)["status"], "manual")
+            id=1, mb_release_id="mbid-x", status="unsearchable"))
+        self.assertEqual(db.request(1)["status"], "unsearchable")
 
     def test_seed_request_allows_multiple_null_mb_release_ids(self):
         # PG UNIQUE permits any number of NULLs (Discogs-only rows).

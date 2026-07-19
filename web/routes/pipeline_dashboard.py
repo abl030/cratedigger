@@ -28,8 +28,8 @@ def _dashboard_disk_coverage(s) -> dict[str, object] | None:
     Only ``imported`` claims beets presence, so ``drift_rows`` carries
     off-disk ``imported`` rows only (a release that vanished from beets
     is the Lucksmiths-class out-of-band drift signal). Off-disk wanted
-    (not yet acquired), downloading (in flight), and manual (staged for
-    review) rows are lifecycle-normal, not drift."""
+    (not yet acquired), downloading (in flight), and unsearchable
+    (operator search stop) rows are lifecycle-normal, not drift."""
     beets = s._beets_db()
     if beets is None:
         return None

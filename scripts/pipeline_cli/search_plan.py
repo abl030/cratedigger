@@ -138,7 +138,7 @@ def cmd_search_plan_regenerate(db, args):
         "error_message": result.error_message,
     }
     # Add an executability hint so operators don't misread "200 / success"
-    # on an imported/manual request as "now downloading".
+    # on an imported/unsearchable request as "now downloading".
     req = db.get_request(int(args.id))
     if req is not None:
         payload["request_status"] = req.get("status")

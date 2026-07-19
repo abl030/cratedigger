@@ -215,7 +215,7 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
             pipeline_request=make_request_row(
                 id=42,
                 mb_release_id=RELEASE_ID,
-                status="manual",
+                status="unsearchable",
                 source="request",
             ),
             download_history=[_history_row(

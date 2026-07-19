@@ -47,11 +47,13 @@ from lib.pipeline_db import (
 )
 from lib.import_manifest import audio_relative_paths
 from lib.quality import ActiveDownloadFileState, ActiveDownloadState
-from lib.youtube_ingest_service import YoutubeImportPayload
+from lib.youtube_ingest_service import (
+    YOUTUBE_IMPORT_ALLOWED_REQUEST_STATUSES,
+    YoutubeImportPayload,
+)
 
 logger = logging.getLogger("cratedigger-importer")
 RESTART_REQUEUE_MESSAGE = "Importer restarted while job was running; retry queued"
-YOUTUBE_IMPORT_ALLOWED_REQUEST_STATUSES = frozenset({"wanted", "manual"})
 
 
 def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
@@ -408,7 +410,7 @@ def execute_youtube_import_job(
             False,
             (
                 f"Album request {request_id} is status {status!r}; "
-                "YouTube import requires wanted/manual"
+                "YouTube import requires wanted/unsearchable"
             ),
         )
 
@@ -421,7 +423,7 @@ def execute_youtube_import_job(
     # active_download_state untouched on the row, and the downstream
     # update_download_state_current_path call inside
     # _materialize_processing_dir is gated by status='downloading' so
-    # it no-ops for wanted/manual rows.
+    # it no-ops for wanted/unsearchable rows.
     state = ActiveDownloadState(
         filetype=row.get("target_format") or "opus",
         enqueued_at="",

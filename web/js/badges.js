@@ -33,7 +33,7 @@ import { qualityLabelShort } from './util.js';
  *   matters: Opus 128 is transparent, MP3 128 is poor — same bitrate,
  *   different rank).
  * @property {string|null|undefined} [pipeline_status]
- *   'wanted' | 'downloading' | 'imported' | 'manual' | null
+ *   'wanted' | 'downloading' | 'imported' | 'unsearchable' | null
  * @property {boolean} [pipeline_verified_lossless] - The tracked install
  *   carries a verified-lossless proof (terminal quality identity).
  * @property {boolean} [pipeline_provisional] - The tracked install is an
@@ -76,6 +76,6 @@ export function renderStatusBadges(item) {
   if (pStatus === 'wanted') html += '<span class="badge badge-wanted">wanted</span>';
   if (pStatus === 'downloading') html += '<span class="badge badge-downloading">downloading</span>';
   if (pStatus === 'imported') html += '<span class="badge badge-imported">imported</span>';
-  if (pStatus === 'manual') html += '<span class="badge badge-manual">manual</span>';
+  if (pStatus === 'unsearchable') html += '<span class="badge badge-unsearchable">unsearchable</span>';
   return html;
 }

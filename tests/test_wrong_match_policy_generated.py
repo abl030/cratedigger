@@ -117,7 +117,7 @@ class TestGeneratedWrongMatchPolicy(unittest.TestCase):
     )
     @example(
         scenario="bad_audio_hash",
-        request_status="manual",
+        request_status="unsearchable",
         include_replaced=True,
     )
     @example(
@@ -154,7 +154,7 @@ class TestGeneratedWrongMatchPolicy(unittest.TestCase):
         scenario=st.one_of(st.none(), st.text(max_size=40)),
         request_status=st.one_of(
             st.none(),
-            st.sampled_from(("wanted", "downloading", "manual", "imported", "replaced")),
+            st.sampled_from(("wanted", "downloading", "unsearchable", "imported", "replaced")),
         ),
         include_replaced=st.booleans(),
     )

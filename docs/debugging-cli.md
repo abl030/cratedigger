@@ -47,7 +47,6 @@ Every top-level `pipeline-cli` subcommand, one line each. Run `pipeline-cli rout
 | `add` | Add a new request by MBID or Discogs ID |
 | `beets-distance` | Real beets-distance between a download_log's audio and an MBID (refuses if MBID is outside the request's release group) |
 | `ban-source` | Mark a request's server-resolved exact release as a bad rip, remove it from beets, and requeue it (requires `--confirm BAN`) |
-| `cancel` | Cancel a request (set to skipped) |
 | `disk-coverage` | Show which active pipeline rows are actually present in beets |
 | `force-import` | Force-import a rejected download by download_log ID |
 | `import-jobs` | List recent import queue jobs |
@@ -73,10 +72,9 @@ the named PostgreSQL row remains after a purge failure.
 | `query` | Run a read-only SQL query for debugging |
 | `repair-spectral` | Fix albums stuck by stale `current_spectral_bitrate` (#18) |
 | `replace` | Supersede a request with a new row at a different release id in the same release group/master (same pathway as the source) |
-| `retry` | Reset a failed request to wanted |
 | `routes` | Self-document the CLI surface — every subcommand, its args, and its description |
 | `search-plan` | Inspect persisted search plans (read-only, U6) |
-| `set` | Change the status of a request |
+| `set` | Set a request to `wanted`, `unsearchable`, or `imported` through the lifecycle transition graph |
 | `set-intent` | Toggle lossless-on-disk for a request |
 | `show` | Show full details of a request |
 | `status` | Show counts by status |

@@ -209,7 +209,8 @@ class LedgerPruneRow:
     accepted: bool
 
 
-_STATUSES = ("wanted", "downloading", "imported", "manual", "replaced")
+_STATUSES = (
+    "wanted", "downloading", "imported", "unsearchable", "replaced")
 _RETENTION_DAYS = 90
 _RETENTION_SECONDS = _RETENTION_DAYS * 24 * 60 * 60
 _PRUNE_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)

@@ -123,7 +123,7 @@ class TestTerminalOutcomeCallers(unittest.TestCase):
 
     def test_preview_worker_uses_one_terminal_persistence_call(self) -> None:
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="manual"))
+        db.seed_request(make_request_row(id=42, status="unsearchable"))
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
@@ -155,7 +155,7 @@ class TestTerminalOutcomeCallers(unittest.TestCase):
         self.assertEqual(updated.status, "failed")
         self.assertEqual(len(db.persist_preview_terminal_outcome_calls), 1)
         self.assertEqual(len(db.download_logs), 1)
-        self.assertEqual(db.request(42)["status"], "manual")
+        self.assertEqual(db.request(42)["status"], "unsearchable")
         command = db.persist_preview_terminal_outcome_calls[0]
         self.assertIsNone(command.request_transition)
 

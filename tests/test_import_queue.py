@@ -530,7 +530,7 @@ class TestImporterWorker(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42,
-            status="manual",
+            status="unsearchable",
             min_bitrate=116,
             verified_lossless=False,
             current_spectral_grade="likely_transcode",
@@ -640,7 +640,7 @@ class TestImporterWorker(unittest.TestCase):
             db.seed_request(make_request_row(
                 id=42,
                 mb_release_id="mbid-123",
-                status="manual",
+                status="unsearchable",
             ))
             log_id = self._log_wrong_match(db, failed_path=source)
             job = db.enqueue_import_job(
@@ -692,7 +692,7 @@ class TestImporterWorker(unittest.TestCase):
         through the REAL manifest guard (no mocked dispatch).
 
         Proves the two halves compose: the guard preserves the operator-owned
-        ``manual`` status AND its audit row does NOT inflate Wrong Matches,
+        ``unsearchable`` status AND its audit row does NOT inflate Wrong Matches,
         while the importer preserves the original WM entry for review (the
         ``IMPORT_MANIFEST_REJECTED`` code skips cleanup). beets never runs —
         the guard rejects upstream of it.
@@ -709,7 +709,7 @@ class TestImporterWorker(unittest.TestCase):
             db.seed_request(make_request_row(
                 id=42,
                 mb_release_id="mbid-123",
-                status="manual",
+                status="unsearchable",
             ))
             # One expected track but two audio files on disk → extra audio.
             db.set_tracks(42, [{"track_number": 1, "title": "One"}])
@@ -733,7 +733,7 @@ class TestImporterWorker(unittest.TestCase):
 
             assert updated is not None
             self.assertEqual(updated.status, "failed")
-            self.assertEqual(db.request(42)["status"], "manual")
+            self.assertEqual(db.request(42)["status"], "unsearchable")
             self.assertEqual(db.request(42)["validation_attempts"], 0)
             # The dead WM entry is preserved (extra audio → operator review),
             # and the audit row did NOT create a second entry.
@@ -776,7 +776,7 @@ class TestImporterWorker(unittest.TestCase):
             db.seed_request(make_request_row(
                 id=42,
                 mb_release_id="mbid-123",
-                status="manual",
+                status="unsearchable",
             ))
             db.set_tracks(42, [
                 {"track_number": 1, "title": "One"},
@@ -807,7 +807,7 @@ class TestImporterWorker(unittest.TestCase):
                 "under-count force-import must NOT delete the operator's folder")
             self.assertTrue(os.path.isfile(os.path.join(source, "01.mp3")))
             # The operator-owned request state is not this guard's to clear.
-            self.assertEqual(db.request(42)["status"], "manual")
+            self.assertEqual(db.request(42)["status"], "unsearchable")
             self.assertEqual(db.request(42)["validation_attempts"], 0)
             # WM entry preserved (something to inspect), no duplicate.
             self.assertEqual(len(db.get_wrong_matches()), 1)
@@ -2783,7 +2783,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
     """U9: importer dispatcher for ``youtube_import`` job_type.
 
     Covers AE7 (happy-path import to terminal state), AE8 (long-tail
-    rescue audit chain), AE9 (rescue from ``manual``), the preview-worker
+    rescue audit chain), AE9 (rescue from ``unsearchable``), the preview-worker
     front-gate path-resolution divergence, no-cooldown-leakage, and
     payload type-validation.
 
@@ -3058,9 +3058,9 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
         # Current category is cleared (the rescue IS the resolution).
         self.assertIsNone(row["unfindable_category"])
 
-    def test_rescue_from_manual_transitions_manual_to_imported(self):
-        """AE9: a request started in ``manual`` status transitions
-        ``manual → imported`` through the same single source-agnostic
+    def test_rescue_from_unsearchable_transitions_to_imported(self):
+        """AE9: a request started ``unsearchable`` transitions to
+        ``imported`` through the same single source-agnostic
         write site (``mark_imported_with_rescue``)."""
         from scripts import importer
         from lib import transitions
@@ -3069,9 +3069,9 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
             db = FakePipelineDB()
             db.seed_request(make_request_row(
                 id=42,
-                status="manual",
+                status="unsearchable",
                 active_download_state=None,
-                mb_release_id="mbid-yt-from-manual",
+                mb_release_id="mbid-yt-from-unsearchable",
                 unfindable_category="album_absent_artist_present",
                 unfindable_categorised_at=datetime(
                     2026, 5, 1, tzinfo=timezone.utc),
@@ -3087,11 +3087,13 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
                     cast(Any, db),
                     42,
                     transitions.RequestTransition.to_imported(
-                        from_status="manual",
+                        from_status="unsearchable",
                     ),
                 )
                 return CompletionDispatched(
-                    outcome=DispatchOutcome(True, "Imported from manual"))
+                    outcome=DispatchOutcome(
+                        True, "Imported from unsearchable"
+                    ))
 
             with patch(
                 "lib.download_processing.process_completed_album",

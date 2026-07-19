@@ -182,7 +182,7 @@ export function renderLibraryDetailBody(data, id) {
         <span class="p-detail-label" style="line-height:28px;">Status:</span>
         <button class="p-btn ${pStatus === 'wanted' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'wanted', null)">wanted</button>
         <button class="p-btn ${pStatus === 'imported' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'imported', null)">imported</button>
-        <button class="p-btn ${pStatus === 'manual' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'manual', null)">manual</button>
+        <button class="p-btn ${pStatus === 'unsearchable' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'unsearchable', null)">unsearchable</button>
       </div>`;
       html += `<div class="p-actions" style="margin-top:6px;">
         <span class="p-detail-label" style="line-height:28px;">Min bitrate:</span>

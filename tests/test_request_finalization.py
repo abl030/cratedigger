@@ -341,8 +341,8 @@ class TestRequestStatusWriteVisitor(unittest.TestCase):
 
     def test_rejects_non_downloading_module_constant_in_download_module(self) -> None:
         tree = ast.parse(
-            "STATUS_MANUAL = 'manual'\n"
-            "apply_transition(db, 42, STATUS_MANUAL)\n"
+            "STATUS_UNSEARCHABLE = 'unsearchable'\n"
+            "apply_transition(db, 42, STATUS_UNSEARCHABLE)\n"
         )
         visitor = _RequestStatusWriteVisitor(
             "lib/download.py",

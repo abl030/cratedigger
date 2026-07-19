@@ -405,7 +405,6 @@ class _DownloadLogMixin(_PipelineDBBase):
                     UPDATE album_requests
                     SET status = 'wanted',
                         active_download_state = NULL,
-                        manual_reason = NULL,
                         updated_at = %s
                     WHERE id = %s
                       AND status = 'downloading'

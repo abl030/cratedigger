@@ -468,11 +468,11 @@ console.log('ownership credit variants preserve the established contract');
     'foreign credit lands in Other releases');
 }
 
-console.log('in-flight lens includes downloading/manual and excludes ambient states');
+console.log('in-flight lens includes only downloading requests');
 {
   const albums = [
     library({ id: 1, album: 'DL', pipeline_status: 'downloading', pipeline_id: 11 }),
-    library({ id: 2, album: 'Manual', pipeline_status: 'manual', pipeline_id: 12 }),
+    library({ id: 2, album: 'Stopped', pipeline_status: 'unsearchable', pipeline_id: 12 }),
     library({ id: 3, album: 'Wanted', pipeline_status: 'wanted', pipeline_id: 13 }),
     library({ id: 4, album: 'Imported', pipeline_status: 'imported', pipeline_id: 14 }),
     library({ id: 5, album: 'None', pipeline_status: null }),
@@ -482,8 +482,8 @@ console.log('in-flight lens includes downloading/manual and excludes ambient sta
     }),
   ];
   assertEqual(classify([], albums).inFlight.map(row => row.album).join(','),
-    'DL,Manual,Pipeline-only DL',
-    'downloading/manual are visible regardless of library ownership');
+    'DL,Pipeline-only DL',
+    'downloading is visible regardless of library ownership');
 }
 
 console.log('empty and orphan-only artist worlds remain renderable');

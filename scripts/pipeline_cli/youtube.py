@@ -233,7 +233,7 @@ def cmd_youtube_rescue(db, args, *, service_factory=None):
       * 2 — ``request_not_found``
       * 3 — ``no_resolver_mapping``, ``track_count_precheck_failed``
             (semantic input violations)
-      * 4 — ``wrong_state`` (request is not ``wanted`` / ``manual``),
+      * 4 — ``wrong_state`` (request is not ``wanted`` / ``unsearchable``),
             ``in_flight`` (an existing ``youtube_running`` row already
             owns this request — re-issue once it's terminal)
       * 5 — ``transient`` (DB / MB-mirror hiccup; retry)

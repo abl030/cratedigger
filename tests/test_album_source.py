@@ -106,7 +106,7 @@ class TestDatabaseSourceRejectAndRequeueSeam(unittest.TestCase):
         is therefore proof that the seam resolved from_status itself.
         """
         fake_db = FakePipelineDB()
-        fake_db.seed_request(make_request_row(id=42, status="manual"))
+        fake_db.seed_request(make_request_row(id=42, status="unsearchable"))
 
         source = DatabaseSource.__new__(DatabaseSource)
         source._db = fake_db  # type: ignore[assignment]
@@ -314,7 +314,7 @@ class TestDatabaseSource(unittest.TestCase):
             album_title="B",
             source="request",
         )
-        db.update_status(req_id, "manual")
+        db.update_status(req_id, "unsearchable")
         record = _make_record(db_request_id=req_id, db_source="request")
         bv_result = ValidationResult(valid=False, distance=0.35, scenario="high_distance")
 

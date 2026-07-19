@@ -518,7 +518,7 @@ function renderUnfindableBody(triage) {
     ? `<div class="lt-rollup">artist probe: ${unfindable.last_artist_probe_match_count} match${unfindable.last_artist_probe_match_count === 1 ? '' : 'es'}${unfindable.last_artist_probe_at ? ` · ${esc(consoleTimestamp(unfindable.last_artist_probe_at))}` : ''}</div>`
     : '';
   return `<div class="lt-unfindable-cat">
-      <span class="badge badge-manual">${esc(String(unfindable.category))}</span>
+      <span class="badge badge-muted">${esc(String(unfindable.category))}</span>
       ${catAt ? `<span class="lt-meta-chip">categorised ${esc(catAt)}</span>` : ''}
     </div>${rollup}${probe}`;
 }
@@ -584,7 +584,7 @@ function renderRescuesBody(history, inFlightFlag) {
     (h) => h.outcome === 'youtube_failed' || h.outcome === 'youtube_success');
   if (terminal && terminal.outcome === 'youtube_failed') {
     const reason = youtubeFailureReason(terminal);
-    return `<div class="lt-rescue-status"><span class="badge badge-manual">last rescue failed</span> <span class="lt-rescue-reason">${esc(reason)}</span></div>`;
+    return `<div class="lt-rescue-status"><span class="badge badge-muted">last rescue failed</span> <span class="lt-rescue-reason">${esc(reason)}</span></div>`;
   }
   if (rows.length === 0) {
     return '<div class="lt-panel-empty">No rescue attempts yet.</div>';
@@ -1221,7 +1221,7 @@ export function rescueOutcomeCopy(result) {
     case 'wrong_state':
       return {
         title: 'Request changed',
-        detail: 'This request is no longer wanted/manual — refresh and try again.',
+        detail: 'This request is no longer wanted/unsearchable — refresh and try again.',
         tone: 'error',
       };
     case 'no_resolver_mapping':

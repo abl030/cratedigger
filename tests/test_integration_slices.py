@@ -1823,7 +1823,7 @@ class TestForceImportSlice(unittest.TestCase):
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
-            id=42, status="manual", mb_release_id="mbid-123",
+            id=42, status="unsearchable", mb_release_id="mbid-123",
             min_bitrate=180, current_spectral_bitrate=128,
             # Stale distance from a prior auto-import attempt: the force
             # import (which bypasses the distance check, so no measurement
@@ -1904,7 +1904,7 @@ class TestForceImportSlice(unittest.TestCase):
         row = db.request(42)
         # Decision 19 keeps the quality/search policy identical; terminal
         # persistence preserves the current operator-owned search stop.
-        self.assertEqual(row["status"], "manual")
+        self.assertEqual(row["status"], "unsearchable")
         # #550 defect #4: force import bypasses the beets distance check —
         # no measurement exists, so the write is NULL (was a fabricated
         # 0.0), overwriting the stale 0.31 seeded above.
@@ -1931,7 +1931,7 @@ class TestForceImportSlice(unittest.TestCase):
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
-            id=833, status="manual", mb_release_id="mbid-go-team",
+            id=833, status="unsearchable", mb_release_id="mbid-go-team",
             imported_path="/mnt/virtio/music/slskd/failed_imports/stale-source",
         ))
         # Track rows satisfy the force-import untracked-audio guard.
@@ -2615,7 +2615,7 @@ class TestReleaseLockContention(unittest.TestCase):
                                      release_id_to_lock_key)
 
         db = FakePipelineDB()
-        # Force-import typically runs against an 'imported' or 'manual'
+        # Force-import typically runs against an 'imported' or 'unsearchable'
         # row; pick 'imported' as the representative starting state.
         db.seed_request(make_request_row(
             id=42, mb_release_id=self.MBID, status="imported"))
@@ -4194,10 +4194,8 @@ class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):
     - happy path: search_log row written with outcome='exhausted'; the
       request stays ``wanted`` and ``search_attempts`` is reset to 0 so
       the variant ladder wraps back to default on the next cycle.
-    - re-queue via ``apply_transition`` (operator-driven manual→wanted)
-      clears ``manual_reason`` and ``search_attempts`` — this seam is
-      independent of the exhaustion path but worth covering since
-      ``manual_reason`` exists for future operator-hold workflows.
+    - re-queue via ``apply_transition`` (operator-driven
+      unsearchable→wanted) clears ``search_attempts``.
     """
 
     def setUp(self):
@@ -4277,7 +4275,6 @@ class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):
         self.assertEqual(row["status"], "wanted")
         self.assertEqual(row["next_plan_ordinal"], 0)
         self.assertEqual(row["plan_cycle_count"], 0)
-        self.assertIsNone(row["manual_reason"])
         # Backoff applies (non-consuming method increments scheduler
         # counters), so the request is currently parked behind a
         # ``next_retry_after``. Asserting status alone is the right
@@ -4293,23 +4290,20 @@ class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):
         db = FakePipelineDB()
         rid = db.add_request(
             artist_name="A", album_title="B", source="request",
-            mb_release_id="mb-req", status="manual",
+            mb_release_id="mb-req", status="unsearchable",
         )
-        # Simulate prior state: search_attempts=7, manual_reason populated.
-        db.update_request_fields(
-            rid, search_attempts=7, manual_reason="search_exhausted")
+        db.update_request_fields(rid, search_attempts=7)
 
         # The web UI button / pipeline-cli requeue / importer requeue all
-        # funnel through apply_transition('manual' -> 'wanted'). Cast to
+        # funnel through apply_transition('unsearchable' -> 'wanted'). Cast to
         # the concrete type — FakePipelineDB is duck-typed for the
         # methods apply_transition uses (get_request, reset_to_wanted).
         apply_transition(
-            cast(PipelineDB, db), rid, "wanted", from_status="manual")
+            cast(PipelineDB, db), rid, "wanted", from_status="unsearchable")
 
         row = db.request(rid)
         self.assertEqual(row["status"], "wanted")
         self.assertEqual(row["search_attempts"], 0)
-        self.assertIsNone(row["manual_reason"])
         # Re-queued request is back in the wanted pool.
         wanted_ids = [r["id"] for r in db.get_wanted()]
         self.assertIn(rid, wanted_ids)
@@ -4423,7 +4417,7 @@ class TestImportSubprocessStartedFlag(unittest.TestCase):
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
-            id=42, status="manual",
+            id=42, status="unsearchable",
             mb_release_id="mbid-123",
         ))
         existing = ActiveDownloadState(
@@ -6064,7 +6058,7 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
             db.seed_request(make_request_row(
                 id=42,
                 mb_release_id="mbid-requeue",
-                status="manual",
+                status="unsearchable",
                 artist_name="A",
                 album_title="B",
             ))
@@ -6376,7 +6370,7 @@ class TestU5PreviewWorkerLifecycleSlice(unittest.TestCase):
         )
         db.seed_request(make_request_row(
             id=request_id,
-            status="manual",
+            status="unsearchable",
             mb_release_id="mbid-u5",
         ))
         download_log_id = db.log_download(
@@ -6398,7 +6392,7 @@ class TestU5PreviewWorkerLifecycleSlice(unittest.TestCase):
 
     def test_ae6_source_vanished_preserves_operator_status(self):
         """AE6: ffmpeg ENOENT during measurement → measurement_failed,
-        request remains manual, job → failed, download_log carries the typed
+        request remains unsearchable, job → failed, download_log carries the typed
         payload."""
         from lib.import_preview import ImportPreviewResult
         from lib.quality import MeasurementFailure
@@ -6435,7 +6429,7 @@ class TestU5PreviewWorkerLifecycleSlice(unittest.TestCase):
         # Worker surface: preview_status reflects the new state, job failed.
         self.assertEqual(updated.preview_status, "measurement_failed")
         self.assertEqual(updated.status, "failed")
-        self.assertEqual(db.request(42)["status"], "manual")
+        self.assertEqual(db.request(42)["status"], "unsearchable")
         # Two download_log rows: the original rejected entry + the new
         # measurement_failed one.
         outcomes = [log.outcome for log in db.download_logs]
@@ -6449,7 +6443,7 @@ class TestU5PreviewWorkerLifecycleSlice(unittest.TestCase):
 
     def test_ae5_snapshot_stale_preserves_operator_status(self):
         """AE5: snapshot mismatch after retry → measurement_failed,
-        request remains manual."""
+        request remains unsearchable."""
         from lib.import_preview import ImportPreviewResult
         from lib.quality import MeasurementFailure
         from scripts import import_preview_worker
@@ -6483,7 +6477,7 @@ class TestU5PreviewWorkerLifecycleSlice(unittest.TestCase):
 
         assert updated is not None
         self.assertEqual(updated.preview_status, "measurement_failed")
-        self.assertEqual(db.request(43)["status"], "manual")
+        self.assertEqual(db.request(43)["status"], "unsearchable")
 
     def test_request_not_found_no_finalize_subcase(self):
         """request_id=None subcase: the self-heal helper raises (the
@@ -6631,7 +6625,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
     entry point), and asserts the rejection side effects fire:
 
       * ``download_log`` row with the reject scenario and validation_result
-      * operator-owned request status stays ``manual``
+      * operator-owned request status stays ``unsearchable``
       * beets is NEVER touched (``sp.run`` is asserted not-called)
       * staged dir cleanup happens for auto-import scenarios
 
@@ -6656,7 +6650,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
 
         db.seed_request(make_request_row(
             id=request_id,
-            status="manual",
+            status="unsearchable",
             mb_release_id=f"mbid-u6-{request_id}",
             artist_name="Test Artist",
             album_title="Test Album",
@@ -6813,7 +6807,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
 
     def test_audio_corrupt_evidence_preserves_operator_status(self):
         """AE2: candidate evidence with audio_corrupt=True → preimport_decide
-        rejects without clearing manual, download_log carries the scenario,
+        rejects without clearing unsearchable, download_log carries the scenario,
         beets (sp.run) is never invoked."""
         import msgspec
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
@@ -6843,7 +6837,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             # Need to enqueue first to get the job id for owner_id
             from lib.import_queue import IMPORT_JOB_FORCE
             db.seed_request(make_request_row(
-                id=42, status="manual", mb_release_id="mbid-u6-corrupt",
+                id=42, status="unsearchable", mb_release_id="mbid-u6-corrupt",
             ))
             # Track rows satisfy the force-import untracked-audio guard.
             db.set_tracks(42, [{"track_number": 1, "title": "Track"}])
@@ -6887,7 +6881,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             "beets import_one.py must not run when preimport_decide rejects")
         # Force rejection must not clear the operator-owned search short-circuit.
         row = db.request(42)
-        self.assertEqual(row["status"], "manual")
+        self.assertEqual(row["status"], "unsearchable")
         self.assertEqual(row["validation_attempts"], 0)
         # download_log row records the rejection scenario.
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
@@ -6903,7 +6897,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         )
 
     def test_nested_layout_evidence_preserves_operator_status(self):
-        """AE3: nested evidence rejects without clearing manual status."""
+        """AE3: nested evidence rejects without clearing unsearchable."""
         from lib.quality_evidence import snapshot_audio_files
 
         db = FakePipelineDB()
@@ -6916,7 +6910,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             files = snapshot_audio_files(tmpdir)
             from lib.import_queue import IMPORT_JOB_FORCE
             db.seed_request(make_request_row(
-                id=43, status="manual", mb_release_id="mbid-u6-nested",
+                id=43, status="unsearchable", mb_release_id="mbid-u6-nested",
             ))
             # Track rows satisfy the force-import untracked-audio guard.
             db.set_tracks(43, [{"track_number": 1, "title": "Track"}])
@@ -6944,7 +6938,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         self.assertIn("nested_layout", result.message or "")
         self.assertEqual(ext.run.call_count, 0)
         row = db.request(43)
-        self.assertEqual(row["status"], "manual")
+        self.assertEqual(row["status"], "unsearchable")
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
         self.assertIn(("rejected", "nested_layout"), outcomes)
         # nested_layout is a folder-shape problem, not a peer-quality problem
@@ -6965,7 +6959,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             from lib.import_queue import IMPORT_JOB_FORCE
             db.seed_request(make_request_row(
-                id=44, status="manual", mb_release_id="mbid-u6-empty",
+                id=44, status="unsearchable", mb_release_id="mbid-u6-empty",
             ))
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
@@ -6992,7 +6986,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         self.assertIn("empty_fileset", result.message or "")
         self.assertEqual(ext.run.call_count, 0)
         row = db.request(44)
-        self.assertEqual(row["status"], "manual")
+        self.assertEqual(row["status"], "unsearchable")
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
         self.assertIn(("rejected", "empty_fileset"), outcomes)
         # empty_fileset is a missing-audio fault, not a peer-quality problem —
@@ -7013,7 +7007,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             from lib.import_queue import IMPORT_JOB_FORCE
             db.seed_request(make_request_row(
-                id=46, status="manual", mb_release_id="mbid-u6-empty-tracks",
+                id=46, status="unsearchable", mb_release_id="mbid-u6-empty-tracks",
             ))
             db.set_tracks(46, [{"track_number": 1, "title": "Track"}])
             job = db.enqueue_import_job(
@@ -7041,7 +7035,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         self.assertIn("empty_fileset", result.message or "")
         self.assertEqual(ext.run.call_count, 0)
         row = db.request(46)
-        self.assertEqual(row["status"], "manual")
+        self.assertEqual(row["status"], "unsearchable")
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
         self.assertIn(("rejected", "empty_fileset"), outcomes)
 
@@ -7074,7 +7068,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             ]
             from lib.import_queue import IMPORT_JOB_FORCE
             db.seed_request(make_request_row(
-                id=45, status="manual", mb_release_id="mbid-u6-spectral",
+                id=45, status="unsearchable", mb_release_id="mbid-u6-spectral",
                 current_spectral_grade="likely_transcode",
                 current_spectral_bitrate=128,
             ))
@@ -7343,7 +7337,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
         )
         db.seed_request(make_request_row(
             id=request_id,
-            status="manual",
+            status="unsearchable",
             mb_release_id=f"mbid-bocfix-{request_id}",
             artist_name="Boards of Canada",
             album_title="Geogaddi",
@@ -7548,7 +7542,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             assert updated is not None
             self.assertEqual(updated.preview_status, "measurement_failed")
             self.assertEqual(updated.status, "failed")
-            self.assertEqual(db.request(41)["status"], "manual")
+            self.assertEqual(db.request(41)["status"], "unsearchable")
             failures = [
                 log for log in db.download_logs
                 if log.outcome == "measurement_failed"
@@ -7704,7 +7698,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             # The non-quality failure is explicit in the audit trail.
             outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
             self.assertIn(("have_analysis_error", "have_analysis_error"), outcomes)
-            self.assertEqual(db.request(42)["status"], "manual")
+            self.assertEqual(db.request(42)["status"], "unsearchable")
 
     def test_clean_upgrade_persists_evidence_and_importer_accepts(self):
         """Happy path: suspect spectral but a clear bitrate upgrade.
@@ -7878,7 +7872,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             self.assertEqual(result.code, "have_analysis_error")
             self.assertIn("Installed HAVE analysis failed", result.message or "")
             self.assertEqual(ext.run.call_count, 0)
-            self.assertEqual(db.request(44)["status"], "manual")
+            self.assertEqual(db.request(44)["status"], "unsearchable")
             outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
             self.assertIn(("have_analysis_error", "have_analysis_error"), outcomes)
 
@@ -7896,7 +7890,7 @@ class TestWrongMatchCleanupFKChainAvoidsRemeasurement(unittest.TestCase):
         from tests.helpers import make_request_row as _make_req
         db = FakePipelineDB()
         db.seed_request(_make_req(
-            id=1, status="manual", mb_release_id="mbid-1",
+            id=1, status="unsearchable", mb_release_id="mbid-1",
         ))
         db.log_download(
             1,
@@ -8078,7 +8072,7 @@ class TestWrongMatchStaleEvidenceRefreshSlice(unittest.TestCase):
 
             db = FakePipelineDB()
             db.seed_request(make_request_row(
-                id=1, status="manual", mb_release_id="mbid-1",
+                id=1, status="unsearchable", mb_release_id="mbid-1",
             ))
             db.log_download(
                 1,
@@ -8330,7 +8324,7 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=3779,
-            status="manual",
+            status="unsearchable",
             mb_release_id=self.MB_RELEASE_ID,
         ))
 
@@ -8465,7 +8459,7 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=3780,
-            status="manual",
+            status="unsearchable",
             mb_release_id=self.MB_RELEASE_ID,
         ))
 
@@ -8543,7 +8537,7 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
         # must compress it to "lossless".
         db.seed_request(make_request_row(
             id=3781,
-            status="manual",
+            status="unsearchable",
             mb_release_id=self.MB_RELEASE_ID,
             search_filetype_override=QUALITY_UPGRADE_TIERS,
         ))
@@ -9997,10 +9991,10 @@ class TestReplaceFullPath(unittest.TestCase):
         self.assertIsNone(new["active_download_state"])
 
     def test_manual_variant(self):
-        """``status='manual'`` behaves like ``wanted`` for fs cleanup:
+        """``status='unsearchable'`` behaves like ``wanted`` for fs cleanup:
         the old release is displaced whenever its id resolves."""
         from lib.mbid_replace_service import RESULT_REPLACED
-        _db, result, _, _, mocks = self._run(old_status="manual")
+        _db, result, _, _, mocks = self._run(old_status="unsearchable")
         self.assertEqual(result.outcome, RESULT_REPLACED)
         mocks["remove"].assert_called_once()
 

@@ -148,7 +148,7 @@ console.log('Library quality controls — adversarial deterministic release-id p
   const html = libraryDetail(id);
   const arg = expectedJsArg(id);
   assertContains(html, `window.setLibQuality(${arg}, 'wanted', null)`, 'wanted control encodes release id');
-  assertContains(html, `window.setLibQuality(${arg}, 'manual', null)`, 'manual control encodes release id');
+  assertContains(html, `window.setLibQuality(${arg}, 'unsearchable', null)`, 'unsearchable control encodes release id');
   assertContains(html, `window.setLibQuality(${arg}, null, parseInt(v))`, 'min-bitrate control encodes release id');
   assertExcludes(html, `window.setLibQuality('${id}'`, 'known-bad raw single-quoted interpolation is absent');
 }

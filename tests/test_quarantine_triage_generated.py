@@ -28,7 +28,7 @@ REFERENCE_KINDS = (
 REQUEST_STATUSES = (
     "wanted",
     "downloading",
-    "manual",
+    "unsearchable",
     "imported",
     "replaced",
 )

@@ -111,10 +111,11 @@ OUTCOME_EXIT_CODE: dict[str, int] = {
 """Service ``SubmitOutcome`` → CLI exit code. U4 imports this directly."""
 
 
-# Request statuses that may be advanced into a YT rescue submission. Per
-# R3: ``wanted`` and ``manual`` only. ``downloading`` would race the slskd
-# pipeline; ``imported`` / ``replaced`` are terminal.
-_VALID_SUBMIT_STATUSES: frozenset[str] = frozenset({"wanted", "manual"})
+# Request statuses that may be advanced into a YT rescue submission.
+# ``unsearchable`` stops Soulseek search, not operator-requested imports.
+YOUTUBE_IMPORT_ALLOWED_REQUEST_STATUSES: frozenset[str] = frozenset(
+    {"wanted", "unsearchable"}
+)
 
 
 # ---------------------------------------------------------------------------
@@ -584,13 +585,13 @@ class YoutubeIngestService:
 
         # 2. Request status gate (R3).
         status = str(request_row.get("status") or "")
-        if status not in _VALID_SUBMIT_STATUSES:
+        if status not in YOUTUBE_IMPORT_ALLOWED_REQUEST_STATUSES:
             return SubmitResult(
                 outcome="wrong_state",
                 detail=(
                     f"request {request_id} is in status {status!r}; "
                     f"submit requires one of "
-                    f"{sorted(_VALID_SUBMIT_STATUSES)!r}"
+                    f"{sorted(YOUTUBE_IMPORT_ALLOWED_REQUEST_STATUSES)!r}"
                 ),
             )
 
@@ -782,7 +783,7 @@ class YoutubeIngestService:
                 ),
             )
         request_status = str(request_row.get("status") or "")
-        if request_status not in _VALID_SUBMIT_STATUSES:
+        if request_status not in YOUTUBE_IMPORT_ALLOWED_REQUEST_STATUSES:
             return self._terminal_failed(
                 download_log_id,
                 reason="request_no_longer_rescuable",
@@ -791,7 +792,7 @@ class YoutubeIngestService:
                 detail=(
                     f"request_id={request_id} is now status "
                     f"{request_status!r}; rescue requires one of "
-                    f"{sorted(_VALID_SUBMIT_STATUSES)!r}"
+                    f"{sorted(YOUTUBE_IMPORT_ALLOWED_REQUEST_STATUSES)!r}"
                 ),
             )
 
@@ -921,7 +922,7 @@ class YoutubeIngestService:
                 extra_metadata=_cleanup_metadata(cleanup_error),
             )
         latest_status = str(latest_request_row.get("status") or "")
-        if latest_status not in _VALID_SUBMIT_STATUSES:
+        if latest_status not in YOUTUBE_IMPORT_ALLOWED_REQUEST_STATUSES:
             cleanup_error = self._cleanup_ytdlp_run(run)
             return self._terminal_failed(
                 download_log_id,

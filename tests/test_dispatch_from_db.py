@@ -126,7 +126,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         req_kwargs = {
             "id": 42,
             "mb_release_id": "mbid-123",
-            "status": "manual",
+            "status": "unsearchable",
             "artist_name": "Son Ambulance",
             "album_title": "Someone Else's Deja Vu",
             "min_bitrate": 180,
@@ -248,7 +248,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
     def test_successful_force_import_preserves_stop_without_terminal_acceptance(self):
         r = self._dispatch()
         self.assertTrue(r["result"].success)
-        self.assertEqual(r["db"].request(42)["status"], "manual")
+        self.assertEqual(r["db"].request(42)["status"], "unsearchable")
 
     def test_terminally_accepted_force_import_marks_imported(self):
         r = self._dispatch(quality_gate_plan=QualityGatePlan(
@@ -309,13 +309,13 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         ir = make_import_result(decision="downgrade",
                                 new_min_bitrate=128, prev_min_bitrate=180)
         r = self._dispatch(ir=ir)
-        self.assertEqual(r["db"].request(42)["status"], "manual")
+        self.assertEqual(r["db"].request(42)["status"], "unsearchable")
 
     def test_transcode_downgrade_does_not_requeue(self):
         ir = make_import_result(decision="transcode_downgrade",
                                 new_min_bitrate=190, prev_min_bitrate=320)
         r = self._dispatch(ir=ir)
-        self.assertEqual(r["db"].request(42)["status"], "manual")
+        self.assertEqual(r["db"].request(42)["status"], "unsearchable")
 
     # --- Audit trail ---
 
@@ -364,7 +364,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             mb_release_id="mbid-123",
-            status="manual",
+            status="unsearchable",
             artist_name="Son Ambulance",
             album_title="Someone Else's Deja Vu",
         ))
@@ -445,7 +445,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             mb_release_id="mbid-123",
-            status="manual",
+            status="unsearchable",
             artist_name="Son Ambulance",
             album_title="Someone Else's Deja Vu",
         ))
@@ -527,7 +527,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             mb_release_id="mbid-123",
-            status="manual",
+            status="unsearchable",
             artist_name="Son Ambulance",
             album_title="Someone Else's Deja Vu",
         ))
@@ -590,7 +590,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             mb_release_id="mbid-123",
-            status="manual",
+            status="unsearchable",
             artist_name="Son Ambulance",
             album_title="Someone Else's Deja Vu",
         ))
@@ -664,7 +664,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             mb_release_id="mbid-zero",
-            status="manual",
+            status="unsearchable",
             artist_name="The Bug Tester",
             album_title="Zero Rows Affected",
         ))
@@ -771,7 +771,7 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
     def _seed_db(self) -> "FakePipelineDB":
         db = FakePipelineDB()
         db.seed_request(make_request_row(
-            id=42, mb_release_id="mbid-123", status="manual",
+            id=42, mb_release_id="mbid-123", status="unsearchable",
             artist_name="Son Ambulance", album_title="Someone Else's Deja Vu",
         ))
         _seed_single_track(db)
@@ -824,7 +824,7 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
         # No download_log rows
         self.assertEqual(db.download_logs, [])
         # Status unchanged
-        self.assertEqual(db.request(42)["status"], "manual")
+        self.assertEqual(db.request(42)["status"], "unsearchable")
         # No denylist / cooldown / attempt recording
         self.assertEqual(db.denylist, [])
         self.assertEqual(db.recorded_attempts, [])
@@ -873,7 +873,7 @@ class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             mb_release_id="mbid-123",
-            status="manual",
+            status="unsearchable",
             artist_name="Artist",
             album_title="Album",
         ))
@@ -952,7 +952,7 @@ class TestDispatchFromDbPrecondition(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             mb_release_id="mbid-123",
-            status="manual",
+            status="unsearchable",
             artist_name="Artist",
             album_title="Album",
         ))
@@ -981,7 +981,7 @@ class TestDispatchFromDbPrecondition(unittest.TestCase):
             ext.run.assert_not_called()
             # No download_log row written; the request status is untouched.
             self.assertEqual(db.download_logs, [])
-            self.assertEqual(db.request(42)["status"], "manual")
+            self.assertEqual(db.request(42)["status"], "unsearchable")
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)

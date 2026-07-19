@@ -268,7 +268,7 @@ def post_pipeline_youtube_rescue(h, body: dict, req_id_str: str) -> None:
       * 400 — body validation failure (missing ``browse_id`` etc.) or
         invalid URL ``request_id``
       * 404 — ``request_not_found``
-      * 409 — ``wrong_state`` (request is not ``wanted`` / ``manual``),
+      * 409 — ``wrong_state`` (request is not ``wanted`` / ``unsearchable``),
               ``in_flight`` (an existing ``youtube_running`` row already
               owns this request — re-issue once it's terminal)
       * 422 — ``no_resolver_mapping`` (run the YouTube album resolver

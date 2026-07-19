@@ -46,10 +46,10 @@ class TestFindInconsistencies(unittest.TestCase):
         self.assertEqual(len(issues), 0,
                          "wanted + imported_path is a valid upgrade-search state")
 
-    def test_manual_with_imported_path_is_fine(self):
-        """Same rationale as wanted: manual status after a force-import
+    def test_unsearchable_with_imported_path_is_fine(self):
+        """Same rationale as wanted: unsearchable after a force-import
         could legitimately carry imported_path until the row is cleared."""
-        rows = [{"id": 4, "status": "manual",
+        rows = [{"id": 4, "status": "unsearchable",
                  "active_download_state": None,
                  "imported_path": "/Beets/Artist/Album"}]
         issues = find_inconsistencies(rows)

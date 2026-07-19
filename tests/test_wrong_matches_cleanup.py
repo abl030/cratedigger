@@ -26,7 +26,7 @@ class TestWrongMatchCleanup(unittest.TestCase):
             artist_name="Artist",
             album_title="Album",
             mb_release_id="mbid-1",
-            status="manual",
+            status="unsearchable",
         ))
         return db
 
@@ -304,7 +304,7 @@ class TestWrongMatchDeleteService(unittest.TestCase):
             artist_name="Artist",
             album_title="Album",
             mb_release_id="mbid-1",
-            status="manual",
+            status="unsearchable",
         ))
         return db
 
@@ -456,7 +456,7 @@ class TestWrongMatchDeleteService(unittest.TestCase):
             artist_name="Other",
             album_title="Album",
             mb_release_id="mbid-2",
-            status="manual",
+            status="unsearchable",
         ))
         root1, source1 = make_failed_import_source()
         root2, source2 = make_failed_import_source()

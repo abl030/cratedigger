@@ -31,7 +31,7 @@ Tests get `ctx.cfg.stalled_timeout = 600` → `make_test_config(stalled_timeout=
 
 ```python
 # lib/pipeline_db.py
-VALID_STATUSES = ("wanted", "downloading", "imported", "manual")
+VALID_STATUSES = ("wanted", "downloading", "imported", "unsearchable")
 
 # tests/test_pipeline_db.py
 def test_status_exhaustiveness(self):

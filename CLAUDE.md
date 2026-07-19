@@ -30,7 +30,7 @@ If a design drifts toward "good enough" matches, "smart" defaults, or auto-throt
 1. **Run `hostname` at the start of every chat.** `proxmox-vm` = doc1, `doc2` = doc2, `framework` = Framework laptop, `DESKTOP-*` = Windows. You are likely already on doc1 — do NOT ssh to doc1 from doc1.
 2. **Windows laptop SSH**: no native key. Extract via WSL: `wsl -d NixOS -- bash -c 'cat /run/secrets/ssh_key_abl030' > ~/.ssh/id_doc2 && chmod 600 ~/.ssh/id_doc2`, then `ssh -i ~/.ssh/id_doc2 abl030@doc2` (works for doc1 too).
 3. **nixosconfig changes MUST be made on doc1** (`~/nixosconfig`; it has the Forgejo token + signing key). Edit, commit (signed), push, then deploy to doc2.
-4. **Pipeline DB is PostgreSQL on doc2** (nspawn `cratedigger-db` at `10.20.0.11:5432`; DSN in `/var/lib/cratedigger/config.ini`). The `10.20.0.0/24` subnet is doc2-local — query via `pipeline-cli` over SSH to doc2, never raw TCP from elsewhere. Request statuses: `wanted`, `downloading`, `imported`, `manual`, `replaced` (terminal, frozen audit). Import queue: `queued`, `running`, `completed`, `failed`.
+4. **Pipeline DB is PostgreSQL on doc2** (nspawn `cratedigger-db` at `10.20.0.11:5432`; DSN in `/var/lib/cratedigger/config.ini`). The `10.20.0.0/24` subnet is doc2-local — query via `pipeline-cli` over SSH to doc2, never raw TCP from elsewhere. Request statuses: `wanted`, `downloading`, `imported`, `unsearchable`, `replaced` (terminal, frozen audit). `unsearchable` is an explicit, reversible operator search stop; it is orthogonal to source cleanup such as Bad Rip / ban-source. Import queue: `queued`, `running`, `completed`, `failed`.
 5. **This is a curated collection.** Multiple editions/pressings of the same album are intentional. NEVER delete or merge duplicate albums — beets disambiguates them into separate folders.
 6. **The pipeline self-heals — the request is the source of truth, everything else is derived.** Operator actions that touch identity supersede the row rather than mutate it (canonical example: Replace, `lib/mbid_replace_service.py` — old row flips to `replaced`, new row points back via `replaces_request_id`, next cycle rebuilds).
 7. **Don't duplicate convergence — reuse the cleanup paths that already exist.** Prefer letting existing convergence (e.g. `lib/slskd_transfers.py::converge_slskd_orphans`) reap orphans over adding bespoke teardown to an action.
@@ -122,7 +122,7 @@ docs/             — subsystem docs; docs/solutions/ = compounding lessons (gre
 ## Pipeline flow
 
 ```
-Web UI / CLI → PostgreSQL (wanted → downloading → imported | manual)
+Web UI / CLI → PostgreSQL (wanted → downloading → imported; wanted ↔ unsearchable)
    Phase 1: poll_active_downloads()   Phase 2: get_wanted() → search + enqueue
    completed download → validate vs exact release ID (dist ≤ 0.15)
    source=request    → stage /Incoming/auto-import  → import_one.py (spectral → convert → quality gate) → /Beets

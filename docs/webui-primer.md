@@ -84,8 +84,9 @@ Browser → https://music.ablz.au
   never establish ownership and a Discogs master never inherits ownership
   from one of its child pressings. Missing = ordinary own-work
   release groups the beets library doesn't hold; In flight =
-  requests currently `downloading` or `manual` (`wanted` is ambient after the
-  full-library backfill and stays a badge). Appearances, promo-only,
+  requests currently `downloading`. `wanted` is ambient after the full-library
+  backfill and stays a badge; `unsearchable` is a stopped request, not active
+  work. Appearances, promo-only,
   unofficial-only, and unknown-provenance rows all remain visible inside Other
   releases; pairing and master topology are internal diagnostic facts, not page
   taxonomy. Two slow feeds decorate the page after the fast render:

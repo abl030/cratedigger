@@ -336,7 +336,7 @@ class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
         from lib.dispatch import _record_rejection_and_maybe_requeue
 
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="manual"))
+        db.seed_request(make_request_row(id=42, status="unsearchable"))
 
         _record_rejection_and_maybe_requeue(
             db,  # type: ignore[arg-type]
@@ -643,7 +643,7 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
 
     Automatic imports pass ``requeue_on_failure=True`` so a bad candidate
     self-heals to ``wanted``. Force imports pass False because the operator's
-    ``manual`` (next-step ``unsearchable``) status must not be cleared by a
+    ``unsearchable`` status must not be cleared by a
     candidate-integrity fact.
     """
 
@@ -797,10 +797,10 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
             requeue_on_failure=False,
             pending=True,
             search_filetype_override=QUALITY_UPGRADE_TIERS,
-            initial_status="manual",
+            initial_status="unsearchable",
         )
 
-        self.assertEqual(db.request(42)["status"], "manual")
+        self.assertEqual(db.request(42)["status"], "unsearchable")
         self.assertEqual(db.download_logs[-1].outcome, "rejected")
         self.assertEqual(db.denylist, [])
         self.assertEqual(db.download_logs[-1].outcome, "rejected")
@@ -828,7 +828,7 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
             db = FakePipelineDB()
             db.seed_request(make_request_row(
                 id=42,
-                status="manual" if force else "downloading",
+                status="unsearchable" if force else "downloading",
                 search_filetype_override="lossless",
                 active_download_state={"files": [], "filetype": "flac"},
             ))
@@ -918,7 +918,7 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
         self._persist_failed_outcome(db, outcome)
 
         row = db.request(42)
-        self.assertEqual(row["status"], "manual")
+        self.assertEqual(row["status"], "unsearchable")
         self.assertEqual(row["validation_attempts"], 0)
         self.assertIsNone(row["next_retry_after"])
         self.assertEqual(row["search_filetype_override"], "lossless")
@@ -1196,11 +1196,11 @@ class TestDispatchImport(unittest.TestCase):
                         make_import_result(decision=decision),
                         scenario=scenario,
                         force=force,
-                        initial_status="manual",
+                        initial_status="unsearchable",
                         queued=True,
                     )
                     row = result["db"].request(42)
-                    self.assertEqual(row["status"], "manual")
+                    self.assertEqual(row["status"], "unsearchable")
                     self.assertEqual(
                         row["search_filetype_override"], expected_override)
                     self.assertEqual(
@@ -1614,7 +1614,7 @@ class TestDispatchImport(unittest.TestCase):
         self.assertEqual(db.download_logs[0].beets_scenario,
                          "duplicate_remove_guard_failed")
         self.assertEqual(db.request(42)["status"], "wanted")
-        self.assertNotEqual(db.request(42)["status"], "manual")
+        self.assertNotEqual(db.request(42)["status"], "unsearchable")
         self.assertEqual(len(db.denylist), 1)
         self.assertEqual(db.denylist[0].username, "user1")
         ext.cleanup.assert_not_called()

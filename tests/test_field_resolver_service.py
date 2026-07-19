@@ -1677,7 +1677,7 @@ class TestApplyResolveAllResult(unittest.TestCase):
             "track_artist": None,
         }])
         self.assertTrue(db.update_status(
-            request_id, "manual", expected_status="wanted",
+            request_id, "unsearchable", expected_status="wanted",
         ))
         before_row = copy.deepcopy(db.get_request(request_id))
         before_tracks = db.get_tracks(request_id)

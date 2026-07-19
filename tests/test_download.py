@@ -3229,7 +3229,7 @@ class TestHarvestTerminalTransferEvidence(unittest.TestCase):
 
         def get_downloading_then_flip():
             rows = original_get_downloading()
-            fake_db._requests[1]["status"] = "manual"
+            fake_db._requests[1]["status"] = "unsearchable"
             return rows
 
         cast(Any, fake_db).get_downloading = get_downloading_then_flip

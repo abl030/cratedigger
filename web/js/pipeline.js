@@ -1,6 +1,6 @@
 // @ts-check
 import { state, API, toast } from './state.js';
-import { esc, qualityLabel, manualReasonLabel, renderForensicBlock } from './util.js';
+import { esc, qualityLabel, renderForensicBlock } from './util.js';
 import { renderDownloadHistoryItem } from './history.js';
 import {
   renderBeetsTrackRow, renderExpectedTrackRow, renderDetailRow, renderExternalLinkRow, toggleExpand,
@@ -212,13 +212,6 @@ export async function toggleDetail(elId, requestId) {
     const history = data.history || [];
 
     let html = '';
-    // Manual-reason chip (e.g. search_exhausted) — surfaces the reason a
-    // request landed in `manual` so the operator does not have to query
-    // JSONB. Hidden when null (manually-set or pre-U7 rows).
-    const reasonLabel = manualReasonLabel(data.manual_reason);
-    if (reasonLabel) {
-      html += renderDetailRow('Manual reason', `<span class="p-manual-chip">${esc(reasonLabel)}</span>`);
-    }
     // External link (MB or Discogs)
     html += renderExternalLinkRow(req.mb_release_id || '');
     if (req.imported_path) {
@@ -239,7 +232,7 @@ export async function toggleDetail(elId, requestId) {
       <span class="p-detail-label" style="line-height:28px;">Status:</span>
       <button class="p-btn ${req.status === 'wanted' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.updateStatus(${id}, 'wanted')">wanted</button>
       <button class="p-btn ${req.status === 'imported' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.updateStatus(${id}, 'imported')">imported</button>
-      <button class="p-btn ${req.status === 'manual' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.updateStatus(${id}, 'manual')">manual</button>`;
+      <button class="p-btn ${req.status === 'unsearchable' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.updateStatus(${id}, 'unsearchable')">unsearchable</button>`;
     // Bad-rip reuses the library renderer — pipelineId + releaseId are all
     // it needs from state. Hidden when either is absent (issue #188).
     html += renderBadRipButton(/** @type {any} */ ({pipelineId: id, releaseId: req.mb_release_id}), {

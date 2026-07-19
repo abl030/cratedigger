@@ -59,7 +59,7 @@ def assert_operator_stop_matches_terminal_acceptance(
     successful_terminal_acceptance: bool,
 ) -> None:
     """Only explicit successful acceptance may supersede the search stop."""
-    expected = "imported" if successful_terminal_acceptance else "manual"
+    expected = "imported" if successful_terminal_acceptance else "unsearchable"
     if status != expected:
         raise AssertionError(
             f"terminal_acceptance={successful_terminal_acceptance!r} left "
@@ -159,8 +159,7 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42,
-            status="manual",
-            manual_reason="operator_stop",
+            status="unsearchable",
         ))
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
@@ -214,7 +213,7 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
     def test_terminal_acceptance_checker_trips_on_wrong_status(self) -> None:
         for successful_terminal_acceptance, status in (
             (False, "imported"),
-            (True, "manual"),
+            (True, "unsearchable"),
         ):
             with self.subTest(
                 successful_terminal_acceptance=(
@@ -284,10 +283,9 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42,
-            status="manual",
+            status="unsearchable",
             min_bitrate=existing_min_bitrate,
             prev_min_bitrate=192,
-            manual_reason="operator_stop",
         ))
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
@@ -309,7 +307,7 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
             request_id=42,
             import_job_id=claimed.id,
             initial_transition=transitions.RequestTransition.to_wanted_fields(
-                from_status="downloading",
+                from_status="unsearchable",
                 attempt_type=attempt_type,
                 fields=fields,
             ),
@@ -323,8 +321,7 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
         ))
 
         row = db.request(42)
-        self.assertEqual(row["status"], "manual")
-        self.assertEqual(row["manual_reason"], "operator_stop")
+        self.assertEqual(row["status"], "unsearchable")
         self.assertEqual(row["search_filetype_override"], search_override)
         self.assertEqual(
             row[f"{attempt_type}_attempts"] if attempt_type else 0,

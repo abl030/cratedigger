@@ -4,7 +4,7 @@ Pure functions for transition validation. The imperative apply_transition()
 delegates to pipeline_db methods and is the single entry point for all
 state mutations.
 
-Active statuses: wanted, downloading, imported, manual.
+Active statuses: wanted, downloading, imported, unsearchable.
 Terminal audit status: replaced (no outgoing lifecycle transitions).
 """
 
@@ -89,7 +89,8 @@ class _OmittedField:
 _OMITTED = _OmittedField()
 
 
-RequestStatus = Literal["wanted", "downloading", "imported", "manual"]
+RequestStatus = Literal[
+    "wanted", "downloading", "imported", "unsearchable"]
 
 
 class TransitionConflictKind(str, Enum):
@@ -172,7 +173,7 @@ _IMPORTED_FIELDS = frozenset({
 })
 
 _DOWNLOADING_FIELDS = frozenset({"state_json"})
-_MANUAL_FIELDS = frozenset()
+_UNSEARCHABLE_FIELDS = _WANTED_FIELDS
 _RESERVED_FIELDS = frozenset({"from_status", "attempt_type"})
 
 
@@ -212,8 +213,8 @@ def _validate_transition_fields(
     if target_status == "imported":
         _reject_unknown_fields(target_status, fields, _IMPORTED_FIELDS)
         return
-    if target_status == "manual":
-        _reject_unknown_fields(target_status, fields, _MANUAL_FIELDS)
+    if target_status == "unsearchable":
+        _reject_unknown_fields(target_status, fields, _UNSEARCHABLE_FIELDS)
         return
     if target_status == "downloading":
         _reject_unknown_fields(target_status, fields, _DOWNLOADING_FIELDS)
@@ -374,12 +375,27 @@ class RequestTransition:
         )
 
     @classmethod
-    def to_manual(
+    def to_unsearchable(
         cls,
         *,
         from_status: str | None = None,
     ) -> "RequestTransition":
-        return cls(target_status="manual", from_status=from_status)
+        return cls(target_status="unsearchable", from_status=from_status)
+
+    @classmethod
+    def to_unsearchable_fields(
+        cls,
+        *,
+        from_status: str | None = None,
+        fields: Mapping[str, object],
+    ) -> "RequestTransition":
+        """Retain a search stop while applying Bad Rip search policy."""
+        _reject_unknown_fields("unsearchable", fields, _UNSEARCHABLE_FIELDS)
+        return cls(
+            target_status="unsearchable",
+            from_status=from_status,
+            fields=dict(fields),
+        )
 
     @classmethod
     def status_only(
@@ -392,8 +408,8 @@ class RequestTransition:
             return cls.to_wanted(from_status=from_status)
         if target_status == "imported":
             return cls.to_imported(from_status=from_status)
-        if target_status == "manual":
-            return cls.to_manual(from_status=from_status)
+        if target_status == "unsearchable":
+            return cls.to_unsearchable(from_status=from_status)
         if target_status == "downloading":
             raise ValueError("state_json is required for downloading transitions")
         raise ValueError(f"Unknown request status: {target_status!r}")
@@ -522,24 +538,22 @@ VALID_TRANSITIONS: dict[tuple[str, str], TransitionSideEffects] = {
     ("wanted", "downloading"): TransitionSideEffects(),
     ("downloading", "imported"): TransitionSideEffects(),
     ("downloading", "wanted"): TransitionSideEffects(record_attempt=True),
-    ("downloading", "manual"): TransitionSideEffects(),
-
-    # Manual status changes
-    ("wanted", "manual"): TransitionSideEffects(),
-    ("imported", "manual"): TransitionSideEffects(),
+    # Operator-owned reversible search stop. It cannot abandon an active
+    # download or retroactively stop an already-imported request.
+    ("wanted", "unsearchable"): TransitionSideEffects(),
     # Idempotent reset (re-queue from wanted, field-only update)
     ("wanted", "wanted"): TransitionSideEffects(clear_retry_counters=True),
 
-    # Re-queue (upgrade, retry from manual)
+    # Re-queue (upgrade, explicit operator resume)
     ("imported", "wanted"): TransitionSideEffects(clear_retry_counters=True),
-    ("manual", "wanted"): TransitionSideEffects(clear_retry_counters=True),
+    ("unsearchable", "wanted"): TransitionSideEffects(clear_retry_counters=True),
 
     # In-place update (quality gate accept, bitrate update)
     ("imported", "imported"): TransitionSideEffects(),
-    ("manual", "manual"): TransitionSideEffects(),
+    ("unsearchable", "unsearchable"): TransitionSideEffects(),
 
     # Admin overrides (force-import, web accept)
-    ("manual", "imported"): TransitionSideEffects(),
+    ("unsearchable", "imported"): TransitionSideEffects(),
     ("wanted", "imported"): TransitionSideEffects(),
 }
 

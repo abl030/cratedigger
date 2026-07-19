@@ -467,64 +467,9 @@ class TestCmdList(unittest.TestCase):
         self.assertNotIn("Two", text)
 
 
-class TestCmdRetry(unittest.TestCase):
-    def setUp(self):
-        self.db = make_db()
-
-    def tearDown(self):
-        self.db.close()
-
-    def test_retry_resets_to_wanted(self):
-        req_id = self.db.add_request(mb_release_id="a", artist_name="A", album_title="B", source="request")
-        self.db.update_status(req_id, "imported")
-        args = MagicMock(id=req_id)
-        pipeline_cli.cmd_retry(self.db, args)
-        req = self.db.get_request(req_id)
-        assert req is not None
-        self.assertEqual(req["status"], "wanted")
-
-    @patch("scripts.pipeline_cli.album_requests.finalize_request")
-    def test_retry_maps_stale_transition_to_nonzero_without_success(
-        self, mock_transition,
-    ):
-        req_id = self.db.add_request(
-            mb_release_id="retry-conflict", artist_name="A",
-            album_title="B", source="request")
-        mock_transition.return_value = TransitionConflict(
-            request_id=req_id,
-            target_status="wanted",
-            kind=TransitionConflictKind.stale_source,
-            expected_status="imported",
-            actual_status="replaced",
-        )
-
-        out = io.StringIO()
-        with redirect_stdout(out):
-            rc = pipeline_cli.cmd_retry(self.db, MagicMock(id=req_id))
-
-        self.assertEqual(rc, 4)
-        self.assertEqual(json.loads(out.getvalue())["error"], "transition_conflict")
-
-
-class TestCmdCancel(unittest.TestCase):
-    def setUp(self):
-        self.db = make_db()
-
-    def tearDown(self):
-        self.db.close()
-
-    def test_cancel_sets_manual(self):
-        req_id = self.db.add_request(mb_release_id="a", artist_name="A", album_title="B", source="request")
-        args = MagicMock(id=req_id)
-        pipeline_cli.cmd_cancel(self.db, args)
-        req = self.db.get_request(req_id)
-        assert req is not None
-        self.assertEqual(req["status"], "manual")
-
-
 class TestCmdSet(unittest.TestCase):
     def test_same_status_is_idempotent_for_operator_statuses(self):
-        for index, status in enumerate(("wanted", "imported", "manual"), 1):
+        for index, status in enumerate(("wanted", "imported", "unsearchable"), 1):
             with self.subTest(status=status):
                 db = FakePipelineDB()
                 db.seed_request(make_request_row(id=index, status=status))
@@ -538,17 +483,17 @@ class TestCmdSet(unittest.TestCase):
                 self.assertEqual(rc, 0)
                 self.assertEqual(db.get_request(index), before)
 
-    def test_imported_to_manual_is_supported(self):
+    def test_imported_to_unsearchable_is_rejected(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=8, status="imported"))
 
         rc = pipeline_cli.cmd_set(
             cast(Any, db),
-            MagicMock(id=8, status="manual"),
+            MagicMock(id=8, status="unsearchable"),
         )
 
-        self.assertEqual(rc, 0)
-        self.assertEqual(db.request(8)["status"], "manual")
+        self.assertEqual(rc, 4)
+        self.assertEqual(db.request(8)["status"], "imported")
 
     @patch("builtins.print")
     @patch("scripts.pipeline_cli.album_requests.finalize_request")
@@ -560,7 +505,7 @@ class TestCmdSet(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=9,
-            status="manual",
+            status="unsearchable",
             artist_name="A",
             album_title="B",
         ))
@@ -572,7 +517,7 @@ class TestCmdSet(unittest.TestCase):
         self.assertIs(called_db, db)
         self.assertEqual(request_id, 9)
         self.assertEqual(transition.target_status, "imported")
-        self.assertEqual(transition.from_status, "manual")
+        self.assertEqual(transition.from_status, "unsearchable")
 
 
 class TestTracksFromMbRelease(unittest.TestCase):
@@ -592,7 +537,7 @@ class TestCmdForceImport(unittest.TestCase):
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
-            id=123, status="manual", min_bitrate=320,
+            id=123, status="unsearchable", min_bitrate=320,
             mb_release_id="mbid-123", artist_name="Artist", album_title="Album",
         ))
         # Seed a download_log entry that ``get_download_log_entry`` will
@@ -2113,7 +2058,7 @@ class TestCmdShowSearchForensics(unittest.TestCase):
     No TEST_DB_DSN required — drives ``cmd_show`` against a
     ``_ForensicsDB`` (typed FakePipelineDB subclass) seeded with the
     forensic blob the test author cared about, and verifies the printed
-    text contains variant + final_state + manual_reason + the top-3
+    text contains variant + final_state + the top-3
     candidate table from the JSONB blob.
     """
 
@@ -2129,9 +2074,7 @@ class TestCmdShowSearchForensics(unittest.TestCase):
 
     def test_show_renders_variant_final_state_and_top_3(self):
         db = _ForensicsDB()
-        db.seed_request(self._row(
-            id=1843, manual_reason=None, status="wanted",
-        ))
+        db.seed_request(self._row(id=1843, status="wanted"))
         # JSONB candidates blob — psycopg2 returns parsed Python list.
         candidates_blob = [
             {"username": "alice", "dir": "A\\Album", "filetype": "flac",
@@ -2173,28 +2116,10 @@ class TestCmdShowSearchForensics(unittest.TestCase):
         self.assertGreater(bob_idx, carol_idx)
         self.assertEqual(dave_idx, -1, "4th candidate must be truncated")
 
-    def test_show_renders_manual_reason_chip(self):
-        db = _ForensicsDB()
-        db.seed_request(self._row(
-            id=2, manual_reason="search_exhausted", status="manual",
-        ))
-        db.set_stub_search_history([{
-            "id": 1, "request_id": 2, "query": "q",
-            "result_count": 0, "elapsed_s": 0.1, "outcome": "exhausted",
-            "created_at": "2026-04-29T00:00:00+00:00",
-            "candidates": None,
-            "variant": "exhausted", "final_state": None,
-        }])
-
-        out = self._capture(db, 2)
-
-        self.assertIn("manual_reason:  search_exhausted", out)
-        self.assertIn("variant:        exhausted", out)
-
     def test_show_handles_null_candidates_gracefully(self):
         """Historical row with NULL candidates → no crash, no top list."""
         db = _ForensicsDB()
-        db.seed_request(self._row(id=3, manual_reason=None))
+        db.seed_request(self._row(id=3))
         db.set_stub_search_history([{
             "id": 1, "request_id": 3, "query": "q",
             "result_count": None, "elapsed_s": None, "outcome": "timeout",
@@ -2205,14 +2130,14 @@ class TestCmdShowSearchForensics(unittest.TestCase):
         out = self._capture(db, 3)
 
         # Pre-U1 / NULL row prints the "no forensic data" sentinel because
-        # variant + final_state + manual_reason are all NULL.
+        # variant + final_state are both NULL.
         self.assertIn("(no forensic data yet)", out)
         # And the per-row table renders the variant column as a dash.
         self.assertIn("-", out)
 
     def test_show_handles_empty_candidates_list(self):
         db = _ForensicsDB()
-        db.seed_request(self._row(id=4, manual_reason=None))
+        db.seed_request(self._row(id=4))
         db.set_stub_search_history([{
             "id": 1, "request_id": 4, "query": "q",
             "result_count": 0, "elapsed_s": 0.1, "outcome": "no_results",
@@ -2228,7 +2153,7 @@ class TestCmdShowSearchForensics(unittest.TestCase):
 
     def test_show_renders_youtube_history_source_and_metadata(self):
         db = _ForensicsDB()
-        db.seed_request(self._row(id=5, manual_reason=None))
+        db.seed_request(self._row(id=5))
         log_id = db.insert_youtube_running(
             request_id=5,
             browse_id="MPREb_cli_show",
@@ -2258,7 +2183,7 @@ class TestCmdShowSearchForensics(unittest.TestCase):
 
     def test_show_renders_have_analysis_failure_diagnostics(self):
         db = _ForensicsDB()
-        db.seed_request(self._row(id=6, manual_reason=None))
+        db.seed_request(self._row(id=6))
         db.set_stub_download_history([{
             "id": 711,
             "request_id": 6,

@@ -102,6 +102,18 @@ def assert_rejection_preserved_state(
         raise AssertionError("destructive rejection mutated owned state")
 
 
+def assert_ban_searchability_preserved(
+    *, initial_status: str, final_status: str,
+) -> None:
+    """Bad Rip changes source authority, not operator searchability."""
+    expected = "unsearchable" if initial_status == "unsearchable" else "wanted"
+    if final_status != expected:
+        raise AssertionError(
+            f"bad rip changed searchability: {initial_status!r} -> "
+            f"{final_status!r}; expected {expected!r}"
+        )
+
+
 def assert_delete_postcondition(
     *,
     outcome: str,
@@ -282,6 +294,32 @@ def _configure_lock_world(
 
 
 class TestGeneratedDestructiveAuthority(unittest.TestCase):
+    @given(initial_status=st.sampled_from(("imported", "unsearchable")))
+    @example(initial_status="unsearchable")
+    def test_successful_ban_preserves_searchability(
+        self,
+        initial_status: str,
+    ) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41,
+            status=initial_status,
+            mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        ))
+        beets = FakeBeetsDB()
+
+        result = ban_source(
+            pipeline_db=db,
+            beets_db=beets,
+            request=BanSourceRequest(41),
+        )
+
+        self.assertIsInstance(result, BanSourceSuccess)
+        assert_ban_searchability_preserved(
+            initial_status=initial_status,
+            final_status=str(db.request(41)["status"]),
+        )
+
     @example(
         mb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         discogs_id="12856590",
@@ -1058,6 +1096,13 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
 
 
 class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
+    def test_ban_searchability_checker_kills_resume_mutant(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "changed searchability"):
+            assert_ban_searchability_preserved(
+                initial_status="unsearchable",
+                final_status="wanted",
+            )
+
     def test_checker_trips_on_fault_injected_production_mutation(self) -> None:
         class FaultInjectingPipelineDB(FakePipelineDB):
             inject_mutation = False

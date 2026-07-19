@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from lib.pipeline_db.download_log import DownloadLogOutcome
 
 
-OPERATOR_SEARCH_STOP_STATUS = "manual"
+OPERATOR_SEARCH_STOP_STATUS = "unsearchable"
 
 
 def operator_search_stop_is_current(status: str | None) -> bool:
