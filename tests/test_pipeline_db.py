@@ -4423,10 +4423,108 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
             "album_quality_evidence_lossless_lineage_spectral_subject",
         )
 
+    def test_fake_current_spectral_write_rejects_lossless_lineage(self):
+        from lib.quality import AlbumQualityV0Metric
+
+        db = FakePipelineDB()
+        request_id = db.add_request(
+            mb_release_id="fake-spectral-writer",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        evidence = self._seed(
+            mb_release_id="fake-spectral-writer",
+            measurement=AudioQualityMeasurement(format="Opus"),
+            v0_metric=AlbumQualityV0Metric(
+                avg_bitrate_kbps=225,
+                subject="source",
+                provenance="carried",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        db.upsert_album_quality_evidence(evidence)
+        stored = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(db.set_request_current_evidence(request_id, stored.id))
+
+        with self.assertRaises(psycopg2.errors.CheckViolation) as raised:
+            db.persist_current_spectral_measurement(
+                request_id=request_id,
+                expected_evidence_id=stored.id,
+                expected_snapshot_fingerprint=stored.snapshot_fingerprint,
+                grade="genuine",
+                bitrate_kbps=None,
+            )
+        self.assertIn(
+            "album_quality_evidence_lossless_lineage_spectral_subject",
+            str(raised.exception),
+        )
+
+    def test_current_source_v0_write_constraint_matches_fake(self):
+        from lib.quality import AlbumQualityV0Metric
+
+        evidence = self._seed(
+            mb_release_id="source-v0-writer",
+            measurement=AudioQualityMeasurement(
+                format="Opus",
+                spectral_grade="genuine",
+                spectral_subject="installed",
+                spectral_provenance="measured",
+            ),
+            on_disk_v0_research_attempted=True,
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        adapters = (("fake", FakePipelineDB()), ("postgres", self.db))
+        for name, db in adapters:
+            with self.subTest(adapter=name):
+                request_id = db.add_request(
+                    mb_release_id=evidence.mb_release_id,
+                    artist_name="A",
+                    album_title="B",
+                    source="request",
+                )
+                db.upsert_album_quality_evidence(evidence)
+                stored = db.find_album_quality_evidence(
+                    mb_release_id=evidence.mb_release_id,
+                    snapshot_fingerprint=evidence.snapshot_fingerprint,
+                )
+                assert stored is not None and stored.id is not None
+                self.assertTrue(db.set_request_current_evidence(
+                    request_id, stored.id,
+                ))
+
+                with self.assertRaises(psycopg2.errors.CheckViolation) as raised:
+                    db.persist_current_v0_research_metric(
+                        request_id=request_id,
+                        expected_evidence_id=stored.id,
+                        expected_snapshot_fingerprint=(
+                            stored.snapshot_fingerprint
+                        ),
+                        metric=AlbumQualityV0Metric(
+                            avg_bitrate_kbps=225,
+                            subject="source",
+                            provenance="measured",
+                        ),
+                    )
+                self.assertIn(
+                    "album_quality_evidence_lossless_lineage_spectral_subject",
+                    str(raised.exception),
+                )
+
     def test_upsert_new_lossless_lineage_clears_installed_spectral(self):
         from lib.quality import AlbumQualityV0Metric, VerifiedLosslessProof
 
-        for anchor in ("source_v0", "proof", "flac", "alac", "wav"):
+        for anchor in (
+            "source_v0", "proof", "flac", "FLAC", "alac", "wav",
+        ):
             with self.subTest(anchor=anchor):
                 mbid = f"merge-lossless-{anchor}"
                 existing = self._seed(
@@ -4454,7 +4552,8 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
                         spectral_subject=None,
                         spectral_provenance=None,
                         was_converted_from=(
-                            anchor if anchor in ("flac", "alac", "wav")
+                            anchor
+                            if anchor.lower() in ("flac", "alac", "wav")
                             else None
                         ),
                     ),
