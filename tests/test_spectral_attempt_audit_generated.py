@@ -100,6 +100,10 @@ def _run_have_boundary_through_both_adapters(
     request_id = 42
     mbid = "mbid-42"
     cfg = CratediggerConfig(audio_check_mode="off")
+    carries_lossless_lineage = (
+        (converted_from or "").lower() in {"flac", "alac", "wav"}
+        or lossless_v0_lineage
+    )
     current_evidence = make_album_quality_evidence(
         mb_release_id=mbid,
         measurement=AudioQualityMeasurement(
@@ -110,6 +114,12 @@ def _run_have_boundary_through_both_adapters(
             spectral_grade=persisted_grade,
             spectral_bitrate_kbps=persisted_bitrate,
             was_converted_from=converted_from,
+            spectral_subject=(
+                "source" if carries_lossless_lineage else "installed"
+            ),
+            spectral_provenance=(
+                "carried" if carries_lossless_lineage else "measured"
+            ),
         ),
         v0_metric=(
             AlbumQualityV0Metric(

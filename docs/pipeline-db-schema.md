@@ -83,6 +83,14 @@ research/unknown values → `installed`); `v0_source_provenance` becomes
 (`import_result` → `measured`, `legacy_request_seed` → `carried`); and the
 redundant `v0_proof_provenance` column is dropped.
 
+Migration 057 makes the R19 lossless-lineage boundary a validated v4 CHECK.
+A row whose `spectral_subject` is `installed` cannot also carry any lossless
+lineage signal: a source-subject V0 metric, verified-lossless proof, or
+`was_converted_from` in `flac` / `alac` / `wav` (case-insensitive). Native
+installed spectral remains valid, as does source-subject spectral on a
+lossless-derived installed copy. The CHECK is version-gated so historical
+v1/v3 rows can rebuild on touch instead of blocking migration.
+
 ## `album_quality_evidence_files` — snapshot guard rows
 
 Each active evidence row owns typed file-snapshot rows:

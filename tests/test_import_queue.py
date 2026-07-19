@@ -2050,6 +2050,8 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     format="Opus",
                     spectral_grade="likely_transcode",
                     was_converted_from="flac",
+                    spectral_subject="source",
+                    spectral_provenance="carried",
                 ),
                 codec="opus",
                 container="opus",

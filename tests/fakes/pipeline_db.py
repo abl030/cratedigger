@@ -72,6 +72,7 @@ from lib.quality import (
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
+    LOSSLESS_CODECS,
     V0_PROBE_LOSSLESS_SOURCE,
     V0_PROBE_NATIVE_LOSSY_RESEARCH,
 )
@@ -2716,6 +2717,46 @@ class FakePipelineDB:
             request_id, **update.as_update_fields(),
         )
 
+    @staticmethod
+    def _assert_album_quality_evidence_constraints(
+        evidence: AlbumQualityEvidence,
+    ) -> None:
+        has_lossless_lineage = (
+            (
+                evidence.v0_metric is not None
+                and evidence.v0_metric.subject == EVIDENCE_SUBJECT_SOURCE
+            )
+            or evidence.verified_lossless_proof is not None
+            or (
+                evidence.measurement.was_converted_from or ""
+            ).lower() in LOSSLESS_CODECS
+        )
+        if (
+            evidence.lineage_version >= 4
+            and evidence.measurement.spectral_subject
+                == EVIDENCE_SUBJECT_INSTALLED
+            and has_lossless_lineage
+        ):
+            import psycopg2.errors
+            raise psycopg2.errors.CheckViolation(
+                "violates check constraint "
+                '"album_quality_evidence_lossless_lineage_spectral_subject"'
+            )
+
+    def _store_album_quality_evidence(
+        self,
+        evidence: AlbumQualityEvidence,
+    ) -> None:
+        """Mirror PostgreSQL constraints at every fake evidence write."""
+        self._assert_album_quality_evidence_constraints(evidence)
+        evidence_id = evidence.id
+        if evidence_id is None:
+            raise ValueError("stored album quality evidence requires an id")
+        stored = copy.deepcopy(evidence)
+        key = (stored.mb_release_id, stored.snapshot_fingerprint)
+        self.album_quality_evidence[key] = stored
+        self._evidence_by_id[evidence_id] = stored
+
     def upsert_album_quality_evidence(
         self,
         evidence: AlbumQualityEvidence,
@@ -2726,13 +2767,31 @@ class FakePipelineDB:
             raise ValueError("; ".join(errors))
         key = (evidence.mb_release_id, evidence.snapshot_fingerprint)
         existing = self.album_quality_evidence.get(key)
+        incoming_lossless_lineage = (
+            (
+                evidence.v0_metric is not None
+                and evidence.v0_metric.subject == EVIDENCE_SUBJECT_SOURCE
+            )
+            or evidence.verified_lossless_proof is not None
+            or (
+                evidence.measurement.was_converted_from or ""
+            ).lower() in LOSSLESS_CODECS
+        )
         # Spectral is an atomic pair. A stale writer without a grade cannot
         # erase a successful attempt-time scan on the same audio snapshot.
+        # R19 is the exception: new lossless lineage clears a stored
+        # installed-subject tuple because those derivative bytes are not an
+        # authoritative spectral subject.
         if (
             existing is not None
             and existing.lineage_version >= 4
             and existing.measurement.spectral_grade is not None
             and evidence.measurement.spectral_grade is None
+            and not (
+                incoming_lossless_lineage
+                and existing.measurement.spectral_subject
+                    == EVIDENCE_SUBJECT_INSTALLED
+            )
         ):
             evidence = msgspec.structs.replace(
                 evidence,
@@ -2774,9 +2833,9 @@ class FakePipelineDB:
         else:
             self._next_evidence_id += 1
             evidence_id = self._next_evidence_id
-        stored = copy.deepcopy(msgspec.structs.replace(evidence, id=evidence_id))
-        self.album_quality_evidence[key] = stored
-        self._evidence_by_id[evidence_id] = stored
+        self._store_album_quality_evidence(
+            msgspec.structs.replace(evidence, id=evidence_id)
+        )
 
     def load_album_quality_evidence_by_id(
         self,
@@ -2816,13 +2875,11 @@ class FakePipelineDB:
             or evidence.on_disk_v0_research_attempted
         ):
             return False
-        claimed = copy.deepcopy(msgspec.structs.replace(
+        claimed = msgspec.structs.replace(
             evidence,
             on_disk_v0_research_attempted=True,
-        ))
-        key = (claimed.mb_release_id, claimed.snapshot_fingerprint)
-        self.album_quality_evidence[key] = claimed
-        self._evidence_by_id[int(expected_evidence_id)] = claimed
+        )
+        self._store_album_quality_evidence(claimed)
         return True
 
     def persist_current_spectral_measurement(
@@ -2852,13 +2909,11 @@ class FakePipelineDB:
             spectral_subject=EVIDENCE_SUBJECT_INSTALLED,
             spectral_provenance=EVIDENCE_PROVENANCE_MEASURED,
         )
-        completed = copy.deepcopy(msgspec.structs.replace(
+        completed = msgspec.structs.replace(
             evidence,
             measurement=measurement,
-        ))
-        key = (completed.mb_release_id, completed.snapshot_fingerprint)
-        self.album_quality_evidence[key] = completed
-        self._evidence_by_id[int(expected_evidence_id)] = completed
+        )
+        self._store_album_quality_evidence(completed)
         return True
 
     def persist_current_v0_research_metric(
@@ -2880,13 +2935,11 @@ class FakePipelineDB:
             or evidence.v0_metric is not None
         ):
             return False
-        completed = copy.deepcopy(msgspec.structs.replace(
+        completed = msgspec.structs.replace(
             evidence,
             v0_metric=metric,
-        ))
-        key = (completed.mb_release_id, completed.snapshot_fingerprint)
-        self.album_quality_evidence[key] = completed
-        self._evidence_by_id[int(expected_evidence_id)] = completed
+        )
+        self._store_album_quality_evidence(completed)
         return True
 
     def release_current_v0_research_attempt(
@@ -2903,13 +2956,11 @@ class FakePipelineDB:
             or evidence.v0_metric is not None
         ):
             return False
-        released = copy.deepcopy(msgspec.structs.replace(
+        released = msgspec.structs.replace(
             evidence,
             on_disk_v0_research_attempted=False,
-        ))
-        key = (released.mb_release_id, released.snapshot_fingerprint)
-        self.album_quality_evidence[key] = released
-        self._evidence_by_id[int(expected_evidence_id)] = released
+        )
+        self._store_album_quality_evidence(released)
         return True
 
     def set_import_job_candidate_evidence(
