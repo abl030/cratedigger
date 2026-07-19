@@ -39,12 +39,18 @@ hair-splitting; the branches were folded into
   `_PREIMPORT_FACT_REJECT_DECISIONS`; that frozenset is the shared generated-
   test taxonomy, not a production router. The dispatch caller owns requeue
   policy. Terminal persistence applies the common quality/search policy while
-  preserving operator search state current when the request row is locked.
-  Every terminal ``wanted`` transition uses that arbitration, including
-  rejection and local-completion bundles; policy fields and attempt/backoff
-  accounting still apply without clearing the stop. CLI/API lifecycle actions
-  retry a stale compare-and-set against the post-terminal status so an
-  operator command queued behind the row lock is not lost.
+  preserving operator search state on every non-accepting outcome when that
+  state is current as the request row is locked. Every terminal ``wanted``
+  transition uses that arbitration, including rejection and local-completion
+  bundles; policy fields and attempt/backoff accounting still apply without
+  clearing the stop. A successful exact-release terminal acceptance instead
+  records ``imported``.
+  Authority: "A successful exact-release terminal import acceptance supersedes
+  an operator-owned `unsearchable` search stop and records the request as
+  `imported`." — https://github.com/abl030/cratedigger/issues/737#issuecomment-5013436918
+  CLI/API lifecycle actions retry a stale compare-and-set against the
+  post-terminal status so an operator command queued behind the row lock is not
+  lost.
 
 **The album test set is the contract.** Live-bug scenarios go in
 `tests/test_quality_classification.py::TestLiveBugReproductions` (one test

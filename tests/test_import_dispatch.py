@@ -656,6 +656,7 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
         requeue_on_failure: bool,
         pending: bool = False,
         search_filetype_override: str | None = None,
+        initial_status: str = "downloading",
     ):
         from lib.dispatch import _reject_import_from_evidence_decision
         from lib.dispatch.types import ImportAttemptResult
@@ -665,7 +666,7 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
-            id=42, status="downloading",
+            id=42, status=initial_status,
             mb_release_id="test-mbid",
             search_filetype_override=search_filetype_override,
         ))
@@ -788,6 +789,19 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
             db.request(42)["search_filetype_override"],
             QUALITY_UPGRADE_TIERS,
         )
+
+    def test_verified_lossless_lock_pending_preserves_operator_stop(self) -> None:
+        """A proof-lock rejection is not successful terminal acceptance."""
+        db = self._reject(
+            decision="verified_lossless_locked",
+            requeue_on_failure=False,
+            pending=True,
+            search_filetype_override=QUALITY_UPGRADE_TIERS,
+            initial_status="manual",
+        )
+
+        self.assertEqual(db.request(42)["status"], "manual")
+        self.assertEqual(db.download_logs[-1].outcome, "rejected")
         self.assertEqual(db.denylist, [])
         self.assertEqual(db.download_logs[-1].outcome, "rejected")
 
@@ -2177,6 +2191,8 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         )
 
         self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertFalse(plan.successful_terminal_acceptance)
         row = db.request(42)
         self.assertEqual(row["status"], "wanted")
         self.assertEqual(row["min_bitrate"], 245)
@@ -2222,6 +2238,37 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         row = db.request(42)
         self.assertEqual(row["status"], "imported")
         self.assertIsNone(row["search_filetype_override"])
+
+    def test_verified_lossless_plan_marks_terminal_acceptance(self):
+        from lib.dispatch import _check_quality_gate_core
+        from lib.dispatch.types import QualityGateState
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="imported"))
+        state = QualityGateState(
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=150,
+                avg_bitrate_kbps=150,
+                median_bitrate_kbps=150,
+                format="MP3",
+                is_cbr=False,
+            ),
+            verified_lossless_proof=True,
+        )
+
+        plan = _check_quality_gate_core(
+            mb_id="test-mbid",
+            label="Terminal Acceptance",
+            request_id=42,
+            files=[],
+            db=db,  # type: ignore[arg-type]
+            apply=False,
+            state_loader=lambda **_kwargs: state,
+        )
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertTrue(plan.successful_terminal_acceptance)
 
     def test_verified_lossless_proof_does_not_denylist(self):
         db = self._run_quality_gate(

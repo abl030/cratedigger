@@ -1404,6 +1404,26 @@ class FakePipelineDB:
                     transition,
                     operator_stop_was_current=operator_stop_was_current,
                 ))
+            if (
+                operator_stop_was_current
+                and not command.successful_terminal_acceptance
+            ):
+                row = transition_db.get_request(command.request_id)
+                if row is None:
+                    raise RuntimeError(
+                        "locked operator-stop row vanished during terminal outcome"
+                    )
+                current_status = str(row["status"])
+                if not operator_search_stop_is_current(current_status):
+                    applied.append(transitions.require_transition_applied(
+                        transitions.finalize_request(
+                            transition_db,
+                            command.request_id,
+                            transitions.RequestTransition.to_manual(
+                                from_status=current_status,
+                            ),
+                        )
+                    ))
             cooled: set[str] = set()
             for entry in command.denylists:
                 denied_before = len(self.denylist)

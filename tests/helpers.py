@@ -765,11 +765,13 @@ class RecordingQualityGate:
     Records each invocation's kwargs (the gate is keyword-only) so tests
     can assert call counts and arguments."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, result: object | None = None) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.result = result
 
-    def __call__(self, **kwargs: Any) -> None:
+    def __call__(self, **kwargs: Any) -> object | None:
         self.calls.append(kwargs)
+        return self.result
 
     @property
     def call_count(self) -> int:

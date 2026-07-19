@@ -86,9 +86,12 @@ def _run_or_stage_quality_gate(
     )
     if not isinstance(plan, QualityGatePlan):
         return pending
-    return pending.append_transitions(plan.transition).append_denylists(
+    pending = pending.append_transitions(plan.transition).append_denylists(
         *plan.denylists
     )
+    if plan.successful_terminal_acceptance:
+        pending = pending.mark_successful_terminal_acceptance()
+    return pending
 
 
 def _resolve_post_import_search_policy(

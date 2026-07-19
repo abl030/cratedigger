@@ -7,12 +7,15 @@ from typing import Any, cast
 
 from lib import transitions
 from lib.dispatch import DispatchOutcome
+from lib.dispatch.post_import import _run_or_stage_quality_gate
+from lib.dispatch.quality_gate import QualityGatePlan
 from lib.import_preview import ImportPreviewResult
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
 )
 from lib.quality import MeasurementFailure
 from lib.terminal_outcomes import (
+    ImportJobTerminal,
     PendingImportTerminalOutcome,
     TerminalDownloadAudit,
 )
@@ -30,6 +33,52 @@ def _seed_request(db: FakePipelineDB) -> None:
 
 
 class TestTerminalOutcomeCallers(unittest.TestCase):
+    def test_rejection_cannot_claim_successful_terminal_acceptance(self) -> None:
+        pending = PendingImportTerminalOutcome(
+            request_id=42,
+            import_job_id=7,
+            initial_transition=transitions.RequestTransition.to_imported(),
+            audit=TerminalDownloadAudit(outcome="rejected"),
+        ).mark_successful_terminal_acceptance()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "successful terminal acceptance requires",
+        ):
+            pending.with_job(ImportJobTerminal(
+                status="failed",
+                error="rejected",
+                result={"success": False},
+                message="rejected",
+            ))
+
+    def test_quality_gate_acceptance_marks_pending_terminal_bundle(self) -> None:
+        pending = PendingImportTerminalOutcome(
+            request_id=42,
+            import_job_id=7,
+            initial_transition=transitions.RequestTransition.to_imported(),
+            audit=TerminalDownloadAudit(outcome="success"),
+        )
+
+        def accepted_plan(**_kwargs: object) -> QualityGatePlan:
+            return QualityGatePlan(
+                transition=transitions.RequestTransition.to_imported(
+                    from_status="imported",
+                ),
+                successful_terminal_acceptance=True,
+            )
+
+        result = _run_or_stage_quality_gate(
+            accepted_plan,
+            pending,
+            db=cast(Any, FakePipelineDB()),
+            request_id=42,
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertTrue(result.successful_terminal_acceptance)
+
     def test_importer_consumes_pending_bundle_without_double_finalization(self) -> None:
         db = FakePipelineDB()
         _seed_request(db)

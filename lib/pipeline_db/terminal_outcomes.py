@@ -681,6 +681,30 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                     transition,
                     operator_stop_was_current=operator_stop_was_current,
                 ))
+            # Authority: "A successful exact-release terminal import
+            # acceptance supersedes an operator-owned `unsearchable` search
+            # stop and records the request as `imported`." —
+            # https://github.com/abl030/cratedigger/issues/737#issuecomment-5013436918
+            if (
+                operator_stop_was_current
+                and not command.successful_terminal_acceptance
+            ):
+                row = transition_db.get_request(command.request_id)
+                if row is None:
+                    raise RuntimeError(
+                        "locked operator-stop row vanished during terminal outcome"
+                    )
+                current_status = str(row["status"])
+                if not operator_search_stop_is_current(current_status):
+                    applied.append(transitions.require_transition_applied(
+                        transitions.finalize_request(
+                            transition_db,
+                            command.request_id,
+                            transitions.RequestTransition.to_manual(
+                                from_status=current_status,
+                            ),
+                        )
+                    ))
             for entry in command.denylists:
                 if self._persist_terminal_denylist(
                     command.request_id,

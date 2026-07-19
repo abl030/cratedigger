@@ -53,6 +53,20 @@ def assert_terminal_snapshot_all_or_none(
         raise AssertionError(f"partial terminal outcome: {after!r}")
 
 
+def assert_operator_stop_matches_terminal_acceptance(
+    status: str,
+    *,
+    successful_terminal_acceptance: bool,
+) -> None:
+    """Only explicit successful acceptance may supersede the search stop."""
+    expected = "imported" if successful_terminal_acceptance else "manual"
+    if status != expected:
+        raise AssertionError(
+            f"terminal_acceptance={successful_terminal_acceptance!r} left "
+            f"operator-stop row {status!r}, want {expected!r}"
+        )
+
+
 def _terminal_command(request_id: int, job_id: int) -> ImportTerminalOutcome:
     return ImportTerminalOutcome(
         request_id=request_id,
@@ -130,6 +144,90 @@ def _persist_known_bad_split_outcome(
 
 
 class TestTerminalOutcomeGenerated(unittest.TestCase):
+    @given(
+        successful_terminal_acceptance=st.booleans(),
+        min_bitrate=st.one_of(
+            st.none(),
+            st.integers(min_value=0, max_value=1500),
+        ),
+    )
+    def test_only_successful_terminal_acceptance_supersedes_operator_stop(
+        self,
+        successful_terminal_acceptance: bool,
+        min_bitrate: int | None,
+    ) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="manual",
+            manual_reason="operator_stop",
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            payload={"failed_path": "/tmp/generated"},
+        )
+        db.mark_import_job_preview_importable(job.id, preview_result={})
+        claimed = db.claim_next_import_job(worker_id="generated-stop")
+        assert claimed is not None
+        db.persist_import_terminal_outcome(ImportTerminalOutcome(
+            request_id=42,
+            import_job_id=claimed.id,
+            initial_transition=transitions.RequestTransition.to_imported(
+                min_bitrate=min_bitrate,
+            ),
+            audit=TerminalDownloadAudit(
+                outcome=(
+                    "success"
+                    if successful_terminal_acceptance
+                    else "rejected"
+                ),
+            ),
+            job=ImportJobTerminal(
+                status=(
+                    "completed"
+                    if successful_terminal_acceptance
+                    else "failed"
+                ),
+                error=(
+                    None
+                    if successful_terminal_acceptance
+                    else "rejected"
+                ),
+                result={"success": successful_terminal_acceptance},
+                message="generated terminal outcome",
+            ),
+            successful_terminal_acceptance=(
+                successful_terminal_acceptance
+            ),
+        ))
+
+        row = db.request(42)
+        assert_operator_stop_matches_terminal_acceptance(
+            row["status"],
+            successful_terminal_acceptance=(
+                successful_terminal_acceptance
+            ),
+        )
+        self.assertEqual(row["min_bitrate"], min_bitrate)
+
+    def test_terminal_acceptance_checker_trips_on_wrong_status(self) -> None:
+        for successful_terminal_acceptance, status in (
+            (False, "imported"),
+            (True, "manual"),
+        ):
+            with self.subTest(
+                successful_terminal_acceptance=(
+                    successful_terminal_acceptance
+                ),
+            ), self.assertRaises(AssertionError):
+                assert_operator_stop_matches_terminal_acceptance(
+                    status,
+                    successful_terminal_acceptance=(
+                        successful_terminal_acceptance
+                    ),
+                )
+
     @example(
         attempt_type="validation",
         existing_min_bitrate=320,

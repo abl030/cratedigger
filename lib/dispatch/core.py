@@ -822,9 +822,9 @@ def dispatch_import_core(
                 # for every import mode."
                 # https://github.com/abl030/cratedigger/issues/711#issuecomment-5000425284
                 # Operator imports run the identical quality/search policy.
-                # The terminal DB transaction preserves an operator search
-                # stop that is current at commit time; terminal proof
-                # acceptance remains imported.
+                # The quality-gate plan explicitly distinguishes successful
+                # terminal acceptance from every non-accepting outcome; the
+                # terminal DB transaction owns search-stop arbitration.
                 if action.run_quality_gate:
                     terminal_outcome = _run_or_stage_quality_gate(
                         quality_gate_fn,

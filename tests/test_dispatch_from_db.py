@@ -11,7 +11,9 @@ from unittest.mock import MagicMock, patch
 
 import msgspec
 
+from lib import transitions
 from lib.config import CratediggerConfig
+from lib.dispatch.quality_gate import QualityGatePlan
 from lib.import_evidence import (
     ActionEvidenceProvenance,
     CandidateEvidenceActionResult,
@@ -107,6 +109,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
 
     def _dispatch(self, ir=None, source_username=None,
                   source_download_log_id=None,
+                  quality_gate_plan: QualityGatePlan | None = None,
                   **req_overrides):
         """Drive a force-import through the evidence-gated dispatch path.
 
@@ -209,7 +212,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 storage_format="mp3",
             )
 
-            mock_gate = RecordingQualityGate()
+            mock_gate = RecordingQualityGate(result=quality_gate_plan)
             with patch_dispatch_externals() as ext, \
                  patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db_for_dispatch()), \
@@ -242,8 +245,18 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
 
     # --- Success path ---
 
-    def test_successful_force_import_marks_imported(self):
+    def test_successful_force_import_preserves_stop_without_terminal_acceptance(self):
         r = self._dispatch()
+        self.assertTrue(r["result"].success)
+        self.assertEqual(r["db"].request(42)["status"], "manual")
+
+    def test_terminally_accepted_force_import_marks_imported(self):
+        r = self._dispatch(quality_gate_plan=QualityGatePlan(
+            transition=transitions.RequestTransition.to_imported(
+                from_status="imported",
+            ),
+            successful_terminal_acceptance=True,
+        ))
         self.assertTrue(r["result"].success)
         self.assertEqual(r["db"].request(42)["status"], "imported")
 

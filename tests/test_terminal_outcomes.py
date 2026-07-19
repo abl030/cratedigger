@@ -789,6 +789,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
                 ),
             ),
             job=command.job,
+            successful_terminal_acceptance=True,
         )
 
         result = db.persist_import_terminal_outcome(command)
@@ -801,6 +802,31 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             tuple(item.target_status for item in result.transitions),
             ("imported", "imported"),
         )
+
+    def test_import_rejection_preserving_imported_keeps_operator_stop(self):
+        db, request_id, job_id = _seed_running_import()
+        self.addCleanup(db.close)
+        db._execute(
+            "UPDATE album_requests SET status = 'manual' WHERE id = %s",
+            (request_id,),
+        )
+
+        db.persist_import_terminal_outcome(ImportTerminalOutcome(
+            request_id=request_id,
+            import_job_id=job_id,
+            initial_transition=transitions.RequestTransition.to_imported(),
+            audit=TerminalDownloadAudit(outcome="rejected"),
+            job=ImportJobTerminal(
+                status="failed",
+                error="verified_lossless_locked",
+                result={"success": False},
+                message="verified lossless proof locked",
+            ),
+        ))
+
+        request = db.get_request(request_id)
+        assert request is not None
+        self.assertEqual(request["status"], "manual")
 
     def test_import_success_round_trip_returns_complete_bundle(self):
         db, request_id, job_id = _seed_running_import(unfindable=True)
