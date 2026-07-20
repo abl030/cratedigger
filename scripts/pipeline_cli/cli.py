@@ -80,10 +80,7 @@ def main():
     # connection — short-circuit before constructing PipelineDB so the
     # command works without a reachable database.
     if args.command == "routes":
-        rc = cmd_routes(None, args)
-        if isinstance(rc, int):
-            sys.exit(rc)
-        return
+        sys.exit(cmd_routes(None, args))
 
     # Mirror origins for every web.mb / web.discogs consumer in this
     # process (add --discogs, youtube-album, distance, Replace, field

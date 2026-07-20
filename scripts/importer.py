@@ -358,12 +358,13 @@ def _dispatch_outcome_from_completion(
             message=completed_message,
             terminal_outcome=result.terminal_outcome,
         )
-    if isinstance(result, CompletionFailed):
-        return DispatchOutcome(
-            success=False,
-            message=failed_message,
-            terminal_outcome=result.terminal_outcome,
-        )
+    match result:
+        case CompletionFailed():
+            return DispatchOutcome(
+                success=False,
+                message=failed_message,
+                terminal_outcome=result.terminal_outcome,
+            )
     assert_never(result)
 
 

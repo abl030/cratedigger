@@ -739,7 +739,7 @@ review list.
 2. Resolve path (handle both relative and absolute) → verify files still exist.
 3. Look up `mb_release_id` from `album_requests` via `request_id`.
 4. Enqueue `import_jobs(job_type='force_import')` with a dedupe key for the `download_log` row.
-5. `cratedigger-importer` claims the job and calls the existing dispatch path, including `import_one.py --force` (sets `MAX_DISTANCE=999` — everything else runs normally: conversion, spectral, quality comparison).
+5. `cratedigger-importer` claims the job and calls the existing dispatch path, including `import_one.py --force` (sets `max_distance=999` — everything else runs normally: conversion, spectral, quality comparison).
 6. The worker marks the job `completed` or `failed`; the import internals still write `download_log` and `album_requests` outcomes.
 7. If a queued force-import fails with a terminal, non-deferred pipeline rejection, the worker deletes the reviewed source directory and clears the actionable `failed_path` pointer from the original wrong-match row plus duplicate rejected rows for the same request/path. The failed job and `download_log` audit rows remain.
 

@@ -226,7 +226,8 @@ def classify_rejection_from_log_inputs(
         ):
             cross_check = True
     return classify_rejection_reason(
-        candidates, pre_filter_skip_count, matched=(outcome == "found"),
+        # The early return above means ``outcome`` is never "found" here.
+        candidates, pre_filter_skip_count, matched=False,
         strict_accept_then_failed_cross_check=cross_check,
     )
 

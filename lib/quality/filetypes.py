@@ -240,11 +240,6 @@ def has_mixed_lossless_and_lossy(
         and containers & _MIXED_REJECT_LOSSY_CONTAINERS
     )
 
-# Sentinel: matches any audio file (used for catch-all "download anything" mode)
-# Assigned after AudioFileSpec class definition below
-CATCH_ALL_SPEC: "AudioFileSpec"
-
-
 def _m4a_codec_heuristic(
     bitrate: Optional[int],
     bit_depth: Optional[int],
@@ -295,7 +290,7 @@ class AudioFileSpec:
         return self.codec
 
 
-# Now that AudioFileSpec is defined, create the sentinel
+# Sentinel: matches any audio file (used for catch-all "download anything" mode)
 CATCH_ALL_SPEC = AudioFileSpec(codec="*", extension="*")
 
 

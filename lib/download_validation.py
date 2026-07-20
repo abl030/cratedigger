@@ -270,9 +270,7 @@ def _handle_valid_result(
         will_auto_import
         and current_path_location.blocks_auto_import_dispatch
         and download_materialization._import_subprocess_already_started(
-            ctx.pipeline_db_source._get_db()
-            if ctx.pipeline_db_source is not None
-            else None,
+            ctx.pipeline_db_source._get_db(),
             request_id,
         )
     ):
@@ -322,11 +320,7 @@ def _handle_valid_result(
                 deferred=True,
             )
 
-        db = (
-            ctx.pipeline_db_source._get_db()
-            if ctx.pipeline_db_source is not None
-            else None
-        )
+        db = ctx.pipeline_db_source._get_db()
         dest = staged_album.move_to(
             stage_to_ai_path(
                 artist=album_data.artist,

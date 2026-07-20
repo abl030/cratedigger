@@ -98,7 +98,7 @@ from lib.v0_probe import (
 HARNESS = os.path.join(os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh")
 HARNESS_TIMEOUT = 300
 IMPORT_TIMEOUT = 1800
-MAX_DISTANCE = 0.5
+max_distance = 0.5
 DUPLICATE_REMOVE_GUARD_EXIT_CODE = 7
 _current_result: ImportResult | None = None
 _preview_temp_root: str | None = None
@@ -1013,10 +1013,10 @@ def run_import(path, mb_release_id):
                 cand = candidates[matched_idx]
                 dist = cand.get("distance", 1.0)
 
-                if dist > MAX_DISTANCE:
+                if dist > max_distance:
                     proc.stdin.write(json.dumps({"action": "skip"}) + "\n")
                     proc.stdin.flush()
-                    print(f"  [REJECT] distance={dist:.4f} > {MAX_DISTANCE}", file=sys.stderr)
+                    print(f"  [REJECT] distance={dist:.4f} > {max_distance}", file=sys.stderr)
                     if proc.poll() is None:
                         proc.wait()
                     return RunImportOutcome(
@@ -1568,10 +1568,10 @@ def main():
             _rank_cfg = QualityRankConfig.defaults()
 
     # --force: raise distance threshold so high-distance candidates are accepted
-    global MAX_DISTANCE
+    global max_distance
     if args.force:
-        MAX_DISTANCE = 999
-        _log("[FORCE] Distance check disabled (MAX_DISTANCE=999)")
+        max_distance = 999
+        _log("[FORCE] Distance check disabled (max_distance=999)")
 
     # Accumulate structured result (module-level so crash handler can preserve data)
     global _current_result  # noqa: PLW0603

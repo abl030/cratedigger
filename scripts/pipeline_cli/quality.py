@@ -7,8 +7,31 @@ by stale ``current_spectral_bitrate`` (issue #18).
 
 import argparse
 
+from typing import TypedDict
+
 from lib import transitions
 from scripts.pipeline_cli._format import _fmt_br
+
+
+class _ScenarioParams(TypedDict, total=False):
+    """Candidate-side ``full_pipeline_decision`` kwargs a scenario may set."""
+
+    is_flac: bool
+    min_bitrate: int
+    is_cbr: bool
+    is_vbr: bool
+    avg_bitrate: int
+    spectral_grade: str
+    spectral_bitrate: int
+    converted_count: int
+    post_conversion_min_bitrate: int
+    post_conversion_is_cbr: bool
+    candidate_v0_probe_avg: int
+    candidate_v0_probe_min: int
+    candidate_v0_probe_kind: str
+    audio_corrupt: bool
+    has_nested_audio: bool
+    audio_check_mode: str
 
 # Module-level DI seam for ``transitions.finalize_request`` — see
 # ``lib.dispatch.outcome_actions.finalize_request`` for the rationale.
@@ -213,86 +236,86 @@ def cmd_quality(db, args):
 
     lossless_target_label = _quality_preview_target_label(
         target_format, verified_lossless_target)
-    scenarios = [
+    scenarios: list[tuple[str, _ScenarioParams]] = [
         # --- FLAC downloads ---
-        (f"Genuine FLAC → {lossless_target_label} (high bitrate)", dict(
-            is_flac=True, min_bitrate=245, is_cbr=False,
-            spectral_grade="genuine", converted_count=12,
-            post_conversion_min_bitrate=245,
-            post_conversion_is_cbr=False)),
-        (f"Genuine FLAC → {lossless_target_label} (lo-fi, 207kbps)", dict(
-            is_flac=True, min_bitrate=207, is_cbr=False,
-            spectral_grade="genuine", converted_count=12,
-            post_conversion_min_bitrate=207,
-            post_conversion_is_cbr=False)),
-        (f"Marginal FLAC → {lossless_target_label}", dict(
-            is_flac=True, min_bitrate=240, is_cbr=False,
-            spectral_grade="marginal", converted_count=12,
-            post_conversion_min_bitrate=240,
-            post_conversion_is_cbr=False)),
-        ("Suspect FLAC (transcode, 190kbps)", dict(
-            is_flac=True, min_bitrate=190, is_cbr=False,
-            spectral_grade="suspect", converted_count=12,
-            post_conversion_min_bitrate=190,
-            post_conversion_is_cbr=False)),
-        ("Suspect FLAC (transcode, 245kbps)", dict(
-            is_flac=True, min_bitrate=245, is_cbr=False,
-            spectral_grade="suspect", converted_count=12,
-            post_conversion_min_bitrate=245,
-            post_conversion_is_cbr=False)),
+        (f"Genuine FLAC → {lossless_target_label} (high bitrate)", {
+            "is_flac": True, "min_bitrate": 245, "is_cbr": False,
+            "spectral_grade": "genuine", "converted_count": 12,
+            "post_conversion_min_bitrate": 245,
+            "post_conversion_is_cbr": False}),
+        (f"Genuine FLAC → {lossless_target_label} (lo-fi, 207kbps)", {
+            "is_flac": True, "min_bitrate": 207, "is_cbr": False,
+            "spectral_grade": "genuine", "converted_count": 12,
+            "post_conversion_min_bitrate": 207,
+            "post_conversion_is_cbr": False}),
+        (f"Marginal FLAC → {lossless_target_label}", {
+            "is_flac": True, "min_bitrate": 240, "is_cbr": False,
+            "spectral_grade": "marginal", "converted_count": 12,
+            "post_conversion_min_bitrate": 240,
+            "post_conversion_is_cbr": False}),
+        ("Suspect FLAC (transcode, 190kbps)", {
+            "is_flac": True, "min_bitrate": 190, "is_cbr": False,
+            "spectral_grade": "suspect", "converted_count": 12,
+            "post_conversion_min_bitrate": 190,
+            "post_conversion_is_cbr": False}),
+        ("Suspect FLAC (transcode, 245kbps)", {
+            "is_flac": True, "min_bitrate": 245, "is_cbr": False,
+            "spectral_grade": "suspect", "converted_count": 12,
+            "post_conversion_min_bitrate": 245,
+            "post_conversion_is_cbr": False}),
         # Bill Hicks 1990 "Dangerous" shape: spoken-word lossless that
         # spectral_check false-positives as suspect (high HF deficit
         # against music-tuned thresholds), but the lossless_source_v0
         # probe corroborates a genuine master. The V0-avg trust override
         # in determine_verified_lossless flips this to verified.
-        ("Suspect FLAC + lossless_source_v0 avg=241/min=219 (V0 override)", dict(
-            is_flac=True, min_bitrate=219, is_cbr=False,
-            spectral_grade="suspect", converted_count=10,
-            post_conversion_min_bitrate=219,
-            post_conversion_is_cbr=False,
-            candidate_v0_probe_avg=241,
-            candidate_v0_probe_min=219,
-            candidate_v0_probe_kind="lossless_source_v0")),
+        ("Suspect FLAC + lossless_source_v0 avg=241/min=219 (V0 override)", {
+            "is_flac": True, "min_bitrate": 219, "is_cbr": False,
+            "spectral_grade": "suspect", "converted_count": 10,
+            "post_conversion_min_bitrate": 219,
+            "post_conversion_is_cbr": False,
+            "candidate_v0_probe_avg": 241,
+            "candidate_v0_probe_min": 219,
+            "candidate_v0_probe_kind": "lossless_source_v0"}),
         # --- MP3 VBR downloads ---
         # avg_bitrate drives the new preimport spectral gate (issue #93):
         # VBR with avg >= cfg.mp3_vbr.excellent skips spectral entirely,
         # below gates through analysis even without a spectral_grade input.
-        ("MP3 V0 genuine (avg 245kbps, gate skips)", dict(
-            is_flac=False, min_bitrate=240, is_cbr=False,
-            is_vbr=True, avg_bitrate=245)),
-        ("MP3 V0 (low, avg 205kbps, gate runs)", dict(
-            is_flac=False, min_bitrate=205, is_cbr=False,
-            is_vbr=True, avg_bitrate=205)),
-        ("VBR transcode (Go! Team shape, avg 182kbps)", dict(
-            is_flac=False, min_bitrate=126, is_cbr=False,
-            is_vbr=True, avg_bitrate=182,
-            spectral_grade="likely_transcode", spectral_bitrate=96)),
-        ("MP3 V2 (avg 190kbps, gate runs)", dict(
-            is_flac=False, min_bitrate=190, is_cbr=False,
-            is_vbr=True, avg_bitrate=190)),
+        ("MP3 V0 genuine (avg 245kbps, gate skips)", {
+            "is_flac": False, "min_bitrate": 240, "is_cbr": False,
+            "is_vbr": True, "avg_bitrate": 245}),
+        ("MP3 V0 (low, avg 205kbps, gate runs)", {
+            "is_flac": False, "min_bitrate": 205, "is_cbr": False,
+            "is_vbr": True, "avg_bitrate": 205}),
+        ("VBR transcode (Go! Team shape, avg 182kbps)", {
+            "is_flac": False, "min_bitrate": 126, "is_cbr": False,
+            "is_vbr": True, "avg_bitrate": 182,
+            "spectral_grade": "likely_transcode", "spectral_bitrate": 96}),
+        ("MP3 V2 (avg 190kbps, gate runs)", {
+            "is_flac": False, "min_bitrate": 190, "is_cbr": False,
+            "is_vbr": True, "avg_bitrate": 190}),
         # --- MP3 CBR downloads (no spectral) ---
-        ("CBR 320 (no spectral)", dict(
-            is_flac=False, min_bitrate=320, is_cbr=True)),
-        ("CBR 256 (no spectral)", dict(
-            is_flac=False, min_bitrate=256, is_cbr=True)),
-        ("CBR 192 (no spectral)", dict(
-            is_flac=False, min_bitrate=192, is_cbr=True)),
+        ("CBR 320 (no spectral)", {
+            "is_flac": False, "min_bitrate": 320, "is_cbr": True}),
+        ("CBR 256 (no spectral)", {
+            "is_flac": False, "min_bitrate": 256, "is_cbr": True}),
+        ("CBR 192 (no spectral)", {
+            "is_flac": False, "min_bitrate": 192, "is_cbr": True}),
         # --- MP3 CBR downloads (with spectral) ---
-        ("CBR 320 genuine", dict(
-            is_flac=False, min_bitrate=320, is_cbr=True,
-            spectral_grade="genuine")),
-        ("CBR 320 suspect (~128kbps)", dict(
-            is_flac=False, min_bitrate=320, is_cbr=True,
-            spectral_grade="suspect", spectral_bitrate=128)),
-        ("CBR 320 suspect (~192kbps)", dict(
-            is_flac=False, min_bitrate=320, is_cbr=True,
-            spectral_grade="suspect", spectral_bitrate=192)),
-        ("CBR 256 genuine", dict(
-            is_flac=False, min_bitrate=256, is_cbr=True,
-            spectral_grade="genuine")),
-        ("CBR 192 genuine", dict(
-            is_flac=False, min_bitrate=192, is_cbr=True,
-            spectral_grade="genuine")),
+        ("CBR 320 genuine", {
+            "is_flac": False, "min_bitrate": 320, "is_cbr": True,
+            "spectral_grade": "genuine"}),
+        ("CBR 320 suspect (~128kbps)", {
+            "is_flac": False, "min_bitrate": 320, "is_cbr": True,
+            "spectral_grade": "suspect", "spectral_bitrate": 128}),
+        ("CBR 320 suspect (~192kbps)", {
+            "is_flac": False, "min_bitrate": 320, "is_cbr": True,
+            "spectral_grade": "suspect", "spectral_bitrate": 192}),
+        ("CBR 256 genuine", {
+            "is_flac": False, "min_bitrate": 256, "is_cbr": True,
+            "spectral_grade": "genuine"}),
+        ("CBR 192 genuine", {
+            "is_flac": False, "min_bitrate": 192, "is_cbr": True,
+            "spectral_grade": "genuine"}),
     ]
     # --- Preimport gate scenarios (issue #91) ---
     # Audio and nested-layout gates short-circuit before any FLAC/MP3 stage
@@ -313,19 +336,19 @@ def cmd_quality(db, args):
         # below so the scenario honestly reflects the deployment: on an
         # `audio_check = off` deployment this prints `skipped_off`, which
         # is what the live pipeline would do (Codex round 2 P3 + round 3 P2).
-        ("PREIMPORT: Audio corrupt (ffmpeg fail)", dict(
-            is_flac=False, min_bitrate=256, is_cbr=False,
-            audio_corrupt=True)),
-        ("PREIMPORT: Nested folders", dict(
-            is_flac=False, min_bitrate=320, is_cbr=True,
-            has_nested_audio=True)),
+        ("PREIMPORT: Audio corrupt (ffmpeg fail)", {
+            "is_flac": False, "min_bitrate": 256, "is_cbr": False,
+            "audio_corrupt": True}),
+        ("PREIMPORT: Nested folders", {
+            "is_flac": False, "min_bitrate": 320, "is_cbr": True,
+            "has_nested_audio": True}),
     ])
 
     print(f"\n  What would happen if we downloaded:")
     for name, params in scenarios:
         # Apply runtime audio_check_mode as a default; scenarios that
         # explicitly override it still win (dict unpack order).
-        params_with_runtime = {
+        params_with_runtime: _ScenarioParams = {
             "audio_check_mode": runtime_audio_check,
             **params,
         }

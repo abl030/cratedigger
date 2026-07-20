@@ -258,8 +258,7 @@ def ensure_current_evidence_for_action(
                     ),
                     fallback_reason=fallback_reason,
                     installed_path=(
-                        current_album_path
-                        or (existing.source_path if existing is not None else None)
+                        current_album_path or existing.source_path
                     ),
                     fail_closed=True,
                 ),

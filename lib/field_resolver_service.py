@@ -241,8 +241,6 @@ def _default_mb_get_release_group_year(rg_mbid: str) -> int | None:
 def _default_discogs_get_master_year(master_id: str) -> int | None:
     from web.discogs import get_master_releases
     data = get_master_releases(int(master_id))
-    if not isinstance(data, dict):
-        return None
     raw = data.get("first_release_date")
     if not raw:
         return None
@@ -499,7 +497,7 @@ def resolve_release_group_id(
                 )
                 _record(pdb, request_id, FIELD_RELEASE_GROUP_ID, result)
                 return result
-        rg_id = data.get("release_group_id") if isinstance(data, dict) else None
+        rg_id = data.get("release_group_id")
         if not rg_id:
             result = ResolverResult(
                 field_name=FIELD_RELEASE_GROUP_ID,
@@ -542,7 +540,7 @@ def resolve_release_group_id(
             )
             _record(pdb, request_id, FIELD_RELEASE_GROUP_ID, result)
             return result
-    rg_id = data.get("release_group_id") if isinstance(data, dict) else None
+    rg_id = data.get("release_group_id")
     if not rg_id:
         result = ResolverResult(
             field_name=FIELD_RELEASE_GROUP_ID,
@@ -684,7 +682,7 @@ def _resolve_mb_track_artists(
     per_track: list[ResolverResult] = []
 
     # Shape 1: direct MB JSON with media[].tracks[]
-    media_list = data.get("media") if isinstance(data, dict) else None
+    media_list = data.get("media")
     if isinstance(media_list, list) and media_list:
         for medium in media_list:
             if not isinstance(medium, dict):
@@ -718,7 +716,7 @@ def _resolve_mb_track_artists(
                 ))
     else:
         # Shape 2: web.mb.get_release shape -- no per-track artist info.
-        tracks_summary = data.get("tracks") if isinstance(data, dict) else None
+        tracks_summary = data.get("tracks")
         if isinstance(tracks_summary, list) and tracks_summary:
             # Fall back to the release-level artist for every track --
             # this is "the album artist" rather than the per-track
@@ -812,7 +810,7 @@ def _resolve_discogs_track_artists(
        only -- ``unresolved_field_missing_upstream``).
     """
     per_track: list[ResolverResult] = []
-    tracks = data.get("tracks") if isinstance(data, dict) else None
+    tracks = data.get("tracks")
     if not isinstance(tracks, list) or not tracks:
         result = ResolverResult(
             field_name=FIELD_TRACK_ARTIST,
@@ -984,8 +982,6 @@ def resolve_catalog_number(
 
 def _first_mb_catalog_number(data: dict[str, Any]) -> str | None:
     """Pick the first non-empty ``catalog-number`` from an MB release."""
-    if not isinstance(data, dict):
-        return None
     labels = data.get("label-info") or data.get("labels") or []
     if not isinstance(labels, list):
         return None
@@ -1003,8 +999,6 @@ def _first_mb_catalog_number(data: dict[str, Any]) -> str | None:
 
 def _first_discogs_catno(data: dict[str, Any]) -> str | None:
     """Pick the first non-empty ``catno`` from a Discogs release."""
-    if not isinstance(data, dict):
-        return None
     labels = data.get("labels") or []
     if not isinstance(labels, list):
         return None

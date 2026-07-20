@@ -464,8 +464,6 @@ def default_mb_track_count_from_mirror(mbid: str) -> Optional[int]:
     from web import mb as mb_api
 
     release = mb_api.get_release(mbid, fresh=False)
-    if not isinstance(release, dict):
-        return None
     tracks = release.get("tracks")
     if not isinstance(tracks, list):
         return None
@@ -837,11 +835,7 @@ class YoutubeIngestService:
                 download_log_id,
                 reason=reason,
                 stderr_excerpt=run.stderr_excerpt,
-                observed_track_count=(
-                    len(run.staged_files)
-                    if run.staged_files is not None
-                    else None
-                ),
+                observed_track_count=len(run.staged_files),
                 detail=(
                     f"yt-dlp exit_code={run.exit_code} "
                     f"staged_files={len(run.staged_files)}"

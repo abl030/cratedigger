@@ -25,7 +25,7 @@ import msgspec
 
 from lib.artist_catalogue import ArtistCatalogueRow
 from web import cache as _cache
-from web.artist_search import merge_exact_artist_identities
+from web.artist_search import ArtistHit, merge_exact_artist_identities
 
 # Mirror-REQUIRED (tier-2 plan U6, R13): these endpoints (/api/search,
 # /api/masters/<id>, ...) and the msgspec response Structs are the Rust
@@ -247,10 +247,10 @@ def search_artists(query: str) -> list[dict]:
     """
     api_base = require_mirror_configured()
 
-    def _fetch() -> list[dict]:
+    def _fetch() -> list[ArtistHit]:
         q = urllib.parse.quote(query)
         data = _get(f"{api_base}/api/artists?name={q}&per_page=20")
-        results = [
+        results: list[ArtistHit] = [
             {
                 "id": str(r["id"]),
                 "name": r.get("name", ""),
@@ -269,7 +269,7 @@ def search_artists(query: str) -> list[dict]:
             detail = _get(f"{api_base}/api/artists/{exact['id']}")
         except (urllib.error.HTTPError, urllib.error.URLError):
             return results
-        related = [
+        related: list[ArtistHit] = [
             {
                 "id": str(alias["id"]),
                 "name": alias.get("name", ""),

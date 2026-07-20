@@ -689,38 +689,38 @@ def _run_completed_processing(
             )
         return result
 
-    if isinstance(result, CompletionFailed):
-        refreshed = db.get_request(request_id)
-        transition = None
-        if refreshed and refreshed["status"] == "downloading":
-            transition = transitions.RequestTransition.to_wanted(
-                from_status="downloading",
-                attempt_type="download",
-            )
-        if bundle_terminal_outcome and transition is not None:
-            return CompletionFailed(
-                reason=result.reason,
-                terminal_outcome=_local_completion_terminal_outcome(
-                    entry,
-                    state,
-                    request_id=request_id,
-                    import_job_id=import_job_id,
-                    transition=transition,
-                    outcome="failed",
-                    detail=result.reason,
-                    error_message=result.reason,
-                ),
-            )
-        if transition is not None:
-            logger.warning(
-                "  process_completed_album failed without setting status "
-                "— resetting to wanted"
-            )
-            transitions.require_transition_applied(
-                transitions.finalize_request(db, request_id, transition)
-            )
-        return result
-
+    match result:
+        case CompletionFailed():
+            refreshed = db.get_request(request_id)
+            transition = None
+            if refreshed and refreshed["status"] == "downloading":
+                transition = transitions.RequestTransition.to_wanted(
+                    from_status="downloading",
+                    attempt_type="download",
+                )
+            if bundle_terminal_outcome and transition is not None:
+                return CompletionFailed(
+                    reason=result.reason,
+                    terminal_outcome=_local_completion_terminal_outcome(
+                        entry,
+                        state,
+                        request_id=request_id,
+                        import_job_id=import_job_id,
+                        transition=transition,
+                        outcome="failed",
+                        detail=result.reason,
+                        error_message=result.reason,
+                    ),
+                )
+            if transition is not None:
+                logger.warning(
+                    "  process_completed_album failed without setting status "
+                    "— resetting to wanted"
+                )
+                transitions.require_transition_applied(
+                    transitions.finalize_request(db, request_id, transition)
+                )
+            return result
     assert_never(result)
 
 
