@@ -1,10 +1,14 @@
 """Heavy real-PostgreSQL/real-Beets lifecycle world model (#743).
 
-This module is intentionally outside unittest discovery. Run it directly:
+The normal suite invokes this module explicitly after unittest discovery:
+
+    nix-shell --run "bash scripts/run_tests.sh"
+
+It can also be run directly while working on the world model:
 
     nix-shell --run "python3 -m unittest tests.world_model.state_machine -v"
 
-Direct invocation uses a small deterministic budget. The operator-only
+Normal-suite and direct invocation use a small deterministic budget. The
 ``scripts/world_model_burst.sh`` switches the same machine to randomized
 generation with a replay database and a much deeper lifecycle budget.
 """

@@ -3,9 +3,10 @@
 Issue #548. Hypothesis-driven generated tests assert **policy invariants**
 over large generated state spaces instead of hand-picked examples. The normal
 pure/fake-backed modules are ordinary members of the unittest suite — no seed
-bookkeeping or standing service. The heavyweight cross-engine world model has
-its own direct runner while issue #743 measures its cost; suite and scheduled
-placement are deliberately separate follow-up decisions.
+bookkeeping or standing service. The deterministic cross-engine world model is
+also part of the normal suite at its measured small budget. Deeper randomized,
+mirror-backed, long-fuzz, and live-audit runs remain separate scheduled work
+tracked by issue #498.
 
 ## Bug hunting — the house method
 
@@ -135,8 +136,11 @@ Fault injection qualifies the retry property: temporarily removing the durable
 gate makes the pinned installed/installed world become authoritative on its
 first touch, and the generated test fails on that explicit example.
 
-It is intentionally named outside unittest's `test*.py` discovery pattern.
-Run the deterministic pin and generated state machine directly:
+It is intentionally named outside unittest's `test*.py` discovery pattern so
+raw discovery cannot accidentally inherit a randomized hammer environment.
+The canonical `scripts/run_tests.sh` explicitly fixes the six-example,
+eight-step deterministic budget, scrubs `TEST_DB_DSN`, and runs the module as
+part of every normal suite. It can also be run directly while iterating:
 
 ```bash
 nix-shell --run "python3 -m unittest tests.world_model.state_machine -v"
@@ -158,9 +162,10 @@ CRATEDIGGER_WORLD_EXAMPLES=20 CRATEDIGGER_WORLD_STEPS=20 \
   nix-shell --run "python3 -m unittest tests.world_model.state_machine -v"
 ```
 
-Do not add this runner to `scripts/run_tests.sh` or schedule it merely because
-the core exists. Issue #743 records runtime and fault-injection evidence first;
-standard-suite and scheduled-depth choices belong to a follow-up PR.
+The 20.396-second measured cost is about six percent of the 355-second normal
+suite and was accepted for standard-suite coverage after issue #743 completed
+its runtime qualification. Do not raise this deterministic budget in the
+normal suite; deeper exploration belongs to the scheduled runners below.
 
 ### Randomized lifecycle hammer
 
@@ -184,9 +189,9 @@ failures print a reproduction blob and shrink to a minimal operation sequence.
 On doc1 on 2026-07-19, the initial 3-world × 20-step randomized smoke completed
 all six module tests in 8.470 test-seconds (10 seconds wrapper wall time). The
 default 25 × 100 profile completed cleanly in 449.930 test-seconds (451 seconds
-wrapper wall time). That measured depth remains operator-only and is not part of
-`scripts/run_tests.sh`; suite/nightly placement is still the explicit follow-up
-decision recorded on issue #743.
+wrapper wall time). That measured depth is not part of `scripts/run_tests.sh`.
+Its exact-revision doc1 schedule, alongside the long generated fuzz burst, is
+tracked by issue #498.
 
 The default hammer uses the in-process production adapter that performs real
 Beets model/database/filesystem mutations beneath the real dispatch services.
@@ -211,8 +216,8 @@ loads the shipped path template, exact-ID duplicate keys, inline field, match
 policy, and MusicBrainz plugin; unrelated production fetchart/lyrics/scrub hooks
 stay disabled so the boundary test cannot make external content requests. A
 2-world × 5-step mirror smoke completed cleanly in 5 seconds on doc1 on
-2026-07-19. It remains operator-only: neither this profile nor the in-process
-hammer has been added to standard discovery or a schedule.
+2026-07-19. It remains outside the normal suite; exact-revision scheduled
+execution and separate mirror-failure reporting are tracked by issue #498.
 
 When the hammer finds a defect:
 

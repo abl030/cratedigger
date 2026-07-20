@@ -30,3 +30,15 @@ echo ""
 
 echo "=== Python tests ==="
 python3 -m unittest discover -s tests -t . -p 'test*.py' -v
+
+echo ""
+echo "=== Deterministic cross-engine world model ==="
+(
+  # The normal suite owns the small reproducible budget only. Never inherit
+  # the randomized hammer's depth, replay database, or an external PG target.
+  unset TEST_DB_DSN
+  export CRATEDIGGER_WORLD_RANDOMIZED=0
+  export CRATEDIGGER_WORLD_EXAMPLES=6
+  export CRATEDIGGER_WORLD_STEPS=8
+  python3 -m unittest tests.world_model.state_machine -v
+)
