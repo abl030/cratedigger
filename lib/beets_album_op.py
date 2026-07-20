@@ -24,7 +24,8 @@ or ``-1`` would still construct; that's a convention for callers, not
 a type-level constraint:
 
 1. **Album-mode (``-a``) is mandatory.** Every argv built by
-   ``_run_beet_op`` starts with ``[beet, verb, "-a"]``. Without ``-a``
+   ``_run_beet_op`` uses ``[beet, "-P", "importsource", verb, "-a",
+   "-f"]``. Without ``-a``
    the ``id:<N>`` selector would be interpreted against ``items.id``
    (a single track row in a separate auto-increment namespace), not
    ``albums.id``. PR #131 round 2 P1 caught item-mode silently
@@ -62,6 +63,8 @@ from typing import Literal
 
 import msgspec
 
+from lib.beets_config_contract import BeetsConfigError, validate_beets_config
+
 log = logging.getLogger("cratedigger")
 
 
@@ -73,8 +76,7 @@ BeetsOpFailureReason = Literal["timeout", "nonzero_rc", "exception"]
 
 
 class BeetsOpFailure(msgspec.Struct, frozen=True):
-    """Why a single ``beet remove`` or ``beet move`` invocation did not
-    exit cleanly.
+    """Why a single ``beet remove`` invocation did not exit cleanly.
 
     ``reason`` is a coarse Literal tag — callers and downstream JSONB
     audit consumers can classify failures at a glance without parsing
@@ -143,7 +145,7 @@ def _run_beet_op(
     delete_files: bool = False,
     timeout: int,
 ) -> BeetsOpFailure | None:
-    """Run one ``beet <verb> -a [...] <selector>`` invocation. Never raises.
+    """Run one forced, album-scoped ``beet remove`` invocation. Never raises.
 
     Internal primitive; ``remove_album`` and ``remove_by_selector`` are
     the public entry points. Captures every
@@ -173,28 +175,31 @@ def _run_beet_op(
         # contract holds for callers built around BeetsOpFailure.
         beet = beet_bin()
         beets_env = beets_subprocess_env()
-    except RuntimeError as exc:
+        validate_beets_config(beets_env["BEETSDIR"])
+    except (RuntimeError, BeetsConfigError) as exc:
         msg = str(exc)
         log.warning("beets_album_op: beet %s %s %s", verb, selector, msg)
         return BeetsOpFailure(reason="exception", detail=msg, selector=selector)
 
-    argv: list[str] = [beet, verb, "-a"]
+    # ``importsource.suggest_removal`` prompts once per removed item and does
+    # not honor Beets' command-level ``--force`` flag. Cratedigger's delete
+    # authority covers the managed library copy only, never the plugin's
+    # separately recorded import source, so the plugin is disabled for this
+    # operation. Every module-rendered production plugin remains loaded.
+    argv: list[str] = [beet, "-P", "importsource", verb, "-a", "-f"]
     if verb == "remove" and delete_files:
         argv.append("-d")
     argv.append(selector)
 
     try:
-        # ``beet remove`` prompts "Really? (yes/[no])" before destructive
-        # deletes. Running from systemd (no tty) with stdin inherited from
-        # the parent, the prompt reads EOF and exits rc=1 with "stdin stream
-        # ended while input required" — silently blocking every upgrade
-        # post-import cleanup. Piping "y\n" answers the prompt affirmatively.
-        # ``beet move`` doesn't prompt, so the extra byte is harmless there.
+        # ``--force`` is Beets' supported noninteractive contract. Closing
+        # stdin is independent defense: plugin initialization must never
+        # consume an operator keystroke or a parent's protocol payload.
         proc = sp.run(
             argv,
             capture_output=True, text=True, errors="replace", timeout=timeout,
             env=beets_env,
-            input="y\n",
+            stdin=sp.DEVNULL,
         )
     except sp.TimeoutExpired as exc:
         msg = f"timed out after {exc.timeout}s"
@@ -229,7 +234,7 @@ def remove_album(
 ) -> BeetsOpResult:
     """Remove one beets album by numeric primary key.
 
-    Runs ``beet remove -a [-d] id:<album_id>``. Never raises — any
+    Runs a forced, album-scoped ``beet remove [-d] id:<album_id>``. Never raises — any
     subprocess failure is surfaced as a typed ``BeetsOpResult`` with
     ``success=False`` and a populated ``failure``.
 
@@ -253,7 +258,7 @@ def remove_by_selector(
     *,
     timeout: int = DEFAULT_REMOVE_TIMEOUT,
 ) -> BeetsOpFailure | None:
-    """Low-level primitive: ``beet remove -a -d <selector>``. Never raises.
+    """Low-level primitive: forced album ``beet remove -d <selector>``.
 
     For callsites that iterate arbitrary selectors (``mb_albumid:X``,
     ``discogs_albumid:Y``) because the album id is not known up front

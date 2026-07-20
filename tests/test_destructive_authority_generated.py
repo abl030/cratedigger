@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import logging
 import os
+import subprocess as sp
 import tempfile
 import unittest
 import uuid
@@ -13,9 +14,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hypothesis import example, given, strategies as st
+import msgspec
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.destructive_release_service import (
+    BanSourceCleanupIncomplete,
     BanSourceSuccess,
     BanSourceRequest,
     DeleteIncomplete,
@@ -28,6 +31,7 @@ from lib.beets_delete import (
     BeetsDeleteCompleted,
     BeetsDeleteFailureReason,
     BeetsDeleteRequest,
+    run_beets_delete,
 )
 from lib.beets_delete import (
     BeetsDeleteFailed,
@@ -41,6 +45,7 @@ from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_RELEASE,
 )
 from lib.release_identity import ReleaseIdentity
+from lib.release_cleanup import ReleaseCleanupResult, SelectorFailure
 from tests.fakes import DenylistEntry, FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
 
@@ -54,6 +59,16 @@ class DestructiveState:
     album: dict[str, object] | None
     files: tuple[tuple[str, bytes], ...]
     directories: tuple[str, ...]
+
+
+def assert_ban_completion_truth(*, completed: bool, absent_after: bool) -> None:
+    if completed != absent_after:
+        raise AssertionError("ban completion did not match exact-release absence")
+
+
+def assert_protocol_truth(*, accepted: bool, canonical: bool) -> None:
+    if accepted != canonical:
+        raise AssertionError("delete protocol accepted a non-canonical frame")
 
 
 def snapshot_state(
@@ -294,6 +309,121 @@ def _configure_lock_world(
 
 
 class TestGeneratedDestructiveAuthority(unittest.TestCase):
+    @example(
+        initial_status="imported", absent_after=False,
+        beets_removed=False, failure_count=1,
+    )
+    @example(
+        initial_status="unsearchable", absent_after=True,
+        beets_removed=True, failure_count=1,
+    )
+    @given(
+        initial_status=st.sampled_from(("wanted", "imported", "unsearchable")),
+        absent_after=st.booleans(),
+        beets_removed=st.booleans(),
+        failure_count=st.integers(min_value=0, max_value=2),
+    )
+    def test_ban_completion_is_exactly_authoritative_absence(
+        self,
+        initial_status: str,
+        absent_after: bool,
+        beets_removed: bool,
+        failure_count: int,
+    ) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41,
+            status=initial_status,
+            mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        ))
+        beets = FakeBeetsDB()
+        failures = tuple(
+            SelectorFailure(
+                reason="nonzero_rc",
+                detail=f"generated selector failure {index}",
+                selector=f"id:{index + 1}",
+            )
+            for index in range(failure_count)
+        )
+        cleanup = ReleaseCleanupResult(
+            beets_removed=beets_removed and absent_after,
+            absent_after=absent_after,
+            selector_failures=failures,
+        )
+
+        result = ban_source(
+            pipeline_db=db,
+            beets_db=beets,
+            request=BanSourceRequest(41),
+            cleanup_release_fn=lambda **_kwargs: cleanup,
+        )
+
+        completed = isinstance(result, BanSourceSuccess)
+        assert_ban_completion_truth(
+            completed=completed,
+            absent_after=absent_after,
+        )
+        self.assertEqual(
+            isinstance(result, BanSourceCleanupIncomplete),
+            not absent_after,
+        )
+        assert isinstance(result, (BanSourceSuccess, BanSourceCleanupIncomplete))
+        self.assertEqual(db.request(41)["status"], (
+            "unsearchable" if initial_status == "unsearchable" else "wanted"
+        ))
+        self.assertEqual(db.download_logs[-1].outcome, "curator_ban")
+        self.assertEqual(tuple(result.cleanup_errors), failures)
+
+    @given(
+        prefix=st.binary(min_size=0, max_size=24),
+        suffix=st.binary(min_size=0, max_size=24),
+        album_id=st.integers(min_value=1, max_value=2**31 - 1),
+    )
+    @example(prefix=b"plugin output\n", suffix=b"", album_id=7)
+    @example(prefix=b"", suffix=b"\n", album_id=7)
+    @example(prefix=b"", suffix=b"{}", album_id=7)
+    def test_delete_protocol_accepts_only_one_canonical_frame(
+        self,
+        prefix: bytes,
+        suffix: bytes,
+        album_id: int,
+    ) -> None:
+        outcome = BeetsDeleteFailed(
+            album_id=album_id,
+            reason="album_not_found",
+            detail="generated",
+            album_still_present=False,
+        )
+        canonical = msgspec.json.encode(outcome)
+        raw = prefix + canonical + suffix
+
+        previous_disable = logging.root.manager.disable
+        logging.disable(logging.CRITICAL)
+        try:
+            result = run_beets_delete(
+                BeetsDeleteRequest(
+                    album_id=album_id,
+                    expected_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    library_db_path="/tmp/library.db",
+                    library_root="/tmp/library",
+                ),
+                runner=lambda argv, **_kwargs: sp.CompletedProcess(
+                    argv, 0, stdout=raw, stderr=b"",
+                ),
+            )
+        finally:
+            logging.disable(previous_disable)
+
+        accepted = result == outcome
+        assert_protocol_truth(
+            accepted=accepted,
+            canonical=not prefix and not suffix,
+        )
+        if prefix or suffix:
+            self.assertIsInstance(result, BeetsDeleteFailed)
+            assert isinstance(result, BeetsDeleteFailed)
+            self.assertEqual(result.reason, "protocol_error")
+
     @given(initial_status=st.sampled_from(("imported", "unsearchable")))
     @example(initial_status="unsearchable")
     def test_successful_ban_preserves_searchability(
@@ -1213,6 +1343,12 @@ class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
                     notification_count=int(world["notification_count"]),
                     context_retained=bool(world["context_retained"]),
                 )
+
+    def test_ban_and_protocol_checkers_kill_historical_mutants(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "exact-release absence"):
+            assert_ban_completion_truth(completed=True, absent_after=False)
+        with self.assertRaisesRegex(AssertionError, "non-canonical frame"):
+            assert_protocol_truth(accepted=True, canonical=False)
 
     def test_enumeration_checker_kills_each_fail_closed_mutant(self) -> None:
         mutants = {

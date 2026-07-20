@@ -4623,7 +4623,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())["error"], "release_mismatch")
         self.assertEqual(db.denylist, [])
 
-    def test_ban_source_success_reports_resulting_searchability(self) -> None:
+    def test_ban_source_incomplete_reports_resulting_searchability(self) -> None:
         args = SimpleNamespace(
             request_id=41,
             release_id=RELEASE_A,
@@ -4646,11 +4646,11 @@ class TestDestructiveCliAdapters(unittest.TestCase):
                     with self._env(), redirect_stdout(output):
                         rc = pipeline_cli.cmd_ban_source(db, args)
 
-                    self.assertEqual(rc, 0)
-                    self.assertEqual(
-                        json.loads(output.getvalue())["request_status"],
-                        request_status,
-                    )
+                    self.assertEqual(rc, 4)
+                    payload = json.loads(output.getvalue())
+                    self.assertEqual(payload["error"], "cleanup_incomplete")
+                    self.assertEqual(payload["status"], "partial")
+                    self.assertEqual(payload["request_status"], request_status)
             self.assertEqual(mock_beet.call_count, 2)
 
     def test_library_delete_lock_contention_returns_state_exit_4(self) -> None:

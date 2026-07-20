@@ -121,6 +121,20 @@ console.log('delete result UI surfaces unknown content and notifier warnings');
   assertContains(warning.message, 'jellyfin: exact album item jf-7 remains observable', 'notifier warning detail visible');
 }
 
+console.log('Bad Rip cleanup partial is never described as success');
+{
+  const partial = describeBanSourceSuccess({
+    status: 'partial',
+    error: 'cleanup_incomplete',
+    request_status: 'wanted',
+    username: 'peer',
+    beets_removed: false,
+    hashes_recorded: 12,
+  });
+  assertContains(partial, 'still in beets', 'retained album is explicit');
+  assertExcludes(partial, 'not in beets', 'partial is not phrased as absence');
+}
+
 /** Independent expected encoder: JSON JS literal, then HTML attribute escaping. */
 function expectedJsArg(value) {
   return JSON.stringify(String(value))
