@@ -158,7 +158,6 @@ def audit_world(
             ))
 
     requests = pipeline_db.list_non_replaced_requests()
-    request_ids = [int(row["id"]) for row in requests]
     denylist_rows = pipeline_db.list_denylist_rows()
     denylist_request_ids = sorted({
         int(row["request_id"])
