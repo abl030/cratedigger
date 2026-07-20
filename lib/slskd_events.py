@@ -29,6 +29,7 @@ ingest.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -179,7 +180,7 @@ def _completion_info_from_events(
 
 def _stamp_local_paths(
     db: Any,
-    downloading: list[dict[str, Any]],
+    downloading: Sequence[Mapping[str, Any]],
     completion_info: dict[tuple[str, str], _EventCompletionInfo],
 ) -> tuple[int, int]:
     """Write matched local paths into each request's persisted state.
@@ -292,7 +293,7 @@ def recent_completion_paths(slskd: Any) -> RecentCompletionPaths:
 def ingest_download_file_events(
     db: Any,
     slskd: Any,
-    downloading: list[dict[str, Any]],
+    downloading: Sequence[Mapping[str, Any]],
 ) -> EventIngestResult:
     """One ingestion pass: page new events, stamp local paths, advance cursor.
 

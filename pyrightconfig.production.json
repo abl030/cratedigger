@@ -1,5 +1,7 @@
 {
-  "extraPaths": ["."],
+  "extraPaths": [
+    "."
+  ],
   "venvPath": ".",
   "venv": ".pyright-venv",
   "pythonVersion": "3.13",
@@ -9,6 +11,23 @@
   "reportUnnecessaryComparison": "error",
   "reportConstantRedefinition": "error",
   "reportDeprecated": "error",
+  "reportUntypedFunctionDecorator": "error",
+  "reportUntypedClassDecorator": "error",
+  "reportUntypedBaseClass": "error",
+  "reportUntypedNamedTuple": "error",
+  "reportPrivateImportUsage": "error",
+  "reportInvalidStringEscapeSequence": "error",
+  "reportSelfClsParameterName": "error",
+  "reportAssertAlwaysTrue": "error",
+  "reportUnusedExpression": "error",
+  "reportUnnecessaryContains": "error",
+  "reportRedeclaration": "error",
+  "reportInconsistentConstructor": "error",
+  "reportOverlappingOverload": "error",
+  "reportPropertyTypeMismatch": "error",
+  "reportTypeCommentUsage": "error",
+  "reportMatchNotExhaustive": "error",
+  "reportShadowedImports": "error",
   "exclude": [
     "build",
     "tools/vulture",

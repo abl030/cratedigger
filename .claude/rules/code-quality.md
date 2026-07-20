@@ -104,11 +104,21 @@ tests/_typing_ratchet_baseline.py`). Counting is lexical (stdlib
 tokenizer) — mentions inside strings and docstrings don't count, and the
 scanner is deliberately not a semantic analyzer.
 
-Phase 2 additionally enforces four mode-independent strict rules on
-production code — `reportUnnecessaryIsInstance`,
+Phases 2 and 7 enforce every strict-mode rule that production is already
+clean on — 21 rules as of phase 7 (`reportUnnecessaryIsInstance`,
 `reportUnnecessaryComparison`, `reportConstantRedefinition`,
-`reportDeprecated` — via `pyrightconfig.production.json`, gated in
-`scripts/run_tests.sh`. They are deliberately NOT in the main
+`reportDeprecated`, plus the 17 promoted wholesale after an empirical
+zero-error probe) — via `pyrightconfig.production.json`, gated in
+`scripts/run_tests.sh`. Deliberately NOT promoted, with reasons:
+`reportUninitializedInstanceVariable` (conflicts with the mixin
+forward-declaration idiom in `lib/pipeline_db/_core.py`),
+`reportCallInDefaultInitializer` (conflicts with the kwarg-DI
+production-default seam pattern), `reportImplicitOverride` (style, needs
+`@override` sprinkling), `reportUnusedFunction`/`Class` (incompatible
+with cross-module private imports — phase 5 finding), and the
+`reportUnknown*`/`reportMissingParameterType` family (the remaining
+~5,300-error annotation campaign that the typed-row rollout chips at
+per family). They are deliberately NOT in the main
 `pyrightconfig.json`: tests carry intentional protocol-conformance
 `issubclass` pins (the #430 parity-gate pattern) that the isinstance rule
 would flag, and a tests `executionEnvironments` split doesn't work here

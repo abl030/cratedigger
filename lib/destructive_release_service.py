@@ -15,7 +15,10 @@ import logging
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Literal, Protocol, TypeAlias
+from typing import Any, Callable, Literal, Protocol, TYPE_CHECKING, TypeAlias
+
+if TYPE_CHECKING:
+    from lib.pipeline_db.rows import AlbumRequestRow
 
 from lib import transitions
 from lib.audio_hash import AudioHashError, hash_audio_content
@@ -47,7 +50,7 @@ class SupportsReleaseLookupDB(Protocol):
 
     def get_request_by_release_id(
         self, release_id: object | None,
-    ) -> dict[str, Any] | None: ...
+    ) -> "AlbumRequestRow | None": ...
 
 
 class SupportsDestructivePipelineDB(transitions.TransitionsDB, Protocol):
@@ -55,7 +58,7 @@ class SupportsDestructivePipelineDB(transitions.TransitionsDB, Protocol):
 
     def get_request_by_release_id(
         self, release_id: object | None,
-    ) -> dict[str, Any] | None: ...
+    ) -> "AlbumRequestRow | None": ...
     def get_active_import_job_for_request(self, request_id: int) -> object | None: ...
     def advisory_lock(
         self, namespace: int, key: int,
@@ -154,7 +157,7 @@ def resolve_pipeline_request(
     pipeline_db: SupportsReleaseLookupDB | None,
     *,
     release_id: str,
-) -> dict[str, Any] | None:
+) -> "AlbumRequestRow | None":
     """Resolve the pipeline overlay from a server-derived release ID."""
     if pipeline_db is None or not normalize_release_id(release_id):
         return None
