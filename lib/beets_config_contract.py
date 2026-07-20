@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess as sp
-from typing import Any
 
 import yaml
 
@@ -13,7 +12,7 @@ class BeetsConfigError(RuntimeError):
     """The configured Beets file set cannot be read exactly as declared."""
 
 
-def _read_mapping(path: Path) -> dict[str, Any]:
+def _read_mapping(path: Path) -> dict[str, object]:
     try:
         raw = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
