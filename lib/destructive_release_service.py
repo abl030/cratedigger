@@ -8,6 +8,8 @@ and CLI callers are adapters only; they never select what is deleted.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import json
 import logging
 from contextlib import AbstractContextManager
@@ -127,7 +129,7 @@ def _distinct_identities(
     return tuple(identities)
 
 
-def _request_identity(row: dict[str, Any]) -> ReleaseIdentity | None:
+def _request_identity(row: Mapping[str, Any]) -> ReleaseIdentity | None:
     identities = _distinct_identities(
         row.get("mb_release_id"),
         row.get("discogs_release_id"),
@@ -516,7 +518,7 @@ def _default_delete_notify(path: str) -> tuple[DeleteNotification, ...]:
 def _delete_mismatch(
     request: DeleteRequest,
     identity: ReleaseIdentity | None,
-    pipeline_row: dict[str, Any] | None,
+    pipeline_row: Mapping[str, Any] | None,
 ) -> DeleteReleaseMismatch:
     return DeleteReleaseMismatch(
         album_id=request.album_id,
@@ -532,7 +534,7 @@ def _delete_mismatch(
 def _delete_confirmations_match(
     request: DeleteRequest,
     identity: ReleaseIdentity | None,
-    pipeline_row: dict[str, Any] | None,
+    pipeline_row: Mapping[str, Any] | None,
 ) -> bool:
     if identity is None or not _identity_matches(request.expected_release_id, identity):
         return False
@@ -566,7 +568,7 @@ def _incomplete_delete_detail(
     *,
     failed: BeetsDeleteFailed,
     former_album_path: str,
-    pipeline_row: dict[str, Any] | None,
+    pipeline_row: Mapping[str, Any] | None,
 ) -> str:
     """Explain the manual boundary when the child acknowledgement is ambiguous."""
     if failed.reason not in _ACK_AMBIGUOUS_DELETE_REASONS:
@@ -595,7 +597,7 @@ def _delete_incomplete(
     *,
     album_id: int,
     preflight_detail: dict[str, object],
-    pipeline_row: dict[str, Any] | None,
+    pipeline_row: Mapping[str, Any] | None,
     reason: str,
     detail: str,
     album_still_present: bool,
@@ -634,7 +636,7 @@ def _delete_under_release_lock(
     beets_db: SupportsDestructiveBeetsDB,
     request: DeleteRequest,
     identity: ReleaseIdentity,
-    pipeline_row: dict[str, Any] | None,
+    pipeline_row: Mapping[str, Any] | None,
     beets_delete_fn: BeetsDeleteFn,
 ) -> DeleteResult:
     # Both identities are re-read after lock acquisition. This is the final
@@ -745,7 +747,7 @@ def _delete_with_release_lock(
     beets_db: SupportsDestructiveBeetsDB,
     request: DeleteRequest,
     identity: ReleaseIdentity,
-    pipeline_row: dict[str, Any] | None,
+    pipeline_row: Mapping[str, Any] | None,
     beets_delete_fn: BeetsDeleteFn,
 ) -> DeleteResult:
     with pipeline_db.advisory_lock(

@@ -53,11 +53,17 @@ See:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
+
+if TYPE_CHECKING:
+    from lib.pipeline_db.rows import AlbumRequestRow
+
 
 logger = logging.getLogger(__name__)
 
@@ -512,7 +518,7 @@ class _PipelineDBProto(Protocol):
     through ``self.db.<x>``.
     """
 
-    def get_request(self, request_id: int) -> dict[str, Any] | None: ...
+    def get_request(self, request_id: int) -> "AlbumRequestRow | None": ...
     def get_tracks(self, request_id: int) -> list[dict[str, Any]]: ...
     def list_unfindable_probe_candidates(
         self, *, limit: int, probe_interval_days: int,
@@ -754,7 +760,7 @@ class UnfindableDetectionService:
 
     @staticmethod
     def _build_probe_history(
-        row: dict[str, Any], latest_match_count: int,
+        row: Mapping[str, Any], latest_match_count: int,
     ) -> list[int]:
         """Construct the probe history vector for the classifier.
 

@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 
+from lib.pipeline_db.rows import AlbumRequestRow, album_request_row
 from lib.pipeline_db._shared import (
     AddRequestInput,
     BACKOFF_BASE_MINUTES,
@@ -77,12 +78,12 @@ class _RequestsMixin(_PipelineDBBase):
         return row["id"]
 
 
-    def get_request(self, request_id: int) -> dict[str, Any] | None:
+    def get_request(self, request_id: int) -> AlbumRequestRow | None:
         cur = self._execute(
             "SELECT * FROM album_requests WHERE id = %s", (request_id,)
         )
         row = cur.fetchone()
-        return dict(row) if row else None
+        return album_request_row(row) if row else None
 
 
     def get_pipeline_overlay(

@@ -31,6 +31,8 @@ full design.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import json
 import logging
 import os
@@ -548,7 +550,7 @@ class MbidReplaceService:
     def _replace_discogs_target(
         self,
         request_id: int,
-        source: dict[str, Any],
+        source: Mapping[str, Any],
         source_mbid: str | None,
         target_mb_release_id: str,
     ) -> ReplaceResult:

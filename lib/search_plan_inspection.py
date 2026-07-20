@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from lib.pipeline_db import (
     ActiveSearchPlan,
@@ -29,6 +29,10 @@ from lib.search import SEARCH_PLAN_GENERATOR_ID
 # a head sample. Operators inspecting a stuck request need a quick read
 # on what the pre-plan-context history looked like; the full list is
 # always available via ``pipeline-cli show``.
+if TYPE_CHECKING:
+    from lib.pipeline_db.rows import AlbumRequestRow
+
+
 LEGACY_LOG_HEAD_LIMIT = 5
 
 
@@ -37,7 +41,7 @@ class _DBLike(Protocol):
 
     def get_request(
         self, request_id: int,
-    ) -> dict[str, Any] | None: ...
+    ) -> AlbumRequestRow | None: ...
 
     def get_search_plan_inspection(
         self, request_id: int,

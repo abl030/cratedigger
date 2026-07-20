@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
 import logging
 import os
 import tempfile
@@ -47,7 +48,7 @@ from tests.helpers import make_request_row
 
 @dataclass(frozen=True)
 class DestructiveState:
-    requests: tuple[tuple[int, dict[str, object] | None], ...]
+    requests: tuple[tuple[int, Mapping[str, object] | None], ...]
     denylist: tuple[object, ...]
     hashes: tuple[object, ...]
     logs: tuple[object, ...]

@@ -31,8 +31,10 @@ ships green before either wrapper exists; U16 / U17 fill those in.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from datetime import datetime
-from typing import Any, Iterable, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Iterable, Optional, Protocol
 
 import msgspec
 
@@ -58,6 +60,10 @@ from lib.unfindable_detection_service import (
 # adjusting syntax. Service-layer parser raises ``InvalidFilterError``
 # on garbage; CLI maps to exit code 3, API maps to HTTP 400 (per the
 # CLI ⇄ API symmetry convention).
+if TYPE_CHECKING:
+    from lib.pipeline_db.rows import AlbumRequestRow
+
+
 _FILTER_ALL = "all"
 _FILTER_UNFINDABLE = "unfindable"
 _FILTER_DATA_QUALITY = "data_quality"
@@ -343,7 +349,7 @@ class _PipelineDB(Protocol):
     class so tests can drop in a ``FakePipelineDB`` without monkey-patching.
     """
 
-    def get_request(self, request_id: int) -> Optional[dict[str, Any]]: ...
+    def get_request(self, request_id: int) -> "AlbumRequestRow | None": ...
 
     def list_triage_page(
         self,
@@ -455,7 +461,7 @@ def list_triage(
 
 
 def _compose_one(
-    request_row: dict[str, Any],
+    request_row: Mapping[str, Any],
     field_rows: Iterable[dict[str, Any]],
     summary_row: Optional[dict[str, Any]],
     log_rows: Iterable[dict[str, Any]],
@@ -472,7 +478,7 @@ def _compose_one(
     )
 
 
-def _request_meta(row: dict[str, Any]) -> RequestMeta:
+def _request_meta(row: Mapping[str, Any]) -> RequestMeta:
     return RequestMeta(
         id=int(row["id"]),
         artist_name=str(row.get("artist_name") or ""),
@@ -490,7 +496,7 @@ def _request_meta(row: dict[str, Any]) -> RequestMeta:
     )
 
 
-def _unfindable_state(row: dict[str, Any]) -> Optional[UnfindableState]:
+def _unfindable_state(row: Mapping[str, Any]) -> Optional[UnfindableState]:
     category = row.get("unfindable_category")
     categorised_at = row.get("unfindable_categorised_at")
     last_probe = row.get("last_artist_probe_at")

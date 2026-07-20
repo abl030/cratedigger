@@ -33,11 +33,13 @@ deterministically.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import logging
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, Protocol
 
 import msgspec
 
@@ -54,6 +56,10 @@ from lib import pipeline_db as _pipeline_db_mod  # noqa: F401 — module-import 
 # ``importlib.reload(pipeline_db)`` and the symbol then points at the
 # pre-reload class while the fake raises the post-reload class. Module-level
 # attribute lookup survives the reload because the module object is the same.
+
+if TYPE_CHECKING:
+    from lib.pipeline_db.rows import AlbumRequestRow
+
 
 log = logging.getLogger(__name__)
 
@@ -304,7 +310,7 @@ audio files from yt-dlp's temp output to
 :func:`_default_stage_dir`."""
 
 
-ReleaseGroupResolverFn = Callable[[dict[str, Any]], Optional[tuple[str, str]]]
+ReleaseGroupResolverFn = Callable[[Mapping[str, Any]], Optional[tuple[str, str]]]
 """``release_group_resolver_fn(request_row) -> (source, rg_id) | None``.
 
 Used by ``submit`` to find the ``(release_group_identifier, source)``
@@ -336,7 +342,7 @@ class _PipelineDB(Protocol):
     in ``FakePipelineDB`` without monkey-patching.
     """
 
-    def get_request(self, request_id: int) -> Optional[dict[str, Any]]: ...
+    def get_request(self, request_id: int) -> "AlbumRequestRow | None": ...
 
     def get_youtube_album_mapping(
         self, release_group_identifier: str, source: str,
@@ -503,7 +509,7 @@ def _default_stage_dir(src: Path, dest: Path) -> None:
 
 
 def _default_release_group_resolver(
-    request_row: dict[str, Any],
+    request_row: Mapping[str, Any],
 ) -> Optional[tuple[str, str]]:
     """Default release-group resolver: trust ``mb_release_group_id`` only.
 
@@ -1039,7 +1045,7 @@ class YoutubeIngestService:
         self,
         *,
         request_id: int,
-        request_row: dict[str, Any],
+        request_row: Mapping[str, Any],
         browse_id: str,
     ) -> SubmitResult | tuple[str, dict[str, Any], str]:
         request_mbid = self._request_mbid(request_row)
@@ -1121,7 +1127,7 @@ class YoutubeIngestService:
         self,
         *,
         request_id: int,
-        request_row: dict[str, Any],
+        request_row: Mapping[str, Any],
         source: str,
         mapping_row: dict[str, Any],
         target_release_id: str,
@@ -1206,7 +1212,7 @@ class YoutubeIngestService:
         return len(tracks)
 
     @staticmethod
-    def _request_mbid(request_row: dict[str, Any]) -> Optional[str]:
+    def _request_mbid(request_row: Mapping[str, Any]) -> Optional[str]:
         """Return the request's MB release id, or ``None`` for Discogs-only.
 
         ``mb_release_id`` may contain a numeric Discogs id for legacy
@@ -1220,7 +1226,7 @@ class YoutubeIngestService:
 
     @staticmethod
     def _request_discogs_release_id(
-        request_row: dict[str, Any],
+        request_row: Mapping[str, Any],
     ) -> Optional[str]:
         for key in ("discogs_release_id", "mb_release_id"):
             value = normalize_release_id(request_row.get(key))
@@ -1312,7 +1318,7 @@ class YoutubeIngestService:
 
     def _derive_staging_target(
         self,
-        request_row: dict[str, Any],
+        request_row: Mapping[str, Any],
         metadata: YoutubeIngestMetadata,
         *,
         download_log_id: int,
