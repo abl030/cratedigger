@@ -34,6 +34,7 @@ from lib.quality import (
 )
 from lib.staged_album import StagedAlbum
 from tests.fakes import (
+    FakeBeetsDB,
     FakePipelineDB,
     FakePipelineDBSource,
     FakeSlskdAPI,
@@ -8156,8 +8157,11 @@ class TestWrongMatchCleanupFKChainAvoidsRemeasurement(unittest.TestCase):
             )
             assert stored is not None and stored.id is not None
             db.set_download_log_candidate_evidence(log_id, stored.id)
+            beets = FakeBeetsDB()
+            beets.set_album_info("mbid-1", None)
 
             with self._patch_cfg(), \
+                    patch("lib.beets_db.BeetsDB", return_value=beets), \
                     patch("lib.measurement.measure_preimport_state") as mp:
                 result = cleanup_wrong_match(db, log_id)
 
@@ -8270,8 +8274,11 @@ class TestWrongMatchStaleEvidenceRefreshSlice(unittest.TestCase):
             assert stored is not None and stored.id is not None
             db.set_download_log_candidate_evidence(log_id, stored.id)
             stale_evidence_id = stored.id
+            beets = FakeBeetsDB()
+            beets.set_album_info("mbid-1", None)
 
-            with self._patch_cfg():
+            with self._patch_cfg(), \
+                    patch("lib.beets_db.BeetsDB", return_value=beets):
                 result = cleanup_wrong_match(db, log_id)
 
             # The real worker-mode preview re-measured the 0-byte file as

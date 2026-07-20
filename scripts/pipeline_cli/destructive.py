@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from typing import Protocol, cast
 
 from lib.beets_db import BeetsDB, open_beets_db
 from lib.destructive_release_service import (
@@ -31,16 +32,33 @@ from lib.destructive_release_service import (
 )
 
 
+class _BanSourceArgs(Protocol):
+    beets_db: str | None
+    beets_directory: str | None
+    request_id: int
+    release_id: str | None
+
+
+class _LibraryDeleteArgs(Protocol):
+    beets_db: str | None
+    beets_directory: str | None
+    album_id: int
+    purge_pipeline: bool
+    pipeline_id: int | None
+    release_id: str | None
+
+
 def _open_beets(path: str | None, library_root: str | None) -> BeetsDB:
     return open_beets_db(db_path=path, library_root=library_root)
 
 
 def cmd_ban_source(db, args) -> int:
     """Ban an exact source; preserve unsearchable or requeue as wanted."""
+    typed_args = cast(_BanSourceArgs, args)
     try:
         beets = _open_beets(
-            args.beets_db,
-            getattr(args, "beets_directory", None),
+            typed_args.beets_db,
+            typed_args.beets_directory,
         )
     except (FileNotFoundError, ValueError) as exc:
         print(json.dumps({"error": "beets_db_unavailable", "detail": str(exc)}))
@@ -50,8 +68,8 @@ def cmd_ban_source(db, args) -> int:
             pipeline_db=db,
             beets_db=beets,
             request=BanSourceRequest(
-                request_id=int(args.request_id),
-                expected_release_id=args.release_id,
+                request_id=int(typed_args.request_id),
+                expected_release_id=typed_args.release_id,
             ),
         )
     if isinstance(result, BanSourceSuccess):
@@ -133,10 +151,11 @@ def cmd_library_delete(
     notify_fn: DeleteNotifyFn | None = None,
 ) -> int:
     """Delete one exact beets album with optional pipeline purge."""
+    typed_args = cast(_LibraryDeleteArgs, args)
     try:
         beets = _open_beets(
-            args.beets_db,
-            getattr(args, "beets_directory", None),
+            typed_args.beets_db,
+            typed_args.beets_directory,
         )
     except (FileNotFoundError, ValueError) as exc:
         print(json.dumps({"error": "beets_db_unavailable", "detail": str(exc)}))
@@ -146,10 +165,10 @@ def cmd_library_delete(
             pipeline_db=db,
             beets_db=beets,
             request=DeleteRequest(
-                album_id=int(args.album_id),
-                purge_pipeline=bool(args.purge_pipeline),
-                expected_pipeline_id=args.pipeline_id,
-                expected_release_id=args.release_id,
+                album_id=int(typed_args.album_id),
+                purge_pipeline=bool(typed_args.purge_pipeline),
+                expected_pipeline_id=typed_args.pipeline_id,
+                expected_release_id=typed_args.release_id,
             ),
             beets_delete_fn=beets_delete_fn,
             notify_fn=notify_fn,
@@ -244,7 +263,9 @@ def cmd_library_delete(
     raise AssertionError(f"Unhandled library-delete result: {result!r}")
 
 
-def add_destructive_subparsers(sub: argparse._SubParsersAction) -> None:
+def add_destructive_subparsers(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
     ban = sub.add_parser(
         "ban-source",
         help="Mark a request's server-resolved exact release as a bad rip, "

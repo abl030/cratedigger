@@ -4822,7 +4822,11 @@ class TestWorldAuditCLI(unittest.TestCase):
         ):
             rc = pipeline_cli.cmd_audit_world(
                 db,
-                argparse.Namespace(beets_db="unused.db", json=True),
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                ),
             )
 
         payload = json.loads(output.getvalue())

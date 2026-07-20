@@ -6,17 +6,27 @@
 needs.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys
 import urllib.error
 import urllib.request
+from typing import Protocol, cast
 
 import msgspec
 
 from lib import transitions
 from lib.disk_coverage_service import disk_coverage
 from lib.release_identity import detect_release_source, normalize_release_id
+
+
+class _DiskCoverageArgs(Protocol):
+    beets_db: str | None
+    beets_directory: str | None
+    counts_only: bool
+    include_inverse: bool
 
 # Module-level DI seam for the operator transition service — see
 # ``lib.dispatch.outcome_actions.finalize_request`` for the rationale.
@@ -159,15 +169,16 @@ def cmd_list(db, args):
 def cmd_disk_coverage(db, args):
     from lib.beets_db import open_beets_db
 
+    typed_args = cast(_DiskCoverageArgs, args)
     with open_beets_db(
-        db_path=args.beets_db,
-        library_root=getattr(args, "beets_directory", None),
+        db_path=typed_args.beets_db,
+        library_root=typed_args.beets_directory,
     ) as beets:
         result = disk_coverage(
             db,
             beets,
-            include_rows=not args.counts_only,
-            include_inverse=args.include_inverse,
+            include_rows=not typed_args.counts_only,
+            include_inverse=typed_args.include_inverse,
         )
     print(json.dumps(msgspec.to_builtins(result), indent=2, sort_keys=True))
 
@@ -559,7 +570,9 @@ def cmd_set_intent(db, args):
     return 0
 
 
-def add_album_requests_subparsers(sub: argparse._SubParsersAction) -> None:
+def add_album_requests_subparsers(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
     """Add ``list`` / ``add`` / ``status`` / ``disk-coverage`` / ``set`` /
     ``set-intent`` (#521 carve out of
     ``routes_meta._build_parser``, verbatim argument definitions)."""

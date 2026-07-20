@@ -188,6 +188,11 @@ def _beets_db() -> BeetsDB | None:
     handle on first use. An injected `_beets` (tests) wins."""
     if _beets is not None:
         return _beets
+    # DSN-less mode is dependency-injected (tests and the web dev server).
+    # An absent explicit pair means Beets is deliberately unavailable; never
+    # fall through to the operator's production runtime config in that mode.
+    if not _db_dsn and beets_db_path is None:
+        return None
     handle = getattr(_thread_state, "beets", None)
     if handle is None:
         try:

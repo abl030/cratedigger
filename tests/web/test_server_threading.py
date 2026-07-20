@@ -452,6 +452,7 @@ class TestPerThreadBeetsHandles(unittest.TestCase):
             cfg = CratediggerConfig.from_ini(ini)
             srv.beets_db_path = None
             srv._beets = None
+            srv._db_dsn = "postgresql://runtime-production"
             with patch("lib.config.read_runtime_config", return_value=cfg):
                 handle = srv._beets_db()
 

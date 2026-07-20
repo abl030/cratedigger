@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import argparse
 import json
+from typing import Protocol, cast
 
 import msgspec
 
 from lib.beets_db import BeetsDB, open_beets_db
 from lib.world_audit_service import WorldAuditReport, audit_world
+
+
+class _AuditWorldArgs(Protocol):
+    beets_db: str | None
+    beets_directory: str | None
+    json: bool
 
 
 def _open_beets(path: str | None, library_root: str | None) -> BeetsDB:
@@ -37,10 +44,11 @@ def _render_text(report: WorldAuditReport) -> None:
 
 def cmd_audit_world(db, args: argparse.Namespace) -> int:
     """Run the shared world invariant bank without mutating either store."""
+    typed_args = cast(_AuditWorldArgs, args)
     try:
         beets = _open_beets(
-            args.beets_db,
-            getattr(args, "beets_directory", None),
+            typed_args.beets_db,
+            typed_args.beets_directory,
         )
     except (FileNotFoundError, ValueError) as exc:
         print(json.dumps({
@@ -50,14 +58,16 @@ def cmd_audit_world(db, args: argparse.Namespace) -> int:
         return 5
     with beets:
         report = audit_world(db, beets)
-    if args.json:
+    if typed_args.json:
         print(json.dumps(msgspec.to_builtins(report), indent=2))
     else:
         _render_text(report)
     return 0 if report.status == "clean" else 1
 
 
-def add_audit_subparser(sub: argparse._SubParsersAction) -> None:
+def add_audit_subparser(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
     audit = sub.add_parser(
         "audit",
         help="Run read-only cross-engine invariant audits.",
