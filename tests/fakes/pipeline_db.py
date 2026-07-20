@@ -2842,6 +2842,15 @@ class FakePipelineDB:
                 evidence,
                 on_disk_v0_research_attempted=True,
             )
+        if (
+            existing is not None
+            and existing.current_enrichment_required
+            and not evidence.current_enrichment_required
+        ):
+            evidence = msgspec.structs.replace(
+                evidence,
+                current_enrichment_required=True,
+            )
         if existing is not None and existing.id is not None:
             evidence_id = existing.id
         else:

@@ -406,6 +406,19 @@ carry unconditionally with provenance `carried`; installed-subject facts are
 remeasured and can only have provenance `measured`. Proof is conceptually a
 source acquisition fact, so it needs only its provenance marker.
 
+**A changed installed snapshot is linked before neutral enrichment, but it is
+not immediately action authority.** The new content-addressed row must exist
+first so the preview-owned spectral and V0 writers can target its exact id and
+fingerprint. Such a rebuild sets `current_enrichment_required=true`; action
+loaders keep failing closed on every unchanged retry until that exact row has
+both a spectral result and either a V0 metric or the persisted once-only V0
+attempt marker. Source-subject spectral/V0 facts may satisfy the gate because
+they survive byte changes by definition; installed-subject facts do not and
+must be measured again. The marker is monotonic for a content address, so a
+same-address upsert from another writer cannot erase the retry gate. It need
+not be cleared after enrichment: completeness of the required facts is what
+makes the row authoritative.
+
 **A genuine spectral grade does not prove source bitrate for fullband codecs.**
 Opus can retain a fullband cutoff at low bitrates, so a native Opus scan may
 look spectrally genuine without establishing that the acquisition was
@@ -461,8 +474,9 @@ When the on-disk files are unchanged (the legacy-backfill case) the
 rebuilt row shares the `(mb_release_id, snapshot_fingerprint)` content
 address, so the upsert repairs `source_path` in place — same row id,
 FK untouched; if the files have changed since capture, backfill writes
-a fresh row and repoints the FK. Either way enrichment can then
-complete the surviving row. The candidate-reuse preview fast path also
+a fresh row, repoints the FK, and persists the changed-snapshot enrichment
+gate described above. Either way enrichment can then complete the surviving
+row. The candidate-reuse preview fast path also
 persists its attempt-time HAVE scan through
 `persist_exact_current_spectral_from_attempt` before marking the job
 importable, so a reused-evidence force import decides against the same
@@ -494,9 +508,14 @@ result writes only
 `search_filetype_override="lossless"`: `target_format` remains untouched, and
 `search_tiers` disables the catch-all fallback for that override. The normal
 forever cadence continues, now searching only for the remaining meaningful
-upgrade: lossless. Every other unverified retained copy stays wanted on the
-full search surface; only verified-lossless proof ends acquisition, in every
-import mode.
+upgrade: lossless. That narrowing is monotonic across successful retained
+imports: post-import persistence and the quality gate preserve an existing
+`"lossless"` override even when the new retained-copy decision would normally
+propose the full search surface. Only verified-lossless terminal acceptance or
+explicit operator intent may clear it; evidence/decision failures retain their
+separate fail-open recovery policy. Every other unverified retained copy that
+starts unrestricted stays wanted on the full search surface. Only
+verified-lossless proof ends acquisition, in every import mode.
 
 Older library rows may still have NULL spectral / V0 / bad-hash facts. The
 deploy transition materializes each member of the canonical acquisition-fact

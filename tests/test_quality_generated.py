@@ -616,7 +616,11 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
             mb_id="generated-mbid", label="Generated",
             request_id=42,
             files=[SimpleNamespace(username="peer")],
-            db=SimpleNamespace(),  # type: ignore[arg-type]
+            db=SimpleNamespace(
+                get_request=lambda _request_id: {
+                    "search_filetype_override": None,
+                },
+            ),  # type: ignore[arg-type]
             apply=False,
             state_loader=lambda **_kwargs: state,
         )

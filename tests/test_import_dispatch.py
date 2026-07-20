@@ -1225,6 +1225,20 @@ class TestDispatchImport(unittest.TestCase):
         self.assertEqual(row["status"], "wanted")
         self.assertEqual(row["search_filetype_override"], "lossless")
 
+    def test_retained_import_cannot_widen_existing_lossless_scope(self):
+        result = self._dispatch(
+            make_import_result(decision="transcode_upgrade"),
+            scenario="force_import",
+            force=True,
+            initial_status="wanted",
+            queued=True,
+            request_overrides={"search_filetype_override": "lossless"},
+        )
+
+        row = result["db"].request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["search_filetype_override"], "lossless")
+
     def test_import_success(self):
         imported_path = "/mnt/virtio/Music/Beets/Test Artist/2026 - Test Album"
         ir = make_import_result(
@@ -2294,6 +2308,16 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         row = db.request(42)
         self.assertEqual(row["status"], "wanted")
         self.assertIsNone(row["search_filetype_override"])
+
+    def test_requeue_upgrade_cannot_widen_existing_lossless_scope(self):
+        db = self._run_quality_gate(
+            info=self._bare_mp3_vbr_low(),
+            search_filetype_override="lossless",
+        )
+
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["search_filetype_override"], "lossless")
 
     def test_verified_lossless_proof_accepts_regardless_of_rank(self):
         db = self._run_quality_gate(

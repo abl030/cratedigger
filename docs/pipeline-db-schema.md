@@ -59,6 +59,16 @@ Key fields:
   `v0_median_bitrate_kbps`, `v0_subject`, `v0_provenance` — one neutral V0
   metric plus its two-axis markers. Legacy policy-shaped probe kinds are
   rejected here.
+- `on_disk_v0_research_attempted BOOLEAN` — monotonic once-only claim that the
+  exact content-addressed installed snapshot has already had its neutral V0
+  research opportunity, including a probe that produced no metric.
+- `current_enrichment_required BOOLEAN` — monotonic marker set when a changed
+  installed snapshot is linked before its exact spectral/V0 enrichment has
+  completed. Action loaders require the row's neutral enrichment facts while
+  this marker is true, so an unchanged retry cannot turn a newly linked but
+  unenriched row into authority. Source-subject facts may survive the rebuild;
+  missing installed-subject facts must be measured anew. Same-address upserts
+  combine the marker with logical OR and cannot clear it.
 - `verified_lossless BOOLEAN` plus `verified_lossless_provenance`,
   `verified_lossless_source`, `verified_lossless_classifier`,
   `verified_lossless_detail` — the proof object is the sole writable owner of

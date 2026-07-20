@@ -18,7 +18,7 @@ from lib import transitions
 # Module-level DI seam for ``transitions.finalize_request``.
 finalize_request = transitions.finalize_request
 
-from lib.quality import extract_usernames
+from lib.quality import extract_usernames, resolve_retained_search_override
 from lib.quality.decisions import (
     PostImportSearchAction,
     post_import_search_action_if_known,
@@ -140,8 +140,22 @@ def _apply_post_import_search_action(
             "requeueing import decision mapped to non-wanted "
             f"status: {decision} -> {search_action.status}"
         )
+    request = db.get_request(request_id)
+    raw_existing_override = (
+        request.get("search_filetype_override")
+        if request is not None
+        else None
+    )
+    existing_override = (
+        raw_existing_override
+        if isinstance(raw_existing_override, str)
+        else None
+    )
     fields: dict[str, object] = {
-        "search_filetype_override": search_action.search_filetype_override,
+        "search_filetype_override": resolve_retained_search_override(
+            existing_override,
+            search_action.search_filetype_override,
+        ),
     }
     if mark_done and new_bitrate is not None:
         fields["min_bitrate"] = new_bitrate

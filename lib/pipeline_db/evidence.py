@@ -68,6 +68,7 @@ class _EvidenceMixin(_PipelineDBBase):
                     v0_median_bitrate_kbps, v0_subject,
                     v0_provenance,
                     on_disk_v0_research_attempted,
+                    current_enrichment_required,
                     verified_lossless_provenance,
                     verified_lossless_source, verified_lossless_classifier,
                     verified_lossless_detail,
@@ -84,6 +85,7 @@ class _EvidenceMixin(_PipelineDBBase):
                     %s, %s, %s, %s, %s, %s, -- spectral/lossless/conversion
                     %s, %s, %s, %s, %s, -- V0 metric
                     %s, -- on-disk V0 research attempted
+                    %s, -- changed-current enrichment required
                     %s, %s, %s, %s, -- verified-lossless proof
                     %s, %s, %s, %s, %s, %s, -- preview facts
                     NOW()
@@ -227,6 +229,9 @@ class _EvidenceMixin(_PipelineDBBase):
                     on_disk_v0_research_attempted =
                         album_quality_evidence.on_disk_v0_research_attempted
                         OR EXCLUDED.on_disk_v0_research_attempted,
+                    current_enrichment_required =
+                        album_quality_evidence.current_enrichment_required
+                        OR EXCLUDED.current_enrichment_required,
                     verified_lossless_provenance =
                         EXCLUDED.verified_lossless_provenance,
                     verified_lossless_source =
@@ -306,6 +311,7 @@ class _EvidenceMixin(_PipelineDBBase):
                 v0.subject if v0 else None,
                 v0.provenance if v0 else None,
                 evidence.on_disk_v0_research_attempted,
+                evidence.current_enrichment_required,
                 proof.provenance if proof else None,
                 proof.source if proof else None,
                 proof.classifier if proof else None,
@@ -703,6 +709,9 @@ class _EvidenceMixin(_PipelineDBBase):
             v0_metric=v0_metric,
             on_disk_v0_research_attempted=bool(
                 row.get("on_disk_v0_research_attempted", False)
+            ),
+            current_enrichment_required=bool(
+                row["current_enrichment_required"]
             ),
             verified_lossless_proof=proof,
             audio_corrupt=bool(row.get("audio_corrupt", False)),

@@ -13,6 +13,7 @@ from lib.quality import (
     SpectralAnalysisDetail,
     measurement_rank,
     rejection_backfill_override,
+    resolve_retained_search_override,
 )
 
 
@@ -191,6 +192,19 @@ def assert_no_lossy_tier_added(input_override, result_override) -> None:
         )
 
 
+def assert_retained_lossless_scope(
+    existing_override: str | None,
+    result_override: str | None,
+) -> None:
+    """A retained import cannot clear an existing lossless-only scope."""
+
+    if existing_override == QUALITY_LOSSLESS and result_override != QUALITY_LOSSLESS:
+        raise AssertionError(
+            "retained import widened lossless-only scope: "
+            f"{existing_override!r} -> {result_override!r}"
+        )
+
+
 _override_csv = st.one_of(
     st.none(),
     st.sampled_from([
@@ -261,6 +275,22 @@ class TestGeneratedNoOverrideWidening(unittest.TestCase):
         )
         assert_no_lossy_tier_added(override, resolution.override)
 
+    @given(
+        existing_override=_override_csv,
+        proposed_override=st.sampled_from((None, QUALITY_LOSSLESS)),
+    )
+    @example(existing_override=QUALITY_LOSSLESS, proposed_override=None)
+    def test_retained_import_never_widens_lossless_scope(
+        self,
+        existing_override: str | None,
+        proposed_override: str | None,
+    ) -> None:
+        result = resolve_retained_search_override(
+            existing_override,
+            proposed_override,
+        )
+        assert_retained_lossless_scope(existing_override, result)
+
 
 class TestNoWideningCheckerTripsOnViolations(unittest.TestCase):
     def test_trips_when_a_lossy_tier_is_added(self):
@@ -276,3 +306,7 @@ class TestNoWideningCheckerTripsOnViolations(unittest.TestCase):
 
     def test_accepts_pure_narrowing(self):
         assert_no_lossy_tier_added("lossless,mp3 v0,mp3 320", "lossless,mp3 v0")
+
+    def test_retained_checker_trips_on_lossless_to_full(self):
+        with self.assertRaisesRegex(AssertionError, "widened"):
+            assert_retained_lossless_scope(QUALITY_LOSSLESS, None)

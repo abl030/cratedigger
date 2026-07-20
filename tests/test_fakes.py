@@ -317,6 +317,26 @@ class TestFakePipelineDB(unittest.TestCase):
         assert persisted is not None
         self.assertTrue(persisted.on_disk_v0_research_attempted)
 
+    def test_album_quality_evidence_enrichment_gate_is_monotonic(self):
+        db = FakePipelineDB()
+        evidence = make_album_quality_evidence(
+            mb_release_id="mb-enrichment-gate-1",
+            current_enrichment_required=True,
+        )
+        db.upsert_album_quality_evidence(evidence)
+
+        db.upsert_album_quality_evidence(msgspec.structs.replace(
+            evidence,
+            current_enrichment_required=False,
+        ))
+
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None
+        self.assertTrue(persisted.current_enrichment_required)
+
     def test_album_quality_evidence_absent_v0_preserves_stored_tuple(self):
         from lib.quality import AlbumQualityV0Metric
 
