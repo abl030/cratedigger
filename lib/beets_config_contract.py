@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess as sp
 
+import msgspec
 import yaml
 
 
@@ -20,14 +21,17 @@ def _read_mapping(path: Path) -> dict[str, object]:
             f"cannot read Beets config {path}: {type(exc).__name__}: {exc}"
         ) from exc
     try:
-        value = yaml.safe_load(raw)
+        value: object = yaml.safe_load(raw)
     except yaml.YAMLError as exc:
         raise BeetsConfigError(f"invalid Beets YAML {path}: {exc}") from exc
     if value is None:
         return {}
-    if not isinstance(value, dict):
-        raise BeetsConfigError(f"Beets config {path} must contain a mapping")
-    return value
+    try:
+        return msgspec.convert(value, type=dict[str, object])
+    except msgspec.ValidationError as exc:
+        raise BeetsConfigError(
+            f"Beets config {path} must contain a mapping"
+        ) from exc
 
 
 def _plugin_names(value: object, *, source: Path) -> frozenset[str]:
@@ -35,8 +39,11 @@ def _plugin_names(value: object, *, source: Path) -> frozenset[str]:
         return frozenset()
     if isinstance(value, str):
         return frozenset(value.split())
-    if isinstance(value, list) and all(isinstance(item, str) for item in value):
-        return frozenset(value)
+    if isinstance(value, list):
+        try:
+            return frozenset(msgspec.convert(value, type=list[str]))
+        except msgspec.ValidationError:
+            pass
     raise BeetsConfigError(
         f"Beets config {source} plugins must be a string or list"
     )
@@ -58,10 +65,13 @@ def validate_beets_config(config_dir: str) -> frozenset[str]:
     declared = config.get("include", ())
     if isinstance(declared, str):
         includes = (declared,)
-    elif isinstance(declared, list) and all(
-        isinstance(item, str) for item in declared
-    ):
-        includes = tuple(declared)
+    elif isinstance(declared, list):
+        try:
+            includes = tuple(msgspec.convert(declared, type=list[str]))
+        except msgspec.ValidationError as exc:
+            raise BeetsConfigError(
+                f"Beets config {config_path} include must be a string or list"
+            ) from exc
     elif declared in (None, ()):
         includes = ()
     else:
