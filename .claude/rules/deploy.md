@@ -14,12 +14,15 @@
 - Flake updates MUST happen on doc1 (has the Forgejo token + signing key). NEVER from doc2.
 - `restartIfChanged = false` on the cratedigger service — deploys don't restart it. The timer (`OnUnitInactiveSec`, back-to-back cycles) picks up new code on the next cycle. `cratedigger-web` and `cratedigger-db-migrate` use the systemd default and DO restart on switch.
 - Post-switch pipeline verification first derives and checks the exact active
-  source store, then captures the current `cratedigger.service` invocation as a
-  fresh baseline. It captures the first later invocation whose
-  invocation-scoped journal names that source, then requires that same
+  source store, then captures the tail cursor of `cratedigger.service`'s
+  journal as a fresh baseline. It enumerates ordered systemd start records
+  after that cursor and captures the first invocation whose invocation-scoped
+  journal names that source, then requires that same
   invocation's application cycle-complete record and systemd successful
-  deactivation/finished-job records. This post-switch observation boundary is
-  required even for same-source, same-revision retries; a pre-trigger
+  deactivation/finished-job records. Journal ordering prevents a short-lived
+  failed target from disappearing between state polls. This post-switch
+  observation boundary is required even for same-source, same-revision
+  retries; a pre-trigger
   invocation ID is audit evidence only because cycles can roll during the
   asynchronous build. A later timer invocation replacing the unit's current
   `InvocationID` is neither success nor failure evidence for the captured

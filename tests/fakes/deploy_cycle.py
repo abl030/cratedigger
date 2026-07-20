@@ -37,6 +37,21 @@ if "systemctl show cratedigger.service" in remote:
     save()
     raise SystemExit(0)
 
+if "journalctl" in remote and "--show-cursor" in remote:
+    print("-- No entries --")
+    print(f"-- cursor: {state['cursor']}")
+    save()
+    raise SystemExit(0)
+
+if "journalctl" in remote and "--after-cursor=" in remote:
+    snapshots = state["start_journal_snapshots"]
+    index = min(state["start_journal_index"], len(snapshots) - 1)
+    state["start_journal_index"] += 1
+    for record in snapshots[index]:
+        print(json.dumps(record, sort_keys=True))
+    save()
+    raise SystemExit(0)
+
 if "journalctl" in remote and "--invocation=" in remote:
     match = re.search(r"--invocation=([0-9a-f]{32})", remote)
     if match is None:
@@ -67,6 +82,7 @@ class FakeDeployCycleCommands:
     TARGET = "3" * 32
     NEXT = "4" * 32
     SOURCE = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-source"
+    CURSOR = "s=abc;i=1;b=def;m=2;t=3;x=4"
 
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -109,6 +125,14 @@ class FakeDeployCycleCommands:
             "MESSAGE": "Cratedigger starting",
         }
 
+    @staticmethod
+    def start_record(invocation: str) -> dict[str, str]:
+        return {
+            "INVOCATION_ID": invocation,
+            "JOB_TYPE": "start",
+            "MESSAGE": "Starting Cratedigger — Soulseek download pipeline...",
+        }
+
     @classmethod
     def success_records(
         cls,
@@ -143,6 +167,7 @@ class FakeDeployCycleCommands:
         *,
         system_states: list[dict[str, str]],
         journal_snapshots: dict[str, list[list[dict[str, str]]]],
+        start_journal_snapshots: list[list[dict[str, str]]] | None = None,
     ) -> None:
         self.state_path.write_text(
             json.dumps(
@@ -152,6 +177,9 @@ class FakeDeployCycleCommands:
                     "system_state_index": 0,
                     "journal_snapshots": journal_snapshots,
                     "journal_indexes": {},
+                    "cursor": self.CURSOR,
+                    "start_journal_snapshots": start_journal_snapshots or [[]],
+                    "start_journal_index": 0,
                 },
                 sort_keys=True,
             ),

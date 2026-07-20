@@ -23,9 +23,10 @@ usage() {
   cat >&2 <<'EOF'
 usage:
   verify_cratedigger_cycle.sh capture-current
-  verify_cratedigger_cycle.sh capture-target <previous-id-or-none> <expected-source-store>
+  verify_cratedigger_cycle.sh capture-cursor
+  verify_cratedigger_cycle.sh capture-target <baseline-journal-cursor> <expected-source-store>
   verify_cratedigger_cycle.sh verify-exact <target-id> <expected-source-store>
-  verify_cratedigger_cycle.sh wait <previous-id-or-none> <expected-source-store>
+  verify_cratedigger_cycle.sh wait <baseline-journal-cursor> <expected-source-store>
 EOF
   return 64
 }
@@ -47,17 +48,16 @@ validate_invocation() {
     || die "invalid systemd InvocationID: $invocation"
 }
 
-validate_previous() {
-  local invocation=$1
-  if [[ "$invocation" != none ]]; then
-    validate_invocation "$invocation"
-  fi
-}
-
 validate_source() {
   local source=$1
   [[ "$source" =~ ^/nix/store/[0-9a-z]{32}-source$ ]] \
     || die "invalid expected source store: $source"
+}
+
+validate_cursor() {
+  local cursor=$1
+  [[ -n "$cursor" && "$cursor" =~ ^[A-Za-z0-9_.:=\;-]+$ ]] \
+    || die "invalid systemd journal cursor: $cursor"
 }
 
 read_current_state() {
@@ -83,6 +83,13 @@ read_invocation_journal() {
   validate_invocation "$invocation"
   ssh "$REMOTE_HOST" \
     "sudo journalctl -u $UNIT --invocation=$invocation --no-pager -o json"
+}
+
+read_start_journal_after_cursor() {
+  local cursor=$1
+  validate_cursor "$cursor"
+  ssh "$REMOTE_HOST" \
+    "sudo journalctl -u $UNIT --after-cursor='$cursor' --no-pager -o json"
 }
 
 journal_has_source() {
@@ -164,24 +171,44 @@ capture_current() {
   fi
 }
 
+capture_cursor() {
+  local output cursor
+  if ! output=$(ssh "$REMOTE_HOST" \
+    "sudo journalctl -u $UNIT -n 0 --show-cursor --no-pager"); then
+    die "could not capture $REMOTE_HOST $UNIT journal cursor"
+    return 1
+  fi
+  cursor=$(sed -n 's/^-- cursor: //p' <<<"$output")
+  validate_cursor "$cursor"
+  printf '%s\n' "$cursor"
+}
+
 capture_target() {
-  local previous=$1 expected_source=$2
-  local deadline polls=0 candidate journal
+  local baseline_cursor=$1 expected_source=$2
+  local deadline polls=0 candidate journal starts
   local -a candidates=()
   local -A seen=()
-  validate_previous "$previous"
+  validate_cursor "$baseline_cursor"
   validate_source "$expected_source"
   deadline=$((SECONDS + TIMEOUT_SECONDS))
 
   while true; do
     polls=$((polls + 1))
-    read_current_state
-    if [[ -n "$CURRENT_INVOCATION" \
-      && "$CURRENT_INVOCATION" != "$previous" \
-      && -z "${seen[$CURRENT_INVOCATION]:-}" ]]; then
-      candidates+=("$CURRENT_INVOCATION")
-      seen[$CURRENT_INVOCATION]=1
+    if ! starts=$(read_start_journal_after_cursor "$baseline_cursor"); then
+      die "could not read $UNIT starts after the baseline cursor"
+      return 1
     fi
+    while IFS= read -r candidate; do
+      [[ -n "$candidate" ]] || continue
+      validate_invocation "$candidate"
+      if [[ -z "${seen[$candidate]:-}" ]]; then
+        candidates+=("$candidate")
+        seen[$candidate]=pending
+      fi
+    done < <(jq -r '
+      select(.JOB_TYPE == "start" and .JOB_RESULT == null)
+      | .INVOCATION_ID // empty
+    ' <<<"$starts")
 
     for candidate in "${candidates[@]}"; do
       if ! journal=$(read_invocation_journal "$candidate"); then
@@ -265,8 +292,8 @@ verify_exact() {
 }
 
 wait_for_cycle() {
-  local previous=$1 expected_source=$2 target
-  target=$(capture_target "$previous" "$expected_source")
+  local baseline_cursor=$1 expected_source=$2 target
+  target=$(capture_target "$baseline_cursor" "$expected_source")
   verify_exact "$target" "$expected_source"
 }
 
@@ -277,6 +304,10 @@ main() {
     capture-current)
       (($# == 1)) || usage
       capture_current
+      ;;
+    capture-cursor)
+      (($# == 1)) || usage
+      capture_cursor
       ;;
     capture-target)
       (($# == 3)) || usage

@@ -37,6 +37,12 @@ class TestDeployCycleVerifier(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), "none")
 
+    def test_capture_cursor_returns_exact_journal_boundary(self) -> None:
+        proc = self.fake.run(SCRIPT, "capture-cursor")
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), self.fake.CURSOR)
+
     def test_capture_target_ignores_old_source_then_returns_target(self) -> None:
         self.fake.write_state(
             system_states=[
@@ -51,18 +57,64 @@ class TestDeployCycleVerifier(unittest.TestCase):
                 )]],
                 self.fake.TARGET: [[self.fake.source_record()]],
             },
+            start_journal_snapshots=[[
+                self.fake.start_record(self.fake.OLD_SUCCESSOR),
+                self.fake.start_record(self.fake.TARGET),
+            ]],
         )
 
         proc = self.fake.run(
             SCRIPT,
             "capture-target",
-            self.fake.OLD,
+            self.fake.CURSOR,
             self.fake.SOURCE,
         )
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), self.fake.TARGET)
         self.assertIn("ignoring non-target-source invocation", proc.stderr)
+
+    def test_capture_target_cannot_skip_rolled_failed_target_in_journal(self) -> None:
+        failed_target = [
+            self.fake.source_record(),
+            {
+                "INVOCATION_ID": self.fake.TARGET,
+                "JOB_RESULT": "failed",
+                "JOB_TYPE": "start",
+                "MESSAGE": "Failed to start Cratedigger.",
+            },
+        ]
+        self.fake.write_state(
+            system_states=[
+                self.fake.system_state(self.fake.OLD),
+                self.fake.system_state(self.fake.NEXT),
+            ],
+            journal_snapshots={
+                self.fake.TARGET: [failed_target],
+                self.fake.NEXT: [self.fake.success_records(
+                    invocation=self.fake.NEXT,
+                )],
+            },
+            start_journal_snapshots=[[
+                self.fake.start_record(self.fake.TARGET),
+                self.fake.start_record(self.fake.NEXT),
+            ]],
+        )
+
+        proc = self.fake.run(
+            SCRIPT,
+            "capture-target",
+            self.fake.CURSOR,
+            self.fake.SOURCE,
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), self.fake.TARGET)
+        system_reads = [
+            event for event in self.fake.state["events"]
+            if "systemctl show cratedigger.service" in " ".join(event)
+        ]
+        self.assertEqual(system_reads, [])
 
     def test_wait_verifies_target_after_current_id_rolls_to_next(self) -> None:
         self.fake.write_state(
@@ -77,12 +129,15 @@ class TestDeployCycleVerifier(unittest.TestCase):
                     self.fake.success_records(),
                 ],
             },
+            start_journal_snapshots=[[
+                self.fake.start_record(self.fake.TARGET),
+            ]],
         )
 
         proc = self.fake.run(
             SCRIPT,
             "wait",
-            self.fake.OLD,
+            self.fake.CURSOR,
             self.fake.SOURCE,
         )
 
@@ -259,27 +314,23 @@ class TestDeployCycleVerifier(unittest.TestCase):
         source = SKILL.read_text(encoding="utf-8")
         self.assertIn("scripts/verify_cratedigger_cycle.sh", source)
         self.assertIn("capture-current", source)
+        self.assertIn("capture-cursor", source)
         self.assertIn("capture-target", source)
         self.assertIn("verify-exact", source)
         self.assertIn(
             "PRE_SWITCH_CRATEDIGGER_INVOCATION=%s\\n",
             source,
         )
+        self.assertIn("POST_SWITCH_CRATEDIGGER_CURSOR=$(\n", source)
         self.assertIn(
-            "POST_SWITCH_CRATEDIGGER_INVOCATION=$(\n"
-            '  "$CRATEDIGGER_REPO/scripts/verify_cratedigger_cycle.sh" '
-            "capture-current\n)",
-            source,
-        )
-        self.assertIn(
-            '"$POST_SWITCH_CRATEDIGGER_INVOCATION" "$CRATEDIGGER_SOURCE"',
+            '"$POST_SWITCH_CRATEDIGGER_CURSOR" "$CRATEDIGGER_SOURCE"',
             source,
         )
         self.assertNotIn("<value printed by step 3>", source)
         step_six = source.index("6. Derive the active wrapper")
         source_check = source.index("ssh doc2 \"grep '<something unique>'", step_six)
         post_switch_capture = source.index(
-            "POST_SWITCH_CRATEDIGGER_INVOCATION=$(",
+            "POST_SWITCH_CRATEDIGGER_CURSOR=$(",
             step_six,
         )
         target_capture = source.index("TARGET_CRATEDIGGER_INVOCATION=$(", step_six)

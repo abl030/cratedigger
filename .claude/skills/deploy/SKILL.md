@@ -201,8 +201,9 @@ exact source store from the wrapper and verify the deployed change there
 (choose a unique string in a production file). Do not glob every historical
 store path: an old generation could produce a false positive. Inspect the
 rendered unit/config when the NixOS module changed. After deriving and checking
-the active source, capture a fresh current Cratedigger invocation as the
-post-switch baseline. Then capture the first later invocation whose
+the active source, capture a fresh tail cursor from the Cratedigger unit
+journal as the post-switch baseline. Then enumerate ordered start records
+after that cursor and capture the first invocation whose
 invocation-scoped journal names that exact source and verify it through the
 tracked boundary. This guarantees that the verified cycle started after a
 post-switch observation even on a same-source, same-revision retry; waiting one
@@ -210,7 +211,8 @@ extra cycle is safe. The verifier requires the application cycle-complete
 record plus systemd's successful deactivation and finished-job records. If the
 back-to-back timer has already replaced the target `InvocationID`, it follows
 the captured target through `journalctl --invocation=<ID>` instead of treating
-rollover as either success or failure:
+rollover as either success or failure. The journal cursor also prevents a
+short-lived failed invocation from vanishing between state polls:
 ```bash
 set -euo pipefail
 CRATEDIGGER_REPO=$(git rev-parse --show-toplevel)
@@ -222,14 +224,14 @@ CRATEDIGGER_SOURCE=$(ssh doc2 "grep -o '/nix/store/[^ ]*-source/cratedigger.py' 
   '$CRATEDIGGER_BIN' | head -1 | sed 's#/cratedigger.py##'")
 test -n "$CRATEDIGGER_SOURCE"
 ssh doc2 "grep '<something unique>' '$CRATEDIGGER_SOURCE/<changed-file>.py'"
-POST_SWITCH_CRATEDIGGER_INVOCATION=$(
-  "$CRATEDIGGER_REPO/scripts/verify_cratedigger_cycle.sh" capture-current
+POST_SWITCH_CRATEDIGGER_CURSOR=$(
+  "$CRATEDIGGER_REPO/scripts/verify_cratedigger_cycle.sh" capture-cursor
 )
-printf 'POST_SWITCH_CRATEDIGGER_INVOCATION=%s\n' \
-  "$POST_SWITCH_CRATEDIGGER_INVOCATION"
+printf 'POST_SWITCH_CRATEDIGGER_CURSOR=%s\n' \
+  "$POST_SWITCH_CRATEDIGGER_CURSOR"
 TARGET_CRATEDIGGER_INVOCATION=$(
   "$CRATEDIGGER_REPO/scripts/verify_cratedigger_cycle.sh" capture-target \
-    "$POST_SWITCH_CRATEDIGGER_INVOCATION" "$CRATEDIGGER_SOURCE"
+    "$POST_SWITCH_CRATEDIGGER_CURSOR" "$CRATEDIGGER_SOURCE"
 )
 "$CRATEDIGGER_REPO/scripts/verify_cratedigger_cycle.sh" verify-exact \
   "$TARGET_CRATEDIGGER_INVOCATION" "$CRATEDIGGER_SOURCE"

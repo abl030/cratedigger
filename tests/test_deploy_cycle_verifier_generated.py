@@ -113,6 +113,72 @@ class TestExactCycleCheckerKnownBad(unittest.TestCase):
 
 
 class TestGeneratedExactCycleVerifier(unittest.TestCase):
+    @settings(max_examples=20, deadline=None)
+    @given(
+        old_source_first=st.booleans(),
+        failed_target=st.booleans(),
+        later_healthy_target_source=st.booleans(),
+    )
+    @example(
+        old_source_first=False,
+        failed_target=True,
+        later_healthy_target_source=True,
+    )
+    def test_capture_chooses_first_target_source_start_from_journal_history(
+        self,
+        old_source_first: bool,
+        failed_target: bool,
+        later_healthy_target_source: bool,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            fake = FakeDeployCycleCommands(Path(tempdir))
+            starts: list[dict[str, str]] = []
+            journals: dict[str, list[list[dict[str, str]]]] = {}
+            if old_source_first:
+                starts.append(fake.start_record(fake.OLD_SUCCESSOR))
+                journals[fake.OLD_SUCCESSOR] = [[fake.source_record(
+                    invocation=fake.OLD_SUCCESSOR,
+                    source="/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-source",
+                )]]
+            target_records = [fake.source_record()]
+            if failed_target:
+                target_records.append({
+                    "INVOCATION_ID": fake.TARGET,
+                    "JOB_RESULT": "failed",
+                    "JOB_TYPE": "start",
+                    "MESSAGE": "Failed to start Cratedigger.",
+                })
+            starts.append(fake.start_record(fake.TARGET))
+            journals[fake.TARGET] = [target_records]
+            starts.append(fake.start_record(fake.NEXT))
+            later_source = (
+                fake.SOURCE
+                if later_healthy_target_source
+                else "/nix/store/cccccccccccccccccccccccccccccccc-source"
+            )
+            journals[fake.NEXT] = [[fake.source_record(
+                invocation=fake.NEXT,
+                source=later_source,
+            )]]
+            fake.write_state(
+                system_states=[
+                    fake.system_state(fake.OLD),
+                    fake.system_state(fake.NEXT),
+                ],
+                journal_snapshots=journals,
+                start_journal_snapshots=[starts],
+            )
+
+            proc = fake.run(
+                SCRIPT,
+                "capture-target",
+                fake.CURSOR,
+                fake.SOURCE,
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(proc.stdout.strip(), fake.TARGET)
+
     @settings(max_examples=40, deadline=None)
     @given(
         source=st.booleans(),
