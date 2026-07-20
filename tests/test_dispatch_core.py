@@ -198,7 +198,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             "db": db,
             "path": tmpdir,
             "cleanup_calls": ext.cleanup.call_count,
-            "orphan_cleanup_calls": ext.orphans.call_count,
         }
 
     # --- Success path ---
@@ -217,7 +216,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         r = self._dispatch()
 
         self.assertEqual(r["cleanup_calls"], 0)
-        self.assertEqual(r["orphan_cleanup_calls"], 0)
         cleanup = r["result"].post_commit_cleanup
         assert cleanup is not None
         self.assertEqual(cleanup.staged_path, r["path"])

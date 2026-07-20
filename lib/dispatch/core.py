@@ -3,9 +3,9 @@
 ``dispatch_import_core`` is the funnel every import path (automatic and
 force) runs through: acquire the RELEASE advisory lock, load evidence,
 run the subprocess, and dispatch on the decision.
-``cleanup_disambiguation_orphans`` and ``_cleanup_staged_dir`` are looked
-up here (tests patch them on this module). The post-import search-policy
-appliers live in ``lib.dispatch.post_import``.
+Destructive convergence is returned to the queue owner as an in-memory
+post-commit plan. The post-import search-policy appliers live in
+``lib.dispatch.post_import``.
 """
 
 from __future__ import annotations
@@ -30,16 +30,13 @@ from lib.quality import (AlbumQualityEvidenceDecisionFacts, DownloadInfo,
                          override_bitrate_from_current_evidence,
                          resolve_rejection_search_override)
 from lib.quality_evidence import EvidenceBuildResult, audit_v0_probe_from_metric
-from lib.util import cleanup_disambiguation_orphans
-
 from lib.dispatch.types import (DispatchOutcome, EvidenceImportGate,
                                 FORCE_IMPORT_SCENARIOS, ImportAttemptResult,
                                 ImportOneRun, PostCommitCleanup, QualityGateFn)
 from lib.dispatch.subprocess_runner import run_import_one
-from lib.dispatch.helpers import (_cleanup_staged_dir, _guard_failure_detail,
+from lib.dispatch.helpers import (_guard_failure_detail,
                                   _log_postflight_bad_extensions,
                                   _populate_dl_info_from_import_result,
-                                  _quarantine_duplicate_remove_guard_source,
                                   _should_cleanup_path)
 from lib.dispatch.evidence_gate import (_current_evidence_analysis_failed,
                                         _import_allowed_by_evidence_pipeline,
@@ -687,25 +684,12 @@ def dispatch_import_core(
                     elif decision == "duplicate_remove_guard_failed":
                         fail_scenario = "duplicate_remove_guard_failed"
                         fail_detail = _guard_failure_detail(ir)
-                        if candidate_import_job_id is None:
-                            # The no-job compatibility path writes its terminal
-                            # audit immediately, so quarantine remains safe and
-                            # its result can be included in that audit.
-                            attempt_result.apply(
-                                lambda result: _quarantine_duplicate_remove_guard_source(
-                                    ir=result,
-                                    path=path,
-                                    request_id=request_id,
-                                    cfg=cfg,
-                                )
-                            )
-                        else:
-                            post_commit_duplicate_guard_path = path
-                            post_commit_duplicate_guard_staging_dir = (
-                                cfg.beets_staging_dir
-                                if cfg is not None and cfg.beets_staging_dir
-                                else os.path.dirname(os.path.abspath(path))
-                            )
+                        post_commit_duplicate_guard_path = path
+                        post_commit_duplicate_guard_staging_dir = (
+                            cfg.beets_staging_dir
+                            if cfg is not None and cfg.beets_staging_dir
+                            else os.path.dirname(os.path.abspath(path))
+                        )
                         guard = ir.postflight.duplicate_remove_guard
                         if guard is not None:
                             logger.error(
@@ -945,20 +929,9 @@ def dispatch_import_core(
                     # already-imported album. Auto-import scenarios always
                     # clean — their staging dir under ``/Incoming`` is
                     # disposable by design.
-                    if candidate_import_job_id is not None:
-                        post_commit_staged_path = path
-                    else:
-                        _cleanup_staged_dir(path)
+                    post_commit_staged_path = path
                 if action.mark_done and ir.postflight.disambiguated and ir.postflight.imported_path:
-                    if candidate_import_job_id is not None:
-                        post_commit_disambiguation_path = ir.postflight.imported_path
-                    else:
-                        cleanup_disambiguation_orphans(
-                            ir.postflight.imported_path,
-                            beets_directory=(
-                                cfg.beets_directory if cfg is not None else ""
-                            ),
-                        )
+                    post_commit_disambiguation_path = ir.postflight.imported_path
         except sp.TimeoutExpired:
             logger.error(f"{mode} TIMEOUT: {label}")
             if beets_launch_authorized:
