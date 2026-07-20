@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 def _band_from_detail(
     rid: str,
     in_library: set[str],
-    quality: dict[str, dict],
+    quality: dict[str, dict[str, object]],
 ) -> str:
     """Three-way band for one release id given already-fetched membership
     + ``check_mbids_detail`` output (KTD1).
@@ -77,7 +77,9 @@ def band_release_ids(release_ids: Iterable[str]) -> dict[str, str]:
     try:
         in_library = srv.check_beets_library(ids_list)
         b = srv._beets_db()
-        quality = b.check_mbids_detail(list(in_library)) if in_library and b else {}
+        quality: dict[str, dict[str, object]] = (
+            b.check_mbids_detail(list(in_library)) if in_library and b else {}
+        )
     except Exception:
         # Beets unavailable (locked / missing DB) — degrade to all-"missing"
         # rather than 500-ing the whole worklist (matches the CLI's
@@ -92,7 +94,10 @@ def band_release_ids(release_ids: Iterable[str]) -> dict[str, str]:
     return {rid: _band_from_detail(rid, in_library, quality) for rid in ids_list}
 
 
-def overlay_release_rows_in_place(rows: list[dict], release_ids: Iterable[str]) -> None:
+def overlay_release_rows_in_place(
+    rows: list[dict[str, object]],
+    release_ids: Iterable[str],
+) -> None:
     """Annotate each release row with library + pipeline state in place.
 
     Parameters
@@ -120,14 +125,22 @@ def overlay_release_rows_in_place(rows: list[dict], release_ids: Iterable[str]) 
     from lib.banding import current_library_bitrate
 
     ids_list = list(release_ids)
-    in_library = srv.check_beets_library(ids_list) if ids_list else set()
-    in_pipeline = srv.check_pipeline(ids_list) if ids_list else {}
+    in_library: set[str] = (
+        srv.check_beets_library(ids_list) if ids_list else set()
+    )
+    in_pipeline: dict[str, dict[str, object]] = (
+        srv.check_pipeline(ids_list) if ids_list else {}
+    )
     b = srv._beets_db()
-    beets_ids = b.get_album_ids_by_mbids(list(in_library)) if in_library and b else {}
-    quality = b.check_mbids_detail(list(in_library)) if in_library and b else {}
+    beets_ids: dict[str, int] = (
+        b.get_album_ids_by_mbids(list(in_library)) if in_library and b else {}
+    )
+    quality: dict[str, dict[str, object]] = (
+        b.check_mbids_detail(list(in_library)) if in_library and b else {}
+    )
 
     for r in rows:
-        rid = r["id"]
+        rid = str(r["id"])
         r["in_library"] = rid in in_library
         r["beets_album_id"] = beets_ids.get(rid)
         q = quality.get(rid)

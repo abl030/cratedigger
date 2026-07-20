@@ -9,10 +9,12 @@ frontend renders the same shape regardless of upstream.
 from __future__ import annotations
 
 import urllib.error
+from typing import TypeGuard
 
 import msgspec
 
 from web import discogs as discogs_api
+from web.discogs import LabelEntity
 from web.routes._overlay import overlay_release_rows_in_place
 from web.routes._registry import (
     RouteHandler,
@@ -65,7 +67,21 @@ def _parse_positive_int(
     return v
 
 
-def _label_entity_payload(entity) -> dict:
+def _as_release_rows(value: object) -> TypeGuard[list[dict[str, object]]]:
+    """Narrow the label-releases envelope's ``results`` value.
+
+    `web.discogs.get_label_releases` returns a `dict[str, object]`
+    envelope, so its nested ``results`` list is `object`-typed at the
+    type-checker boundary even though it is always built as
+    `list[dict[str, object]]`. `overlay_release_rows_in_place` mutates
+    rows in place, so this narrows the existing list rather than
+    reconstructing a copy (e.g. via `msgspec.convert`) that would
+    silently detach the overlay mutation from the enclosing envelope.
+    """
+    return isinstance(value, list)
+
+
+def _label_entity_payload(entity: LabelEntity) -> dict[str, object]:
     """Convert a `LabelEntity` Struct to a JSON-safe dict.
 
     Per `.claude/rules/code-quality.md` § "Wire-boundary types":
@@ -170,8 +186,9 @@ def get_discogs_label_detail(
             return
         raise
     releases = releases_resp["results"]
+    assert _as_release_rows(releases)
 
-    overlay_release_rows_in_place(releases, [r["id"] for r in releases])
+    overlay_release_rows_in_place(releases, [str(r["id"]) for r in releases])
 
     h._json({
         "label": _label_entity_payload(entity),

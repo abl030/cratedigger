@@ -12,7 +12,7 @@ from web.routes._overlay import band_release_ids, overlay_release_rows_in_place
 
 class TestOverlayReleaseRowsInPlace(unittest.TestCase):
     def test_populates_library_and_pipeline_state(self):
-        rows = [
+        rows: list[dict[str, object]] = [
             {"id": "held", "title": "Held Release"},
             {"id": "queued", "title": "Queued Release"},
             {"id": "both", "title": "Both Release"},
@@ -46,7 +46,7 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
                                    "provisional_lossless": False},
                       }), \
                 patch("web.server._beets_db", return_value=mock_beets):
-            overlay_release_rows_in_place(rows, [r["id"] for r in rows])
+            overlay_release_rows_in_place(rows, [str(r["id"]) for r in rows])
 
         by_id = {row["id"]: row for row in rows}
 

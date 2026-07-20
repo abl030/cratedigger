@@ -3,7 +3,9 @@
 import json
 import os
 from collections.abc import Mapping, Sequence
-from typing import Any, TypedDict
+from email.message import Message
+from io import BufferedIOBase
+from typing import Any, Protocol, TypedDict
 
 import msgspec
 from pydantic import BaseModel, Field, model_validator
@@ -13,6 +15,7 @@ from web.routes._pydantic import parse_body
 from lib.quality import _is_explicit_label
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
+    ImportJob,
     force_import_dedupe_key,
     force_import_payload,
 )
@@ -28,6 +31,9 @@ from lib.wrong_match_delete_service import (
     OUTCOME_SKIPPED_LOCKED as DELETE_OUTCOME_LOCKED,
     OUTCOME_SKIPPED_NOT_VISIBLE as DELETE_OUTCOME_NOT_VISIBLE,
     OUTCOME_SKIPPED_UNSAFE_PATH as DELETE_OUTCOME_UNSAFE_PATH,
+    WrongMatchDeleteDB,
+    WrongMatchDeleteResult,
+    WrongMatchDeleteSummary,
     delete_wrong_match,
     delete_wrong_match_group,
 )
@@ -42,7 +48,7 @@ from lib.validation_envelope import (
     decode_validation_envelope,
 )
 from web.routes.pipeline import _serialize_import_job
-from web.routes._registry import RouteRegistration, route
+from web.routes._registry import RouteHandler, RouteRegistration, route
 from web.routes._server_access import _server
 from web.triage_runner import TriageRunner
 from web.wrong_match_file_service import (
@@ -106,7 +112,7 @@ _RANK_SORT_ORDER: dict[str, int] = {
 }
 
 
-def _entry_sort_key(entry: dict[str, object]) -> tuple:
+def _entry_sort_key(entry: dict[str, object]) -> tuple[int, float, int]:
     """Best-quality first; ties broken by distance asc, id desc."""
     rank_name = entry.get("quality_rank")
     rank_value = _RANK_SORT_ORDER.get(rank_name, 0) \
@@ -254,11 +260,11 @@ def _build_wrong_match_groups(
     pdb = srv._db()
     rows = pdb.get_wrong_matches()
     active_import_jobs = pdb.list_active_import_jobs(limit=200)
-    active_jobs_by_log_id: dict[int, object] = {}
-    active_jobs_by_request_id: dict[int, list[object]] = {}
+    active_jobs_by_log_id: dict[int, ImportJob] = {}
+    active_jobs_by_request_id: dict[int, list[ImportJob]] = {}
     for job in active_import_jobs:
-        payload = getattr(job, "payload", {}) or {}
-        request_id = getattr(job, "request_id", None)
+        payload = job.payload or {}
+        request_id = job.request_id
         if isinstance(request_id, int):
             active_jobs_by_request_id.setdefault(request_id, []).append(job)
         download_log_id = payload.get("download_log_id")
@@ -272,6 +278,7 @@ def _build_wrong_match_groups(
     beets_info = srv.check_beets_library_detail(mbids) if mbids else {}
 
     groups: dict[int, dict[str, object]] = {}
+    group_entries: dict[int, list[dict[str, object]]] = {}
     order: list[int] = []
 
     for row in rows:
@@ -298,6 +305,7 @@ def _build_wrong_match_groups(
             # legacy copies honestly read 'not in library' now.
             presence = _row_presence(row, beets_info)
             in_library = presence == "exact"
+            new_entries_list: list[dict[str, object]] = []
             group = {
                 "request_id": request_id,
                 "artist": row["artist_name"],
@@ -306,7 +314,7 @@ def _build_wrong_match_groups(
                 "mb_release_group_id": row.get("mb_release_group_id"),
                 "in_library": in_library,
                 "pending_count": 0,
-                "entries": [],
+                "entries": new_entries_list,
                 "import_jobs": [
                     _serialize_import_job(job)
                     for job in active_jobs_by_request_id.get(request_id, [])
@@ -315,11 +323,11 @@ def _build_wrong_match_groups(
                 **_quality_summary(row, beets_info, presence),
             }
             groups[request_id] = group
+            group_entries[request_id] = new_entries_list
             order.append(request_id)
 
         target = target_candidate(vr)
-        entries_list = group["entries"]
-        assert isinstance(entries_list, list)
+        entries_list = group_entries[request_id]
         # ``download_log_id`` is a required, non-nullable ``download_log.id``
         # column (WrongMatchCandidateRow), so the row type already proves
         # this is an ``int``.
@@ -404,15 +412,13 @@ def _build_wrong_match_groups(
     # sees the most promising candidate (e.g. a FLAC) before the worse
     # ones (MP3 192). Ties broken by distance ascending then download_log
     # id descending (newest first).
-    for group in groups.values():
-        entries_list = group["entries"]
-        assert isinstance(entries_list, list)
+    for entries_list in group_entries.values():
         entries_list.sort(key=_entry_sort_key)
 
     return [groups[rid] for rid in order]
 
 
-def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
+def get_wrong_matches(h: RouteHandler, params: dict[str, list[str]]) -> None:
     """Return grouped wrong-match rejections for the manual-review UI.
 
     ``?include_replaced=true`` opts into showing rows whose parent
@@ -464,7 +470,7 @@ def _byte_range(range_header: str | None, size: int) -> tuple[int, int, int] | N
     return start, end, (end - start) + 1
 
 
-def get_wrong_match_explorer(h, params: dict[str, list[str]]) -> None:
+def get_wrong_match_explorer(h: RouteHandler, params: dict[str, list[str]]) -> None:
     """Return filesystem-backed file/tag explorer data for one wrong match."""
     try:
         log_id = _download_log_id_from_params(params)
@@ -488,7 +494,28 @@ def get_wrong_match_explorer(h, params: dict[str, list[str]]) -> None:
     h._json(payload)
 
 
-def get_wrong_match_audio(h, params: dict[str, list[str]]) -> None:
+class _StreamingRouteHandler(RouteHandler, Protocol):
+    """``RouteHandler`` plus the raw ``BaseHTTPRequestHandler`` surface
+    ``get_wrong_match_audio`` needs for manual byte-range streaming
+    (headers/response-line/body writes bypass the ``_json``/``_error``
+    envelope entirely). The real ``web/server.py::Handler`` satisfies
+    this structurally, same as ``RouteHandler`` itself.
+    """
+
+    headers: Message
+    wfile: BufferedIOBase
+    close_connection: bool
+
+    def send_response(self, code: int, message: str | None = None) -> None: ...
+
+    def send_header(self, keyword: str, value: str) -> None: ...
+
+    def end_headers(self) -> None: ...
+
+
+def get_wrong_match_audio(
+    h: _StreamingRouteHandler, params: dict[str, list[str]],
+) -> None:
     """Stream one wrong-match audio file with byte-range support."""
     try:
         log_id = _download_log_id_from_params(params)
@@ -563,7 +590,9 @@ def get_wrong_match_audio(h, params: dict[str, list[str]]) -> None:
         h.close_connection = True
 
 
-def _delete_wrong_match_row(pdb, log_id: int):
+def _delete_wrong_match_row(
+    pdb: WrongMatchDeleteDB, log_id: int,
+) -> WrongMatchDeleteResult:
     """Converge helper: operator-authority delete via lib/wrong_match_delete_service.
 
     Do NOT route this through cleanup_wrong_match. Converge has already collected
@@ -579,7 +608,7 @@ class WrongMatchDeleteRequest(BaseModel):
     download_log_id: int = Field(gt=0)
 
 
-def post_wrong_match_delete(h, body: dict) -> None:
+def post_wrong_match_delete(h: RouteHandler, body: dict[str, object]) -> None:
     """Operator-triggered deletion of one visible Wrong Matches candidate."""
     req_body = parse_body(h, body, WrongMatchDeleteRequest)
     if req_body is None:
@@ -609,7 +638,9 @@ class WrongMatchDeleteGroupRequest(BaseModel):
     request_id: int = Field(gt=0)
 
 
-def post_wrong_match_delete_group(h, body: dict) -> None:
+def post_wrong_match_delete_group(
+    h: RouteHandler, body: dict[str, object],
+) -> None:
     """Operator-triggered deletion of all current Wrong Matches for a request."""
     req_body = parse_body(h, body, WrongMatchDeleteGroupRequest)
     if req_body is None:
@@ -624,7 +655,7 @@ def post_wrong_match_delete_group(h, body: dict) -> None:
     )
 
 
-def _wrong_match_delete_group_http_status(summary) -> int:
+def _wrong_match_delete_group_http_status(summary: WrongMatchDeleteSummary) -> int:
     """Mirror the CLI status/exit-code precedence for group delete."""
     if summary.success:
         return 200
@@ -657,7 +688,7 @@ class WrongMatchConvergeRequest(BaseModel):
     threshold_milli: Any = None
 
 
-def post_wrong_match_converge(h, body: dict) -> None:
+def post_wrong_match_converge(h: RouteHandler, body: dict[str, object]) -> None:
     """Queue acceptable candidates and delete the rest for the release.
 
     ⚠ OPERATOR-AUTHORITY CONTRACT — do not route deletion through
@@ -818,7 +849,7 @@ def post_wrong_match_converge(h, body: dict) -> None:
     }, status=202)
 
 
-def _preview_values_from_body(body: dict) -> ImportPreviewValues:
+def _preview_values_from_body(body: dict[str, object]) -> ImportPreviewValues:
     raw_values = body.get("values")
     if raw_values is None and body.get("values_json"):
         raw_values = json.loads(str(body["values_json"]))
@@ -829,7 +860,7 @@ def _preview_values_from_body(body: dict) -> ImportPreviewValues:
     return msgspec.convert(raw_values, type=ImportPreviewValues)
 
 
-def post_import_preview(h, body: dict) -> None:
+def post_import_preview(h: RouteHandler, body: dict[str, object]) -> None:
     """Preview either typed values, a request/path, or a download-log row."""
     has_values = any(k in body for k in ("values", "values_json", "is_flac", "min_bitrate"))
     has_download_log = body.get("download_log_id") is not None
@@ -847,14 +878,22 @@ def post_import_preview(h, body: dict) -> None:
                 cfg=read_runtime_rank_config(),
             )
         elif has_download_log:
+            download_log_db = _server()._db()
+            raw_download_log_id = body["download_log_id"]
+            if not isinstance(raw_download_log_id, (str, int, float)):
+                raise TypeError("download_log_id must be a number or string")
             preview = preview_import_from_download_log(
-                _server()._db(),
-                int(body["download_log_id"]),
+                download_log_db,
+                int(raw_download_log_id),
             )
         else:
+            path_db = _server()._db()
+            raw_request_id = body["request_id"]
+            if not isinstance(raw_request_id, (str, int, float)):
+                raise TypeError("request_id must be a number or string")
             preview = preview_import_from_path(
-                _server()._db(),
-                request_id=int(body["request_id"]),
+                path_db,
+                request_id=int(raw_request_id),
                 path=str(body["path"]),
                 force=bool(body.get("force", True)),
             )
@@ -887,7 +926,7 @@ class WrongMatchTriageRequest(BaseModel):
 _triage_runner = TriageRunner()
 
 
-def post_wrong_match_triage(h, body: dict) -> None:
+def post_wrong_match_triage(h: RouteHandler, body: dict[str, object]) -> None:
     """Start the bulk triage sweep on a background thread (202).
 
     The sweep takes minutes when stale rows trigger re-measurement
@@ -909,7 +948,9 @@ def post_wrong_match_triage(h, body: dict) -> None:
     h._json({"status": "started", "state": "running"}, status=202)
 
 
-def get_wrong_match_triage_status(h, params: dict) -> None:
+def get_wrong_match_triage_status(
+    h: RouteHandler, params: dict[str, list[str]],
+) -> None:
     h._json(_triage_runner.status())
 
 

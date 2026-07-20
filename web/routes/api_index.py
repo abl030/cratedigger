@@ -10,7 +10,7 @@ indexes — keep the response shape stable.
 
 import textwrap
 
-from web.routes._registry import RouteRegistration, route
+from web.routes._registry import RouteHandler, RouteRegistration, route
 
 
 # --- U18 step 2: /api/_index — self-documenting API surface ----------------
@@ -70,7 +70,7 @@ def _extract_request_model(fn: object) -> str | None:
     return None
 
 
-def get_api_index(h, params: dict[str, list[str]]) -> None:
+def get_api_index(h: RouteHandler, params: dict[str, list[str]]) -> None:
     """``GET /api/_index`` — self-documenting API surface.
 
     Returns a list of ``{method, path, description, request_model}`` rows

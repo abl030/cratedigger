@@ -22,10 +22,12 @@ from typing import TYPE_CHECKING, Literal
 import msgspec
 from pydantic import BaseModel, Field
 
+from lib.import_queue import ImportJob
+
 if TYPE_CHECKING:
     from lib.pipeline_db import LatestDownloadSummary
 
-from web.routes._registry import RouteRegistration, pattern_route, route
+from web.routes._registry import RouteHandler, RouteRegistration, pattern_route, route
 from web.routes._pydantic import parse_body
 from web.routes._server_access import _server
 
@@ -217,7 +219,7 @@ def _pipeline_log_limit(params: dict[str, list[str]]) -> int:
 # ── GET handlers ─────────────────────────────────────────────────
 
 
-def get_pipeline_log(h, params: dict[str, list[str]]) -> None:
+def get_pipeline_log(h: RouteHandler, params: dict[str, list[str]]) -> None:
     outcome_filter = params.get("outcome", [None])[0]
     if outcome_filter not in (None, "imported", "rejected"):
         outcome_filter = None
@@ -229,7 +231,7 @@ def get_pipeline_log(h, params: dict[str, list[str]]) -> None:
         str(e["mb_release_id"]) for e in entries if e.get("mb_release_id")
     })
     beets_info = _server().check_beets_library_detail(mbids) if mbids else {}
-    result = []
+    result: list[dict[str, object]] = []
     for e in entries:
         item = _classify_pipeline_log_item(e)
         mbid = item.get("mb_release_id")
@@ -242,9 +244,10 @@ def get_pipeline_log(h, params: dict[str, list[str]]) -> None:
             item["beets_avg_bitrate"] = bi.get("beets_avg_bitrate")
         result.append(item)
     source_ids = [
-        int(item["id"])
+        item_id
         for item in result
-        if isinstance(item.get("id"), int)
+        for item_id in [item.get("id")]
+        if isinstance(item_id, int)
     ]
     linked_items = [
         _classify_pipeline_log_item(row)
@@ -267,7 +270,7 @@ def get_pipeline_log(h, params: dict[str, list[str]]) -> None:
     })
 
 
-def get_pipeline_status(h, params: dict[str, list[str]]) -> None:
+def get_pipeline_status(h: RouteHandler, params: dict[str, list[str]]) -> None:
     counts = _server()._db().count_by_status()
     wanted = _server()._db().get_wanted(limit=50)
     h._json({
@@ -287,9 +290,9 @@ def get_pipeline_status(h, params: dict[str, list[str]]) -> None:
 
 
 def _attach_latest_download_summaries(
-    items: list[dict],
+    items: list[dict[str, object]],
     summaries: "Mapping[int, LatestDownloadSummary]",
-) -> list[dict]:
+) -> list[dict[str, object]]:
     """Stamp each request row with its newest download's verdict fields.
 
     ``summaries`` comes from ``get_latest_download_summaries`` — one
@@ -312,11 +315,11 @@ def _attach_latest_download_summaries(
 IMPORTED_RECENT_LIMIT = 100
 
 
-def get_pipeline_all(h, params: dict[str, list[str]]) -> None:
+def get_pipeline_all(h: RouteHandler, params: dict[str, list[str]]) -> None:
     s = _server()
     counts = s._db().count_by_status()
     all_data: dict[str, object] = {"counts": counts}
-    status_items: dict[str, list[dict]] = {}
+    status_items: dict[str, list[dict[str, object]]] = {}
     all_ids: list[int] = []
     statuses: tuple[str, ...] = (
         "wanted", "downloading", "imported", "unsearchable")
@@ -350,7 +353,7 @@ def get_pipeline_all(h, params: dict[str, list[str]]) -> None:
     h._json(all_data)
 
 
-def get_pipeline_search(h, params: dict[str, list[str]]) -> None:
+def get_pipeline_search(h: RouteHandler, params: dict[str, list[str]]) -> None:
     """Operator search over artist/album across every status (#426)."""
     s = _server()
     query = params.get("q", [""])[0]
@@ -364,7 +367,7 @@ def get_pipeline_search(h, params: dict[str, list[str]]) -> None:
     })
 
 
-def get_pipeline_downloading(h, params: dict[str, list[str]]) -> None:
+def get_pipeline_downloading(h: RouteHandler, params: dict[str, list[str]]) -> None:
     s = _server()
     counts = s._db().count_by_status()
     rows = [s._serialize_row(r) for r in s._db().get_by_status("downloading")]
@@ -431,7 +434,7 @@ def _build_last_search_payload(
     }
 
 
-def get_pipeline_detail(h, params: dict[str, list[str]], req_id_str: str) -> None:
+def get_pipeline_detail(h: RouteHandler, params: dict[str, list[str]], req_id_str: str) -> None:
     s = _server()
     req_id = int(req_id_str)
     req = s._db().get_request(req_id)
@@ -458,7 +461,7 @@ def get_pipeline_detail(h, params: dict[str, list[str]], req_id_str: str) -> Non
     h._json(result)
 
 
-def get_pipeline_requests_by_rg(h, params: dict, rg_id: str) -> None:
+def get_pipeline_requests_by_rg(h: RouteHandler, params: dict[str, list[str]], rg_id: str) -> None:
     """``GET /api/pipeline/requests-by-rg/<rg_id>``.
 
     Returns the non-replaced ``album_requests`` rows sharing the given
@@ -482,7 +485,7 @@ def get_pipeline_requests_by_rg(h, params: dict, rg_id: str) -> None:
     h._json({"requests": requests})
 
 
-def get_pipeline_active_rgs(h, params: dict) -> None:
+def get_pipeline_active_rgs(h: RouteHandler, params: dict[str, list[str]]) -> None:
     """``GET /api/pipeline/active-rgs``.
 
     Returns the distinct set of ``mb_release_group_id`` values held by
@@ -495,13 +498,11 @@ def get_pipeline_active_rgs(h, params: dict) -> None:
     h._json({"release_group_ids": ids})
 
 
-def _serialize_import_job(job) -> dict[str, object]:
-    if hasattr(job, "to_json_dict"):
-        return job.to_json_dict()
-    return dict(job)
+def _serialize_import_job(job: ImportJob) -> dict[str, object]:
+    return job.to_json_dict()
 
 
-def get_import_jobs(h, params: dict[str, list[str]]) -> None:
+def get_import_jobs(h: RouteHandler, params: dict[str, list[str]]) -> None:
     status = params.get("status", [None])[0]
     request_id_raw = params.get("request_id", [None])[0]
     if status not in (
@@ -532,10 +533,10 @@ def get_import_jobs(h, params: dict[str, list[str]]) -> None:
     })
 
 
-def get_import_jobs_timeline(h, params: dict[str, list[str]]) -> None:
+def get_import_jobs_timeline(h: RouteHandler, params: dict[str, list[str]]) -> None:
     db = _server()._db()
     jobs = db.list_import_job_timeline(limit=50)
-    serialized = []
+    serialized: list[dict[str, object]] = []
     for queue_position, job in enumerate(jobs):
         item = _serialize_import_job(job)
         item.update(msgspec.to_builtins(classify_import_job_display(
@@ -556,7 +557,7 @@ def get_import_jobs_timeline(h, params: dict[str, list[str]]) -> None:
     })
 
 
-def get_import_job(h, params: dict[str, list[str]], job_id_str: str) -> None:
+def get_import_job(h: RouteHandler, params: dict[str, list[str]], job_id_str: str) -> None:
     job = _server()._db().get_import_job(int(job_id_str))
     if job is None:
         h._error("Import job not found", 404)
@@ -570,8 +571,8 @@ class ImportJobRecoveryRequest(BaseModel):
 
 
 def post_import_job_recovery(
-    h,
-    body: dict,
+    h: RouteHandler,
+    body: dict[str, object],
     job_id_str: str,
 ) -> None:
     """Apply an explicit operator decision to ambiguous Beets work."""

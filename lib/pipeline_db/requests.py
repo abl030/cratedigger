@@ -1331,7 +1331,13 @@ class _RequestsMixin(_PipelineDBBase):
         return [album_request_row(r) for r in cur.fetchall()]
 
 
-    def get_by_status(self, status, *, limit=None, newest_first=False) -> list[AlbumRequestRow]:
+    def get_by_status(
+        self,
+        status: str,
+        *,
+        limit: int | None = None,
+        newest_first: bool = False,
+    ) -> list[AlbumRequestRow]:
         """Rows in one status. ``newest_first`` orders by ``updated_at``
         DESC (recency window for the imported list, #426); ``limit``
         caps the result. Defaults preserve the original full-list shape.

@@ -274,9 +274,11 @@ class TestClassifyDisambiguationFailure(unittest.TestCase):
     def test_clean_import_leaves_fields_none(self):
         # Happy path: ImportResult present, disambiguation succeeded.
         entry = self._entry_with_disambig("timeout", "ignored")
-        assert entry.import_result is not None
-        entry.import_result["postflight"]["disambiguation_failure"] = None
-        entry.import_result["postflight"]["disambiguated"] = True
+        assert isinstance(entry.import_result, dict)
+        postflight = entry.import_result["postflight"]
+        assert isinstance(postflight, dict)
+        postflight["disambiguation_failure"] = None
+        postflight["disambiguated"] = True
         result = classify_log_entry(entry)
         self.assertIsNone(result.disambiguation_failure)
         self.assertIsNone(result.disambiguation_detail)

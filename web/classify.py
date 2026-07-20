@@ -44,12 +44,12 @@ class LogEntry:
     error_message: Optional[str] = None
     download_path: Optional[str] = None
     staged_path: Optional[str] = None
-    import_result: Optional[Any] = None
-    validation_result: Optional[Any] = None
+    import_result: Optional[dict[str, object] | str] = None
+    validation_result: Optional[dict[str, object] | str] = None
     # Per-file failure detail audit blob (issue #564 C7, migration 043) —
     # a list of FileFailureDetail dicts behind a download-timeout row's
     # composed error_message summary. Not currently rendered; audit-only.
-    transfer_detail: Optional[Any] = None
+    transfer_detail: Optional[list[dict[str, object]]] = None
 
     # download quality
     filetype: Optional[str] = None
@@ -135,13 +135,13 @@ class ClassifiedEntry(msgspec.Struct):
     # ``detail`` for hover/tooltip — do not parse it.
     disambiguation_failure: Optional[str] = None
     disambiguation_detail: Optional[str] = None
-    bad_extensions: list[str] = msgspec.field(default_factory=list)
+    bad_extensions: list[str] = msgspec.field(default_factory=lambda: [])
     wrong_match_triage_action: Optional[str] = None
     wrong_match_triage_summary: Optional[str] = None
     wrong_match_triage_reason: Optional[str] = None
     wrong_match_triage_preview_verdict: Optional[str] = None
     wrong_match_triage_preview_decision: Optional[str] = None
-    wrong_match_triage_stage_chain: list[str] = msgspec.field(default_factory=list)
+    wrong_match_triage_stage_chain: list[str] = msgspec.field(default_factory=lambda: [])
     wrong_match_triage_detail: Optional[str] = None
     # The on-disk codec at download time, from import_result JSONB
     # (current_measurement.format). Rank-driven upgrades at equal
@@ -1006,9 +1006,7 @@ def _parse_import_result(entry: LogEntry) -> ImportResult | None:
     try:
         if isinstance(raw, dict):
             return ImportResult.from_dict(raw)
-        elif isinstance(raw, str):
-            return ImportResult.from_json(raw)
-        return None
+        return ImportResult.from_json(raw)
     except (json.JSONDecodeError, TypeError, KeyError, ValueError,
             msgspec.ValidationError):
         return None

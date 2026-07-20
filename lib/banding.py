@@ -67,7 +67,7 @@ def current_library_bitrate(detail: dict[str, object]) -> int:
 def band_from_detail(
     rid: str,
     in_library: set[str],
-    quality: dict[str, dict],
+    quality: dict[str, dict[str, object]],
     cfg: QualityRankConfig,
 ) -> str:
     """Three-way band for one release id given already-fetched membership +
