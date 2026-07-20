@@ -13,7 +13,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Optional, Sequence, cast
 import msgspec
 
 
@@ -90,6 +90,10 @@ from lib.release_identity import (
     ReleaseIdentity,
     detect_release_source,
     normalize_release_id,
+)
+from lib.search_scheduler import (
+    NEW_REQUEST_PRIORITY_HOURS,
+    search_cohort_slots,
 )
 
 
@@ -3941,13 +3945,11 @@ class FakePipelineDB:
         }
 
     def get_wanted(self, limit: int | None = None) -> list[dict[str, Any]]:
-        """Return wanted requests past their retry gate, fresh/manual rows first.
+        """Return wanted requests past their retry gate.
 
-        Mirrors the real ORDER BY (no search/download/validation attempts ahead
-        of the rest) but breaks ties in insertion order rather than with
-        ``RANDOM()`` so tests are deterministic. Callers that care about
-        specific rows within a priority bucket should assert on set membership
-        rather than list order — the real DB randomises ties every cycle.
+        Production randomizes the diagnostic result.  The fake keeps insertion
+        order for deterministic tests, but does not apply attempt-count
+        priority.
         """
         now = _utcnow()
         eligible = [
@@ -3956,14 +3958,6 @@ class FakePipelineDB:
             and (r.get("next_retry_after") is None
                  or r["next_retry_after"] <= now)
         ]
-        eligible.sort(
-            key=lambda r: (
-                0 if (
-                    (r.get("search_attempts") or 0) == 0
-                    and (r.get("download_attempts") or 0) == 0
-                    and (r.get("validation_attempts") or 0) == 0
-                ) else 1
-            ))
         if limit is not None:
             eligible = eligible[:int(limit)]
         return [copy.deepcopy(r) for r in eligible]
@@ -6206,6 +6200,9 @@ class FakePipelineDB:
         self,
         generator_id: str,
         limit: int | None = None,
+        *,
+        title_blacklist: Sequence[str] = (),
+        now: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """Mirror of ``PipelineDB.get_wanted_searchable``.
 
@@ -6214,12 +6211,16 @@ class FakePipelineDB:
         matches ``generator_id``. Rows without a current-generator
         active plan are filtered out.
         """
-        now = _utcnow()
+        snapshot_at = now or _utcnow()
+        blacklist = tuple(term.lower() for term in title_blacklist if term)
         eligible: list[dict[str, Any]] = []
         for r in self._requests.values():
             if r.get("status") != "wanted":
                 continue
-            if r.get("next_retry_after") is not None and r["next_retry_after"] > now:
+            if (
+                r.get("next_retry_after") is not None
+                and r["next_retry_after"] > snapshot_at
+            ):
                 continue
             plan_id = r.get("active_plan_id")
             if plan_id is None:
@@ -6245,18 +6246,31 @@ class FakePipelineDB:
                 for row in self._import_jobs
             ):
                 continue
+            title = str(r.get("album_title") or "").lower()
+            if any(term in title for term in blacklist):
+                continue
             eligible.append(r)
-        eligible.sort(
-            key=lambda r: (
-                0 if (
-                    (r.get("search_attempts") or 0) == 0
-                    and (r.get("download_attempts") or 0) == 0
-                    and (r.get("validation_attempts") or 0) == 0
-                ) else 1
-            ))
-        if limit is not None:
-            eligible = eligible[:int(limit)]
-        return [copy.deepcopy(r) for r in eligible]
+        if limit is None:
+            return [copy.deepcopy(r) for r in eligible]
+        page_size = int(limit)
+        slots = search_cohort_slots(page_size)
+        cutoff = snapshot_at - timedelta(hours=NEW_REQUEST_PRIORITY_HOURS)
+        new = [
+            row for row in eligible
+            if self._as_utc(_as_datetime(row.get("created_at"))) > cutoff
+        ]
+        established = [
+            row for row in eligible
+            if self._as_utc(_as_datetime(row.get("created_at"))) <= cutoff
+        ]
+        selected = new[:slots.new] + established[:slots.established]
+        selected_ids = {int(row["id"]) for row in selected}
+        remaining = [
+            row for row in eligible
+            if int(row["id"]) not in selected_ids
+        ]
+        selected.extend(remaining[:max(page_size - len(selected), 0)])
+        return [copy.deepcopy(r) for r in selected]
 
     def get_search_plan_inspection(
         self,
@@ -6641,7 +6655,10 @@ class FakePipelineDBSource:
         self,
         generator_id: str,
         limit: int | None = None,
+        *,
+        title_blacklist: Sequence[str] = (),
     ) -> list[Any]:
+        del generator_id, title_blacklist
         if limit is None:
             return list(self._wanted_searchable)
         return list(self._wanted_searchable[:limit])

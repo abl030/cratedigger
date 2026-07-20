@@ -69,6 +69,17 @@ class TestConfigFromIni(unittest.TestCase):
     def test_page_size(self):
         self.assertEqual(self.cfg.page_size, 5)
 
+    def test_page_size_must_leave_capacity_for_both_search_cohorts(self):
+        for value in (-1, 0, 1):
+            with self.subTest(value=value):
+                ini = configparser.ConfigParser()
+                ini.read_string(
+                    "[Search Settings]\n"
+                    f"number_of_albums_to_grab = {value}\n"
+                )
+                with self.assertRaisesRegex(ValueError, "must be at least 2"):
+                    CratediggerConfig.from_ini(ini)
+
     def test_search_blacklist_empty(self):
         self.assertEqual(self.cfg.search_blacklist, ())
 

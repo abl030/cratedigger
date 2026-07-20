@@ -1165,7 +1165,14 @@ in {
         default = "incrementing_page";
       };
       parallelSearches = mkOption { type = types.int; default = 8; };
-      numberOfAlbumsToGrab = mkOption { type = types.int; default = 16; };
+      numberOfAlbumsToGrab = mkOption {
+        type = types.int;
+        default = 16;
+        description = ''
+          Eligible requests selected per pipeline cycle. Must be at least 2 so
+          new-request priority cannot starve the established library.
+        '';
+      };
       searchResponseLimit = mkOption {
         type = types.int;
         default = 1000;
@@ -1347,6 +1354,10 @@ in {
       {
         assertion = cfg.importer.previewWorkers >= 1;
         message = "services.cratedigger.importer.previewWorkers must be at least 1";
+      }
+      {
+        assertion = cfg.searchSettings.numberOfAlbumsToGrab >= 2;
+        message = "services.cratedigger.searchSettings.numberOfAlbumsToGrab must be at least 2";
       }
     ];
 

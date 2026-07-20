@@ -3798,38 +3798,31 @@ class TestResetToWanted(unittest.TestCase):
         self.assertEqual(history[0]["validation_result"]["failed_path"],
                          "/tmp/failed")
 
-    def test_get_wanted_prioritizes_only_never_attempted_rows(self):
-        fresh_ids = {
-            self.db.add_request(
-                mb_release_id=f"fresh-{idx}",
-                artist_name="Fresh",
-                album_title=str(idx),
-                source="request",
-            )
-            for idx in range(3)
-        }
-        for idx in range(40):
-            req_id = self.db.add_request(
-                mb_release_id=f"auto-requeued-{idx}",
-                artist_name="Auto",
-                album_title=str(idx),
-                source="request",
-            )
-            self.db._execute(
-                """
-                UPDATE album_requests
-                SET search_attempts = 0,
-                    validation_attempts = 1,
-                    next_retry_after = %s
-                WHERE id = %s
-                """,
-                (datetime.now(timezone.utc) - timedelta(minutes=1), req_id),
-            )
+    def test_get_wanted_returns_attempted_and_untried_rows(self):
+        attempted_id = self.db.add_request(
+            mb_release_id="diagnostic-attempted",
+            artist_name="Attempted",
+            album_title="Attempted",
+            source="request",
+        )
+        untried_id = self.db.add_request(
+            mb_release_id="diagnostic-untried",
+            artist_name="Untried",
+            album_title="Untried",
+            source="request",
+        )
+        self.db._execute(
+            "UPDATE album_requests SET search_attempts = 5 WHERE id = %s",
+            (attempted_id,),
+        )
         self.db.conn.commit()
 
-        wanted = self.db.get_wanted(limit=3)
+        wanted = self.db.get_wanted()
 
-        self.assertEqual({row["id"] for row in wanted}, fresh_ids)
+        self.assertEqual(
+            {int(row["id"]) for row in wanted},
+            {attempted_id, untried_id},
+        )
 
     def test_preserves_search_filetype_override_when_omitted(self):
         req_id = self._make_request("preserve-qo")
@@ -7595,6 +7588,373 @@ class TestGetWantedSearchable(unittest.TestCase):
                 ordinal=0, strategy="default", query=f"q-{request_id}")],
         )
 
+    def _add_searchable(
+        self,
+        mbid: str,
+        *,
+        created_at: datetime,
+        attempts: int = 0,
+    ) -> int:
+        request_id = self._add_wanted(mbid)
+        self._make_active(request_id, "g1")
+        self.db._execute(
+            """
+            UPDATE album_requests
+            SET created_at = %s,
+                search_attempts = %s,
+                download_attempts = %s,
+                validation_attempts = %s
+            WHERE id = %s
+            """,
+            (created_at, attempts, attempts, attempts, request_id),
+        )
+        self.db.conn.commit()
+        return request_id
+
+    def test_low_volume_new_requests_all_run_with_established_floor(self):
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        new_ids = {
+            self._add_searchable(
+                f"new-{index}", created_at=now - timedelta(hours=1),
+                attempts=1,
+            )
+            for index in range(4)
+        }
+        established_ids = {
+            self._add_searchable(
+                f"old-{index}", created_at=now - timedelta(days=2),
+                attempts=1,
+            )
+            for index in range(20)
+        }
+
+        rows = self.db.get_wanted_searchable("g1", limit=16, now=now)
+        selected = {int(row["id"]) for row in rows}
+
+        self.assertEqual(new_ids & selected, new_ids)
+        self.assertEqual(len(established_ids & selected), 12)
+        self.assertEqual(len(selected), 16)
+
+    def test_seventeen_new_requests_use_four_slots_not_the_whole_page(self):
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        new_ids = {
+            self._add_searchable(
+                f"burst-{index}", created_at=now - timedelta(hours=1),
+                attempts=1,
+            )
+            for index in range(17)
+        }
+        established_ids = {
+            self._add_searchable(
+                f"established-{index}",
+                created_at=now - timedelta(days=2),
+                attempts=1,
+            )
+            for index in range(20)
+        }
+
+        selected = {
+            int(row["id"])
+            for row in self.db.get_wanted_searchable("g1", limit=16, now=now)
+        }
+
+        self.assertEqual(len(new_ids & selected), 4)
+        self.assertEqual(len(established_ids & selected), 12)
+
+    def test_unused_new_capacity_is_borrowed_by_established_requests(self):
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        new_ids = {
+            self._add_searchable(
+                f"few-new-{index}", created_at=now - timedelta(hours=1),
+                attempts=1,
+            )
+            for index in range(2)
+        }
+        established_ids = {
+            self._add_searchable(
+                f"many-old-{index}", created_at=now - timedelta(days=2),
+                attempts=1,
+            )
+            for index in range(20)
+        }
+
+        selected = {
+            int(row["id"])
+            for row in self.db.get_wanted_searchable("g1", limit=16, now=now)
+        }
+
+        self.assertEqual(new_ids & selected, new_ids)
+        self.assertEqual(len(established_ids & selected), 14)
+
+    def test_unused_established_capacity_is_borrowed_by_new_requests(self):
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        new_ids = {
+            self._add_searchable(
+                f"many-new-{index}", created_at=now - timedelta(hours=1),
+                attempts=1,
+            )
+            for index in range(20)
+        }
+        established_ids = {
+            self._add_searchable(
+                f"few-old-{index}", created_at=now - timedelta(days=2),
+                attempts=1,
+            )
+            for index in range(2)
+        }
+
+        selected = {
+            int(row["id"])
+            for row in self.db.get_wanted_searchable("g1", limit=16, now=now)
+        }
+
+        self.assertEqual(len(new_ids & selected), 14)
+        self.assertEqual(established_ids & selected, established_ids)
+
+    def test_small_page_keeps_proportional_established_floor(self):
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        new_ids = {
+            self._add_searchable(
+                f"small-new-{index}", created_at=now - timedelta(hours=1),
+                attempts=1,
+            )
+            for index in range(2)
+        }
+        established_ids = {
+            self._add_searchable(
+                f"small-old-{index}", created_at=now - timedelta(days=2),
+                attempts=1,
+            )
+            for index in range(5)
+        }
+
+        selected = {
+            int(row["id"])
+            for row in self.db.get_wanted_searchable("g1", limit=5, now=now)
+        }
+
+        self.assertEqual(len(new_ids & selected), 1)
+        self.assertEqual(len(established_ids & selected), 4)
+
+    def test_page_size_must_leave_capacity_for_both_cohorts(self):
+        for page_size in (-1, 0, 1):
+            with self.subTest(page_size=page_size):
+                with self.assertRaisesRegex(ValueError, "at least 2"):
+                    self.db.get_wanted_searchable(
+                        "g1", limit=page_size,
+                        now=datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc),
+                    )
+
+    def test_exact_24_hour_boundary_is_established(self):
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        new_ids = {
+            self._add_searchable(
+                f"inside-{index}",
+                created_at=now - timedelta(hours=23, minutes=59),
+                attempts=1,
+            )
+            for index in range(5)
+        }
+        boundary_id = self._add_searchable(
+            "exact-boundary", created_at=now - timedelta(hours=24),
+            attempts=1,
+        )
+        established_ids = {boundary_id} | {
+            self._add_searchable(
+                f"beyond-{index}", created_at=now - timedelta(days=2),
+                attempts=1,
+            )
+            for index in range(11)
+        }
+
+        for _ in range(8):
+            selected = {
+                int(row["id"])
+                for row in self.db.get_wanted_searchable(
+                    "g1", limit=16, now=now)
+            }
+            self.assertEqual(len(new_ids & selected), 4)
+            self.assertEqual(established_ids & selected, established_ids)
+
+    def test_backoff_and_downloading_are_excluded_before_allocation(self):
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        due_id = self._add_searchable(
+            "new-due", created_at=now - timedelta(hours=1), attempts=1)
+        backed_off_id = self._add_searchable(
+            "new-backed-off", created_at=now - timedelta(hours=1), attempts=1)
+        downloading_id = self._add_searchable(
+            "new-downloading", created_at=now - timedelta(hours=1), attempts=1)
+        self.db._execute(
+            "UPDATE album_requests SET next_retry_after = %s WHERE id = %s",
+            (now + timedelta(minutes=1), backed_off_id),
+        )
+        self.db._execute(
+            "UPDATE album_requests SET status = 'downloading' WHERE id = %s",
+            (downloading_id,),
+        )
+        established_ids = {
+            self._add_searchable(
+                f"gate-old-{index}", created_at=now - timedelta(days=2),
+                attempts=1,
+            )
+            for index in range(15)
+        }
+        self.db.conn.commit()
+
+        selected = {
+            int(row["id"])
+            for row in self.db.get_wanted_searchable("g1", limit=16, now=now)
+        }
+
+        self.assertIn(due_id, selected)
+        self.assertNotIn(backed_off_id, selected)
+        self.assertNotIn(downloading_id, selected)
+        self.assertEqual(established_ids & selected, established_ids)
+
+    def test_aged_untried_request_uses_same_established_lottery(self):
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        new_ids = {
+            self._add_searchable(
+                f"fresh-untried-{index}",
+                created_at=now - timedelta(hours=1),
+                attempts=1,
+            )
+            for index in range(4)
+        }
+        aged_untried_id = self._add_searchable(
+            "aged-untried", created_at=now - timedelta(days=2),
+            attempts=0,
+        )
+        established_ids = {aged_untried_id} | {
+            self._add_searchable(
+                f"aged-tried-{index}", created_at=now - timedelta(days=2),
+                attempts=2,
+            )
+            for index in range(23)
+        }
+
+        untried_selected: list[bool] = []
+        for _ in range(48):
+            selected = {
+                int(row["id"])
+                for row in self.db.get_wanted_searchable(
+                    "g1", limit=16, now=now)
+            }
+            self.assertEqual(new_ids & selected, new_ids)
+            self.assertEqual(len(established_ids & selected), 12)
+            untried_selected.append(aged_untried_id in selected)
+
+        self.assertIn(True, untried_selected)
+        self.assertIn(False, untried_selected)
+
+    def test_manual_requeue_does_not_reset_priority_age(self):
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        requeued_id = self._add_searchable(
+            "old-manual-requeue",
+            created_at=now - timedelta(days=2),
+            attempts=3,
+        )
+        before = self.db.get_request(requeued_id)
+        assert before is not None
+        self.assertTrue(self.db.update_status(
+            requeued_id, "imported", expected_status="wanted"))
+        self.assertTrue(self.db.reset_to_wanted(
+            requeued_id, expected_status="imported"))
+        after = self.db.get_request(requeued_id)
+        assert after is not None
+        self.assertEqual(after["created_at"], before["created_at"])
+        self.assertEqual(after["search_attempts"], 0)
+
+        new_ids = {
+            self._add_searchable(
+                f"requeue-new-{index}",
+                created_at=now - timedelta(hours=1),
+                attempts=1,
+            )
+            for index in range(5)
+        }
+        established_ids = {requeued_id} | {
+            self._add_searchable(
+                f"requeue-old-{index}",
+                created_at=now - timedelta(days=2),
+                attempts=1,
+            )
+            for index in range(11)
+        }
+
+        selected = {
+            int(row["id"])
+            for row in self.db.get_wanted_searchable("g1", limit=16, now=now)
+        }
+
+        self.assertEqual(len(new_ids & selected), 4)
+        self.assertEqual(established_ids & selected, established_ids)
+
+    def test_title_blacklist_is_applied_before_capacity(self):
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        blocked_ids = {
+            self._add_searchable(
+                f"Blocked release {index}",
+                created_at=now - timedelta(hours=1),
+                attempts=1,
+            )
+            for index in range(4)
+        }
+        allowed_new_id = self._add_searchable(
+            "Allowed release", created_at=now - timedelta(hours=1), attempts=1)
+        established_ids = {
+            self._add_searchable(
+                f"allowed-old-{index}", created_at=now - timedelta(days=2),
+                attempts=1,
+            )
+            for index in range(20)
+        }
+
+        selected = {
+            int(row["id"])
+            for row in self.db.get_wanted_searchable(
+                "g1",
+                limit=16,
+                title_blacklist=("blocked",),
+                now=now,
+            )
+        }
+
+        self.assertFalse(blocked_ids & selected)
+        self.assertIn(allowed_new_id, selected)
+        self.assertEqual(len(established_ids & selected), 15)
+        self.assertEqual(len(selected), 16)
+
+    def test_randomizes_within_both_cohorts(self):
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        new_ids = {
+            self._add_searchable(
+                f"random-new-{index}", created_at=now - timedelta(hours=1),
+                attempts=1,
+            )
+            for index in range(8)
+        }
+        established_ids = {
+            self._add_searchable(
+                f"random-old-{index}", created_at=now - timedelta(days=2),
+                attempts=1,
+            )
+            for index in range(20)
+        }
+        samples = [
+            {
+                int(row["id"])
+                for row in self.db.get_wanted_searchable(
+                    "g1", limit=16, now=now)
+            }
+            for _ in range(8)
+        ]
+
+        self.assertGreater(
+            len({frozenset(sample & new_ids) for sample in samples}), 1)
+        self.assertGreater(
+            len({frozenset(sample & established_ids) for sample in samples}), 1)
+
     def test_returns_only_rows_with_current_generator_active_plan(self):
         rid_match = self._add_wanted("match")
         self._make_active(rid_match, "g1")
@@ -11263,6 +11623,34 @@ class TestReadProjectionParity(unittest.TestCase):
 
         self.assertEqual(self.db.get_wanted_searchable("g-parity"), [])
         self.assertEqual(self.fake.get_wanted_searchable("g-parity"), [])
+
+    def test_get_wanted_searchable_blacklist_row_shape_parity(self):
+        for db in (self.db, self.fake):
+            allowed_id = db.add_request(
+                "WS Artist", "Allowed Album", "request",
+                mb_release_id="ws-allowed")
+            blocked_id = db.add_request(
+                "WS Artist", "Blocked Album", "request",
+                mb_release_id="ws-blocked")
+            from lib.pipeline_db import SearchPlanItemInput
+            for request_id in (allowed_id, blocked_id):
+                db.create_successful_search_plan(
+                    request_id=request_id,
+                    generator_id="g-parity",
+                    items=[SearchPlanItemInput(
+                        ordinal=0, strategy="default", query="Q")],
+                )
+
+        real_rows = self.db.get_wanted_searchable(
+            "g-parity", title_blacklist=("blocked",))
+        fake_rows = self.fake.get_wanted_searchable(
+            "g-parity", title_blacklist=("blocked",))
+
+        self.assertEqual(len(real_rows), 1)
+        self.assertEqual(len(fake_rows), 1)
+        self._assert_keyset_parity(
+            self, real_rows, fake_rows,
+            "get_wanted_searchable(blacklist)")
 
     # --- get_search_summaries_for_requests (#523) ----------------------------
 

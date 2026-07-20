@@ -816,7 +816,6 @@ OPTIONS_WITHOUT_DESCRIPTION_OK: frozenset[str] = frozenset({
     "searchSettings.trackPrependArtist",          # TODO: document
     "searchSettings.searchType",                  # TODO: document
     "searchSettings.parallelSearches",            # TODO: document
-    "searchSettings.numberOfAlbumsToGrab",        # TODO: document
     "searchSettings.titleBlacklist",              # TODO: document
     "searchSettings.searchBlacklist",             # TODO: document
     "downloadSettings.downloadFiltering",         # TODO: document

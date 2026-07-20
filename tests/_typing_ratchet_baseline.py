@@ -8,7 +8,7 @@ hatches with:
 """
 
 TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
-    "cratedigger.py": {"any": 24},
+    "cratedigger.py": {"any": 22},
     "lib/beets_delete.py": {"any": 3},
     "lib/browse.py": {"any": 18},
     "lib/context.py": {"any": 25},
