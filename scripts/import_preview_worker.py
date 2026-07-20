@@ -532,6 +532,10 @@ def process_claimed_preview_job(
             "Reused candidate evidence for import job %s; skipping preview measurement",
             job.id,
         )
+        db.set_import_job_candidate_evidence(
+            job.id,
+            front_gate_result.evidence.id,
+        )
         return db.mark_import_job_preview_importable(
             job.id,
             preview_result=reused_payload,

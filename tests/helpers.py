@@ -212,6 +212,17 @@ def make_album_quality_evidence(
     )
 
 
+def finalize_claimed_dispatch(db: Any, job: Any, outcome: Any) -> Any:
+    """Apply a direct dispatch result through the production queue owner."""
+    from scripts.importer import process_claimed_job
+
+    return process_claimed_job(
+        db,
+        job,
+        execute_fn=lambda *_args, **_kwargs: outcome,
+    )
+
+
 def build_parity_candidate_evidence(
     *,
     is_flac: bool,
@@ -804,16 +815,16 @@ def patch_dispatch_externals():
     Yields a SimpleNamespace with attributes: run, cleanup, plex, jellyfin, orphans.
     run is pre-configured with returncode=0, stdout="", stderr="".
 
-    ``_cleanup_staged_dir`` has two call sites after the #139 split
-    (``lib.dispatch.core.dispatch_import_core`` and
-    ``lib.dispatch.outcome_actions._reject_import_from_evidence_decision``);
-    both bindings are patched with the same mock so ``ext.cleanup`` observes
-    a call from whichever path fires.
+    ``_cleanup_staged_dir`` has three call sites after the #703 fence:
+    core dispatch, evidence rejection, and importer post-commit cleanup.
+    All bindings use the same mock so ``ext.cleanup`` observes whichever
+    path fires.
     """
     cleanup = MagicMock()
     with patch("lib.dispatch.subprocess_runner.sp.run") as run, \
          patch("lib.dispatch.core._cleanup_staged_dir", cleanup), \
          patch("lib.dispatch.outcome_actions._cleanup_staged_dir", cleanup), \
+         patch("lib.dispatch.helpers._cleanup_staged_dir", cleanup), \
          patch("lib.util.trigger_plex_scan") as plex, \
          patch("lib.util.trigger_jellyfin_scan") as jellyfin, \
          patch("lib.dispatch.core.cleanup_disambiguation_orphans",
