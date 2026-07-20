@@ -158,9 +158,12 @@ def cmd_list(db, args):
 
 
 def cmd_disk_coverage(db, args):
-    from lib.beets_db import BeetsDB
+    from lib.beets_db import open_beets_db
 
-    with BeetsDB(args.beets_db) as beets:
+    with open_beets_db(
+        db_path=args.beets_db,
+        library_root=getattr(args, "beets_directory", None),
+    ) as beets:
         result = disk_coverage(
             db,
             beets,
@@ -586,8 +589,13 @@ def add_album_requests_subparsers(sub: argparse._SubParsersAction) -> None:
     )
     p_disk.add_argument(
         "--beets-db",
-        default=os.environ.get("BEETS_DB", "/mnt/virtio/Music/beets-library.db"),
-        help="Path to beets SQLite DB (default: BEETS_DB or production path)",
+        default=None,
+        help="Explicit Beets SQLite override; requires --beets-directory.",
+    )
+    p_disk.add_argument(
+        "--beets-directory",
+        default=None,
+        help="Library root paired with --beets-db.",
     )
     p_disk.add_argument(
         "--counts-only",

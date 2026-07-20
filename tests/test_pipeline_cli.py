@@ -4614,6 +4614,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
             request_id=41,
             release_id=RELEASE_B,
             beets_db=self.beets_path,
+            beets_directory=self.tmpdir.name,
         )
         output = io.StringIO()
         with self._env(), redirect_stdout(output):
@@ -4628,6 +4629,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
             request_id=41,
             release_id=RELEASE_A,
             beets_db=self.beets_path,
+            beets_directory=self.tmpdir.name,
         )
         with patch("lib.beets_album_op.sp.run") as mock_beet:
             mock_beet.return_value = SimpleNamespace(
@@ -4665,6 +4667,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
             pipeline_id=41,
             release_id=RELEASE_A,
             beets_db=self.beets_path,
+            beets_directory=self.tmpdir.name,
         )
         output = io.StringIO()
         with self._env(), redirect_stdout(output):
@@ -4688,6 +4691,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
             pipeline_id=None,
             release_id=RELEASE_A,
             beets_db=self.beets_path,
+            beets_directory=self.tmpdir.name,
         )
         outcome = BeetsDeleteCompleted(
             album_id=7,
@@ -4745,6 +4749,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
             pipeline_id=41,
             release_id=RELEASE_A,
             beets_db=self.beets_path,
+            beets_directory=self.tmpdir.name,
         )
         output = io.StringIO()
         failure = BeetsDeleteFailed(

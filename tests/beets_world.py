@@ -580,7 +580,7 @@ class BeetsWorld:
     def set_release_item_path(
         self,
         release_id: str,
-        path: bytes,
+        path: bytes | None,
     ) -> None:
         """Store an exact raw Beets item path for poisoned-topology worlds."""
 
@@ -597,7 +597,7 @@ class BeetsWorld:
         items = list(matches[0].items())
         if not items:
             raise AssertionError("path mutation release has no Beets items")
-        items[0].path = path
+        items[0].path = path  # type: ignore[assignment]
         items[0].store()
 
     def set_release_paths_relative(self, release_id: str) -> None:

@@ -67,10 +67,18 @@ class ReleaseLocation:
 
 @dataclass(frozen=True)
 class CurrentBeetsItem:
-    """One current item primary key and absolute Beets-owned path."""
+    """One item from the resolver's coherent current-library snapshot."""
 
     id: int
     path: str
+    title: str | None = None
+    track: int | None = None
+    disc: int | None = None
+    length: float | None = None
+    format: str | None = None
+    bitrate: int | None = None
+    samplerate: int | None = None
+    bitdepth: int | None = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +121,18 @@ class CurrentBeetsAmbiguous:
 CurrentBeetsResolution: TypeAlias = (
     CurrentBeetsUnique | CurrentBeetsMissing | CurrentBeetsAmbiguous
 )
+_RawCurrentItem: TypeAlias = tuple[
+    int,
+    object,
+    object,
+    object,
+    object,
+    object,
+    object,
+    object,
+    object,
+    object,
+]
 
 DEFAULT_BEETS_DB = os.environ.get("BEETS_DB", "/mnt/virtio/Music/beets-library.db")
 
@@ -141,9 +161,39 @@ def _lookup_identity(raw: object | None) -> ReleaseIdentity | None:
     return ReleaseIdentity(source="musicbrainz", release_id=normalized)
 
 
-def open_beets_db(config: "CratediggerConfig | None" = None) -> "BeetsDB":
-    """Open the runtime-configured shipped Beets database/root pair."""
+def _lookup_identities(
+    release_ids: list[str],
+) -> dict[str, ReleaseIdentity]:
+    """Canonical input-key map shared by all batch resolver adapters."""
 
+    identities: dict[str, ReleaseIdentity] = {}
+    for release_id in release_ids:
+        identity = _lookup_identity(release_id)
+        if identity is not None:
+            identities.setdefault(identity.release_id, identity)
+    return identities
+
+
+def open_beets_db(
+    config: "CratediggerConfig | None" = None,
+    *,
+    db_path: str | None = None,
+    library_root: str | None = None,
+) -> "BeetsDB":
+    """Open one inseparable Beets database/root pair.
+
+    Production omits explicit paths and reads the module-rendered runtime pair.
+    Development/operator overrides must supply both values together.
+    """
+
+    if config is not None and (db_path is not None or library_root is not None):
+        raise ValueError("config and explicit Beets paths are mutually exclusive")
+    if (db_path is None) != (library_root is None):
+        raise ValueError(
+            "Beets DB and library root overrides must be supplied together"
+        )
+    if db_path is not None and library_root is not None:
+        return BeetsDB(db_path, library_root=library_root)
     if config is None:
         from lib.config import read_runtime_config
 
@@ -355,11 +405,13 @@ class BeetsDB:
         # One joined SELECT is the snapshot boundary. Beets can move an album
         # concurrently; separate album and item queries could otherwise return
         # a cardinality from before the move and paths from after it.
-        item_rows_by_album_id: dict[int, list[tuple[int, object]]] = {}
+        item_rows_by_album_id: dict[int, list[_RawCurrentItem]] = {}
         conflicting_album_ids: set[int] = set()
         if conditions:
             rows = self._conn.execute(
-                "SELECT a.id, a.mb_albumid, a.discogs_albumid, i.id, i.path "
+                "SELECT a.id, a.mb_albumid, a.discogs_albumid, "
+                "i.id, i.path, i.title, i.track, i.disc, i.length, i.format, "
+                "i.bitrate, i.samplerate, i.bitdepth "
                 "FROM albums a LEFT JOIN items i ON i.album_id = a.id "
                 f"WHERE {' OR '.join(conditions)} ORDER BY a.id, i.id",
                 parameters,
@@ -370,6 +422,14 @@ class BeetsDB:
                 raw_discogs_release_id,
                 raw_item_id,
                 raw_path,
+                raw_title,
+                raw_track,
+                raw_disc,
+                raw_length,
+                raw_format,
+                raw_bitrate,
+                raw_samplerate,
+                raw_bitdepth,
             ) in rows:
                 album_id = int(raw_album_id)
                 item_rows_by_album_id.setdefault(album_id, [])
@@ -400,7 +460,11 @@ class BeetsDB:
 
                 if raw_item_id is not None:
                     item_rows_by_album_id[album_id].append(
-                        (int(raw_item_id), raw_path),
+                        (
+                            int(raw_item_id), raw_path, raw_title, raw_track,
+                            raw_disc, raw_length, raw_format, raw_bitrate,
+                            raw_samplerate, raw_bitdepth,
+                        ),
                     )
 
         resolutions: dict[ReleaseIdentity, CurrentBeetsResolution] = {}
@@ -440,9 +504,23 @@ class BeetsDB:
             directories: set[str] = set()
             unresolved_relative_path = False
             invalid_path = False
-            for item_id, raw_path in rows:
+            for (
+                item_id,
+                raw_path,
+                raw_title,
+                raw_track,
+                raw_disc,
+                raw_length,
+                raw_format,
+                raw_bitrate,
+                raw_samplerate,
+                raw_bitdepth,
+            ) in rows:
+                if raw_path is None:
+                    invalid_path = True
+                    break
                 decoded = self._decode_path(raw_path)
-                if not decoded:
+                if not decoded or "\x00" in decoded:
                     invalid_path = True
                     break
                 if not os.path.isabs(decoded):
@@ -455,7 +533,24 @@ class BeetsDB:
                         invalid_path = True
                         break
                 absolute = os.path.abspath(decoded)
-                items.append(CurrentBeetsItem(id=item_id, path=absolute))
+                items.append(CurrentBeetsItem(
+                    id=int(item_id),
+                    path=absolute,
+                    title=(str(raw_title) if raw_title is not None else None),
+                    track=(int(raw_track) if isinstance(
+                        raw_track, (int, float)) else None),
+                    disc=(int(raw_disc) if isinstance(
+                        raw_disc, (int, float)) else None),
+                    length=(float(raw_length) if isinstance(
+                        raw_length, (int, float)) else None),
+                    format=(str(raw_format) if raw_format is not None else None),
+                    bitrate=(int(raw_bitrate) if isinstance(
+                        raw_bitrate, (int, float)) else None),
+                    samplerate=(int(raw_samplerate) if isinstance(
+                        raw_samplerate, (int, float)) else None),
+                    bitdepth=(int(raw_bitdepth) if isinstance(
+                        raw_bitdepth, (int, float)) else None),
+                ))
                 directories.add(os.path.dirname(absolute))
             if invalid_path:
                 resolutions[identity] = CurrentBeetsAmbiguous(
@@ -563,11 +658,7 @@ class BeetsDB:
         paired-consistency concern Codex round 1 + round 2 kept circling
         (issue #121).
         """
-        identities_by_release_id: dict[str, ReleaseIdentity] = {}
-        for release_id in release_ids:
-            identity = _lookup_identity(release_id)
-            if identity is not None:
-                identities_by_release_id.setdefault(identity.release_id, identity)
+        identities_by_release_id = _lookup_identities(release_ids)
         resolutions = self.resolve_current_releases(
             list(identities_by_release_id.values()),
         )
@@ -579,14 +670,14 @@ class BeetsDB:
 
         return result
 
-    def _lookup_album_id(self, release_id: str) -> Optional[int]:
-        """Legacy thin wrapper — kept for internal callers only.
+    def _resolve_unique(self, release_id: str) -> CurrentBeetsUnique | None:
+        """Resolve one legacy string without discarding its snapshot."""
 
-        New code should call ``locate()`` and inspect ``.album_id``.
-        Returns the exact-match album id or None.
-        """
-        loc = self.locate(release_id)
-        return loc.album_id if loc.kind == "exact" else None
+        identity = _lookup_identity(release_id)
+        if identity is None:
+            return None
+        result = self.resolve_current_release(identity)
+        return result if isinstance(result, CurrentBeetsUnique) else None
 
     def album_exists(self, release_id: str) -> bool:
         """Check if a release is already in the beets library.
@@ -612,74 +703,65 @@ class BeetsDB:
         ``cfg.mixed_format_precedence`` — the worst codec in that tuple wins
         so the rank stays conservative.
         """
-        album_id = self._lookup_album_id(mb_release_id)
-        if album_id is None:
+        current = self._resolve_unique(mb_release_id)
+        if current is None:
             return None
 
-        # Get bitrate + format stats (exclude 0-bitrate tracks)
-        rows = self._conn.execute(
-            "SELECT bitrate, path, format FROM items "
-            "WHERE album_id = ? AND bitrate > 0",
-            (album_id,)
-        ).fetchall()
-        if not rows:
+        measured = [
+            (item, bitrate)
+            for item in current.items
+            if (bitrate := item.bitrate) is not None and bitrate > 0
+        ]
+        if not measured:
             return None
 
-        bitrates = [r[0] for r in rows]
-        min_br = min(bitrates)
-        avg_br = sum(bitrates) / len(bitrates)
+        numeric_bitrates = [bitrate for _item, bitrate in measured]
+        min_br = min(numeric_bitrates)
+        avg_br = sum(numeric_bitrates) / len(numeric_bitrates)
         # statistics.median() returns the middle value (or the mean of the two
         # middle values for even counts) — robust to per-track outliers like
         # short interludes or hidden tracks at the album boundary. Computed in
         # Python because the beets DB is SQLite, which has no native median.
-        median_br = statistics.median(bitrates)
-        is_cbr = len(set(bitrates)) == 1
-        track_count = len(rows)
-
-        # Album path = directory of first track. Beets stores items.path
-        # relative to the library root in production; absolutize so
-        # downstream FS consumers (snapshot_audio_files, spectral_analyze,
-        # os.path.isdir checks) work regardless of cwd.
-        first_path = self._resolve_path(rows[0][1])
-        album_path = os.path.dirname(first_path)
+        median_br = statistics.median(numeric_bitrates)
+        is_cbr = len(set(numeric_bitrates)) == 1
+        track_count = len(measured)
 
         # Reduce multi-format albums via cfg.mixed_format_precedence.
-        formats_on_disk = {r[2] for r in rows if r[2]}
+        formats_on_disk = {
+            item.format for item, _bitrate in measured if item.format
+        }
         album_format = _reduce_album_format(formats_on_disk, cfg)
 
         return AlbumInfo(
-            album_id=album_id,
+            album_id=current.album_id,
             track_count=track_count,
             min_bitrate_kbps=int(min_br / 1000),
             avg_bitrate_kbps=int(avg_br / 1000),
             median_bitrate_kbps=int(median_br / 1000),
             is_cbr=is_cbr,
-            album_path=album_path,
+            album_path=current.album_path,
             format=album_format,
         )
 
     def get_min_bitrate(self, mb_release_id: str) -> Optional[int]:
         """Get min track bitrate (kbps) for a release. Returns None if not found."""
-        album_id = self._lookup_album_id(mb_release_id)
-        if album_id is None:
+        current = self._resolve_unique(mb_release_id)
+        if current is None:
             return None
-        br_row = self._conn.execute(
-            "SELECT MIN(bitrate) FROM items WHERE album_id = ? AND bitrate > 0",
-            (album_id,)
-        ).fetchone()
-        if not br_row or not br_row[0]:
+        bitrates = [
+            item.bitrate for item in current.items
+            if item.bitrate is not None and item.bitrate > 0
+        ]
+        if not bitrates:
             return None
-        return int(br_row[0] / 1000)
+        return int(min(bitrates) / 1000)
 
     def get_item_paths(self, mb_release_id: str) -> list[tuple[int, str]]:
         """Get all (item_id, path) pairs for an album. Returns empty list if not found."""
-        album_id = self._lookup_album_id(mb_release_id)
-        if album_id is None:
+        current = self._resolve_unique(mb_release_id)
+        if current is None:
             return []
-        rows = self._conn.execute(
-            "SELECT id, path FROM items WHERE album_id = ?", (album_id,)
-        ).fetchall()
-        return [(r[0], self._resolve_path(r[1])) for r in rows]
+        return [(item.id, item.path) for item in current.items]
 
     # ── Web UI query methods ────────────────────────────────────────
 
@@ -734,54 +816,44 @@ class BeetsDB:
         if not mbids:
             return {}
 
-        album_ids_by_release = self._batch_lookup_album_ids(mbids)
-        if not album_ids_by_release:
-            return {}
-
-        detail_cols = (
-            "  (SELECT COUNT(*) FROM items WHERE album_id = a.id) AS track_count, "
-            "  (SELECT GROUP_CONCAT(DISTINCT i.format) FROM items i WHERE i.album_id = a.id) AS formats, "
-            "  (SELECT MIN(i.bitrate) FROM items i "
-            "   WHERE i.album_id = a.id AND i.bitrate > 0) AS min_bitrate, "
-            "  (SELECT AVG(i.bitrate) FROM items i WHERE i.album_id = a.id AND i.bitrate > 0) AS avg_bitrate, "
-            "  (SELECT MIN(i.samplerate) FROM items i WHERE i.album_id = a.id) AS samplerate, "
-            "  (SELECT MAX(i.bitdepth) FROM items i WHERE i.album_id = a.id) AS bitdepth "
+        identities_by_release_id = _lookup_identities(mbids)
+        resolutions = self.resolve_current_releases(
+            list(identities_by_release_id.values()),
         )
-
-        album_ids = tuple(album_ids_by_release.values())
-        placeholders = ",".join("?" for _ in album_ids)
-        rows = self._conn.execute(
-            f"SELECT a.id, {detail_cols}"
-            f"FROM albums a WHERE a.id IN ({placeholders})",
-            album_ids,
-        ).fetchall()
-        detail_by_album_id: dict[int, dict[str, object]] = {}
-        for row in rows:
-            bitrate = row[3]
-            kbps = (
-                int(bitrate / 1000)
-                if isinstance(bitrate, (int, float))
-                else None
-            )
-            avg_bitrate = row[4]
-            avg_kbps = (
-                int(avg_bitrate / 1000)
-                if isinstance(avg_bitrate, (int, float))
-                else None
-            )
-            detail_by_album_id[int(row[0])] = {
-                "beets_tracks": row[1],
-                "beets_format": row[2],
-                "beets_bitrate": kbps,
-                "beets_avg_bitrate": avg_kbps,
-                "beets_samplerate": row[5],
-                "beets_bitdepth": row[6],
+        result: dict[str, dict[str, object]] = {}
+        for release_id, identity in identities_by_release_id.items():
+            current = resolutions[identity]
+            if not isinstance(current, CurrentBeetsUnique):
+                continue
+            formats = tuple(dict.fromkeys(
+                item.format for item in current.items if item.format
+            ))
+            bitrates = [
+                item.bitrate for item in current.items
+                if item.bitrate is not None and item.bitrate > 0
+            ]
+            samplerates = [
+                item.samplerate for item in current.items
+                if item.samplerate is not None
+            ]
+            bitdepths = [
+                item.bitdepth for item in current.items
+                if item.bitdepth is not None
+            ]
+            result[release_id] = {
+                "beets_tracks": len(current.items),
+                "beets_format": ",".join(formats) if formats else None,
+                "beets_bitrate": (
+                    int(min(bitrates) / 1000) if bitrates else None
+                ),
+                "beets_avg_bitrate": (
+                    int(sum(bitrates) / len(bitrates) / 1000)
+                    if bitrates else None
+                ),
+                "beets_samplerate": min(samplerates) if samplerates else None,
+                "beets_bitdepth": max(bitdepths) if bitdepths else None,
             }
-        return {
-            release_id: detail_by_album_id[album_id]
-            for release_id, album_id in album_ids_by_release.items()
-            if album_id in detail_by_album_id
-        }
+        return result
 
     def get_album_detail(self, album_id: int) -> Optional[dict[str, object]]:
         """Get full album metadata + track list. Returns None if not found."""
@@ -885,20 +957,19 @@ class BeetsDB:
         otherwise the browse-tab 'view release' endpoint would render a
         release as in-library but fail to show its track list.
         """
-        album_id = self._lookup_album_id(mbid)
-        if album_id is None:
+        current = self._resolve_unique(mbid)
+        if current is None:
             return None
-        items = self._conn.execute(
-            "SELECT title, track, disc, length, format, bitrate, "
-            "       samplerate, bitdepth "
-            "FROM items WHERE album_id = ? ORDER BY disc, track",
-            (album_id,),
-        ).fetchall()
+        items = sorted(
+            current.items,
+            key=lambda item: (item.disc or 0, item.track or 0, item.id),
+        )
         return [{
-            "title": i[0], "track": i[1], "disc": i[2],
-            "length": i[3], "format": i[4], "bitrate": i[5],
-            "samplerate": i[6], "bitdepth": i[7],
-        } for i in items]
+            "title": item.title, "track": item.track, "disc": item.disc,
+            "length": item.length, "format": item.format,
+            "bitrate": item.bitrate, "samplerate": item.samplerate,
+            "bitdepth": item.bitdepth,
+        } for item in items]
 
     def get_album_ids_by_mbids(self, mbids: list[str]) -> dict[str, int]:
         """Map release IDs to beets album IDs. Returns {id: album_id}.
@@ -918,17 +989,16 @@ class BeetsDB:
         Routes through ``locate`` (issue #121) so Discogs numerics
         resolve the same way every other postflight lookup does.
         """
-        album_id = self._lookup_album_id(mb_release_id)
-        if album_id is None:
+        current = self._resolve_unique(mb_release_id)
+        if current is None:
             return None
-        avg_row = self._conn.execute(
-            "SELECT CAST(AVG(bitrate) AS INTEGER) FROM items "
-            "WHERE album_id = ? AND bitrate > 0",
-            (album_id,),
-        ).fetchone()
-        if not avg_row or not avg_row[0]:
+        bitrates = [
+            item.bitrate for item in current.items
+            if item.bitrate is not None and item.bitrate > 0
+        ]
+        if not bitrates:
             return None
-        return int(avg_row[0] / 1000)
+        return int(sum(bitrates) / len(bitrates) / 1000)
 
     def list_world_albums(self) -> list["BeetsWorldAlbum"]:
         """Return every Beets album with exact identities and resolved paths.

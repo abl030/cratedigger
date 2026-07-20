@@ -414,13 +414,8 @@ def configure_live_db(config: DevConfig) -> None:
     # handles exactly like production.
     web_server.beets_db_path = config.beets_db
     if config.beets_db is not None:
-        from lib.config import read_runtime_config
-
-        web_server.beets_library_root = (
-            config.beets_directory
-            if config.beets_directory is not None
-            else read_runtime_config().beets_directory
-        )
+        assert config.beets_directory is not None
+        web_server.beets_library_root = config.beets_directory
     web_server._beets = None
 
     if config.redis_host:
@@ -493,6 +488,10 @@ def main() -> None:
     parser.add_argument("--redis-host", default=None)
     parser.add_argument("--redis-port", type=int, default=6379)
     args = parser.parse_args()
+    if (args.beets_db is None) != (args.beets_directory is None):
+        parser.error(
+            "--beets-db and --beets-directory must be supplied together"
+        )
 
     config = build_config(args)
     server = create_server(args.host, args.port, config)

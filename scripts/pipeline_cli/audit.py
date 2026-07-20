@@ -7,18 +7,12 @@ import json
 
 import msgspec
 
-from lib.beets_db import BeetsDB, DEFAULT_BEETS_DB
+from lib.beets_db import BeetsDB, open_beets_db
 from lib.world_audit_service import WorldAuditReport, audit_world
 
 
-def _beets_library_root() -> str:
-    from lib.config import read_runtime_config
-
-    return read_runtime_config().beets_directory
-
-
-def _open_beets(path: str) -> BeetsDB:
-    return BeetsDB(path, library_root=_beets_library_root())
+def _open_beets(path: str | None, library_root: str | None) -> BeetsDB:
+    return open_beets_db(db_path=path, library_root=library_root)
 
 
 def _render_text(report: WorldAuditReport) -> None:
@@ -44,8 +38,11 @@ def _render_text(report: WorldAuditReport) -> None:
 def cmd_audit_world(db, args: argparse.Namespace) -> int:
     """Run the shared world invariant bank without mutating either store."""
     try:
-        beets = _open_beets(args.beets_db)
-    except FileNotFoundError as exc:
+        beets = _open_beets(
+            args.beets_db,
+            getattr(args, "beets_directory", None),
+        )
+    except (FileNotFoundError, ValueError) as exc:
         print(json.dumps({
             "error": "beets_db_unavailable",
             "detail": str(exc),
@@ -70,7 +67,16 @@ def add_audit_subparser(sub: argparse._SubParsersAction) -> None:
         "world",
         help="Audit PipelineDB, Beets, and library-disk coherence.",
     )
-    world.add_argument("--beets-db", default=DEFAULT_BEETS_DB)
+    world.add_argument(
+        "--beets-db",
+        default=None,
+        help="Explicit Beets SQLite override; requires --beets-directory.",
+    )
+    world.add_argument(
+        "--beets-directory",
+        default=None,
+        help="Library root paired with --beets-db.",
+    )
     world.add_argument(
         "--json",
         action="store_true",

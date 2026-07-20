@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from lib.beets_db import BeetsDB, AlbumInfo
+from lib.beets_db import AlbumInfo, BeetsDB, open_beets_db
 from lib.config import CratediggerConfig
 from lib.quality import QualityRankConfig
 
@@ -149,6 +149,32 @@ class TestBeetsDBConnection(unittest.TestCase):
             with BeetsDB() as db:
                 self.assertEqual(db.library_db_path, self.db_path)
                 self.assertEqual(db.library_root, "/runtime/library")
+
+    def test_factory_rejects_each_half_of_an_explicit_override(self) -> None:
+        with self.assertRaisesRegex(ValueError, "supplied together"):
+            open_beets_db(db_path=self.db_path)
+        with self.assertRaisesRegex(ValueError, "supplied together"):
+            open_beets_db(library_root="/explicit/library")
+
+    def test_factory_rejects_runtime_config_mixed_with_explicit_paths(self) -> None:
+        cfg = CratediggerConfig(
+            beets_library_db=self.db_path,
+            beets_directory="/runtime/library",
+        )
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            open_beets_db(
+                cfg,
+                db_path=self.db_path,
+                library_root="/explicit/library",
+            )
+
+    def test_factory_opens_an_explicit_database_root_pair(self) -> None:
+        with open_beets_db(
+            db_path=self.db_path,
+            library_root="/explicit/library",
+        ) as db:
+            self.assertEqual(db.library_db_path, self.db_path)
+            self.assertEqual(db.library_root, "/explicit/library")
 
 
 class TestAlbumAndItemsAbsent(unittest.TestCase):
@@ -561,8 +587,8 @@ class TestBatchLookupAlbumIds(unittest.TestCase):
             "12856590": 3,
         })
 
-    def test_uses_one_joined_snapshot_query(self) -> None:
-        """No N+1 or torn read: every nonempty batch uses one SELECT.
+    def test_public_identity_wrappers_use_one_joined_snapshot_query(self) -> None:
+        """No N+1 or torn read: every identity lookup uses one SELECT.
 
         Identity cardinality and item topology must come from the same SQLite
         statement. Separate SELECTs could straddle a concurrent Beets move and
@@ -588,14 +614,29 @@ class TestBatchLookupAlbumIds(unittest.TestCase):
 
         with BeetsDB(self.db_path) as db:
             db._conn = _TrackingConn(db._conn)  # type: ignore[assignment]
-            db._batch_lookup_album_ids(
-                ["aaa-111", "bbb-222", "12856590", "5555555",
-                 "missing-1", "missing-2", "missing-3"])
-
-        self.assertEqual(
-            len(calls), 1,
-            f"_batch_lookup_album_ids must issue one snapshot query, "
-            f"got {len(calls)}: {calls}")
+            operations = {
+                "batch ids": lambda: db._batch_lookup_album_ids([
+                    "aaa-111", "bbb-222", "12856590", "5555555",
+                    "missing-1", "missing-2", "missing-3",
+                ]),
+                "album info": lambda: db.get_album_info(
+                    "aaa-111", QualityRankConfig.defaults(),
+                ),
+                "minimum bitrate": lambda: db.get_min_bitrate("aaa-111"),
+                "average bitrate": lambda: db.get_avg_bitrate_kbps("aaa-111"),
+                "item paths": lambda: db.get_item_paths("aaa-111"),
+                "tracks": lambda: db.get_tracks_by_mb_release_id("aaa-111"),
+                "batch detail": lambda: db.check_mbids_detail(["aaa-111"]),
+            }
+            for label, operation in operations.items():
+                with self.subTest(operation=label):
+                    calls.clear()
+                    operation()
+                    self.assertEqual(
+                        len(calls), 1,
+                        f"{label} must issue one snapshot query, "
+                        f"got {len(calls)}: {calls}",
+                    )
 
     def test_empty_input(self) -> None:
         with BeetsDB(self.db_path) as db:

@@ -19,9 +19,26 @@ from scripts.cleanup_ghost_imported import classify_imported_rows
 
 def _make_beets_db(path: str) -> None:
     conn = sqlite3.connect(path)
-    conn.execute(
-        "CREATE TABLE albums (id INTEGER PRIMARY KEY, mb_albumid TEXT, discogs_albumid INTEGER)"
-    )
+    conn.executescript("""
+        CREATE TABLE albums (
+            id INTEGER PRIMARY KEY,
+            mb_albumid TEXT,
+            discogs_albumid INTEGER
+        );
+        CREATE TABLE items (
+            id INTEGER PRIMARY KEY,
+            album_id INTEGER,
+            path BLOB,
+            title TEXT,
+            track INTEGER,
+            disc INTEGER,
+            length REAL,
+            format TEXT,
+            bitrate INTEGER,
+            samplerate INTEGER,
+            bitdepth INTEGER
+        );
+    """)
     conn.commit()
     conn.close()
 
@@ -48,6 +65,14 @@ class TestCleanupGhostImported(unittest.TestCase):
         conn.execute(
             "INSERT INTO albums (id, discogs_albumid) VALUES (2, ?)",
             (12856590,),
+        )
+        conn.execute(
+            "INSERT INTO items (id, album_id, path) VALUES (11, 1, ?)",
+            (os.path.join(self.tmpdir, "mb", "01.flac"),),
+        )
+        conn.execute(
+            "INSERT INTO items (id, album_id, path) VALUES (21, 2, ?)",
+            (os.path.join(self.tmpdir, "discogs", "01.flac"),),
         )
         conn.commit()
         conn.close()

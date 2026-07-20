@@ -49,9 +49,8 @@ without exposing the Postgres port to the laptop. The proxy forwards `Range`
 headers, so Wrong Matches audio playback and scrubbing still work through the
 tunnel.
 
-`--beets-db` is optional in this flow. Pair a scratch override with
-`--beets-directory`; otherwise its root comes from runtime `[Beets] directory`.
-Wrong Matches does not need either option; only
+`--beets-db` is optional in this flow and must be paired with
+`--beets-directory` when supplied. Wrong Matches does not need either option; only
 beets-backed library badges and lookups do.
 
 ## Screenshot verification loop

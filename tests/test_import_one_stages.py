@@ -1107,7 +1107,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
 
     def test_evidence_backed_import_skips_candidate_measurement_helpers(self):
         from harness import import_one
-        from lib.beets_db import AlbumInfo
+        from lib.beets_db import AlbumInfo, ReleaseLocation
 
         with tempfile.TemporaryDirectory() as tmpdir:
             album = os.path.join(tmpdir, "album")
@@ -1132,7 +1132,9 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                 median_bitrate_kbps=250,
                 format="MP3",
             ))
-            beets.set_item_paths("mbid-123", [])
+            beets.queue_locate_results([
+                ReleaseLocation(kind="absent", album_id=None, selectors=()),
+            ])
 
             stdout = io.StringIO()
             argv = [
@@ -1188,7 +1190,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
         underreports the import in download_log JSONB and starves every
         legacy proof reader downstream."""
         from harness import import_one
-        from lib.beets_db import AlbumInfo
+        from lib.beets_db import AlbumInfo, ReleaseLocation
         from lib.quality import VerifiedLosslessProof
 
         proof = VerifiedLosslessProof(
@@ -1224,7 +1226,9 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                 median_bitrate_kbps=250,
                 format="MP3",
             ))
-            beets.set_item_paths("mbid-123", [])
+            beets.queue_locate_results([
+                ReleaseLocation(kind="absent", album_id=None, selectors=()),
+            ])
 
             stdout = io.StringIO()
             argv = [
@@ -1335,7 +1339,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
         ImportResult — the Jellyfin pin capture reads their old paths after
         a path-changing upgrade."""
         from harness import import_one
-        from lib.beets_db import AlbumInfo
+        from lib.beets_db import AlbumInfo, ReleaseLocation
         from lib.quality import DuplicateRemoveCandidate
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1361,7 +1365,9 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                 median_bitrate_kbps=250,
                 format="MP3",
             ))
-            beets.set_item_paths("mbid-123", [])
+            beets.queue_locate_results([
+                ReleaseLocation(kind="absent", album_id=None, selectors=()),
+            ])
 
             replaced = [DuplicateRemoveCandidate(
                 beets_album_id=3902,

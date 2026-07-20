@@ -330,8 +330,9 @@ services.cratedigger.redis.enable = mkOption { type = types.bool; default = true
 
 The web service opens `beets.config.library` together with
 `beets.config.directory` through the module-rendered `[Beets]` runtime
-configuration. The `--beets-db` flag on `web/server.py` remains an explicit development/test
-override only; the NixOS service never passes it.
+configuration. The paired `--beets-db` and `--beets-directory` flags on
+`web/server.py` remain explicit development/test overrides only; the NixOS
+service passes neither.
 
 Enabled in this homelab via `~/nixosconfig/hosts/doc2/configuration.nix` (the upstream module now owns `redis-cratedigger.service`; the homelab wrapper only supplies site-specific wiring such as reverse proxy defaults):
 

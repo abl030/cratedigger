@@ -378,7 +378,7 @@
     extensions_whitelist = ${concatStringsSep "," cfg.downloadSettings.extensionsWhitelist}
 
     [Beets]
-    directory = ${cfg.beets.directory}
+    directory = ${cfg.beets.config.directory}
     library = ${cfg.beets.config.library}
     config_dir = ${beetsConfigDir}
     beet_binary = ${pythonEnv}/bin/beet
@@ -824,8 +824,8 @@ in {
 
     # ONE beets option tree (issue #497): package build-time knobs
     # (beets.package.*), the operator-tunable subset of the rendered
-    # config.yaml (beets.config.*), the config.ini [Beets] directory
-    # (beets.directory), and the pipeline validation gate (beets.validation.*)
+    # config.yaml/runtime pair (beets.config.*), and the pipeline validation
+    # gate (beets.validation.*)
     # all live under services.cratedigger.beets.*. Everything under
     # beets.config NOT listed here (path templates, duplicate_keys, plugin
     # list, match weights, ...) is rendered as a fixed production-parity
@@ -946,26 +946,6 @@ in {
             description = "beets musicbrainz ratelimit (req/s). 1 for public MB; 100 against a local mirror.";
           };
         };
-      };
-
-      # config.ini [Beets] directory. Follows beets.config.directory by
-      # default (mkDefault'd in the config block below).
-      directory = mkOption {
-        type = types.str;
-        default = "";
-        example = "/mnt/virtio/Music/Beets";
-        description = ''
-          Absolute path to the beets library root (matches `directory:` in
-          ~/.config/beets/config.yaml). Beets stores file paths in its SQLite
-          DB as relative to this root, so consumers that perform host-side
-          filesystem ops (cleanup_disambiguation_orphans) or send absolute
-          paths to external services (trigger_plex_scan on bare-metal Plex)
-          need to absolutize against this root.
-
-          Optional but recommended. Leave empty if you provide an equivalent
-          absolute prefix via notifiers.plex.pathMap (Docker remap form
-          `/host/beets:/container/path`).
-        '';
       };
 
       validation = {
@@ -1441,10 +1421,6 @@ in {
 
     services.cratedigger.web.redis.host = lib.mkDefault cfg.redis.host;
     services.cratedigger.web.redis.port = lib.mkDefault cfg.redis.port;
-    # One concept, one value: the config.ini [Beets] directory follows the
-    # rendered beets config.yaml `directory:` unless explicitly overridden.
-    services.cratedigger.beets.directory = lib.mkDefault cfg.beets.config.directory;
-
     # One MB value, three consumers (U6/KTD6): the rendered beets
     # musicbrainz block derives from musicbrainz.apiBase — mirror =>
     # host:port / plain http / ratelimit 100 (the harness --upstream

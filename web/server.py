@@ -192,8 +192,8 @@ def _beets_db() -> BeetsDB | None:
     if handle is None:
         try:
             if beets_db_path is not None:
-                handle = BeetsDB(
-                    beets_db_path,
+                handle = open_beets_db(
+                    db_path=beets_db_path,
                     library_root=beets_library_root,
                 )
             else:
@@ -544,6 +544,14 @@ def main():
             "[Beets] library and directory values from config.ini."
         ),
     )
+    parser.add_argument(
+        "--beets-directory",
+        default=None,
+        help=(
+            "Dev/test-only library root paired with --beets-db. The two "
+            "override flags must always be supplied together."
+        ),
+    )
     parser.add_argument("--mb-api", default=None,
                         help="MusicBrainz API base URL (full base incl. /ws/2). Dev-only override — "
                              "production reads config.ini [MusicBrainz] api_base (issue #497); the "
@@ -555,6 +563,10 @@ def main():
     parser.add_argument("--redis-host", default=None, help="Redis host for caching (optional)")
     parser.add_argument("--redis-port", type=int, default=6379)
     args = parser.parse_args()
+    if (args.beets_db is None) != (args.beets_directory is None):
+        parser.error(
+            "--beets-db and --beets-directory must be supplied together"
+        )
 
     if args.redis_host:
         cache.init(args.redis_host, args.redis_port)
@@ -584,6 +596,8 @@ def main():
     # it, filesystem consumers such as bad-rip hashing resolve paths from the
     # web service's cwd and silently miss every imported track.
     _configure_beets_library_root_from_runtime_config()
+    if args.beets_directory is not None:
+        beets_library_root = args.beets_directory
     if args.mb_api:
         mb_api.MB_API_BASE = args.mb_api
     if args.discogs_api:

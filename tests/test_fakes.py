@@ -5234,6 +5234,15 @@ class TestFakeBeetsDB(unittest.TestCase):
         assert isinstance(ambiguous, CurrentBeetsAmbiguous)
         self.assertEqual(ambiguous.reason, "multiple_matches")
 
+        beets.set_album_ids_for_release(identity.release_id, [7])
+        for invalid in ("", None, "bad\x00path.flac"):
+            with self.subTest(invalid=invalid):
+                beets.set_item_paths(identity.release_id, [(70, invalid)])
+                poisoned = beets.resolve_current_release(identity)
+                self.assertIsInstance(poisoned, CurrentBeetsAmbiguous)
+                assert isinstance(poisoned, CurrentBeetsAmbiguous)
+                self.assertEqual(poisoned.reason, "invalid_path")
+
     def test_check_mbids_detail_returns_seeded_rows_only(self) -> None:
         beets = FakeBeetsDB()
         beets.set_mbid_detail(
@@ -5466,8 +5475,11 @@ class TestFakeBeetsDB(unittest.TestCase):
             album_path="/Beets/Artist/Album",
         )
         beets.set_album_info("mbid-1", info)
+        beets.set_item_paths("mbid-1", [(70, "/Beets/Moved/01.flac")])
         # Two-arg form (matches real signature: mb_release_id + cfg).
-        self.assertIs(beets.get_album_info("mbid-1", None), info)
+        current = beets.get_album_info("mbid-1", None)
+        self.assertIsNot(current, info)
+        self.assertEqual(current.album_path, "/Beets/Moved")
         # Unseeded returns None.
         self.assertIsNone(beets.get_album_info("mbid-unknown"))
         self.assertEqual(

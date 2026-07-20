@@ -22,6 +22,7 @@ from lib.beets_db import (
     open_beets_db,
 )
 from lib.config import CratediggerConfig
+from lib.quality import QualityRankConfig
 from lib.release_identity import ReleaseIdentity
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
 
@@ -241,12 +242,15 @@ class TestCurrentBeetsResolverPins(unittest.TestCase):
                     ))
 
     def test_conflicting_discogs_columns_and_invalid_paths_are_ambiguous(self) -> None:
-        cases = (
-            ("conflicting_identity", "conflict"),
-            ("invalid_path", "invalid_path"),
+        cases: tuple[tuple[str, str, bytes | None], ...] = (
+            ("conflicting_identity", "conflict", b"unused"),
+            ("invalid_path", "invalid_path", b""),
+            ("invalid_path", "invalid_path", None),
+            ("invalid_path", "invalid_path", b"bad\x00path.flac"),
+            ("invalid_path", "invalid_path", b"../outside.flac"),
         )
-        for reason, mutation in cases:
-            with self.subTest(reason=reason):
+        for reason, mutation, raw_path in cases:
+            with self.subTest(reason=reason, raw_path=raw_path):
                 with BeetsWorld(REPO) as world:
                     world.import_release(_release("discogs", tracks=1))
                     if mutation == "conflict":
@@ -255,7 +259,7 @@ class TestCurrentBeetsResolverPins(unittest.TestCase):
                             conflicting_release_id=DISCOGS_SIBLING,
                         )
                     else:
-                        world.set_release_item_path(DISCOGS_TARGET, b"")
+                        world.set_release_item_path(DISCOGS_TARGET, raw_path)
                     with BeetsDB(
                         str(world.library_db),
                         library_root=str(world.library_root),
@@ -366,6 +370,14 @@ class TestCurrentBeetsResolverGenerated(unittest.TestCase):
                 result = beets.resolve_current_release(_identity(identity_source))
                 batch_present = release_id in beets.check_mbids([release_id])
                 batch_ids = beets.get_album_ids_by_mbids([release_id])
+                album_info = beets.get_album_info(
+                    release_id, QualityRankConfig.defaults(),
+                )
+                item_paths = beets.get_item_paths(release_id)
+                tracks = beets.get_tracks_by_mb_release_id(release_id)
+                minimum_bitrate = beets.get_min_bitrate(release_id)
+                average_bitrate = beets.get_avg_bitrate_kbps(release_id)
+                detail = beets.check_mbids_detail([release_id])
 
             topology_error = None
             if cardinality >= 1 and source == "discogs_conflict":
@@ -388,6 +400,25 @@ class TestCurrentBeetsResolverGenerated(unittest.TestCase):
             should_be_unique = cardinality == 1 and topology_error is None
             self.assertEqual(batch_present, should_be_unique)
             self.assertEqual(release_id in batch_ids, should_be_unique)
+            if should_be_unique:
+                assert isinstance(result, CurrentBeetsUnique)
+                self.assertIsNotNone(album_info)
+                assert album_info is not None
+                self.assertEqual(album_info.album_path, result.album_path)
+                self.assertEqual(item_paths, [
+                    (item.id, item.path) for item in result.items
+                ])
+                self.assertEqual(len(tracks or []), track_count)
+                self.assertIsNotNone(minimum_bitrate)
+                self.assertIsNotNone(average_bitrate)
+                self.assertIn(release_id, detail)
+            else:
+                self.assertIsNone(album_info)
+                self.assertEqual(item_paths, [])
+                self.assertIsNone(tracks)
+                self.assertIsNone(minimum_bitrate)
+                self.assertIsNone(average_bitrate)
+                self.assertEqual(detail, {})
 
     def test_checker_kills_limit_one_one_column_and_fuzzy_mutants(self) -> None:
         mb = _identity("mb")

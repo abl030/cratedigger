@@ -480,6 +480,8 @@ class TestPerThreadBeetsHandles(unittest.TestCase):
                 str(TEST_DSN),
                 "--beets-db",
                 db_file.name,
+                "--beets-directory",
+                "/scratch/Music/Beets",
             ],
         ), patch(
             "lib.config.read_runtime_config",
@@ -491,7 +493,7 @@ class TestPerThreadBeetsHandles(unittest.TestCase):
             with self.assertRaises(BootStop):
                 srv.main()
 
-        self.assertEqual(srv.beets_library_root, "/boot-config/Music/Beets")
+        self.assertEqual(srv.beets_library_root, "/scratch/Music/Beets")
 
 
 if __name__ == "__main__":

@@ -341,7 +341,8 @@ class TestRenderedBeetsConfigContract(unittest.TestCase):
     def test_beets_runtime_keys_rendered_into_config_ini(self) -> None:
         """[Beets] carries the one DB/root pair plus the pinned runtime."""
         text = MODULE_NIX.read_text(encoding="utf-8")
-        self.assertIn("directory = ${cfg.beets.directory}", text)
+        self.assertIn("directory = ${cfg.beets.config.directory}", text)
+        self.assertNotIn("services.cratedigger.beets.directory", text)
         self.assertIn("library = ${cfg.beets.config.library}", text)
         self.assertIn("config_dir = ${beetsConfigDir}", text)
         self.assertIn("beet_binary = ${pythonEnv}/bin/beet", text)
