@@ -151,9 +151,13 @@ class TestAllSelectorsSucceed(unittest.TestCase):
             release_id=RELEASE_UUID, request_id=42)
 
         argv = mock_run.call_args.args[0]
-        # Shape: [beet_binary, "remove", "-a", "-d", selector]
-        self.assertEqual(argv[1:4], ["remove", "-a", "-d"])
-        self.assertEqual(argv[4], f"mb_albumid:{RELEASE_UUID}")
+        self.assertEqual(
+            argv[1:],
+            [
+                "-P", "importsource", "remove", "-a", "-f", "-d",
+                f"mb_albumid:{RELEASE_UUID}",
+            ],
+        )
 
     @patch("lib.beets_album_op.sp.run")
     def test_discogs_pair_of_selectors_both_run(

@@ -18,6 +18,7 @@ from typing import Any, Callable, Literal, TypeAlias
 
 import msgspec
 
+from lib.beets_config_contract import BeetsConfigError, validate_beets_config
 from lib.release_identity import ReleaseIdentity
 
 
@@ -48,6 +49,7 @@ class BeetsDeleteCompleted(
 BeetsDeleteFailureReason = Literal[
     "album_not_found",
     "configuration_mismatch",
+    "configuration_error",
     "release_mismatch",
     "empty_manifest",
     "path_escape",
@@ -402,6 +404,16 @@ def execute_pinned_beets_delete(request: BeetsDeleteRequest) -> BeetsDeleteOutco
     """Delete one exact album using the active pinned Beets configuration."""
     from beets import config, library, plugins, util
 
+    config_dir = os.environ.get("BEETSDIR", "")
+    try:
+        configured_plugins = validate_beets_config(config_dir)
+    except BeetsConfigError as exc:
+        return BeetsDeleteFailed(
+            album_id=request.album_id,
+            reason="configuration_error",
+            detail=str(exc),
+            album_still_present=True,
+        )
     config.read()
     configured_db = config["library"].as_filename()
     configured_root = config["directory"].as_filename()
@@ -416,7 +428,21 @@ def execute_pinned_beets_delete(request: BeetsDeleteRequest) -> BeetsDeleteOutco
             album_still_present=True,
         )
 
+    # ImportSource's removal hook can prompt once per item and can delete the
+    # separately recorded import source. Neither behavior is authorized by a
+    # Cratedigger library delete, so force that common plugin profile into its
+    # documented non-suggesting mode for this operation.
+    config["importsource"]["suggest_removal"].set(False)
     plugins.load_plugins()
+    loaded_plugins = {plugin.name for plugin in plugins.find_plugins()}
+    missing_plugins = sorted(configured_plugins - loaded_plugins)
+    if missing_plugins:
+        return BeetsDeleteFailed(
+            album_id=request.album_id,
+            reason="configuration_error",
+            detail="configured Beets plugins failed to load: " + ", ".join(missing_plugins),
+            album_still_present=True,
+        )
     root = Path(configured_root).resolve(strict=True)
     lib = library.Library(
         configured_db,
@@ -578,8 +604,11 @@ def run_beets_delete(
             album_still_present=True,
         )
     try:
-        return msgspec.json.decode(proc.stdout, type=BeetsDeleteOutcome)
-    except msgspec.DecodeError as exc:
+        outcome = msgspec.json.decode(proc.stdout, type=BeetsDeleteOutcome)
+        if proc.stdout != msgspec.json.encode(outcome):
+            raise ValueError("stdout was not one canonical outcome frame")
+        return outcome
+    except (msgspec.DecodeError, ValueError) as exc:
         log.error("Pinned Beets delete returned invalid JSON: %s", exc)
         return BeetsDeleteFailed(
             album_id=request.album_id,
