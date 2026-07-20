@@ -39,6 +39,7 @@ REMOVAL_STABLE_ROOT_FILES = frozenset({
     "flake.nix",
     "pyrightconfig.json",
     "pyrightconfig.production.json",
+    "pyrightconfig.strict-production.json",
     "shell.nix",
 })
 _REMOVAL_STABLE_ROOT_FILE_FAMILIES_RE = re.compile(

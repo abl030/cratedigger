@@ -118,7 +118,16 @@ production-default seam pattern), `reportImplicitOverride` (style, needs
 with cross-module private imports — phase 5 finding), and the
 `reportUnknown*`/`reportMissingParameterType` family (the remaining
 ~5,300-error annotation campaign that the typed-row rollout chips at
-per family). They are deliberately NOT in the main
+per family).
+
+That campaign (issue #784) is enforced by the strict-coverage ratchet:
+`tests/test_strict_ratchet.py` runs pyright with
+`pyrightconfig.strict-production.json` (the campaign's end-state strict
+config, house-convention rules off) and requires per-file error counts
+to EXACTLY match `tests/_strict_ratchet_baseline.py` — new strict
+errors fail the suite, and any reduction must tighten the baseline in
+the same PR. When the baseline empties, the final campaign PR flips
+`pyrightconfig.production.json` to strict and deletes the ratchet. They are deliberately NOT in the main
 `pyrightconfig.json`: tests carry intentional protocol-conformance
 `issubclass` pins (the #430 parity-gate pattern) that the isinstance rule
 would flag, and a tests `executionEnvironments` split doesn't work here
