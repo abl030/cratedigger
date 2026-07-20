@@ -119,6 +119,10 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         "preview_status", "preview_result", "preview_message", "preview_error",
         "preview_attempts", "preview_worker_id", "preview_started_at",
         "preview_heartbeat_at", "preview_completed_at", "importable_at",
+        "candidate_evidence_id", "beets_launch_authorized_at",
+        "beets_launch_release_id", "beets_launch_source_path",
+        "beets_launch_request_status",
+        "beets_launch_snapshot_fingerprint",
     }
     DISK_COVERAGE_COUNT_FIELDS = {
         "active_total", "on_disk_total", "off_disk_total", "by_status",
@@ -1310,6 +1314,31 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         )
         return job.id
 
+    def _mark_force_job_recovery(self, job_id: int) -> None:
+        from tests.helpers import make_album_quality_evidence
+
+        release_id = self.db.request(100)["mb_release_id"]
+        evidence = make_album_quality_evidence(
+            mb_release_id=release_id,
+            source_path="/tmp/Test Album",
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.db.set_import_job_candidate_evidence(job_id, persisted.id)
+        row = next(row for row in self.db._import_jobs if row["id"] == job_id)
+        row.update({
+            "status": "recovery_required",
+            "beets_launch_authorized_at": datetime.now(timezone.utc),
+            "beets_launch_release_id": release_id,
+            "beets_launch_source_path": "/tmp/Test Album",
+            "beets_launch_request_status": self.db.request(100)["status"],
+            "beets_launch_snapshot_fingerprint": evidence.snapshot_fingerprint,
+        })
+
     def test_import_jobs_contract(self):
         self._enqueue_force_job()
         status, data = self._get("/api/import-jobs")
@@ -1370,6 +1399,47 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         status, data = self._get("/api/import-jobs?request_id=abc")
         self.assertEqual(status, 400)
         self.assertIn("error", data)
+
+    def test_import_job_recovery_close_is_explicit_and_never_replays(self):
+        job_id = self._enqueue_force_job()
+        self._mark_force_job_recovery(job_id)
+
+        status, data = self._post(f"/api/import-jobs/{job_id}/recovery", {
+            "resolution": "close",
+            "reason": "Reconciled Beets and request state manually",
+        })
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["outcome"], "closed")
+        self.assertEqual(data["job"]["status"], "failed")
+        self.assertIsNone(data["retry_job"])
+        self.assertIsNone(self.db.claim_next_import_job(worker_id="replay"))
+
+    def test_import_job_recovery_retry_mints_new_operation(self):
+        job_id = self._enqueue_force_job()
+        self._mark_force_job_recovery(job_id)
+
+        status, data = self._post(f"/api/import-jobs/{job_id}/recovery", {
+            "resolution": "retry",
+            "reason": "Confirmed Beets did not apply the operation",
+        })
+
+        self.assertEqual(status, 202)
+        self.assertEqual(data["outcome"], "retry_queued")
+        self.assertEqual(data["job"]["status"], "failed")
+        self.assertNotEqual(data["retry_job"]["id"], job_id)
+        self.assertEqual(data["retry_job"]["status"], "queued")
+
+    def test_import_job_recovery_rejects_non_recovery_job(self):
+        job_id = self._enqueue_force_job()
+
+        status, data = self._post(f"/api/import-jobs/{job_id}/recovery", {
+            "resolution": "retry",
+            "reason": "Should not be accepted",
+        })
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["outcome"], "wrong_state")
 
 
 if __name__ == "__main__":

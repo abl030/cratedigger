@@ -16,6 +16,7 @@ from scripts.pipeline_cli.beets_distance import cmd_beets_distance
 from scripts.pipeline_cli.destructive import cmd_ban_source, cmd_library_delete
 from scripts.pipeline_cli.imports import (
     cmd_force_import,
+    cmd_import_job_recovery,
     cmd_import_jobs,
     cmd_import_preview,
 )
@@ -115,6 +116,7 @@ def main():
         "show": cmd_show,
         "quality": cmd_quality,
         "force-import": cmd_force_import,
+        "import-job-recovery": cmd_import_job_recovery,
         "import-jobs": cmd_import_jobs,
         "import-preview": cmd_import_preview,
         "wrong-match-triage": cmd_wrong_match_triage,

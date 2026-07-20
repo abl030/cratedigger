@@ -54,6 +54,9 @@ from lib.youtube_ingest_service import (
 
 logger = logging.getLogger("cratedigger-importer")
 RESTART_REQUEUE_MESSAGE = "Importer restarted while job was running; retry queued"
+RESTART_RECOVERY_MESSAGE = (
+    "Recovery required: importer restarted after Beets launch authorization"
+)
 
 
 def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
@@ -524,6 +527,12 @@ def process_claimed_job(
         outcome = execute_fn(db, job, ctx=ctx)
     except Exception as exc:
         logger.exception("Import job %s crashed", job.id)
+        recovery = db.mark_import_job_recovery_required(
+            job.id,
+            reason=f"{type(exc).__name__}: {exc}",
+        )
+        if recovery is not None:
+            return recovery
         return db.mark_import_job_failed(
             job.id,
             error=type(exc).__name__,
@@ -533,9 +542,6 @@ def process_claimed_job(
 
     result = _job_result(outcome)
     if outcome.success:
-        dismissal = _dismiss_successful_force_import(db, job)
-        if dismissal is not None:
-            result["wrong_match_dismissal"] = dismissal
         if outcome.terminal_outcome is not None:
             terminal = db.persist_import_terminal_outcome(
                 outcome.terminal_outcome.with_job(ImportJobTerminal(
@@ -544,18 +550,42 @@ def process_claimed_job(
                     message=outcome.message,
                 ))
             )
+            terminal_job = terminal.job
+            dismissal = _dismiss_successful_force_import(db, job)
+            if dismissal is not None:
+                merged = db.merge_import_job_result(
+                    job.id,
+                    {"wrong_match_dismissal": dismissal},
+                )
+                if merged is not None:
+                    terminal_job = merged
             _cleanup_committed_wrong_match_rejection(
                 db,
                 job,
                 terminal.download_log_id,
                 outcome.post_commit_wrong_match_scenario,
             )
-            return terminal.job
-        return db.mark_import_job_completed(
+            return terminal_job
+        recovery = db.mark_import_job_recovery_required(
+            job.id,
+            reason="Beets returned without a terminal acknowledgement bundle",
+        )
+        if recovery is not None:
+            return recovery
+        completed = db.mark_import_job_completed(
             job.id,
             result=result,
             message=outcome.message,
         )
+        if completed is None:
+            return None
+        dismissal = _dismiss_successful_force_import(db, job)
+        if dismissal is not None:
+            return db.merge_import_job_result(
+                job.id,
+                {"wrong_match_dismissal": dismissal},
+            ) or completed
+        return completed
     # U2: dispatch flipped this row back to the preview lane (or tried to).
     # We do NOT write a terminal failed status, do NOT bump retry counters,
     # and do NOT run the wrong-match cleanup decision. The dispatch-side
@@ -581,15 +611,18 @@ def process_claimed_job(
             job.request_id,
             outcome.message,
         )
+        recovery = db.mark_import_job_recovery_required(
+            job.id,
+            reason=f"requeue-to-preview failed after launch: {outcome.message}",
+        )
+        if recovery is not None:
+            return recovery
         return db.mark_import_job_failed(
             job.id,
             error=outcome.message,
             message=f"requeue-to-preview failed: {outcome.message}",
             result=result,
         )
-    cleanup = _cleanup_failed_force_import(db, job, outcome)
-    if cleanup is not None:
-        result["cleanup"] = cleanup
     if outcome.terminal_outcome is not None:
         terminal = db.persist_import_terminal_outcome(
             outcome.terminal_outcome.with_job(ImportJobTerminal(
@@ -599,19 +632,40 @@ def process_claimed_job(
                 message=outcome.message,
             ))
         )
+        terminal_job = terminal.job
+        cleanup = _cleanup_failed_force_import(db, job, outcome)
+        if cleanup is not None:
+            merged = db.merge_import_job_result(job.id, {"cleanup": cleanup})
+            if merged is not None:
+                terminal_job = merged
         _cleanup_committed_wrong_match_rejection(
             db,
             job,
             terminal.download_log_id,
             outcome.post_commit_wrong_match_scenario,
         )
-        return terminal.job
-    return db.mark_import_job_failed(
+        return terminal_job
+    recovery = db.mark_import_job_recovery_required(
+        job.id,
+        reason="Beets returned without a terminal acknowledgement bundle",
+    )
+    if recovery is not None:
+        return recovery
+    failed = db.mark_import_job_failed(
         job.id,
         error=outcome.message,
         message=outcome.message,
         result=result,
     )
+    if failed is None:
+        return None
+    cleanup = _cleanup_failed_force_import(db, job, outcome)
+    if cleanup is not None:
+        return db.merge_import_job_result(
+            job.id,
+            {"cleanup": cleanup},
+        ) or failed
+    return failed
 
 
 def run_once(
@@ -628,8 +682,18 @@ def run_once(
 
 
 def recover_abandoned_running_jobs(db: PipelineDB) -> list[ImportJob]:
-    """Requeue jobs left running by a previous importer process."""
-    return db.requeue_running_import_jobs(message=RESTART_REQUEUE_MESSAGE)
+    """Retry only unlaunched jobs; stop ambiguous Beets work for recovery."""
+    recovered: list[ImportJob] = []
+    batch_size = 50
+    while True:
+        batch = db.recover_running_import_jobs(
+            requeue_message=RESTART_REQUEUE_MESSAGE,
+            recovery_message=RESTART_RECOVERY_MESSAGE,
+            limit=batch_size,
+        )
+        recovered.extend(batch)
+        if len(batch) < batch_size:
+            return recovered
 
 
 def main() -> int:
@@ -659,7 +723,7 @@ def main() -> int:
             recovered = recover_abandoned_running_jobs(db)
             if recovered:
                 logger.warning(
-                    "Requeued %s abandoned running import job(s)",
+                    "Recovered %s abandoned running import job(s)",
                     len(recovered),
                 )
 

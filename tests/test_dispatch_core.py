@@ -13,8 +13,10 @@ import msgspec
 
 from lib.beets_db import AlbumInfo
 from lib.config import CratediggerConfig
-from lib.import_queue import IMPORT_JOB_FORCE
+from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
+from lib.dispatch.types import EvidenceImportGate
 from lib.pipeline_db import DownloadLogOutcome
+from lib.terminal_outcomes import ImportJobTerminal
 from lib.quality import (
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
@@ -111,15 +113,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         if ir is None:
             ir = make_import_result(decision="import", new_min_bitrate=245)
 
-        db = FakePipelineDB()
-        req = make_request_row(
-            id=42, status="downloading",
-            min_bitrate=180, current_spectral_bitrate=128,
-            active_download_state={"files": [], "filetype": "flac"},
-            **(request_overrides or {}),
-        )
-        db.seed_request(req)
-
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             pipeline_db_enabled=True,
@@ -129,6 +122,35 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
+            db = FakePipelineDB()
+            req = make_request_row(
+                id=42, status="downloading", mb_release_id="mbid-123",
+                min_bitrate=180, current_spectral_bitrate=128,
+                active_download_state={
+                    "files": [],
+                    "filetype": "flac",
+                    "current_path": tmpdir,
+                },
+                **(request_overrides or {}),
+            )
+            db.seed_request(req)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
+                request_id=42,
+                payload={"failed_path": tmpdir} if force else {},
+            )
+            candidate = _seed_candidate_for_import_job(
+                db,
+                job.id,
+                mb_release_id="mbid-123",
+                source_path=tmpdir,
+            )
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+            )
+            claimed = db.claim_next_import_job(worker_id="dispatch-core-test")
+            assert claimed is not None
             with patch_dispatch_externals() as ext, \
                  patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
                 result = dispatch_import_core(
@@ -150,8 +172,21 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     cfg=cfg,
                     outcome_label=outcome_label,
                     requeue_on_failure=requeue_on_failure,
+                    candidate_import_job_id=job.id,
                     quality_gate_fn=noop_quality_gate,
+                    evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(
+                        candidate=candidate,
+                    ),
                 )
+                if result.terminal_outcome is not None:
+                    db.persist_import_terminal_outcome(
+                        result.terminal_outcome.with_job(ImportJobTerminal(
+                            status="completed" if result.success else "failed",
+                            result={"success": result.success},
+                            message=result.message,
+                            error=None if result.success else result.message,
+                        ))
+                    )
                 cmd = ext.run.call_args[0][0] if ext.run.call_args else []
         finally:
             import shutil
@@ -191,6 +226,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             status="downloading",
+            mb_release_id="mbid-123",
             active_download_state={"files": [], "filetype": "flac"},
         ))
         cfg = CratediggerConfig(
@@ -199,6 +235,32 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            db.seed_request(make_request_row(
+                id=42,
+                status="downloading",
+                mb_release_id="mbid-123",
+                active_download_state={
+                    "files": [],
+                    "filetype": "flac",
+                    "current_path": tmpdir,
+                },
+            ))
+            job = db.enqueue_import_job(
+                IMPORT_JOB_AUTOMATION,
+                request_id=42,
+                payload={},
+            )
+            candidate = _seed_candidate_for_import_job(
+                db,
+                job.id,
+                mb_release_id="mbid-123",
+                source_path=tmpdir,
+            )
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+            )
+            assert db.claim_next_import_job(worker_id="stale-test") is not None
             with patch_dispatch_externals() as ext:
                 outcome = dispatch_import_core(
                     path=tmpdir,
@@ -216,7 +278,11 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     scenario="strong_match",
                     files=[MagicMock(username="user1", filename="01.mp3")],
                     cfg=cfg,
+                    candidate_import_job_id=job.id,
                     quality_gate_fn=noop_quality_gate,
+                    evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(
+                        candidate=candidate,
+                    ),
                 )
 
         self.assertFalse(outcome.success)
@@ -400,6 +466,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             status="downloading",
+            mb_release_id="mbid-123",
             active_download_state={"files": [], "filetype": "flac"},
         ))
 
@@ -420,6 +487,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             _seed_candidate_for_import_job(
                 db, import_job_id,
                 mb_release_id="mbid-123",
+                source_path=tmpdir,
                 files=files,
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=245,
@@ -432,6 +500,11 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 container="mp3",
                 storage_format="MP3",
             )
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+            )
+            assert db.claim_next_import_job(worker_id="dispatch-test") is not None
             _seed_current_for_request(
                 db, 42,
                 mb_release_id="mbid-123-current",
@@ -562,6 +635,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             status="downloading",
+            mb_release_id="mbid-123",
             active_download_state={"files": [], "filetype": "flac"},
         ))
 
@@ -577,6 +651,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             _seed_candidate_for_import_job(
                 db, job.id,
                 mb_release_id="mbid-123",
+                source_path=tmpdir,
                 files=snapshot_audio_files(tmpdir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=245,
@@ -589,6 +664,11 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 container="mp3",
                 storage_format="MP3",
             )
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+            )
+            assert db.claim_next_import_job(worker_id="dispatch-test") is not None
             cfg = CratediggerConfig(
                 beets_harness_path=_HARNESS,
                 pipeline_db_enabled=True,
@@ -944,12 +1024,6 @@ class TestDispatchCoreSeams(unittest.TestCase):
         from lib.dispatch import dispatch_import_core
         ir = kwargs.pop("ir", make_import_result())
         beets_directory = kwargs.pop("beets_directory", "")
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42,
-            status="downloading",
-            active_download_state={"files": [], "filetype": "flac"},
-        ))
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             beets_directory=beets_directory,
@@ -957,6 +1031,34 @@ class TestDispatchCoreSeams(unittest.TestCase):
         )
         tmpdir = tempfile.mkdtemp()
         try:
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                status="downloading",
+                mb_release_id="mbid-123",
+                active_download_state={
+                    "files": [],
+                    "filetype": "flac",
+                    "current_path": tmpdir,
+                },
+            ))
+            force = bool(kwargs.get("force", False))
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
+                request_id=42,
+                payload={"failed_path": tmpdir} if force else {},
+            )
+            candidate = _seed_candidate_for_import_job(
+                db,
+                job.id,
+                mb_release_id="mbid-123",
+                source_path=tmpdir,
+            )
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+            )
+            assert db.claim_next_import_job(worker_id="seam-test") is not None
             with patch_dispatch_externals() as ext, \
                  patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
                 dispatch_import_core(
@@ -968,7 +1070,11 @@ class TestDispatchCoreSeams(unittest.TestCase):
                     db=db,  # type: ignore[arg-type]
                     dl_info=DownloadInfo(),
                     cfg=cfg,
+                    candidate_import_job_id=job.id,
                     quality_gate_fn=noop_quality_gate,
+                    evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(
+                        candidate=candidate,
+                    ),
                     **kwargs,
                 )
                 return ext.run.call_args[0][0] if ext.run.call_args else []

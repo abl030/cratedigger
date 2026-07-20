@@ -49,7 +49,7 @@ def assert_import_job_display_contract(display: object) -> None:
 
 class TestGeneratedImportJobDisplay(unittest.TestCase):
     @given(
-        status=st.sampled_from(["queued", "running"]),
+        status=st.sampled_from(["queued", "running", "recovery_required"]),
         preview_status=st.one_of(
             st.none(), st.sampled_from(sorted(IMPORT_JOB_PREVIEW_STATUSES)),
         ),
@@ -76,6 +76,9 @@ class TestGeneratedImportJobDisplay(unittest.TestCase):
         assert_import_job_display_contract(display)
         if status == "running":
             self.assertEqual(display.badge, "Importing")
+            self.assertEqual(display.summary, text)
+        if status == "recovery_required":
+            self.assertEqual(display.badge, "Recovery required")
             self.assertEqual(display.summary, text)
 
     def test_contract_checker_rejects_the_old_tuple_shape(self) -> None:

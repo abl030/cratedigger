@@ -138,6 +138,18 @@ console.log('_pollImportJob() leaves row visible after failed jobs — no full r
   assertEqual(dom.toast.className, 'toast error', 'failure toast is an error');
 }
 
+console.log('_pollImportJob() stops visibly when operator recovery is required');
+{
+  const { calls, dom, btn } = await runPoll({
+    status: 'recovery_required',
+    message: 'Recovery required: Beets may have run',
+  }, 100);
+  assertEqual(btn.textContent, 'Recovery required', 'button shows recovery stop');
+  assert(!calls.includes('/api/wrong-matches'),
+    'does NOT refetch or imply the ambiguous operation completed');
+  assertEqual(dom.toast.className, 'toast error', 'recovery stop is prominent');
+}
+
 console.log('converge helpers classify green candidates');
 {
   installStorage();

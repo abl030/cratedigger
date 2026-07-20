@@ -229,12 +229,19 @@ def classify_import_job_display(
     queue_position: int,
 ) -> ImportJobDisplay:
     """Classify importer work without duplicating lifecycle copy in JS."""
-    if job.status not in ("queued", "running"):
+    if job.status not in ("queued", "running", "recovery_required"):
         raise ValueError(
             f"timeline display requires an active import job, got {job.status!r}"
         )
     if queue_position < 0:
         raise ValueError("queue_position must be non-negative")
+    if job.status == "recovery_required":
+        return ImportJobDisplay(
+            badge="Recovery required",
+            badge_class="badge-failed",
+            border_color="#a33",
+            summary=(job.message or job.error or "Automatic replay refused"),
+        )
     if job.status == "running":
         return ImportJobDisplay(
             badge="Importing",

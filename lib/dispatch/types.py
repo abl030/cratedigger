@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 DISPATCH_CODE_REQUEUED_FOR_PREVIEW = "requeued_for_preview"
 # U2: when the requeue UPDATE itself raised (DB transient, connection drop),
 # dispatch swallows the exception and returns this code so the importer
-# leaves the job in ``running`` for ``requeue_running_import_jobs`` on next
+# leaves the job in ``running`` for conservative startup recovery on next
 # worker boot to recover. NEVER write terminal failure on this code.
 DISPATCH_CODE_REQUEUE_FAILED = "requeue_failed"
 # U4: programmer-error code returned by ``dispatch_import_from_db`` when

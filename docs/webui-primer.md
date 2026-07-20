@@ -49,8 +49,9 @@ Browser → https://music.ablz.au
 | `/api/wrong-matches/converge` | POST | Queue every wrong-match candidate within a release's loosen threshold and delete the rest |
 | `/api/wrong-matches/triage` | POST | Evidence-only full-queue Wrong Matches cleanup; requires `{"confirm_all_wrong_matches": true}` |
 | `/api/import-jobs` | GET | List recent import queue jobs |
-| `/api/import-jobs/timeline` | GET | List active queued/running import jobs in importer order, with server-classified display fields |
+| `/api/import-jobs/timeline` | GET | List active queued/running/recovery-required import jobs in importer order, with server-classified display fields |
 | `/api/import-jobs/<id>` | GET | Poll a single import queue job |
+| `/api/import-jobs/<id>/recovery` | POST | Explicitly close an ambiguous Beets operation or authorize a fresh retry after inspection |
 | `/api/library/artist?name=...` | GET | Albums by artist from beets library (MB vs Discogs source) |
 | `/api/discogs/search?q=...` | GET | Search Discogs mirror (artist or release mode via `type=` param) |
 | `/api/discogs/artist/<id>` | GET | Artist's normalized catalogue identities, including exact masterless releases (via mirror `/masters/all` + `/appearances`) |
@@ -364,9 +365,10 @@ The web service auto-restarts when the Nix store path changes.
 
 After deploy, check `systemctl status cratedigger-import-preview-worker
 cratedigger-importer` and the worker journals. The Recents Imports subview shows
-only active queued/running import jobs as they move from waiting preview, to
-previewing, to importable, to importing. Completed, failed, or preview-rejected
-rows are history/audit rows, not live queue rows.
+active queued/running/recovery-required import jobs as they move from waiting
+preview, to previewing, to importable, to importing—or stop for operator
+recovery. Completed, failed, or preview-rejected rows are history/audit rows,
+not live queue rows.
 On doc2 the homelab wrapper opts into the preview gate explicitly. Deployments
 that leave `services.cratedigger.importer.preview.enable = false` should not
 start the preview worker; their newly queued jobs are importable immediately.

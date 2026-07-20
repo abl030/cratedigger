@@ -12,7 +12,7 @@ mechanical pattern as the ``lib/quality/`` split, issue #477):
     query.py            query (read-only SQL escape hatch)
     show.py             show (full per-request detail dump)
     quality.py           quality / repair-spectral (quality-gate debug)
-    imports.py           force-import / import-jobs /
+    imports.py           force-import / import-jobs / import-job-recovery /
                        import-preview
     wrong_match.py       wrong-match-triage / -delete / -delete-group
     search_plan.py       search-plan show / regenerate / dry-run /
@@ -80,6 +80,7 @@ from scripts.pipeline_cli.imports import (
     SLSKD_DOWNLOAD_DIRS,
     SPECTRAL_GRADE_CHOICES,
     cmd_force_import,
+    cmd_import_job_recovery,
     cmd_import_jobs,
     cmd_import_preview,
 )
@@ -126,6 +127,7 @@ __all__ = [
     "cmd_ban_source",
     "cmd_disk_coverage",
     "cmd_force_import",
+    "cmd_import_job_recovery",
     "cmd_import_jobs",
     "cmd_import_preview",
     "cmd_list",

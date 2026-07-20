@@ -44,7 +44,9 @@ class _ImportJobsMixin(_PipelineDBBase):
                 VALUES (%s, %s, %s, %s, %s, %s, NULL, NULL, NULL)
                 ON CONFLICT (dedupe_key)
                     WHERE dedupe_key IS NOT NULL
-                      AND status IN ('queued', 'running')
+                      AND status IN (
+                          'queued', 'running', 'recovery_required'
+                      )
                 DO NOTHING
                 RETURNING *
             )
@@ -55,7 +57,7 @@ class _ImportJobsMixin(_PipelineDBBase):
             FROM import_jobs
             WHERE %s IS NOT NULL
               AND dedupe_key = %s
-              AND status IN ('queued', 'running')
+              AND status IN ('queued', 'running', 'recovery_required')
               AND NOT EXISTS (SELECT 1 FROM inserted)
             ORDER BY deduped
             LIMIT 1
@@ -127,7 +129,7 @@ class _ImportJobsMixin(_PipelineDBBase):
         cur = self._execute(f"""
             SELECT *
             FROM import_jobs
-            WHERE status IN ('queued', 'running')
+            WHERE status IN ('queued', 'running', 'recovery_required')
             {request_filter}
             ORDER BY created_at ASC, id ASC
             LIMIT %s
@@ -145,7 +147,7 @@ class _ImportJobsMixin(_PipelineDBBase):
         ignore_import_job_id: int | None = None,
         limit: int = 50,
     ) -> list[ImportJob]:
-        """Return queued/running import jobs that could be using this source."""
+        """Return active import jobs that could be using this source."""
         paths = [str(path) for path in dict.fromkeys(failed_paths) if path]
         dirs = [str(path) for path in dict.fromkeys(source_dirs) if path]
         match_clauses: list[str] = ["payload->>'download_log_id' = %s::text"]
@@ -166,7 +168,7 @@ class _ImportJobsMixin(_PipelineDBBase):
         cur = self._execute(f"""
             SELECT *
             FROM import_jobs
-            WHERE status IN ('queued', 'running')
+            WHERE status IN ('queued', 'running', 'recovery_required')
               {ignore_clause}
               AND ({" OR ".join(match_clauses)})
             ORDER BY created_at ASC, id ASC
@@ -188,11 +190,12 @@ class _ImportJobsMixin(_PipelineDBBase):
         cur = self._execute("""
             SELECT *
             FROM import_jobs
-            WHERE status IN ('queued', 'running')
+            WHERE status IN ('queued', 'running', 'recovery_required')
             ORDER BY
               CASE
                 WHEN status = 'queued' AND preview_status = 'evidence_ready' THEN 0
                 WHEN status = 'queued' AND preview_status = 'would_import' THEN 0
+                WHEN status = 'recovery_required' THEN 0
                 WHEN status = 'running' THEN 1
                 WHEN status = 'queued' AND preview_status = 'running' THEN 2
                 WHEN status = 'queued' AND preview_status = 'waiting' THEN 3
@@ -261,6 +264,295 @@ class _ImportJobsMixin(_PipelineDBBase):
         return ImportJob.from_row(dict(row)) if row else None
 
 
+    def authorize_import_job_launch(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        release_id: str,
+        source_path: str,
+        expected_request_status: str,
+    ) -> ImportJob | None:
+        """Atomically bind one running job to the exact Beets launch.
+
+        This is the final authorization immediately before ``import_one.py``.
+        It runs while the caller holds the release advisory lock.  The linked
+        candidate-evidence row is the content-addressed source snapshot; the
+        job-type-specific path predicate prevents a stale payload or request
+        staging path from reaching Beets.
+        """
+        cur = self._execute("""
+            UPDATE import_jobs AS job
+            SET beets_launch_authorized_at = NOW(),
+                beets_launch_release_id = request.mb_release_id,
+                beets_launch_source_path = %s,
+                beets_launch_request_status = request.status,
+                beets_launch_snapshot_fingerprint = evidence.snapshot_fingerprint,
+                updated_at = NOW()
+            FROM album_requests AS request,
+                 album_quality_evidence AS evidence
+            WHERE job.id = %s
+              AND job.status = 'running'
+              AND job.beets_launch_authorized_at IS NULL
+              AND job.request_id = %s
+              AND request.id = job.request_id
+              AND request.id = %s
+              AND request.status = %s
+              AND request.status != 'replaced'
+              AND request.mb_release_id = %s
+              AND evidence.id = job.candidate_evidence_id
+              AND evidence.mb_release_id = %s
+              AND evidence.source_path = %s
+              AND evidence.snapshot_fingerprint IS NOT NULL
+              AND evidence.snapshot_fingerprint != ''
+              AND (
+                    (
+                        job.job_type = 'automation_import'
+                        AND request.status = 'downloading'
+                        AND request.active_download_state IS NOT NULL
+                        AND request.active_download_state->>'current_path' = %s
+                    )
+                    OR (
+                        job.job_type = 'force_import'
+                        AND job.payload->>'failed_path' = %s
+                    )
+                    OR (
+                        job.job_type = 'youtube_import'
+                        AND request.status IN ('wanted', 'unsearchable')
+                        AND job.payload->>'staged_path' = %s
+                    )
+              )
+            RETURNING job.*
+        """, (
+            source_path,
+            job_id,
+            request_id,
+            request_id,
+            expected_request_status,
+            release_id,
+            release_id,
+            source_path,
+            source_path,
+            source_path,
+            source_path,
+        ))
+        row = cur.fetchone()
+        return ImportJob.from_row(dict(row)) if row else None
+
+
+    def mark_import_job_recovery_required(
+        self,
+        job_id: int,
+        *,
+        reason: str,
+    ) -> ImportJob | None:
+        """Stop a launched-but-unacknowledged job for operator recovery."""
+        cur = self._execute("""
+            UPDATE import_jobs
+            SET status = 'recovery_required',
+                message = %s,
+                error = %s,
+                worker_id = NULL,
+                heartbeat_at = NULL,
+                updated_at = NOW()
+            WHERE id = %s
+              AND status = 'running'
+              AND beets_launch_authorized_at IS NOT NULL
+            RETURNING *
+        """, (
+            f"Recovery required: {reason}",
+            "Automatic replay refused because Beets may have mutated the library",
+            job_id,
+        ))
+        row = cur.fetchone()
+        return ImportJob.from_row(dict(row)) if row else None
+
+
+    def resolve_import_job_recovery(
+        self,
+        job_id: int,
+        *,
+        resolution: str,
+        reason: str,
+    ) -> tuple[ImportJob, ImportJob | None] | None:
+        """Resolve one recovery row, optionally creating a new operation.
+
+        ``retry`` closes the ambiguous operation and inserts a fresh job ID;
+        it never reuses the operation that may already have reached Beets.
+        ``close`` records that the operator reconciled the external state and
+        intentionally schedules no replay.
+        """
+        if resolution not in ("retry", "close"):
+            raise ValueError(f"Invalid import recovery resolution: {resolution}")
+        reason = reason.strip()
+        if not reason:
+            raise ValueError("Import recovery resolution requires a reason")
+
+        with self._atomic():
+            cur = self._execute(
+                "SELECT * FROM import_jobs WHERE id = %s FOR UPDATE",
+                (job_id,),
+            )
+            raw = cur.fetchone()
+            if raw is None or raw["status"] != "recovery_required":
+                self.conn.rollback()
+                return None
+            original = ImportJob.from_row(dict(raw))
+
+            if resolution == "retry":
+                authority_cur = self._execute("""
+                    SELECT request.status,
+                           request.mb_release_id,
+                           request.active_download_state,
+                           evidence.snapshot_fingerprint
+                    FROM album_requests AS request
+                    LEFT JOIN album_quality_evidence AS evidence
+                      ON evidence.id = %s
+                    WHERE request.id = %s
+                    FOR UPDATE OF request
+                """, (original.candidate_evidence_id, original.request_id))
+                authority = authority_cur.fetchone()
+                if (
+                    authority is None
+                    or authority["status"]
+                    != original.beets_launch_request_status
+                    or authority["mb_release_id"]
+                    != original.beets_launch_release_id
+                    or authority["snapshot_fingerprint"]
+                    != original.beets_launch_snapshot_fingerprint
+                ):
+                    self.conn.rollback()
+                    return None
+
+                expected_source = None
+                if original.job_type == "automation_import":
+                    state = authority["active_download_state"]
+                    expected_source = (
+                        state.get("current_path")
+                        if isinstance(state, dict)
+                        else None
+                    )
+                elif original.job_type == "force_import":
+                    expected_source = original.payload.get("failed_path")
+                elif original.job_type == "youtube_import":
+                    expected_source = original.payload.get("staged_path")
+                else:
+                    self.conn.rollback()
+                    return None
+                if expected_source != original.beets_launch_source_path:
+                    self.conn.rollback()
+                    return None
+
+            if resolution == "retry" and original.job_type == "automation_import":
+                clear = self._execute("""
+                    UPDATE album_requests
+                    SET active_download_state =
+                            active_download_state - 'import_subprocess_started_at',
+                        updated_at = NOW()
+                    WHERE id = %s
+                      AND status = 'downloading'
+                      AND mb_release_id = %s
+                      AND active_download_state IS NOT NULL
+                      AND active_download_state->>'current_path' = %s
+                    RETURNING id
+                """, (
+                    original.request_id,
+                    original.beets_launch_release_id,
+                    original.beets_launch_source_path,
+                ))
+                if clear.fetchone() is None:
+                    self.conn.rollback()
+                    return None
+
+            resolution_result = {
+                "recovery_resolution": {
+                    "resolution": resolution,
+                    "reason": reason,
+                },
+            }
+            resolved_cur = self._execute("""
+                UPDATE import_jobs
+                SET status = 'failed',
+                    result = COALESCE(result, '{}'::jsonb) || %s::jsonb,
+                    message = %s,
+                    error = %s,
+                    worker_id = NULL,
+                    heartbeat_at = NULL,
+                    completed_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND status = 'recovery_required'
+                RETURNING *
+            """, (
+                psycopg2.extras.Json(resolution_result),
+                (
+                    f"Operator authorized a fresh retry: {reason}"
+                    if resolution == "retry"
+                    else f"Operator resolved without replay: {reason}"
+                ),
+                (
+                    "Ambiguous Beets operation closed before fresh retry"
+                    if resolution == "retry"
+                    else "Ambiguous Beets operation closed by operator"
+                ),
+                job_id,
+            ))
+            resolved_raw = resolved_cur.fetchone()
+            if resolved_raw is None:
+                self.conn.rollback()
+                return None
+            resolved = ImportJob.from_row(dict(resolved_raw))
+
+            retry: ImportJob | None = None
+            if resolution == "retry":
+                retry_cur = self._execute("""
+                    INSERT INTO import_jobs (
+                        job_type,
+                        request_id,
+                        dedupe_key,
+                        payload,
+                        message,
+                        preview_status,
+                        preview_result,
+                        preview_message,
+                        preview_error,
+                        preview_attempts,
+                        preview_completed_at,
+                        importable_at,
+                        candidate_evidence_id
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
+                    RETURNING *
+                """, (
+                    original.job_type,
+                    original.request_id,
+                    original.dedupe_key,
+                    psycopg2.extras.Json(original.payload),
+                    f"Operator-authorized retry of recovery job {original.id}",
+                    original.preview_status,
+                    (
+                        psycopg2.extras.Json(original.preview_result)
+                        if original.preview_result is not None
+                        else None
+                    ),
+                    original.preview_message,
+                    original.preview_error,
+                    original.preview_attempts,
+                    original.preview_completed_at,
+                    original.importable_at,
+                    original.candidate_evidence_id,
+                ))
+                retry_raw = retry_cur.fetchone()
+                if retry_raw is None:
+                    raise RuntimeError("import recovery retry insert returned no row")
+                retry = ImportJob.from_row(dict(retry_raw))
+
+            self.conn.commit()
+        return resolved, retry
+
+
     def mark_import_job_failed(
         self,
         job_id: int,
@@ -285,33 +577,68 @@ class _ImportJobsMixin(_PipelineDBBase):
         return ImportJob.from_row(dict(row)) if row else None
 
 
-    def requeue_running_import_jobs(
+    def merge_import_job_result(
+        self,
+        job_id: int,
+        patch: dict[str, Any],
+    ) -> ImportJob | None:
+        """Append best-effort post-commit convergence details to a job."""
+        cur = self._execute("""
+            UPDATE import_jobs
+            SET result = COALESCE(result, '{}'::jsonb) || %s::jsonb,
+                updated_at = NOW()
+            WHERE id = %s
+              AND status IN ('completed', 'failed')
+            RETURNING *
+        """, (psycopg2.extras.Json(patch), job_id))
+        row = cur.fetchone()
+        return ImportJob.from_row(dict(row)) if row else None
+
+
+    def recover_running_import_jobs(
         self,
         *,
-        message: str,
+        requeue_message: str,
+        recovery_message: str,
         limit: int = 50,
     ) -> list[ImportJob]:
-        """Reset abandoned running jobs to queued for immediate retry."""
+        """Recover abandoned jobs without replaying possible Beets effects."""
         cur = self._execute("""
             WITH running AS (
-                SELECT id
+                SELECT id, beets_launch_authorized_at
                 FROM import_jobs
                 WHERE status = 'running'
                 ORDER BY updated_at ASC, id ASC
                 LIMIT %s
             )
             UPDATE import_jobs
-            SET status = 'queued',
-                message = %s,
-                error = NULL,
+            SET status = CASE
+                    WHEN running.beets_launch_authorized_at IS NULL
+                        THEN 'queued'
+                    ELSE 'recovery_required'
+                END,
+                message = CASE
+                    WHEN running.beets_launch_authorized_at IS NULL
+                        THEN %s
+                    ELSE %s
+                END,
+                error = CASE
+                    WHEN running.beets_launch_authorized_at IS NULL
+                        THEN NULL
+                    ELSE 'Automatic replay refused because Beets may have mutated the library'
+                END,
                 worker_id = NULL,
-                started_at = NULL,
+                started_at = CASE
+                    WHEN running.beets_launch_authorized_at IS NULL
+                        THEN NULL
+                    ELSE import_jobs.started_at
+                END,
                 heartbeat_at = NULL,
                 updated_at = NOW()
             FROM running
             WHERE import_jobs.id = running.id
             RETURNING import_jobs.*
-        """, (limit, message))
+        """, (limit, requeue_message, recovery_message))
         return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
 
 
@@ -328,7 +655,7 @@ class _ImportJobsMixin(_PipelineDBBase):
         the row on its next sweep, measure, persist evidence, and mark it
         importable again.
 
-        Column semantics (modeled on ``requeue_running_import_jobs``):
+        Column semantics (modeled on pre-launch running-job recovery):
         - ``status`` → ``queued``
         - ``preview_status`` → ``waiting``
         - ``worker_id`` / ``started_at`` / ``heartbeat_at`` → ``NULL``
@@ -356,6 +683,7 @@ class _ImportJobsMixin(_PipelineDBBase):
                 updated_at = NOW()
             WHERE id = %s
               AND status = 'running'
+              AND beets_launch_authorized_at IS NULL
             RETURNING *
         """, (reason, job_id))
         row = cur.fetchone()
@@ -525,7 +853,7 @@ class _ImportJobsMixin(_PipelineDBBase):
     ) -> list[ImportJob]:
         """Reset every running preview job to ``waiting`` for immediate retry.
 
-        Mirrors ``requeue_running_import_jobs`` for the preview lane.
+        Mirrors import-job startup recovery for the preview lane.
         Called at preview-worker startup: the previous worker process is
         dead by definition (systemd has just spawned this one), so any
         ``preview_status='running'`` row is owned by a ghost worker and
@@ -562,7 +890,7 @@ class _ImportJobsMixin(_PipelineDBBase):
         self,
         request_id: int,
     ) -> ImportJob | None:
-        """Return the most recent queued/running import job for this request.
+        """Return the most recent active import job for this request.
 
         Used by the ban-source route's importer-race check (E1.3 in the
         plan). All callers consume the queue's concrete ``ImportJob`` shape.
@@ -571,7 +899,7 @@ class _ImportJobsMixin(_PipelineDBBase):
             SELECT *
             FROM import_jobs
             WHERE request_id = %s
-              AND status IN ('queued', 'running')
+              AND status IN ('queued', 'running', 'recovery_required')
             ORDER BY id DESC
             LIMIT 1
         """, (request_id,))

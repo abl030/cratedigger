@@ -1161,7 +1161,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
         finally:
             other.close()
 
-    def test_running_jobs_can_be_requeued_immediately_after_worker_restart(self):
+    def test_unlaunched_jobs_can_be_requeued_after_worker_restart(self):
         from lib.import_queue import IMPORT_JOB_FORCE
 
         job = self.db.enqueue_import_job(
@@ -1178,8 +1178,9 @@ class TestImportJobQueueAPI(unittest.TestCase):
         claimed = self.db.claim_next_import_job(worker_id="old-worker")
         assert claimed is not None
 
-        recovered = self.db.requeue_running_import_jobs(
-            message="worker restarted",
+        recovered = self.db.recover_running_import_jobs(
+            requeue_message="worker restarted",
+            recovery_message="operator recovery required",
         )
         self.assertEqual([job.id for job in recovered], [claimed.id])
         self.assertEqual(recovered[0].status, "queued")
@@ -1509,7 +1510,7 @@ class TestRequeueImportJobForPreview(unittest.TestCase):
 class TestRequeueRunningImportPreviewJobs(unittest.TestCase):
     """Startup self-heal for the async preview worker.
 
-    Mirrors the importer's ``requeue_running_import_jobs`` — when the
+    Mirrors the importer's running-job recovery — when the
     preview worker process restarts, it must immediately requeue every
     job in ``preview_status='running'`` regardless of heartbeat age,
     because by definition no preview worker is currently processing

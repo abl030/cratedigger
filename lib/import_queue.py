@@ -18,14 +18,25 @@ IMPORT_JOB_AUTOMATION = "automation_import"
 # the existing per-job pipeline (preview measurement, quality gate,
 # beets distance, wrong-matches OR auto-import, ``mark_imported_with_rescue``).
 IMPORT_JOB_YOUTUBE = "youtube_import"
+IMPORT_JOB_RECOVERY_REQUIRED = "recovery_required"
 
 IMPORT_JOB_TYPES = frozenset({
     IMPORT_JOB_FORCE,
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_YOUTUBE,
 })
-IMPORT_JOB_STATUSES = frozenset({"queued", "running", "completed", "failed"})
-IMPORT_JOB_ACTIVE_STATUSES = frozenset({"queued", "running"})
+IMPORT_JOB_STATUSES = frozenset({
+    "queued",
+    "running",
+    IMPORT_JOB_RECOVERY_REQUIRED,
+    "completed",
+    "failed",
+})
+IMPORT_JOB_ACTIVE_STATUSES = frozenset({
+    "queued",
+    "running",
+    IMPORT_JOB_RECOVERY_REQUIRED,
+})
 IMPORT_JOB_PREVIEW_WAITING = "waiting"
 IMPORT_JOB_PREVIEW_RUNNING = "running"
 IMPORT_JOB_PREVIEW_EVIDENCE_READY = "evidence_ready"
@@ -92,6 +103,12 @@ class ImportJob:
     preview_heartbeat_at: datetime | None = None
     preview_completed_at: datetime | None = None
     importable_at: datetime | None = None
+    candidate_evidence_id: int | None = None
+    beets_launch_authorized_at: datetime | None = None
+    beets_launch_release_id: str | None = None
+    beets_launch_source_path: str | None = None
+    beets_launch_request_status: str | None = None
+    beets_launch_snapshot_fingerprint: str | None = None
     deduped: bool = False
 
     @classmethod
@@ -168,6 +185,34 @@ class ImportJob:
             preview_heartbeat_at=row.get("preview_heartbeat_at"),
             preview_completed_at=row.get("preview_completed_at"),
             importable_at=row.get("importable_at"),
+            candidate_evidence_id=(
+                int(row["candidate_evidence_id"])
+                if row.get("candidate_evidence_id") is not None
+                else None
+            ),
+            beets_launch_authorized_at=row.get(
+                "beets_launch_authorized_at"
+            ),
+            beets_launch_release_id=(
+                str(row["beets_launch_release_id"])
+                if row.get("beets_launch_release_id") is not None
+                else None
+            ),
+            beets_launch_source_path=(
+                str(row["beets_launch_source_path"])
+                if row.get("beets_launch_source_path") is not None
+                else None
+            ),
+            beets_launch_request_status=(
+                str(row["beets_launch_request_status"])
+                if row.get("beets_launch_request_status") is not None
+                else None
+            ),
+            beets_launch_snapshot_fingerprint=(
+                str(row["beets_launch_snapshot_fingerprint"])
+                if row.get("beets_launch_snapshot_fingerprint") is not None
+                else None
+            ),
             deduped=deduped,
         )
 
@@ -199,6 +244,14 @@ class ImportJob:
             "preview_heartbeat_at": self.preview_heartbeat_at,
             "preview_completed_at": self.preview_completed_at,
             "importable_at": self.importable_at,
+            "candidate_evidence_id": self.candidate_evidence_id,
+            "beets_launch_authorized_at": self.beets_launch_authorized_at,
+            "beets_launch_release_id": self.beets_launch_release_id,
+            "beets_launch_source_path": self.beets_launch_source_path,
+            "beets_launch_request_status": self.beets_launch_request_status,
+            "beets_launch_snapshot_fingerprint": (
+                self.beets_launch_snapshot_fingerprint
+            ),
             "deduped": self.deduped,
         }
 
@@ -214,6 +267,7 @@ class ImportJob:
             "preview_heartbeat_at",
             "preview_completed_at",
             "importable_at",
+            "beets_launch_authorized_at",
         ):
             value = result[key]
             if hasattr(value, "isoformat"):

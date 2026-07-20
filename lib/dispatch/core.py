@@ -407,6 +407,45 @@ def dispatch_import_core(
                     verified_lossless_target=verified_lossless_target,
                     gate=evidence_gate,
                 )
+            if candidate_import_job_id is None:
+                return DispatchOutcome(
+                    success=False,
+                    message=(
+                        "Beets launch refused: no active import job owns "
+                        "this mutation"
+                    ),
+                    code="launch_authority_missing",
+                )
+            launch_request = db.get_request(request_id)
+            expected_request_status = (
+                str(launch_request["status"])
+                if launch_request is not None
+                and launch_request.get("status") is not None
+                else None
+            )
+            if expected_request_status is None:
+                return DispatchOutcome(
+                    success=False,
+                    message="Beets launch refused: request authority is missing",
+                    code="launch_authority_conflict",
+                )
+            authorized_job = db.authorize_import_job_launch(
+                candidate_import_job_id,
+                request_id=request_id,
+                release_id=mb_release_id,
+                source_path=path,
+                expected_request_status=expected_request_status,
+            )
+            if authorized_job is None:
+                return DispatchOutcome(
+                    success=False,
+                    message=(
+                        "Beets launch refused: import job authority is stale "
+                        "or no longer active"
+                    ),
+                    code="launch_authority_conflict",
+                )
+
             # Mark the subprocess as launching on the auto-import path
             # so the resume guard can distinguish "never started" from
             # "may have written to beets" if this process crashes

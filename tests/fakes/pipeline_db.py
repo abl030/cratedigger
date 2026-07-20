@@ -23,6 +23,8 @@ if TYPE_CHECKING:
 
 from lib.import_queue import (
     ImportJob,
+    IMPORT_JOB_ACTIVE_STATUSES,
+    IMPORT_JOB_RECOVERY_REQUIRED,
     IMPORT_JOB_YOUTUBE,
     IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES,
     IMPORT_JOB_PREVIEW_EVIDENCE_READY,
@@ -806,7 +808,7 @@ class FakePipelineDB:
                 if (
                     row.get("job_type") == IMPORT_JOB_YOUTUBE
                     and row.get("request_id") == request_id
-                    and row.get("status") in ("queued", "running")
+                    and row.get("status") in IMPORT_JOB_ACTIVE_STATUSES
                 ):
                     raise ValueError(
                         "active youtube_import already exists for "
@@ -843,6 +845,11 @@ class FakePipelineDB:
             "preview_completed_at": None,
             "importable_at": None,
             "candidate_evidence_id": None,
+            "beets_launch_authorized_at": None,
+            "beets_launch_release_id": None,
+            "beets_launch_source_path": None,
+            "beets_launch_request_status": None,
+            "beets_launch_snapshot_fingerprint": None,
         }
         self._import_jobs.append(row)
         return ImportJob.from_row(copy.deepcopy(row))
@@ -864,7 +871,7 @@ class FakePipelineDB:
             if row.get("dedupe_key") == dedupe_key
             and (
                 not active_only
-                or row.get("status") in ("queued", "running")
+                or row.get("status") in IMPORT_JOB_ACTIVE_STATUSES
             )
         ]
         rows.sort(key=lambda row: (_as_datetime(row.get("updated_at")), row["id"]), reverse=True)
@@ -895,7 +902,7 @@ class FakePipelineDB:
     ) -> list[ImportJob]:
         rows = [
             row for row in self._import_jobs
-            if row.get("status") in ("queued", "running")
+            if row.get("status") in IMPORT_JOB_ACTIVE_STATUSES
             and (request_id is None or row.get("request_id") == request_id)
         ]
         rows.sort(key=lambda row: (_as_datetime(row.get("created_at")), row["id"]))
@@ -911,7 +918,7 @@ class FakePipelineDB:
             row for row in self._import_jobs
             if row.get("job_type") == IMPORT_JOB_YOUTUBE
             and row.get("request_id") == request_id
-            and row.get("status") in ("queued", "running")
+            and row.get("status") in IMPORT_JOB_ACTIVE_STATUSES
         ]
         rows.sort(key=lambda row: row["id"])
         return ImportJob.from_row(copy.deepcopy(rows[0])) if rows else None
@@ -959,7 +966,7 @@ class FakePipelineDB:
         dirs = {str(path) for path in source_dirs if path}
         rows: list[dict[str, Any]] = []
         for row in self._import_jobs:
-            if row.get("status") not in ("queued", "running"):
+            if row.get("status") not in IMPORT_JOB_ACTIVE_STATUSES:
                 continue
             if (
                 ignore_import_job_id is not None
@@ -993,25 +1000,27 @@ class FakePipelineDB:
     def list_import_job_timeline(self, *, limit: int = 50) -> list[ImportJob]:
         active_rows = [
             row for row in self._import_jobs
-            if row.get("status") in ("queued", "running")
+            if row.get("status") in IMPORT_JOB_ACTIVE_STATUSES
         ]
 
         def sort_key(row: dict[str, Any]) -> tuple[int, datetime, datetime, int]:
             status = row.get("status")
             preview_status = row.get("preview_status")
-            if (
+            if status == IMPORT_JOB_RECOVERY_REQUIRED:
+                bucket = 0
+            elif (
                 status == "queued"
                 and preview_status in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
             ):
-                bucket = 0
-            elif status == "running":
                 bucket = 1
-            elif status == "queued" and preview_status == "running":
+            elif status == "running":
                 bucket = 2
-            elif status == "queued" and preview_status == "waiting":
+            elif status == "queued" and preview_status == "running":
                 bucket = 3
-            else:
+            elif status == "queued" and preview_status == "waiting":
                 bucket = 4
+            else:
+                bucket = 5
             return (
                 bucket,
                 _as_datetime(row.get("importable_at")),
@@ -1068,6 +1077,221 @@ class FakePipelineDB:
                 return ImportJob.from_row(copy.deepcopy(row))
         return None
 
+    def authorize_import_job_launch(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        release_id: str,
+        source_path: str,
+        expected_request_status: str,
+    ) -> ImportJob | None:
+        request = self._requests.get(request_id)
+        for row in self._import_jobs:
+            if (
+                row["id"] != job_id
+                or row.get("status") != "running"
+                or row.get("beets_launch_authorized_at") is not None
+                or row.get("request_id") != request_id
+                or request is None
+                or request.get("status") != expected_request_status
+                or request.get("status") == "replaced"
+                or request.get("mb_release_id") != release_id
+            ):
+                continue
+            evidence_id = row.get("candidate_evidence_id")
+            evidence = (
+                self._evidence_by_id.get(int(evidence_id))
+                if evidence_id is not None else None
+            )
+            if (
+                evidence is None
+                or evidence.mb_release_id != release_id
+                or evidence.source_path != source_path
+                or not evidence.snapshot_fingerprint
+            ):
+                return None
+            job_type = row.get("job_type")
+            if job_type == "automation_import":
+                state = request.get("active_download_state")
+                if (
+                    request.get("status") != "downloading"
+                    or not isinstance(state, dict)
+                    or state.get("current_path") != source_path
+                ):
+                    return None
+            elif job_type == "force_import":
+                payload = row.get("payload")
+                if (
+                    not isinstance(payload, dict)
+                    or payload.get("failed_path") != source_path
+                ):
+                    return None
+            elif job_type == "youtube_import":
+                payload = row.get("payload")
+                if (
+                    request.get("status") not in ("wanted", "unsearchable")
+                    or not isinstance(payload, dict)
+                    or payload.get("staged_path") != source_path
+                ):
+                    return None
+            else:
+                return None
+            now = _utcnow()
+            row["beets_launch_authorized_at"] = now
+            row["beets_launch_release_id"] = release_id
+            row["beets_launch_source_path"] = source_path
+            row["beets_launch_request_status"] = request.get("status")
+            row["beets_launch_snapshot_fingerprint"] = (
+                evidence.snapshot_fingerprint
+            )
+            row["updated_at"] = now
+            return ImportJob.from_row(copy.deepcopy(row))
+        return None
+
+    def mark_import_job_recovery_required(
+        self,
+        job_id: int,
+        *,
+        reason: str,
+    ) -> ImportJob | None:
+        for row in self._import_jobs:
+            if (
+                row["id"] == job_id
+                and row.get("status") == "running"
+                and row.get("beets_launch_authorized_at") is not None
+            ):
+                now = _utcnow()
+                row["status"] = IMPORT_JOB_RECOVERY_REQUIRED
+                row["message"] = f"Recovery required: {reason}"
+                row["error"] = (
+                    "Automatic replay refused because Beets may have "
+                    "mutated the library"
+                )
+                row["worker_id"] = None
+                row["heartbeat_at"] = None
+                row["updated_at"] = now
+                return ImportJob.from_row(copy.deepcopy(row))
+        return None
+
+    def resolve_import_job_recovery(
+        self,
+        job_id: int,
+        *,
+        resolution: str,
+        reason: str,
+    ) -> tuple[ImportJob, ImportJob | None] | None:
+        if resolution not in ("retry", "close"):
+            raise ValueError(f"Invalid import recovery resolution: {resolution}")
+        reason = reason.strip()
+        if not reason:
+            raise ValueError("Import recovery resolution requires a reason")
+        row = next(
+            (
+                item for item in self._import_jobs
+                if item["id"] == job_id
+                and item.get("status") == IMPORT_JOB_RECOVERY_REQUIRED
+            ),
+            None,
+        )
+        if row is None:
+            return None
+        original = ImportJob.from_row(copy.deepcopy(row))
+        if resolution == "retry":
+            request = self._requests.get(int(original.request_id or 0))
+            evidence = (
+                self._evidence_by_id.get(original.candidate_evidence_id)
+                if original.candidate_evidence_id is not None
+                else None
+            )
+            if (
+                request is None
+                or request.get("status")
+                != original.beets_launch_request_status
+                or request.get("mb_release_id")
+                != original.beets_launch_release_id
+                or evidence is None
+                or evidence.snapshot_fingerprint
+                != original.beets_launch_snapshot_fingerprint
+            ):
+                return None
+
+            expected_source = None
+            if original.job_type == "automation_import":
+                state = request.get("active_download_state")
+                expected_source = (
+                    state.get("current_path")
+                    if isinstance(state, dict)
+                    else None
+                )
+            elif original.job_type == "force_import":
+                expected_source = original.payload.get("failed_path")
+            elif original.job_type == "youtube_import":
+                expected_source = original.payload.get("staged_path")
+            else:
+                return None
+            if expected_source != original.beets_launch_source_path:
+                return None
+
+        if resolution == "retry" and original.job_type == "automation_import":
+            request = self._requests.get(int(original.request_id or 0))
+            state = request.get("active_download_state") if request else None
+            assert request is not None and isinstance(state, dict)
+            state.pop("import_subprocess_started_at", None)
+            request["updated_at"] = _utcnow()
+
+        now = _utcnow()
+        prior_result = row.get("result")
+        merged_result = (
+            copy.deepcopy(prior_result)
+            if isinstance(prior_result, dict)
+            else {}
+        )
+        merged_result["recovery_resolution"] = {
+            "resolution": resolution,
+            "reason": reason,
+        }
+        row["status"] = "failed"
+        row["result"] = merged_result
+        row["message"] = (
+            f"Operator authorized a fresh retry: {reason}"
+            if resolution == "retry"
+            else f"Operator resolved without replay: {reason}"
+        )
+        row["error"] = (
+            "Ambiguous Beets operation closed before fresh retry"
+            if resolution == "retry"
+            else "Ambiguous Beets operation closed by operator"
+        )
+        row["worker_id"] = None
+        row["heartbeat_at"] = None
+        row["completed_at"] = now
+        row["updated_at"] = now
+        resolved = ImportJob.from_row(copy.deepcopy(row))
+
+        retry: ImportJob | None = None
+        if resolution == "retry":
+            retry = self.enqueue_import_job(
+                original.job_type,
+                request_id=original.request_id,
+                dedupe_key=original.dedupe_key,
+                payload=original.payload,
+                message=f"Operator-authorized retry of recovery job {original.id}",
+            )
+            retry_row = next(
+                item for item in self._import_jobs if item["id"] == retry.id
+            )
+            retry_row["preview_status"] = original.preview_status
+            retry_row["preview_result"] = copy.deepcopy(original.preview_result)
+            retry_row["preview_message"] = original.preview_message
+            retry_row["preview_error"] = original.preview_error
+            retry_row["preview_attempts"] = original.preview_attempts
+            retry_row["preview_completed_at"] = original.preview_completed_at
+            retry_row["importable_at"] = original.importable_at
+            retry_row["candidate_evidence_id"] = original.candidate_evidence_id
+            retry = ImportJob.from_row(copy.deepcopy(retry_row))
+        return resolved, retry
+
     def mark_import_job_failed(
         self,
         job_id: int,
@@ -1088,10 +1312,26 @@ class FakePipelineDB:
                 return ImportJob.from_row(copy.deepcopy(row))
         return None
 
-    def requeue_running_import_jobs(
+    def merge_import_job_result(
+        self,
+        job_id: int,
+        patch: dict[str, Any],
+    ) -> ImportJob | None:
+        for row in self._import_jobs:
+            if row["id"] == job_id and row.get("status") in ("completed", "failed"):
+                result = row.get("result")
+                merged = copy.deepcopy(result) if isinstance(result, dict) else {}
+                merged.update(copy.deepcopy(patch))
+                row["result"] = merged
+                row["updated_at"] = _utcnow()
+                return ImportJob.from_row(copy.deepcopy(row))
+        return None
+
+    def recover_running_import_jobs(
         self,
         *,
-        message: str,
+        requeue_message: str,
+        recovery_message: str,
         limit: int = 50,
     ) -> list[ImportJob]:
         running = [
@@ -1102,11 +1342,19 @@ class FakePipelineDB:
         updated_jobs = []
         for row in running[:limit]:
             now = _utcnow()
-            row["status"] = "queued"
-            row["message"] = message
-            row["error"] = None
+            launched = row.get("beets_launch_authorized_at") is not None
+            row["status"] = (
+                IMPORT_JOB_RECOVERY_REQUIRED if launched else "queued"
+            )
+            row["message"] = recovery_message if launched else requeue_message
+            row["error"] = (
+                "Automatic replay refused because Beets may have mutated "
+                "the library"
+                if launched else None
+            )
             row["worker_id"] = None
-            row["started_at"] = None
+            if not launched:
+                row["started_at"] = None
             row["heartbeat_at"] = None
             row["updated_at"] = now
             updated_jobs.append(ImportJob.from_row(copy.deepcopy(row)))
@@ -1124,7 +1372,11 @@ class FakePipelineDB:
         state, sets preview_status='waiting', preserves attempt counters.
         """
         for row in self._import_jobs:
-            if row["id"] == job_id and row.get("status") == "running":
+            if (
+                row["id"] == job_id
+                and row.get("status") == "running"
+                and row.get("beets_launch_authorized_at") is None
+            ):
                 now = _utcnow()
                 row["status"] = "queued"
                 row["preview_status"] = IMPORT_JOB_PREVIEW_WAITING
@@ -2401,7 +2653,7 @@ class FakePipelineDB:
         rows = [
             row for row in self._import_jobs
             if row.get("request_id") == request_id
-            and row.get("status") in ("queued", "running")
+            and row.get("status") in IMPORT_JOB_ACTIVE_STATUSES
         ]
         if not rows:
             return None
@@ -5976,7 +6228,7 @@ class FakePipelineDB:
             if any(
                 row.get("job_type") == IMPORT_JOB_YOUTUBE
                 and row.get("request_id") == r.get("id")
-                and row.get("status") in ("queued", "running")
+                and row.get("status") in IMPORT_JOB_ACTIVE_STATUSES
                 for row in self._import_jobs
             ):
                 continue
