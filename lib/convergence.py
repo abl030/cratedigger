@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import Enum
 from importlib import import_module
 from types import MappingProxyType
-from typing import cast, Protocol
+from typing import Protocol
 
 from lib.context import CratediggerContext
 
@@ -48,7 +48,7 @@ def resolve_convergence_target(
     target = getattr(module, callable_name)
     if not callable(target):
         raise TypeError(f"{module_name}.{callable_name} is not callable")
-    return cast(StepCallable, target)
+    return target
 
 
 def _lazy_step(

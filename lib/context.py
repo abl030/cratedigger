@@ -12,6 +12,7 @@ import threading
 from typing import Any, Protocol, Sequence, TYPE_CHECKING, runtime_checkable
 
 if TYPE_CHECKING:
+    from cratedigger import TrackRecord
     from lib.config import CratediggerConfig
 
 
@@ -27,7 +28,7 @@ class PipelineDBSource(Protocol):
     """
 
     def _get_db(self) -> Any: ...
-    def get_tracks(self, album_record: Any) -> list[dict[str, Any]]: ...
+    def get_tracks(self, album_record: Any) -> list[TrackRecord]: ...
     def get_wanted_searchable(
         self,
         generator_id: str,
@@ -76,7 +77,8 @@ class CratediggerContext:
     current_album_cache: dict[int, Any] = field(default_factory=dict)
     denied_users_cache: dict[int, set[str]] = field(default_factory=dict)
     cooled_down_users: set[str] = field(default_factory=set)
-    prefetched_album_tracks: dict[int, list[Any]] = field(default_factory=dict)
+    prefetched_album_tracks: dict[int, list[TrackRecord]] = (
+        field(default_factory=dict))
     peer_cache: Any = None
     peer_cache_negative_skips: set[tuple[str, str]] = field(default_factory=set)
     # Distinct peers cold-browsed this cycle; flushed to the

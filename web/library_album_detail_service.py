@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime
-from typing import Protocol, cast
+from typing import Protocol
 
 import msgspec
 
@@ -160,7 +160,17 @@ class LibraryAlbumDetail(msgspec.Struct, frozen=True):
     download_history: list[DownloadHistoryViewRow]
 
     def to_dict(self) -> dict[str, object]:
-        return cast(dict[str, object], msgspec.to_builtins(self))
+        return msgspec.to_builtins(self)
+
+
+def _detail_track_rows(
+    detail_row: Mapping[str, object],
+) -> list[Mapping[str, object]]:
+    """Narrow the raw ``tracks`` value to the row mappings it carries."""
+    raw = detail_row.get("tracks")
+    if not isinstance(raw, list):
+        return []
+    return [row for row in raw if isinstance(row, Mapping)]
 
 
 def build_library_album_detail(
@@ -191,7 +201,7 @@ def build_library_album_detail(
             },
             type=LibraryAlbumTrack,
         )
-        for track in cast(Sequence[Mapping[str, object]], detail_row.get("tracks") or [])
+        for track in _detail_track_rows(detail_row)
     ]
     frontend_id = _detail_release_id(detail_row)
     raw_formats = str(detail_row.get("formats") or "")

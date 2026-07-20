@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import cast
+
 
 import msgspec
 
@@ -109,7 +109,7 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     youtube_metadata: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return cast(dict[str, object], msgspec.to_builtins(self))
+        return msgspec.to_builtins(self)
 
 
 def build_download_history_rows(
@@ -140,7 +140,7 @@ def build_download_history_row(
     return msgspec.convert(
         {
             **entry.to_json_dict(),
-            **cast(dict[str, object], msgspec.to_builtins(classified)),
+            **msgspec.to_builtins(classified),
         },
         type=DownloadHistoryViewRow,
         strict=True,

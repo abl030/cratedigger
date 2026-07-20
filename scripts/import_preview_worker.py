@@ -11,8 +11,10 @@ import sys
 import threading
 from collections.abc import Callable
 from datetime import timedelta
-from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from cratedigger import TrackRecord
 
 import msgspec
 import psycopg2
@@ -140,6 +142,39 @@ def derive_canonical_import_folder(
     return canonical_folder_for_row(entry, cfg.slskd_download_dir)
 
 
+class _PreviewDBSource:
+    """Minimal ``PipelineDBSource`` for preview materialization.
+
+    Only ``_get_db`` is live — the preview worker already holds the DB
+    handle. Every other protocol member raises: reaching one from a
+    preview materialization is a programming error, same sentinel shape
+    as ``lib.enqueue._WorkerPipelineDBSource``.
+    """
+
+    def __init__(self, db: object) -> None:
+        self._db = db
+
+    def _get_db(self) -> object:
+        return self._db
+
+    def get_tracks(self, album_record: object) -> "list[TrackRecord]":
+        raise AssertionError("preview materialization must not read tracks")
+
+    def get_wanted_searchable(
+        self, *args: object, **kwargs: object,
+    ) -> list[object]:
+        raise AssertionError("preview materialization must not search")
+
+    def mark_done(self, *args: object, **kwargs: object) -> object:
+        raise AssertionError("preview materialization must not mark done")
+
+    def reject_and_requeue(self, *args: object, **kwargs: object) -> object:
+        raise AssertionError("preview materialization must not requeue")
+
+    def close(self) -> None:
+        raise AssertionError("preview materialization does not own the DB")
+
+
 def _materialize_automation_preview_path(
     db: Any,
     request_id: int,
@@ -153,6 +188,7 @@ def _materialize_automation_preview_path(
         Materialized,
         _materialize_processing_dir,
     )
+    from lib.context import CratediggerContext
     from lib.staged_album import StagedAlbum
 
     cfg = read_runtime_config()
@@ -160,10 +196,11 @@ def _materialize_automation_preview_path(
     canonical_path = derive_canonical_import_folder(row, state)
     if entry.import_folder is None:
         entry.import_folder = canonical_path
-    ctx = cast(Any, SimpleNamespace(
+    ctx = CratediggerContext(
         cfg=cfg,
-        pipeline_db_source=SimpleNamespace(_get_db=lambda: db),
-    ))
+        slskd=None,
+        pipeline_db_source=_PreviewDBSource(db),
+    )
     staged_album = StagedAlbum.from_entry(
         entry,
         default_path=canonical_path,
@@ -475,9 +512,8 @@ def _handle_measurement_failed(
                 exc_info=True,
             )
 
-    refreshed = getattr(db, "get_import_job", None)
-    if callable(refreshed):
-        return cast(ImportJob | None, refreshed(job.id))
+    if hasattr(db, "get_import_job"):
+        return db.get_import_job(job.id)
     return None
 
 

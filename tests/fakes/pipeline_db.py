@@ -18,6 +18,7 @@ import msgspec
 
 
 if TYPE_CHECKING:
+    from cratedigger import TrackRecord
     from lib.quality import CandidateScore
     from lib.pipeline_db import SaturationSummary, SearchLogHistoryPage
 
@@ -6628,19 +6629,19 @@ class FakePipelineDBSource:
     def _get_db(self) -> FakePipelineDB:
         return self.db
 
-    def get_tracks(self, album_record: Any) -> list[dict[str, Any]]:
+    def get_tracks(self, album_record: Any) -> list[TrackRecord]:
         self.get_tracks_calls.append(album_record)
         request_id = getattr(album_record, "db_request_id", None)
         if not request_id:
             return []
         rows = self.db._tracks.get(request_id, [])
         album_id = request_id * -1
-        out: list[dict[str, Any]] = []
+        out: list[TrackRecord] = []
         for t in rows:
             out.append({
-                "title": t.get("title"),
+                "title": t["title"],
                 "trackNumber": str(t.get("track_number") or ""),
-                "mediumNumber": t.get("disc_number"),
+                "mediumNumber": t["disc_number"],
                 "duration": int((t.get("length_seconds") or 0) * 10_000_000),
                 "id": 0,
                 "albumId": album_id,

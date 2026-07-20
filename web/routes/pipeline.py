@@ -17,7 +17,7 @@ was split out (#546 W4) into ``web/routes/pipeline_mutations.py``.
 
 import logging
 from collections.abc import Mapping, Sequence
-from typing import Literal, cast
+from typing import Literal
 
 import msgspec
 from pydantic import BaseModel, Field
@@ -198,10 +198,7 @@ def _classify_pipeline_log_item(
     classified_row = classify_download_log_row(row)
     return {
         **classified_row.entry.to_json_dict(),
-        **cast(
-            dict[str, object],
-            msgspec.to_builtins(classified_row.classified),
-        ),
+        **msgspec.to_builtins(classified_row.classified),
     }
 
 
@@ -536,13 +533,10 @@ def get_import_jobs_timeline(h, params: dict[str, list[str]]) -> None:
     serialized = []
     for queue_position, job in enumerate(jobs):
         item = _serialize_import_job(job)
-        item.update(cast(
-            dict[str, object],
-            msgspec.to_builtins(classify_import_job_display(
-                job,
-                queue_position=queue_position,
-            )),
-        ))
+        item.update(msgspec.to_builtins(classify_import_job_display(
+            job,
+            queue_position=queue_position,
+        )))
         request_id = item.get("request_id")
         if isinstance(request_id, (int, str)) and not isinstance(request_id, bool):
             req = db.get_request(int(request_id))

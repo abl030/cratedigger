@@ -13,7 +13,7 @@ web UI's POST invalidation paths. See issue #101.
 """
 
 import json
-from typing import cast
+
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -201,9 +201,13 @@ def _normalize_artist_release_group(
     # not only by omitting the field. The shared catalogue contract keeps
     # display text non-null and carries structural knowledge separately.
     primary_type = rg.get("primary-type") or ""
+    _structural: dict[str, ArtistStructuralType] = {
+        "Album": "Album", "EP": "EP", "Single": "Single",
+    }
     primary_types: list[ArtistStructuralType] = []
-    if primary_type in {"Album", "EP", "Single"}:
-        primary_types.append(cast(ArtistStructuralType, primary_type))
+    structural_type = _structural.get(primary_type)
+    if structural_type is not None:
+        primary_types.append(structural_type)
     return ArtistCatalogueRow(
         id=rg["id"],
         title=rg.get("title") or "",

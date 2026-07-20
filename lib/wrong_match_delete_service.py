@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from typing import Any, Iterable, Protocol, cast, runtime_checkable
+from typing import Any, Iterable, Protocol, runtime_checkable
 
 import msgspec
 
@@ -83,7 +83,7 @@ class WrongMatchDeleteResult(msgspec.Struct, frozen=True):
     error: str | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return cast(dict[str, object], msgspec.to_builtins(self))
+        return msgspec.to_builtins(self)
 
 
 class WrongMatchDeleteSummary(msgspec.Struct, frozen=True):
@@ -101,7 +101,7 @@ class WrongMatchDeleteSummary(msgspec.Struct, frozen=True):
     results: tuple[WrongMatchDeleteResult, ...]
 
     def to_dict(self) -> dict[str, object]:
-        return cast(dict[str, object], msgspec.to_builtins(self))
+        return msgspec.to_builtins(self)
 
 
 def delete_wrong_match(
