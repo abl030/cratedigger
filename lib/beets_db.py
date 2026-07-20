@@ -134,9 +134,6 @@ _RawCurrentItem: TypeAlias = tuple[
     object,
 ]
 
-DEFAULT_BEETS_DB = os.environ.get("BEETS_DB", "/mnt/virtio/Music/beets-library.db")
-
-
 def _resolve_library_path(path: str, library_root: str) -> str:
     """Anchor a Beets-relative path to its configured library root."""
     if library_root and not os.path.isabs(path):
