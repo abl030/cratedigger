@@ -4209,11 +4209,13 @@ class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):
         self._cratedigger._module_ctx = self._orig_module_ctx
 
     def _ctx_with_db(self, db):
+        from lib.config import CratediggerConfig
         from lib.context import CratediggerContext
         source = FakePipelineDBSource(db)
         self._cratedigger.pipeline_db_source = source
         ctx = CratediggerContext(
-            cfg=self._cratedigger.cfg, slskd=MagicMock(),
+            cfg=cast(CratediggerConfig, self._cratedigger.cfg),
+            slskd=MagicMock(),
             pipeline_db_source=source,
         )
         self._cratedigger._module_ctx = ctx

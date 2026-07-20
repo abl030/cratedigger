@@ -267,12 +267,12 @@ class DevHandler(BaseHTTPRequestHandler):
         try:
             fn = web_server.Handler._FUNC_GET_ROUTES.get(path)
             if fn:
-                fn(self, params)  # type: ignore[operator]
+                fn(self, params)
                 return
             for pattern, fn in web_server.Handler._FUNC_GET_PATTERNS:
                 match = pattern.match(path)
                 if match:
-                    fn(self, params, *match.groups())  # type: ignore[operator]
+                    fn(self, params, *match.groups())
                     return
             self._error("Not found", 404)
         except _discogs.DiscogsMirrorNotConfigured as exc:

@@ -54,10 +54,10 @@ class SlskdDirectory(TypedDict):
 
 
 # === Typed Config (populated in main() via CratediggerConfig.from_ini()) ===
-cfg: CratediggerConfig = None  # type: ignore[assignment]  # Set in main()
+cfg: CratediggerConfig | None = None  # Set in main()
 
 # === API Clients & Logging ===
-slskd: SlskdClient = None  # type: ignore[assignment]  # Set in main()
+slskd: SlskdClient | None = None  # Set in main()
 logger = logging.getLogger("cratedigger")
 
 
@@ -383,13 +383,13 @@ def search_for_album(album, ctx):
         search_id, purpose="plan_search",
         request_id=getattr(album, "db_request_id", None),
     )
-    submit_kwargs = _plan_search_submit_kwargs(query, cfg)
+    submit_kwargs = _plan_search_submit_kwargs(query, ctx.cfg)
     submit_kwargs["id"] = search_id
     try:
         exec_result = execute_search(
-            slskd,
+            ctx.slskd,
             submit_kwargs=submit_kwargs,
-            delete=cfg.delete_searches,
+            delete=ctx.cfg.delete_searches,
         )
     except SearchSubmitError:
         # Pre-accepted-search failure: non-consuming (final_state stays None).
@@ -1357,12 +1357,17 @@ def main():
         from concurrent.futures import ThreadPoolExecutor
         from lib.download import poll_active_downloads as _poll_impl
 
+        # Closure locals: narrowing on the module globals doesn't reach into
+        # a nested function, so capture the already-assigned values here.
+        main_cfg = cfg
+        main_slskd = slskd
+
         def _run_phase1():
             """Run Phase 1 in a background thread with its own DB connection."""
-            phase1_source = DatabaseSource(cfg.pipeline_db_dsn)
+            phase1_source = DatabaseSource(main_cfg.pipeline_db_dsn)
             phase1_ctx = CratediggerContext(
-                cfg=cfg,
-                slskd=slskd,
+                cfg=main_cfg,
+                slskd=main_slskd,
                 pipeline_db_source=phase1_source,
                 cooled_down_users=_module_ctx.cooled_down_users,
             )

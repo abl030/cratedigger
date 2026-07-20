@@ -34,6 +34,7 @@ import logging
 import re
 import threading
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from typing import Callable
 from urllib.parse import urlparse, parse_qs
 
 logging.basicConfig(
@@ -302,11 +303,13 @@ class Handler(BaseHTTPRequestHandler):
     # live on each ``RouteRegistration`` itself; see ``ALL_ROUTES``,
     # ``get_api_index`` (web/routes/api_index.py), and
     # ``TestRouteContractAudit`` (tests/web/test_route_audit.py).
-    _FUNC_GET_ROUTES: dict[str, object] = build_get_routes(ALL_ROUTES)
-    _FUNC_GET_PATTERNS: list[tuple[re.Pattern[str], object]] = (
+    _FUNC_GET_ROUTES: dict[str, Callable[..., None]] = (
+        build_get_routes(ALL_ROUTES))
+    _FUNC_GET_PATTERNS: list[tuple[re.Pattern[str], Callable[..., None]]] = (
         build_get_patterns(ALL_ROUTES))
-    _FUNC_POST_ROUTES: dict[str, object] = build_post_routes(ALL_ROUTES)
-    _FUNC_POST_PATTERNS: list[tuple[re.Pattern[str], object]] = (
+    _FUNC_POST_ROUTES: dict[str, Callable[..., None]] = (
+        build_post_routes(ALL_ROUTES))
+    _FUNC_POST_PATTERNS: list[tuple[re.Pattern[str], Callable[..., None]]] = (
         build_post_patterns(ALL_ROUTES))
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
@@ -412,12 +415,12 @@ class Handler(BaseHTTPRequestHandler):
             # Check route module handlers
             fn = self._FUNC_GET_ROUTES.get(path)
             if fn:
-                fn(self, params)  # type: ignore[operator]
+                fn(self, params)
                 return
             for pattern, fn in self._FUNC_GET_PATTERNS:
                 m = pattern.match(path)
                 if m:
-                    fn(self, params, *m.groups())  # type: ignore[operator]
+                    fn(self, params, *m.groups())
                     return
             self._error("Not found", 404)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
@@ -467,14 +470,14 @@ class Handler(BaseHTTPRequestHandler):
             if fn:
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length)) if length else {}
-                fn(self, body)  # type: ignore[operator]
+                fn(self, body)
                 return
             for pattern, fn in self._FUNC_POST_PATTERNS:
                 m = pattern.match(path)
                 if m:
                     length = int(self.headers.get("Content-Length", 0))
                     body = json.loads(self.rfile.read(length)) if length else {}
-                    fn(self, body, *m.groups())  # type: ignore[operator]
+                    fn(self, body, *m.groups())
                     return
             self._error("Not found", 404)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:

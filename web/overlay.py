@@ -14,6 +14,7 @@ None-handle inputs degrade gracefully (empty overlay), matching the
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from typing import Any, Protocol
 
 
@@ -44,10 +45,7 @@ def serialize_row(row: dict[str, object]) -> dict[str, object]:
     """Serialize a DB row dict — convert datetime objects to ISO strings."""
     result: dict[str, object] = {}
     for k, v in row.items():
-        if hasattr(v, "isoformat"):
-            result[k] = v.isoformat()  # type: ignore[union-attr]
-        else:
-            result[k] = v
+        result[k] = v.isoformat() if isinstance(v, (datetime, date)) else v
     return result
 
 
