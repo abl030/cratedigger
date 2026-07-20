@@ -1,4 +1,4 @@
--- 059_import_job_beets_launch_fence.sql
+-- 060_import_job_beets_launch_fence.sql
 --
 -- One import_jobs row is the durable identity of one Beets mutation.  The
 -- launch fields are written atomically immediately before import_one.py is

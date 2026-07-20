@@ -1712,7 +1712,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         logged = ImportResult.from_json(db.download_logs[0].import_result)
         self.assertEqual(logged.spectral, audit)
 
-    def test_timeout_preserves_attempt_spectral_audit(self):
+    def test_timeout_after_launch_requires_operator_recovery(self):
         import subprocess as sp
         from lib.dispatch import dispatch_import_core
         from lib.dispatch.types import ImportOneRun
@@ -1762,10 +1762,15 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-        logged = ImportResult.from_json(db.download_logs[0].import_result)
-        self.assertEqual(logged.spectral, audit)
+        recovered = db.get_import_job(claimed.id)
+        assert recovered is not None
+        self.assertEqual(recovered.status, "recovery_required")
+        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(db.download_logs, [])
+        self.assertIsNone(db.claim_next_import_job(
+            worker_id="automatic-replay"))
 
-    def test_exception_preserves_attempt_spectral_audit(self):
+    def test_exception_after_launch_requires_operator_recovery(self):
         from lib.dispatch import dispatch_import_core
         from lib.dispatch.types import ImportOneRun
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
@@ -1814,12 +1819,15 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-        logged_raw = db.download_logs[0].import_result
-        assert logged_raw is not None
-        logged = ImportResult.from_json(logged_raw)
-        self.assertEqual(logged.spectral, audit)
+        recovered = db.get_import_job(claimed.id)
+        assert recovered is not None
+        self.assertEqual(recovered.status, "recovery_required")
+        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(db.download_logs, [])
+        self.assertIsNone(db.claim_next_import_job(
+            worker_id="automatic-replay"))
 
-    def test_post_result_exception_preserves_full_import_result_and_audit(self):
+    def test_post_result_exception_requires_operator_recovery(self):
         from lib.dispatch import dispatch_import_core
         from lib.dispatch.types import ImportOneRun
         from lib.quality import (
@@ -1898,20 +1906,13 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-        failure_log = db.download_logs[-1]
-        self.assertEqual(failure_log.outcome, "failed")
-        logged_raw = failure_log.import_result
-        assert logged_raw is not None
-        logged = ImportResult.from_json(logged_raw)
-        self.assertEqual(logged, result)
-        self.assertEqual(logged.spectral, audit)
-        self.assertEqual(logged.decision, "import")
-        self.assertIsNotNone(logged.source_measurement)
-        self.assertIsNotNone(logged.current_measurement)
-        self.assertTrue(logged.conversion.was_converted)
-        self.assertEqual(logged.postflight.beets_id, 77)
-        self.assertEqual(
-            logged.quality_evidence_provenance.candidate_status, "ready")
+        recovered = db.get_import_job(claimed.id)
+        assert recovered is not None
+        self.assertEqual(recovered.status, "recovery_required")
+        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(db.download_logs, [])
+        self.assertIsNone(db.claim_next_import_job(
+            worker_id="automatic-replay"))
 
 
 class TestForceImportSlice(unittest.TestCase):

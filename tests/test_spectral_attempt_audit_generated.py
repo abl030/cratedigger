@@ -446,11 +446,16 @@ def _run_dispatch_finalization_world(
                 )
                 finalize_claimed_dispatch(db, claimed, outcome)
 
-    last_log = db.download_logs[-1]
+    final_job = db.get_import_job(job.id)
+    assert final_job is not None
+    last_log = db.download_logs[-1] if db.download_logs else None
     return {
-        "import_result": last_log.import_result,
+        "import_result": (
+            last_log.import_result if last_log is not None else None
+        ),
         "outcomes": [row.outcome for row in db.download_logs],
         "status": db.request(42)["status"],
+        "job_status": final_job.status,
         "denylist": [(row.username, row.reason) for row in db.denylist],
     }
 
@@ -718,14 +723,24 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             converted=converted,
         )
 
-        self.assertTrue(_persisted_attempt_has_exact_audit(
-            audited["import_result"], audit))
-        self.assertEqual(
-            _policy_payload(audited["import_result"]),
-            _policy_payload(unaudited["import_result"]),
-        )
+        ambiguous_modes = {
+            "timeout", "pre_result_exception", "post_result_exception",
+        }
+        if mode in ambiguous_modes:
+            self.assertIsNone(audited["import_result"])
+            self.assertIsNone(unaudited["import_result"])
+            self.assertEqual(audited["job_status"], "recovery_required")
+            self.assertEqual(unaudited["job_status"], "recovery_required")
+        else:
+            self.assertTrue(_persisted_attempt_has_exact_audit(
+                audited["import_result"], audit))
+            self.assertEqual(
+                _policy_payload(audited["import_result"]),
+                _policy_payload(unaudited["import_result"]),
+            )
         self.assertEqual(audited["outcomes"], unaudited["outcomes"])
         self.assertEqual(audited["status"], unaudited["status"])
+        self.assertEqual(audited["job_status"], unaudited["job_status"])
         self.assertEqual(audited["denylist"], unaudited["denylist"])
 
     @given(

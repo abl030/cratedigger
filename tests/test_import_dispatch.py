@@ -1806,6 +1806,7 @@ class TestDispatchImport(unittest.TestCase):
 
     def test_timeout(self):
         from lib.dispatch import dispatch_import_core
+        from scripts.importer import process_claimed_job
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42,
@@ -1817,34 +1818,36 @@ class TestDispatchImport(unittest.TestCase):
             path="/tmp/dest",
             release_id="test-mbid",
         )
+
+        def execute(db_arg, _job, *, ctx=None):
+            del ctx
+            return dispatch_import_core(
+                path="/tmp/dest", mb_release_id="test-mbid",
+                request_id=42, label="Test",
+                beets_harness_path=_HARNESS,
+                db=db_arg,
+                dl_info=DownloadInfo(filetype="mp3"),
+                candidate_import_job_id=claimed.id,
+                prevalidated_candidate_result=candidate,
+            )
 
         with patch("lib.dispatch.subprocess_runner.sp.run",
                    side_effect=sp.TimeoutExpired(cmd="test", timeout=1800)):
-            outcome = dispatch_import_core(
-                path="/tmp/dest", mb_release_id="test-mbid",
-                request_id=42, label="Test",
-                beets_harness_path=_HARNESS,
-                db=db,  # type: ignore[arg-type]
-                dl_info=DownloadInfo(filetype="mp3"),
-                candidate_import_job_id=claimed.id,
-                prevalidated_candidate_result=candidate,
+            recovered = process_claimed_job(
+                db,  # type: ignore[arg-type]
+                claimed,
+                execute_fn=execute,
             )
-        assert outcome.terminal_outcome is not None
-        from lib.terminal_outcomes import ImportJobTerminal
-        db.persist_import_terminal_outcome(
-            outcome.terminal_outcome.with_job(ImportJobTerminal(
-                status="failed",
-                error=outcome.message,
-                result={"success": False},
-                message=outcome.message,
-            ))
-        )
 
-        self.assertEqual(len(db.download_logs), 1)
-        self.assertEqual(db.download_logs[0].outcome, "failed")
+        assert recovered is not None
+        self.assertEqual(recovered.status, "recovery_required")
+        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(db.download_logs, [])
+        self.assertIsNone(db.claim_next_import_job(worker_id="automatic-replay"))
 
     def test_exception(self):
         from lib.dispatch import dispatch_import_core
+        from scripts.importer import process_claimed_job
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42,
@@ -1857,30 +1860,31 @@ class TestDispatchImport(unittest.TestCase):
             release_id="test-mbid",
         )
 
-        with patch("lib.dispatch.subprocess_runner.sp.run",
-                   side_effect=RuntimeError("boom")):
-            outcome = dispatch_import_core(
+        def execute(db_arg, _job, *, ctx=None):
+            del ctx
+            return dispatch_import_core(
                 path="/tmp/dest", mb_release_id="test-mbid",
                 request_id=42, label="Test",
                 beets_harness_path=_HARNESS,
-                db=db,  # type: ignore[arg-type]
+                db=db_arg,
                 dl_info=DownloadInfo(filetype="mp3"),
                 candidate_import_job_id=claimed.id,
                 prevalidated_candidate_result=candidate,
             )
-        assert outcome.terminal_outcome is not None
-        from lib.terminal_outcomes import ImportJobTerminal
-        db.persist_import_terminal_outcome(
-            outcome.terminal_outcome.with_job(ImportJobTerminal(
-                status="failed",
-                error=outcome.message,
-                result={"success": False},
-                message=outcome.message,
-            ))
-        )
 
-        self.assertEqual(len(db.download_logs), 1)
-        self.assertEqual(db.download_logs[0].outcome, "failed")
+        with patch("lib.dispatch.subprocess_runner.sp.run",
+                   side_effect=RuntimeError("boom")):
+            recovered = process_claimed_job(
+                db,  # type: ignore[arg-type]
+                claimed,
+                execute_fn=execute,
+            )
+
+        assert recovered is not None
+        self.assertEqual(recovered.status, "recovery_required")
+        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(db.download_logs, [])
+        self.assertIsNone(db.claim_next_import_job(worker_id="automatic-replay"))
 
 
 class TestImportDispatchRescueCapture(unittest.TestCase):

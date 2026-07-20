@@ -150,6 +150,7 @@ def dispatch_import_core(
     post_commit_disambiguation_path: str | None = None
     post_commit_duplicate_guard_path: str | None = None
     post_commit_duplicate_guard_staging_dir: str | None = None
+    beets_launch_authorized = False
 
     # Acquire the RELEASE (per-MBID) advisory lock for the duration of
     # the ``import_one.py`` subprocess. This is the funnel every path
@@ -444,6 +445,7 @@ def dispatch_import_core(
                     ),
                     code="launch_authority_conflict",
                 )
+            beets_launch_authorized = True
 
             # Mark the subprocess as launching on the auto-import path
             # so the resume guard can distinguish "never started" from
@@ -970,6 +972,15 @@ def dispatch_import_core(
                         )
         except sp.TimeoutExpired:
             logger.error(f"{mode} TIMEOUT: {label}")
+            if beets_launch_authorized:
+                return DispatchOutcome(
+                    success=False,
+                    message=(
+                        "Import timed out after Beets launch; operator "
+                        "recovery is required"
+                    ),
+                    code="beets_acknowledgement_ambiguous",
+                )
             pending = _record_rejection_and_maybe_requeue(
                 db, request_id, dl_info,
                 detail="import_one.py timed out", error="timeout",
@@ -990,6 +1001,15 @@ def dispatch_import_core(
             outcome_message = "Import timed out"
         except Exception:
             logger.exception(f"{mode} ERROR: {label}")
+            if beets_launch_authorized:
+                return DispatchOutcome(
+                    success=False,
+                    message=(
+                        "Import failed after Beets launch without a terminal "
+                        "acknowledgement; operator recovery is required"
+                    ),
+                    code="beets_acknowledgement_ambiguous",
+                )
             pending = _record_rejection_and_maybe_requeue(
                 db, request_id, dl_info,
                 detail="unhandled exception in auto-import", error="exception",
