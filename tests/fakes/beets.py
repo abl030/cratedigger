@@ -125,10 +125,16 @@ class FakeBeetsDB:
                 == normalize_release_id(mb_release_id)
                 for seeded in self._item_paths
             ):
-                self._item_paths[mb_release_id] = [(
-                    info.album_id * 100,
-                    os.path.join(info.album_path, "01.fake"),
-                )]
+                self._item_paths[mb_release_id] = [
+                    (
+                        info.album_id * 100 + index,
+                        os.path.join(
+                            info.album_path,
+                            f"{index + 1:02d}.fake",
+                        ),
+                    )
+                    for index in range(info.track_count)
+                ]
 
     def set_item_paths(
         self, release_id: str, paths: Sequence[tuple[int, str | None]],
@@ -440,7 +446,14 @@ class FakeBeetsDB:
                         album_ids=album_ids,
                         reason="unresolved_relative_path",
                     )
-                path = os.path.join(self.library_root, path)
+                root = os.path.abspath(self.library_root)
+                path = os.path.abspath(os.path.join(root, path))
+                if os.path.commonpath((root, path)) != root:
+                    return CurrentBeetsAmbiguous(
+                        identity=identity,
+                        album_ids=album_ids,
+                        reason="invalid_path",
+                    )
             absolute = os.path.abspath(path)
             items.append(CurrentBeetsItem(id=item_id, path=absolute))
             directories.add(os.path.dirname(absolute))
@@ -536,6 +549,11 @@ class FakeBeetsDB:
                 seeded_info = info
                 break
         if isinstance(seeded_info, AlbumInfo):
+            # ``AlbumInfo`` is derived from the same joined item snapshot in
+            # production. Never let summary metadata survive a fake topology
+            # mutation that changed the number of current items.
+            if seeded_info.track_count != len(resolution.items):
+                return None
             return replace(
                 seeded_info,
                 album_id=resolution.album_id,

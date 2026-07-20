@@ -5235,7 +5235,7 @@ class TestFakeBeetsDB(unittest.TestCase):
         self.assertEqual(ambiguous.reason, "multiple_matches")
 
         beets.set_album_ids_for_release(identity.release_id, [7])
-        for invalid in ("", None, "bad\x00path.flac"):
+        for invalid in ("", None, "bad\x00path.flac", "../outside.flac"):
             with self.subTest(invalid=invalid):
                 beets.set_item_paths(identity.release_id, [(70, invalid)])
                 poisoned = beets.resolve_current_release(identity)
@@ -5475,16 +5475,25 @@ class TestFakeBeetsDB(unittest.TestCase):
             album_path="/Beets/Artist/Album",
         )
         beets.set_album_info("mbid-1", info)
-        beets.set_item_paths("mbid-1", [(70, "/Beets/Moved/01.flac")])
+        beets.set_item_paths("mbid-1", [
+            (70 + index, f"/Beets/Moved/{index + 1:02d}.flac")
+            for index in range(info.track_count)
+        ])
         # Two-arg form (matches real signature: mb_release_id + cfg).
         current = beets.get_album_info("mbid-1", None)
         self.assertIsNot(current, info)
         self.assertEqual(current.album_path, "/Beets/Moved")
+
+        beets.set_item_paths("mbid-1", [(70, "/Beets/Moved/01.flac")])
+        self.assertIsNone(
+            beets.get_album_info("mbid-1", None),
+            "summary metadata cannot survive a contradictory item topology",
+        )
         # Unseeded returns None.
         self.assertIsNone(beets.get_album_info("mbid-unknown"))
         self.assertEqual(
             beets.get_album_info_calls,
-            ["mbid-1", "mbid-unknown"],
+            ["mbid-1", "mbid-1", "mbid-unknown"],
         )
 
     def test_check_mbids_uses_seeded_album_exists_state(self) -> None:
