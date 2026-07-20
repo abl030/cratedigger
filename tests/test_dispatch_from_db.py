@@ -233,6 +233,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                     quality_gate_fn=mock_gate,
                 )
                 finalize_claimed_dispatch(db, claimed, result)
+                path_exists_after_finalize = os.path.exists(tmpdir)
                 cmd = ext.run.call_args[0][0] if ext.run.call_args else []
         finally:
             import shutil
@@ -242,7 +243,9 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             "result": result,
             "cmd": cmd,
             "db": db,
+            "job_id": job.id,
             "path": tmpdir,
+            "path_exists_after_finalize": path_exists_after_finalize,
             "mock_gate": mock_gate,
             "mock_jellyfin": ext.jellyfin,
             "mock_cleanup": ext.cleanup,
@@ -796,7 +799,10 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         """
         r = self._dispatch()  # default decision="import"
         self.assertTrue(r["result"].success)
-        r["mock_cleanup"].assert_called_once_with(r["path"])
+        job = r["db"].get_import_job(r["job_id"])
+        assert job is not None
+        self.assertEqual(job.status, "completed")
+        self.assertFalse(r["path_exists_after_finalize"])
 
 class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
     """Issue #92: concurrent force-import on the same request_id
