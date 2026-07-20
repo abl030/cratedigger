@@ -54,7 +54,7 @@ from web import discogs as _discogs
 from web import mb as mb_api
 from web import overlay as _overlay
 from lib.beets_db import BeetsDB
-from lib.pipeline_db import PipelineDB
+from lib.pipeline_db import AlbumRequestRow, PipelineDB
 from web.routes import api_index as _api_index_routes
 from web.routes import beets_distance as _beets_distance_routes
 from web.routes import browse as _browse_routes
@@ -277,7 +277,7 @@ def check_pipeline(mbids):
 def list_artist_requests(
     artist_name: str,
     mb_artist_id: str = "",
-) -> list[dict[str, object]]:
+) -> list[AlbumRequestRow]:
     """One artist's request rows, for the rg-row badge overlay (#575)."""
     db = _db_or_none()
     if db is None or not artist_name:

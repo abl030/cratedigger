@@ -15,6 +15,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal, TYPE_CHECKING
 
 from lib.download_reconstruction import reconstruct_grab_list_entry
@@ -751,7 +752,7 @@ class DiskReapOwnershipError(Exception):
 
 def _protected_paths_for_downloading(
     root: str,
-    downloading_rows: list[dict[str, Any]],
+    downloading_rows: Sequence[Mapping[str, Any]],
 ) -> tuple[set[str], set[str]]:
     """Return (protected_dirs, protected_files) the reaper must never touch,
     regardless of ledger ownership or age — the ACTIVE half of the

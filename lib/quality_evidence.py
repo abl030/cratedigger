@@ -30,6 +30,7 @@ from lib.quality import (
 )
 
 if TYPE_CHECKING:
+    from lib.pipeline_db.rows import AlbumRequestRow
     from lib.measurement import PreimportMeasurement
 
 
@@ -42,7 +43,7 @@ class QualityEvidenceDB(Protocol):
     reason. Parity tests live in ``tests/test_quality_evidence.py``.
     """
 
-    def get_request(self, request_id: int) -> dict[str, Any] | None: ...
+    def get_request(self, request_id: int) -> "AlbumRequestRow | None": ...
 
     def upsert_album_quality_evidence(
         self, evidence: AlbumQualityEvidence,

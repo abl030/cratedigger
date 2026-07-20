@@ -63,10 +63,10 @@ class _AlbumRequestUpdate:
 # The ratchet does not infer parameter dataflow: transition SQL must use the
 # canonical direct call grammar below.
 _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/terminal_outcomes.py", 89, "741f55b2f7eee516"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 91, "741f55b2f7eee516"): (
         "terminal metadata keys use the existing validated request-field vocabulary"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 304, "6cfaff9c6507c211"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 306, "6cfaff9c6507c211"): (
         "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
     ),
     ("lib/beets_db.py", 339, "8f86dc625b889913"): (
@@ -111,31 +111,34 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/misc.py", 570, "47e316b5c87e000f"): (
         "triage joins and predicates are selected from closed service enums"
     ),
-    ("lib/pipeline_db/requests.py", 69, "092ac19c7715cd88"): (
+    ("lib/pipeline_db/requests.py", 70, "092ac19c7715cd88"): (
         "INSERT columns derive from the fixed AddRequestInput schema"
     ),
-    ("lib/pipeline_db/requests.py", 103, "723856dd7a3eba80"): (
+    ("lib/pipeline_db/requests.py", 104, "723856dd7a3eba80"): (
         "badge-overlay batch IN list contains only psycopg value placeholders; "
         "the evidence JOIN and identity derivations are static SQL"
     ),
-    ("lib/pipeline_db/requests.py", 249, "dffc52ed3fcd380d"): (
-        "release-id lookup selects one of two fixed identity predicates"
+    ("lib/pipeline_db/requests.py", 250, "fd6c0bbbe61ee7e6"): (
+        "release-id lookup selects one of two fixed identity predicates "
+        "(issue #765: return type retyped to AlbumRequestRow, no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 463, "b73bda10a331e1c3"): (
+    ("lib/pipeline_db/requests.py", 464, "b73bda10a331e1c3"): (
         "metadata keys are validated identifiers, lifecycle fields are reserved, "
         "and values use one typed JSONB record parameter"
     ),
-    ("lib/pipeline_db/requests.py", 481, "86eaf6b403f76820"): (
+    ("lib/pipeline_db/requests.py", 482, "86eaf6b403f76820"): (
         "metadata keys are validated identifiers, lifecycle fields are reserved, "
         "and values use one typed JSONB record parameter"
     ),
-    ("lib/pipeline_db/requests.py", 1329, "28d04a2e32db29d5"): (
-        "optional LIMIT is normalized through int before interpolation"
+    ("lib/pipeline_db/requests.py", 1330, "7db79742051b4f8f"): (
+        "optional LIMIT is normalized through int before interpolation "
+        "(issue #765: return type retyped to list[AlbumRequestRow], no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1344, "f027e891f4828e53"): (
-        "ORDER is selected from two literals and LIMIT remains a value placeholder"
+    ("lib/pipeline_db/requests.py", 1345, "a586333614f3b096"): (
+        "ORDER is selected from two literals and LIMIT remains a value placeholder "
+        "(issue #765: return type retyped to list[AlbumRequestRow], no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1529, "714da98640ff84f0"): (
+    ("lib/pipeline_db/requests.py", 1530, "714da98640ff84f0"): (
         "attempt kind is validated against the fixed retry-counter vocabulary"
     ),
 }
@@ -147,43 +150,43 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
 # beside the implementation they review; movement or SQL-shape drift fails the
 # ratchet just like the dynamic-SQL exceptions above.
 _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/terminal_outcomes.py", 131, "e0057766c732179a"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 133, "e0057766c732179a"): (
         "atomic terminal transition mirrors typed wanted CAS inside one transaction"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 190, "6d280a5c4dbb4e32"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 192, "6d280a5c4dbb4e32"): (
         "atomic preview recovery accepts only downloading as its exact source"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 345, "786d2b82f14ac409"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 347, "786d2b82f14ac409"): (
         "atomic terminal import CASes status with rescue audit in the same transaction"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 385, "0a9c4396d1185b94"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 387, "0a9c4396d1185b94"): (
         "atomic terminal typed transition CASes the source status selected by the DAG"
     ),
     ("lib/pipeline_db/download_log.py", 406, "6c7d7519e8c91827"): (
         "atomic abandoned-import recovery performs downloading-to-wanted CAS"
     ),
-    ("lib/pipeline_db/requests.py", 288, "558917722283199d"): (
+    ("lib/pipeline_db/requests.py", 289, "558917722283199d"): (
         "Replace holds the row lock and CASes the captured active source status"
     ),
-    ("lib/pipeline_db/requests.py", 771, "3c900d15e8bfd2b2"): (
+    ("lib/pipeline_db/requests.py", 772, "3c900d15e8bfd2b2"): (
         "operator idempotence uses a no-op CAS against the observed status"
     ),
-    ("lib/pipeline_db/requests.py", 806, "cb4bc190bb194188"): (
+    ("lib/pipeline_db/requests.py", 807, "cb4bc190bb194188"): (
         "ordinary typed transitions CAS the source status selected by the DAG"
     ),
-    ("lib/pipeline_db/requests.py", 904, "c99b75cd27718b63"): (
+    ("lib/pipeline_db/requests.py", 905, "c99b75cd27718b63"): (
         "typed imported transition CASes status with rescue audit atomically"
     ),
-    ("lib/pipeline_db/requests.py", 1042, "c062c0704de758f9"): (
+    ("lib/pipeline_db/requests.py", 1043, "c062c0704de758f9"): (
         "typed reset-to-wanted transition CASes its captured source status"
     ),
-    ("lib/pipeline_db/requests.py", 1111, "cfedc69363af13f0"): (
+    ("lib/pipeline_db/requests.py", 1112, "cfedc69363af13f0"): (
         "automatic recovery accepts only downloading as its exact source"
     ),
-    ("lib/pipeline_db/requests.py", 1156, "2b2c27302b2ab78e"): (
+    ("lib/pipeline_db/requests.py", 1157, "2b2c27302b2ab78e"): (
         "typed download claim accepts only the explicit wanted source status"
     ),
-    ("lib/pipeline_db/requests.py", 1192, "186e1c3ba3188478"): (
+    ("lib/pipeline_db/requests.py", 1193, "186e1c3ba3188478"): (
         "plan-aware download claim uses an exact wanted source predicate"
     ),
 }

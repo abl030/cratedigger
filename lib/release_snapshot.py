@@ -23,6 +23,8 @@ not have to import from `lib.search` for a frozen value type.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from typing import Any, Protocol
 
 from lib.search import ReleaseSnapshot
@@ -194,7 +196,7 @@ def _catalog_number_from_value(value: object) -> str | None:
 
 
 def snapshot_from_request_row(
-    row: dict[str, Any],
+    row: Mapping[str, Any],
     tracks: list[dict[str, Any]],
     *,
     prepend_artist: bool = False,

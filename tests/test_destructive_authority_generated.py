@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
 import logging
 import os
 import subprocess as sp
@@ -43,6 +44,7 @@ from lib.import_queue import IMPORT_JOB_AUTOMATION
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
     ADVISORY_LOCK_NAMESPACE_RELEASE,
+    AlbumRequestRow,
 )
 from lib.release_identity import ReleaseIdentity
 from lib.release_cleanup import ReleaseCleanupResult, SelectorFailure
@@ -52,7 +54,7 @@ from tests.helpers import make_request_row
 
 @dataclass(frozen=True)
 class DestructiveState:
-    requests: tuple[tuple[int, dict[str, object] | None], ...]
+    requests: tuple[tuple[int, Mapping[str, object] | None], ...]
     denylist: tuple[object, ...]
     hashes: tuple[object, ...]
     logs: tuple[object, ...]
@@ -1241,7 +1243,7 @@ class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
 
             def get_request_by_release_id(
                 self, release_id: object | None,
-            ) -> dict[str, object] | None:
+            ) -> AlbumRequestRow | None:
                 row = super().get_request_by_release_id(release_id)
                 if self.inject_mutation:
                     self.inject_mutation = False

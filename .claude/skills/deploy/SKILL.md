@@ -249,39 +249,69 @@ issue (pattern: #573, #590) or state that nothing clears the bar.
 
 ## Holding timer-driven work across a switch
 
-A runtime systemd mask normally persists until reboot, including across a
-NixOS switch. It is still imperative state, not evidence that the post-switch
-system is safely held: re-apply it idempotently and verify both the timer and
-its service after the switch before any one-shot or state rewrite begins.
+NixOS-generated units under `/etc/systemd/system` outrank ordinary runtime
+masks under `/run/systemd/system`, and a timer mask does not cancel service
+starts that systemd already queued. Strict holds therefore use the tracked
+helper; never substitute `systemctl mask --runtime`, a service mask, or manual
+link cleanup. The helper fixes the authority surface to the main, unfindable,
+and metadata-gate-watchdog timer/service pairs and records only links and the
+manual metadata hold it created.
 
-For a hold on the two timer-driven Cratedigger jobs:
+Run the reviewed helper on doc2 through Python stdin so the pre-switch host does
+not need this revision deployed already:
 
-1. On doc2, runtime-mask and stop `cratedigger.timer` and
-   `cratedigger-unfindable.timer`. Let any already-running oneshot finish; do
-   not interrupt it to create the maintenance window.
-2. Trigger the deploy and wait for the exact new `nixos-upgrade.service`
-   invocation as described above.
-3. Immediately runtime-mask both timers again as an idempotent safety step.
-   Verify both are masked and both `cratedigger.service` and
-   `cratedigger-unfindable.service` are inactive. If either service ran because
-   the pre-switch hold was absent or ineffective, leave the timers masked and
-   wait for that cycle to finish before touching shared state, then assess and
-   record what it read or changed before continuing.
-4. Run the one-shot only after those checks pass. When the maintenance work and
-   its reconciliation checks are complete, unmask and start the timers.
+```bash
+set -euo pipefail
+CRATEDIGGER_REPO=$(git rev-parse --show-toplevel)
+DEPLOY_HOLD="$CRATEDIGGER_REPO/scripts/cratedigger_deploy_hold.py"
+CYCLE_VERIFY="$CRATEDIGGER_REPO/scripts/verify_cratedigger_cycle.sh"
 
-Do not make a strict transition depend solely on imperative state, even though
-the runtime mask is expected to survive the switch. When a one-shot must finish
-before the new code's first cycle, either run a backwards-compatible one-shot
-under the pre-switch mask and reconcile it before deploying, or deploy a
-reviewed declarative timer hold in the target NixOS generation and restore the
-timers in a later switch. If a new-code cycle starts before the strict one-shot,
-stop and assess/recover its reads and mutations; waiting for it to finish does
-not restore the precondition.
+# Before fleet-deploy: acquire authoritative masks and stable quiescence.
+ssh doc2 'sudo python3 - acquire' < "$DEPLOY_HOLD"
+```
 
-Apply the same idempotent post-switch hold verification to any long-running
-worker held for a maintenance operation. Never treat a pre-switch runtime mask
-alone as evidence that the post-switch system is still held.
+After the exact `nixos-upgrade.service` invocation succeeds, re-prove the same
+receipt-owned boundary before any strict one-shot or state rewrite:
+
+```bash
+ssh doc2 'sudo python3 - verify-held' < "$DEPLOY_HOLD"
+# Run and reconcile the reviewed maintenance operation here.
+```
+
+Release in four evidence-gated phases. Derive `CRATEDIGGER_SOURCE` from the
+active wrapper as in step 6 before capturing either cycle:
+
+```bash
+# All three timers remain masked for one controlled main cycle.
+CONTROLLED_CURSOR=$("$CYCLE_VERIFY" capture-cursor)
+ssh doc2 'sudo python3 - prepare-controlled' < "$DEPLOY_HOLD"
+CONTROLLED_ID=$(
+  "$CYCLE_VERIFY" capture-target "$CONTROLLED_CURSOR" "$CRATEDIGGER_SOURCE"
+)
+"$CYCLE_VERIFY" verify-exact "$CONTROLLED_ID" "$CRATEDIGGER_SOURCE"
+
+# Only the main timer opens. Capture its first ordinary successor before
+# releasing the watchdog/unfindable timers and metadata gate.
+ORDINARY_CURSOR=$("$CYCLE_VERIFY" capture-cursor)
+ssh doc2 'sudo python3 - open-main-timer' < "$DEPLOY_HOLD"
+ORDINARY_ID=$(
+  "$CYCLE_VERIFY" capture-target "$ORDINARY_CURSOR" "$CRATEDIGGER_SOURCE"
+)
+ssh doc2 sudo python3 - finish-release "$ORDINARY_ID" < "$DEPLOY_HOLD"
+"$CYCLE_VERIFY" verify-exact "$ORDINARY_ID" "$CRATEDIGGER_SOURCE"
+ssh doc2 sudo python3 - complete "$ORDINARY_ID" < "$DEPLOY_HOLD"
+```
+
+Every helper phase fails closed on an unexpected phase, pre-existing unowned
+hold/link, changed owned link, surviving job, or wrong invocation ID. On
+failure, leave the receipt and remaining masks in place and inspect the exact
+reported boundary. Rerun an interrupted `acquire`; after a failed release
+phase, return safely to the strict boundary with
+`ssh doc2 'sudo python3 - recover-held' < "$DEPLOY_HOLD"` before restarting
+release. Rerun an interrupted `complete` to finish its atomic retired-receipt
+cleanup. Do not remove `/run/cratedigger-deploy-hold` or its
+`system.control` links by hand; they are the recovery ownership record. See
+`docs/solutions/deployment/authoritative-systemd-deploy-holds.md`.
 
 ## Database migrations
 

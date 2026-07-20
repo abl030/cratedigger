@@ -264,7 +264,9 @@ class TestDatabaseSource(unittest.TestCase):
         req = db.get_request(req_id)
         assert req is not None
         self.assertEqual(req["status"], "imported")
-        self.assertAlmostEqual(req["beets_distance"], 0.08)
+        distance = req["beets_distance"]
+        assert distance is not None
+        self.assertAlmostEqual(distance, 0.08)
 
     def test_mark_done_request_stages(self):
         source, db = self._make_source()

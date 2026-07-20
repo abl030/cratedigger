@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 
+from lib.pipeline_db.rows import AlbumRequestRow, album_request_row
 from lib.pipeline_db._shared import (
     AddRequestInput,
     BACKOFF_BASE_MINUTES,
@@ -77,12 +78,12 @@ class _RequestsMixin(_PipelineDBBase):
         return row["id"]
 
 
-    def get_request(self, request_id: int) -> dict[str, Any] | None:
+    def get_request(self, request_id: int) -> AlbumRequestRow | None:
         cur = self._execute(
             "SELECT * FROM album_requests WHERE id = %s", (request_id,)
         )
         row = cur.fetchone()
-        return dict(row) if row else None
+        return album_request_row(row) if row else None
 
 
     def get_pipeline_overlay(
@@ -126,23 +127,23 @@ class _RequestsMixin(_PipelineDBBase):
             for r in cur.fetchall()
         }
 
-    def get_request_by_mb_release_id(self, mb_release_id: str) -> dict[str, Any] | None:
+    def get_request_by_mb_release_id(self, mb_release_id: str) -> AlbumRequestRow | None:
         cur = self._execute(
             "SELECT * FROM album_requests WHERE mb_release_id = %s", (mb_release_id,)
         )
         row = cur.fetchone()
-        return dict(row) if row else None
+        return album_request_row(row) if row else None
 
 
-    def get_request_by_discogs_release_id(self, discogs_release_id: str) -> dict[str, Any] | None:
+    def get_request_by_discogs_release_id(self, discogs_release_id: str) -> AlbumRequestRow | None:
         cur = self._execute(
             "SELECT * FROM album_requests WHERE discogs_release_id = %s", (discogs_release_id,)
         )
         row = cur.fetchone()
-        return dict(row) if row else None
+        return album_request_row(row) if row else None
 
 
-    def get_request_by_release_id(self, release_id: object | None) -> dict[str, Any] | None:
+    def get_request_by_release_id(self, release_id: object | None) -> AlbumRequestRow | None:
         """Resolve a pipeline row through the shared exact-release seam.
 
         - MB UUIDs query ``mb_release_id``.
@@ -170,7 +171,7 @@ class _RequestsMixin(_PipelineDBBase):
 
     def get_request_by_replaces_request_id(
         self, replaced_id: int
-    ) -> dict[str, Any] | None:
+    ) -> AlbumRequestRow | None:
         """Reverse lineage lookup: find the descendant row that points at
         ``replaced_id`` via ``replaces_request_id``.
 
@@ -185,7 +186,7 @@ class _RequestsMixin(_PipelineDBBase):
             (replaced_id,),
         )
         row = cur.fetchone()
-        return dict(row) if row else None
+        return album_request_row(row) if row else None
 
 
     def get_oldest_request_chain_created_at(
@@ -222,7 +223,7 @@ class _RequestsMixin(_PipelineDBBase):
         *,
         exclude_replaced: bool = True,
         exclude_request_id: int | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[AlbumRequestRow]:
         """List ``album_requests`` rows in the same MB release group.
 
         - ``exclude_replaced=True`` (default) skips rows with
@@ -247,7 +248,7 @@ class _RequestsMixin(_PipelineDBBase):
             "ORDER BY id DESC"
         )
         cur = self._execute(sql, tuple(params))
-        return [dict(r) for r in cur.fetchall()]
+        return [album_request_row(r) for r in cur.fetchall()]
 
 
     def list_active_release_group_ids(self) -> set[str]:
@@ -267,14 +268,14 @@ class _RequestsMixin(_PipelineDBBase):
         return {row["mb_release_group_id"] for row in cur.fetchall()}
 
 
-    def list_non_replaced_requests(self) -> list[dict[str, Any]]:
+    def list_non_replaced_requests(self) -> list[AlbumRequestRow]:
         """Return active pipeline rows for disk-coverage reconciliation."""
         cur = self._execute(
             "SELECT * FROM album_requests "
             "WHERE status != 'replaced' "
             "ORDER BY id ASC"
         )
-        return [dict(r) for r in cur.fetchall()]
+        return [album_request_row(r) for r in cur.fetchall()]
 
 
     @staticmethod
@@ -1305,18 +1306,18 @@ class _RequestsMixin(_PipelineDBBase):
         return cur.rowcount > 0
 
 
-    def get_downloading(self) -> list[dict[str, Any]]:
+    def get_downloading(self) -> list[AlbumRequestRow]:
         """Get all albums currently being downloaded."""
         cur = self._execute(
             "SELECT * FROM album_requests WHERE status = 'downloading' "
             "ORDER BY updated_at ASC"
         )
-        return [dict(r) for r in cur.fetchall()]
+        return [album_request_row(r) for r in cur.fetchall()]
 
 
     # --- Query methods ---
 
-    def get_wanted(self, limit=None):
+    def get_wanted(self, limit=None) -> list[AlbumRequestRow]:
         now = datetime.now(timezone.utc)
         sql = """
             SELECT * FROM album_requests
@@ -1327,10 +1328,10 @@ class _RequestsMixin(_PipelineDBBase):
         if limit:
             sql += f" LIMIT {int(limit)}"
         cur = self._execute(sql, (now,))
-        return [dict(r) for r in cur.fetchall()]
+        return [album_request_row(r) for r in cur.fetchall()]
 
 
-    def get_by_status(self, status, *, limit=None, newest_first=False):
+    def get_by_status(self, status, *, limit=None, newest_first=False) -> list[AlbumRequestRow]:
         """Rows in one status. ``newest_first`` orders by ``updated_at``
         DESC (recency window for the imported list, #426); ``limit``
         caps the result. Defaults preserve the original full-list shape.
@@ -1342,7 +1343,7 @@ class _RequestsMixin(_PipelineDBBase):
             sql += " LIMIT %s"
             params.append(int(limit))
         cur = self._execute(sql, tuple(params))
-        return [dict(r) for r in cur.fetchall()]
+        return [album_request_row(r) for r in cur.fetchall()]
 
 
     def search_requests(
@@ -1351,7 +1352,7 @@ class _RequestsMixin(_PipelineDBBase):
         *,
         limit: int = 200,
         status: str | None = None,
-    ) -> list[dict]:
+    ) -> list[AlbumRequestRow]:
         """Operator search over artist/album (#426).
 
         Case-insensitive substring match with LIKE wildcards escaped, so
@@ -1379,7 +1380,7 @@ class _RequestsMixin(_PipelineDBBase):
             " LIMIT %s",
             tuple(params),
         )
-        return [dict(r) for r in cur.fetchall()]
+        return [album_request_row(r) for r in cur.fetchall()]
 
 
     def count_by_status(self):
@@ -1470,7 +1471,7 @@ class _RequestsMixin(_PipelineDBBase):
         self,
         artist_name: str,
         mb_artist_id: str = "",
-    ) -> list[dict[str, Any]]:
+    ) -> list[AlbumRequestRow]:
         """List request rows for one artist, including legacy name fallbacks.
 
         ``/api/library/artist`` is the SSOT view for albums already in
@@ -1507,7 +1508,7 @@ class _RequestsMixin(_PipelineDBBase):
                 """,
                 (name_pattern,),
             )
-        return [dict(r) for r in cur.fetchall()]
+        return [album_request_row(r) for r in cur.fetchall()]
 
 
     # --- Retry logic ---

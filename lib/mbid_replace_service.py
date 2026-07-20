@@ -31,15 +31,20 @@ full design.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import json
 import logging
 import os
 import shutil
 import socket
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, TYPE_CHECKING, runtime_checkable
 from urllib.error import URLError
 
 import msgspec
+
+if TYPE_CHECKING:
+    from lib.pipeline_db.rows import AlbumRequestRow
 
 
 # MB-mirror transient errors — network blips, timeouts, malformed
@@ -110,15 +115,15 @@ class MbidReplaceDB(
 
     def get_request_by_mb_release_id(
         self, mb_release_id: str,
-    ) -> dict[str, Any] | None: ...
+    ) -> "AlbumRequestRow | None": ...
 
     def get_request_by_release_id(
         self, release_id: object | None,
-    ) -> dict[str, Any] | None: ...
+    ) -> "AlbumRequestRow | None": ...
 
     def get_request_by_replaces_request_id(
         self, replaced_id: int,
-    ) -> dict[str, Any] | None: ...
+    ) -> "AlbumRequestRow | None": ...
 
     def supersede_request_mbid(
         self,
@@ -548,7 +553,7 @@ class MbidReplaceService:
     def _replace_discogs_target(
         self,
         request_id: int,
-        source: dict[str, Any],
+        source: Mapping[str, Any],
         source_mbid: str | None,
         target_mb_release_id: str,
     ) -> ReplaceResult:

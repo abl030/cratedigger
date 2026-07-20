@@ -21,6 +21,12 @@ from lib.pipeline_db.pin_status import (
     PlexPinStatus,
     PlexTerminalPinStatus,
 )
+from lib.pipeline_db.rows import (
+    AlbumRequestRow,
+    DownloadLogRow,
+    album_request_row,
+    download_log_row,
+)
 from lib.pipeline_db._shared import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
     ADVISORY_LOCK_NAMESPACE_IMPORTER,
@@ -130,6 +136,8 @@ __all__ = [
     "JELLYFIN_TERMINAL_PIN_STATUSES",
     "DownloadLogCounts",
     "DownloadLogOutcome",
+    "DownloadLogRow",
+    "download_log_row",
     "ImportJobTerminalConflict",
     "JellyfinPinStatus",
     "JellyfinTerminalPinStatus",
@@ -145,6 +153,8 @@ __all__ = [
     "PersistedDistance",
     "PersistedTrack",
     "PersistedYoutubeRow",
+    "AlbumRequestRow",
+    "album_request_row",
     "PlexPinStatus",
     "PlexTerminalPinStatus",
     "RequestSpectralStateUpdate",

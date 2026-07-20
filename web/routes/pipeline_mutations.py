@@ -1024,7 +1024,7 @@ def post_pipeline_delete(h, body: dict) -> None:
     descendant = db.get_request_by_replaces_request_id(int(req_id))
     if descendant is not None:
         descendant_ids: list[int] = []
-        cursor: dict | None = descendant
+        cursor = descendant
         while cursor is not None:
             descendant_ids.append(int(cursor["id"]))
             cursor = db.get_request_by_replaces_request_id(int(cursor["id"]))

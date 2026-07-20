@@ -19,6 +19,7 @@ import msgspec
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from lib.artist_catalogue import ArtistCatalogueRow
+from lib.pipeline_db import AlbumRequestRow
 from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 
 from tests.fakes import FakeBeetsDB, FakePipelineDB
@@ -1086,7 +1087,7 @@ class _FailingArtistRequestsDB(FakePipelineDB):
         self,
         artist_name: str,
         mb_artist_id: str = "",
-    ) -> list[dict[str, object]]:
+    ) -> list[AlbumRequestRow]:
         raise RuntimeError("downstream artist overlay unavailable")
 
 

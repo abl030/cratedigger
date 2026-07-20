@@ -1413,7 +1413,7 @@ class TestCmdStatusShowsDownloading(unittest.TestCase):
 
         req = self.db.get_request(id1)
         assert req is not None
-        ads = req.get("active_download_state")
+        ads: Any = req.get("active_download_state")
         assert ads is not None
         self.assertEqual(ads["filetype"], "flac")
         self.assertEqual(len(ads["files"]), 1)

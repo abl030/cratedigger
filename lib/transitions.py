@@ -13,7 +13,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Literal, Mapping, Protocol, TypeAlias, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Mapping, Protocol, TypeAlias, runtime_checkable
+
+if TYPE_CHECKING:
+    from lib.pipeline_db.rows import AlbumRequestRow
+
 
 @runtime_checkable
 class TransitionsDB(Protocol):
@@ -22,7 +26,7 @@ class TransitionsDB(Protocol):
     Parity tests live in ``tests/test_transitions.py``.
     """
 
-    def get_request(self, request_id: int) -> dict[str, Any] | None: ...
+    def get_request(self, request_id: int) -> "AlbumRequestRow | None": ...
 
     def set_downloading(
         self,

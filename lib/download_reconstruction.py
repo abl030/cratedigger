@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import logging
 from typing import Any
 
@@ -29,7 +31,7 @@ def _restored_terminal_status(
 
 
 def reconstruct_grab_list_entry(
-    request: dict[str, Any],
+    request: Mapping[str, Any],
     state: ActiveDownloadState,
     *,
     transfer_ids: dict[tuple[str, str], str] | None = None,

@@ -958,7 +958,9 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         row = db.get_request(request_id)
         assert row is not None
         self.assertEqual(row["status"], "imported")
-        self.assertEqual(float(row["beets_distance"]), 0.04)
+        force_distance = row["beets_distance"]
+        assert force_distance is not None
+        self.assertEqual(float(force_distance), 0.04)
         self.assertEqual(row["prior_unfindable_category"], "artist_absent")
 
     def test_job_backed_force_audit_preserves_origin_distance(self):

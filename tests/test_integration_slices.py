@@ -11320,7 +11320,9 @@ class TestRescueCaptureSlice(unittest.TestCase):
         self.assertEqual(row["prior_unfindable_category"], "artist_absent")
         self.assertIsNone(row["unfindable_category"])
         self.assertIsNotNone(row["rescued_at"])
-        self.assertEqual(float(row["beets_distance"]), 0.07)
+        rescue_distance = row["beets_distance"]
+        assert rescue_distance is not None
+        self.assertEqual(float(rescue_distance), 0.07)
 
     def test_mid_flow_failure_rolls_back_all_four_writes_together(self):
         """A forced UPDATE failure must leave the row in its original state.
