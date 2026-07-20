@@ -120,16 +120,22 @@ def _build_youtube_client():
     The session also binds a default ``(connect, read)`` timeout of
     ``(5, 30)`` so unresponsive YT endpoints can't pin a worker
     forever (finding #4). ``requests`` exposes no Session-level
-    timeout config; ``functools.partial`` on ``session.request`` is
-    the established pattern.
+    timeout config; a ``Session`` subclass defaulting the ``request``
+    timeout kwarg is the established pattern.
     """
-    from functools import partial
     import requests
     from urllib3.util.retry import Retry
     from requests.adapters import HTTPAdapter
     from ytmusicapi import YTMusic
 
-    session = requests.Session()
+    # Bind a default (connect, read) timeout so unresponsive remotes don't
+    # pin the worker forever. Per-call ``timeout=`` kwargs still override.
+    class _DefaultTimeoutSession(requests.Session):
+        def request(self, *args, **kwargs):
+            kwargs.setdefault("timeout", (5, 30))
+            return super().request(*args, **kwargs)
+
+    session = _DefaultTimeoutSession()
     retry = Retry(
         total=3,
         backoff_factor=1.5,
@@ -146,11 +152,6 @@ def _build_youtube_client():
         ),
         "Accept-Language": "en-US,en;q=0.9",
     })
-    # Bind a default (connect, read) timeout so unresponsive remotes
-    # don't pin the worker forever. Per-call ``timeout=`` kwargs
-    # still override this default.
-    session.request = partial(  # type: ignore[method-assign]
-        session.request, timeout=(5, 30))
     return YTMusic(requests_session=session, language="en"), session
 
 

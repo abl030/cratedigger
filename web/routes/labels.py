@@ -9,16 +9,17 @@ frontend renders the same shape regardless of upstream.
 from __future__ import annotations
 
 import urllib.error
-from typing import TYPE_CHECKING
 
 import msgspec
 
 from web import discogs as discogs_api
 from web.routes._overlay import overlay_release_rows_in_place
-from web.routes._registry import RouteRegistration, pattern_route, route
-
-if TYPE_CHECKING:
-    from http.server import BaseHTTPRequestHandler
+from web.routes._registry import (
+    RouteHandler,
+    RouteRegistration,
+    pattern_route,
+    route,
+)
 
 
 # Auto-flip threshold: if the label's `release_count` exceeds this AND the
@@ -77,7 +78,7 @@ def _label_entity_payload(entity) -> dict:
 
 
 def get_discogs_label_search(
-    h: BaseHTTPRequestHandler, params: dict[str, list[str]]
+    h: RouteHandler, params: dict[str, list[str]]
 ) -> None:
     """`GET /api/discogs/label/search?q=...`.
 
@@ -87,14 +88,14 @@ def get_discogs_label_search(
     """
     q = params.get("q", [""])[0].strip()
     if not q:
-        h._error("Missing query parameter 'q'")  # type: ignore[attr-defined]
+        h._error("Missing query parameter 'q'")
         return
     hits = discogs_api.search_labels(q)
-    h._json({"results": [_label_entity_payload(e) for e in hits]})  # type: ignore[attr-defined]
+    h._json({"results": [_label_entity_payload(e) for e in hits]})
 
 
 def get_discogs_label_detail(
-    h: BaseHTTPRequestHandler, params: dict[str, list[str]], label_id: str
+    h: RouteHandler, params: dict[str, list[str]], label_id: str
 ) -> None:
     """`GET /api/discogs/label/{id}` — label entity + overlaid catalogue.
 
@@ -117,7 +118,7 @@ def get_discogs_label_detail(
     if explicit:
         raw_flag = params["include_sublabels"][0].strip().lower()
         if raw_flag not in _INCLUDE_SUBLABELS_VALID:
-            h._error(  # type: ignore[attr-defined]
+            h._error(
                 "Invalid include_sublabels — expected one of "
                 "true/false/1/0", 400)
             return
@@ -132,7 +133,7 @@ def get_discogs_label_detail(
     if "page" in params:
         page = _parse_positive_int(params["page"][0])
         if page is None:
-            h._error(  # type: ignore[attr-defined]
+            h._error(
                 "Invalid page — expected a positive integer", 400)
             return
     else:
@@ -141,7 +142,7 @@ def get_discogs_label_detail(
         per_page = _parse_positive_int(
             params["per_page"][0], max_value=_MAX_PER_PAGE)
         if per_page is None:
-            h._error(  # type: ignore[attr-defined]
+            h._error(
                 "Invalid per_page — expected a positive integer", 400)
             return
     else:
@@ -151,7 +152,7 @@ def get_discogs_label_detail(
         entity = discogs_api.get_label(label_id)
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            h._error("Label not found", 404)  # type: ignore[attr-defined]
+            h._error("Label not found", 404)
             return
         raise
 
@@ -165,14 +166,14 @@ def get_discogs_label_detail(
             page=page, per_page=per_page)
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            h._error("Label not found", 404)  # type: ignore[attr-defined]
+            h._error("Label not found", 404)
             return
         raise
     releases = releases_resp["results"]
 
     overlay_release_rows_in_place(releases, [r["id"] for r in releases])
 
-    h._json({  # type: ignore[attr-defined]
+    h._json({
         "label": _label_entity_payload(entity),
         "releases": releases,
         "sub_labels": entity.sub_labels,

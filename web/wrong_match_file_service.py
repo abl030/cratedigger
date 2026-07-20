@@ -309,7 +309,7 @@ def _reorder_files_by_match(
 
 def _inspect_audio_file(path: str) -> tuple[dict[str, list[str]], float | None, int | None]:
     try:
-        from mutagen import File as mutagen_file  # type: ignore[import-untyped]
+        from mutagen import File as mutagen_file  # pyright: ignore[reportPrivateImportUsage]
     except ImportError:
         return {}, None, None
 

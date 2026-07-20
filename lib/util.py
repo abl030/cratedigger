@@ -1059,10 +1059,12 @@ def log_validation_result(album_data: GrabListEntry, result: ValidationResult,
 
 
 def setup_logging(config: Any) -> None:
-    _DEFAULT = {
-        "level": "INFO",
-        "format": "[%(levelname)s|%(module)s|L%(lineno)d] %(asctime)s: %(message)s",
-        "datefmt": "%Y-%m-%dT%H:%M:%S%z",
-    }
-    log_config = config["Logging"] if "Logging" in config else _DEFAULT
-    logging.basicConfig(**log_config)  # type: ignore
+    section = config["Logging"] if "Logging" in config else {}
+    logging.basicConfig(
+        level=section.get("level", "INFO"),
+        format=section.get(
+            "format",
+            "[%(levelname)s|%(module)s|L%(lineno)d] %(asctime)s: %(message)s",
+        ),
+        datefmt=section.get("datefmt", "%Y-%m-%dT%H:%M:%S%z"),
+    )

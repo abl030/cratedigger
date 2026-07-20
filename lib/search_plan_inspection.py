@@ -10,6 +10,7 @@ API contract: add a key here, update the contract test in
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Any, Protocol
 
 from lib.pipeline_db import (
@@ -67,10 +68,8 @@ class RequestNotFound:
 
 
 def _iso(value: object) -> object:
-    if value is None:
-        return None
-    if hasattr(value, "isoformat"):
-        return value.isoformat()  # type: ignore[union-attr]
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
     return value
 
 
