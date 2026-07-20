@@ -1488,7 +1488,9 @@ console.log('renderDownloadHistoryItem() leads with the verdict, red on rejectio
 
 console.log('renderDownloadHistoryItem() colors the verdict red across the failure family');
 {
-  for (const outcome of ['rejected', 'failed', 'timeout', 'user_offline', 'curator_ban']) {
+  for (const outcome of [
+    'rejected', 'failed', 'timeout', 'measurement_failed', 'user_offline', 'curator_ban',
+  ]) {
     const html = renderDownloadHistoryFixture({
       outcome,
       soulseek_username: 'testuser',

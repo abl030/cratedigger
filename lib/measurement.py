@@ -264,6 +264,7 @@ class PreimportMeasurement(msgspec.Struct, frozen=True):
     """
     corrupt_files: list[str] = msgspec.field(default_factory=list)
     audio_corrupt: bool = False
+    audio_error: str | None = None
     matched_bad_hash_id: int | None = None
     matched_bad_track_path: str | None = None
     download_spectral: SpectralMeasurement | None = None
@@ -343,7 +344,7 @@ def inspect_local_files(path: str) -> LocalFileInspection:
             if ext == "mp3":
                 full = os.path.join(root, name)
                 try:
-                    from mutagen.mp3 import MP3  # type: ignore[import-untyped]
+                    from mutagen.mp3 import MP3
                     mp3 = MP3(full)
                     br = getattr(mp3.info, "bitrate", None)
                     br_mode = getattr(mp3.info, "bitrate_mode", None)
@@ -719,10 +720,12 @@ def measure_preimport_state(
     # --- Audio integrity gate ---
     corrupt_files: list[str] = []
     audio_corrupt = False
+    audio_error: str | None = None
     if cfg.audio_check_mode != "off":
         audio_result = validate_audio(path, cfg.audio_check_mode)
         if not audio_result.valid:
             audio_corrupt = True
+            audio_error = audio_result.error
             corrupt_files = [name for name, _ in audio_result.failed_files]
             logger.warning(
                 f"AUDIO CORRUPT: {label} "
@@ -741,6 +744,7 @@ def measure_preimport_state(
             return PreimportMeasurement(
                 corrupt_files=corrupt_files,
                 audio_corrupt=audio_corrupt,
+                audio_error=audio_error,
                 folder_layout=folder_layout,
                 audio_file_count=audio_file_count,
                 filetype_band=filetype_band,
@@ -936,6 +940,7 @@ def measure_preimport_state(
     return PreimportMeasurement(
         corrupt_files=corrupt_files,
         audio_corrupt=audio_corrupt,
+        audio_error=audio_error,
         matched_bad_hash_id=matched_bad_hash_id,
         matched_bad_track_path=matched_bad_track_path,
         download_spectral=download_spectral,

@@ -342,7 +342,7 @@ class TestStopBestEffort(unittest.TestCase):
                 clock.advance(91.0)
             return original_state(sid, include)
 
-        searches.state = _state  # type: ignore[method-assign]
+        searches.state = _state
 
     def test_stop_raises_does_not_break_harvest(self):
         searches = FakeSlskdSearches()

@@ -1021,7 +1021,7 @@ class ImportPreviewResult(msgspec.Struct):
     failure: MeasurementFailure | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return msgspec.to_builtins(self)  # type: ignore[no-any-return]
+        return msgspec.to_builtins(self)
 
     def to_json(self) -> str:
         return msgspec.json.encode(self).decode()
@@ -1535,11 +1535,21 @@ def measure_and_persist_candidate_evidence(
                 source_path=path,
             )
 
+        # Integrity facts are authoritative even when the same corrupt
+        # lossless source also prevents spectral analysis from producing a
+        # grade. Persist/reject the concrete decode failure instead of
+        # demoting it to the secondary measurement failure.
+        measurement_rejecting = (
+            measurement.audio_corrupt
+            or measurement.matched_bad_hash_id is not None
+            or measurement.folder_layout == "nested"
+            or (measurement.audio_file_count == 0 and not source_snapshot)
+        )
         spectral_failure = _lossless_candidate_spectral_failure(
             measurement,
             lossless_candidate=measurement.lossless_candidate,
         )
-        if spectral_failure is not None:
+        if spectral_failure is not None and not measurement_rejecting:
             return _measurement_failed_result(
                 mode="path",
                 reason="measurement_crashed",
@@ -1558,12 +1568,6 @@ def measure_and_persist_candidate_evidence(
         # ``full_pipeline_decision_from_evidence`` (U11) reads those facts
         # off the persisted evidence row and rejects via the four-fact
         # early-exit branches.
-        measurement_rejecting = (
-            measurement.audio_corrupt
-            or measurement.matched_bad_hash_id is not None
-            or measurement.folder_layout == "nested"
-            or (measurement.audio_file_count == 0 and not source_snapshot)
-        )
         audit_result = ImportResult(spectral=measurement.spectral_audit)
         if measurement_rejecting:
             if not audio_snapshot_matches(path, source_snapshot):
@@ -2012,22 +2016,6 @@ def preview_import_from_path(
                 source_path=path,
             )
 
-        spectral_failure = _lossless_candidate_spectral_failure(
-            measurement,
-            lossless_candidate=measurement.lossless_candidate,
-        )
-        if spectral_failure is not None:
-            return _measurement_failed_result(
-                mode="path",
-                reason="measurement_crashed",
-                decision="spectral_analysis_failed",
-                detail=spectral_failure,
-                request_id=request_id,
-                download_log_id=download_log_id,
-                source_path=path,
-                import_result=ImportResult(spectral=measurement.spectral_audit),
-            )
-
         # Four-fact reject (mirror worker-mode lines 517-522). ``nested_layout``
         # is already handled by the ``inspection.has_nested_audio`` branch
         # above; ``empty_fileset`` is handled by the ``not source_snapshot``
@@ -2047,10 +2035,12 @@ def preview_import_from_path(
                 else "empty_fileset"
             )
             detail: str | None = None
-            if audio_corrupt and measurement.corrupt_files:
-                detail = (
-                    f"{len(measurement.corrupt_files)} files failed ffmpeg decode"
-                )
+            if audio_corrupt:
+                detail = measurement.audio_error
+                if detail is None and measurement.corrupt_files:
+                    detail = (
+                        f"{len(measurement.corrupt_files)} files failed ffmpeg decode"
+                    )
             elif bad_audio_hash and measurement.matched_bad_track_path:
                 detail = (
                     f"matched bad_audio_hash id={measurement.matched_bad_hash_id} "
@@ -2067,6 +2057,22 @@ def preview_import_from_path(
                 download_log_id=download_log_id,
                 source_path=path,
                 cleanup_eligible=True,
+            )
+
+        spectral_failure = _lossless_candidate_spectral_failure(
+            measurement,
+            lossless_candidate=measurement.lossless_candidate,
+        )
+        if spectral_failure is not None:
+            return _measurement_failed_result(
+                mode="path",
+                reason="measurement_crashed",
+                decision="spectral_analysis_failed",
+                detail=spectral_failure,
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+                import_result=ImportResult(spectral=measurement.spectral_audit),
             )
 
         existing_spectral = measurement.existing_spectral

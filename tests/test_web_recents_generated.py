@@ -399,7 +399,9 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         self.assertEqual(item["existing_v0_probe_avg_bitrate"], current_v0)
 
     @given(
-        card_kind=st.sampled_from(("deleted", "failed", "timeout")),
+        card_kind=st.sampled_from((
+            "deleted", "failed", "timeout", "measurement_failed",
+        )),
         partial_kind=st.sampled_from((
             "v0_only",
             "spectral_only",
@@ -437,6 +439,16 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         current_median=128,
         current_spectral="suspect",
         current_v0=256,
+    )
+    @example(
+        card_kind="measurement_failed",
+        partial_kind="spectral_only",
+        current_format="Opus",
+        current_min=90,
+        current_avg=97,
+        current_median=95,
+        current_spectral="suspect",
+        current_v0=None,
     )
     def test_partial_have_selects_one_complete_snapshot(
         self,

@@ -87,7 +87,9 @@ def _project_current_library_have(
     partial_snapshot_can_be_replaced = (
         item.get("comparison_basis") is None
         and (
-            item.get("outcome") in ("failed", "timeout")
+            item.get("outcome") in (
+                "failed", "timeout", "measurement_failed",
+            )
             or item.get("wrong_match_triage_action") in (
                 "deleted_reject",
                 "deleted_verified_lossless_parent",

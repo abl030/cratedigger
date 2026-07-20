@@ -144,6 +144,8 @@ def make_album_quality_evidence(
     lineage_version: int = 4,
     on_disk_v0_research_attempted: bool = False,
     current_enrichment_required: bool = False,
+    audio_corrupt: bool = False,
+    audio_error: str | None = None,
 ) -> AlbumQualityEvidence:
     """Build production-shaped active album-quality evidence.
 
@@ -209,6 +211,8 @@ def make_album_quality_evidence(
         on_disk_v0_research_attempted=on_disk_v0_research_attempted,
         current_enrichment_required=current_enrichment_required,
         verified_lossless_proof=verified_lossless_proof,
+        audio_corrupt=audio_corrupt,
+        audio_error=audio_error,
     )
 
 

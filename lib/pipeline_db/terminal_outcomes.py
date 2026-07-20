@@ -516,6 +516,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
     def _insert_terminal_download_audit(
         self,
         request_id: int,
+        import_job_id: int,
         audit: TerminalDownloadAudit,
         boundary: Callable[[str], None],
     ) -> int:
@@ -540,11 +541,13 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 v0_probe_avg_bitrate, v0_probe_median_bitrate,
                 existing_v0_probe_kind, existing_v0_probe_min_bitrate,
                 existing_v0_probe_avg_bitrate, existing_v0_probe_median_bitrate,
-                source_download_log_id
+                source_download_log_id, candidate_evidence_id
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s,
+                (SELECT candidate_evidence_id FROM import_jobs
+                 WHERE id = %s AND request_id = %s)
             ) RETURNING id
             """,
             (
@@ -584,6 +587,8 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 audit.existing_v0_probe_avg_bitrate,
                 audit.existing_v0_probe_median_bitrate,
                 audit.source_download_log_id,
+                import_job_id,
+                request_id,
             ),
         )
         row = cur.fetchone()
@@ -724,6 +729,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 ))
             download_log_id = self._insert_terminal_download_audit(
                 command.request_id,
+                command.import_job_id,
                 command.audit,
                 boundary,
             )
@@ -788,6 +794,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 ))
             download_log_id = self._insert_terminal_download_audit(
                 command.request_id,
+                command.import_job_id,
                 command.audit,
                 boundary,
             )

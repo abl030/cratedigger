@@ -857,6 +857,21 @@ def _classify(
             )
         return _Classification("Rejected", "badge-rejected", "#a33", verdict)
 
+    # --- Preview measurement failure ---
+    # The worker persists the exact operator-facing diagnostic in
+    # ``error_message``. Historical rows predate that write contract but carry
+    # the same detail in ``beets_detail``, so keep those cards readable too.
+    if entry.outcome == "measurement_failed":
+        diagnostic = entry.error_message or entry.beets_detail
+        verdict = (
+            f"Measurement failed: {diagnostic}"
+            if diagnostic
+            else "Measurement failed"
+        )
+        return _Classification(
+            "Measurement failed", "badge-failed", "#a33", verdict,
+        )
+
     # --- Timeout (download-phase; outcome="timeout" is written ONLY by
     # lib/download.py::_timeout_album — error_message is the real
     # per-file evidence summary, issue #564 C5, when any was captured) ---

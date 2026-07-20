@@ -60,7 +60,7 @@ _DEFAULTS = LogEntry(
 
 def _entry(**overrides: object) -> LogEntry:
     """Build a LogEntry with sensible defaults, overridden as needed."""
-    return replace(_DEFAULTS, **overrides)  # type: ignore[arg-type]
+    return replace(_DEFAULTS, **overrides)
 
 
 # ============================================================================
@@ -579,13 +579,11 @@ class TestClassifyExistingFormat(unittest.TestCase):
 class TestClassifyBadge(unittest.TestCase):
     """Test that classify_log_entry returns the correct badge for each scenario."""
 
-    def test_unknown_outcome_badge_is_humanized(self):
-        """Raw enum outcomes must not leak underscores into the badge
-        (the live Recents tab showed a literal "Measurement_failed" pill,
-        issue #575 PR2)."""
+    def test_measurement_failed_badge_is_humanized(self):
+        """Raw enum outcomes must not leak underscores into the badge."""
         result = classify_log_entry(_entry(outcome="measurement_failed"))
         self.assertEqual(result.badge, "Measurement failed")
-        self.assertEqual(result.badge_class, "badge-rejected")
+        self.assertEqual(result.badge_class, "badge-failed")
 
     def test_new_import(self):
         """First-time import, nothing on disk before."""
@@ -1170,6 +1168,33 @@ class TestClassifyEdgeCases(unittest.TestCase):
 # ============================================================================
 
 class TestExceptionVerdicts(unittest.TestCase):
+
+    def test_measurement_failed_uses_persisted_error_message(self):
+        result = classify_log_entry(_entry(
+            outcome="measurement_failed",
+            beets_scenario="measurement_failed",
+            error_message="ffmpeg decode failed on track 05",
+            beets_detail="generic measurement failure",
+        ))
+        self.assertEqual(result.badge, "Measurement failed")
+        self.assertEqual(result.badge_class, "badge-failed")
+        self.assertEqual(result.border_color, "#a33")
+        self.assertEqual(
+            result.verdict,
+            "Measurement failed: ffmpeg decode failed on track 05",
+        )
+
+    def test_measurement_failed_legacy_row_falls_back_to_beets_detail(self):
+        result = classify_log_entry(_entry(
+            outcome="measurement_failed",
+            beets_scenario="measurement_failed",
+            error_message=None,
+            beets_detail="lossless spectral analysis returned no usable grade",
+        ))
+        self.assertEqual(
+            result.verdict,
+            "Measurement failed: lossless spectral analysis returned no usable grade",
+        )
 
     def test_exception_with_error_message(self):
         """Exception verdict should include the error_message when available."""

@@ -402,6 +402,85 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["log"][0]["existing_format"], "AAC")
         self.assertEqual(data["log"][0]["existing_min_bitrate"], 256)
 
+    def test_measurement_failed_uses_complete_pre_attempt_have_and_diagnostic(self):
+        """Badlands: a partial spectral audit cannot hide canonical HAVE."""
+        from lib.quality import (
+            AudioQualityMeasurement,
+            ImportResult,
+            SpectralAnalysisDetail,
+            SpectralDetail,
+        )
+        from tests.helpers import make_album_quality_evidence
+
+        evidence = make_album_quality_evidence(
+            mb_release_id="test-mbid-0100",
+            measured_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=90,
+                avg_bitrate_kbps=97,
+                median_bitrate_kbps=95,
+                format="Opus",
+                spectral_grade="suspect",
+                spectral_subject="installed",
+                spectral_provenance="measured",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(self.db.set_request_current_evidence(100, stored.id))
+
+        diagnostic = "ffmpeg decode failed on 05 - Black Nylon.flac"
+        log_id = self.db.log_download(
+            100,
+            outcome="measurement_failed",
+            beets_scenario="measurement_failed",
+            beets_detail=diagnostic,
+            error_message=diagnostic,
+            import_result=ImportResult(
+                spectral=SpectralDetail(
+                    candidate=SpectralAnalysisDetail(
+                        attempted=True,
+                        grade="error",
+                    ),
+                    existing=SpectralAnalysisDetail(
+                        attempted=True,
+                        grade="suspect",
+                    ),
+                ),
+            ).to_json(),
+        )
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        self.assertEqual(item["badge"], "Measurement failed")
+        self.assertEqual(item["badge_class"], "badge-failed")
+        self.assertEqual(item["border_color"], "#a33")
+        self.assertEqual(item["error_message"], diagnostic)
+        self.assertEqual(item["verdict"], f"Measurement failed: {diagnostic}")
+        self.assertEqual(item["summary"], f"Measurement failed: {diagnostic}")
+        self.assertEqual(item["existing_format"], "Opus")
+        self.assertEqual(item["existing_min_bitrate"], 90)
+        self.assertEqual(item["existing_avg_bitrate"], 97)
+        self.assertEqual(item["existing_median_bitrate"], 95)
+        self.assertEqual(item["existing_spectral_grade"], "suspect")
+        self.assertFalse(item["existing_spectral_attempted"])
+        self.assertIsNone(item["existing_spectral_error"])
+
+        rejected_status, rejected_data = self._get(
+            "/api/pipeline/log?outcome=rejected"
+        )
+        self.assertEqual(rejected_status, 200)
+        self.assertIn(log_id, {row["id"] for row in rejected_data["log"]})
+
     def test_kept_would_import_uses_complete_canonical_current_have(self):
         import web.server as srv
         from lib.quality import (

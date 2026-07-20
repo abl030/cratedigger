@@ -2436,6 +2436,13 @@ class TestDownloadLog(unittest.TestCase):
         self.db.log_download(
             self.req_id, "user-gate", "mp3", "/tmp/reject",
             outcome="rejected", beets_scenario="spectral_reject")
+        # A preview measurement failure is also a non-imported failure row.
+        self.db.log_download(
+            self.req_id,
+            outcome="measurement_failed",
+            beets_scenario="measurement_failed",
+            error_message="ffmpeg decode failed",
+        )
 
         imported = self.db.get_log(outcome_filter="imported")
         outcomes = {row["outcome"] for row in imported}
@@ -2451,6 +2458,11 @@ class TestDownloadLog(unittest.TestCase):
         rejected_outcomes = {row["outcome"] for row in rejected}
         self.assertIn("rejected", rejected_outcomes,
                       "gate-rejected rows must surface under the rejected filter")
+        self.assertIn(
+            "measurement_failed",
+            rejected_outcomes,
+            "preview failures must surface under the rejected filter",
+        )
 
     def test_get_log_keeps_download_source_and_aliases_request_source(self):
         slskd_id = self.db.log_download(
@@ -5008,6 +5020,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         evidence = msgspec.structs.replace(
             evidence,
             audio_corrupt=True,
+            audio_error="01 - Track.mp3: Invalid data found when processing input",
             folder_layout="nested",
             audio_file_count=1,
             filetype_band="mp3",
@@ -5023,6 +5036,10 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
 
         assert loaded is not None
         self.assertTrue(loaded.audio_corrupt)
+        self.assertEqual(
+            loaded.audio_error,
+            "01 - Track.mp3: Invalid data found when processing input",
+        )
         self.assertEqual(loaded.folder_layout, "nested")
         self.assertEqual(loaded.audio_file_count, 1)
         self.assertEqual(loaded.filetype_band, "mp3")
@@ -8615,7 +8632,7 @@ class TestPipelineDBReconnectOnDeadConn(unittest.TestCase):
         # The retry happened on the live conn.
         self.assertEqual(len(live_conn.cursors), 1)
         self.assertIs(cur, live_conn.cursors[0])
-        self.assertEqual(cur.executed, [("SELECT 1", None)])  # type: ignore[attr-defined]
+        self.assertEqual(cur.executed, [("SELECT 1", None)])
 
     def test_does_not_retry_when_conn_still_open_after_error(self):
         """Statement-level OperationalError (e.g. statement_timeout) keeps

@@ -363,7 +363,7 @@ class TestImporterWorker(unittest.TestCase):
         source_path: str,
         request_id: int = 42,
     ) -> None:
-        if request_id not in db._requests:  # type: ignore[attr-defined]
+        if request_id not in db._requests:
             db.seed_request(make_request_row(
                 id=request_id,
                 mb_release_id="mbid-123",
@@ -1827,6 +1827,179 @@ class TestImportPreviewWorker(unittest.TestCase):
         self.assertEqual(updated.status, "failed")
         self.assertEqual(updated.preview_status, "measurement_failed")
         self.assertEqual(db.get_denylisted_users(42), [])
+
+    def test_measurement_failure_prepares_have_before_terminal_then_enriches(self):
+        """Every eligible failure completes the same HAVE lifecycle."""
+        from scripts import import_preview_worker
+
+        order: list[str] = []
+
+        class RecordingDB(FakePipelineDB):
+            def persist_preview_terminal_outcome(self, command: Any) -> Any:
+                order.append("terminal")
+                return super().persist_preview_terminal_outcome(command)
+
+        db = RecordingDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-42",
+            status="unsearchable",
+        ))
+        db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key="force_import:failure-have-lifecycle",
+            payload={"failed_path": "/tmp/corrupt-audio"},
+        )
+        claimed = db.claim_next_import_preview_job(worker_id="preview")
+        assert claimed is not None
+        cfg = CratediggerConfig(beets_directory="/music/library")
+
+        def prepare(db_arg: Any, **kwargs: Any) -> str:
+            self.assertIs(db_arg, db)
+            self.assertEqual(kwargs, {
+                "request_id": 42,
+                "mb_release_id": "mbid-42",
+                "quality_ranks": cfg.quality_ranks,
+                "beets_library_root": "/music/library",
+            })
+            order.append("prepare")
+            return "ready"
+
+        def enrich(db_arg: Any, **kwargs: Any) -> str:
+            self.assertIs(db_arg, db)
+            self.assertEqual(kwargs, {
+                "request_id": 42,
+                "mb_release_id": "mbid-42",
+                "quality_ranks": cfg.quality_ranks,
+                "beets_library_root": "/music/library",
+            })
+            order.append("enrich")
+            return "complete"
+
+        with patch(
+            "scripts.import_preview_worker.read_runtime_config",
+            return_value=cfg,
+        ):
+            updated = import_preview_worker.process_claimed_preview_job(
+                db,
+                claimed,
+                preview_fn=lambda _db, _job: self._preview(
+                    "measurement_failed",
+                    reason="decoder rejected corrupt audio",
+                    source_path="/tmp/corrupt-audio",
+                ),
+                prepare_failure_have_fn=prepare,
+                enrich_failure_have_fn=enrich,
+            )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(order, ["prepare", "terminal", "enrich"])
+        self.assertEqual(len(db.download_logs), 1)
+        self.assertEqual(
+            db.download_logs[0].error_message,
+            "decoder rejected corrupt audio",
+        )
+
+    def test_have_lifecycle_errors_never_suppress_measurement_terminal(self):
+        """Config, preparation, and enrichment are all fail-soft."""
+        from scripts import import_preview_worker
+
+        for failing_stage in ("config", "prepare", "enrich"):
+            with self.subTest(failing_stage=failing_stage):
+                db = FakePipelineDB()
+                db.seed_request(make_request_row(
+                    id=42,
+                    mb_release_id="mbid-42",
+                    status="unsearchable",
+                ))
+                db.enqueue_import_job(
+                    IMPORT_JOB_FORCE,
+                    request_id=42,
+                    dedupe_key=f"force_import:failure-have-{failing_stage}",
+                    payload={"failed_path": "/tmp/corrupt-audio"},
+                )
+                claimed = db.claim_next_import_preview_job(worker_id="preview")
+                assert claimed is not None
+                cfg = CratediggerConfig(beets_directory="/music/library")
+                prepare = MagicMock(return_value="ready")
+                enrich = MagicMock(return_value="complete")
+                config_error = (
+                    RuntimeError("config unavailable")
+                    if failing_stage == "config"
+                    else None
+                )
+                if failing_stage == "prepare":
+                    prepare.side_effect = RuntimeError("prepare crashed")
+                if failing_stage == "enrich":
+                    enrich.side_effect = RuntimeError("enrich crashed")
+
+                with patch(
+                    "scripts.import_preview_worker.read_runtime_config",
+                    return_value=cfg,
+                    side_effect=config_error,
+                ), patch("scripts.import_preview_worker.logger.warning"):
+                    updated = import_preview_worker.process_claimed_preview_job(
+                        db,
+                        claimed,
+                        preview_fn=lambda _db, _job: self._preview(
+                            "measurement_failed",
+                            reason="decode failure",
+                        ),
+                        prepare_failure_have_fn=prepare,
+                        enrich_failure_have_fn=enrich,
+                    )
+
+                assert updated is not None
+                self.assertEqual(updated.status, "failed")
+                self.assertEqual(updated.preview_status, "measurement_failed")
+                self.assertEqual(len(db.download_logs), 1)
+                self.assertEqual(db.download_logs[0].error_message, "decode failure")
+                if failing_stage in ("config", "prepare"):
+                    enrich.assert_not_called()
+
+    def test_measurement_failure_without_mbid_skips_have_lifecycle(self):
+        """Identity-less failures remain terminal but cannot address HAVE."""
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id=None,
+            status="unsearchable",
+        ))
+        db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key="force_import:failure-have-no-mbid",
+            payload={"failed_path": "/tmp/corrupt-audio"},
+        )
+        claimed = db.claim_next_import_preview_job(worker_id="preview")
+        assert claimed is not None
+        prepare = MagicMock()
+        enrich = MagicMock()
+
+        with patch(
+            "scripts.import_preview_worker.read_runtime_config",
+        ) as read_config:
+            updated = import_preview_worker.process_claimed_preview_job(
+                db,
+                claimed,
+                preview_fn=lambda _db, _job: self._preview(
+                    "measurement_failed",
+                    reason="missing identity",
+                ),
+                prepare_failure_have_fn=prepare,
+                enrich_failure_have_fn=enrich,
+            )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(len(db.download_logs), 1)
+        read_config.assert_not_called()
+        prepare.assert_not_called()
+        enrich.assert_not_called()
 
     def test_threaded_worker_exits_nonzero_when_worker_thread_crashes(self):
         from scripts import import_preview_worker

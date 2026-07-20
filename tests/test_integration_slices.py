@@ -366,7 +366,7 @@ class TestPeerOnlineProbeAtEnqueueSlice(unittest.TestCase):
         ``.response.text``."""
         import requests
         err = requests.HTTPError("500 Server Error")
-        err.response = SimpleNamespace(  # type: ignore[attr-defined]
+        err.response = SimpleNamespace(
             text="User pooyork appears to be offline",
         )
         return err
@@ -5109,7 +5109,7 @@ class TestStartupReconciliationSlice(unittest.TestCase):
             failure_class="resolver_unavailable", transient=True)
 
         service = self._service(db)
-        service.generate_for_request = MagicMock(  # type: ignore[method-assign]
+        service.generate_for_request = MagicMock(
             side_effect=AssertionError("sticky failures should not inspect"))
 
         summary = reconcile_search_plans(
@@ -5229,7 +5229,7 @@ class TestStartupReconciliationSlice(unittest.TestCase):
             if request_id == rid_bomb:
                 raise RuntimeError("boom")
             return original(request_id, **kwargs)
-        service.generate_for_request = _wrapped  # type: ignore[method-assign]
+        service.generate_for_request = _wrapped
 
         summary = reconcile_search_plans(db, service, generator_id="g-test")
         self.assertEqual(summary.wanted_total, 3)
@@ -6967,7 +6967,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info_no_path)), \
                 patch("lib.config.read_runtime_config", return_value=cfg):
             result = dispatch_import_from_db(
-                db,  # type: ignore[arg-type]
+                db,
                 request_id=request_id,
                 failed_path=tmpdir,
                 source_username="alice",

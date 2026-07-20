@@ -23,7 +23,11 @@ from lib.terminal_outcomes import (
 from tests.test_pipeline_db import TEST_DSN, make_db, requires_postgres
 from tests.fakes import FakePipelineDB
 from tests.fakes.download import RecordingProcessAlbum
-from tests.helpers import make_ctx_with_fake_db, make_request_row
+from tests.helpers import (
+    make_album_quality_evidence,
+    make_ctx_with_fake_db,
+    make_request_row,
+)
 
 
 class InjectedTerminalWriteFailure(RuntimeError):
@@ -510,6 +514,79 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             command_factory=command,
             expected_boundaries=expected,
             persist_method="persist_preview_terminal_outcome",
+        )
+
+    def test_preview_terminal_audit_copies_job_candidate_evidence(self):
+        db, request_id, job_id = _seed_running_preview()
+        self.addCleanup(db.close)
+        evidence = make_album_quality_evidence(
+            mb_release_id="terminal-preview-candidate"
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_import_job_candidate_evidence(job_id, persisted.id)
+
+        result = db.persist_preview_terminal_outcome(PreviewTerminalOutcome(
+            request_id=request_id,
+            import_job_id=job_id,
+            request_transition=transitions.RequestTransition.to_wanted(),
+            audit=TerminalDownloadAudit(
+                outcome="measurement_failed",
+                beets_scenario="measurement_failed",
+                beets_detail="late preview failure",
+                error_message="late preview failure",
+            ),
+            preview_status="measurement_failed",
+            preview_result={"verdict": "measurement_failed"},
+            message="late preview failure",
+            error="late preview failure",
+        ))
+
+        self.assertEqual(
+            db.get_download_log_candidate_evidence_id(result.download_log_id),
+            persisted.id,
+        )
+
+    def test_import_terminal_audit_copies_job_candidate_evidence(self):
+        db, request_id, job_id = _seed_running_import()
+        self.addCleanup(db.close)
+        evidence = make_album_quality_evidence(
+            mb_release_id="terminal-import-candidate"
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_import_job_candidate_evidence(job_id, persisted.id)
+
+        result = db.persist_import_terminal_outcome(ImportTerminalOutcome(
+            request_id=request_id,
+            import_job_id=job_id,
+            initial_transition=transitions.RequestTransition.to_wanted(
+                attempt_type="validation"
+            ),
+            audit=TerminalDownloadAudit(
+                outcome="rejected",
+                beets_detail="audio decode failed",
+                error_message="audio decode failed",
+            ),
+            job=ImportJobTerminal(
+                status="failed",
+                error="audio decode failed",
+                result={"success": False},
+                message="audio decode failed",
+            ),
+        ))
+
+        self.assertEqual(
+            db.get_download_log_candidate_evidence_id(result.download_log_id),
+            persisted.id,
         )
 
     def test_preview_failure_preserves_current_operator_status(self):

@@ -400,7 +400,7 @@ def _delete_manifest(
 
 def execute_pinned_beets_delete(request: BeetsDeleteRequest) -> BeetsDeleteOutcome:
     """Delete one exact album using the active pinned Beets configuration."""
-    from beets import config, library, plugins, util  # type: ignore[attr-defined]
+    from beets import config, library, plugins, util
 
     config.read()
     configured_db = config["library"].as_filename()

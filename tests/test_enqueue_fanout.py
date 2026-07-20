@@ -425,7 +425,7 @@ class _PrefetchSource(FakePipelineDBSource):
         super().__init__()
         self._stub_tracks = list(stub_tracks)
 
-    def get_tracks(self, album_record: object) -> list[dict[str, object]]:  # type: ignore[override]
+    def get_tracks(self, album_record: object) -> list[dict[str, object]]:
         self.get_tracks_calls.append(album_record)
         return list(self._stub_tracks)
 

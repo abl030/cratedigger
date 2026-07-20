@@ -102,7 +102,8 @@ class _DownloadLogMixin(_PipelineDBBase):
         Args:
             limit: max entries to return
             outcome_filter: "imported" (success + force_import),
-                           "rejected" (rejected + failed + timeout),
+                           "rejected" (rejected + failed + timeout +
+                           measurement_failed),
                            or None for all
         """
         if outcome_filter == "imported":
@@ -190,7 +191,9 @@ class _DownloadLogMixin(_PipelineDBBase):
                 JOIN album_requests ar ON dl.request_id = ar.id
                 LEFT JOIN album_quality_evidence current_evidence
                     ON current_evidence.id = ar.current_evidence_id
-                WHERE dl.outcome IN ('rejected', 'failed', 'timeout')
+                WHERE dl.outcome IN (
+                    'rejected', 'failed', 'timeout', 'measurement_failed'
+                )
                 ORDER BY dl.created_at DESC LIMIT %s
             """
         else:

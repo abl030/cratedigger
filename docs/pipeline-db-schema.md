@@ -49,12 +49,14 @@ Key fields:
   `spectral_provenance`, `was_converted_from` — the wrapped
   `AudioQualityMeasurement` facts. The measurement has no verified-lossless
   boolean; an observation about bytes cannot assert acquisition completion.
-- `audio_corrupt BOOLEAN`, `folder_layout TEXT` (`flat` | `nested`),
+- `audio_corrupt BOOLEAN`, `audio_error TEXT`, `folder_layout TEXT` (`flat` | `nested`),
   `audio_file_count INTEGER`, `filetype_band TEXT`,
   `matched_bad_audio_hash_id`, `matched_bad_audio_hash_path` — the four
   folder/audio-integrity facts the importer's
   `full_pipeline_decision_from_evidence` reads as early-exit reject
   branches (U11).
+  `audio_error` preserves the exact album-level ffmpeg decoder diagnostic;
+  `album_quality_evidence_files.decode_ok` identifies the individual files.
 - `v0_min_bitrate_kbps`, `v0_avg_bitrate_kbps`,
   `v0_median_bitrate_kbps`, `v0_subject`, `v0_provenance` — one neutral V0
   metric plus its two-axis markers. Legacy policy-shaped probe kinds are

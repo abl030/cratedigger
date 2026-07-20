@@ -344,8 +344,15 @@ def dispatch_import_core(
                 if not _import_allowed_by_evidence_pipeline(evidence_decision):
                     decision = evidence_decision_name(evidence_decision)
                     detail = (
-                        "import-time persisted evidence rejected candidate "
-                        f"(decision={decision})"
+                        evidence_gate.candidate.audio_error
+                        if (
+                            decision == "audio_corrupt"
+                            and evidence_gate.candidate.audio_error
+                        )
+                        else (
+                            "import-time persisted evidence rejected candidate "
+                            f"(decision={decision})"
+                        )
                     )
                     attempt_result.merge(ImportResult(
                         decision=decision,

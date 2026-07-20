@@ -2236,6 +2236,63 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
         self.assertEqual(
             cmd[cmd.index("--existing-v0-probe-median-bitrate") + 1], "169")
 
+    def test_audio_corrupt_evidence_persists_exact_decoder_diagnostic(self):
+        from lib.dispatch import dispatch_import_core
+        from lib.dispatch.types import EvidenceImportGate
+
+        decode_error = (
+            "5/8 files failed: 01.flac: Invalid data found when processing "
+            "input; 02.flac: End of file"
+        )
+        candidate = make_album_quality_evidence(
+            mb_release_id="test-mbid",
+            storage_format="FLAC",
+            codec="flac",
+            container="flac",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=900,
+                avg_bitrate_kbps=900,
+                median_bitrate_kbps=900,
+                format="FLAC",
+                is_cbr=False,
+            ),
+            audio_corrupt=True,
+            audio_error=decode_error,
+        )
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            mb_release_id="test-mbid",
+            active_download_state={"files": [], "filetype": "flac"},
+        ))
+
+        with patch_dispatch_externals() as ext:
+            dispatch_import_core(
+                path="/tmp/badlands",
+                mb_release_id="test-mbid",
+                request_id=42,
+                label="Dirty Beaches - Badlands",
+                beets_harness_path=_HARNESS,
+                cfg=_full_dispatch_config(),
+                db=db,  # type: ignore[arg-type]
+                dl_info=DownloadInfo(filetype="flac", username="peer"),
+                files=[make_download_file(
+                    username="peer", filename="01.flac")],
+                quality_gate_fn=noop_quality_gate,
+                evidence_gate_fn=(
+                    lambda *_args, **_kwargs: EvidenceImportGate(
+                        candidate=candidate
+                    )
+                ),
+            )
+
+        ext.run.assert_not_called()
+        self.assertEqual(len(db.download_logs), 1)
+        self.assertEqual(db.download_logs[0].outcome, "rejected")
+        self.assertEqual(db.download_logs[0].beets_detail, decode_error)
+        self.assertEqual(db.download_logs[0].error_message, decode_error)
+
 
 class TestLoadQualityGateState(unittest.TestCase):
     """Direct tests for the shared quality-gate state adapter."""
