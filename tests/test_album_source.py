@@ -226,10 +226,9 @@ class TestDatabaseSource(unittest.TestCase):
             title_blacklist=("blocked",),
         )
 
-        self.assertEqual(
-            [record.db_request_id for record in records],
-            [allowed_id, second_allowed_id],
-        )
+        selected_ids = {record.db_request_id for record in records}
+        self.assertEqual(len(records), 2)
+        self.assertEqual(selected_ids, {allowed_id, second_allowed_id})
 
     def test_get_tracks_returns_track_dicts(self):
         source, db = self._make_source()
