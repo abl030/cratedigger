@@ -13,6 +13,17 @@
 - The NixOS module lives in this repo at `nix/module.nix` (exposed as `nixosModules.default`). The downstream wrapper at `~/nixosconfig/modules/nixos/services/cratedigger.nix` imports it via `inputs.cratedigger-src.nixosModules.default`.
 - Flake updates MUST happen on doc1 (has the Forgejo token + signing key). NEVER from doc2.
 - `restartIfChanged = false` on the cratedigger service — deploys don't restart it. The timer (`OnUnitInactiveSec`, back-to-back cycles) picks up new code on the next cycle. `cratedigger-web` and `cratedigger-db-migrate` use the systemd default and DO restart on switch.
+- Post-switch pipeline verification first derives and checks the exact active
+  source store, then captures the current `cratedigger.service` invocation as a
+  fresh baseline. It captures the first later invocation whose
+  invocation-scoped journal names that source, then requires that same
+  invocation's application cycle-complete record and systemd successful
+  deactivation/finished-job records. This post-switch observation boundary is
+  required even for same-source, same-revision retries; a pre-trigger
+  invocation ID is audit evidence only because cycles can roll during the
+  asynchronous build. A later timer invocation replacing the unit's current
+  `InvocationID` is neither success nor failure evidence for the captured
+  target; verify the target itself with `journalctl --invocation=<ID>`.
 - Always derive the active cratedigger wrapper from `systemctl show cratedigger.service --property=ExecStart --value`, extract its exact `*-source` path from the wrapper, and verify the unique source string there; never glob historical store generations, which can produce a false positive. For module changes, inspect `systemctl cat cratedigger.service` and the rendered `/var/lib/cratedigger/config.ini`.
 - Before deploying changes to `nix/module.nix`, run the VM check: `nix build .#checks.x86_64-linux.moduleVm`.
 - **Every `nix flake update` in cratedigger must re-run the real-beets drift gate** (`tests/test_harness_beets2_contract.py` inside the re-pinned shell, plus the full suite): since tier-2 packaging, the flake.lock — not the consumer's nixpkgs — decides the beets version production runs. A lock bump is a beets upgrade until proven otherwise.

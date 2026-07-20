@@ -60,17 +60,25 @@ The Forgejo token remains confined to the helper's fail-fast subshell
 environment and must never appear in an argv value, command-line `-c`
 assignment, remote URL, xtrace, or Git trace output.
 
-3. Capture the current systemd invocation, deploy doc2 through the
+3. Capture the current systemd invocations, deploy doc2 through the
 forced-command locked-sibling trigger, then wait up to 30 minutes for a **new,
 nonempty** `InvocationID`. Capturing before the trigger prevents an old green
-unit result from being mistaken for this deployment. Poll that
-same invocation to a terminal state. This also handles a same-revision retry:
+upgrade result from being mistaken for this deployment. Print the current
+Cratedigger invocation as pre-switch audit evidence; step 6 establishes its
+verification boundary from a fresh post-switch observation. Poll the new
+upgrade invocation to a terminal state. This also handles a same-revision retry:
 the anchor may already equal the target, but a fresh invocation must still run.
 Success means `ActiveState=inactive`, `SubState=dead`, and `Result=success` for
 the new invocation; any failed, unexpected, replaced, or timed-out state is a
 deploy failure:
 ```bash
 set -euo pipefail
+CRATEDIGGER_REPO=$(git rev-parse --show-toplevel)
+PRE_SWITCH_CRATEDIGGER_INVOCATION=$(
+  "$CRATEDIGGER_REPO/scripts/verify_cratedigger_cycle.sh" capture-current
+)
+printf 'PRE_SWITCH_CRATEDIGGER_INVOCATION=%s\n' \
+  "$PRE_SWITCH_CRATEDIGGER_INVOCATION"
 before_state=$(ssh doc2 'systemctl show nixos-upgrade.service \
   --property=InvocationID')
 PREVIOUS_INVOCATION=$(sed -n 's/^InvocationID=//p' <<<"$before_state")
@@ -130,6 +138,9 @@ if [[ "$deploy_complete" != 1 ]]; then
   exit 1
 fi
 ```
+The printed `PRE_SWITCH_CRATEDIGGER_INVOCATION` is audit evidence only. Do not
+use it as the post-switch cycle baseline: timer cycles can roll while the
+asynchronous fleet build is still running.
 
 `fleet-deploy` is asynchronous. It starts doc2's verified
 `nixos-upgrade.service`, which fetches Forgejo, verifies every new commit
@@ -189,9 +200,20 @@ printf '%s\n' "$service_states"
 exact source store from the wrapper and verify the deployed change there
 (choose a unique string in a production file). Do not glob every historical
 store path: an old generation could produce a false positive. Inspect the
-rendered unit/config when the NixOS module changed:
+rendered unit/config when the NixOS module changed. After deriving and checking
+the active source, capture a fresh current Cratedigger invocation as the
+post-switch baseline. Then capture the first later invocation whose
+invocation-scoped journal names that exact source and verify it through the
+tracked boundary. This guarantees that the verified cycle started after a
+post-switch observation even on a same-source, same-revision retry; waiting one
+extra cycle is safe. The verifier requires the application cycle-complete
+record plus systemd's successful deactivation and finished-job records. If the
+back-to-back timer has already replaced the target `InvocationID`, it follows
+the captured target through `journalctl --invocation=<ID>` instead of treating
+rollover as either success or failure:
 ```bash
 set -euo pipefail
+CRATEDIGGER_REPO=$(git rev-parse --show-toplevel)
 CRATEDIGGER_BIN=$(ssh doc2 "systemctl show cratedigger.service \
   --property=ExecStart --value | grep -o '/nix/store/[^ ;]*/bin/cratedigger' \
   | head -1")
@@ -200,6 +222,17 @@ CRATEDIGGER_SOURCE=$(ssh doc2 "grep -o '/nix/store/[^ ]*-source/cratedigger.py' 
   '$CRATEDIGGER_BIN' | head -1 | sed 's#/cratedigger.py##'")
 test -n "$CRATEDIGGER_SOURCE"
 ssh doc2 "grep '<something unique>' '$CRATEDIGGER_SOURCE/<changed-file>.py'"
+POST_SWITCH_CRATEDIGGER_INVOCATION=$(
+  "$CRATEDIGGER_REPO/scripts/verify_cratedigger_cycle.sh" capture-current
+)
+printf 'POST_SWITCH_CRATEDIGGER_INVOCATION=%s\n' \
+  "$POST_SWITCH_CRATEDIGGER_INVOCATION"
+TARGET_CRATEDIGGER_INVOCATION=$(
+  "$CRATEDIGGER_REPO/scripts/verify_cratedigger_cycle.sh" capture-target \
+    "$POST_SWITCH_CRATEDIGGER_INVOCATION" "$CRATEDIGGER_SOURCE"
+)
+"$CRATEDIGGER_REPO/scripts/verify_cratedigger_cycle.sh" verify-exact \
+  "$TARGET_CRATEDIGGER_INVOCATION" "$CRATEDIGGER_SOURCE"
 # For nix/module.nix changes:
 ssh doc2 'systemctl cat cratedigger.service'
 ssh doc2 'grep "<rendered setting>" /var/lib/cratedigger/config.ini'
