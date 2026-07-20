@@ -936,6 +936,16 @@ class TestPreviewEvidenceFactsSchema(unittest.TestCase):
         self.assertEqual(data_type, "boolean")
         self.assertIn("true", (default or "").lower())
 
+    def test_album_quality_evidence_has_audio_error_column(self):
+        rows = self._query("""
+            SELECT column_name, is_nullable, data_type, column_default
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'album_quality_evidence'
+              AND column_name = 'audio_error'
+        """)
+        self.assertEqual(rows, [("audio_error", "YES", "text", None)])
+
     def test_folder_layout_check_rejects_unknown_values(self):
         self._exec("""
             INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)

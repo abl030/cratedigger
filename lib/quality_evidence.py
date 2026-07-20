@@ -493,6 +493,7 @@ def evidence_from_import_result(
     audio_corrupt = any(not file.decode_ok for file in files)
     if measurement is not None:
         audio_corrupt = audio_corrupt or measurement.audio_corrupt
+        audio_error = measurement.audio_error
         folder_layout = measurement.folder_layout
         audio_file_count = (
             measurement.audio_file_count
@@ -504,6 +505,7 @@ def evidence_from_import_result(
         matched_bad_hash_id = measurement.matched_bad_hash_id
         matched_bad_hash_path = measurement.matched_bad_track_path
     else:
+        audio_error = None
         folder_layout = derive_folder_layout(files)
         audio_file_count = len(files)
         filetype_band = derive_filetype_band(files)
@@ -527,6 +529,7 @@ def evidence_from_import_result(
         ),
         verified_lossless_proof=proof,
         audio_corrupt=audio_corrupt,
+        audio_error=audio_error,
         folder_layout=folder_layout,
         audio_file_count=audio_file_count,
         filetype_band=filetype_band,
@@ -634,6 +637,7 @@ def evidence_from_measurement(
         v0_metric=None,
         verified_lossless_proof=None,
         audio_corrupt=measurement.audio_corrupt,
+        audio_error=measurement.audio_error,
         folder_layout=measurement.folder_layout,
         audio_file_count=audio_file_count,
         filetype_band=filetype_band,

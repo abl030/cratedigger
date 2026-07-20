@@ -72,7 +72,7 @@ class _EvidenceMixin(_PipelineDBBase):
                     verified_lossless_provenance,
                     verified_lossless_source, verified_lossless_classifier,
                     verified_lossless_detail,
-                    audio_corrupt, folder_layout, audio_file_count,
+                    audio_corrupt, audio_error, folder_layout, audio_file_count,
                     filetype_band, matched_bad_audio_hash_id,
                     matched_bad_audio_hash_path,
                     updated_at
@@ -87,7 +87,7 @@ class _EvidenceMixin(_PipelineDBBase):
                     %s, -- on-disk V0 research attempted
                     %s, -- changed-current enrichment required
                     %s, %s, %s, %s, -- verified-lossless proof
-                    %s, %s, %s, %s, %s, %s, -- preview facts
+                    %s, %s, %s, %s, %s, %s, %s, -- preview facts
                     NOW()
                 )
                 ON CONFLICT (mb_release_id, snapshot_fingerprint)
@@ -241,6 +241,7 @@ class _EvidenceMixin(_PipelineDBBase):
                     verified_lossless_detail =
                         EXCLUDED.verified_lossless_detail,
                     audio_corrupt = EXCLUDED.audio_corrupt,
+                    audio_error = EXCLUDED.audio_error,
                     folder_layout = EXCLUDED.folder_layout,
                     audio_file_count = EXCLUDED.audio_file_count,
                     filetype_band = EXCLUDED.filetype_band,
@@ -317,6 +318,7 @@ class _EvidenceMixin(_PipelineDBBase):
                 proof.classifier if proof else None,
                 proof.detail if proof else None,
                 evidence.audio_corrupt,
+                evidence.audio_error,
                 evidence.folder_layout,
                 evidence.audio_file_count,
                 evidence.filetype_band,
@@ -715,6 +717,7 @@ class _EvidenceMixin(_PipelineDBBase):
             ),
             verified_lossless_proof=proof,
             audio_corrupt=bool(row.get("audio_corrupt", False)),
+            audio_error=row.get("audio_error"),
             folder_layout=row.get("folder_layout") or "flat",
             audio_file_count=int(row.get("audio_file_count") or 0),
             filetype_band=row.get("filetype_band") or "",

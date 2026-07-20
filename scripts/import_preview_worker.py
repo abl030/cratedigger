@@ -27,10 +27,12 @@ from lib.import_preview import (
     PREVIEW_VERDICT_EVIDENCE_READY,
     PREVIEW_VERDICT_MEASUREMENT_FAILED,
     ImportPreviewResult,
+    enrich_incomplete_current_evidence_for_request,
     load_current_evidence_for_preview,
     load_persisted_existing_spectral,
     measure_and_persist_candidate_evidence,
     persist_exact_current_spectral_from_attempt,
+    prepare_current_evidence_for_failure,
     preserve_existing_source_spectral,
 )
 from lib.import_evidence import (
@@ -72,6 +74,9 @@ RESTART_PREVIEW_MESSAGE = "Preview worker restarted while job was running; retry
 PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 30.0
 PREVIEW_STALE_RECOVERY_INTERVAL_SECONDS = 60.0
 PREVIEW_STALE_AGE = timedelta(minutes=15)
+
+FailureHavePrepareFn = Callable[..., str]
+FailureHaveEnrichFn = Callable[..., str]
 
 
 def _preview_result_dict(result: ImportPreviewResult) -> dict[str, Any]:
@@ -363,6 +368,9 @@ def _handle_measurement_failed(
     db: Any,
     job: ImportJob,
     result: ImportPreviewResult,
+    *,
+    prepare_failure_have_fn: FailureHavePrepareFn | None = None,
+    enrich_failure_have_fn: FailureHaveEnrichFn | None = None,
 ) -> ImportJob | None:
     """Persist a measurement failure through one DB-owned terminal bundle.
 
@@ -388,7 +396,12 @@ def _handle_measurement_failed(
             source_path=result.source_path or "",
         )
     preview_payload = _preview_result_dict(result)
-    if job.request_id is None or db.get_request(job.request_id) is None:
+    request = (
+        db.get_request(job.request_id)
+        if job.request_id is not None
+        else None
+    )
+    if job.request_id is None or request is None:
         return db.mark_import_job_preview_failed(
             job.id,
             preview_status=PREVIEW_VERDICT_MEASUREMENT_FAILED,
@@ -396,6 +409,41 @@ def _handle_measurement_failed(
             preview_result=preview_payload,
             message=f"Preview measurement failed: {payload.reason}",
         )
+
+    mb_release_id = request.get("mb_release_id")
+    runtime_config = None
+    prepared_outcome: str | None = None
+    if isinstance(mb_release_id, str) and mb_release_id:
+        try:
+            runtime_config = read_runtime_config()
+        except Exception:
+            logger.warning(
+                "Unable to load runtime config while preparing HAVE evidence "
+                "for preview failure on request %s",
+                job.request_id,
+                exc_info=True,
+            )
+        if runtime_config is not None:
+            prepare_fn = (
+                prepare_failure_have_fn
+                or prepare_current_evidence_for_failure
+            )
+            try:
+                prepared_outcome = prepare_fn(
+                    db,
+                    request_id=job.request_id,
+                    mb_release_id=mb_release_id,
+                    quality_ranks=runtime_config.quality_ranks,
+                    beets_library_root=runtime_config.beets_directory,
+                )
+            except Exception:
+                logger.warning(
+                    "HAVE evidence preparation crashed for preview failure "
+                    "on request %s",
+                    job.request_id,
+                    exc_info=True,
+                )
+
     _record_preview_measurement_failed(
         db,
         request_id=job.request_id,
@@ -405,6 +453,28 @@ def _handle_measurement_failed(
         preview_result=preview_payload,
         requeue_to_wanted=job.job_type == IMPORT_JOB_AUTOMATION,
     )
+
+    if prepared_outcome == "ready" and runtime_config is not None:
+        enrich_fn = (
+            enrich_failure_have_fn
+            or enrich_incomplete_current_evidence_for_request
+        )
+        try:
+            enrich_fn(
+                db,
+                request_id=job.request_id,
+                mb_release_id=mb_release_id,
+                quality_ranks=runtime_config.quality_ranks,
+                beets_library_root=runtime_config.beets_directory,
+            )
+        except Exception:
+            logger.warning(
+                "HAVE evidence enrichment crashed after preview failure "
+                "on request %s",
+                job.request_id,
+                exc_info=True,
+            )
+
     refreshed = getattr(db, "get_import_job", None)
     if callable(refreshed):
         return cast(ImportJob | None, refreshed(job.id))
@@ -421,7 +491,18 @@ def process_claimed_preview_job(
     spectral_detail_analyzer: SpectralDetailAnalyzer | None = None,
     existing_spectral_resolver: ExistingSpectralResolver | None = None,
     preview_fn: PreviewFn | None = None,
+    prepare_failure_have_fn: FailureHavePrepareFn | None = None,
+    enrich_failure_have_fn: FailureHaveEnrichFn | None = None,
 ) -> ImportJob | None:
+    def handle_measurement_failed(result: ImportPreviewResult) -> ImportJob | None:
+        return _handle_measurement_failed(
+            db,
+            job,
+            result,
+            prepare_failure_have_fn=prepare_failure_have_fn,
+            enrich_failure_have_fn=enrich_failure_have_fn,
+        )
+
     # Front-gate: if stored candidate evidence already passes the cheap
     # snapshot guard, mark the job importable without invoking measurement.
     # The post-measurement gate below remains as belt-and-braces for the
@@ -560,10 +641,10 @@ def process_claimed_preview_job(
             request_id=job.request_id,
             failure=crash_payload,
         )
-        return _handle_measurement_failed(db, job, crash_result)
+        return handle_measurement_failed(crash_result)
 
     if result.verdict == PREVIEW_VERDICT_MEASUREMENT_FAILED:
-        return _handle_measurement_failed(db, job, result)
+        return handle_measurement_failed(result)
 
     if result.verdict == PREVIEW_VERDICT_EVIDENCE_READY:
         preview_payload = _preview_result_dict(result)
@@ -599,7 +680,7 @@ def process_claimed_preview_job(
             import_result=result.import_result,
             failure=fallback_payload,
         )
-        return _handle_measurement_failed(db, job, fallback_result)
+        return handle_measurement_failed(fallback_result)
 
     # Defensive: anything else (including legacy verdicts in case of bugs)
     # routes through measurement_failed so caller lifecycle authority applies
@@ -626,7 +707,7 @@ def process_claimed_preview_job(
         import_result=result.import_result,
         failure=fallback_payload,
     )
-    return _handle_measurement_failed(db, job, fallback_result)
+    return handle_measurement_failed(fallback_result)
 
 
 def preview_heartbeat_loop(

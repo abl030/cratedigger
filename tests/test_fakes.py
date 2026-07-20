@@ -424,6 +424,7 @@ class TestFakePipelineDB(unittest.TestCase):
         evidence = msgspec.structs.replace(
             evidence,
             audio_corrupt=True,
+            audio_error="01 - Track.mp3: Invalid data found when processing input",
             folder_layout="nested",
             audio_file_count=1,
             filetype_band="mp3",
@@ -438,6 +439,10 @@ class TestFakePipelineDB(unittest.TestCase):
         )
         assert loaded is not None
         self.assertTrue(loaded.audio_corrupt)
+        self.assertEqual(
+            loaded.audio_error,
+            "01 - Track.mp3: Invalid data found when processing input",
+        )
         self.assertEqual(loaded.folder_layout, "nested")
         self.assertEqual(loaded.audio_file_count, 1)
         self.assertEqual(loaded.filetype_band, "mp3")

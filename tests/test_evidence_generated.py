@@ -602,6 +602,26 @@ def assert_lossless_spectral_failure_lifecycle(
         raise AssertionError("harness ran without usable lossless spectral evidence")
 
 
+def assert_integrity_fact_precedes_spectral_failure(
+    *,
+    job_status: str,
+    preview_status: str | None,
+    decision: str | None,
+    harness_calls: int,
+    candidate_evidence_id: int | None,
+) -> None:
+    """Completed corruption evidence must not become measurement_failed."""
+
+    if job_status != "queued" or preview_status != "evidence_ready":
+        raise AssertionError("audio corruption was demoted to measurement failure")
+    if decision != "audio_corrupt":
+        raise AssertionError("audio corruption did not win decision precedence")
+    if harness_calls:
+        raise AssertionError("harness ran after completed audio-corrupt evidence")
+    if candidate_evidence_id is None:
+        raise AssertionError("audio-corrupt candidate evidence was not linked")
+
+
 def _lossless_spectral_detail(
     kind: LosslessSpectralFailureKind,
 ) -> SpectralAnalysisDetail | None:
@@ -621,7 +641,9 @@ def _lossless_spectral_detail(
 
 def _run_lossless_spectral_failure_world(
     kind: LosslessSpectralFailureKind,
-) -> tuple[str, str, str | None, int]:
+    *,
+    audio_corrupt: bool = False,
+) -> tuple[str, str, str | None, int, str | None, int | None]:
     from lib.config import CratediggerConfig
     from lib.import_queue import (
         IMPORT_JOB_FORCE,
@@ -687,17 +709,33 @@ def _run_lossless_spectral_failure_world(
         ini = configparser.ConfigParser()
         ini["Beets Validation"] = {
             "harness_path": "/fake/harness/run_beets_harness.sh",
-            "audio_check": "off",
+            "audio_check": "normal" if audio_corrupt else "off",
         }
         ini["Pipeline DB"] = {"enabled": "true"}
         cfg = CratediggerConfig.from_ini(ini)
         fake_beets = FakeBeetsDB()
+        from lib.util import AudioValidationResult
+
+        audio_result = AudioValidationResult(
+            valid=not audio_corrupt,
+            error=(
+                "01.flac: Invalid data found when processing input"
+                if audio_corrupt else None
+            ),
+            failed_files=(
+                [("01.flac", "Invalid data found when processing input")]
+                if audio_corrupt else []
+            ),
+        )
         with patch(
             "lib.config.read_runtime_config",
             return_value=cfg,
         ), patch(
             "lib.beets_db.BeetsDB",
             lambda **_kwargs: fake_beets,
+        ), patch(
+            "lib.measurement.validate_audio",
+            return_value=audio_result,
         ):
             updated = import_preview_worker.process_claimed_preview_job(
                 cast(Any, db),
@@ -705,11 +743,14 @@ def _run_lossless_spectral_failure_world(
                 preview_fn=preview,
             )
         assert updated is not None
+        preview_result = updated.preview_result or {}
         return (
             str(db.request(71)["status"]),
             updated.status,
             updated.preview_status,
             harness_calls,
+            cast(str | None, preview_result.get("decision")),
+            db.get_import_job_candidate_evidence_id(claimed.id),
         )
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -725,7 +766,14 @@ class TestGeneratedLosslessSpectralFailureLifecycle(unittest.TestCase):
     )))
     @example(kind="absent")
     def test_unusable_lossless_spectral_never_reaches_harness(self, kind):
-        request_status, job_status, preview_status, harness_calls = (
+        (
+            request_status,
+            job_status,
+            preview_status,
+            harness_calls,
+            _decision,
+            _candidate_evidence_id,
+        ) = (
             _run_lossless_spectral_failure_world(kind)
         )
         assert_lossless_spectral_failure_lifecycle(
@@ -734,6 +782,31 @@ class TestGeneratedLosslessSpectralFailureLifecycle(unittest.TestCase):
             job_status=job_status,
             preview_status=preview_status,
             harness_calls=harness_calls,
+        )
+
+    @given(kind=st.sampled_from((
+        "absent",
+        "not_attempted",
+        "error",
+        "grade_none",
+        "grade_error",
+    )))
+    @example(kind="grade_error")
+    def test_audio_corrupt_wins_over_every_spectral_failure_shape(self, kind):
+        (
+            _request_status,
+            job_status,
+            preview_status,
+            harness_calls,
+            decision,
+            candidate_evidence_id,
+        ) = _run_lossless_spectral_failure_world(kind, audio_corrupt=True)
+        assert_integrity_fact_precedes_spectral_failure(
+            job_status=job_status,
+            preview_status=preview_status,
+            decision=decision,
+            harness_calls=harness_calls,
+            candidate_evidence_id=candidate_evidence_id,
         )
 
 
@@ -756,6 +829,16 @@ class TestLosslessSpectralFailureCheckerTripsOnViolations(unittest.TestCase):
                 job_status="failed",
                 preview_status="measurement_failed",
                 harness_calls=1,
+            )
+
+    def test_integrity_checker_trips_on_measurement_failure(self):
+        with self.assertRaisesRegex(AssertionError, "demoted"):
+            assert_integrity_fact_precedes_spectral_failure(
+                job_status="failed",
+                preview_status="measurement_failed",
+                decision="spectral_analysis_failed",
+                harness_calls=0,
+                candidate_evidence_id=None,
             )
 
 class TestLifecycleCheckerTripsOnViolations(unittest.TestCase):

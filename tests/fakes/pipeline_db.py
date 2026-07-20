@@ -1458,6 +1458,10 @@ class FakePipelineDB:
                 request_id=command.request_id,
                 **command.audit.as_log_kwargs(),
             )
+            self.set_download_log_candidate_evidence(
+                download_log_id,
+                self.get_import_job_candidate_evidence_id(command.import_job_id),
+            )
             boundary("download_log")
             for transition in command.post_audit_transitions:
                 applied.extend(self._apply_terminal_request_transition(
@@ -1564,6 +1568,10 @@ class FakePipelineDB:
             download_log_id = cast(Any, self.log_download)(
                 request_id=command.request_id,
                 **command.audit.as_log_kwargs(),
+            )
+            self.set_download_log_candidate_evidence(
+                download_log_id,
+                self.get_import_job_candidate_evidence_id(command.import_job_id),
             )
             boundary("download_log")
             cooled: set[str] = set()
@@ -3773,7 +3781,7 @@ class FakePipelineDB:
                 outcome_filter: str | None = None,
                 ) -> list[dict[str, object]]:
         imported = {"success", "force_import"}
-        rejected = {"rejected", "failed", "timeout"}
+        rejected = {"rejected", "failed", "timeout", "measurement_failed"}
         rows: list[dict[str, object]] = []
         # Newest-first to match the real ORDER BY dl.created_at DESC.
         for entry in reversed(self.download_logs):
