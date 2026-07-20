@@ -10,6 +10,7 @@ import unittest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "world_model_burst.sh"
+RUN_TESTS_SCRIPT = REPO_ROOT / "scripts" / "run_tests.sh"
 
 
 class TestWorldModelBurstScript(unittest.TestCase):
@@ -90,6 +91,20 @@ class TestWorldModelBurstScript(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("randomized real-storage lifecycle hammer", result.stdout)
+
+    def test_standard_suite_runs_only_the_deterministic_world_budget(self) -> None:
+        script = RUN_TESTS_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "python3 -m unittest tests.world_model.state_machine -v",
+            script,
+        )
+        self.assertIn("CRATEDIGGER_WORLD_RANDOMIZED=0", script)
+        self.assertIn("CRATEDIGGER_WORLD_EXAMPLES=6", script)
+        self.assertIn("CRATEDIGGER_WORLD_STEPS=8", script)
+        self.assertIn("unset TEST_DB_DSN", script)
+        self.assertNotIn("scripts/world_model_burst.sh", script)
+        self.assertNotIn("scripts/fuzz_burst.sh", script)
 
 
 if __name__ == "__main__":
