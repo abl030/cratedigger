@@ -117,17 +117,20 @@ class TestGeneratedExactCycleVerifier(unittest.TestCase):
     @given(
         old_source_first=st.booleans(),
         failed_target=st.booleans(),
+        target_has_process_record=st.booleans(),
         later_healthy_target_source=st.booleans(),
     )
     @example(
         old_source_first=False,
         failed_target=True,
+        target_has_process_record=False,
         later_healthy_target_source=True,
     )
     def test_capture_chooses_first_target_source_start_from_journal_history(
         self,
         old_source_first: bool,
         failed_target: bool,
+        target_has_process_record: bool,
         later_healthy_target_source: bool,
     ) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -140,13 +143,22 @@ class TestGeneratedExactCycleVerifier(unittest.TestCase):
                     invocation=fake.OLD_SUCCESSOR,
                     source="/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-source",
                 )]]
-            target_records = [fake.source_record()]
+            target_records = (
+                [fake.source_record()] if target_has_process_record else []
+            )
             if failed_target:
                 target_records.append({
                     "INVOCATION_ID": fake.TARGET,
                     "JOB_RESULT": "failed",
                     "JOB_TYPE": "start",
                     "MESSAGE": "Failed to start Cratedigger.",
+                })
+            else:
+                target_records.append({
+                    "INVOCATION_ID": fake.TARGET,
+                    "JOB_RESULT": "done",
+                    "JOB_TYPE": "start",
+                    "MESSAGE": "Finished Cratedigger — Soulseek download pipeline.",
                 })
             starts.append(fake.start_record(fake.TARGET))
             journals[fake.TARGET] = [target_records]

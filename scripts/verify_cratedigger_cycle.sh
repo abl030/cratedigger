@@ -102,6 +102,18 @@ journal_has_source() {
     ' >/dev/null <<<"$journal"
 }
 
+journal_source_stores() {
+  local journal=$1 invocation=$2
+  jq -r --arg invocation "$invocation" '
+      select(._SYSTEMD_INVOCATION_ID == $invocation)
+      | select((._CMDLINE? | type) == "string")
+      | ._CMDLINE
+      | split(" ")[]
+      | select(test("^/nix/store/[0-9a-z]{32}-source/cratedigger[.]py$"))
+      | sub("/cratedigger[.]py$"; "")
+    ' <<<"$journal" | sort -u
+}
+
 journal_has_cycle_complete() {
   local journal=$1 invocation=$2
   jq -e --arg invocation "$invocation" '
@@ -185,8 +197,9 @@ capture_cursor() {
 
 capture_target() {
   local baseline_cursor=$1 expected_source=$2
-  local deadline polls=0 candidate journal starts
+  local deadline polls=0 candidate journal starts identified_source
   local -a candidates=()
+  local -a identified_sources=()
   local -A seen=()
   validate_cursor "$baseline_cursor"
   validate_source "$expected_source"
@@ -215,15 +228,38 @@ capture_target() {
         die "could not read journal for candidate invocation $candidate"
         return 1
       fi
-      if journal_has_source "$journal" "$candidate" "$expected_source"; then
+      mapfile -t identified_sources < <(
+        journal_source_stores "$journal" "$candidate"
+      )
+      if ((${#identified_sources[@]} > 1)); then
+        die "candidate invocation $candidate names multiple source stores"
+        return 1
+      fi
+      if ((${#identified_sources[@]} == 1)); then
+        identified_source=${identified_sources[0]}
+        if [[ "$identified_source" == "$expected_source" ]]; then
+          printf '%s\n' "$candidate"
+          return 0
+        fi
+        if [[ "${seen[$candidate]}" != reported ]]; then
+          printf 'verify-cratedigger-cycle: ignoring invocation %s from source %s\n' \
+            "$candidate" "$identified_source" >&2
+          seen[$candidate]=reported
+        fi
+        continue
+      fi
+
+      # An invocation with no process record is unknown, not proof of a
+      # different source. Once it terminates, return it so verify-exact fails
+      # closed on its failure or incomplete evidence. While it is live, do not
+      # skip ahead to any later start record.
+      if journal_has_failure "$journal" "$candidate" \
+        || journal_has_finished_success "$journal" "$candidate" \
+        || journal_has_deactivated_success "$journal" "$candidate"; then
         printf '%s\n' "$candidate"
         return 0
       fi
-      if [[ "${seen[$candidate]}" != reported ]]; then
-        printf 'verify-cratedigger-cycle: ignoring non-target-source invocation %s\n' \
-          "$candidate" >&2
-        seen[$candidate]=reported
-      fi
+      break
     done
 
     if poll_limit_reached "$polls" "$deadline"; then

@@ -53,7 +53,7 @@ class TestDeployCycleVerifier(unittest.TestCase):
             journal_snapshots={
                 self.fake.OLD_SUCCESSOR: [[self.fake.source_record(
                     self.fake.OLD_SUCCESSOR,
-                    source="/nix/store/old-source",
+                    source="/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-source",
                 )]],
                 self.fake.TARGET: [[self.fake.source_record()]],
             },
@@ -72,11 +72,11 @@ class TestDeployCycleVerifier(unittest.TestCase):
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), self.fake.TARGET)
-        self.assertIn("ignoring non-target-source invocation", proc.stderr)
+        self.assertIn("ignoring invocation", proc.stderr)
+        self.assertIn("from source", proc.stderr)
 
-    def test_capture_target_cannot_skip_rolled_failed_target_in_journal(self) -> None:
+    def test_capture_target_cannot_skip_manager_only_failed_start(self) -> None:
         failed_target = [
-            self.fake.source_record(),
             {
                 "INVOCATION_ID": self.fake.TARGET,
                 "JOB_RESULT": "failed",
