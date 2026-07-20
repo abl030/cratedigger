@@ -317,13 +317,18 @@ class TestRenderedBeetsConfigContract(unittest.TestCase):
         self.assertIn('mv -f "$tmp_yaml" "$beets_dir/config.yaml"', text)
 
     def test_discogs_token_file_pattern(self) -> None:
-        """Real token via issue #117 *File include; placeholder otherwise."""
+        """Real token access is explicit for service and operator principals."""
         text = MODULE_NIX.read_text(encoding="utf-8")
         self.assertIn("discogsTokenFile", text)
-        # secrets.yaml materialized 0400 from the *File — the token itself
-        # never lands in the world-readable config.yaml.
+        # The default remains service-only. An explicit operator group uses
+        # group-read without exposing the token to unrelated users.
+        self.assertIn("discogsOperatorGroup", text)
         self.assertIn('chmod 0400 "$tmp_secrets"', text)
+        self.assertIn('chmod 0440 "$tmp_secrets"', text)
+        self.assertIn('chgrp', text)
         self.assertIn('mv -f "$tmp_secrets" "$beets_dir/secrets.yaml"', text)
+        self.assertIn('rm -f "$beets_dir/secrets.yaml"', text)
+        self.assertIn("extraGroups = optional", text)
         # Fail-loud on unreadable/empty token: a bare assignment trips
         # set -e on cat failure, and an empty token is rejected (an empty
         # user_token re-enables the discogs interactive OAuth at load).

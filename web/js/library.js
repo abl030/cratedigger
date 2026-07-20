@@ -270,7 +270,9 @@ export function describeBanSourceSuccess(data) {
   if (data.request_status !== 'wanted' && data.request_status !== 'unsearchable') {
     throw new Error(`Unexpected Bad Rip request status: ${data.request_status}`);
   }
-  const removed = data.beets_removed ? 'removed from beets' : 'not in beets';
+  const removed = data.status === 'partial'
+    ? 'still in beets — cleanup incomplete'
+    : (data.beets_removed ? 'removed from beets' : 'not in beets');
   const hashCount = data.hashes_recorded ?? 0;
   const hashes = `${hashCount} hash${hashCount === 1 ? '' : 'es'} recorded`;
   const lifecycle = data.request_status === 'unsearchable'
@@ -300,11 +302,16 @@ export async function banSource(requestId, mbid) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({request_id: requestId, mb_release_id: mbid, confirm: 'BAN'}),
     });
-    if (r.status === 409) {
+    const data = await r.json();
+    if (r.status === 409 && data.error === 'importer_busy') {
       toast('Importer is busy with this album — try again in a moment.', true);
       return;
     }
-    const data = await r.json();
+    if (data.status === 'partial' && data.error === 'cleanup_incomplete') {
+      console.warn('ban-source cleanup incomplete:', data);
+      toast(`${describeBanSourceSuccess(data)} Inspect the exact album before recovery.`, true);
+      return;
+    }
     if (data.status !== 'ok') {
       toast(data.error || 'Ban failed', true);
       return;

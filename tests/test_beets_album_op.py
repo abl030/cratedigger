@@ -108,25 +108,23 @@ class TestRemoveAlbum(unittest.TestCase):
     @patch("lib.beets_album_op.sp.run")
     def test_argv_uses_album_mode_and_delete_by_default(
             self, mock_run: MagicMock) -> None:
-        """``beet remove -a -d id:<N>`` — album mode + delete files by default."""
+        """Remove is album-scoped, forced, and deletes files by default."""
         mock_run.return_value = _ok()
         remove_album(BeetsAlbumHandle(album_id=42))
         argv = mock_run.call_args.args[0]
-        self.assertEqual(argv[1:], ["remove", "-a", "-d", "id:42"])
+        self.assertEqual(
+            argv[1:],
+            ["-P", "importsource", "remove", "-a", "-f", "-d", "id:42"],
+        )
 
     @patch("lib.beets_album_op.sp.run")
-    def test_passes_affirmative_stdin_to_beets_prompt(
+    def test_closes_stdin_instead_of_scripting_beets_prompts(
             self, mock_run: MagicMock) -> None:
-        """``beet remove`` prompts "Really? (yes/[no])" before deleting.
-
-        Live 2026-04-21: running from systemd (no tty) with stdin inherited,
-        the prompt read EOF and exited rc=1 with "stdin stream ended while
-        input required" — every upgrade post-import cleanup silently failed,
-        leaving split-brain 2-row states. Fix: always pipe ``y\\n`` to stdin.
-        """
+        """No plugin or command prompt may consume operator/protocol stdin."""
         mock_run.return_value = _ok()
         remove_album(BeetsAlbumHandle(album_id=42))
-        self.assertEqual(mock_run.call_args.kwargs.get("input"), "y\n")
+        self.assertIs(mock_run.call_args.kwargs.get("stdin"), sp.DEVNULL)
+        self.assertNotIn("input", mock_run.call_args.kwargs)
 
     @patch("lib.beets_album_op.sp.run")
     def test_delete_files_false_omits_dash_d(
@@ -136,7 +134,10 @@ class TestRemoveAlbum(unittest.TestCase):
         remove_album(BeetsAlbumHandle(album_id=42), delete_files=False)
         argv = mock_run.call_args.args[0]
         self.assertNotIn("-d", argv)
-        self.assertEqual(argv[1:], ["remove", "-a", "id:42"])
+        self.assertEqual(
+            argv[1:],
+            ["-P", "importsource", "remove", "-a", "-f", "id:42"],
+        )
 
     @patch("lib.beets_album_op.sp.run")
     def test_timeout_is_typed_failure(self, mock_run: MagicMock) -> None:
@@ -185,7 +186,12 @@ class TestRemoveBySelector(unittest.TestCase):
         self.assertIsNone(result)
         argv = mock_run.call_args.args[0]
         self.assertEqual(
-            argv[1:], ["remove", "-a", "-d", "mb_albumid:abc-uuid"])
+            argv[1:],
+            [
+                "-P", "importsource", "remove", "-a", "-f", "-d",
+                "mb_albumid:abc-uuid",
+            ],
+        )
 
     @patch("lib.beets_album_op.sp.run")
     def test_non_id_selector_failure_records_selector(

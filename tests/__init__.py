@@ -13,12 +13,17 @@ precedence anyway) is never overridden.
 
 import os
 import tempfile
+from pathlib import Path
 
-# A real (creatable) dir: beets' config.read() makedirs(BEETSDIR) at import
-# in the in-process consumers (lib/beets_distance.py slices), so a
-# nonexistent root path would PermissionError. Fixed path (not mkdtemp) so
-# repeated suite runs reuse one dir instead of accreting temp dirs.
+# A real (creatable) dir with a minimal valid config: Beets and Cratedigger's
+# destructive preflight both consume BEETSDIR in-process. Fixed path (not
+# mkdtemp) keeps repeated suite runs from accreting temp directories.
 if "BEETSDIR" not in os.environ:
-    _beetsdir = os.path.join(tempfile.gettempdir(), "cratedigger-test-beetsdir")
-    os.makedirs(_beetsdir, exist_ok=True)
-    os.environ["BEETSDIR"] = _beetsdir
+    os.environ["BEETSDIR"] = os.path.join(
+        tempfile.gettempdir(), "cratedigger-test-beetsdir",
+    )
+_beetsdir = os.environ["BEETSDIR"]
+os.makedirs(_beetsdir, exist_ok=True)
+_beets_config = Path(_beetsdir, "config.yaml")
+if not _beets_config.exists():
+    _beets_config.write_text("plugins: []\n", encoding="utf-8")

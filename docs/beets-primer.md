@@ -29,7 +29,7 @@ In modern beets (2.x), `musicbrainz` is a **plugin** that must be explicitly lis
 ## Configuration
 
 **Rendered config**: `/var/lib/cratedigger/beets/config.yaml` (BEETSDIR; rendered by the module's preStart — do NOT edit, it is overwritten on every service start)
-**Secrets**: `/var/lib/cratedigger/beets/secrets.yaml` (0400; materialized from `services.cratedigger.beets.package.discogsTokenFile`, included via beets `include:`)
+**Secrets**: `/var/lib/cratedigger/beets/secrets.yaml` (service-only 0400, or explicit operator-group 0440 via `services.cratedigger.beets.package.discogsOperatorGroup`; materialized from `discogsTokenFile` and included via beets `include:`; removed when the token option returns to null)
 
 To change the config:
 1. Tunables (`beets.config.{directory,library}`, fetchart widths, `musicbrainz.*` via `musicbrainz.apiBase`) are module options — set them in the nixosconfig wrapper. Everything else (path templates, `duplicate_keys`, the plugin list) is a fixed literal in cratedigger's `nix/module.nix` `beetsSettings` — change it there, in this repo, with the U12-style rendered-config diff in mind.

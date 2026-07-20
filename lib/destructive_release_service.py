@@ -189,6 +189,20 @@ class BanSourceSuccess:
 
 
 @dataclass(frozen=True)
+class BanSourceCleanupIncomplete:
+    """Bad-source evidence committed but the exact Beets release remains."""
+
+    request_id: int
+    release_id: str
+    request_status: Literal["wanted", "unsearchable"]
+    username: str | None
+    beets_removed: Literal[False]
+    hashes_recorded: int
+    cleanup_errors: tuple[BeetsOpFailure, ...]
+    hash_capture_errors: tuple[HashCaptureFailure, ...]
+
+
+@dataclass(frozen=True)
 class BanSourceRequestNotFound:
     request_id: int
 
@@ -219,6 +233,7 @@ class BanSourceTransitionConflict:
 
 BanSourceResult: TypeAlias = (
     BanSourceSuccess
+    | BanSourceCleanupIncomplete
     | BanSourceRequestNotFound
     | BanSourceReleaseMismatch
     | BanSourceLockContended
@@ -338,6 +353,7 @@ def _ban_source_locked(
         "hashes_recorded": hashes_recorded,
         "denylisted_username": reported_username,
         "reason": reason,
+        "cleanup_absent_after": cleanup.absent_after,
         "cleanup_errors": [
             {
                 "selector": failure.selector,
@@ -359,6 +375,17 @@ def _ban_source_locked(
         beets_detail=detail,
         validation_result=validation_result,
     )
+    if not cleanup.absent_after:
+        return BanSourceCleanupIncomplete(
+            request_id=request.request_id,
+            release_id=release_id,
+            request_status=request_status,
+            username=reported_username,
+            beets_removed=False,
+            hashes_recorded=hashes_recorded,
+            cleanup_errors=cleanup_errors,
+            hash_capture_errors=tuple(hash_failures),
+        )
     return BanSourceSuccess(
         request_id=request.request_id,
         release_id=release_id,

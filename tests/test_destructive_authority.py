@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 import threading
 import os
@@ -15,6 +16,7 @@ from unittest.mock import patch
 from beets import library
 
 from lib.destructive_release_service import (
+    BanSourceCleanupIncomplete,
     BanSourceImporterBusy,
     BanSourceLockContended,
     BanSourceReleaseMismatch,
@@ -262,6 +264,29 @@ class TestBanSourceAuthority(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["release_id"], RELEASE_A)
         self.assertTrue(calls[0]["clear_pipeline_state"])
+
+    def test_cleanup_that_leaves_exact_release_is_typed_incomplete(self) -> None:
+        failure = ReleaseCleanupResult(
+            beets_removed=False,
+            absent_after=False,
+            selector_failures=(),
+        )
+
+        result = ban_source(
+            pipeline_db=self.db,
+            beets_db=self.beets,
+            request=BanSourceRequest(request_id=41),
+            cleanup_release_fn=lambda **_kwargs: failure,
+        )
+
+        self.assertIsInstance(result, BanSourceCleanupIncomplete)
+        assert isinstance(result, BanSourceCleanupIncomplete)
+        self.assertEqual(result.request_status, "wanted")
+        self.assertFalse(result.beets_removed)
+        self.assertEqual(self.db.request(41)["status"], "wanted")
+        self.assertEqual(self.db.download_logs[-1].outcome, "curator_ban")
+        audit = json.loads(self.db.download_logs[-1].validation_result)
+        self.assertIs(audit["cleanup_absent_after"], False)
 
 
 class TestLibraryDeleteAuthority(unittest.TestCase):
