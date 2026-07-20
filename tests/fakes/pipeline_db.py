@@ -845,6 +845,11 @@ class FakePipelineDB:
             "preview_completed_at": None,
             "importable_at": None,
             "candidate_evidence_id": None,
+            "expected_request_status": (
+                self._requests.get(request_id, {}).get("status")
+                if request_id is not None
+                else None
+            ),
             "beets_launch_authorized_at": None,
             "beets_launch_release_id": None,
             "beets_launch_source_path": None,
@@ -1084,7 +1089,6 @@ class FakePipelineDB:
         request_id: int,
         release_id: str,
         source_path: str,
-        expected_request_status: str,
     ) -> ImportJob | None:
         request = self._requests.get(request_id)
         for row in self._import_jobs:
@@ -1094,7 +1098,8 @@ class FakePipelineDB:
                 or row.get("beets_launch_authorized_at") is not None
                 or row.get("request_id") != request_id
                 or request is None
-                or request.get("status") != expected_request_status
+                or row.get("expected_request_status") is None
+                or request.get("status") != row.get("expected_request_status")
                 or request.get("status") == "replaced"
                 or request.get("mb_release_id") != release_id
             ):

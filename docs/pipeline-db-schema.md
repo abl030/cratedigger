@@ -210,6 +210,10 @@ Key fields:
   parallel active YouTube import for the same request.
 - `attempts`, `worker_id`, `started_at`, `heartbeat_at`, `completed_at` —
   claim and recovery metadata.
+- `expected_request_status` — the request status captured atomically when the
+  job is enqueued. Launch authorization compares the live request row with
+  this stored precondition; the importer cannot make the check tautological by
+  rereading the live value immediately before launch.
 - `beets_launch_authorized_at`, `beets_launch_release_id`,
   `beets_launch_source_path`, `beets_launch_request_status`, and
   `beets_launch_snapshot_fingerprint` — the exact release/request/source
@@ -259,6 +263,12 @@ and terminal `import_jobs` update commit together through the typed commands in
 compare-and-set conflict rolls back the entire bundle; callers must not perform
 a second job finalization. Direct/no-job poller transitions retain their
 existing non-queue behavior and are outside this job-owned transaction.
+Destructive staged-folder, duplicate-guard quarantine, and disambiguation
+cleanup returned by dispatch are performed only after that terminal commit.
+The cleanup description is process-local and best-effort: a crash after the
+terminal acknowledgement may leave harmless filesystem debris, but a failed
+or rolled-back acknowledgement cannot erase the source needed for operator
+recovery.
 
 Async preview workers run outside the beets mutation lane. They claim queued
 jobs with `preview_status='waiting'`, call the no-mutation import preview path,

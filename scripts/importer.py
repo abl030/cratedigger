@@ -68,6 +68,78 @@ def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
     }
 
 
+def _run_post_commit_cleanup(outcome: DispatchOutcome) -> dict[str, object] | None:
+    """Run narrow destructive convergence only after terminal acknowledgement."""
+    plan = outcome.post_commit_cleanup
+    if plan is None:
+        return None
+
+    details: dict[str, object] = {}
+    if plan.duplicate_guard_source_path is not None:
+        try:
+            from lib.duplicate_remove_guard import (
+                quarantine_duplicate_remove_guard_source,
+            )
+
+            quarantine = quarantine_duplicate_remove_guard_source(
+                source_path=plan.duplicate_guard_source_path,
+                staging_dir=plan.duplicate_guard_staging_dir or "",
+                request_id=plan.duplicate_guard_request_id,
+            )
+            details["duplicate_guard_quarantine"] = {
+                "source_path": quarantine.source_path,
+                "quarantine_path": quarantine.quarantine_path,
+                "moved": quarantine.moved,
+                "already_quarantined": quarantine.already_quarantined,
+                "path_missing": quarantine.path_missing,
+                "error": quarantine.error,
+            }
+        except Exception as exc:  # noqa: BLE001 - terminal commit must stand
+            logger.exception("Post-commit duplicate-guard quarantine failed")
+            details["duplicate_guard_quarantine"] = {
+                "source_path": plan.duplicate_guard_source_path,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    if plan.staged_path is not None:
+        try:
+            from lib.dispatch.helpers import _cleanup_staged_dir
+
+            _cleanup_staged_dir(plan.staged_path)
+            details["staged_path"] = {
+                "path": plan.staged_path,
+                "success": True,
+            }
+        except Exception as exc:  # noqa: BLE001 - terminal commit must stand
+            logger.exception("Post-commit staged-path cleanup failed")
+            details["staged_path"] = {
+                "path": plan.staged_path,
+                "success": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    if plan.disambiguation_imported_path is not None:
+        try:
+            from lib.util import cleanup_disambiguation_orphans
+
+            removed = cleanup_disambiguation_orphans(
+                plan.disambiguation_imported_path,
+                beets_directory=plan.beets_directory,
+            )
+            details["disambiguation_orphans"] = {
+                "imported_path": plan.disambiguation_imported_path,
+                "removed": removed,
+            }
+        except Exception as exc:  # noqa: BLE001 - terminal commit must stand
+            logger.exception("Post-commit disambiguation cleanup failed")
+            details["disambiguation_orphans"] = {
+                "imported_path": plan.disambiguation_imported_path,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    return details or None
+
+
 def _force_job_wrong_match_payload(job: ImportJob) -> tuple[int, str | None] | None:
     if job.job_type != IMPORT_JOB_FORCE:
         return None
@@ -551,6 +623,14 @@ def process_claimed_job(
                 ))
             )
             terminal_job = terminal.job
+            post_commit_cleanup = _run_post_commit_cleanup(outcome)
+            if post_commit_cleanup is not None:
+                merged = db.merge_import_job_result(
+                    job.id,
+                    {"post_commit_cleanup": post_commit_cleanup},
+                )
+                if merged is not None:
+                    terminal_job = merged
             dismissal = _dismiss_successful_force_import(db, job)
             if dismissal is not None:
                 merged = db.merge_import_job_result(
@@ -633,6 +713,14 @@ def process_claimed_job(
             ))
         )
         terminal_job = terminal.job
+        post_commit_cleanup = _run_post_commit_cleanup(outcome)
+        if post_commit_cleanup is not None:
+            merged = db.merge_import_job_result(
+                job.id,
+                {"post_commit_cleanup": post_commit_cleanup},
+            )
+            if merged is not None:
+                terminal_job = merged
         cleanup = _cleanup_failed_force_import(db, job, outcome)
         if cleanup is not None:
             merged = db.merge_import_job_result(job.id, {"cleanup": cleanup})

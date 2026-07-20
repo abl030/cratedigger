@@ -6,11 +6,20 @@
 -- worker crash; a marked row is not.
 
 ALTER TABLE import_jobs
+    ADD COLUMN expected_request_status TEXT,
     ADD COLUMN beets_launch_authorized_at TIMESTAMPTZ,
     ADD COLUMN beets_launch_release_id TEXT,
     ADD COLUMN beets_launch_source_path TEXT,
     ADD COLUMN beets_launch_request_status TEXT,
     ADD COLUMN beets_launch_snapshot_fingerprint TEXT;
+
+-- Existing queued jobs were prepared against the request state visible at
+-- deployment. New enqueues capture this value in the same INSERT that creates
+-- the job, so a later status change makes launch authorization fail closed.
+UPDATE import_jobs AS job
+SET expected_request_status = request.status
+FROM album_requests AS request
+WHERE request.id = job.request_id;
 
 ALTER TABLE import_jobs
     DROP CONSTRAINT IF EXISTS import_jobs_status_check;

@@ -39,9 +39,12 @@ class _ImportJobsMixin(_PipelineDBBase):
                 INSERT INTO import_jobs (
                     job_type, request_id, dedupe_key, payload, message,
                     preview_status, preview_message, preview_completed_at,
-                    importable_at
+                    importable_at, expected_request_status
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, NULL, NULL, NULL)
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, NULL, NULL, NULL,
+                    (SELECT status FROM album_requests WHERE id = %s)
+                )
                 ON CONFLICT (dedupe_key)
                     WHERE dedupe_key IS NOT NULL
                       AND status IN (
@@ -68,6 +71,7 @@ class _ImportJobsMixin(_PipelineDBBase):
             psycopg2.extras.Json(payload),
             message,
             IMPORT_JOB_PREVIEW_WAITING,
+            request_id,
             dedupe_key,
             dedupe_key,
         ))
@@ -271,7 +275,6 @@ class _ImportJobsMixin(_PipelineDBBase):
         request_id: int,
         release_id: str,
         source_path: str,
-        expected_request_status: str,
     ) -> ImportJob | None:
         """Atomically bind one running job to the exact Beets launch.
 
@@ -297,7 +300,8 @@ class _ImportJobsMixin(_PipelineDBBase):
               AND job.request_id = %s
               AND request.id = job.request_id
               AND request.id = %s
-              AND request.status = %s
+              AND job.expected_request_status IS NOT NULL
+              AND request.status = job.expected_request_status
               AND request.status != 'replaced'
               AND request.mb_release_id = %s
               AND evidence.id = job.candidate_evidence_id
@@ -328,7 +332,6 @@ class _ImportJobsMixin(_PipelineDBBase):
             job_id,
             request_id,
             request_id,
-            expected_request_status,
             release_id,
             release_id,
             source_path,
@@ -519,10 +522,12 @@ class _ImportJobsMixin(_PipelineDBBase):
                         preview_attempts,
                         preview_completed_at,
                         importable_at,
-                        candidate_evidence_id
+                        candidate_evidence_id,
+                        expected_request_status
                     )
                     VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s
                     )
                     RETURNING *
                 """, (
@@ -543,6 +548,7 @@ class _ImportJobsMixin(_PipelineDBBase):
                     original.preview_completed_at,
                     original.importable_at,
                     original.candidate_evidence_id,
+                    original.expected_request_status,
                 ))
                 retry_raw = retry_cur.fetchone()
                 if retry_raw is None:

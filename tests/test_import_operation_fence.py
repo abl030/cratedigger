@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from lib.dispatch import DispatchOutcome
+from lib.dispatch.types import PostCommitCleanup
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
@@ -79,7 +80,6 @@ class TestImportOperationFence(unittest.TestCase):
             request_id=42,
             release_id="release-42",
             source_path=source_path,
-            expected_request_status="wanted",
         )
         assert launched is not None
         recovery = db.mark_import_job_recovery_required(
@@ -122,7 +122,6 @@ class TestImportOperationFence(unittest.TestCase):
             request_id=42,
             release_id="release-old",
             source_path=source_path,
-            expected_request_status="wanted",
         )
         if authorized is not None:
             beets_invocations.append(claimed.id)
@@ -166,7 +165,6 @@ class TestImportOperationFence(unittest.TestCase):
             request_id=2,
             release_id="release-2",
             source_path="/tmp/two",
-            expected_request_status="wanted",
         )
         assert authorized is not None
 
@@ -213,7 +211,6 @@ class TestImportOperationFence(unittest.TestCase):
             request_id=42,
             release_id="release-42",
             source_path=source_path,
-            expected_request_status="wanted",
         )
         assert authorized is not None
 
@@ -262,7 +259,6 @@ class TestImportOperationFence(unittest.TestCase):
             request_id=42,
             release_id="release-42",
             source_path=source_path,
-            expected_request_status="wanted",
         ) is not None
         terminal = PendingImportTerminalOutcome(
             request_id=42,
@@ -317,7 +313,6 @@ class TestImportOperationFence(unittest.TestCase):
             request_id=42,
             release_id="release-42",
             source_path=source_path,
-            expected_request_status="downloading",
         )
 
         assert authorized is not None
@@ -412,9 +407,15 @@ class TestImportOperationFence(unittest.TestCase):
                 success=False,
                 message="rejected",
                 terminal_outcome=pending,
+                post_commit_cleanup=PostCommitCleanup(
+                    staged_path="/tmp/operator-copy",
+                    disambiguation_imported_path="/library/Artist/Album",
+                    beets_directory="/library",
+                ),
             )
 
-        with patch.object(importer, "_cleanup_failed_force_import") as cleanup:
+        with patch.object(importer, "_cleanup_failed_force_import") as cleanup, \
+             patch.object(importer, "_run_post_commit_cleanup") as post_cleanup:
             with self.assertRaisesRegex(
                 RuntimeError,
                 "terminal acknowledgement failed",
@@ -425,6 +426,65 @@ class TestImportOperationFence(unittest.TestCase):
                     execute_fn=rejected,
                 )
         cleanup.assert_not_called()
+        post_cleanup.assert_not_called()
+
+    def test_post_commit_cleanup_runs_only_after_terminal_persistence(self) -> None:
+        from scripts import importer
+
+        events: list[str] = []
+
+        class OrderingDB(FakePipelineDB):
+            def persist_import_terminal_outcome(
+                self,
+                command: ImportTerminalOutcome,
+            ) -> TerminalOutcomeResult:
+                result = super().persist_import_terminal_outcome(command)
+                events.append("terminal")
+                return result
+
+        db = OrderingDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            payload={"failed_path": "/tmp/operator-copy"},
+        )
+        db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
+        claimed = db.claim_next_import_job(worker_id="worker")
+        assert claimed is not None
+        pending = PendingImportTerminalOutcome(
+            request_id=42,
+            import_job_id=claimed.id,
+            initial_transition=None,
+            audit=TerminalDownloadAudit(outcome="rejected"),
+        )
+
+        def rejected(*_args: object, **_kwargs: object) -> DispatchOutcome:
+            return DispatchOutcome(
+                success=False,
+                message="rejected",
+                terminal_outcome=pending,
+                post_commit_cleanup=PostCommitCleanup(
+                    staged_path="/tmp/operator-copy",
+                ),
+            )
+
+        def record_cleanup(_outcome: DispatchOutcome) -> dict[str, object]:
+            events.append("cleanup")
+            return {"staged_path": {"success": True}}
+
+        with patch.object(
+            importer,
+            "_run_post_commit_cleanup",
+            side_effect=record_cleanup,
+        ):
+            importer.process_claimed_job(
+                cast(Any, db),
+                claimed,
+                execute_fn=rejected,
+            )
+
+        self.assertEqual(events, ["terminal", "cleanup"])
 
     def test_automation_retry_clears_legacy_request_launch_guard(self) -> None:
         db = FakePipelineDB()
@@ -459,7 +519,6 @@ class TestImportOperationFence(unittest.TestCase):
             request_id=42,
             release_id="release-42",
             source_path=source_path,
-            expected_request_status="downloading",
         ) is not None
         recovery = db.mark_import_job_recovery_required(
             claimed.id,
@@ -518,7 +577,6 @@ class TestImportOperationFencePostgres(unittest.TestCase):
             request_id=request_id,
             release_id="release-pg",
             source_path=source_path,
-            expected_request_status="wanted",
         )
         assert launched is not None
         db.close()
@@ -624,7 +682,6 @@ class TestImportOperationFencePostgres(unittest.TestCase):
             request_id=request_id,
             release_id="release-terminal-rollback",
             source_path=source_path,
-            expected_request_status="wanted",
         ) is not None
 
         failing = FaultInjectingPipelineDB(TEST_DSN, fail_after_write=1)

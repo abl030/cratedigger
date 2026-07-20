@@ -69,6 +69,23 @@ class QualityGateState:
 
 
 @dataclass(frozen=True)
+class PostCommitCleanup:
+    """Destructive convergence that is safe only after terminal commit.
+
+    This value is intentionally in-memory only. A crash after acknowledgement
+    may leave harmless staging debris, but a crash before acknowledgement must
+    leave every recovery source in place for operator inspection.
+    """
+
+    staged_path: str | None = None
+    disambiguation_imported_path: str | None = None
+    beets_directory: str = ""
+    duplicate_guard_source_path: str | None = None
+    duplicate_guard_staging_dir: str | None = None
+    duplicate_guard_request_id: int | None = None
+
+
+@dataclass(frozen=True)
 class DispatchOutcome:
     """Summary of an import outcome."""
 
@@ -78,6 +95,7 @@ class DispatchOutcome:
     code: str | None = None
     terminal_outcome: "PendingImportTerminalOutcome | None" = None
     post_commit_wrong_match_scenario: str | None = None
+    post_commit_cleanup: PostCommitCleanup | None = None
 
 
 class DispatchCoreFn(Protocol):

@@ -197,6 +197,8 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             "cmd": cmd,
             "db": db,
             "path": tmpdir,
+            "cleanup_calls": ext.cleanup.call_count,
+            "orphan_cleanup_calls": ext.orphans.call_count,
         }
 
     # --- Success path ---
@@ -210,6 +212,15 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         r = self._dispatch()
         self.assertEqual(len(r["db"].download_logs), 1)
         self.assertEqual(r["db"].download_logs[0].outcome, "success")
+
+    def test_job_owned_destructive_cleanup_is_returned_for_post_commit(self):
+        r = self._dispatch()
+
+        self.assertEqual(r["cleanup_calls"], 0)
+        self.assertEqual(r["orphan_cleanup_calls"], 0)
+        cleanup = r["result"].post_commit_cleanup
+        assert cleanup is not None
+        self.assertEqual(cleanup.staged_path, r["path"])
 
     def test_stale_request_stops_before_import_subprocess(self):
         from lib.dispatch import dispatch_import_core
@@ -294,6 +305,70 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         ext.run.assert_not_called()
         self.assertEqual(db.request(42)["status"], "downloading")
         self.assertEqual(db.download_logs, [])
+
+    def test_force_job_status_change_after_enqueue_stops_before_beets(self):
+        from lib.dispatch import dispatch_import_core
+
+        db = FakePipelineDB()
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db.seed_request(make_request_row(
+                id=42,
+                status="wanted",
+                mb_release_id="mbid-123",
+            ))
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                payload={"failed_path": tmpdir},
+            )
+            candidate = _seed_candidate_for_import_job(
+                db,
+                job.id,
+                mb_release_id="mbid-123",
+                source_path=tmpdir,
+            )
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+            )
+            claimed = db.claim_next_import_job(worker_id="stale-force-test")
+            assert claimed is not None
+            self.assertEqual(claimed.expected_request_status, "wanted")
+
+            # The job was prepared under wanted. A later request transition
+            # cannot become its own expectation at the launch boundary.
+            db.request(42)["status"] = "imported"
+            recorder = MagicMock()
+            outcome = dispatch_import_core(
+                path=tmpdir,
+                mb_release_id="mbid-123",
+                request_id=42,
+                label="Test Artist - Test Album",
+                force=True,
+                beets_harness_path=cfg.beets_harness_path,
+                db=db,  # type: ignore[arg-type]
+                dl_info=DownloadInfo(username="user1"),
+                distance=0.05,
+                scenario="force_import",
+                cfg=cfg,
+                candidate_import_job_id=job.id,
+                quality_gate_fn=noop_quality_gate,
+                evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(
+                    candidate=candidate,
+                ),
+                run_import_fn=recorder,
+            )
+
+        self.assertFalse(outcome.success)
+        self.assertEqual(outcome.code, "launch_authority_conflict")
+        recorder.assert_not_called()
+        current = db.get_import_job(job.id)
+        assert current is not None
+        self.assertIsNone(current.beets_launch_authorized_at)
 
     def test_outcome_label_in_download_log(self):
         r = self._dispatch(outcome_label="force_import")

@@ -104,6 +104,7 @@ class ImportJob:
     preview_completed_at: datetime | None = None
     importable_at: datetime | None = None
     candidate_evidence_id: int | None = None
+    expected_request_status: str | None = None
     beets_launch_authorized_at: datetime | None = None
     beets_launch_release_id: str | None = None
     beets_launch_source_path: str | None = None
@@ -190,6 +191,11 @@ class ImportJob:
                 if row.get("candidate_evidence_id") is not None
                 else None
             ),
+            expected_request_status=(
+                str(row["expected_request_status"])
+                if row.get("expected_request_status") is not None
+                else None
+            ),
             beets_launch_authorized_at=row.get(
                 "beets_launch_authorized_at"
             ),
@@ -245,6 +251,7 @@ class ImportJob:
             "preview_completed_at": self.preview_completed_at,
             "importable_at": self.importable_at,
             "candidate_evidence_id": self.candidate_evidence_id,
+            "expected_request_status": self.expected_request_status,
             "beets_launch_authorized_at": self.beets_launch_authorized_at,
             "beets_launch_release_id": self.beets_launch_release_id,
             "beets_launch_source_path": self.beets_launch_source_path,

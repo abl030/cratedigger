@@ -17,6 +17,8 @@ import unittest
 from typing import Never
 from unittest.mock import MagicMock, patch
 
+import msgspec
+
 from lib.config import CratediggerConfig
 from lib.quality import (DownloadInfo, ImportResult, ConversionInfo,
                          DuplicateRemoveCandidate, DuplicateRemoveGuardInfo,
@@ -80,7 +82,7 @@ def _make_ctx():
     cfg.beets_distance_threshold = 0.15
     cfg.beets_staging_dir = "/tmp/staging"
     cfg.verified_lossless_target = ""
-    cfg.quality_ranks.to_json.return_value = "{}"
+    cfg.quality_ranks = QualityRankConfig.defaults()
     fake_db = FakePipelineDB()
     fake_db.seed_request(make_request_row(
         id=42,
@@ -111,6 +113,58 @@ def _full_dispatch_config() -> CratediggerConfig:
     ini["Beets Validation"] = {"harness_path": _HARNESS}
     ini["Pipeline DB"] = {"enabled": "true"}
     return CratediggerConfig.from_ini(ini)
+
+
+def _claim_dispatch_job(
+    db: FakePipelineDB,
+    *,
+    path: str,
+    release_id: str,
+    force: bool = False,
+    request_id: int = 42,
+    evidence_kwargs=None,
+):
+    """Create the production-shaped job/evidence authority for a core test."""
+    from lib.import_evidence import (
+        ActionEvidenceProvenance,
+        CandidateEvidenceActionResult,
+    )
+    from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
+
+    request = db.request(request_id)
+    request["mb_release_id"] = release_id
+    if not force:
+        state = dict(request.get("active_download_state") or {})
+        state["current_path"] = path
+        state.setdefault("files", [])
+        request["active_download_state"] = state
+    job = db.enqueue_import_job(
+        IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
+        request_id=request_id,
+        payload={"failed_path": path} if force else {},
+    )
+    evidence = make_album_quality_evidence(
+        mb_release_id=release_id,
+        source_path=path,
+        **(evidence_kwargs or {}),
+    )
+    db.upsert_album_quality_evidence(evidence)
+    persisted = db.find_album_quality_evidence(
+        mb_release_id=release_id,
+        snapshot_fingerprint=evidence.snapshot_fingerprint,
+    )
+    assert persisted is not None and persisted.id is not None
+    db.set_import_job_candidate_evidence(job.id, persisted.id)
+    db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
+    claimed = db.claim_next_import_job(worker_id="dispatch-test")
+    assert claimed is not None
+    return claimed, CandidateEvidenceActionResult(
+        evidence=persisted,
+        provenance=ActionEvidenceProvenance(
+            candidate_status="reused",
+            snapshot_guard="matched",
+        ),
+    )
 
 
 def _dispatch_valid_result_cmd(
@@ -159,7 +213,20 @@ def _dispatch_valid_result_cmd(
         with patch("lib.download_validation.log_validation_result"), \
              patch_dispatch_externals() as ext, \
              patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
-            _handle_valid_result(
+            from lib.dispatch import dispatch_import_core
+
+            def dispatch_with_job(**kwargs):
+                db = ctx.pipeline_db_source._get_db()
+                claimed, candidate = _claim_dispatch_job(
+                    db,
+                    path=kwargs["path"],
+                    release_id=kwargs["mb_release_id"],
+                )
+                kwargs["candidate_import_job_id"] = claimed.id
+                kwargs["prevalidated_candidate_result"] = candidate
+                return dispatch_import_core(**kwargs)
+
+            outcome = _handle_valid_result(
                 album_data,
                 bv_result,
                 StagedAlbum(
@@ -168,7 +235,9 @@ def _dispatch_valid_result_cmd(
                 ),
                 ctx,
                 quality_gate_fn=noop_quality_gate,
+                dispatch_fn=dispatch_with_job,
             )
+            assert ext.run.call_args is not None, outcome
             return ext.run.call_args[0][0]
 
 
@@ -848,10 +917,39 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            request = db.request(42)
+            request["mb_release_id"] = "test-mbid"
+            request["active_download_state"] = {
+                "files": [],
+                "filetype": "flac",
+                "current_path": tmpdir,
+            }
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
                 request_id=42,
                 payload={"failed_path": tmpdir} if force else {},
+            )
+            candidate = msgspec.structs.replace(
+                candidate,
+                mb_release_id="test-mbid",
+                source_path=tmpdir,
+            )
+            db.upsert_album_quality_evidence(candidate)
+            persisted = db.find_album_quality_evidence(
+                mb_release_id=candidate.mb_release_id,
+                snapshot_fingerprint=candidate.snapshot_fingerprint,
+            )
+            assert persisted is not None and persisted.id is not None
+            db.set_import_job_candidate_evidence(job.id, persisted.id)
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+            )
+            claimed = db.claim_next_import_job(worker_id="have-analysis-test")
+            assert claimed is not None
+            candidate_result = msgspec.structs.replace(
+                candidate_result,
+                evidence=persisted,
             )
             with patch_dispatch_externals() as ext, patch(
                 "lib.dispatch.subprocess_runner.parse_import_result",
@@ -1093,55 +1191,69 @@ class TestDispatchImport(unittest.TestCase):
         if ir is self._SENTINEL:
             ir = make_import_result(decision="import")
 
-        db = FakePipelineDB()
-        request_overrides = {
-            "active_download_state": {"files": [], "filetype": "mp3"},
-            **(request_overrides or {}),
-        }
-        db.seed_request(make_request_row(
-            id=42, status=initial_status,
-            **request_overrides,
-        ))
         cfg = _full_dispatch_config()
         dl_info = DownloadInfo(filetype="mp3")
 
         mock_gate = RecordingQualityGate()
         tmpdir = tempfile.mkdtemp()
         try:
-            import_job_id = None
-            candidate_result = None
-            if queued:
-                from lib.import_evidence import (
-                    ActionEvidenceProvenance,
-                    CandidateEvidenceActionResult,
-                )
-                from lib.import_queue import (
-                    IMPORT_JOB_AUTOMATION,
-                    IMPORT_JOB_FORCE,
-                )
+            del queued  # every Beets seam now requires a claimed job
+            db = FakePipelineDB()
+            supplied_overrides = dict(request_overrides or {})
+            active_state = dict(
+                supplied_overrides.get("active_download_state") or {}
+            )
+            active_state.setdefault("files", [])
+            active_state.setdefault("filetype", "mp3")
+            active_state["current_path"] = tmpdir
+            request_overrides = {
+                "mb_release_id": "test-mbid",
+                **supplied_overrides,
+                "active_download_state": active_state,
+            }
+            db.seed_request(make_request_row(
+                id=42, status=initial_status,
+                **request_overrides,
+            ))
+            from lib.import_evidence import (
+                ActionEvidenceProvenance,
+                CandidateEvidenceActionResult,
+            )
+            from lib.import_queue import (
+                IMPORT_JOB_AUTOMATION,
+                IMPORT_JOB_FORCE,
+            )
 
-                job = db.enqueue_import_job(
-                    IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
-                    request_id=42,
-                    payload={"failed_path": tmpdir} if force else {},
-                )
-                db.mark_import_job_preview_importable(
-                    job.id,
-                    preview_result={"ready": True},
-                )
-                claimed = db.claim_next_import_job(worker_id="dispatch-test")
-                assert claimed is not None
-                import_job_id = claimed.id
-                candidate_result = CandidateEvidenceActionResult(
-                    evidence=make_album_quality_evidence(
-                        mb_release_id="test-mbid",
-                        source_path=tmpdir,
-                    ),
-                    provenance=ActionEvidenceProvenance(
-                        candidate_status="reused",
-                        snapshot_guard="matched",
-                    ),
-                )
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
+                request_id=42,
+                payload={"failed_path": tmpdir} if force else {},
+            )
+            evidence = make_album_quality_evidence(
+                mb_release_id="test-mbid",
+                source_path=tmpdir,
+            )
+            db.upsert_album_quality_evidence(evidence)
+            persisted = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert persisted is not None and persisted.id is not None
+            db.set_import_job_candidate_evidence(job.id, persisted.id)
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+            )
+            claimed = db.claim_next_import_job(worker_id="dispatch-test")
+            assert claimed is not None
+            import_job_id = claimed.id
+            candidate_result = CandidateEvidenceActionResult(
+                evidence=persisted,
+                provenance=ActionEvidenceProvenance(
+                    candidate_status="reused",
+                    snapshot_guard="matched",
+                ),
+            )
             with patch_dispatch_externals() as ext, \
                  patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
                 outcome = dispatch_import_core(
@@ -1179,6 +1291,7 @@ class TestDispatchImport(unittest.TestCase):
 
         return {
             "db": db,
+            "outcome": outcome,
             "mock_cleanup": ext.cleanup,
             "mock_jellyfin": ext.jellyfin,
             "mock_gate": mock_gate,
@@ -1250,7 +1363,9 @@ class TestDispatchImport(unittest.TestCase):
         r["mock_jellyfin"].assert_called_once()
         self.assertEqual(
             r["mock_jellyfin"].call_args.args[1], imported_path)
-        r["mock_cleanup"].assert_called_once()
+        cleanup = r["outcome"].post_commit_cleanup
+        assert cleanup is not None
+        self.assertIsNotNone(cleanup.staged_path)
         r["mock_gate"].assert_called_once()
 
     def test_import_with_bad_extensions_logs_error_and_persists_jsonb(self):
@@ -1353,7 +1468,9 @@ class TestDispatchImport(unittest.TestCase):
         self.assertEqual(r["db"].download_logs[0].outcome, "rejected")
         self.assertEqual(r["db"].request(42)["status"], "wanted")
         self.assertTrue(len(r["db"].denylist) > 0)
-        r["mock_cleanup"].assert_called_once()
+        cleanup = r["outcome"].post_commit_cleanup
+        assert cleanup is not None
+        self.assertIsNotNone(cleanup.staged_path)
 
     def test_downgrade_passes_narrowed_override_to_transition(self):
         ir = make_import_result(decision="downgrade", new_min_bitrate=320,
@@ -1603,6 +1720,11 @@ class TestDispatchImport(unittest.TestCase):
             status="downloading",
             active_download_state={"files": [], "filetype": "mp3"},
         ))
+        claimed, candidate = _claim_dispatch_job(
+            db,
+            path=source,
+            release_id="test-mbid",
+        )
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             beets_staging_dir=staging_root,
@@ -1611,7 +1733,7 @@ class TestDispatchImport(unittest.TestCase):
         try:
             with patch_dispatch_externals() as ext, \
                  patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
-                dispatch_import_core(
+                outcome = dispatch_import_core(
                     path=source,
                     mb_release_id="test-mbid",
                     request_id=42,
@@ -1625,7 +1747,26 @@ class TestDispatchImport(unittest.TestCase):
                     cfg=cfg,
                     requeue_on_failure=True,
                     attempt_spectral_audit=audit,
+                    candidate_import_job_id=claimed.id,
+                    prevalidated_candidate_result=candidate,
                 )
+                assert outcome.terminal_outcome is not None
+                from lib.terminal_outcomes import ImportJobTerminal
+                db.persist_import_terminal_outcome(
+                    outcome.terminal_outcome.with_job(ImportJobTerminal(
+                        status="failed",
+                        error=outcome.message,
+                        result={"success": False},
+                        message=outcome.message,
+                    ))
+                )
+                from scripts.importer import _run_post_commit_cleanup
+                cleanup_result = _run_post_commit_cleanup(outcome)
+                if cleanup_result is not None:
+                    db.merge_import_job_result(
+                        claimed.id,
+                        {"post_commit_cleanup": cleanup_result},
+                    )
         finally:
             shutil.rmtree(staging_root, ignore_errors=True)
 
@@ -1646,10 +1787,16 @@ class TestDispatchImport(unittest.TestCase):
         self.assertTrue(persisted.conversion.was_converted)
         persisted_guard = persisted.postflight.duplicate_remove_guard
         assert persisted_guard is not None
-        self.assertIsNotNone(persisted_guard.quarantine_path)
-        assert persisted_guard.quarantine_path is not None
+        self.assertIsNone(persisted_guard.quarantine_path)
+        completed_job = db.get_import_job(claimed.id)
+        assert completed_job is not None and completed_job.result is not None
+        quarantine = completed_job.result["post_commit_cleanup"][
+            "duplicate_guard_quarantine"
+        ]
+        self.assertIsNotNone(quarantine["quarantine_path"])
+        assert quarantine["quarantine_path"] is not None
         self.assertIn("duplicate-remove-guard",
-                      persisted_guard.quarantine_path)
+                      quarantine["quarantine_path"])
         self.assertFalse(os.path.exists(source))
 
     def test_no_json_result(self):
@@ -1665,16 +1812,33 @@ class TestDispatchImport(unittest.TestCase):
             status="downloading",
             active_download_state={"files": [], "filetype": "mp3"},
         ))
+        claimed, candidate = _claim_dispatch_job(
+            db,
+            path="/tmp/dest",
+            release_id="test-mbid",
+        )
 
         with patch("lib.dispatch.subprocess_runner.sp.run",
                    side_effect=sp.TimeoutExpired(cmd="test", timeout=1800)):
-            dispatch_import_core(
+            outcome = dispatch_import_core(
                 path="/tmp/dest", mb_release_id="test-mbid",
                 request_id=42, label="Test",
                 beets_harness_path=_HARNESS,
                 db=db,  # type: ignore[arg-type]
                 dl_info=DownloadInfo(filetype="mp3"),
+                candidate_import_job_id=claimed.id,
+                prevalidated_candidate_result=candidate,
             )
+        assert outcome.terminal_outcome is not None
+        from lib.terminal_outcomes import ImportJobTerminal
+        db.persist_import_terminal_outcome(
+            outcome.terminal_outcome.with_job(ImportJobTerminal(
+                status="failed",
+                error=outcome.message,
+                result={"success": False},
+                message=outcome.message,
+            ))
+        )
 
         self.assertEqual(len(db.download_logs), 1)
         self.assertEqual(db.download_logs[0].outcome, "failed")
@@ -1687,16 +1851,33 @@ class TestDispatchImport(unittest.TestCase):
             status="downloading",
             active_download_state={"files": [], "filetype": "mp3"},
         ))
+        claimed, candidate = _claim_dispatch_job(
+            db,
+            path="/tmp/dest",
+            release_id="test-mbid",
+        )
 
         with patch("lib.dispatch.subprocess_runner.sp.run",
                    side_effect=RuntimeError("boom")):
-            dispatch_import_core(
+            outcome = dispatch_import_core(
                 path="/tmp/dest", mb_release_id="test-mbid",
                 request_id=42, label="Test",
                 beets_harness_path=_HARNESS,
                 db=db,  # type: ignore[arg-type]
                 dl_info=DownloadInfo(filetype="mp3"),
+                candidate_import_job_id=claimed.id,
+                prevalidated_candidate_result=candidate,
             )
+        assert outcome.terminal_outcome is not None
+        from lib.terminal_outcomes import ImportJobTerminal
+        db.persist_import_terminal_outcome(
+            outcome.terminal_outcome.with_job(ImportJobTerminal(
+                status="failed",
+                error=outcome.message,
+                result={"success": False},
+                message=outcome.message,
+            ))
+        )
 
         self.assertEqual(len(db.download_logs), 1)
         self.assertEqual(db.download_logs[0].outcome, "failed")
@@ -1750,10 +1931,15 @@ class TestImportDispatchRescueCapture(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
+            claimed, candidate = _claim_dispatch_job(
+                db,
+                path=tmpdir,
+                release_id="test-mbid",
+            )
             with patch_dispatch_externals(), \
                  patch("lib.dispatch.subprocess_runner.parse_import_result",
                        return_value=ir):
-                dispatch_import_core(
+                outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="test-mbid",
                     request_id=42,
@@ -1767,6 +1953,17 @@ class TestImportDispatchRescueCapture(unittest.TestCase):
                                      filename="01 - T.mp3")],
                     cfg=cfg,
                     quality_gate_fn=noop_quality_gate,
+                    candidate_import_job_id=claimed.id,
+                    prevalidated_candidate_result=candidate,
+                )
+                assert outcome.terminal_outcome is not None
+                from lib.terminal_outcomes import ImportJobTerminal
+                db.persist_import_terminal_outcome(
+                    outcome.terminal_outcome.with_job(ImportJobTerminal(
+                        status="completed",
+                        result={"success": True},
+                        message=outcome.message,
+                    ))
                 )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -1885,6 +2082,11 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
             active_download_state={"files": [], "filetype": "mp3"},
         ))
         ir = make_import_result(decision="import")
+        claimed, candidate = _claim_dispatch_job(
+            db,
+            path="/tmp/dest",
+            release_id="mbid-1",
+        )
 
         with patch_dispatch_externals() as ext, \
              patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
@@ -1897,6 +2099,8 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
                 dl_info=DownloadInfo(filetype="mp3"),
                 files=[MagicMock(username="user1", filename="01.mp3")],
                 quality_gate_fn=noop_quality_gate,
+                candidate_import_job_id=claimed.id,
+                prevalidated_candidate_result=candidate,
             )
             return ext.run.call_args[0][0]
 
@@ -1978,6 +2182,25 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
             status="downloading",
             active_download_state={"files": [], "filetype": "mp3"},
         ))
+        claimed, candidate_result = _claim_dispatch_job(
+            db,
+            path="/tmp/dest",
+            release_id="test-mbid",
+            evidence_kwargs={
+                "measurement": AudioQualityMeasurement(
+                    min_bitrate_kbps=1000,
+                    avg_bitrate_kbps=1000,
+                    median_bitrate_kbps=1000,
+                    format="FLAC",
+                    spectral_grade="genuine",
+                    spectral_bitrate_kbps=None,
+                ),
+                "codec": "flac",
+                "container": "flac",
+                "storage_format": "FLAC",
+            },
+        )
+        assert candidate_result.evidence is not None
         with patch_dispatch_externals() as ext, patch(
             "lib.dispatch.subprocess_runner.parse_import_result",
             return_value=make_import_result(decision="import"),
@@ -1993,8 +2216,12 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
                 dl_info=DownloadInfo(filetype="mp3"),
                 files=[make_download_file(username="user1", filename="01.mp3")],
                 quality_gate_fn=noop_quality_gate,
+                candidate_import_job_id=claimed.id,
                 evidence_gate_fn=(
-                    lambda *_args, **_kwargs: EvidenceImportGate(current=current)
+                    lambda *_args, **_kwargs: EvidenceImportGate(
+                        candidate=candidate_result.evidence,
+                        current=current,
+                    )
                 ),
             )
             cmd = ext.run.call_args[0][0]
@@ -2508,10 +2735,15 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         ))
         ir = make_import_result(decision="transcode_upgrade",
                                 new_min_bitrate=227)
+        claimed, candidate = _claim_dispatch_job(
+            db,
+            path="/tmp/dest",
+            release_id="test-mbid",
+        )
 
         with patch_dispatch_externals(), \
              patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
-            dispatch_import_core(
+            outcome = dispatch_import_core(
                 path="/tmp/dest", mb_release_id="test-mbid",
                 request_id=42, label="Test",
                 beets_harness_path=_HARNESS,
@@ -2519,7 +2751,18 @@ class TestQualityGateUsesIntent(unittest.TestCase):
                 dl_info=DownloadInfo(filetype="mp3"),
                 files=[MagicMock(username="user1", filename="01.mp3")],
                 quality_gate_fn=noop_quality_gate,
+                candidate_import_job_id=claimed.id,
+                prevalidated_candidate_result=candidate,
             )
+        assert outcome.terminal_outcome is not None
+        from lib.terminal_outcomes import ImportJobTerminal
+        db.persist_import_terminal_outcome(
+            outcome.terminal_outcome.with_job(ImportJobTerminal(
+                status="completed",
+                result={"success": outcome.success},
+                message=outcome.message,
+            ))
+        )
 
         row = db.request(42)
         self.assertEqual(row["status"], "wanted")
@@ -2725,6 +2968,11 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
+            claimed, candidate = _claim_dispatch_job(
+                db,
+                path=tmpdir,
+                release_id="test-mbid",
+            )
             with patch_dispatch_externals(), \
                  patch("lib.dispatch.subprocess_runner.parse_import_result",
                        return_value=ir), \
@@ -2744,6 +2992,8 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
                                      filename="01 - Track.mp3")],
                     cfg=cfg,
                     quality_gate_fn=noop_quality_gate,
+                    candidate_import_job_id=claimed.id,
+                    prevalidated_candidate_result=candidate,
                 )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)

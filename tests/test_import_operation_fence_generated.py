@@ -7,6 +7,9 @@ import unittest
 
 from hypothesis import given, strategies as st
 
+from lib.config import CratediggerConfig
+from lib.dispatch import dispatch_import_core
+from lib.dispatch.types import EvidenceImportGate
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
@@ -14,9 +17,15 @@ from lib.import_queue import (
     IMPORT_JOB_YOUTUBE,
     youtube_import_payload,
 )
+from lib.quality import DownloadInfo
+from lib.terminal_outcomes import ImportJobTerminal
 import tests._hypothesis_profiles  # noqa: F401
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_album_quality_evidence, make_request_row
+from tests.helpers import (
+    make_album_quality_evidence,
+    make_request_row,
+    noop_quality_gate,
+)
 
 
 @dataclass(frozen=True)
@@ -108,18 +117,52 @@ def _exercise_world(world: OperationWorld) -> tuple[bool, str, list[int], bool]:
         launch_source = "/tmp/stale-source"
 
     beets_invocations: list[int] = []
-    authorized_job = db.authorize_import_job_launch(
-        claimed.id,
-        request_id=request_id,
-        release_id=launch_release,
-        source_path=launch_source,
-        expected_request_status=request_status,
-    )
-    authorized = authorized_job is not None
-    if authorized:
+
+    class RecorderStop(RuntimeError):
+        pass
+
+    def record_beets_invocation(**_kwargs: object) -> None:
         beets_invocations.append(claimed.id)
-        if world.terminal_acknowledged:
-            db.mark_import_job_completed(claimed.id, result={"success": True})
+        raise RecorderStop("stop immediately after the real Beets seam")
+
+    outcome = dispatch_import_core(
+        path=launch_source,
+        mb_release_id=launch_release,
+        request_id=request_id,
+        label="Generated fence world",
+        force=world.job_type == IMPORT_JOB_FORCE,
+        beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
+        db=db,  # type: ignore[arg-type]
+        dl_info=DownloadInfo(username="generated-peer"),
+        distance=0.05,
+        scenario=(
+            "force_import"
+            if world.job_type == IMPORT_JOB_FORCE
+            else "strong_match"
+        ),
+        cfg=CratediggerConfig(
+            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
+            pipeline_db_enabled=True,
+        ),
+        candidate_import_job_id=claimed.id,
+        quality_gate_fn=noop_quality_gate,
+        evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(
+            candidate=persisted,
+        ),
+        run_import_fn=record_beets_invocation,  # type: ignore[arg-type]
+    )
+    launched_job = db.get_import_job(claimed.id)
+    assert launched_job is not None
+    authorized = launched_job.beets_launch_authorized_at is not None
+    if authorized and world.terminal_acknowledged:
+        assert outcome.terminal_outcome is not None
+        db.persist_import_terminal_outcome(
+            outcome.terminal_outcome.with_job(ImportJobTerminal(
+                status="completed",
+                result={"success": True},
+                message="generated terminal acknowledgement",
+            ))
+        )
 
     db.recover_running_import_jobs(
         requeue_message="proven unstarted",
@@ -128,15 +171,35 @@ def _exercise_world(world: OperationWorld) -> tuple[bool, str, list[int], bool]:
     replay = db.claim_next_import_job(worker_id="automatic-replay")
     replay_claimed = replay is not None
     if replay is not None:
-        replay_authorized = db.authorize_import_job_launch(
-            replay.id,
+        replay_outcome = dispatch_import_core(
+            path=launch_source,
+            mb_release_id=launch_release,
             request_id=request_id,
-            release_id=launch_release,
-            source_path=launch_source,
-            expected_request_status=request_status,
+            label="Generated automatic replay",
+            force=world.job_type == IMPORT_JOB_FORCE,
+            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
+            db=db,  # type: ignore[arg-type]
+            dl_info=DownloadInfo(username="generated-peer"),
+            distance=0.05,
+            scenario=(
+                "force_import"
+                if world.job_type == IMPORT_JOB_FORCE
+                else "strong_match"
+            ),
+            cfg=CratediggerConfig(
+                beets_harness_path=(
+                    "/nix/store/fake/harness/run_beets_harness.sh"
+                ),
+                pipeline_db_enabled=True,
+            ),
+            candidate_import_job_id=replay.id,
+            quality_gate_fn=noop_quality_gate,
+            evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(
+                candidate=persisted,
+            ),
+            run_import_fn=record_beets_invocation,  # type: ignore[arg-type]
         )
-        if replay_authorized is not None:
-            beets_invocations.append(replay.id)
+        del replay_outcome
 
     final = db.get_import_job(claimed.id)
     assert final is not None

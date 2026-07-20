@@ -199,12 +199,6 @@ def _run_dispatch(
             was_converted=world.was_converted,
         )
 
-    db = FakePipelineDB()
-    db.seed_request(make_request_row(
-        id=42, status=initial_status,
-        min_bitrate=180, current_spectral_bitrate=128,
-        active_download_state={"files": [], "filetype": "mp3"},
-    ))
     cfg = CratediggerConfig(
         beets_harness_path=_HARNESS,
         pipeline_db_enabled=True,
@@ -213,37 +207,53 @@ def _run_dispatch(
 
     tmpdir = tempfile.mkdtemp()
     try:
-        import_job_id = None
-        candidate_result = None
-        if queued:
-            from lib.import_evidence import (
-                ActionEvidenceProvenance,
-                CandidateEvidenceActionResult,
-            )
-            from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
+        del queued  # retained argument for existing generated call sites
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status=initial_status, mb_release_id="mbid-generated",
+            min_bitrate=180, current_spectral_bitrate=128,
+            active_download_state={
+                "files": [],
+                "filetype": "mp3",
+                "current_path": tmpdir,
+            },
+        ))
+        from lib.import_evidence import (
+            ActionEvidenceProvenance,
+            CandidateEvidenceActionResult,
+        )
+        from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
 
-            job = db.enqueue_import_job(
-                IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
-                request_id=42,
-                payload={"failed_path": tmpdir} if force else {},
-            )
-            db.mark_import_job_preview_importable(
-                job.id,
-                preview_result={"ready": True},
-            )
-            claimed = db.claim_next_import_job(worker_id="generated-dispatch")
-            assert claimed is not None
-            import_job_id = claimed.id
-            candidate_result = CandidateEvidenceActionResult(
-                evidence=make_album_quality_evidence(
-                    mb_release_id="mbid-generated",
-                    source_path=tmpdir,
-                ),
-                provenance=ActionEvidenceProvenance(
-                    candidate_status="reused",
-                    snapshot_guard="matched",
-                ),
-            )
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
+            request_id=42,
+            payload={"failed_path": tmpdir} if force else {},
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="mbid-generated",
+            source_path=tmpdir,
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_import_job_candidate_evidence(job.id, persisted.id)
+        db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"ready": True},
+        )
+        claimed = db.claim_next_import_job(worker_id="generated-dispatch")
+        assert claimed is not None
+        import_job_id = claimed.id
+        candidate_result = CandidateEvidenceActionResult(
+            evidence=persisted,
+            provenance=ActionEvidenceProvenance(
+                candidate_status="reused",
+                snapshot_guard="matched",
+            ),
+        )
         with patch_dispatch_externals(), \
              patch("lib.dispatch.subprocess_runner.parse_import_result",
                    return_value=ir):

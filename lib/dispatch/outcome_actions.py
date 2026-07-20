@@ -30,7 +30,8 @@ from lib.quality import (DownloadInfo, QualityRankConfig, ValidationResult,
                          resolve_rejection_search_override)
 
 from lib.dispatch.types import (DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
-                                DispatchOutcome, ImportAttemptResult)
+                                DispatchOutcome, ImportAttemptResult,
+                                PostCommitCleanup)
 from lib.dispatch.helpers import (_cleanup_staged_dir,
                                   _populate_dl_info_from_import_result,
                                   _should_cleanup_path, _v0_probe_log_fields)
@@ -175,8 +176,12 @@ def _reject_import_from_evidence_decision(
                 if cooled_down_users is not None:
                     if db.check_and_apply_cooldown(username):
                         cooled_down_users.add(username)
+    cleanup_path = None
     if action.cleanup and _should_cleanup_path(source_path_cleanup_scenario, action):
-        _cleanup_staged_dir(staged_path)
+        if import_job_id is not None:
+            cleanup_path = staged_path
+        else:
+            _cleanup_staged_dir(staged_path)
     return DispatchOutcome(
         success=False,
         message=f"Rejected by persisted quality evidence: {decision}",
@@ -184,6 +189,11 @@ def _reject_import_from_evidence_decision(
         terminal_outcome=(
             terminal_outcome
             if isinstance(terminal_outcome, PendingImportTerminalOutcome)
+            else None
+        ),
+        post_commit_cleanup=(
+            PostCommitCleanup(staged_path=cleanup_path)
+            if cleanup_path is not None
             else None
         ),
     )
