@@ -262,6 +262,11 @@ class CratediggerConfig:
         search_blacklist = tuple(w.strip() for w in search_bl_raw.split(",") if w.strip())
         title_bl_raw = get("Search Settings", "title_blacklist", "")
         title_blacklist = tuple(w.strip() for w in title_bl_raw.split(",") if w.strip())
+        page_size = getint("Search Settings", "number_of_albums_to_grab", 10)
+        if page_size < 2:
+            raise ValueError(
+                "Search Settings.number_of_albums_to_grab must be at least 2"
+            )
 
         return cls(
             # Slskd
@@ -276,7 +281,7 @@ class CratediggerConfig:
             # Search
             ignored_users=ignored_users,
             minimum_match_ratio=getfloat("Search Settings", "minimum_filename_match_ratio", 0.5),
-            page_size=getint("Search Settings", "number_of_albums_to_grab", 10),
+            page_size=page_size,
             search_blacklist=search_blacklist,
             album_prepend_artist=getbool("Search Settings", "album_prepend_artist", False),
             track_prepend_artist=getbool("Search Settings", "track_prepend_artist", False),

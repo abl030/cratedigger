@@ -141,6 +141,20 @@ class TestImporterServiceContract(unittest.TestCase):
         self.assertIn('Environment = "PIPELINE_DB_DSN=${pipelineDsn}"', text)
 
 
+class TestSearchSchedulerConfigContract(unittest.TestCase):
+    def test_page_size_preserves_capacity_for_both_cohorts(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn(
+            "cfg.searchSettings.numberOfAlbumsToGrab >= 2",
+            text,
+        )
+        self.assertIn(
+            "services.cratedigger.searchSettings.numberOfAlbumsToGrab "
+            "must be at least 2",
+            text,
+        )
+
+
 class TestPinnedPackageSetContract(unittest.TestCase):
     """The runtime closure builds from cratedigger's own flake.lock, not the
     consumer's nixpkgs (tier-2 plan U2, R1 / KTD1).

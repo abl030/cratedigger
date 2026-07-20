@@ -10,6 +10,7 @@ import json
 import logging
 import urllib.request
 from dataclasses import dataclass
+from typing import Sequence
 
 logger = logging.getLogger("cratedigger")
 
@@ -183,7 +184,13 @@ class DatabaseSource:
             records.append(record)
         return records
 
-    def get_wanted_searchable(self, generator_id: str, limit: int | None = None):
+    def get_wanted_searchable(
+        self,
+        generator_id: str,
+        limit: int | None = None,
+        *,
+        title_blacklist: Sequence[str] = (),
+    ):
         """Get wanted albums whose active plan matches ``generator_id``.
 
         This is the **execution-eligibility** filter for Phase 2 (U4).
@@ -192,7 +199,11 @@ class DatabaseSource:
         cycle. Mirrors the track-population behavior of ``get_wanted``.
         """
         db = self._get_db()
-        wanted = db.get_wanted_searchable(generator_id, limit=limit)
+        wanted = db.get_wanted_searchable(
+            generator_id,
+            limit=limit,
+            title_blacklist=title_blacklist,
+        )
         records = []
         for row in wanted:
             tracks = db.get_tracks(row["id"])

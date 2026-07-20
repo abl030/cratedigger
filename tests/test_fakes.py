@@ -1974,6 +1974,129 @@ class TestFakeGetWantedSearchable(unittest.TestCase):
         return db.create_successful_search_plan(
             request_id=rid, generator_id=gen, items=self._items("Q"))
 
+    def _seed_searchable(
+        self,
+        db: FakePipelineDB,
+        request_id: int,
+        *,
+        created_at: datetime,
+        attempts: int = 1,
+        title: str | None = None,
+    ) -> int:
+        db.seed_request(make_request_row(
+            id=request_id,
+            mb_release_id=f"scheduler-{request_id}",
+            album_title=title or f"Album {request_id}",
+            created_at=created_at,
+            search_attempts=attempts,
+            download_attempts=attempts,
+            validation_attempts=attempts,
+        ))
+        self._make_active(db, request_id, "g1")
+        return request_id
+
+    def test_page_size_must_leave_capacity_for_both_cohorts(self):
+        db = FakePipelineDB()
+        for page_size in (-1, 0, 1):
+            with self.subTest(page_size=page_size):
+                with self.assertRaisesRegex(ValueError, "at least 2"):
+                    db.get_wanted_searchable("g1", limit=page_size)
+
+    def test_priority_capacity_and_bidirectional_borrowing(self):
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+
+        db = FakePipelineDB()
+        new_ids = {
+            self._seed_searchable(
+                db, index + 1, created_at=now - timedelta(hours=1))
+            for index in range(2)
+        }
+        established_ids = {
+            self._seed_searchable(
+                db, index + 10, created_at=now - timedelta(days=2))
+            for index in range(20)
+        }
+        selected = {
+            int(row["id"])
+            for row in db.get_wanted_searchable("g1", limit=16, now=now)
+        }
+        self.assertEqual(new_ids & selected, new_ids)
+        self.assertEqual(len(established_ids & selected), 14)
+
+        db = FakePipelineDB()
+        new_ids = {
+            self._seed_searchable(
+                db, index + 1, created_at=now - timedelta(hours=1))
+            for index in range(20)
+        }
+        established_ids = {
+            self._seed_searchable(
+                db, index + 100, created_at=now - timedelta(days=2))
+            for index in range(2)
+        }
+        selected = {
+            int(row["id"])
+            for row in db.get_wanted_searchable("g1", limit=16, now=now)
+        }
+        self.assertEqual(len(new_ids & selected), 14)
+        self.assertEqual(established_ids & selected, established_ids)
+
+    def test_small_page_keeps_proportional_established_floor(self):
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        db = FakePipelineDB()
+        new_ids = {
+            self._seed_searchable(
+                db, index + 1, created_at=now - timedelta(hours=1))
+            for index in range(2)
+        }
+        established_ids = {
+            self._seed_searchable(
+                db, index + 100, created_at=now - timedelta(days=2))
+            for index in range(5)
+        }
+
+        selected = {
+            int(row["id"])
+            for row in db.get_wanted_searchable("g1", limit=5, now=now)
+        }
+
+        self.assertEqual(len(new_ids & selected), 1)
+        self.assertEqual(len(established_ids & selected), 4)
+
+    def test_blacklist_cannot_consume_reserved_capacity(self):
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        db = FakePipelineDB()
+        blocked_ids = {
+            self._seed_searchable(
+                db,
+                index + 1,
+                created_at=now - timedelta(hours=1),
+                title=f"Blocked {index}",
+            )
+            for index in range(4)
+        }
+        allowed_new = self._seed_searchable(
+            db, 10, created_at=now - timedelta(hours=1), title="Allowed")
+        established_ids = {
+            self._seed_searchable(
+                db, index + 100, created_at=now - timedelta(days=2))
+            for index in range(20)
+        }
+
+        selected = {
+            int(row["id"])
+            for row in db.get_wanted_searchable(
+                "g1",
+                limit=16,
+                title_blacklist=("blocked",),
+                now=now,
+            )
+        }
+
+        self.assertFalse(blocked_ids & selected)
+        self.assertIn(allowed_new, selected)
+        self.assertEqual(len(established_ids & selected), 15)
+
     def test_filters_to_current_generator_active_plans(self):
         db = FakePipelineDB()
         rid_match = db.add_request(
@@ -3689,12 +3812,12 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         # gone via the cascade rules earlier in delete_request.
         self.assertIsNotNone(db.load_album_quality_evidence_by_id(persisted.id))
 
-    def test_get_wanted_prioritizes_new_and_respects_limit(self):
+    def test_get_wanted_does_not_prioritize_zero_attempts(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1, status="wanted",
-                                          search_attempts=0))
-        db.seed_request(make_request_row(id=2, status="wanted",
                                           search_attempts=5))
+        db.seed_request(make_request_row(id=2, status="wanted",
+                                          search_attempts=0))
         db.seed_request(make_request_row(id=3, status="imported"))
         rows = db.get_wanted()
         self.assertEqual([r["id"] for r in rows], [1, 2])
@@ -3711,8 +3834,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual([r["id"] for r in rows], [2])
 
     def test_get_wanted_tie_break_is_set_not_order(self):
-        """Within a priority bucket the real DB randomises order —
-        callers must assert on set membership, not list position."""
+        """The real DB randomises order; callers assert set membership."""
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=1, status="wanted", search_attempts=0))

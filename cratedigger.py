@@ -10,7 +10,7 @@ import time
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Any, Sequence, TYPE_CHECKING, TypedDict
+from typing import Any, TYPE_CHECKING, TypedDict
 
 from lib.slskd_client import (
     SLSKD_HTTP_TIMEOUT_S,
@@ -120,22 +120,6 @@ from lib.enqueue import (
     prepare_find_download_context,
 )
 from lib.quality import top_candidates_with_skip_split
-
-
-def filter_list(albums: Sequence[Any], filter_cfg: CratediggerConfig) -> list[Any] | None:
-    """Filter albums against the title blacklist. Returns None if nothing passes."""
-    result = []
-    for album in albums:
-        title_lower = album.title.lower()
-        blocked = next(
-            (w for w in filter_cfg.title_blacklist if w and w.lower() in title_lower),
-            None,
-        )
-        if blocked:
-            logger.info(f"Skipping blacklisted album: {album.artist_name} - {album.title} (word: {blocked})")
-        else:
-            result.append(album)
-    return result or None
 
 
 def _build_search_cache(
@@ -1472,17 +1456,16 @@ def main():
             # FK is the gate.
             logger.info("Getting wanted records from pipeline DB...")
             wanted_records = pipeline_db_source.get_wanted_searchable(
-                SEARCH_PLAN_GENERATOR_ID, limit=cfg.page_size)
+                SEARCH_PLAN_GENERATOR_ID,
+                limit=cfg.page_size,
+                title_blacklist=cfg.title_blacklist,
+            )
             logger.info(f"Pipeline DB: {len(wanted_records)} wanted record(s)")
 
             failed = 0
             if len(wanted_records) > 0:
                 try:
-                    filtered = filter_list(wanted_records, cfg)
-                    if filtered is not None:
-                        failed = grab_most_wanted(filtered)
-                    else:
-                        logger.info("No releases wanted that aren't on the deny list and/or blacklisted")
+                    failed = grab_most_wanted(wanted_records)
                 except Exception:
                     logger.exception("Fatal error in search phase!")
                 if failed == 0:

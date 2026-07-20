@@ -28,6 +28,31 @@ variant from `search_attempts`" path is gone:
   `plan_cycle_count` on the request when the final ordinal completes.
   See `docs/pipeline-db-schema.md` for the full plan/cursor schema.
 
+## New-request capacity
+
+Phase 2 applies one eligibility boundary before it allocates the page: the
+request must be `wanted`, its retry deadline must be due, its active plan must
+match the current generator, it must have no conflicting YouTube download or
+import job, and its title must pass the configured title blacklist. Priority
+never bypasses the existing 30/60/120/240-minute retry backoff.
+
+A request is in the new cohort while its immutable `created_at + 24 hours` is
+later than the Phase 2 snapshot time. With the production page size of 16,
+Phase 2 draws up to four randomized new requests and at least 12 randomized
+established requests. Other positive page sizes reserve a floor-rounded
+quarter share for new work (at least one slot). Either cohort borrows slots the
+other cannot fill, so an eligible row is never left idle while the page has
+space. More than four due new requests still use only four production slots
+while established work is available;
+once a request reaches the exact 24-hour boundary it joins the established
+lottery even if it has never been attempted.
+
+For a low-volume addition, "first eligible cycle" means the next Phase 2
+snapshot after its backoff expires. It does not trigger a cycle immediately or
+skip the retry deadline. Manual requeue preserves the original `created_at`;
+a Replace successor is a newly inserted request and receives its own 24-hour
+window.
+
 ### Pre-attempt vs accepted-search consumption boundary
 
 A plan ordinal **consumes a slot** when slskd accepts the search (or
@@ -146,7 +171,7 @@ number_of_albums_to_grab = 16
 ```
 
 - **`parallel_searches`** -- Controls whether parallel mode is used. Set > 1 to enable, 1 for sequential. Default: 8. The actual concurrency during the collect phase is `len(albums)` (all poll simultaneously).
-- **`number_of_albums_to_grab`** -- How many albums per cycle. With parallel collection, wall time is dominated by the slowest search, so you can increase this.
+- **`number_of_albums_to_grab`** -- How many albums per cycle (minimum 2, so both scheduler cohorts retain capacity). With parallel collection, wall time is dominated by the slowest search, so you can increase this. The production value of 16 gives the new/established scheduler its 4/12 reserved allocation.
 
 ### Recommended pairing
 

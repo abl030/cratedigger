@@ -186,6 +186,51 @@ class TestDatabaseSource(unittest.TestCase):
         self.assertEqual(records[0].title, "Album")
         self.assertEqual(records[0].artist_name, "Test")
 
+    def test_get_wanted_searchable_applies_blacklist_before_page_limit(self):
+        from lib.pipeline_db import SearchPlanItemInput
+
+        source, db = self._make_source()
+        blocked_id = db.add_request(
+            mb_release_id="blocked-uuid",
+            artist_name="Blocked Artist",
+            album_title="Blocked Album",
+            source="request",
+        )
+        allowed_id = db.add_request(
+            mb_release_id="allowed-uuid",
+            artist_name="Allowed Artist",
+            album_title="Allowed Album",
+            source="request",
+        )
+        second_allowed_id = db.add_request(
+            mb_release_id="second-allowed-uuid",
+            artist_name="Second Allowed Artist",
+            album_title="Second Allowed Album",
+            source="request",
+        )
+        for request_id in (blocked_id, allowed_id, second_allowed_id):
+            db.create_successful_search_plan(
+                request_id=request_id,
+                generator_id="g1",
+                items=[SearchPlanItemInput(
+                    ordinal=0,
+                    strategy="default",
+                    query=f"query-{request_id}",
+                )],
+            )
+            db.set_tracks(request_id, SAMPLE_TRACKS)
+
+        records = source.get_wanted_searchable(
+            "g1",
+            limit=2,
+            title_blacklist=("blocked",),
+        )
+
+        self.assertEqual(
+            [record.db_request_id for record in records],
+            [allowed_id, second_allowed_id],
+        )
+
     def test_get_tracks_returns_track_dicts(self):
         source, db = self._make_source()
         req_id = db.add_request(

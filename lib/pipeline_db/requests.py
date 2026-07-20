@@ -1007,8 +1007,8 @@ class _RequestsMixin(_PipelineDBBase):
 
         ``clear_retry_counters`` is for operator requeues that should get
         a clean slate. Automatic downloading → wanted failure paths preserve the
-        counters so backoff can keep growing and the picker does not treat the
-        row as brand new.
+        counters so backoff can keep growing. Scheduler priority is based only
+        on immutable ``created_at`` and is unaffected by either reset mode.
 
         """
         unknown = sorted(
@@ -1318,23 +1318,11 @@ class _RequestsMixin(_PipelineDBBase):
 
     def get_wanted(self, limit=None):
         now = datetime.now(timezone.utc)
-        # New/operator-requeued albums go first, then random.
-        # This ensures freshly added or upgrade-requeued albums get picked
-        # up on the next cycle instead of waiting for random selection, while
-        # automatic failed-download requeues stay in the normal random pool.
         sql = """
             SELECT * FROM album_requests
             WHERE status = 'wanted'
               AND (next_retry_after IS NULL OR next_retry_after <= %s)
-            ORDER BY
-              CASE
-                WHEN COALESCE(search_attempts, 0) = 0
-                 AND COALESCE(download_attempts, 0) = 0
-                 AND COALESCE(validation_attempts, 0) = 0
-                THEN 0
-                ELSE 1
-              END,
-              RANDOM()
+            ORDER BY RANDOM()
         """
         if limit:
             sql += f" LIMIT {int(limit)}"

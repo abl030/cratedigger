@@ -1,6 +1,6 @@
 """Search-plan lifecycle, cursor, search_log, attempts, saturation."""
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Sequence
 import psycopg2
 import psycopg2.extras
 
@@ -15,6 +15,10 @@ from lib.import_queue import (
 from lib.search_classification import (
     SearchSummary as _SearchSummary,
     classify_failure_class as _classify_failure_class,
+)
+from lib.search_scheduler import (
+    NEW_REQUEST_PRIORITY_HOURS,
+    search_cohort_slots,
 )
 
 from lib.pipeline_db._shared import (
@@ -891,6 +895,9 @@ class _SearchPlanMixin(_PipelineDBBase):
         self,
         generator_id: str,
         limit: int | None = None,
+        *,
+        title_blacklist: Sequence[str] = (),
+        now: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """Return wanted rows whose active plan matches ``generator_id``.
 
@@ -901,7 +908,15 @@ class _SearchPlanMixin(_PipelineDBBase):
           * ``next_retry_after`` is null or already due (same backoff
             semantics as ``get_wanted``), and
           * ``active_plan_id`` points at a row in ``search_plans`` whose
-            ``status = 'active'`` AND ``generator_id = %s``.
+            ``status = 'active'`` AND ``generator_id = %s``, and
+          * no YouTube download/import work conflicts with Soulseek, and
+          * ``album_title`` contains none of ``title_blacklist``.
+
+        A bounded result reserves a floor-rounded quarter of its page for
+        rows whose immutable ``created_at`` is less than 24 hours old (4/12
+        at production's page size 16). Each cohort is randomized, and unused
+        capacity is borrowed in either direction. The shared ``eligible`` CTE
+        applies every gate before cohort rank or capacity is assigned.
 
         Rows with no active plan, a deterministic-failed-only plan, a
         transient-failed-only plan, or an old-generator active plan are
@@ -912,10 +927,15 @@ class _SearchPlanMixin(_PipelineDBBase):
         older ``get_wanted`` (no plan filter) so they can show every
         wanted row regardless of plan readiness.
         """
-        now = datetime.now(timezone.utc)
-        sql = """
-            SELECT ar.* FROM album_requests ar
-            JOIN search_plans sp ON ar.active_plan_id = sp.id
+        snapshot_at = now or datetime.now(timezone.utc)
+        blacklist = [term for term in title_blacklist if term]
+        eligible_cte = """
+            WITH eligible AS MATERIALIZED (
+              SELECT ar.*,
+                     (ar.created_at
+                        + %s * INTERVAL '1 hour' > %s) AS is_new_request
+              FROM album_requests ar
+              JOIN search_plans sp ON ar.active_plan_id = sp.id
             WHERE ar.status = 'wanted'
               AND (ar.next_retry_after IS NULL OR ar.next_retry_after <= %s)
               AND sp.status = 'active'
@@ -934,19 +954,65 @@ class _SearchPlanMixin(_PipelineDBBase):
                   AND ij.job_type = %s
                   AND ij.status IN ('queued', 'running')
               )
-            ORDER BY
-              CASE
-                WHEN COALESCE(ar.search_attempts, 0) = 0
-                 AND COALESCE(ar.download_attempts, 0) = 0
-                 AND COALESCE(ar.validation_attempts, 0) = 0
-                THEN 0
-                ELSE 1
-              END,
-              RANDOM()
+              AND NOT EXISTS (
+                SELECT 1
+                FROM unnest(%s::text[]) AS blocked(term)
+                WHERE blocked.term <> ''
+                  AND POSITION(
+                    LOWER(blocked.term) IN LOWER(ar.album_title)
+                  ) > 0
+              )
+            )
         """
-        if limit:
-            sql += f" LIMIT {int(limit)}"
-        cur = self._execute(sql, (now, generator_id, IMPORT_JOB_YOUTUBE))
+        params: list[object] = [
+            NEW_REQUEST_PRIORITY_HOURS,
+            snapshot_at,
+            snapshot_at,
+            generator_id,
+            IMPORT_JOB_YOUTUBE,
+            blacklist,
+        ]
+        if limit is None:
+            sql = eligible_cte + """
+                SELECT ar.*
+                FROM album_requests ar
+                JOIN eligible e ON e.id = ar.id
+                ORDER BY RANDOM()
+            """
+        else:
+            page_size = int(limit)
+            slots = search_cohort_slots(page_size)
+            sql = eligible_cte + """
+                , ranked AS (
+                  SELECT id,
+                         is_new_request,
+                         ROW_NUMBER() OVER (
+                           PARTITION BY is_new_request
+                           ORDER BY RANDOM()
+                         ) AS cohort_rank
+                  FROM eligible
+                ), selected_ids AS (
+                  SELECT id
+                  FROM ranked
+                  ORDER BY
+                    CASE
+                      WHEN (
+                        is_new_request AND cohort_rank <= %s
+                      ) OR (
+                        NOT is_new_request AND cohort_rank <= %s
+                      ) THEN 0
+                      ELSE 1
+                    END,
+                    RANDOM()
+                  LIMIT %s
+                )
+                SELECT ar.*
+                FROM album_requests ar
+                JOIN selected_ids selected ON selected.id = ar.id
+                ORDER BY RANDOM()
+            """
+            params.extend((slots.new, slots.established, page_size))
+        cur = self._execute(sql, tuple(params))
         return [dict(r) for r in cur.fetchall()]
 
 

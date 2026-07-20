@@ -129,17 +129,14 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "metadata keys are validated identifiers, lifecycle fields are reserved, "
         "and values use one typed JSONB record parameter"
     ),
-    ("lib/pipeline_db/requests.py", 1341, "0e292421052b4282"): (
+    ("lib/pipeline_db/requests.py", 1329, "28d04a2e32db29d5"): (
         "optional LIMIT is normalized through int before interpolation"
     ),
-    ("lib/pipeline_db/requests.py", 1356, "f027e891f4828e53"): (
+    ("lib/pipeline_db/requests.py", 1344, "f027e891f4828e53"): (
         "ORDER is selected from two literals and LIMIT remains a value placeholder"
     ),
-    ("lib/pipeline_db/requests.py", 1541, "714da98640ff84f0"): (
+    ("lib/pipeline_db/requests.py", 1529, "714da98640ff84f0"): (
         "attempt kind is validated against the fixed retry-counter vocabulary"
-    ),
-    ("lib/pipeline_db/search_plan.py", 949, "3df0db818cab2f3c"): (
-        "optional LIMIT is normalized through int before interpolation"
     ),
 }
 
@@ -177,7 +174,7 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/requests.py", 904, "c99b75cd27718b63"): (
         "typed imported transition CASes status with rescue audit atomically"
     ),
-    ("lib/pipeline_db/requests.py", 1042, "0e937f9ab5227f21"): (
+    ("lib/pipeline_db/requests.py", 1042, "c062c0704de758f9"): (
         "typed reset-to-wanted transition CASes its captured source status"
     ),
     ("lib/pipeline_db/requests.py", 1111, "cfedc69363af13f0"): (

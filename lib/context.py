@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import threading
-from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
+from typing import Any, Protocol, Sequence, TYPE_CHECKING, runtime_checkable
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
@@ -29,7 +29,11 @@ class PipelineDBSource(Protocol):
     def _get_db(self) -> Any: ...
     def get_tracks(self, album_record: Any) -> list[dict[str, Any]]: ...
     def get_wanted_searchable(
-        self, generator_id: str, limit: int | None = None,
+        self,
+        generator_id: str,
+        limit: int | None = None,
+        *,
+        title_blacklist: Sequence[str] = (),
     ) -> list[Any]: ...
     def mark_done(
         self,
