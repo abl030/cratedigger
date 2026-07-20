@@ -70,6 +70,35 @@ pkgs.testers.nixosTest {
     configHoldGate = pkgs.writeShellScript "cratedigger-test-config-hold" ''
       test ! -e /run/cratedigger-test-config-hold
     '';
+    deployHoldTool = pkgs.writeShellScriptBin "cratedigger-deploy-hold" ''
+      exec ${pkgs.python3}/bin/python3 \
+        ${cratediggerSrc}/scripts/cratedigger_deploy_hold.py "$@"
+    '';
+    metadataGateTool = pkgs.writeShellScriptBin "cratedigger-metadata-gate" ''
+      set -euo pipefail
+      hold_dir=/run/cratedigger-metadata-gate/holds
+      case "''${1:-}" in
+        hold)
+          test "''${2:-}" = manual
+          install -d -m 0755 "$hold_dir"
+          printf 'manual\n' > "$hold_dir/manual"
+          ;;
+        release)
+          test "''${2:-}" = manual
+          rm -f "$hold_dir/manual"
+          ;;
+        resume-if-clear)
+          test ! -e "$hold_dir/manual"
+          ;;
+        *) exit 64 ;;
+      esac
+    '';
+    deployHoldBlocker = pkgs.writeShellScript "cratedigger-deploy-hold-blocker" ''
+      set -euo pipefail
+      while test -e /run/cratedigger-deploy-hold-blocker; do
+        sleep 0.1
+      done
+    '';
   in {
     imports = [ cratediggerModule ];
 
@@ -132,24 +161,60 @@ pkgs.testers.nixosTest {
       # The Python config/notifier tests separately pin the null -> full-library
       # fallback.
       notifiers.jellyfin.libraryId = "music-library-item-id";
-      timer.enable = false;
+      # Render the real NixOS-managed timer while keeping it far from firing.
+      # The deploy-hold VM regression below needs the actual /etc unit path.
+      timer = {
+        enable = true;
+        onBootSec = "1d";
+        onUnitInactiveSec = "1d";
+      };
       healthCheck.enable = false;
     };
+
+    environment.systemPackages = [deployHoldTool metadataGateTool];
 
     # Simulate a downstream metadata gate holding every application unit.
     # Only the independent renderer may materialise runtime configuration on
     # first boot; the test removes this hold before exercising the apps.
     systemd.tmpfiles.rules = ["f /run/cratedigger-test-config-hold 0644 root root - held"];
-    systemd.services = lib.genAttrs [
-      "cratedigger"
-      "cratedigger-unfindable"
-      "cratedigger-importer"
-      "cratedigger-import-preview-worker"
-      "cratedigger-youtube-ingest"
-      "cratedigger-web"
-    ] (_: {
-      serviceConfig.ExecCondition = [configHoldGate];
-    });
+    systemd.services = lib.mkMerge [
+      (lib.genAttrs [
+        "cratedigger"
+        "cratedigger-unfindable"
+        "cratedigger-importer"
+        "cratedigger-import-preview-worker"
+        "cratedigger-youtube-ingest"
+        "cratedigger-web"
+      ] (_: {
+        serviceConfig.ExecCondition = [configHoldGate];
+      }))
+      {
+        # The blocker has no dependency edge from the application units. Its
+        # ordering matters only while the VM test has explicitly queued both
+        # jobs, which gives us a deterministic real systemd `start/waiting`.
+        cratedigger.after = ["cratedigger-deploy-hold-blocker.service"];
+        cratedigger-unfindable.after = ["cratedigger-deploy-hold-blocker.service"];
+        cratedigger-metadata-gate-watchdog = {
+          after = ["cratedigger-deploy-hold-blocker.service"];
+          serviceConfig = {
+            Type = "oneshot";
+            ExecStart = "${pkgs.coreutils}/bin/true";
+          };
+        };
+        cratedigger-deploy-hold-blocker.serviceConfig = {
+          Type = "oneshot";
+          ExecStart = deployHoldBlocker;
+        };
+      }
+    ];
+
+    systemd.timers.cratedigger-metadata-gate-watchdog = {
+      wantedBy = ["timers.target"];
+      timerConfig = {
+        OnBootSec = "1d";
+        OnUnitInactiveSec = "1d";
+      };
+    };
 
     # NO manual postgres ordering: the module owns
     # cratedigger-db-migrate's after/requires on postgresql.service when
@@ -209,6 +274,103 @@ pkgs.testers.nixosTest {
     versions = [v.strip() for v in out.strip().split() if v.strip()]
     assert "1" in versions, f"baseline migration missing, got {versions}"
     assert "2" in versions, f"002 migration missing, got {versions}"
+
+    # #750: NixOS materialises generated units in /etc/systemd/system, which
+    # outranks the ordinary runtime-mask location. Reproduce the real failure:
+    # /run/systemd/system/<timer> -> /dev/null exists, yet the unit remains
+    # loaded from /etc and an already-queued service start survives.
+    machine.succeed("test -L /etc/systemd/system/cratedigger.timer")
+    machine.succeed("touch /run/cratedigger-deploy-hold-blocker")
+    machine.succeed("systemctl start --no-block cratedigger-deploy-hold-blocker.service")
+    machine.wait_until_succeeds("systemctl show cratedigger-deploy-hold-blocker.service --property=MainPID --value | grep -Ev '^(0)?$'")
+    machine.succeed("systemctl start --no-block cratedigger.service")
+    queued_job = machine.wait_until_succeeds("systemctl show cratedigger.service --property=Job --value | grep -E '^[0-9]+$'").strip()
+    queued_state = machine.succeed(f"systemctl show {queued_job} --property=State --value").strip()
+    assert queued_state == "waiting", f"expected queued start job, got {queued_state}"
+    machine.succeed("systemctl mask --runtime cratedigger.timer")
+    machine.succeed("test \"$(readlink /run/systemd/system/cratedigger.timer)\" = /dev/null")
+    machine.succeed("systemctl daemon-reload")
+    load_state = machine.succeed("systemctl show cratedigger.timer --property=LoadState --value").strip()
+    assert load_state == "loaded", f"ordinary runtime mask unexpectedly won: {load_state}"
+    machine.succeed(f"test \"$(systemctl show cratedigger.service --property=Job --value)\" = {queued_job}")
+    machine.succeed(f"systemctl cancel {queued_job}")
+    machine.succeed("systemctl unmask --runtime cratedigger.timer")
+    machine.succeed("systemctl daemon-reload")
+    machine.succeed("rm /run/cratedigger-deploy-hold-blocker")
+    machine.wait_until_succeeds("systemctl show cratedigger-deploy-hold-blocker.service --property=ActiveState --value | grep -qx inactive")
+
+    # Exercise the reviewed helper against real systemd. Queue two exact
+    # services behind the blocker and leave the watchdog in a job-free terminal
+    # failure; acquire must cancel only waiting starts, reset only the terminal
+    # failure, mask only the three timers through system.control, and reach
+    # stable inactivity before it returns.
+    machine.succeed("install -d /run/systemd/system/cratedigger-metadata-gate-watchdog.service.d")
+    machine.succeed("printf '[Service]\\nExecStart=\\nExecStart=/run/current-system/sw/bin/false\\n' > /run/systemd/system/cratedigger-metadata-gate-watchdog.service.d/fail.conf")
+    machine.succeed("systemctl daemon-reload")
+    machine.fail("systemctl start cratedigger-metadata-gate-watchdog.service")
+    machine.succeed("systemctl show cratedigger-metadata-gate-watchdog.service --property=ActiveState --value | grep -qx failed")
+    machine.succeed("touch /run/cratedigger-deploy-hold-blocker")
+    machine.succeed("systemctl start --no-block cratedigger-deploy-hold-blocker.service")
+    machine.wait_until_succeeds("systemctl show cratedigger-deploy-hold-blocker.service --property=MainPID --value | grep -Ev '^(0)?$'")
+    for service in (
+        "cratedigger.service",
+        "cratedigger-unfindable.service",
+    ):
+        machine.succeed(f"systemctl start --no-block {service}")
+        job = machine.wait_until_succeeds(f"systemctl show {service} --property=Job --value | grep -E '^[0-9]+$'").strip()
+        state = machine.succeed(f"systemctl show {job} --property=State --value").strip()
+        assert state == "waiting", f"{service} job was not waiting: {state}"
+
+    acquire_status, acquire_output = machine.execute("timeout 60 cratedigger-deploy-hold acquire")
+    if acquire_status != 0:
+        print(acquire_output)
+        print(machine.succeed("systemctl list-jobs --no-legend || true"))
+        for service in (
+            "cratedigger.service",
+            "cratedigger-unfindable.service",
+            "cratedigger-metadata-gate-watchdog.service",
+        ):
+            print(machine.succeed(f"systemctl show {service} --property=Job --property=LoadState --property=ActiveState --property=SubState"))
+    assert acquire_status == 0, f"deploy hold acquire failed: {acquire_status}"
+    for timer in (
+        "cratedigger.timer",
+        "cratedigger-unfindable.timer",
+        "cratedigger-metadata-gate-watchdog.timer",
+    ):
+        machine.succeed(f"test \"$(readlink /run/systemd/system.control/{timer})\" = /dev/null")
+        state = machine.succeed(f"systemctl show {timer} --property=LoadState --value").strip()
+        assert state == "masked", f"{timer} not authoritatively masked: {state}"
+    for service in (
+        "cratedigger.service",
+        "cratedigger-unfindable.service",
+        "cratedigger-metadata-gate-watchdog.service",
+    ):
+        machine.succeed(f"test -z \"$(systemctl show {service} --property=Job --value)\"")
+        state = machine.succeed(f"systemctl show {service} --property=ActiveState --value").strip()
+        assert state == "inactive", f"{service} not inactive after hold: {state}"
+
+    # Qualify idempotent post-switch verification and the staged release. The
+    # config ExecCondition keeps the controlled VM cycle cheap; PR1 owns real
+    # invocation capture/verification in the deploy workflow.
+    machine.succeed("rm -r /run/systemd/system/cratedigger-metadata-gate-watchdog.service.d")
+    machine.succeed("systemctl daemon-reload")
+    machine.succeed("cratedigger-deploy-hold verify-held")
+    machine.succeed("rm /run/cratedigger-deploy-hold-blocker")
+    machine.wait_until_succeeds("systemctl show cratedigger-deploy-hold-blocker.service --property=ActiveState --value | grep -qx inactive")
+    machine.succeed("cratedigger-deploy-hold prepare-controlled")
+    machine.succeed("cratedigger-deploy-hold open-main-timer")
+    machine.succeed("cratedigger-deploy-hold finish-release aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    machine.succeed("cratedigger-deploy-hold complete aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    machine.fail("test -e /run/cratedigger-deploy-hold")
+    machine.fail("test -e /run/cratedigger-metadata-gate/holds/manual")
+    for timer in (
+        "cratedigger.timer",
+        "cratedigger-unfindable.timer",
+        "cratedigger-metadata-gate-watchdog.timer",
+    ):
+        machine.fail(f"test -e /run/systemd/system.control/{timer}")
+        state = machine.succeed(f"systemctl show {timer} --property=LoadState --value").strip()
+        assert state == "loaded", f"{timer} not restored after release: {state}"
 
     # Starting the main service remains safe: its idempotent pre-start render is
     # retained as a fallback and clears the test's deliberately stale lock. It
