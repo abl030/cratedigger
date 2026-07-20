@@ -81,6 +81,13 @@ Every top-level `pipeline-cli` subcommand, one line each. Run `pipeline-cli rout
 | `long-tail` | Long-tail worklist — wanted cohort pre-banded by on-disk quality (missing / QualityRank / unknown) + in_flight_rescue |
 | `library-delete` | Delete one exact Beets album through the pinned runtime, verify owned artifacts absent, optionally purge pipeline last, then notify Plex/Jellyfin (requires `--confirm DELETE`) |
 
+`ban-source` exits 0 only when the exact Beets release is absent after
+cleanup. If hashes, denylist, and request state committed but Beets still owns
+the release, it exits 4 with `status="partial"`,
+`error="cleanup_incomplete"`, and selector/hash details. Inspect the exact
+album and use the guarded `library-delete` recovery path; do not blindly retry
+a commit-ambiguous deletion.
+
 `library-delete` JSON has three truthful terminal shapes. `status=ok` means the
 exact Beets row and owned artifacts are absent; `preserved_paths` lists unknown
 content left untouched and `notifications` records media submissions/warnings.

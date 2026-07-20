@@ -158,7 +158,8 @@
   } // (
     if cfg.beets.package.discogsTokenFile != null then {
       # Real token: issue #117 *File pattern — preStart materializes
-      # secrets.yaml (0400) next to config.yaml; the world-readable
+      # secrets.yaml (service-only 0400, or explicit operator-group 0440)
+      # next to config.yaml; the world-readable
       # config.yaml carries only the include.
       include = ["secrets.yaml"];
     } else {
@@ -456,7 +457,7 @@
     trap - EXIT
     ${optionalString (cfg.beets.package.discogsTokenFile != null) ''
       # Discogs token: *File pattern (issue #117) — the token lands only
-      # in a 0400 secrets.yaml owned by the service user, never in the
+      # in a group-bounded secrets.yaml owned by the service user, never in the
       # world-readable config.yaml. Bare assignment so a failed cat
       # (unreadable secret) fails the unit under set -e instead of being
       # swallowed inside a printf argument.
@@ -477,9 +478,19 @@
         echo 'discogs:'
         echo "  user_token: '$discogs_token'"
       } > "$tmp_secrets"
-      ${pkgs.coreutils}/bin/chmod 0400 "$tmp_secrets"
+      ${if cfg.beets.package.discogsOperatorGroup == null then ''
+        ${pkgs.coreutils}/bin/chmod 0400 "$tmp_secrets"
+      '' else ''
+        ${pkgs.coreutils}/bin/chgrp ${lib.escapeShellArg cfg.beets.package.discogsOperatorGroup} "$tmp_secrets"
+        ${pkgs.coreutils}/bin/chmod 0440 "$tmp_secrets"
+      ''}
       ${pkgs.coreutils}/bin/mv -f "$tmp_secrets" "$beets_dir/secrets.yaml"
       trap - EXIT
+    ''}
+    ${optionalString (cfg.beets.package.discogsTokenFile == null) ''
+      # Declarative convergence: switching back to the placeholder-token
+      # profile must revoke any previously group-readable rendered secret.
+      ${pkgs.coreutils}/bin/rm -f "$beets_dir/secrets.yaml"
     ''}
   '';
 
@@ -850,12 +861,25 @@ in {
             Path to a file containing a Discogs user token (raw, one line).
             Same contract as slskd.apiKeyFile (issue #117): must be readable
             by services.cratedigger.user. When set, preStart materializes it
-            into ''${stateDir}/beets/secrets.yaml (mode 0400) and the rendered
+            into ''${stateDir}/beets/secrets.yaml and the rendered
             config.yaml includes it. When null, a non-empty placeholder token
             is rendered instead so the discogs plugin loads without its
             interactive OAuth flow — public-Discogs lookups then fail
             per-use until a real token is provided (documented
             token-required).
+          '';
+        };
+        discogsOperatorGroup = mkOption {
+          type = types.nullOr types.str;
+          default = null;
+          example = "cratedigger-ops";
+          description = ''
+            Optional UNIX group authorized to run operator-side Beets actions
+            through the module-rendered config. When set with
+            discogsTokenFile, secrets.yaml is owned by this group at 0440;
+            otherwise it remains service-only at 0400. The module creates the
+            group and adds a non-root service user; authorized CLI operators
+            must be added separately.
           '';
         };
       };
@@ -1344,6 +1368,10 @@ in {
         message = "services.cratedigger.discogs.apiBase must be an origin URL (scheme://host[:port]) when set, e.g. https://discogs.ablz.au.";
       }
       {
+        assertion = cfg.beets.package.discogsOperatorGroup == null || cfg.beets.package.discogsTokenFile != null;
+        message = "services.cratedigger.beets.package.discogsOperatorGroup requires discogsTokenFile";
+      }
+      {
         assertion = !cfg.notifiers.plex.enable || (cfg.notifiers.plex.tokenFile != null && cfg.notifiers.plex.url != "");
         message = "services.cratedigger.notifiers.plex: enable requires url and tokenFile";
       }
@@ -1367,12 +1395,18 @@ in {
       ${cfg.user} = {
         isSystemUser = true;
         group = cfg.group;
+        extraGroups = optional
+          (cfg.beets.package.discogsOperatorGroup != null)
+          cfg.beets.package.discogsOperatorGroup;
         description = "Cratedigger service user";
       };
     };
-    users.groups = mkIf (cfg.group != "root") {
-      ${cfg.group} = {};
-    };
+    users.groups = lib.mkMerge [
+      (mkIf (cfg.group != "root") { ${cfg.group} = {}; })
+      (mkIf (cfg.beets.package.discogsOperatorGroup != null) {
+        ${cfg.beets.package.discogsOperatorGroup} = {};
+      })
+    ];
 
     # Since config.ini no longer embeds plaintext secrets (issue #117), the
     # state directory and the rendered config can both be world-readable. The

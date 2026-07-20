@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from typing import Any, Iterable, Protocol, runtime_checkable
 
@@ -140,8 +141,12 @@ def delete_wrong_match_group(
     for row in list(db.get_wrong_matches()):
         if row.get("request_id") != request_id:
             continue
-        log_id = row.get("download_log_id")
-        if not isinstance(log_id, int) or isinstance(log_id, bool):
+        # ``download_log_id`` is a required, non-nullable ``download_log.id``
+        # column (WrongMatchCandidateRow), so the row type already proves
+        # this is an ``int`` — only the bool-subtype guard still needs a
+        # runtime check.
+        log_id = row["download_log_id"]
+        if isinstance(log_id, bool):
             results.append(WrongMatchDeleteResult(
                 download_log_id=0,
                 request_id=request_id,
@@ -421,7 +426,9 @@ def _group_outcome(
     return GROUP_OUTCOME_PARTIAL
 
 
-def _visible_wrong_match_row(db: WrongMatchDeleteDB, download_log_id: int) -> dict[str, Any] | None:
+def _visible_wrong_match_row(
+    db: WrongMatchDeleteDB, download_log_id: int,
+) -> Mapping[str, Any] | None:
     for row in db.get_wrong_matches():
         if row.get("download_log_id") == download_log_id:
             return row

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime
-from typing import Protocol
+from typing import Protocol, TYPE_CHECKING
 
 import msgspec
 
@@ -23,6 +23,9 @@ from lib.release_identity import (
     normalize_release_id,
 )
 from web.download_history_view import DownloadHistoryViewRow, build_download_history_rows
+
+if TYPE_CHECKING:
+    from lib.pipeline_db.rows import DownloadLogWithEvidenceRow
 
 
 class SupportsLibraryAlbumDetailLookup(Protocol):
@@ -38,7 +41,9 @@ class SupportsLibraryAlbumDetailPipelineDB(
 ):
     """Pipeline DB surface needed for library album detail overlays."""
 
-    def get_download_history(self, request_id: int) -> list[dict[str, object]]:
+    def get_download_history(
+        self, request_id: int,
+    ) -> "list[DownloadLogWithEvidenceRow]":
         ...
 
 

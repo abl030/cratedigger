@@ -2,6 +2,7 @@
 
 import json
 import os
+from collections.abc import Mapping, Sequence
 from typing import Any, TypedDict
 
 import msgspec
@@ -53,7 +54,7 @@ from web.wrong_match_file_service import (
 
 
 def _row_presence(
-    row: dict[str, object],
+    row: Mapping[str, object],
     beets_info: dict[str, dict[str, object]],
 ) -> str:
     """Answer 'is this release on disk?' for a wrong-matches row.
@@ -119,7 +120,7 @@ def _entry_sort_key(entry: dict[str, object]) -> tuple:
     return (-rank_value, distance_sort, -log_id_int)
 
 
-def _quality_summary(row: dict[str, object],
+def _quality_summary(row: Mapping[str, object],
                      beets_info: dict[str, dict[str, object]],
                      presence: str,
                      ) -> dict[str, object]:
@@ -193,7 +194,7 @@ def _quality_summary(row: dict[str, object],
 _IMPORT_SUCCESS_OUTCOMES = ("success", "force_import", "manual_import")
 
 
-def _latest_import_summary(rows: list[dict[str, object]]
+def _latest_import_summary(rows: Sequence[Mapping[str, object]]
                            ) -> dict[str, object] | None:
     """Summary of the last successful import for a request.
 
@@ -209,7 +210,7 @@ def _latest_import_summary(rows: list[dict[str, object]]
     if not rows:
         return None
     from datetime import datetime
-    picked: dict[str, object] | None = None
+    picked: Mapping[str, object] | None = None
     for row in rows:
         outcome = row.get("outcome")
         if isinstance(outcome, str) and outcome in _IMPORT_SUCCESS_OUTCOMES:
@@ -319,10 +320,13 @@ def _build_wrong_match_groups(
         target = target_candidate(vr)
         entries_list = group["entries"]
         assert isinstance(entries_list, list)
-        log_id = row.get("download_log_id")
+        # ``download_log_id`` is a required, non-nullable ``download_log.id``
+        # column (WrongMatchCandidateRow), so the row type already proves
+        # this is an ``int``.
+        log_id = row["download_log_id"]
         import_job = (
             _serialize_import_job(active_jobs_by_log_id[log_id])
-            if isinstance(log_id, int) and log_id in active_jobs_by_log_id
+            if log_id in active_jobs_by_log_id
             else None
         )
         # Per-candidate quality measurement comes from
@@ -706,11 +710,10 @@ def post_wrong_match_converge(h, body: dict) -> None:
     for row in pdb.get_wrong_matches():
         if row.get("request_id") != rid:
             continue
-        lid = row.get("download_log_id")
-        if not isinstance(lid, int):
-            skipped.append({"download_log_id": None, "reason": "missing_log_id"})
-            remaining += 1
-            continue
+        # ``download_log_id`` is a required, non-nullable ``download_log.id``
+        # column (WrongMatchCandidateRow), so the row type already proves
+        # this is an ``int``.
+        lid = row["download_log_id"]
 
         vr = decode_validation_envelope(row.get("validation_result"))
         failed_path = vr.failed_path or ""

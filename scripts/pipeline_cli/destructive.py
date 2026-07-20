@@ -8,6 +8,7 @@ import sys
 
 from lib.beets_db import BeetsDB, DEFAULT_BEETS_DB
 from lib.destructive_release_service import (
+    BanSourceCleanupIncomplete,
     BanSourceImporterBusy,
     BanSourceLockContended,
     BanSourceReleaseMismatch,
@@ -68,6 +69,33 @@ def cmd_ban_source(db, args) -> int:
             "hash_capture_errors": len(result.hash_capture_errors),
         }))
         return 0
+    if isinstance(result, BanSourceCleanupIncomplete):
+        print(json.dumps({
+            "error": "cleanup_incomplete",
+            "status": "partial",
+            "request_id": result.request_id,
+            "release_id": result.release_id,
+            "request_status": result.request_status,
+            "username": result.username,
+            "beets_removed": False,
+            "hashes_recorded": result.hashes_recorded,
+            "cleanup_errors": [
+                {
+                    "selector": failure.selector,
+                    "reason": failure.reason,
+                    "detail": failure.detail,
+                }
+                for failure in result.cleanup_errors
+            ],
+            "hash_capture_errors": [
+                {
+                    "track_path": failure.track_path,
+                    "reason": failure.reason,
+                }
+                for failure in result.hash_capture_errors
+            ],
+        }))
+        return 4
     if isinstance(result, BanSourceRequestNotFound):
         print(json.dumps({"error": "request_not_found"}))
         return 2

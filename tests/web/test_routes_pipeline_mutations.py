@@ -1344,7 +1344,7 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
             "mb_release_id": self.RELEASE_ID,
         })
 
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 409)
         # Album still on disk → the wipe must not run at all.
         self.assertEqual(self.db.clear_on_disk_quality_fields_calls, [])
         row = self.db.request(1704)
@@ -1354,6 +1354,8 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         # surfaces under ``partial_failures.cleanup_errors`` (the
         # unified shape). Distinguishes "banned cleanly" from
         # "banned but album still on disk".
+        self.assertEqual(data["error"], "cleanup_incomplete")
+        self.assertEqual(data["status"], "partial")
         cleanup_errors = data["partial_failures"]["cleanup_errors"]
         self.assertEqual(len(cleanup_errors), 1)
         self.assertEqual(cleanup_errors[0]["reason"], "nonzero_rc")

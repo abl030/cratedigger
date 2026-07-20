@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 from lib.quarantine_triage_service import (
@@ -12,6 +13,9 @@ from lib.quarantine_triage_service import (
     list_unreferenced_quarantine_folders,
 )
 from tests.fakes import FakePipelineDB
+
+if TYPE_CHECKING:
+    from lib.pipeline_db import WrongMatchCandidateRow
 
 
 def _seed_wrong_match(
@@ -37,7 +41,7 @@ def _seed_wrong_match(
 
 
 class _FailingWrongMatchesDB(FakePipelineDB):
-    def get_wrong_matches(self) -> list[dict[str, object]]:
+    def get_wrong_matches(self) -> "list[WrongMatchCandidateRow]":
         raise RuntimeError("database unavailable")
 
 

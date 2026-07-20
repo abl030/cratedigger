@@ -8,7 +8,7 @@ errors with:
 """
 
 STRICT_RATCHET_BASELINE: dict[str, int] = {
-    "cratedigger.py": 502,
+    "cratedigger.py": 1,
     "harness/beets_harness.py": 1,
     "lib/artist_compare.py": 31,
     "lib/artist_releases.py": 70,
@@ -45,7 +45,6 @@ STRICT_RATCHET_BASELINE: dict[str, int] = {
     "lib/pipeline_db/_core.py": 4,
     "lib/pipeline_db/_shared.py": 4,
     "lib/pipeline_db/dashboard.py": 83,
-    "lib/pipeline_db/download_log.py": 15,
     "lib/pipeline_db/import_jobs.py": 2,
     "lib/pipeline_db/misc.py": 1,
     "lib/pipeline_db/requests.py": 51,
@@ -119,11 +118,11 @@ STRICT_RATCHET_BASELINE: dict[str, int] = {
     "web/routes/beets_distance.py": 16,
     "web/routes/browse.py": 147,
     "web/routes/disk_coverage.py": 5,
-    "web/routes/imports.py": 121,
+    "web/routes/imports.py": 116,
     "web/routes/labels.py": 17,
     "web/routes/library.py": 19,
     "web/routes/long_tail.py": 7,
-    "web/routes/pipeline.py": 97,
+    "web/routes/pipeline.py": 85,
     "web/routes/pipeline_dashboard.py": 11,
     "web/routes/pipeline_mutations.py": 202,
     "web/routes/release_identity_routes.py": 51,

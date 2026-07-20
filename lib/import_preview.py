@@ -14,9 +14,12 @@ import shutil
 import tempfile
 from collections.abc import Mapping, Callable
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
 
 import msgspec
+
+if TYPE_CHECKING:
+    from lib.pipeline_db.rows import DownloadLogWithEvidenceRow
 
 from lib.dispatch import run_import_one
 from lib.dispatch.types import ImportOneRun
@@ -169,7 +172,9 @@ class ImportPreviewDB(QualityEvidenceDB, Protocol):
     ``tests/test_import_preview.py``.
     """
 
-    def get_download_log_entry(self, log_id: int) -> dict[str, Any] | None: ...
+    def get_download_log_entry(
+        self, log_id: int,
+    ) -> "DownloadLogWithEvidenceRow | None": ...
 
     def persist_current_spectral_measurement(
         self,
@@ -2245,15 +2250,11 @@ def preview_import_from_download_log(
             reason=f"Download log entry {download_log_id} not found",
             download_log_id=download_log_id,
         )
-    request_id_raw = entry.get("request_id")
-    if not isinstance(request_id_raw, int):
-        return _preview_result(
-            mode="download_log",
-            verdict=PREVIEW_VERDICT_UNCERTAIN,
-            decision="missing_request_id",
-            reason="Download log row has no request_id",
-            download_log_id=download_log_id,
-        )
+    # ``request_id`` is a required, non-nullable ``download_log`` column
+    # (DownloadLogWithEvidenceRow), so the row type already proves this is
+    # an ``int`` — no runtime narrowing needed once the row comes through
+    # the typed projection.
+    request_id_raw = entry["request_id"]
     vr = decode_validation_envelope(entry.get("validation_result"))
     raw_path = vr.failed_path
     if not raw_path:
