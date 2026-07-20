@@ -1,0 +1,43 @@
+{
+  "extraPaths": [
+    "."
+  ],
+  "venvPath": ".",
+  "venv": ".pyright-venv",
+  "pythonVersion": "3.13",
+  "reportMissingImports": "error",
+  "reportUnnecessaryTypeIgnoreComment": "error",
+  "reportUnnecessaryIsInstance": "error",
+  "reportUnnecessaryComparison": "error",
+  "reportConstantRedefinition": "error",
+  "reportDeprecated": "error",
+  "reportUntypedFunctionDecorator": "error",
+  "reportUntypedClassDecorator": "error",
+  "reportUntypedBaseClass": "error",
+  "reportUntypedNamedTuple": "error",
+  "reportPrivateImportUsage": "error",
+  "reportInvalidStringEscapeSequence": "error",
+  "reportSelfClsParameterName": "error",
+  "reportAssertAlwaysTrue": "error",
+  "reportUnusedExpression": "error",
+  "reportUnnecessaryContains": "error",
+  "reportRedeclaration": "error",
+  "reportInconsistentConstructor": "error",
+  "reportOverlappingOverload": "error",
+  "reportPropertyTypeMismatch": "error",
+  "reportTypeCommentUsage": "error",
+  "reportMatchNotExhaustive": "error",
+  "reportShadowedImports": "error",
+  "typeCheckingMode": "strict",
+  "reportPrivateUsage": "none",
+  "reportUnusedFunction": "none",
+  "reportUnusedClass": "none",
+  "exclude": [
+    "build",
+    "tools/vulture",
+    ".pyright-venv",
+    ".nixpkgs-src",
+    ".claude/worktrees",
+    "tests"
+  ]
+}
