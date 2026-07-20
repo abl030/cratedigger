@@ -23,6 +23,7 @@ from lib.quality import AudioQualityMeasurement, ImportResult
 from lib.quality_evidence import snapshot_audio_files
 from tests.helpers import (
     RecordingQualityGate,
+    finalize_claimed_dispatch,
     make_album_quality_evidence,
     make_import_result,
     make_request_row,
@@ -161,7 +162,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 request_id=42,
                 payload={"failed_path": tmpdir},
             )
-            import_job_id = job.id
             from lib.quality import SpectralAnalysisDetail, SpectralDetail
             preview_ir = ImportResult(spectral=SpectralDetail(
                 candidate=SpectralAnalysisDetail(
@@ -170,15 +170,16 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                     attempted=True, grade="genuine", bitrate_kbps=None),
             ))
             db.mark_import_job_preview_importable(
-                import_job_id,
+                job.id,
                 preview_result={"import_result": msgspec.to_builtins(preview_ir)},
                 message="two-sided spectral audit ready",
             )
 
             # Seed candidate evidence matching the on-disk snapshot.
             _seed_candidate_for_import_job(
-                db, import_job_id,
-                mb_release_id="mbid-candidate",
+                db, job.id,
+                mb_release_id="mbid-123",
+                source_path=tmpdir,
                 files=snapshot_audio_files(tmpdir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=320,
@@ -191,6 +192,9 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 container="mp3",
                 storage_format="MP3",
             )
+            claimed = db.claim_next_import_job(worker_id="dispatch-from-db-test")
+            assert claimed is not None and claimed.id == job.id
+            import_job_id = claimed.id
             # Seed current (on-disk) evidence so override-min-bitrate
             # derivation flows through the same grade-aware logic the
             # legacy branch used (compute_effective_override_bitrate of
@@ -228,6 +232,8 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                     download_log_id=source_download_log_id,
                     quality_gate_fn=mock_gate,
                 )
+                finalize_claimed_dispatch(db, claimed, result)
+                path_exists_after_finalize = os.path.exists(tmpdir)
                 cmd = ext.run.call_args[0][0] if ext.run.call_args else []
         finally:
             import shutil
@@ -237,7 +243,9 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             "result": result,
             "cmd": cmd,
             "db": db,
+            "job_id": job.id,
             "path": tmpdir,
+            "path_exists_after_finalize": path_exists_after_finalize,
             "mock_gate": mock_gate,
             "mock_jellyfin": ext.jellyfin,
             "mock_cleanup": ext.cleanup,
@@ -359,6 +367,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
 
     def test_force_import_with_valid_candidate_evidence_skips_preimport_measurement(self):
         from lib.dispatch import dispatch_import_from_db
+        from lib.import_queue import IMPORT_JOB_FORCE
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -382,7 +391,8 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             files = snapshot_audio_files(tmpdir)
             _seed_candidate_for_download_log(
                 db, download_log_id,
-                mb_release_id="mbid-candidate",
+                mb_release_id="mbid-123",
+                source_path=tmpdir,
                 files=files,
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=245,
@@ -395,6 +405,34 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 container="mp3",
                 storage_format="MP3",
             )
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                payload={"failed_path": tmpdir},
+            )
+            _seed_candidate_for_import_job(
+                db,
+                job.id,
+                mb_release_id="mbid-123",
+                source_path=tmpdir,
+                files=files,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    avg_bitrate_kbps=256,
+                    median_bitrate_kbps=252,
+                    format="MP3",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="MP3",
+            )
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+            )
+            claimed = db.claim_next_import_job(worker_id="valid-evidence-test")
+            assert claimed is not None and claimed.id == job.id
             _seed_current_for_request(
                 db, 42,
                 mb_release_id="mbid-current",
@@ -422,9 +460,11 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                     request_id=42,
                     failed_path=tmpdir,
                     source_username="alice",
+                    import_job_id=claimed.id,
                     download_log_id=download_log_id,
                     quality_gate_fn=noop_quality_gate,
                 )
+                finalize_claimed_dispatch(db, claimed, result)
 
             self.assertTrue(result.success)
             cmd = ext.run.call_args[0][0]
@@ -759,7 +799,10 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         """
         r = self._dispatch()  # default decision="import"
         self.assertTrue(r["result"].success)
-        r["mock_cleanup"].assert_called_once_with(r["path"])
+        job = r["db"].get_import_job(r["job_id"])
+        assert job is not None
+        self.assertEqual(job.status, "completed")
+        self.assertFalse(r["path_exists_after_finalize"])
 
 class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
     """Issue #92: concurrent force-import on the same request_id

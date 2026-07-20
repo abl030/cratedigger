@@ -158,12 +158,18 @@ class _YoutubeMixin(_PipelineDBBase):
                         INSERT INTO import_jobs (
                             job_type, request_id, dedupe_key, payload, message,
                             preview_status, preview_message,
-                            preview_completed_at, importable_at
+                            preview_completed_at, importable_at,
+                            expected_request_status
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, NULL, NULL, NULL)
+                        VALUES (
+                            %s, %s, %s, %s, %s, %s, NULL, NULL, NULL,
+                            (SELECT status FROM album_requests WHERE id = %s)
+                        )
                         ON CONFLICT (dedupe_key)
                             WHERE dedupe_key IS NOT NULL
-                              AND status IN ('queued', 'running')
+                              AND status IN (
+                                  'queued', 'running', 'recovery_required'
+                              )
                         DO NOTHING
                         RETURNING *
                     )
@@ -173,7 +179,9 @@ class _YoutubeMixin(_PipelineDBBase):
                     SELECT import_jobs.*, true AS deduped
                     FROM import_jobs
                     WHERE dedupe_key = %s
-                      AND status IN ('queued', 'running')
+                      AND status IN (
+                          'queued', 'running', 'recovery_required'
+                      )
                       AND NOT EXISTS (SELECT 1 FROM inserted)
                     ORDER BY deduped
                     LIMIT 1
@@ -185,6 +193,7 @@ class _YoutubeMixin(_PipelineDBBase):
                         psycopg2.extras.Json(payload),
                         message,
                         IMPORT_JOB_PREVIEW_WAITING,
+                        int(request_id),
                         dedupe_key,
                     ),
                 )
@@ -325,7 +334,7 @@ class _YoutubeMixin(_PipelineDBBase):
             FROM import_jobs
             WHERE job_type = %s
               AND request_id = %s
-              AND status IN ('queued', 'running')
+              AND status IN ('queued', 'running', 'recovery_required')
             ORDER BY id ASC
             LIMIT 1
             """,

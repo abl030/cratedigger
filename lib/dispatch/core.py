@@ -3,20 +3,22 @@
 ``dispatch_import_core`` is the funnel every import path (automatic and
 force) runs through: acquire the RELEASE advisory lock, load evidence,
 run the subprocess, and dispatch on the decision.
-``cleanup_disambiguation_orphans`` and ``_cleanup_staged_dir`` are looked
-up here (tests patch them on this module). The post-import search-policy
-appliers live in ``lib.dispatch.post_import``.
+Destructive convergence is returned to the queue owner as an in-memory
+post-commit plan. The post-import search-policy appliers live in
+``lib.dispatch.post_import``.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import subprocess as sp
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Sequence, TYPE_CHECKING
 
 from lib import transitions
+from lib.import_queue import IMPORT_JOB_AUTOMATION
 
 from lib.processing_paths import normalize_source_dirs
 from lib.quality import (AlbumQualityEvidenceDecisionFacts, DownloadInfo,
@@ -28,16 +30,13 @@ from lib.quality import (AlbumQualityEvidenceDecisionFacts, DownloadInfo,
                          override_bitrate_from_current_evidence,
                          resolve_rejection_search_override)
 from lib.quality_evidence import EvidenceBuildResult, audit_v0_probe_from_metric
-from lib.util import cleanup_disambiguation_orphans
-
 from lib.dispatch.types import (DispatchOutcome, EvidenceImportGate,
                                 FORCE_IMPORT_SCENARIOS, ImportAttemptResult,
-                                ImportOneRun, QualityGateFn)
+                                ImportOneRun, PostCommitCleanup, QualityGateFn)
 from lib.dispatch.subprocess_runner import run_import_one
-from lib.dispatch.helpers import (_cleanup_staged_dir, _guard_failure_detail,
+from lib.dispatch.helpers import (_guard_failure_detail,
                                   _log_postflight_bad_extensions,
                                   _populate_dl_info_from_import_result,
-                                  _quarantine_duplicate_remove_guard_source,
                                   _should_cleanup_path)
 from lib.dispatch.evidence_gate import (_current_evidence_analysis_failed,
                                         _import_allowed_by_evidence_pipeline,
@@ -144,6 +143,11 @@ def dispatch_import_core(
     outcome_success = False
     outcome_message = ""
     terminal_outcome: PendingImportTerminalOutcome | None = None
+    post_commit_staged_path: str | None = None
+    post_commit_disambiguation_path: str | None = None
+    post_commit_duplicate_guard_path: str | None = None
+    post_commit_duplicate_guard_staging_dir: str | None = None
+    beets_launch_authorized = False
 
     # Acquire the RELEASE (per-MBID) advisory lock for the duration of
     # the ``import_one.py`` subprocess. This is the funnel every path
@@ -414,6 +418,32 @@ def dispatch_import_core(
                     verified_lossless_target=verified_lossless_target,
                     gate=evidence_gate,
                 )
+            if candidate_import_job_id is None:
+                return DispatchOutcome(
+                    success=False,
+                    message=(
+                        "Beets launch refused: no active import job owns "
+                        "this mutation"
+                    ),
+                    code="launch_authority_missing",
+                )
+            authorized_job = db.authorize_import_job_launch(
+                candidate_import_job_id,
+                request_id=request_id,
+                release_id=mb_release_id,
+                source_path=path,
+            )
+            if authorized_job is None:
+                return DispatchOutcome(
+                    success=False,
+                    message=(
+                        "Beets launch refused: import job authority is stale "
+                        "or no longer active"
+                    ),
+                    code="launch_authority_conflict",
+                )
+            beets_launch_authorized = True
+
             # Mark the subprocess as launching on the auto-import path
             # so the resume guard can distinguish "never started" from
             # "may have written to beets" if this process crashes
@@ -423,7 +453,7 @@ def dispatch_import_core(
             # safe — we still gate to make the intent explicit.
             # See ``docs/advisory-locks.md`` and
             # ``lib/download.py::_import_subprocess_already_started``.
-            if scenario not in FORCE_IMPORT_SCENARIOS:
+            if authorized_job.job_type == IMPORT_JOB_AUTOMATION:
                 try:
                     stamped = db.mark_import_subprocess_started(
                         request_id,
@@ -479,29 +509,18 @@ def dispatch_import_core(
                 ir = attempt_result.merge(ir)
             if ir is None:
                 logger.error(
-                    f"{mode} FAILED (no JSON, rc={run.returncode}): {label}")
+                    f"{mode} ACKNOWLEDGEMENT AMBIGUOUS "
+                    f"(no JSON, rc={run.returncode}): {label}")
                 for line in run.stdout.strip().split("\n"):
                     logger.error(f"  {line}")
-                pending = _record_rejection_and_maybe_requeue(
-                    db, request_id, dl_info,
-                    detail=f"import_one.py rc={run.returncode}, no JSON",
-                    error=f"rc={run.returncode}",
-                    requeue=requeue_on_failure,
-                    outcome_label="failed",
-                    validation_result=ValidationResult(
-                        distance=distance,
-                        scenario="no_json_result",
-                        detail=f"import_one.py rc={run.returncode}, no JSON",
-                        error=f"rc={run.returncode}",
-                        source_dirs=source_dirs,
-                    ).to_json(),
-                    staged_path=path,
-                    attempt_result=attempt_result,
-                    import_job_id=candidate_import_job_id,
-                    source_download_log_id=candidate_download_log_id)
-                if isinstance(pending, PendingImportTerminalOutcome):
-                    terminal_outcome = pending
-                outcome_message = f"No JSON result (rc={run.returncode})"
+                return DispatchOutcome(
+                    success=False,
+                    message=(
+                        "Beets returned without a terminal result; "
+                        "operator recovery is required"
+                    ),
+                    code="beets_acknowledgement_ambiguous",
+                )
             else:
                 _populate_dl_info_from_import_result(dl_info, ir)
                 _log_postflight_bad_extensions(
@@ -665,13 +684,11 @@ def dispatch_import_core(
                     elif decision == "duplicate_remove_guard_failed":
                         fail_scenario = "duplicate_remove_guard_failed"
                         fail_detail = _guard_failure_detail(ir)
-                        attempt_result.apply(
-                            lambda result: _quarantine_duplicate_remove_guard_source(
-                                ir=result,
-                                path=path,
-                                request_id=request_id,
-                                cfg=cfg,
-                            )
+                        post_commit_duplicate_guard_path = path
+                        post_commit_duplicate_guard_staging_dir = (
+                            cfg.beets_staging_dir
+                            if cfg is not None and cfg.beets_staging_dir
+                            else os.path.dirname(os.path.abspath(path))
                         )
                         guard = ir.postflight.duplicate_remove_guard
                         if guard is not None:
@@ -912,14 +929,20 @@ def dispatch_import_core(
                     # already-imported album. Auto-import scenarios always
                     # clean — their staging dir under ``/Incoming`` is
                     # disposable by design.
-                    _cleanup_staged_dir(path)
+                    post_commit_staged_path = path
                 if action.mark_done and ir.postflight.disambiguated and ir.postflight.imported_path:
-                    cleanup_disambiguation_orphans(
-                        ir.postflight.imported_path,
-                        beets_directory=cfg.beets_directory if cfg is not None else "",
-                    )
+                    post_commit_disambiguation_path = ir.postflight.imported_path
         except sp.TimeoutExpired:
             logger.error(f"{mode} TIMEOUT: {label}")
+            if beets_launch_authorized:
+                return DispatchOutcome(
+                    success=False,
+                    message=(
+                        "Import timed out after Beets launch; operator "
+                        "recovery is required"
+                    ),
+                    code="beets_acknowledgement_ambiguous",
+                )
             pending = _record_rejection_and_maybe_requeue(
                 db, request_id, dl_info,
                 detail="import_one.py timed out", error="timeout",
@@ -940,6 +963,15 @@ def dispatch_import_core(
             outcome_message = "Import timed out"
         except Exception:
             logger.exception(f"{mode} ERROR: {label}")
+            if beets_launch_authorized:
+                return DispatchOutcome(
+                    success=False,
+                    message=(
+                        "Import failed after Beets launch without a terminal "
+                        "acknowledgement; operator recovery is required"
+                    ),
+                    code="beets_acknowledgement_ambiguous",
+                )
             pending = _record_rejection_and_maybe_requeue(
                 db, request_id, dl_info,
                 detail="unhandled exception in auto-import", error="exception",
@@ -965,4 +997,28 @@ def dispatch_import_core(
         success=outcome_success,
         message=outcome_message,
         terminal_outcome=terminal_outcome,
+        post_commit_cleanup=(
+            PostCommitCleanup(
+                staged_path=post_commit_staged_path,
+                disambiguation_imported_path=post_commit_disambiguation_path,
+                beets_directory=(
+                    cfg.beets_directory if cfg is not None else ""
+                ),
+                duplicate_guard_source_path=post_commit_duplicate_guard_path,
+                duplicate_guard_staging_dir=(
+                    post_commit_duplicate_guard_staging_dir
+                ),
+                duplicate_guard_request_id=(
+                    request_id
+                    if post_commit_duplicate_guard_path is not None
+                    else None
+                ),
+            )
+            if any((
+                post_commit_staged_path,
+                post_commit_disambiguation_path,
+                post_commit_duplicate_guard_path,
+            ))
+            else None
+        ),
     )

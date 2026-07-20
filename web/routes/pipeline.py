@@ -17,11 +17,13 @@ was split out (#546 W4) into ``web/routes/pipeline_mutations.py``.
 
 import logging
 from collections.abc import Mapping, Sequence
-from typing import cast
+from typing import Literal, cast
 
 import msgspec
+from pydantic import BaseModel, Field
 
 from web.routes._registry import RouteRegistration, pattern_route, route
+from web.routes._pydantic import parse_body
 from web.routes._server_access import _server
 
 logger = logging.getLogger(__name__)
@@ -500,7 +502,15 @@ def _serialize_import_job(job) -> dict[str, object]:
 def get_import_jobs(h, params: dict[str, list[str]]) -> None:
     status = params.get("status", [None])[0]
     request_id_raw = params.get("request_id", [None])[0]
-    if status not in (None, "", "queued", "running", "completed", "failed"):
+    if status not in (
+        None,
+        "",
+        "queued",
+        "running",
+        "recovery_required",
+        "completed",
+        "failed",
+    ):
         h._error("Invalid import job status")
         return
     status = status or None
@@ -553,6 +563,55 @@ def get_import_job(h, params: dict[str, list[str]], job_id_str: str) -> None:
         h._error("Import job not found", 404)
         return
     h._json({"job": _serialize_import_job(job)})
+
+
+class ImportJobRecoveryRequest(BaseModel):
+    resolution: Literal["retry", "close"]
+    reason: str = Field(min_length=1, max_length=500)
+
+
+def post_import_job_recovery(
+    h,
+    body: dict,
+    job_id_str: str,
+) -> None:
+    """Apply an explicit operator decision to ambiguous Beets work."""
+    from lib.import_job_recovery_service import resolve_import_job_recovery
+
+    req_body = parse_body(h, body or {}, ImportJobRecoveryRequest)
+    if req_body is None:
+        return
+    try:
+        job_id = int(job_id_str)
+        result = resolve_import_job_recovery(
+            _server()._db(),
+            job_id,
+            resolution=req_body.resolution,
+            reason=req_body.reason,
+        )
+    except ValueError as exc:
+        h._error(str(exc), 400)
+        return
+
+    payload: dict[str, object] = {
+        "outcome": result.outcome,
+        "message": result.message,
+        "job": (
+            _serialize_import_job(result.job)
+            if result.job is not None else None
+        ),
+        "retry_job": (
+            _serialize_import_job(result.retry_job)
+            if result.retry_job is not None else None
+        ),
+    }
+    if result.outcome == "not_found":
+        h._json(payload, status=404)
+        return
+    if result.outcome in ("wrong_state", "authority_changed"):
+        h._json(payload, status=409)
+        return
+    h._json(payload, status=202 if result.outcome == "retry_queued" else 200)
 
 
 # ── Route tables ─────────────────────────────────────────────────
@@ -624,6 +683,13 @@ ROUTES: list[RouteRegistration] = [
     pattern_route(
         "GET", r"^/api/import-jobs/(\d+)$", get_import_job,
         "Single import-job detail by job id.",
+        classified=True,
+    ),
+    pattern_route(
+        "POST", r"^/api/import-jobs/(\d+)/recovery$",
+        post_import_job_recovery,
+        "Resolve a recovery-required Beets operation by explicitly retrying "
+        "or closing it without replay.",
         classified=True,
     ),
 ]

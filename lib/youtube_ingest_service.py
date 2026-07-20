@@ -595,7 +595,7 @@ class YoutubeIngestService:
 
         # 3. Import-job idempotency. Once yt-dlp has succeeded, the
         # download_log row is terminal but the importer handoff may still be
-        # queued/running. Treat that as in-flight for the same request/browse
+        # active. Treat that as in-flight for the same request/browse
         # id so repeated clicks don't stage duplicate albums.
         try:
             active_import = self.pdb.find_active_youtube_import_job(

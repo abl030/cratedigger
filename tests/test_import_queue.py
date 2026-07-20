@@ -892,7 +892,7 @@ class TestImporterWorker(unittest.TestCase):
         """REL-001: when dispatch returns DISPATCH_CODE_REQUEUE_FAILED (its
         requeue UPDATE itself raised), the importer must mark the job
         terminally failed rather than leaving it running. Leaving the job
-        running would let `requeue_running_import_jobs` on next worker boot
+        running would let startup recovery revisit it on next worker boot
         reclaim it — but the importer's claim query still matches
         preview_status='evidence_ready', so it would re-claim, hit the same
         requeue condition, fail again, and spin forever. Failing terminally

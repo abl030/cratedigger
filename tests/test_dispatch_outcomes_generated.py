@@ -199,12 +199,6 @@ def _run_dispatch(
             was_converted=world.was_converted,
         )
 
-    db = FakePipelineDB()
-    db.seed_request(make_request_row(
-        id=42, status=initial_status,
-        min_bitrate=180, current_spectral_bitrate=128,
-        active_download_state={"files": [], "filetype": "mp3"},
-    ))
     cfg = CratediggerConfig(
         beets_harness_path=_HARNESS,
         pipeline_db_enabled=True,
@@ -213,37 +207,53 @@ def _run_dispatch(
 
     tmpdir = tempfile.mkdtemp()
     try:
-        import_job_id = None
-        candidate_result = None
-        if queued:
-            from lib.import_evidence import (
-                ActionEvidenceProvenance,
-                CandidateEvidenceActionResult,
-            )
-            from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
+        del queued  # retained argument for existing generated call sites
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status=initial_status, mb_release_id="mbid-generated",
+            min_bitrate=180, current_spectral_bitrate=128,
+            active_download_state={
+                "files": [],
+                "filetype": "mp3",
+                "current_path": tmpdir,
+            },
+        ))
+        from lib.import_evidence import (
+            ActionEvidenceProvenance,
+            CandidateEvidenceActionResult,
+        )
+        from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
 
-            job = db.enqueue_import_job(
-                IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
-                request_id=42,
-                payload={"failed_path": tmpdir} if force else {},
-            )
-            db.mark_import_job_preview_importable(
-                job.id,
-                preview_result={"ready": True},
-            )
-            claimed = db.claim_next_import_job(worker_id="generated-dispatch")
-            assert claimed is not None
-            import_job_id = claimed.id
-            candidate_result = CandidateEvidenceActionResult(
-                evidence=make_album_quality_evidence(
-                    mb_release_id="mbid-generated",
-                    source_path=tmpdir,
-                ),
-                provenance=ActionEvidenceProvenance(
-                    candidate_status="reused",
-                    snapshot_guard="matched",
-                ),
-            )
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
+            request_id=42,
+            payload={"failed_path": tmpdir} if force else {},
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="mbid-generated",
+            source_path=tmpdir,
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_import_job_candidate_evidence(job.id, persisted.id)
+        db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"ready": True},
+        )
+        claimed = db.claim_next_import_job(worker_id="generated-dispatch")
+        assert claimed is not None
+        import_job_id = claimed.id
+        candidate_result = CandidateEvidenceActionResult(
+            evidence=persisted,
+            provenance=ActionEvidenceProvenance(
+                candidate_status="reused",
+                snapshot_guard="matched",
+            ),
+        )
         with patch_dispatch_externals(), \
              patch("lib.dispatch.subprocess_runner.parse_import_result",
                    return_value=ir):
@@ -277,6 +287,9 @@ def _run_dispatch(
                     error=None if result.success else result.message,
                 ))
             )
+        else:
+            from tests.helpers import finalize_claimed_dispatch
+            finalize_claimed_dispatch(db, claimed, result)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
     return {"db": db, "result": result}
@@ -638,23 +651,25 @@ def assert_dispatch_outcome_matches_routing(
     landed in the DB — for the no-JSON crash path AND every known decision
     string.
     """
-    assert_download_log_row_created(db)
-    log = db.download_logs[-1]
     status = db.request(42)["status"]
 
     if world.mode == "no_json":
-        if log.outcome != "failed":
+        if db.download_logs:
             raise AssertionError(
-                f"no-JSON crash logged outcome={log.outcome!r}, want 'failed'")
-        expected_status = "wanted" if world.requeue_on_failure else "downloading"
-        if status != expected_status:
+                "no-JSON ambiguity wrote a terminal download audit")
+        if status != "downloading":
             raise AssertionError(
-                f"no-JSON crash requeue_on_failure={world.requeue_on_failure} "
-                f"left status={status!r}, want {expected_status!r}")
+                f"no-JSON ambiguity left status={status!r}, want 'downloading'")
+        job = db.get_import_job(1)
+        if job is None or job.status != "recovery_required":
+            raise AssertionError(
+                "no-JSON ambiguity did not stop in recovery_required")
         if outcome.success:
             raise AssertionError("no-JSON crash reported success=True")
         return
 
+    assert_download_log_row_created(db)
+    log = db.download_logs[-1]
     assert world.decision is not None
     action = dispatch_action(world.decision)
     if action.mark_done:
@@ -890,9 +905,12 @@ class TestGeneratedDispatchOutcomes(unittest.TestCase):
     """Properties over the legacy (subprocess-return) dispatch path."""
 
     @given(world=dispatch_worlds())
-    def test_every_outcome_creates_a_download_log_row(self, world):
+    def test_terminal_outcomes_are_audited_and_ambiguity_is_not(self, world):
         outcome = _run_dispatch(world)
-        assert_download_log_row_created(outcome["db"])
+        if world.mode == "no_json":
+            self.assertEqual(outcome["db"].download_logs, [])
+        else:
+            assert_download_log_row_created(outcome["db"])
 
     @given(world=dispatch_worlds())
     def test_outcome_matches_dispatch_action_routing(self, world):
@@ -1157,7 +1175,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     def test_routing_checker_trips_on_no_json_wrong_log_outcome(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
-        # A crash should log 'failed', not 'success'.
+        # Ambiguous no-JSON work must not write a terminal success audit.
         db.log_download(request_id=42, outcome="success")
         world = DispatchWorld(
             mode="no_json", decision=None, new_min_bitrate=None,

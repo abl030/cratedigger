@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import closing, redirect_stderr, redirect_stdout
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
@@ -528,6 +529,94 @@ class TestTracksFromMbRelease(unittest.TestCase):
         self.assertEqual(tracks[0]["title"], "Houdini Crush")
         self.assertEqual(tracks[0]["disc_number"], 1)
         self.assertAlmostEqual(tracks[0]["length_seconds"], 200.0)
+
+
+class TestCmdImportJobRecovery(unittest.TestCase):
+    def _recovery_job(self) -> tuple[FakePipelineDB, int]:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="release-42",
+            status="wanted",
+        ))
+        job = db.enqueue_import_job(
+            "force_import",
+            request_id=42,
+            dedupe_key="force:cli-recovery",
+            payload={"failed_path": "/tmp/cli-recovery"},
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="release-42",
+            source_path="/tmp/cli-recovery",
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_import_job_candidate_evidence(job.id, persisted.id)
+        row = next(row for row in db._import_jobs if row["id"] == job.id)
+        row.update({
+            "status": "recovery_required",
+            "beets_launch_authorized_at": datetime.now(timezone.utc),
+            "beets_launch_release_id": "release-42",
+            "beets_launch_source_path": "/tmp/cli-recovery",
+            "beets_launch_request_status": "wanted",
+            "beets_launch_snapshot_fingerprint": evidence.snapshot_fingerprint,
+        })
+        return db, job.id
+
+    def test_recovery_listing_exposes_launch_authority(self) -> None:
+        db, _job_id = self._recovery_job()
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            pipeline_cli.cmd_import_jobs(
+                db,
+                SimpleNamespace(status="recovery_required", limit=20),
+            )
+
+        output = stdout.getvalue()
+        self.assertIn("release=release-42", output)
+        self.assertIn("source=/tmp/cli-recovery", output)
+        self.assertIn("snapshot=", output)
+        self.assertIn("authorized=", output)
+
+    def test_retry_reports_new_operation(self) -> None:
+        db, job_id = self._recovery_job()
+        args = SimpleNamespace(
+            job_id=job_id,
+            resolution="retry",
+            reason="Confirmed no Beets mutation",
+        )
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_import_job_recovery(db, args)
+
+        self.assertEqual(rc, 0)
+        self.assertIn("Queued fresh import job", stdout.getvalue())
+        jobs = db.list_import_jobs()
+        self.assertEqual({job.status for job in jobs}, {"failed", "queued"})
+
+    def test_wrong_state_returns_conflict_exit(self) -> None:
+        db = FakePipelineDB()
+        job = db.enqueue_import_job(
+            "force_import",
+            request_id=42,
+            payload={"failed_path": "/tmp/not-recovery"},
+        )
+        args = SimpleNamespace(
+            job_id=job.id,
+            resolution="close",
+            reason="Not applicable",
+        )
+
+        with redirect_stderr(io.StringIO()):
+            rc = pipeline_cli.cmd_import_job_recovery(db, args)
+
+        self.assertEqual(rc, 4)
 
 
 class TestCmdForceImport(unittest.TestCase):

@@ -304,6 +304,8 @@ def _run_dispatch_finalization_world(
     from lib.quality import DownloadInfo, ImportResult, QualityComparisonBasis
     from tests.fakes import FakePipelineDB
     from tests.helpers import (
+        finalize_claimed_dispatch,
+        make_album_quality_evidence,
         make_import_result,
         make_request_row,
         noop_quality_gate,
@@ -313,6 +315,7 @@ def _run_dispatch_finalization_world(
     db = FakePipelineDB()
     db.seed_request(make_request_row(
         id=42,
+        mb_release_id="generated-mbid",
         status="downloading",
         search_filetype_override="mp3",
         active_download_state={"files": [], "filetype": "mp3"},
@@ -394,26 +397,65 @@ def _run_dispatch_finalization_world(
                     source_username="generated-user",
                 )
     else:
-        with patch_dispatch_externals(), _silence_logs():
-            dispatch_import_core(
-                path="/tmp/cratedigger-generated-attempt",
-                mb_release_id="generated-mbid",
-                request_id=42,
-                label="Generated Artist - Generated Album",
-                beets_harness_path=cfg.beets_harness_path,
-                db=db,  # type: ignore[arg-type]
-                dl_info=DownloadInfo(username="generated-user", filetype="mp3"),
-                cfg=cfg,
-                attempt_spectral_audit=audit,
-                run_import_fn=run_import,
-                quality_gate_fn=quality_gate,
-            )
+        from lib.import_queue import IMPORT_JOB_AUTOMATION
+        from lib.quality_evidence import snapshot_audio_files
 
-    last_log = db.download_logs[-1]
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db.request(42)["active_download_state"]["current_path"] = source
+            job = db.enqueue_import_job(
+                IMPORT_JOB_AUTOMATION,
+                request_id=42,
+                payload={},
+            )
+            evidence = make_album_quality_evidence(
+                mb_release_id="generated-mbid",
+                source_path=source,
+                files=snapshot_audio_files(source),
+            )
+            db.upsert_album_quality_evidence(evidence)
+            persisted = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert persisted is not None and persisted.id is not None
+            db.set_import_job_candidate_evidence(job.id, persisted.id)
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+            )
+            claimed = db.claim_next_import_job(worker_id="generated-importer")
+            assert claimed is not None and claimed.id == job.id
+            with patch_dispatch_externals(), _silence_logs():
+                outcome = dispatch_import_core(
+                    path=source,
+                    mb_release_id="generated-mbid",
+                    request_id=42,
+                    label="Generated Artist - Generated Album",
+                    beets_harness_path=cfg.beets_harness_path,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=DownloadInfo(
+                        username="generated-user", filetype="mp3"
+                    ),
+                    cfg=cfg,
+                    attempt_spectral_audit=audit,
+                    run_import_fn=run_import,
+                    quality_gate_fn=quality_gate,
+                    candidate_import_job_id=claimed.id,
+                )
+                finalize_claimed_dispatch(db, claimed, outcome)
+
+    final_job = db.get_import_job(job.id)
+    assert final_job is not None
+    last_log = db.download_logs[-1] if db.download_logs else None
     return {
-        "import_result": last_log.import_result,
+        "import_result": (
+            last_log.import_result if last_log is not None else None
+        ),
         "outcomes": [row.outcome for row in db.download_logs],
         "status": db.request(42)["status"],
+        "job_status": final_job.status,
         "denylist": [(row.username, row.reason) for row in db.denylist],
     }
 
@@ -681,14 +723,25 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             converted=converted,
         )
 
-        self.assertTrue(_persisted_attempt_has_exact_audit(
-            audited["import_result"], audit))
-        self.assertEqual(
-            _policy_payload(audited["import_result"]),
-            _policy_payload(unaudited["import_result"]),
-        )
+        ambiguous_modes = {
+            "no_json", "timeout", "pre_result_exception",
+            "post_result_exception",
+        }
+        if mode in ambiguous_modes:
+            self.assertIsNone(audited["import_result"])
+            self.assertIsNone(unaudited["import_result"])
+            self.assertEqual(audited["job_status"], "recovery_required")
+            self.assertEqual(unaudited["job_status"], "recovery_required")
+        else:
+            self.assertTrue(_persisted_attempt_has_exact_audit(
+                audited["import_result"], audit))
+            self.assertEqual(
+                _policy_payload(audited["import_result"]),
+                _policy_payload(unaudited["import_result"]),
+            )
         self.assertEqual(audited["outcomes"], unaudited["outcomes"])
         self.assertEqual(audited["status"], unaudited["status"])
+        self.assertEqual(audited["job_status"], unaudited["job_status"])
         self.assertEqual(audited["denylist"], unaudited["denylist"])
 
     @given(

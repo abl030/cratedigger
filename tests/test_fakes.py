@@ -3241,7 +3241,10 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(claimed.attempts, 1)
         self.assertEqual(claimed.worker_id, "fake-worker")
 
-        requeued = db.requeue_running_import_jobs(message="retry")
+        requeued = db.recover_running_import_jobs(
+            requeue_message="retry",
+            recovery_message="recovery required",
+        )
         self.assertEqual([job.id for job in requeued], [claimed.id])
         self.assertEqual(requeued[0].status, "queued")
         self.assertIsNone(requeued[0].worker_id)

@@ -1,8 +1,8 @@
 """Small pure helpers for the dispatch package.
 
 Cleanup, DownloadInfo assembly, ImportResult -> DownloadInfo population,
-V0-probe log-field extraction, postflight logging, and the duplicate-remove
-guard quarantine. No import decisions live here.
+V0-probe log-field extraction, and postflight logging. No import decisions
+live here.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ from lib.quality import DownloadInfo, SpectralMeasurement
 from lib.dispatch.types import FORCE_IMPORT_SCENARIOS
 
 if TYPE_CHECKING:
-    from lib.config import CratediggerConfig
     from lib.grab_list import GrabListEntry
     from lib.quality import DispatchAction, ImportResult
 
@@ -159,51 +158,6 @@ def _guard_failure_detail(ir: ImportResult) -> str | None:
     if guard.duplicate_count:
         detail = f"{detail} (duplicates={guard.duplicate_count})"
     return detail
-
-
-def _quarantine_duplicate_remove_guard_source(
-    *,
-    ir: ImportResult,
-    path: str,
-    request_id: int,
-    cfg: "CratediggerConfig | None",
-) -> None:
-    guard = ir.postflight.duplicate_remove_guard
-    if guard is None:
-        return
-
-    from lib.duplicate_remove_guard import (
-        quarantine_duplicate_remove_guard_source,
-    )
-
-    staging_dir = (
-        cfg.beets_staging_dir
-        if cfg is not None and cfg.beets_staging_dir
-        else os.path.dirname(os.path.abspath(path))
-    )
-    result = quarantine_duplicate_remove_guard_source(
-        source_path=path,
-        staging_dir=staging_dir,
-        request_id=request_id,
-    )
-    guard.quarantine_path = result.quarantine_path
-    guard.quarantine_error = result.error
-    if result.success:
-        logger.error(
-            "DUPLICATE REMOVE GUARD: quarantined staged source for "
-            "request_id=%s from %s to %s",
-            request_id,
-            result.source_path,
-            result.quarantine_path,
-        )
-    else:
-        logger.error(
-            "DUPLICATE REMOVE GUARD: failed to quarantine staged source for "
-            "request_id=%s path=%s error=%s",
-            request_id,
-            path,
-            result.error,
-        )
 
 
 def _cleanup_staged_dir(dest: str) -> None:

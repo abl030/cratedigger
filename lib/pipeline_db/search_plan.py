@@ -932,7 +932,9 @@ class _SearchPlanMixin(_PipelineDBBase):
                 FROM import_jobs ij
                 WHERE ij.request_id = ar.id
                   AND ij.job_type = %s
-                  AND ij.status IN ('queued', 'running')
+                  AND ij.status IN (
+                      'queued', 'running', 'recovery_required'
+                  )
               )
             ORDER BY
               CASE

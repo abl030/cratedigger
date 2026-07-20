@@ -884,7 +884,7 @@ def _enqueue_completed_processing(
     )
     if job.deduped:
         logger.info(
-            "Automation import already queued/running for request %s "
+            "Automation import already active for request %s "
             "(job %s)",
             request_id,
             job.id,
