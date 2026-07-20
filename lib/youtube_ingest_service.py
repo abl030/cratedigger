@@ -58,7 +58,7 @@ from lib import pipeline_db as _pipeline_db_mod  # noqa: F401 — module-import 
 # attribute lookup survives the reload because the module object is the same.
 
 if TYPE_CHECKING:
-    from lib.pipeline_db.rows import AlbumRequestRow
+    from lib.pipeline_db.rows import AlbumRequestRow, DownloadLogWithEvidenceRow
 
 
 log = logging.getLogger(__name__)
@@ -379,7 +379,7 @@ class _PipelineDB(Protocol):
 
     def get_download_log_entry(
         self, log_id: int,
-    ) -> Optional[dict[str, Any]]: ...
+    ) -> "Optional[DownloadLogWithEvidenceRow]": ...
 
     def enqueue_import_job(
         self,
@@ -756,19 +756,11 @@ class YoutubeIngestService:
                 ),
             )
 
-        request_id_raw = row.get("request_id")
-        if not isinstance(request_id_raw, int):
-            return self._terminal_failed(
-                download_log_id,
-                reason="malformed_metadata",
-                stderr_excerpt=None,
-                observed_track_count=None,
-                detail=(
-                    f"download_log_id={download_log_id} has no integer "
-                    f"request_id; cannot proceed"
-                ),
-            )
-        request_id = int(request_id_raw)
+        # ``request_id`` is a required, non-nullable ``download_log``
+        # column (DownloadLogWithEvidenceRow), so the row type already
+        # proves this is an ``int`` — no runtime narrowing needed once
+        # the row comes through the typed projection.
+        request_id = row["request_id"]
 
         # Look up the request row for staging-target derivation + R10
         # source-aware count gate. MB requests keep the live MB mirror

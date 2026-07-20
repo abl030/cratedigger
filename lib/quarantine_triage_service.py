@@ -9,12 +9,15 @@ projection and surfaces only those that have no reference.
 from __future__ import annotations
 
 import os
-from typing import Protocol
+from typing import Protocol, TYPE_CHECKING
 
 import msgspec
 
 from lib.validation_envelope import decode_validation_envelope
 from lib.wrong_matches import wrong_match_row_is_visible
+
+if TYPE_CHECKING:
+    from lib.pipeline_db.rows import WrongMatchCandidateRow
 
 
 FAILED_IMPORTS_DIRECTORY = "failed_imports"
@@ -45,7 +48,7 @@ class QuarantineTriageResult(msgspec.Struct, frozen=True):
 
 
 class _WrongMatchesDB(Protocol):
-    def get_wrong_matches(self) -> list[dict[str, object]]: ...
+    def get_wrong_matches(self) -> "list[WrongMatchCandidateRow]": ...
 
 
 def _configured_download_dir(download_dir: str | None) -> str:

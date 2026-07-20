@@ -23,8 +23,13 @@ if TYPE_CHECKING:
     from lib.quality import CandidateScore
     from lib.pipeline_db import (
         AlbumRequestRow,
+        DownloadLogWithEvidenceRow,
+        DownloadLogWithOriginRow,
+        DownloadLogWithRequestRow,
+        LatestDownloadSummary,
         SaturationSummary,
         SearchLogHistoryPage,
+        WrongMatchCandidateRow,
     )
 
 from lib.import_queue import (
@@ -4048,7 +4053,7 @@ class FakePipelineDB:
 
     def get_log(self, limit: int = 50,
                 outcome_filter: str | None = None,
-                ) -> list[dict[str, object]]:
+                ) -> "list[DownloadLogWithRequestRow]":
         imported = {"success", "force_import"}
         rejected = {"rejected", "failed", "timeout", "measurement_failed"}
         rows: list[dict[str, object]] = []
@@ -4065,7 +4070,7 @@ class FakePipelineDB:
             # (bitrate, actual_filetype, spectral_grade, final_format,
             # etc.). Dropping them here would silently mis-classify rows
             # in callers that feed ``get_log`` into LogEntry.from_row.
-            joined: dict[str, object] = self._download_log_to_dict(entry)
+            joined: dict[str, object] = self._download_log_evidence_dict(entry)
             joined.update({
                 # Joined request columns.
                 "album_title": req.get("album_title"),
@@ -4141,19 +4146,19 @@ class FakePipelineDB:
             rows.append(joined)
             if len(rows) >= limit:
                 break
-        return rows
+        return cast("list[DownloadLogWithRequestRow]", rows)
 
     def get_linked_import_logs(
         self,
         source_log_ids: list[int],
-    ) -> list[dict[str, object]]:
+    ) -> "list[DownloadLogWithOriginRow]":
         wanted = {int(log_id) for log_id in source_log_ids}
-        return [
+        return cast("list[DownloadLogWithOriginRow]", [
             self._download_log_to_dict(entry)
             for entry in reversed(self.download_logs)
             if entry.source_download_log_id in wanted
             and entry.outcome in ("success", "force_import", "manual_import")
-        ]
+        ])
 
     def get_by_status(
         self,
@@ -4383,42 +4388,45 @@ class FakePipelineDB:
     # --- Download history queries ---
 
     def get_download_log_entry(self,
-                               log_id: int) -> dict[str, Any] | None:
+                               log_id: int) -> "DownloadLogWithEvidenceRow | None":
         for entry in self.download_logs:
             if entry.id == log_id:
-                return self._download_log_to_dict(entry)
+                return cast(
+                    "DownloadLogWithEvidenceRow",
+                    self._download_log_evidence_dict(entry),
+                )
         return None
 
     def get_download_history(self,
-                             request_id: int) -> list[dict[str, Any]]:
-        return [
-            self._download_log_to_dict(e)
+                             request_id: int) -> "list[DownloadLogWithEvidenceRow]":
+        return cast("list[DownloadLogWithEvidenceRow]", [
+            self._download_log_evidence_dict(e)
             for e in reversed(self.download_logs)
             if e.request_id == request_id
-        ]
+        ])
 
     def get_download_history_batch(
         self, request_ids: list[int],
-    ) -> dict[int, list[dict[str, Any]]]:
+    ) -> "dict[int, list[DownloadLogWithEvidenceRow]]":
         wanted = set(request_ids)
         result: dict[int, list[dict[str, Any]]] = {}
         for entry in reversed(self.download_logs):
             if entry.request_id not in wanted:
                 continue
             result.setdefault(entry.request_id, []).append(
-                self._download_log_to_dict(entry))
-        return result
+                self._download_log_evidence_dict(entry))
+        return cast("dict[int, list[DownloadLogWithEvidenceRow]]", result)
 
     def get_latest_download_summaries(
         self, request_ids: list[int],
-    ) -> dict[int, dict[str, Any]]:
+    ) -> "dict[int, LatestDownloadSummary]":
         """Mirror ``PipelineDB.get_latest_download_summaries``: newest
         row + history count per request (#426)."""
-        return {
+        return cast("dict[int, LatestDownloadSummary]", {
             rid: {"latest": history[0], "count": len(history)}
             for rid, history in
             self.get_download_history_batch(request_ids).items()
-        }
+        })
 
     # --- Pipeline dashboard telemetry ---
 
@@ -5215,9 +5223,27 @@ class FakePipelineDB:
                 row["v0_probe_median_bitrate"] = ev_v0.median_bitrate_kbps
         return row
 
+    def _download_log_evidence_dict(self, entry: DownloadLogRow) -> dict[str, Any]:
+        """``_download_log_to_dict`` plus the guaranteed-present ``source_*``
+        keys the real evidence overlay always stamps (issue #784's
+        ``DownloadLogWithEvidenceRow`` — these four are NOT real
+        ``download_log`` columns, so production keeps them
+        always-present-but-nullable rather than conditionally absent).
+        Used by every reader that joins ``album_quality_evidence``
+        (``get_log``, ``get_download_log_entry``, ``get_download_history``,
+        ``get_download_history_batch``, ``get_latest_download_summaries``).
+        ``get_linked_import_logs`` has no evidence join in production and
+        must call the bare ``_download_log_to_dict`` instead."""
+        row = self._download_log_to_dict(entry)
+        row.setdefault("source_format", None)
+        row.setdefault("source_min_bitrate", None)
+        row.setdefault("source_avg_bitrate", None)
+        row.setdefault("source_median_bitrate", None)
+        return row
+
     # --- Wrong-match review queue ---
 
-    def get_wrong_matches(self) -> list[dict[str, object]]:
+    def get_wrong_matches(self) -> "list[WrongMatchCandidateRow]":
         """Rejected downloads whose ``validation_result.failed_path`` is set.
 
         Mirrors the real ``DISTINCT ON (request_id, failed_path)`` —
@@ -5328,7 +5354,7 @@ class FakePipelineDB:
             })
         rows.sort(key=lambda r: (
             r["request_id"], -int(r["download_log_id"])))  # type: ignore[arg-type, operator]
-        return rows
+        return cast("list[WrongMatchCandidateRow]", rows)
 
     def clear_wrong_match_path(self, log_id: int) -> bool:
         """Strip ``failed_path`` from a download_log row's validation_result.

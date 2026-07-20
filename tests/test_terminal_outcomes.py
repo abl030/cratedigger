@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import unittest
-from typing import Any
+from typing import Any, cast
 
 from lib import transitions
 from lib.dispatch import DispatchOutcome
@@ -998,7 +998,8 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         row = db.get_download_log_entry(result.download_log_id)
         assert row is not None
         self.assertEqual(row["source_download_log_id"], origin_id)
-        self.assertAlmostEqual(float(row["original_beets_distance"]), 0.2328)
+        self.assertAlmostEqual(
+            float(cast(float, row["original_beets_distance"])), 0.2328)
 
     def _run_job_backed_automation_result(
         self,
