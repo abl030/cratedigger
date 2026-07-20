@@ -524,7 +524,9 @@ def get_artist_releases(artist_id: int) -> list[ArtistCatalogueRow]:
 class _DiscogsFormatJSON(TypedDict, total=False):
     """Slice of one Discogs release/master ``formats[]`` entry."""
     name: str
-    descriptions: str | list[str]
+    # Mirror serde emits ``null`` for an absent Option<Vec<String>>, so the
+    # value is genuinely nullable at the wire — the reader guards for it.
+    descriptions: str | list[str] | None
 
 
 class _DiscogsMasterReleaseEntryJSON(TypedDict, total=False):
@@ -577,7 +579,9 @@ def _status_from_formats(formats: list[_DiscogsFormatJSON]) -> str:
             qualifiers.update(
                 value.strip() for value in descriptions.split(",") if value.strip()
             )
-        else:
+        elif isinstance(descriptions, list):
+            # Mirror JSON may carry ``"descriptions": null``; a bare ``else``
+            # would iterate None. Preserve the parent's null-safe skip.
             qualifiers.update(
                 value.strip() for value in descriptions if value.strip()
             )
