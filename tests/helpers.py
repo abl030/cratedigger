@@ -819,16 +819,14 @@ def patch_dispatch_externals():
     Yields a SimpleNamespace with attributes: run, cleanup, plex, jellyfin, orphans.
     run is pre-configured with returncode=0, stdout="", stderr="".
 
-    ``_cleanup_staged_dir`` has three call sites after the #703 fence:
-    core dispatch, evidence rejection, and importer post-commit cleanup.
-    All bindings use the same mock so ``ext.cleanup`` observes whichever
-    path fires.
+    The core-dispatch and evidence-rejection bindings use the same mock.
+    Importer post-commit cleanup is exercised through real inputs or its
+    dedicated queue-owner seam; this helper does not patch that owned code.
     """
     cleanup = MagicMock()
     with patch("lib.dispatch.subprocess_runner.sp.run") as run, \
          patch("lib.dispatch.core._cleanup_staged_dir", cleanup), \
          patch("lib.dispatch.outcome_actions._cleanup_staged_dir", cleanup), \
-         patch("lib.dispatch.helpers._cleanup_staged_dir", cleanup), \
          patch("lib.util.trigger_plex_scan") as plex, \
          patch("lib.util.trigger_jellyfin_scan") as jellyfin, \
          patch("lib.dispatch.core.cleanup_disambiguation_orphans",

@@ -586,7 +586,7 @@ class _ImportJobsMixin(_PipelineDBBase):
     def merge_import_job_result(
         self,
         job_id: int,
-        patch: dict[str, Any],
+        patch: dict[str, object],
     ) -> ImportJob | None:
         """Append best-effort post-commit convergence details to a job."""
         cur = self._execute("""
