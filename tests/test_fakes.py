@@ -5879,7 +5879,7 @@ class TestFakePipelineDBYoutubeIngest(unittest.TestCase):
         entry = db.get_download_log_entry(log_id)
         assert entry is not None
         self.assertEqual(entry["outcome"], "youtube_success")
-        meta = entry["youtube_metadata"]
+        meta = cast(dict, entry["youtube_metadata"])
         self.assertIsInstance(meta, dict)
         # Submission-time fields survive.
         self.assertEqual(meta["browse_id"], "MPREb_default")

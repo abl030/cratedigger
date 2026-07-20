@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, cast
 from unittest.mock import patch
 
 import msgspec
@@ -742,7 +742,7 @@ class TestRunJobHappyPath(unittest.TestCase):
         assert row is not None
         self.assertEqual(row["outcome"], "youtube_success")
         meta = row["youtube_metadata"]
-        self.assertIsNotNone(meta)
+        assert meta is not None
         self.assertEqual(meta["observed_track_count"], EXPECTED_TRACKS)
 
     def test_discogs_happy_path_uses_expected_count_not_mb_mirror(self) -> None:
@@ -867,6 +867,7 @@ class TestRunJobTrackCountGate(unittest.TestCase):
         row = pdb.get_download_log_entry(log_id)
         assert row is not None
         meta = row["youtube_metadata"]
+        assert meta is not None
         self.assertEqual(meta["observed_track_count"], EXPECTED_TRACKS - 1)
         self.assertEqual(meta["reason"], "track_count_mismatch")
 
@@ -893,6 +894,7 @@ class TestRunJobTrackCountGate(unittest.TestCase):
         row = pdb.get_download_log_entry(log_id)
         assert row is not None
         meta = row["youtube_metadata"]
+        assert meta is not None
         self.assertEqual(meta["observed_track_count"], EXPECTED_TRACKS + 1)
 
 
@@ -920,6 +922,7 @@ class TestRunJobYtdlpFailures(unittest.TestCase):
         row = pdb.get_download_log_entry(log_id)
         assert row is not None
         meta = row["youtube_metadata"]
+        assert meta is not None
         self.assertEqual(meta["reason"], "youtube_404")
         self.assertEqual(
             meta["stderr_excerpt"], "ERROR: HTTP Error 404: Not Found")
@@ -976,8 +979,9 @@ class TestRunJobYtdlpFailures(unittest.TestCase):
             row = pdb.get_download_log_entry(log_id)
             assert row is not None
             meta = row["youtube_metadata"]
+            assert meta is not None
             self.assertIn("cleanup_error", meta)
-            self.assertIn("permission denied", meta["cleanup_error"])
+            self.assertIn("permission denied", cast(str, meta["cleanup_error"]))
 
     def test_age_gated_classified_correctly(self) -> None:
         pdb = FakePipelineDB()
@@ -1104,6 +1108,7 @@ class TestRunJobUtf8SurrogateHandling(unittest.TestCase):
         row = pdb.get_download_log_entry(log_id)
         assert row is not None
         meta = row["youtube_metadata"]
+        assert meta is not None
         # The excerpt round-tripped through the fake DB cleanly.
         self.assertEqual(meta["stderr_excerpt"], excerpt)
 
@@ -1259,6 +1264,7 @@ class TestRunJobRunnerUnhandled(unittest.TestCase):
             row = pdb.get_download_log_entry(log_id)
             assert row is not None
             meta = row["youtube_metadata"]
+            assert meta is not None
             self.assertNotIn("quarantine_path", meta)
             self.assertNotIn("quarantine_error", meta)
             self.assertNotIn("cleanup_error", meta)

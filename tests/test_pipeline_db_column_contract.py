@@ -21,10 +21,12 @@ Follows the ephemeral-PostgreSQL harness used by ``test_pipeline_db.py``
 set, so this never skips — see CLAUDE.md § "Skipped tests are an anti-pattern").
 """
 import dataclasses
+import json
 import os
 import sys
 import unittest
 from datetime import datetime
+from typing import cast
 
 import msgspec
 
@@ -36,21 +38,35 @@ from lib.pipeline_db import (
     AlbumRequestRow,
     BadAudioHashInput,
     DownloadLogRow,
+    DownloadLogWithEvidenceRow,
+    DownloadLogWithOriginRow,
+    DownloadLogWithRequestRow,
     PersistedYoutubeRow,
     PipelineDB,
     RequestSpectralStateUpdate,
     RequestV0ProbeStateUpdate,
     TransferLedgerRow,
+    WrongMatchCandidateRow,
     album_request_row,
     download_log_row,
+    download_log_with_evidence_row,
+    download_log_with_origin_row,
+    download_log_with_request_row,
+    wrong_match_candidate_row,
 )
 from tests.helpers import (
+    make_album_quality_evidence,
     make_import_result,
     make_request_row,
     make_validation_result,
 )
 from tests.test_pipeline_db import make_db, requires_postgres
-from lib.quality import SpectralMeasurement, V0ProbeEvidence
+from lib.quality import (
+    AlbumQualityV0Metric,
+    AudioQualityMeasurement,
+    SpectralMeasurement,
+    V0ProbeEvidence,
+)
 
 # conftest boots an ephemeral PostgreSQL and exports TEST_DB_DSN for the whole
 # suite, so this runs unconditionally — NO skip gate (CLAUDE.md § "Skipped tests
@@ -355,6 +371,390 @@ class TestDownloadLogRowRuntimeContract(unittest.TestCase):
         bad["transfer_detail"] = {"not": "a list"}
         with self.assertRaises(msgspec.ValidationError):
             download_log_row(bad)
+
+
+@requires_postgres
+class TestDownloadLogWithEvidenceRowRuntimeContract(unittest.TestCase):
+    """Real-PG round-trip + known-bad tests for
+    ``download_log_with_evidence_row`` (issue #784 continuation of #765
+    phase 6) — the shared ``dl.* LEFT JOIN album_quality_evidence``
+    projection behind ``get_download_log_entry``, ``get_download_history``,
+    ``get_download_history_batch``, and ``get_latest_download_summaries``.
+    The parity source is a REAL EXECUTED QUERY against the ephemeral PG,
+    not a hand-typed key list — a new join column (or a dropped one) must
+    be reflected in the row type in the same PR."""
+
+    def setUp(self) -> None:
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="evidence-row-uuid",
+            artist_name="Evidence Row Artist",
+            album_title="Evidence Row Album",
+            source="request",
+        )
+
+    def tearDown(self) -> None:
+        self.db.close()
+
+    def _seed_full_row(self) -> DownloadLogWithEvidenceRow:
+        """One download_log row exercising every extra field this row
+        type carries: a source-semantic (lineage v4) candidate evidence
+        (source_* + spectral + V0 overlay) and an origin chain
+        (source_download_log_id -> original_beets_distance)."""
+        source_id = self.db.log_download(
+            self.req_id, "source-peer", "flac", "/failed/source",
+            outcome="rejected",
+            validation_result=json.dumps({
+                "scenario": "high_distance", "distance": 0.2328,
+            }),
+        )
+        log_id = self.db.log_download(
+            self.req_id, "source-peer", "flac", "/failed/source",
+            outcome="force_import",
+            source_download_log_id=source_id,
+        )
+        candidate = make_album_quality_evidence(
+            mb_release_id="evidence-row-candidate",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=190, avg_bitrate_kbps=201,
+                median_bitrate_kbps=198, format="MP3",
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=320,
+                spectral_subject="installed",
+                spectral_provenance="measured",
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                subject="installed", min_bitrate_kbps=300,
+                avg_bitrate_kbps=310, median_bitrate_kbps=305,
+            ),
+        )
+        self.db.upsert_album_quality_evidence(candidate)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=candidate.mb_release_id,
+            snapshot_fingerprint=candidate.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.db.set_download_log_candidate_evidence(log_id, stored.id)
+
+        row = self.db.get_download_log_entry(log_id)
+        assert row is not None
+        return row
+
+    def test_get_download_log_entry_matches_download_log_with_evidence_row(
+        self,
+    ) -> None:
+        row = self._seed_full_row()
+        self.assertEqual(
+            set(row.keys()), set(DownloadLogWithEvidenceRow.__annotations__),
+            "get_download_log_entry() drifted from DownloadLogWithEvidenceRow",
+        )
+        self.assertEqual(row["source_format"], "MP3")
+        self.assertEqual(row["source_min_bitrate"], 190)
+        self.assertAlmostEqual(cast(float, row["original_beets_distance"]), 0.2328)
+
+    def test_get_download_history_matches_download_log_with_evidence_row(
+        self,
+    ) -> None:
+        self._seed_full_row()
+        rows = self.db.get_download_history(self.req_id)
+        self.assertTrue(rows, "seeding produced no history rows")
+        for row in rows:
+            self.assertEqual(
+                set(row.keys()),
+                set(DownloadLogWithEvidenceRow.__annotations__),
+                "get_download_history() drifted from DownloadLogWithEvidenceRow",
+            )
+
+    def test_get_download_history_batch_matches_download_log_with_evidence_row(
+        self,
+    ) -> None:
+        self._seed_full_row()
+        batch = self.db.get_download_history_batch([self.req_id])
+        rows = batch[self.req_id]
+        self.assertTrue(rows, "seeding produced no batch rows")
+        for row in rows:
+            self.assertEqual(
+                set(row.keys()),
+                set(DownloadLogWithEvidenceRow.__annotations__),
+                "get_download_history_batch() drifted from "
+                "DownloadLogWithEvidenceRow",
+            )
+
+    def test_get_latest_download_summaries_matches_download_log_with_evidence_row(
+        self,
+    ) -> None:
+        self._seed_full_row()
+        summaries = self.db.get_latest_download_summaries([self.req_id])
+        latest = summaries[self.req_id]["latest"]
+        self.assertEqual(
+            set(latest.keys()), set(DownloadLogWithEvidenceRow.__annotations__),
+            "get_latest_download_summaries() drifted from "
+            "DownloadLogWithEvidenceRow",
+        )
+
+    def test_source_fields_are_always_present_without_evidence(self) -> None:
+        """Known-good self-test for the always-present-but-nullable
+        guarantee (#784): ``source_format`` et al. are NOT real
+        ``download_log`` columns, so without ANY candidate evidence the
+        overlay must still stamp them (as ``None``) rather than leaving
+        the key silently absent."""
+        log_id = self.db.log_download(
+            self.req_id, "no-evidence-peer", "mp3", "/tmp/x",
+            outcome="rejected",
+        )
+        row = self.db.get_download_log_entry(log_id)
+        assert row is not None
+        self.assertEqual(
+            set(row.keys()), set(DownloadLogWithEvidenceRow.__annotations__),
+        )
+        self.assertIsNone(row["source_format"])
+        self.assertIsNone(row["source_min_bitrate"])
+        self.assertIsNone(row["source_avg_bitrate"])
+        self.assertIsNone(row["source_median_bitrate"])
+
+    def test_bogus_row_is_rejected_by_download_log_with_evidence_row(
+        self,
+    ) -> None:
+        """Known-bad self-test: wrong-typed column value must raise."""
+        row = self._seed_full_row()
+        bad = dict(row)
+        bad["source_min_bitrate"] = "not-an-int"
+        with self.assertRaises(msgspec.ValidationError):
+            download_log_with_evidence_row(bad)
+
+
+@requires_postgres
+class TestDownloadLogWithRequestRowRuntimeContract(unittest.TestCase):
+    """Real-PG round-trip + known-bad tests for
+    ``download_log_with_request_row`` — the ``get_log()`` joined
+    projection (issue #784 continuation of #765 phase 6)."""
+
+    def setUp(self) -> None:
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="request-row-uuid",
+            artist_name="Request Row Artist",
+            album_title="Request Row Album",
+            source="request",
+            year=1999,
+            country="US",
+        )
+
+    def tearDown(self) -> None:
+        self.db.close()
+
+    def _seed_full_row(self) -> DownloadLogWithRequestRow:
+        """A ``get_log()`` row exercising every extra field: the
+        request's CURRENT evidence (distinct from the per-candidate
+        evidence below), a source-semantic candidate evidence, and an
+        origin chain."""
+        current = make_album_quality_evidence(
+            mb_release_id="request-row-current",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=200, avg_bitrate_kbps=256,
+                median_bitrate_kbps=250, format="FLAC",
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=900,
+                spectral_subject="installed",
+                spectral_provenance="measured",
+            ),
+            storage_format="FLAC",
+            v0_metric=AlbumQualityV0Metric(
+                subject="installed", min_bitrate_kbps=300,
+                avg_bitrate_kbps=310, median_bitrate_kbps=305,
+            ),
+        )
+        self.db.upsert_album_quality_evidence(current)
+        current_stored = self.db.find_album_quality_evidence(
+            mb_release_id=current.mb_release_id,
+            snapshot_fingerprint=current.snapshot_fingerprint,
+        )
+        assert current_stored is not None and current_stored.id is not None
+        self.assertTrue(self.db.set_request_current_evidence(
+            self.req_id, current_stored.id))
+
+        source_id = self.db.log_download(
+            self.req_id, "source-peer", "flac", "/failed/source",
+            outcome="rejected",
+            validation_result=json.dumps({
+                "scenario": "high_distance", "distance": 0.2328,
+            }),
+        )
+        log_id = self.db.log_download(
+            self.req_id, "source-peer", "flac", "/failed/source",
+            outcome="force_import",
+            source_download_log_id=source_id,
+        )
+        candidate = make_album_quality_evidence(
+            mb_release_id="request-row-candidate",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=190, avg_bitrate_kbps=201,
+                median_bitrate_kbps=198, format="MP3",
+            ),
+        )
+        self.db.upsert_album_quality_evidence(candidate)
+        candidate_stored = self.db.find_album_quality_evidence(
+            mb_release_id=candidate.mb_release_id,
+            snapshot_fingerprint=candidate.snapshot_fingerprint,
+        )
+        assert candidate_stored is not None and candidate_stored.id is not None
+        self.db.set_download_log_candidate_evidence(log_id, candidate_stored.id)
+
+        rows = self.db.get_log(limit=50)
+        return next(r for r in rows if r["id"] == log_id)
+
+    def test_get_log_matches_download_log_with_request_row_exactly(
+        self,
+    ) -> None:
+        row = self._seed_full_row()
+        self.assertEqual(
+            set(row.keys()), set(DownloadLogWithRequestRow.__annotations__),
+            "get_log() drifted from DownloadLogWithRequestRow — a new "
+            "join column (or a dropped one) must be reflected in the "
+            "row type in the same PR.",
+        )
+        self.assertEqual(row["source_format"], "MP3")
+        self.assertEqual(row["_current_evidence_spectral_grade"], "genuine")
+        self.assertAlmostEqual(
+            cast(float, row["original_beets_distance"]), 0.2328)
+        self.assertEqual(row["album_title"], "Request Row Album")
+        self.assertEqual(row["request_source"], "request")
+
+    def test_bogus_row_is_rejected_by_download_log_with_request_row(
+        self,
+    ) -> None:
+        """Known-bad self-test: wrong-typed column value must raise."""
+        row = self._seed_full_row()
+        bad = dict(row)
+        bad["request_status"] = 12345
+        with self.assertRaises(msgspec.ValidationError):
+            download_log_with_request_row(bad)
+
+
+@requires_postgres
+class TestDownloadLogWithOriginRowRuntimeContract(unittest.TestCase):
+    """Real-PG round-trip + known-bad tests for
+    ``download_log_with_origin_row`` — ``get_linked_import_logs``'s
+    narrower, no-evidence-join projection (issue #784)."""
+
+    def setUp(self) -> None:
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="origin-row-uuid",
+            artist_name="Origin Row Artist",
+            album_title="Origin Row Album",
+            source="request",
+        )
+
+    def tearDown(self) -> None:
+        self.db.close()
+
+    def _seed_linked_row(self) -> DownloadLogWithOriginRow:
+        source_id = self.db.log_download(
+            self.req_id, "source-peer", "flac", "/failed/source",
+            outcome="rejected",
+            validation_result=json.dumps({
+                "scenario": "high_distance", "distance": 0.2328,
+            }),
+        )
+        linked_id = self.db.log_download(
+            self.req_id, "source-peer", "flac", "/failed/source",
+            outcome="force_import",
+            source_download_log_id=source_id,
+        )
+        rows = self.db.get_linked_import_logs([source_id])
+        return next(r for r in rows if r["id"] == linked_id)
+
+    def test_get_linked_import_logs_matches_download_log_with_origin_row(
+        self,
+    ) -> None:
+        row = self._seed_linked_row()
+        self.assertEqual(
+            set(row.keys()), set(DownloadLogWithOriginRow.__annotations__),
+            "get_linked_import_logs() drifted from DownloadLogWithOriginRow",
+        )
+        self.assertAlmostEqual(
+            cast(float, row["original_beets_distance"]), 0.2328)
+        # No evidence join for this reader — the source_* fields
+        # DownloadLogWithEvidenceRow carries must NOT appear here.
+        self.assertNotIn("source_format", row)
+
+    def test_bogus_row_is_rejected_by_download_log_with_origin_row(
+        self,
+    ) -> None:
+        """Known-bad self-test: wrong-typed column value must raise."""
+        row = self._seed_linked_row()
+        bad = dict(row)
+        bad["original_beets_distance"] = "not-a-float"
+        with self.assertRaises(msgspec.ValidationError):
+            download_log_with_origin_row(bad)
+
+
+@requires_postgres
+class TestWrongMatchCandidateRowRuntimeContract(unittest.TestCase):
+    """Real-PG round-trip + known-bad tests for
+    ``wrong_match_candidate_row`` — ``get_wrong_matches``'s standalone
+    (non-``dl.*``) projection (issue #784)."""
+
+    def setUp(self) -> None:
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="wrong-match-row-uuid",
+            artist_name="Wrong Match Artist",
+            album_title="Wrong Match Album",
+            source="request",
+        )
+
+    def tearDown(self) -> None:
+        self.db.close()
+
+    def _seed_candidate_row(self) -> WrongMatchCandidateRow:
+        log_id = self.db.log_download(
+            self.req_id, "wrong-match-peer", "mp3", "/fi/wrong-match",
+            outcome="rejected",
+            validation_result=json.dumps({
+                "scenario": "high_distance", "distance": 0.4,
+                "failed_path": "/fi/wrong-match",
+            }),
+        )
+        candidate = make_album_quality_evidence(
+            mb_release_id="wrong-match-candidate",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128, avg_bitrate_kbps=130,
+                median_bitrate_kbps=129, format="MP3",
+                spectral_grade="likely_transcode",
+                spectral_subject="installed",
+                spectral_provenance="measured",
+            ),
+        )
+        self.db.upsert_album_quality_evidence(candidate)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=candidate.mb_release_id,
+            snapshot_fingerprint=candidate.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.db.set_download_log_candidate_evidence(log_id, stored.id)
+
+        rows = self.db.get_wrong_matches()
+        return next(r for r in rows if r["download_log_id"] == log_id)
+
+    def test_get_wrong_matches_matches_wrong_match_candidate_row(self) -> None:
+        row = self._seed_candidate_row()
+        self.assertEqual(
+            set(row.keys()), set(WrongMatchCandidateRow.__annotations__),
+            "get_wrong_matches() drifted from WrongMatchCandidateRow",
+        )
+        self.assertEqual(row["evidence_source_codec"], "mp3")
+        self.assertEqual(row["spectral_grade"], "likely_transcode")
+        self.assertEqual(row["album_title"], "Wrong Match Album")
+
+    def test_bogus_row_is_rejected_by_wrong_match_candidate_row(self) -> None:
+        """Known-bad self-test: wrong-typed column value must raise."""
+        row = self._seed_candidate_row()
+        bad = dict(row)
+        bad["request_id"] = "not-an-int"
+        with self.assertRaises(msgspec.ValidationError):
+            wrong_match_candidate_row(bad)
 
 
 if __name__ == "__main__":

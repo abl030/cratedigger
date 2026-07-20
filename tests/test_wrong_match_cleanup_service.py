@@ -857,7 +857,7 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         self.assertIsNotNone(audit.candidate_v0_probe)
         self.assertIsNotNone(audit.current_v0_probe)
 
-        classified = classify_log_entry(LogEntry.from_row(raw))
+        classified = classify_log_entry(LogEntry.from_row(dict(raw)))
         self.assertIsNone(classified.source_format)
         self.assertIsNone(classified.source_min_bitrate)
         self.assertIsNone(classified.source_avg_bitrate)

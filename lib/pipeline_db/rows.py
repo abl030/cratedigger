@@ -19,14 +19,58 @@ Value-type mapping from ``information_schema``: integer/bigint → int,
 text → str, real → float, boolean → bool, timestamptz → datetime,
 jsonb → ``dict[str, object]``. Nullable columns carry ``| None``.
 
-``download_log`` (issue #765 phase 6 continuation): every existing reader
-in ``lib/pipeline_db/download_log.py`` joins ``dl.*`` against
-``album_quality_evidence`` / ``album_requests`` / a self-join for
-``source_download_log_id`` provenance, so none of them project exactly
-this table's columns — retyping those joined projections to a row type
-plus their extra fields is deferred to a later pass; ``DownloadLogRow`` /
-``download_log_row()`` exist now for the column-contract guard and the
-next pure reader that needs them.
+``download_log`` joined readers (issue #784 continuation of #765 phase 6):
+every existing reader in ``lib/pipeline_db/download_log.py`` joins
+``dl.*`` against ``album_quality_evidence`` / ``album_requests`` / a
+self-join for ``source_download_log_id`` provenance, so none of them
+project exactly this table's columns. Each joined shape gets its own row
+type that INHERITS ``DownloadLogRow`` and declares the join extras:
+
+- ``DownloadLogWithEvidenceRow`` — ``get_download_log_entry``,
+  ``get_download_history``, ``get_download_history_batch``,
+  ``get_latest_download_summaries``: ``dl.*`` LEFT JOINed against
+  ``album_quality_evidence`` (the per-candidate evidence), post-overlay.
+  ``original_beets_distance`` (the self-joined origin row's
+  ``beets_distance``) plus the four ``source_*`` fields — these are
+  NOT real ``download_log`` columns; the overlay is their sole producer
+  (folding ``album_quality_evidence.format``/bitrates in when the
+  evidence is lineage-v3/v4 "source-semantic"), so they are always
+  present but nullable rather than conditionally absent.
+- ``DownloadLogWithRequestRow`` — ``get_log``'s three query variants
+  (default/imported/rejected): everything ``DownloadLogWithEvidenceRow``
+  has, PLUS the surviving ``_current_evidence_*`` facts (the request's
+  CURRENT evidence — a second, separate evidence join from the
+  per-candidate one above) and the joined ``album_requests`` facts.
+- ``DownloadLogWithOriginRow`` — ``get_linked_import_logs`` ONLY: ``dl.*``
+  self-joined for ``original_beets_distance`` with NO evidence join at
+  all (so the overlay never runs and the ``source_*`` fields never
+  appear) — a narrower shape than ``DownloadLogWithEvidenceRow``, not an
+  interchangeable one.
+
+All three row types are the shape AFTER
+``_DownloadLogMixin._overlay_evidence_onto_download_log_row`` runs, where
+applicable — that step POPS the transient ``_evidence_*``/
+``_evidence_lineage_version`` keys off the raw joined row once it folds
+their values into the legacy ``dl.*`` columns (and the four synthetic
+``source_*`` keys), so those transient keys never reach the adapter or
+the row type. **Critical constraint (found in review): ``msgspec.convert``
+targeting a ``TypedDict`` silently DROPS any key not declared on the
+type** — it does not raise. That means the bare ``download_log_row()``
+adapter must never be pointed at one of these joined rows: it would
+silently discard every join extra (``album_title``,
+``original_beets_distance``, ...) instead of erroring, which is exactly
+the failure mode a "typed projection" exists to prevent. Each joined
+projection therefore gets its own adapter (``download_log_with_evidence_row``,
+``download_log_with_request_row``, ``download_log_with_origin_row``) that
+converts to the row type declaring those extras, so the parity/subset
+contract stays meaningful.
+
+``get_wrong_matches`` does not project ``dl.*`` at all — it SELECTs an
+explicit, aliased, COALESCEd column list (candidate-evidence facts merged
+with legacy ``dl.*`` facts in SQL, plus ``album_requests`` facts). Its row
+type, ``WrongMatchCandidateRow``, is a standalone ``TypedDict`` — it does
+NOT inherit ``DownloadLogRow`` because it does not carry that table's full
+column set (e.g. no ``created_at``, no ``outcome``).
 """
 
 from __future__ import annotations
@@ -182,3 +226,138 @@ def download_log_row(raw: Mapping[str, object]) -> DownloadLogRow:
     column-contract guard now and by the next pure reader that needs it.
     """
     return msgspec.convert(dict(raw), type=DownloadLogRow)
+
+
+class DownloadLogWithEvidenceRow(DownloadLogRow):
+    """``get_download_log_entry``, ``get_download_history``,
+    ``get_download_history_batch``, ``get_latest_download_summaries``:
+    ``dl.*`` LEFT JOINed against the per-candidate
+    ``album_quality_evidence`` row, post-overlay. ``source_format`` /
+    ``source_min_bitrate`` / ``source_avg_bitrate`` / ``source_median_bitrate``
+    are NOT real ``download_log`` columns — the evidence overlay is their
+    sole producer, kept always-present-but-nullable by
+    ``_overlay_evidence_onto_download_log_row`` rather than conditionally
+    absent (see the module docstring)."""
+
+    original_beets_distance: float | None
+    source_format: str | None
+    source_min_bitrate: int | None
+    source_avg_bitrate: int | None
+    source_median_bitrate: int | None
+
+
+def download_log_with_evidence_row(
+    raw: Mapping[str, object],
+) -> DownloadLogWithEvidenceRow:
+    """Convert a post-overlay evidence-joined row (no ``album_requests``
+    join) into its typed projection.
+
+    Callers run ``_overlay_evidence_onto_download_log_row`` on the raw
+    joined row FIRST (folding candidate-evidence facts into the legacy
+    ``dl.*`` columns / the synthetic ``source_*`` keys, and popping the
+    transient ``_evidence_*`` keys) — this adapter only validates/detaches
+    the result, exactly like ``album_request_row`` / ``download_log_row``.
+    """
+    return msgspec.convert(dict(raw), type=DownloadLogWithEvidenceRow)
+
+
+class DownloadLogWithRequestRow(DownloadLogWithEvidenceRow):
+    """``get_log``'s three query variants: everything
+    ``DownloadLogWithEvidenceRow`` has, PLUS the request's CURRENT
+    evidence facts (a second, separate evidence join from the
+    per-candidate one) and the joined ``album_requests`` facts."""
+
+    _current_evidence_id: int | None
+    _current_evidence_is_pre_attempt: bool | None
+    _current_evidence_format: str | None
+    _current_evidence_min_bitrate: int | None
+    _current_evidence_avg_bitrate: int | None
+    _current_evidence_median_bitrate: int | None
+    _current_evidence_spectral_grade: str | None
+    _current_evidence_spectral_bitrate: int | None
+    _current_evidence_v0_probe_kind: str | None
+    _current_evidence_v0_probe_min_bitrate: int | None
+    _current_evidence_v0_probe_avg_bitrate: int | None
+    _current_evidence_v0_probe_median_bitrate: int | None
+    album_title: str
+    artist_name: str
+    mb_release_id: str | None
+    year: int | None
+    country: str | None
+    request_status: str
+    request_min_bitrate: int | None
+    prev_min_bitrate: int | None
+    search_filetype_override: str | None
+    request_source: str
+
+
+def download_log_with_request_row(
+    raw: Mapping[str, object],
+) -> DownloadLogWithRequestRow:
+    """Convert a post-overlay ``get_log`` row into its typed projection.
+
+    Same contract as ``download_log_with_evidence_row`` — the caller runs
+    the overlay first; this adapter only validates/detaches the result.
+    """
+    return msgspec.convert(dict(raw), type=DownloadLogWithRequestRow)
+
+
+class DownloadLogWithOriginRow(DownloadLogRow):
+    """``get_linked_import_logs`` ONLY: ``dl.*`` self-joined for
+    ``original_beets_distance``, with NO evidence join — the overlay
+    never runs for this reader, so the ``source_*`` fields
+    ``DownloadLogWithEvidenceRow`` carries never appear here. A narrower,
+    NOT interchangeable shape (see the module docstring)."""
+
+    original_beets_distance: float | None
+
+
+def download_log_with_origin_row(
+    raw: Mapping[str, object],
+) -> DownloadLogWithOriginRow:
+    """Convert ``get_linked_import_logs``'s raw ``dl.* + original_beets_distance``
+    row — no evidence join, so no overlay step runs before this adapter."""
+    return msgspec.convert(dict(raw), type=DownloadLogWithOriginRow)
+
+
+class WrongMatchCandidateRow(TypedDict):
+    """One ``get_wrong_matches`` row: a standalone projection, NOT a
+    ``dl.*`` superset — the query selects an explicit, aliased,
+    COALESCEd column list (candidate evidence merged with legacy
+    ``dl.*`` facts in SQL) plus joined ``album_requests`` facts. See the
+    module docstring for why this does not inherit ``DownloadLogRow``.
+    """
+
+    download_log_id: int
+    request_id: int
+    artist_name: str
+    album_title: str
+    mb_release_id: str | None
+    mb_release_group_id: str | None
+    soulseek_username: str | None
+    validation_result: dict[str, object] | None
+    spectral_grade: str | None
+    spectral_bitrate: int | None
+    v0_probe_kind: str | None
+    v0_probe_avg_bitrate: int | None
+    evidence_source_codec: str | None
+    evidence_source_container: str | None
+    evidence_storage_format: str | None
+    evidence_target_format: str | None
+    evidence_target_is_cbr: bool | None
+    evidence_lineage_version: int | None
+    evidence_min_bitrate: int | None
+    evidence_avg_bitrate: int | None
+    evidence_verified_lossless: bool | None
+    request_status: str
+    request_min_bitrate: int | None
+    request_verified_lossless: bool | None
+    request_current_spectral_grade: str | None
+    request_current_spectral_bitrate: int | None
+    request_imported_path: str | None
+
+
+def wrong_match_candidate_row(raw: Mapping[str, object]) -> WrongMatchCandidateRow:
+    """Detach a psycopg2 ``RealDictRow`` into the validated row projection
+    for one ``get_wrong_matches`` candidate."""
+    return msgspec.convert(dict(raw), type=WrongMatchCandidateRow)

@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import os
 import shutil
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
 
 from lib.util import FAILED_IMPORT_SEARCH_DIRS, resolve_failed_path
 from lib.validation_envelope import decode_validation_envelope
 from lib.wrong_match_policy import rejection_scenario_is_wrong_match_candidate
 
+if TYPE_CHECKING:
+    from lib.pipeline_db.rows import DownloadLogWithEvidenceRow, WrongMatchCandidateRow
+
 
 def wrong_match_row_is_visible(
-    row: dict[str, object],
+    row: Mapping[str, object],
     *,
     include_replaced: bool = False,
 ) -> bool:
@@ -38,9 +42,11 @@ class WrongMatchSourceDB(Protocol):
     tests live in ``tests/test_wrong_matches_cleanup.py``.
     """
 
-    def get_wrong_matches(self) -> list[dict[str, object]]: ...
+    def get_wrong_matches(self) -> "list[WrongMatchCandidateRow]": ...
 
-    def get_download_log_entry(self, log_id: int) -> dict[str, Any] | None: ...
+    def get_download_log_entry(
+        self, log_id: int,
+    ) -> "DownloadLogWithEvidenceRow | None": ...
 
     def clear_wrong_match_path(self, log_id: int) -> bool: ...
 
@@ -134,12 +140,15 @@ def _path_candidates(*paths: str | None) -> list[str]:
 def _wrong_match_entry_parts(
     db: WrongMatchSourceDB,
     download_log_id: int,
-) -> tuple[dict[str, Any] | None, int | None, str | None]:
+) -> tuple[Mapping[str, Any] | None, int | None, str | None]:
     entry = db.get_download_log_entry(download_log_id)
     if not entry:
         return None, None, None
-    request_id_raw = entry.get("request_id")
-    request_id = request_id_raw if isinstance(request_id_raw, int) else None
+    # ``request_id`` is a required, non-nullable ``download_log`` column
+    # (DownloadLogRow), so the row type already proves this is an ``int`` —
+    # no runtime narrowing needed once the row comes through the typed
+    # projection.
+    request_id = entry["request_id"]
     raw_path = validation_failed_path(entry.get("validation_result"))
     return entry, request_id, raw_path
 
