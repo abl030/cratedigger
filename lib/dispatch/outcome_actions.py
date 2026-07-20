@@ -129,7 +129,7 @@ def _reject_import_from_evidence_decision(
         request_id,
         dl_info,
         detail=detail,
-        error=None,
+        error=detail if decision == "audio_corrupt" else None,
         requeue=requeue_on_failure and not action.preserve_imported,
         outcome_label="rejected",
         search_filetype_override=search_filetype_override,
@@ -544,7 +544,8 @@ def _record_preview_measurement_failed(
 
       * ``download_log`` row written with ``outcome='measurement_failed'``,
         ``beets_scenario='measurement_failed'``, and the
-        ``MeasurementFailure`` JSON as ``validation_result``.
+        ``MeasurementFailure`` JSON as ``validation_result``; its detail is
+        also persisted as the operator-facing ``error_message``.
       * Parent request → ``wanted`` for automation, otherwise unchanged.
       * Optional denylist write when ``denylist_username`` is supplied.
       * ``import_jobs.status='failed'`` via ``mark_import_job_failed`` so
@@ -582,7 +583,7 @@ def _record_preview_measurement_failed(
             beets_detail=payload.detail,
             outcome="measurement_failed",
             staged_path=payload.source_path or None,
-            error_message=None,
+            error_message=payload.detail,
             validation_result=validation_json,
             import_result=(
                 import_result.to_json() if import_result is not None else None

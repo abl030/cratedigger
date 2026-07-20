@@ -454,8 +454,8 @@ export function renderDownloadHistoryItem(h) {
   // success story with the actual reason buried as a dim line below
   // the grid (request 8781 / download_log 36660: mbid_missing).
   const FAILURE_OUTCOMES = [
-    'rejected', 'failed', 'timeout', 'user_offline', 'curator_ban',
-    'have_analysis_error',
+    'rejected', 'failed', 'timeout', 'measurement_failed', 'user_offline',
+    'curator_ban', 'have_analysis_error',
   ];
   const verdict = h.verdict || h.beets_scenario || '';
   if (verdict) {

@@ -337,6 +337,9 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
     # legacy rows decoding into a safe shape that the decision function
     # rejects only when explicit reject-shaped facts are present.
     audio_corrupt: bool = False
+    # Exact album-level decoder diagnostic. Per-file ``decode_ok`` remains
+    # the structured identity of the failed files.
+    audio_error: str | None = None
     folder_layout: str = "flat"
     audio_file_count: int = 0
     filetype_band: str = ""
@@ -365,6 +368,7 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
             current_enrichment_required=self.current_enrichment_required,
             verified_lossless_proof=self.verified_lossless_proof,
             audio_corrupt=self.audio_corrupt,
+            audio_error=self.audio_error,
             folder_layout=self.folder_layout,
             audio_file_count=self.audio_file_count,
             filetype_band=self.filetype_band,

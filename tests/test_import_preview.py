@@ -1731,6 +1731,87 @@ class TestImportPreviewPath(unittest.TestCase):
             import shutil
             shutil.rmtree(source, ignore_errors=True)
 
+    def test_badlands_corruption_outranks_lossless_spectral_failure(self):
+        """dl 37604: a corrupt FLAC candidate is completed integrity
+        evidence, not an infrastructure-class spectral measurement failure.
+        """
+        db = self._db()
+        job = db.enqueue_import_job(
+            "automation_import",
+            request_id=42,
+            dedupe_key="automation_import:request:42",
+            payload={},
+        )
+        source = tempfile.mkdtemp()
+        with open(os.path.join(source, "01.flac"), "wb") as handle:
+            handle.write(b"truncated lossless bytes")
+        decode_error = (
+            "01.flac: Cannot determine format of input 0:0 after EOF; "
+            "Invalid data found when processing input"
+        )
+        audit = SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True,
+                grade="error",
+                error="ffmpeg could not decode corrupt source",
+            ),
+            existing=SpectralAnalysisDetail(
+                attempted=True,
+                grade="suspect",
+            ),
+        )
+        try:
+            with patch(
+                "lib.config.read_runtime_config",
+                return_value=CratediggerConfig(
+                    beets_harness_path="/fake/harness/run_beets_harness.sh",
+                    pipeline_db_enabled=True,
+                ),
+            ), patch(
+                "lib.import_preview.inspect_local_files",
+                return_value=LocalFileInspection(
+                    filetype="flac",
+                    min_bitrate_bps=900_000,
+                    is_vbr=False,
+                ),
+            ), patch(
+                "lib.import_preview.measure_preimport_state",
+                return_value=PreimportMeasurement(
+                    audio_corrupt=True,
+                    corrupt_files=["01.flac"],
+                    audio_error=decode_error,
+                    folder_layout="flat",
+                    audio_file_count=1,
+                    filetype_band="flac",
+                    lossless_candidate=True,
+                    min_bitrate_kbps=900,
+                    is_vbr=False,
+                    spectral_audit=audit,
+                ),
+            ), patch("lib.import_preview.run_import_one") as mock_run:
+                preview = measure_and_persist_candidate_evidence(
+                    db,
+                    request_id=42,
+                    path=source,
+                    import_job_id=job.id,
+                )
+
+            self.assertEqual(preview.verdict, "evidence_ready")
+            self.assertEqual(preview.decision, "audio_corrupt")
+            mock_run.assert_not_called()
+            evidence_id = db.get_import_job_candidate_evidence_id(job.id)
+            self.assertIsNotNone(evidence_id)
+            evidence = db.load_album_quality_evidence_by_id(evidence_id)
+            assert evidence is not None
+            self.assertTrue(evidence.audio_corrupt)
+            self.assertEqual(evidence.audio_error, decode_error)
+            self.assertEqual(
+                [(file.relative_path, file.decode_ok) for file in evidence.files],
+                [("01.flac", False)],
+            )
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
     def test_production_preview_prepares_have_before_candidate_ready(self):
         order: list[str] = []
 
