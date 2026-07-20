@@ -12,6 +12,7 @@ lib/slskd_events.py.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from contextlib import AbstractContextManager
 from typing import (Any, Callable, Protocol, TYPE_CHECKING, assert_never,
@@ -83,6 +84,7 @@ from lib.terminal_outcomes import (
 if TYPE_CHECKING:
     from lib.context import CratediggerContext
     from lib.pipeline_db import DownloadLogOutcome
+    from lib.pipeline_db.rows import AlbumRequestRow
 
 logger = logging.getLogger("cratedigger")
 
@@ -98,7 +100,7 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
     ``tests/test_download.py``.
     """
 
-    def get_downloading(self) -> list[dict[str, Any]]: ...
+    def get_downloading(self) -> list[AlbumRequestRow]: ...
 
     def advisory_lock(
         self, namespace: int, key: int,
@@ -1042,7 +1044,7 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
 
 
 def _poll_one_active_download(
-    row: dict[str, Any],
+    row: Mapping[str, Any],
     db: DownloadDB,
     ctx: CratediggerContext,
     cycle_snapshot: list[DownloadUser],

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -26,17 +27,17 @@ from lib.pipeline_db import PipelineDB
 DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN")
 
 
-def _row_release_id(row: dict[str, Any]) -> str:
+def _row_release_id(row: Mapping[str, Any]) -> str:
     return str(row.get("mb_release_id") or row.get("discogs_release_id") or "").strip()
 
 
 def classify_imported_rows(
-    rows: list[dict[str, Any]],
+    rows: Sequence[Mapping[str, Any]],
     beets: BeetsDB,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
     """Split imported rows into ghosts and manual-review rows."""
-    ghosts: list[dict[str, Any]] = []
-    manual_review: list[dict[str, Any]] = []
+    ghosts: list[Mapping[str, Any]] = []
+    manual_review: list[Mapping[str, Any]] = []
     for row in rows:
         release_id = _row_release_id(row)
         if not release_id:
@@ -47,7 +48,7 @@ def classify_imported_rows(
     return ghosts, manual_review
 
 
-def _print_rows(label: str, rows: list[dict[str, Any]]) -> None:
+def _print_rows(label: str, rows: Sequence[Mapping[str, Any]]) -> None:
     print(f"{label}: {len(rows)}")
     for row in rows:
         release_id = _row_release_id(row)

@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import cast
 import unittest
 
+from lib.pipeline_db import AlbumRequestRow
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 from web.library_artist_service import (
@@ -85,16 +87,16 @@ class _RaceAwarePipelineDB:
         self,
         artist_name: str,
         mb_artist_id: str = "",
-    ) -> list[dict[str, object]]:
+    ) -> list[AlbumRequestRow]:
         self.calls.append(f"pipeline:{artist_name}:{mb_artist_id}")
         self._lookup.pipeline_read = True
-        return [make_request_row(
+        return cast("list[AlbumRequestRow]", [make_request_row(
             id=42,
             mb_release_id=RELEASE_ID,
             artist_name="Test Artist",
             album_title="Test Album",
             status="wanted",
-        )]
+        )])
 
     def get_track_counts(self, request_ids: list[int]) -> dict[int, int]:
         self.calls.append(f"track_counts:{request_ids}")

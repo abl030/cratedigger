@@ -125,7 +125,9 @@ def assert_download_state_coherent(row: dict) -> None:
             f"{row['status']!r}")
 
 
-def assert_replacement_linked(replaced_id: int, descendant: dict | None) -> None:
+def assert_replacement_linked(
+    replaced_id: int, descendant: Mapping[str, object] | None,
+) -> None:
     if descendant is None:
         raise AssertionError(
             f"replaced request {replaced_id} has no linked descendant row")

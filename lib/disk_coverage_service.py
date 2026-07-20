@@ -5,9 +5,13 @@ present in beets?" without treating ``album_requests.status`` as disk state.
 """
 
 from collections import Counter
-from typing import Any, Protocol, runtime_checkable
+from collections.abc import Mapping
+from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
 
 import msgspec
+
+if TYPE_CHECKING:
+    from lib.pipeline_db.rows import AlbumRequestRow
 
 
 class DiskCoverageRow(msgspec.Struct, kw_only=True):
@@ -43,7 +47,7 @@ class DiskCoverageResult(msgspec.Struct, kw_only=True):
     inverse: list[BeetsUntrackedAlbum] | None = None
 
 
-def _release_ids_for_request(row: dict[str, Any]) -> list[str]:
+def _release_ids_for_request(row: Mapping[str, Any]) -> list[str]:
     ids: list[str] = []
     for key in ("mb_release_id", "discogs_release_id"):
         value = row.get(key)
@@ -61,7 +65,7 @@ def _release_ids_for_beets_album(row: dict[str, Any]) -> set[str]:
     return ids
 
 
-def _request_row(row: dict[str, Any]) -> DiskCoverageRow:
+def _request_row(row: Mapping[str, Any]) -> DiskCoverageRow:
     return DiskCoverageRow(
         id=int(row["id"]),
         status=str(row.get("status") or ""),
@@ -98,7 +102,7 @@ def _beets_row(row: dict[str, Any]) -> BeetsUntrackedAlbum:
 class DiskCoveragePipelineDB(Protocol):
     """The PipelineDB surface disk_coverage uses (#409)."""
 
-    def list_non_replaced_requests(self) -> list[dict[str, Any]]: ...
+    def list_non_replaced_requests(self) -> "list[AlbumRequestRow]": ...
 
 
 @runtime_checkable

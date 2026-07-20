@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Sequence, TYPE_CHECKING
 
@@ -69,7 +70,7 @@ class AlbumRecord:
     db_release_group_year: int | None = None
 
     @staticmethod
-    def from_db_row(row: dict[str, object], tracks: list[dict[str, object]]) -> AlbumRecord:
+    def from_db_row(row: Mapping[str, object], tracks: list[dict[str, object]]) -> AlbumRecord:
         """Build a typed AlbumRecord from a pipeline DB row + tracks."""
         # Build media structure from tracks (grouped by disc)
         discs: dict[int, list[dict[str, object]]] = {}
