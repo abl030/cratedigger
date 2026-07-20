@@ -38,3 +38,30 @@ paths:
 - Don't add DDL inside `PipelineDB` methods or anywhere outside `migrations/`. The migrator is the only path.
 - Don't edit `migrations/001_initial.sql` (or any other already-shipped migration). It is frozen history.
 - Don't create a `PipelineDB` instance from a script that expects to bootstrap schema. The script must run after the migration unit, or call `apply_migrations()` itself.
+
+## Typed row projections (issue #765 phase 6)
+
+Reads and writes have different canonical typings, both column-audited:
+
+- **Write payloads** are flat `msgspec.Struct`s whose field names ARE column
+  names (`AddRequestInput`, `PersistedYoutubeRow`, … — the #546 W3 pattern),
+  guarded by the subset check in `tests/test_pipeline_db_column_contract.py`.
+- **Read projections** are `TypedDict`s in `lib/pipeline_db/rows.py`
+  (`AlbumRequestRow` is the exemplar): rows stay plain dicts at runtime so
+  the whole `row["field"]` consumer surface keeps working, while pyright
+  gains per-key types. A `SELECT *` row type must match the table's columns
+  EXACTLY (equality check in the same contract test), so a new migration
+  column fails the suite until the row type — and the `make_request_row`
+  builder — learn it in the same PR.
+- The ONE adapter from cursor to row type is `album_request_row()` (per-row
+  `msgspec.convert`), which validates every declared key/type at runtime —
+  column-type drift raises `msgspec.ValidationError` at the boundary.
+- Consumer functions that merely read a row take `Mapping[str, Any]` (a
+  TypedDict is assignable to it; a plain legacy dict too). Retyping those
+  consumers to the concrete row type is incremental follow-up work per
+  module family, not a prerequisite.
+- Deploy-window semantics: `msgspec.convert` IGNORES extra keys, so a
+  migration ADDING a column never breaks the still-running old-code cycle.
+  A column DROP/RENAME is effectively two-phase (old code's row type would
+  raise "missing required field" mid-window) — time such migrations like
+  any other destructive change.

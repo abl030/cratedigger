@@ -9,6 +9,7 @@ from typing import Any
 
 import msgspec
 
+from lib.pipeline_db.rows import AlbumRequestRow
 from lib.beets_db import BeetsDB
 from lib.config import CratediggerConfig
 from lib.destructive_release_service import (
@@ -1292,7 +1293,7 @@ class LifecycleWorld:
             )
             raise AssertionError(f"cross-engine world violations:\n{rendered}")
 
-    def _require_request(self, request_id: int) -> dict[str, object]:
+    def _require_request(self, request_id: int) -> "AlbumRequestRow":
         row = self.db.get_request(request_id)
         if row is None:
             raise AssertionError(f"request {request_id} disappeared")

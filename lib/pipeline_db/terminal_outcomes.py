@@ -9,6 +9,8 @@ from typing import Any
 import msgspec
 import psycopg2.extras
 
+from lib.pipeline_db.rows import AlbumRequestRow, album_request_row
+
 from lib import transitions
 from lib.import_queue import ImportJob, validate_preview_failure_status
 from lib.terminal_outcomes import (
@@ -45,13 +47,13 @@ class _TransactionalTransitionsDB:
         self._db = db
         self._boundary = boundary
 
-    def get_request(self, request_id: int) -> dict[str, Any] | None:
+    def get_request(self, request_id: int) -> AlbumRequestRow | None:
         cur = self._db._execute(
             "SELECT * FROM album_requests WHERE id = %s",
             (request_id,),
         )
         row = cur.fetchone()
-        return dict(row) if row is not None else None
+        return album_request_row(row) if row is not None else None
 
     def set_downloading(
         self,

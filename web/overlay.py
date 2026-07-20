@@ -14,6 +14,7 @@ None-handle inputs degrade gracefully (empty overlay), matching the
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date, datetime
 from typing import Any, Protocol
 
@@ -41,7 +42,7 @@ class OverlayBeetsDB(Protocol):
     ) -> list[dict[str, object]]: ...
 
 
-def serialize_row(row: dict[str, object]) -> dict[str, object]:
+def serialize_row(row: Mapping[str, object]) -> dict[str, object]:
     """Serialize a DB row dict — convert datetime objects to ISO strings."""
     result: dict[str, object] = {}
     for k, v in row.items():

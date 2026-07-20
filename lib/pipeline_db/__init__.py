@@ -21,6 +21,7 @@ from lib.pipeline_db.pin_status import (
     PlexPinStatus,
     PlexTerminalPinStatus,
 )
+from lib.pipeline_db.rows import AlbumRequestRow, album_request_row
 from lib.pipeline_db._shared import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
     ADVISORY_LOCK_NAMESPACE_IMPORTER,
@@ -145,6 +146,8 @@ __all__ = [
     "PersistedDistance",
     "PersistedTrack",
     "PersistedYoutubeRow",
+    "AlbumRequestRow",
+    "album_request_row",
     "PlexPinStatus",
     "PlexTerminalPinStatus",
     "RequestSpectralStateUpdate",

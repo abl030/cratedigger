@@ -81,6 +81,7 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         "imported_path": None,
         "search_filetype_override": None,
         "target_format": None,
+        "final_format": None,
         "min_bitrate": None,
         "prev_min_bitrate": None,
         "last_download_spectral_bitrate": None,

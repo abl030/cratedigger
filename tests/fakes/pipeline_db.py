@@ -13,6 +13,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Optional, Sequence, cast
 import msgspec
 
@@ -20,7 +21,11 @@ import msgspec
 if TYPE_CHECKING:
     from cratedigger import TrackRecord
     from lib.quality import CandidateScore
-    from lib.pipeline_db import SaturationSummary, SearchLogHistoryPage
+    from lib.pipeline_db import (
+        AlbumRequestRow,
+        SaturationSummary,
+        SearchLogHistoryPage,
+    )
 
 from lib.import_queue import (
     ImportJob,
@@ -109,7 +114,7 @@ class _FakeTerminalTransitionsDB:
         self._db = db
         self._boundary = boundary
 
-    def get_request(self, request_id: int) -> dict[str, Any] | None:
+    def get_request(self, request_id: int) -> "AlbumRequestRow | None":
         return self._db.get_request(request_id)
 
     def set_downloading(
@@ -540,7 +545,7 @@ class FakePipelineDB:
         self._next_download_log_id = new_id
         return new_id
 
-    def seed_request(self, row: dict[str, Any]) -> None:
+    def seed_request(self, row: Mapping[str, Any]) -> None:
         """Add a request row to the fake DB. Must include 'id'.
 
         Re-seeding an existing id replaces that row (an update); a NEW id
@@ -550,7 +555,7 @@ class FakePipelineDB:
         rid = row["id"]
         self._assert_mb_release_id_unique(
             row.get("mb_release_id"), exclude_id=rid)
-        self._requests[rid] = copy.deepcopy(row)
+        self._requests[rid] = dict(copy.deepcopy(row))
         if rid > self._next_request_id:
             self._next_request_id = rid
 
@@ -1559,8 +1564,11 @@ class FakePipelineDB:
 
     # --- PipelineDB interface methods ---
 
-    def get_request(self, request_id: int) -> dict[str, Any] | None:
-        return copy.deepcopy(self._requests.get(request_id))
+    def get_request(self, request_id: int) -> "AlbumRequestRow | None":
+        return cast(
+            "AlbumRequestRow | None",
+            copy.deepcopy(self._requests.get(request_id)),
+        )
 
     def _terminal_state_snapshot(self) -> tuple[object, ...]:
         return copy.deepcopy((

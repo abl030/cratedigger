@@ -1686,7 +1686,9 @@ class TestUpdateStatus(unittest.TestCase):
         req = self.db.get_request(self.req_id)
         assert req is not None
         self.assertEqual(req["status"], "imported")
-        self.assertAlmostEqual(req["beets_distance"], 0.05)
+        distance = req["beets_distance"]
+        assert distance is not None
+        self.assertAlmostEqual(distance, 0.05)
         self.assertEqual(req["imported_path"], "/Beets/A/2020 - B")
 
     def test_update_status_metadata_rejects_lifecycle_and_malformed_fields(self):
@@ -3592,18 +3594,22 @@ class TestRetryLogic(unittest.TestCase):
         assert req is not None
         self.assertEqual(req["download_attempts"], 1)
         self.assertIsNotNone(req["last_attempt_at"])
-        self.assertGreater(req["next_retry_after"], datetime.now(timezone.utc))
+        next_retry = req["next_retry_after"]
+        assert next_retry is not None
+        self.assertGreater(next_retry, datetime.now(timezone.utc))
 
     def test_exponential_backoff(self):
         self.db.record_attempt(self.req_id, "search", expected_status="wanted")
         req1 = self.db.get_request(self.req_id)
         assert req1 is not None
         retry1 = req1["next_retry_after"]
+        assert retry1 is not None
 
         self.db.record_attempt(self.req_id, "search", expected_status="wanted")
         req2 = self.db.get_request(self.req_id)
         assert req2 is not None
         retry2 = req2["next_retry_after"]
+        assert retry2 is not None
 
         now = datetime.now(timezone.utc)
         delta1 = (retry1 - now).total_seconds()
@@ -5455,7 +5461,7 @@ class TestDownloadingStatus(unittest.TestCase):
         )
         req = self.db.get_request(req_id)
         assert req is not None
-        ads = req["active_download_state"]
+        ads: Any = req["active_download_state"]
         self.assertIsInstance(ads, dict)
         self.assertEqual(ads["filetype"], "flac")
         self.assertEqual(len(ads["files"]), 1)
@@ -5497,7 +5503,7 @@ class TestDownloadingStatus(unittest.TestCase):
         assert req is not None
         self.assertEqual(req["status"], "downloading")
         self.assertIsNotNone(req["active_download_state"])
-        ads = req["active_download_state"]
+        ads: Any = req["active_download_state"]
         self.assertEqual(ads["filetype"], "mp3 v0")
         # Starting a download should not consume a backoff attempt.
         self.assertEqual(req["download_attempts"], 0)
@@ -5540,7 +5546,7 @@ class TestDownloadingStatus(unittest.TestCase):
         # Original state preserved
         req = self.db.get_request(req_id)
         assert req is not None
-        ads = req["active_download_state"]
+        ads: Any = req["active_download_state"]
         self.assertEqual(ads["filetype"], "flac")
 
     def test_set_downloading_noop_from_unsearchable(self):
@@ -5629,7 +5635,8 @@ class TestDownloadingStatus(unittest.TestCase):
         blocked_req = self.db.get_request(blocked_id)
         assert req is not None
         assert blocked_req is not None
-        self.assertEqual(req["active_download_state"]["filetype"], "mp3 v0")
+        ads: Any = req["active_download_state"]
+        self.assertEqual(ads["filetype"], "mp3 v0")
         self.assertIsNone(blocked_req["active_download_state"])
 
     def test_reset_downloading_to_wanted_success_and_guard(self):
@@ -9207,7 +9214,9 @@ class TestMarkImportedWithRescue(unittest.TestCase):
                     row["prior_unfindable_category"], category)
                 self.assertIsNotNone(row["rescued_at"])
                 # Sanity: the imported extras also landed.
-                self.assertEqual(float(row["beets_distance"]), 0.05)
+                rescued_distance = row["beets_distance"]
+                assert rescued_distance is not None
+                self.assertEqual(float(rescued_distance), 0.05)
 
     def test_no_rescue_stamp_when_unfindable_was_null(self):
         """No prior category → ``rescued_at`` stays NULL."""

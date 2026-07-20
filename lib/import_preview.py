@@ -12,7 +12,7 @@ import logging
 import os
 import shutil
 import tempfile
-from collections.abc import Callable
+from collections.abc import Mapping, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -1325,7 +1325,7 @@ def _classify_import_result(
     return verdict, cleanup_eligible, reason, chain
 
 
-def _request_label(req: dict[str, Any]) -> str:
+def _request_label(req: Mapping[str, Any]) -> str:
     return f"{req.get('artist_name', '')} - {req.get('album_title', '')}".strip(" -")
 
 

@@ -27,12 +27,14 @@ diverging on metadata semantics.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from contextlib import AbstractContextManager
-from typing import Any, Optional, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 
 from lib.config import CratediggerConfig
 from lib.pipeline_db import (
@@ -63,6 +65,10 @@ from lib.search import (
     generate_search_plan,
 )
 
+if TYPE_CHECKING:
+    from lib.pipeline_db.rows import AlbumRequestRow
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -73,7 +79,7 @@ class SearchPlanDB(Protocol):
     Parity tests live in ``tests/test_search_plan_service.py``.
     """
 
-    def get_request(self, request_id: int) -> dict[str, Any] | None: ...
+    def get_request(self, request_id: int) -> "AlbumRequestRow | None": ...
 
     def get_tracks(self, request_id: int) -> list[dict[str, Any]]: ...
 
@@ -1056,7 +1062,7 @@ class SearchPlanService:
     def _build_and_persist(
         self,
         request_id: int,
-        row: dict[str, Any],
+        row: Mapping[str, Any],
         *,
         regenerate: bool,
         prepend_artist: bool,
@@ -1315,7 +1321,7 @@ def dry_run_payload(
     result: "DryRunResult",
     *,
     current_generator_id: str,
-    request_row: dict[str, Any] | None,
+    request_row: Mapping[str, Any] | None,
     has_active_plan: bool,
 ) -> dict[str, Any]:
     """JSON-serialisable payload for U6 dry-run CLI + API responses.
@@ -1435,7 +1441,7 @@ def _metadata_snapshot_from_snapshot(
 
 
 def _metadata_snapshot_from_row(
-    row: dict[str, Any],
+    row: Mapping[str, Any],
     tracks: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Best-effort metadata snapshot when we never built a `ReleaseSnapshot`.

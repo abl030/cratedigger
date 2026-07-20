@@ -32,13 +32,16 @@ import conftest  # noqa: F401 — sets TEST_DB_DSN env var
 
 from lib.pipeline_db import (
     AddRequestInput,
+    AlbumRequestRow,
     BadAudioHashInput,
     PersistedYoutubeRow,
     PipelineDB,
     RequestSpectralStateUpdate,
     RequestV0ProbeStateUpdate,
     TransferLedgerRow,
+    album_request_row,
 )
+from tests.helpers import make_request_row
 from lib.quality import SpectralMeasurement, V0ProbeEvidence
 
 # conftest boots an ephemeral PostgreSQL and exports TEST_DB_DSN for the whole
@@ -129,6 +132,45 @@ class TestWritePayloadColumnContract(unittest.TestCase):
         for label, _table, cols in CONTRACTS:
             with self.subTest(payload=label):
                 self.assertTrue(cols, f"{label} resolved to no columns")
+
+    def test_album_request_row_matches_table_columns_exactly(self) -> None:
+        """Read-projection parity (#765 phase 6): ``AlbumRequestRow`` is the
+        typed view of ``SELECT * FROM album_requests``, so its keys must
+        EQUAL the table's columns — a new migration column fails here until
+        the row type learns it in the same PR (and vice versa)."""
+        table_cols = self._table_columns("album_requests")
+        row_keys = set(AlbumRequestRow.__annotations__)
+        self.assertEqual(
+            row_keys, table_cols,
+            "AlbumRequestRow drifted from album_requests: "
+            f"missing={sorted(table_cols - row_keys)} "
+            f"stale={sorted(row_keys - table_cols)}",
+        )
+
+    def test_make_request_row_builder_matches_row_type(self) -> None:
+        """The shared builder must produce every ``AlbumRequestRow`` key —
+        production-shape fidelity for every test that seeds request rows
+        (this immediately caught the builder lacking ``final_format``)."""
+        built = set(make_request_row())
+        row_keys = set(AlbumRequestRow.__annotations__)
+        self.assertEqual(
+            built, row_keys,
+            f"builder missing={sorted(row_keys - built)} "
+            f"extra={sorted(built - row_keys)}",
+        )
+
+    def test_builder_row_survives_the_runtime_validator(self) -> None:
+        """``album_request_row`` must accept a production-shaped builder row
+        — pins the msgspec-convert boundary against value-type drift."""
+        converted = album_request_row(make_request_row())
+        self.assertEqual(converted["status"], "wanted")
+
+    def test_bogus_row_is_rejected_by_the_runtime_validator(self) -> None:
+        """Known-bad self-test: wrong-typed column value must raise."""
+        bad = dict(make_request_row())
+        bad["search_attempts"] = "three"
+        with self.assertRaises(msgspec.ValidationError):
+            album_request_row(bad)
 
     def test_bogus_struct_field_is_caught_by_the_subset_check(self) -> None:
         """Known-bad self-test: a synthetic ``msgspec.Struct`` with one

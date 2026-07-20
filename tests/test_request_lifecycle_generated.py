@@ -34,6 +34,7 @@ docs/generated-testing.md.
 """
 
 import copy
+from collections.abc import Mapping
 import os
 import sys
 import unittest
@@ -157,8 +158,8 @@ def assert_read_only_cas_result(
     *,
     applied: bool,
     expected_applied: bool,
-    before: dict | None,
-    after: dict | None,
+    before: Mapping[str, object] | None,
+    after: Mapping[str, object] | None,
 ) -> None:
     """An empty metadata CAS tells the truth and never mutates the row."""
     if applied is not expected_applied:
