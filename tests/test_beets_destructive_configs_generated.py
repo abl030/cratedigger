@@ -55,10 +55,14 @@ class ConfigProfile:
     importsource: bool = False
     playlist: bool = False
     missing_plugin: bool = False
+    plugin_override: bool = False
 
     @property
     def expected_failure(self) -> bool:
-        return self.secret in {"unreadable", "invalid_utf8"} or self.missing_plugin
+        return self.secret in {"unreadable", "invalid_utf8"} or (
+            self.missing_plugin
+            and not (self.plugin_override and self.secret != "placeholder")
+        )
 
 
 PROFILES = (
@@ -70,6 +74,9 @@ PROFILES = (
     ConfigProfile("minimal", "placeholder", importsource=True),
     ConfigProfile("minimal", "placeholder", playlist=True),
     ConfigProfile("minimal", "placeholder", missing_plugin=True),
+    ConfigProfile(
+        "minimal", "readable", missing_plugin=True, plugin_override=True,
+    ),
 )
 
 
@@ -175,8 +182,16 @@ def _profile_config(
         if profile.secret == "invalid_utf8":
             secret.write_bytes(b"discogs:\n  user_token: \xff\n")
         else:
+            secret_config: dict[str, object] = {
+                "discogs": {"user_token": "test-token"},
+            }
+            if profile.plugin_override:
+                # Confuse gives later includes higher priority. An explicit
+                # empty plugin list must replace a lower-priority declaration,
+                # exactly as pinned Beets resolves the same files.
+                secret_config["plugins"] = []
             secret.write_text(
-                "discogs:\n  user_token: test-token\n", encoding="utf-8",
+                yaml.safe_dump(secret_config, sort_keys=False), encoding="utf-8",
             )
         if profile.secret == "unreadable":
             secret.chmod(0)
@@ -438,7 +453,11 @@ class TestGeneratedRealBeetsConfigMatrix(unittest.TestCase):
                         )
 
     @settings(
-        max_examples=18,
+        max_examples=(
+            96
+            if os.environ.get("CRATEDIGGER_HYPOTHESIS_PROFILE") == "fuzz"
+            else 18
+        ),
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -469,6 +488,7 @@ class TestGeneratedRealBeetsConfigMatrix(unittest.TestCase):
             importsource=st.booleans(),
             playlist=st.booleans(),
             missing_plugin=st.booleans(),
+            plugin_override=st.booleans(),
         ),
         track_count=st.sampled_from((1, 2, 12)),
         source=st.sampled_from(("mb", "discogs")),

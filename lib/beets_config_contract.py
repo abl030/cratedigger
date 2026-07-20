@@ -69,16 +69,20 @@ def validate_beets_config(config_dir: str) -> frozenset[str]:
         raise BeetsConfigError(
             f"Beets config {config_path} include must be a string or list"
         )
-    configured_plugins = set(_plugin_names(config.get("plugins"), source=config_path))
+    configured_plugins = _plugin_names(config.get("plugins"), source=config_path)
     for declared_path in includes:
         include_path = Path(declared_path)
         if not include_path.is_absolute():
             include_path = root / include_path
         included = _read_mapping(include_path)
-        configured_plugins.update(
-            _plugin_names(included.get("plugins"), source=include_path)
-        )
-    return frozenset(configured_plugins)
+        # Beets/Confuse gives later includes higher priority. A declared
+        # ``plugins`` value therefore replaces, rather than extends, the
+        # lower-priority value from config.yaml or an earlier include.
+        if "plugins" in included:
+            configured_plugins = _plugin_names(
+                included["plugins"], source=include_path,
+            )
+    return configured_plugins
 
 
 def validate_beets_plugins_loaded(

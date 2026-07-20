@@ -69,14 +69,17 @@ let
     root = Path("/var/lib/cratedigger-music")
     db_path = root / "beets-library.db"
     target_id = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    child_target_id = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
     sibling_id = "dddddddd-dddd-dddd-dddd-dddddddddddd"
     target_dir = root / "Target" / "Album"
+    child_target_dir = root / "Child Target" / "Album"
     sibling_dir = root / "Sibling" / "Album"
     sibling_path = sibling_dir / "01 Sibling.flac"
 
     if sys.argv[1] == "seed":
         os.umask(0o002)
         target_dir.mkdir(parents=True)
+        child_target_dir.mkdir(parents=True)
         sibling_dir.mkdir(parents=True)
         root.chmod(0o2775)
         items = []
@@ -87,23 +90,36 @@ let
                 path=str(path), title=f"Track {index}", artist="Target",
                 album="Album", albumartist="Target", mb_albumid=target_id,
             ))
+        child_items = []
+        for index in range(1, 13):
+            path = child_target_dir / f"{index:02d} Track.flac"
+            path.write_bytes(f"child-audio-{index}".encode())
+            child_items.append(library.Item(
+                path=str(path), title=f"Track {index}", artist="Child Target",
+                album="Album", albumartist="Child Target",
+                mb_albumid=child_target_id,
+            ))
         sibling_path.write_bytes(b"rare sibling")
         lib = library.Library(str(db_path), str(root))
         lib.add_album(items)
+        child_album = lib.add_album(child_items)
         lib.add_album([library.Item(
             path=str(sibling_path), title="Sibling", artist="Sibling",
             album="Album", albumartist="Sibling", mb_albumid=sibling_id,
         )])
         lib._close()
         db_path.chmod(0o664)
+        print(f"CHILD_ALBUM_ID={child_album.id}")
     elif sys.argv[1] == "verify":
         lib = library.Library(str(db_path), str(root))
         assert not list(lib.albums(f"mb_albumid:{target_id}"))
+        assert not list(lib.albums(f"mb_albumid:{child_target_id}"))
         sibling = list(lib.albums(f"mb_albumid:{sibling_id}"))
         assert len(sibling) == 1, sibling
         assert len(list(sibling[0].items())) == 1
         lib._close()
         assert not target_dir.exists(), target_dir
+        assert not child_target_dir.exists(), child_target_dir
         assert sibling_path.read_bytes() == b"rare sibling"
     else:
         raise AssertionError(sys.argv)
@@ -229,6 +245,8 @@ pkgs.testers.nixosTest {
   };
 
   testScript = ''
+    import json
+
     machine.start()
     machine.wait_for_unit("postgresql.service")
     machine.wait_for_unit("redis-cratedigger.service")
@@ -476,15 +494,32 @@ pkgs.testers.nixosTest {
     beets_python = machine.succeed(
         "sed -n 's/^python = //p' /var/lib/cratedigger/config.ini"
     ).strip()
-    machine.succeed(
+    seed_out = machine.succeed(
         f"sudo -u cratedigger env BEETSDIR=/var/lib/cratedigger/beets "
         f"{beets_python} ${beetsDestructiveFixture} seed"
     )
+    child_album_id = int(seed_out.strip().split("=", 1)[1])
     remove_out = machine.succeed(
         "sudo -u beets-operator cratedigger-beet -P importsource "
         "remove -a -f -d mb_albumid:cccccccc-cccc-cccc-cccc-cccccccccccc"
     )
     assert "Really?" not in remove_out, remove_out
+    child_request = json.dumps({
+        "album_id": child_album_id,
+        "expected_release_id": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+        "library_db_path": "/var/lib/cratedigger-music/beets-library.db",
+        "library_root": "/var/lib/cratedigger-music",
+    }, separators=(",", ":"))
+    child_out = machine.succeed(
+        f"printf '%s' '{child_request}' | "
+        f"sudo -u beets-operator env BEETSDIR=/var/lib/cratedigger/beets "
+        f"{beets_python} ${cratediggerSrc}/harness/delete_album.py "
+        "2>/tmp/exact-delete.stderr"
+    )
+    child_payload = json.loads(child_out)
+    assert child_payload["status"] == "completed", child_payload
+    assert json.dumps(child_payload, separators=(",", ":")) == child_out
+    machine.succeed("test ! -s /tmp/exact-delete.stderr")
     machine.succeed(
         f"sudo -u cratedigger env BEETSDIR=/var/lib/cratedigger/beets "
         f"{beets_python} ${beetsDestructiveFixture} verify"

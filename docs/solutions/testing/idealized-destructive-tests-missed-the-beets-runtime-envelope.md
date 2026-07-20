@@ -65,7 +65,7 @@ matrix executes the pinned CLI and exact-delete child with:
 - minimal and complete production plugin configurations;
 - placeholder, readable, unreadable, and invalid-UTF-8 included secrets;
 - independently combined `importsource.suggest_removal`, automatic playlist,
-  and missing-plugin worlds;
+  missing-plugin, and include-level plugin-override worlds;
 - MusicBrainz and Discogs identities;
 - single-track, two-track, and twelve-track albums;
 - a sibling pressing that must survive every world.
@@ -76,8 +76,10 @@ canonical typed result frame. Lifecycle completion must be equivalent to the
 verified postcondition: the exact Beets authority is absent.
 
 The matrix drives the full real Ban Source cleanup chain as well as the exact
-child, and the module VM seeds and removes a 12-track album through the actual
-rendered configuration as a non-root operator.
+child. The module VM independently removes two 12-track albums through the
+actual rendered configuration as a non-root operator: one through the pinned
+CLI and one through the exact-delete child, whose stdout must be one canonical
+typed frame.
 
 The implementation uses Beets' noninteractive `--force` contract, closes
 stdin, disables only `importsource` for selector removal because its source-file
