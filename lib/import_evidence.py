@@ -346,10 +346,6 @@ def ensure_current_evidence_for_action(
                     existing_requires_lossless_source_v0
                 ),
             )
-            if existing_snapshot_stale:
-                backfilled_errors.extend(
-                    _current_action_missing_enrichment_reasons(authoritative)
-                )
             if backfilled_errors:
                 backfilled = EvidenceBuildResult(
                     None,
@@ -398,6 +394,8 @@ def _current_action_incomplete_reasons(
         reasons.append(
             "lossless-source V0 metric is required for converted current evidence"
         )
+    if evidence.current_enrichment_required:
+        reasons.extend(_current_action_missing_enrichment_reasons(evidence))
     return reasons
 
 

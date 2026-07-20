@@ -18,8 +18,12 @@ from lib import transitions
 # Module-level DI seam for ``transitions.finalize_request``.
 finalize_request = transitions.finalize_request
 
-from lib.quality import (compute_effective_override_bitrate, extract_usernames,
-                         quality_gate_decision)
+from lib.quality import (
+    compute_effective_override_bitrate,
+    extract_usernames,
+    quality_gate_decision,
+    resolve_retained_search_override,
+)
 from lib.quality.decisions import post_import_search_action
 
 from lib.dispatch.types import QualityGateState
@@ -214,9 +218,24 @@ def _check_quality_gate_core(
             spectral_note = f" (spectral={spectral_br}kbps)" if spectral_br else ""
 
             if action.status == "wanted":
+                request = db.get_request(request_id)
+                raw_existing_override = (
+                    request.get("search_filetype_override")
+                    if request is not None
+                    else None
+                )
+                existing_override = (
+                    raw_existing_override
+                    if isinstance(raw_existing_override, str)
+                    else None
+                )
+                search_override = resolve_retained_search_override(
+                    existing_override,
+                    action.search_filetype_override,
+                )
                 transition = transitions.RequestTransition.to_wanted(
                     from_status="imported",
-                    search_filetype_override=action.search_filetype_override,
+                    search_filetype_override=search_override,
                     min_bitrate=min_br_kbps,
                 )
                 usernames = extract_usernames(files) if action.denylist else set()
@@ -234,7 +253,7 @@ def _check_quality_gate_core(
                     f"QUALITY GATE: {label} "
                     f"min_bitrate={min_br_kbps}kbps{spectral_note}, "
                     f"decision={decision}, denylisted {usernames}, "
-                    f"search_override={action.search_filetype_override!r}")
+                    f"search_override={search_override!r}")
                 successful_terminal_acceptance = False
             else:  # verified-lossless proof accepts terminally
                 transition = transitions.RequestTransition.to_imported(

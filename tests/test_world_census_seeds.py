@@ -6,9 +6,12 @@ from dataclasses import replace
 import unittest
 
 from tests.world_model.census_seeds import (
+    EVIDENCE_DRIFT_FACT_SEEDS,
+    EVIDENCE_DRIFT_MUTATION_SEEDS,
     STATEFUL_WORLD_CENSUS_SEEDS,
     WORLD_CENSUS_SEEDS,
     assert_census_seed_anonymized,
+    assert_evidence_drift_seed_anonymized,
 )
 
 
@@ -52,6 +55,55 @@ class TestWorldCensusSeeds(unittest.TestCase):
 
         with self.assertRaisesRegex(AssertionError, "anonymized"):
             assert_census_seed_anonymized(known_bad)
+
+    def test_live_evidence_drift_corpus_covers_all_238_findings(self) -> None:
+        self.assertEqual(
+            {seed.mutation for seed in EVIDENCE_DRIFT_MUTATION_SEEDS},
+            {
+                "codec_replacement",
+                "filename_rename",
+                "same_name_size_drift",
+                "file_count_drift",
+            },
+        )
+        self.assertEqual(
+            {
+                (seed.name, seed.observed_rows, seed.initial_codec)
+                for seed in EVIDENCE_DRIFT_MUTATION_SEEDS
+                if seed.mutation == "codec_replacement"
+            },
+            {
+                ("mp3_to_opus_replacement", 109, "mp3"),
+                ("m4a_to_opus_replacement", 2, "m4a"),
+            },
+        )
+        self.assertEqual(
+            sum(seed.observed_rows for seed in EVIDENCE_DRIFT_MUTATION_SEEDS),
+            238,
+        )
+        self.assertEqual(
+            sum(seed.observed_rows for seed in EVIDENCE_DRIFT_FACT_SEEDS),
+            238,
+        )
+        self.assertEqual(
+            {
+                (seed.spectral_subject, seed.v0_subject)
+                for seed in EVIDENCE_DRIFT_FACT_SEEDS
+            },
+            {
+                ("source", "source"),
+                ("installed", "installed"),
+                ("installed", None),
+                (None, None),
+            },
+        )
+
+    def test_evidence_drift_corpus_contains_no_identity_or_path(self) -> None:
+        for seed in (
+            *EVIDENCE_DRIFT_MUTATION_SEEDS,
+            *EVIDENCE_DRIFT_FACT_SEEDS,
+        ):
+            assert_evidence_drift_seed_anonymized(seed)
 
 
 if __name__ == "__main__":

@@ -46,15 +46,27 @@ from lib.quality import (
     AlbumQualityEvidence,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
+    EvidenceSubject,
     SpectralAnalysisDetail,
     VerifiedLosslessProof,
 )
 from lib.quality_evidence import (
     backfill_current_evidence_from_album_info,
     snapshot_audio_files,
+    snapshot_fingerprint,
 )
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
+
+
+_CHANGED_SNAPSHOT_FACT_SHAPES: tuple[
+    tuple[EvidenceSubject | None, EvidenceSubject | None], ...
+] = (
+    ("source", "source"),
+    ("installed", "installed"),
+    ("installed", None),
+    (None, None),
+)
 
 
 @dataclass(frozen=True)
@@ -209,6 +221,109 @@ class TestGeneratedEvidenceLifecycle(unittest.TestCase):
             available=available,
             result_v0_avg=result_v0_avg,
         )
+
+    @given(fact_shape=st.sampled_from(_CHANGED_SNAPSHOT_FACT_SHAPES))
+    @example(fact_shape=("installed", "installed"))
+    def test_changed_snapshot_retry_waits_for_surviving_or_new_facts(
+        self,
+        fact_shape: tuple[EvidenceSubject | None, EvidenceSubject | None],
+    ) -> None:
+        """A retry cannot turn an unenriched #743 drift rebuild into authority."""
+
+        spectral_subject, v0_subject = fact_shape
+
+        root = tempfile.mkdtemp(prefix="cratedigger-evidence-drift-")
+        try:
+            audio_path = os.path.join(root, "01 - Track.mp3")
+            with open(audio_path, "wb") as handle:
+                handle.write(b"before")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=1, mb_release_id="drift-mbid"))
+            evidence = make_album_quality_evidence(
+                mb_release_id="drift-mbid",
+                source_path=root,
+                files=snapshot_audio_files(root),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=192,
+                    avg_bitrate_kbps=200,
+                    median_bitrate_kbps=198,
+                    format="MP3",
+                    is_cbr=False,
+                    spectral_grade=(
+                        "genuine" if spectral_subject is not None else None
+                    ),
+                    spectral_subject=spectral_subject,
+                    spectral_provenance=(
+                        "carried"
+                        if spectral_subject == "source"
+                        else "measured"
+                        if spectral_subject == "installed"
+                        else None
+                    ),
+                ),
+                v0_metric=(
+                    AlbumQualityV0Metric(
+                        min_bitrate_kbps=190,
+                        avg_bitrate_kbps=200,
+                        median_bitrate_kbps=198,
+                        subject=v0_subject,
+                        provenance=(
+                            "carried" if v0_subject == "source" else "measured"
+                        ),
+                    )
+                    if v0_subject is not None
+                    else None
+                ),
+            )
+            db.upsert_album_quality_evidence(evidence)
+            stored = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            db.set_request_current_evidence(1, stored.id)
+            with open(audio_path, "ab") as handle:
+                handle.write(b"-after")
+            album_info = AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=192,
+                avg_bitrate_kbps=200,
+                median_bitrate_kbps=198,
+                is_cbr=False,
+                album_path=root,
+                format="MP3",
+            )
+
+            first = ensure_current_evidence_for_action(
+                db,
+                request_id=1,
+                mb_release_id="drift-mbid",
+                current_album_path=root,
+                album_info=album_info,
+            )
+            second = ensure_current_evidence_for_action(
+                db,
+                request_id=1,
+                mb_release_id="drift-mbid",
+                current_album_path=root,
+                album_info=album_info,
+            )
+
+            surviving_authority = (
+                spectral_subject == "source" and v0_subject == "source"
+            )
+            self.assertEqual(first.available, surviving_authority)
+            self.assertEqual(second.available, surviving_authority)
+            linked_id = db.get_request_current_evidence_id(1)
+            linked = db.load_album_quality_evidence_by_id(linked_id)
+            assert linked is not None
+            self.assertEqual(
+                linked.snapshot_fingerprint,
+                snapshot_fingerprint(snapshot_audio_files(root)),
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 @dataclass(frozen=True)

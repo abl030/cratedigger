@@ -1072,6 +1072,11 @@ def backfill_current_evidence_from_album_info(
                     if same_snapshot
                     else result.evidence.on_disk_v0_research_attempted
                 ),
+                current_enrichment_required=(
+                    existing.current_enrichment_required
+                    if same_snapshot
+                    else True
+                ),
             ),
             result.status,
             result.reason,

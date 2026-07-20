@@ -26,13 +26,19 @@ from lib.dispatch.types import ImportOneRun
 from lib.import_evidence import (
     ActionEvidenceProvenance,
     CandidateEvidenceActionResult,
+    CurrentEvidenceActionResult,
     load_current_evidence_for_action,
 )
+from lib.import_preview import enrich_incomplete_current_evidence_for_request
 from lib.quality import (
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_SOURCE,
     AudioQualityMeasurement,
     DownloadInfo,
+    QualityRankConfig,
+    SpectralAnalysisDetail,
+    V0ProbeEvidence,
+    V0_PROBE_ON_DISK_RESEARCH,
     VerifiedLosslessProof,
     resolve_user_requeue_override,
 )
@@ -76,6 +82,8 @@ from tests.helpers import (
 from tests.test_pipeline_db import TEST_DSN, make_db
 from tests.world_model.census_seeds import (
     STATEFUL_WORLD_CENSUS_SEEDS,
+    EvidenceDriftFactSeed,
+    EvidenceDriftMutationSeed,
     WorldCensusSeed,
 )
 
@@ -288,6 +296,170 @@ class LifecycleWorld:
             )
         return request_id
 
+    def seed_evidence_drift_release(
+        self,
+        release: BeetsWorldRelease,
+        facts: EvidenceDriftFactSeed,
+    ) -> int:
+        """Materialize one linked lineage-1 fact shape from the live cohort."""
+
+        request_id = self.add_release(release)
+        if not self.import_request(
+            request_id,
+            codec=release.codec,
+            verified_lossless=facts.verified_lossless,
+        ):
+            raise AssertionError(
+                f"evidence drift seed import was rejected: {facts.name}"
+            )
+        evidence_id = self.db.get_request_current_evidence_id(request_id)
+        evidence = self.db.load_album_quality_evidence_by_id(evidence_id)
+        if evidence is None or evidence.id is None:
+            raise AssertionError("evidence drift seed has no linked evidence")
+        proof = evidence.verified_lossless_proof
+        if facts.verified_lossless and proof is None:
+            raise AssertionError("verified drift seed lost its source proof")
+        self.db._execute(
+            """
+            UPDATE album_quality_evidence
+            SET lineage_version = 1,
+                spectral_grade = %s,
+                spectral_bitrate_kbps = NULL,
+                spectral_subject = %s,
+                spectral_provenance = %s,
+                v0_min_bitrate_kbps = %s,
+                v0_avg_bitrate_kbps = %s,
+                v0_median_bitrate_kbps = %s,
+                v0_subject = %s,
+                v0_provenance = %s,
+                verified_lossless = %s,
+                verified_lossless_provenance = %s,
+                verified_lossless_source = %s,
+                verified_lossless_classifier = %s,
+                verified_lossless_detail = %s,
+                on_disk_v0_research_attempted = FALSE,
+                current_enrichment_required = FALSE
+            WHERE id = %s
+            """,
+            (
+                "genuine" if facts.spectral_subject is not None else None,
+                facts.spectral_subject,
+                facts.spectral_provenance,
+                190 if facts.v0_subject is not None else None,
+                200 if facts.v0_subject is not None else None,
+                198 if facts.v0_subject is not None else None,
+                facts.v0_subject,
+                facts.v0_provenance,
+                facts.verified_lossless,
+                proof.provenance if proof is not None else None,
+                proof.source if proof is not None else None,
+                proof.classifier if proof is not None else None,
+                proof.detail if proof is not None else None,
+                evidence.id,
+            ),
+        )
+        self.db.conn.commit()
+        if not self.db.update_request_fields(
+            request_id,
+            expected_status=str(self._require_request(request_id)["status"]),
+            verified_lossless=facts.verified_lossless,
+        ):
+            raise AssertionError("failed to apply drift request facts")
+        return request_id
+
+    def inject_evidence_drift(
+        self,
+        request_id: int,
+        mutation: str,
+        *,
+        rename_codec_files: bool = False,
+    ) -> None:
+        """Make Beets/disk disagree with the request's linked evidence."""
+
+        release = self._release_by_request[request_id]
+        before = self._album_for_release(release.release_id)
+        before_fingerprint = self._album_fingerprint(before)
+        self.beets.mutate_release_out_of_band(
+            release.release_id,
+            mutation,
+            rename_codec_files=rename_codec_files,
+        )
+        after = self._album_for_release(release.release_id)
+        after_fingerprint = self._album_fingerprint(after)
+        if before_fingerprint == after_fingerprint:
+            raise AssertionError(
+                f"drift mutation did not change the snapshot: {mutation}"
+            )
+        if "evidence_fingerprint_mismatch" not in {
+            violation.code for violation in self.violations()
+        }:
+            raise AssertionError(
+                f"world model did not observe injected drift: {mutation}"
+            )
+
+    def touch_current_evidence(
+        self,
+        request_id: int,
+    ) -> CurrentEvidenceActionResult:
+        """Run the production action-time rebuild against scratch Beets."""
+
+        release = self._release_by_request[request_id]
+        result = load_current_evidence_for_action(
+            self.db,
+            request_id=request_id,
+            mb_release_id=release.release_id,
+            beets_library_db_path=str(self.beets.library_db),
+            beets_library_root=str(self.beets.library_root),
+        )
+        if result is None:
+            raise AssertionError("drifted release disappeared from scratch Beets")
+        return result
+
+    def enrich_current_evidence(self, request_id: int) -> str:
+        """Complete a changed installed snapshot through production helpers."""
+
+        release = self._release_by_request[request_id]
+        outcome = enrich_incomplete_current_evidence_for_request(
+            self.db,
+            request_id=request_id,
+            mb_release_id=release.release_id,
+            quality_ranks=QualityRankConfig.defaults(),
+            beets_library_root=str(self.beets.library_root),
+            spectral_analyzer=lambda _path: SpectralAnalysisDetail(
+                attempted=True,
+                grade="genuine",
+                bitrate_kbps=96,
+            ),
+            probe_fn=lambda _path: V0ProbeEvidence(
+                kind=V0_PROBE_ON_DISK_RESEARCH,
+                min_bitrate_kbps=190,
+                avg_bitrate_kbps=200,
+                median_bitrate_kbps=198,
+            ),
+        )
+        if outcome not in {"complete", "enriched"}:
+            raise AssertionError(
+                "production current-evidence enrichment did not converge: "
+                f"request={request_id} outcome={outcome!r}"
+            )
+        current = self.touch_current_evidence(request_id)
+        if not current.available:
+            raise AssertionError(
+                "production current-evidence enrichment stayed unavailable: "
+                f"request={request_id} "
+                f"reason={current.provenance.fallback_reason!r}"
+            )
+        return outcome
+
+    def latest_download_outcome(self, request_id: int) -> str | None:
+        """Return the newest audit outcome for one generated request."""
+
+        for row in self.db.get_log(limit=100):
+            if row.get("request_id") == request_id:
+                outcome = row.get("outcome")
+                return str(outcome) if outcome is not None else None
+        return None
+
     def import_request(
         self,
         request_id: int,
@@ -473,7 +645,10 @@ class LifecycleWorld:
             after_album_fingerprint=self._album_fingerprint(after_album),
             before_verified_lossless=before_verified_proof,
         ))
-        if not outcome.success and outcome.code != "quality_pipeline_rejected":
+        if not outcome.success and outcome.code not in {
+            "quality_pipeline_rejected",
+            "have_analysis_error",
+        }:
             subprocess_detail = self._subprocess_failure_detail()
             raise AssertionError(
                 "production dispatch rejected world import for request "
@@ -633,7 +808,10 @@ class LifecycleWorld:
             after_album_fingerprint=self._album_fingerprint(after_album),
             before_verified_lossless=before_verified_proof,
         ))
-        if not outcome.success and outcome.code != "quality_pipeline_rejected":
+        if not outcome.success and outcome.code not in {
+            "quality_pipeline_rejected",
+            "have_analysis_error",
+        }:
             subprocess_detail = self._subprocess_failure_detail()
             raise AssertionError(
                 "production force import failed operationally: "
@@ -866,6 +1044,37 @@ class LifecycleWorld:
             if self._album_for_release(release.release_id) is not None
             and self._require_request(request_id)["status"] != "replaced"
         ]
+
+    def request_ids_for_evidence_drift(
+        self,
+        mutation: EvidenceDriftMutationSeed,
+    ) -> list[int]:
+        """Return linked installed requests that can accept this mutation."""
+
+        candidates: list[int] = []
+        for request_id in self.request_ids_with_album():
+            if self.db.get_request_current_evidence_id(request_id) is None:
+                continue
+            release = self._release_by_request[request_id]
+            album = self._album_for_release(release.release_id)
+            if album is None:
+                continue
+            if (
+                mutation.mutation == "file_count_drift"
+                and len(album.item_paths) < 2
+            ):
+                continue
+            if (
+                mutation.mutation == "codec_replacement"
+                and any(
+                    Path(path).suffix.casefold()
+                    != f".{mutation.initial_codec}"
+                    for path in album.item_paths
+                )
+            ):
+                continue
+            candidates.append(request_id)
+        return candidates
 
     def active_request_ids(self) -> list[int]:
         return [

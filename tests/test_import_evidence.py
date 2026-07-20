@@ -407,6 +407,46 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         assert completed.evidence is not None
         self.assertEqual(completed.evidence.id, linked.id)
 
+    def test_stale_rebuild_stays_fail_closed_across_unenriched_retry(self):
+        """The live #743 drift shape cannot become safe merely by retrying."""
+
+        self._persist_current()
+        with open(os.path.join(self.root, "01 - Track.mp3"), "ab") as handle:
+            handle.write(b" changed")
+        album_info = AlbumInfo(
+            album_id=1,
+            track_count=1,
+            min_bitrate_kbps=230,
+            avg_bitrate_kbps=240,
+            median_bitrate_kbps=235,
+            is_cbr=False,
+            album_path=self.root,
+            format="MP3",
+        )
+
+        first = ensure_current_evidence_for_action(
+            self.db,
+            request_id=42,
+            mb_release_id="release-1",
+            current_album_path=self.root,
+            album_info=album_info,
+        )
+        second = ensure_current_evidence_for_action(
+            self.db,
+            request_id=42,
+            mb_release_id="release-1",
+            current_album_path=self.root,
+            album_info=album_info,
+        )
+
+        self.assertFalse(first.available)
+        self.assertFalse(
+            second.available,
+            "retry accepted a newly linked snapshot before enrichment",
+        )
+        self.assertIn("spectral", second.provenance.fallback_reason or "")
+        self.assertIn("V0", second.provenance.fallback_reason or "")
+
     def test_request_v0_scalar_cannot_rescue_missing_linked_anchor(self):
         self.db.update_request_fields(
             42,

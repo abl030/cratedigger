@@ -4284,6 +4284,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
             storage_format="flac",
             target_format="lossless",
             on_disk_v0_research_attempted=True,
+            current_enrichment_required=True,
             v0_metric=AlbumQualityV0Metric(
                 min_bitrate_kbps=165,
                 avg_bitrate_kbps=228,
@@ -4315,6 +4316,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         )
         self.assertEqual(loaded.measurement.format, "flac")
         self.assertTrue(loaded.on_disk_v0_research_attempted)
+        self.assertTrue(loaded.current_enrichment_required)
         self.assertIsNotNone(loaded.verified_lossless_proof)
         self.assertEqual(loaded.target_format, "lossless")
         self.assertFalse(loaded.target_is_cbr)
@@ -4327,6 +4329,25 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         )
         assert loaded.v0_metric is not None
         self.assertEqual(loaded.v0_metric.avg_bitrate_kbps, 228)
+
+    def test_same_address_upsert_cannot_clear_current_enrichment_gate(self):
+        evidence = self._seed(
+            mb_release_id="mbid-enrichment-gate",
+            current_enrichment_required=True,
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        self.db.upsert_album_quality_evidence(msgspec.structs.replace(
+            evidence,
+            current_enrichment_required=False,
+        ))
+
+        loaded = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+
+        assert loaded is not None
+        self.assertTrue(loaded.current_enrichment_required)
 
     def test_v0_research_claim_is_atomic_across_connections(self):
         from lib.pipeline_db import PipelineDB

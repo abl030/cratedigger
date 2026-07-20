@@ -39,6 +39,29 @@ class WorldCensusSeed:
         return self.v0_subject is not None
 
 
+@dataclass(frozen=True)
+class EvidenceDriftMutationSeed:
+    """One filesystem mutation shape from the 238-row #743 live cohort."""
+
+    name: str
+    observed_rows: int
+    mutation: str
+    initial_codec: str
+
+
+@dataclass(frozen=True)
+class EvidenceDriftFactSeed:
+    """One linked quality-fact shape from the same live drift cohort."""
+
+    name: str
+    observed_rows: int
+    spectral_subject: str | None
+    spectral_provenance: str | None
+    v0_subject: str | None
+    v0_provenance: str | None
+    verified_lossless: bool
+
+
 WORLD_CENSUS_SEEDS = (
     WorldCensusSeed(
         name="imported_mb_lineage1_verified_v0",
@@ -193,16 +216,102 @@ STATEFUL_WORLD_CENSUS_SEEDS = tuple(
 )
 
 
+EVIDENCE_DRIFT_MUTATION_SEEDS = (
+    EvidenceDriftMutationSeed(
+        name="mp3_to_opus_replacement",
+        observed_rows=109,
+        mutation="codec_replacement",
+        initial_codec="mp3",
+    ),
+    EvidenceDriftMutationSeed(
+        name="m4a_to_opus_replacement",
+        observed_rows=2,
+        mutation="codec_replacement",
+        initial_codec="m4a",
+    ),
+    EvidenceDriftMutationSeed(
+        name="filename_rename",
+        observed_rows=119,
+        mutation="filename_rename",
+        initial_codec="mp3",
+    ),
+    EvidenceDriftMutationSeed(
+        name="same_name_size_drift",
+        observed_rows=7,
+        mutation="same_name_size_drift",
+        initial_codec="mp3",
+    ),
+    EvidenceDriftMutationSeed(
+        name="file_count_drift",
+        observed_rows=1,
+        mutation="file_count_drift",
+        initial_codec="mp3",
+    ),
+)
+
+
+EVIDENCE_DRIFT_FACT_SEEDS = (
+    EvidenceDriftFactSeed(
+        name="source_facts_carried_v0",
+        observed_rows=206,
+        spectral_subject="source",
+        spectral_provenance="carried",
+        v0_subject="source",
+        v0_provenance="carried",
+        verified_lossless=True,
+    ),
+    EvidenceDriftFactSeed(
+        name="source_facts_measured_v0",
+        observed_rows=25,
+        spectral_subject="source",
+        spectral_provenance="carried",
+        v0_subject="source",
+        v0_provenance="measured",
+        verified_lossless=True,
+    ),
+    EvidenceDriftFactSeed(
+        name="installed_facts_measured",
+        observed_rows=2,
+        spectral_subject="installed",
+        spectral_provenance="measured",
+        v0_subject="installed",
+        v0_provenance="measured",
+        verified_lossless=False,
+    ),
+    EvidenceDriftFactSeed(
+        name="installed_spectral_without_v0",
+        observed_rows=1,
+        spectral_subject="installed",
+        spectral_provenance="measured",
+        v0_subject=None,
+        v0_provenance=None,
+        verified_lossless=False,
+    ),
+    EvidenceDriftFactSeed(
+        name="without_quality_facts",
+        observed_rows=4,
+        spectral_subject=None,
+        spectral_provenance=None,
+        v0_subject=None,
+        v0_provenance=None,
+        verified_lossless=False,
+    ),
+)
+
+
 _UUID = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
     re.IGNORECASE,
 )
 _SAFE_NAME_TOKENS = frozenset({
-    "both", "downloading", "dual", "evidence", "full", "imported",
+    "both", "carried", "codec", "count", "downloading", "drift", "dual",
+    "evidence", "facts", "file", "filename", "full", "imported", "m4a",
     "installed", "ladder", "legacy", "lineage1", "lineage3", "lineage4",
-    "likely", "lossless", "mb", "measurement", "pristine", "replaced",
-    "path", "three", "tier", "transcode", "unsearchable", "v0", "verified",
-    "wanted", "without",
+    "likely", "lossless", "mb", "measured", "measurement", "name",
+    "mp3", "opus", "pristine", "quality", "rename", "replaced",
+    "replacement", "same",
+    "size", "source", "spectral", "path", "three", "tier", "transcode",
+    "to", "unsearchable", "v0", "verified", "wanted", "without",
 })
 
 
@@ -225,9 +334,33 @@ def assert_census_seed_anonymized(seed: WorldCensusSeed) -> None:
         raise AssertionError("census evidence presence and lineage disagree")
 
 
+def assert_evidence_drift_seed_anonymized(
+    seed: EvidenceDriftMutationSeed | EvidenceDriftFactSeed,
+) -> None:
+    """Reject identity/path material in the live anomaly vocabulary."""
+
+    rendered = repr(asdict(seed))
+    name_tokens = frozenset(seed.name.split("_"))
+    if (
+        not name_tokens
+        or not name_tokens.issubset(_SAFE_NAME_TOKENS)
+        or "/" in rendered
+        or "\\" in rendered
+        or _UUID.search(rendered) is not None
+    ):
+        raise AssertionError(f"drift seed is not anonymized: {seed.name!r}")
+    if seed.observed_rows < 1:
+        raise AssertionError("drift seed must represent at least one live row")
+
+
 __all__ = [
+    "EVIDENCE_DRIFT_FACT_SEEDS",
+    "EVIDENCE_DRIFT_MUTATION_SEEDS",
     "STATEFUL_WORLD_CENSUS_SEEDS",
     "WORLD_CENSUS_SEEDS",
+    "EvidenceDriftFactSeed",
+    "EvidenceDriftMutationSeed",
     "WorldCensusSeed",
     "assert_census_seed_anonymized",
+    "assert_evidence_drift_seed_anonymized",
 ]

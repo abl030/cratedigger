@@ -324,6 +324,11 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
     # empty on-disk V0 research probe is still an attempt; import/cleanup
     # consumers never execute the probe and policy never reads this flag.
     on_disk_v0_research_attempted: bool = False
+    # A changed installed snapshot is linked before its neutral enrichment
+    # completes so the async writers can address the exact new evidence row.
+    # This durable bit keeps every action retry fail-closed until the required
+    # spectral/V0 facts either survive as source facts or are measured anew.
+    current_enrichment_required: bool = False
     verified_lossless_proof: VerifiedLosslessProof | None = None
     # U1 (migration 019) preview-evidence facts. The unified decider
     # ``full_pipeline_decision_from_evidence`` reads these as typed facts
@@ -357,6 +362,7 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
             on_disk_v0_research_attempted=(
                 self.on_disk_v0_research_attempted
             ),
+            current_enrichment_required=self.current_enrichment_required,
             verified_lossless_proof=self.verified_lossless_proof,
             audio_corrupt=self.audio_corrupt,
             folder_layout=self.folder_layout,

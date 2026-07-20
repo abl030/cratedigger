@@ -353,6 +353,8 @@ class BeetsWorld:
             encoder_args = ["-c:a", "libmp3lame", "-b:a", "192k"]
         elif codec_key == "opus":
             encoder_args = ["-c:a", "libopus", "-b:a", "128k"]
+        elif codec_key == "m4a":
+            encoder_args = ["-c:a", "aac", "-b:a", "192k"]
         else:
             raise ValueError(f"unsupported scratch-world codec {codec!r}")
         subprocess.run(
@@ -505,6 +507,88 @@ class BeetsWorld:
         for album in matches:
             album.remove(delete=True)
         return len(matches)
+
+    def mutate_release_out_of_band(
+        self,
+        release_id: str,
+        mutation: str,
+        *,
+        rename_codec_files: bool = False,
+    ) -> LibraryAlbumSnapshot:
+        """Apply one production-census library drift outside Cratedigger.
+
+        The mutation updates the scratch Beets database and its real audio
+        files, but deliberately does not touch PipelineDB evidence. This is
+        the input boundary exercised by the #743 weird-state world model.
+        """
+
+        matches = [
+            album
+            for album in self.library.albums()
+            if self._album_release_id(album) == release_id
+        ]
+        if len(matches) != 1:
+            raise AssertionError(
+                f"drift release must resolve once: {release_id!r} -> {len(matches)}"
+            )
+        album = matches[0]
+        items = list(album.items())
+        if not items:
+            raise AssertionError("drift release has no Beets items")
+
+        if mutation == "filename_rename":
+            item = items[0]
+            old_path = Path(self._absolute_path(item.path))
+            new_path = old_path.with_name(
+                f"{old_path.stem} - ascii{old_path.suffix}"
+            )
+            old_path.rename(new_path)
+            item.path = os.fsencode(new_path)
+            item.store()
+        elif mutation == "same_name_size_drift":
+            old_path = Path(self._absolute_path(items[0].path))
+            before_size = old_path.stat().st_size
+            media = MediaFile(old_path)
+            media.title = f"{media.title or 'Track'} [retagged]"
+            media.save()
+            if old_path.stat().st_size == before_size:
+                # FLAC padding can absorb a tag edit without changing the
+                # content-address key. Preserve the valid tagged file and add
+                # ignored trailing bytes to force the live size-only shape.
+                with old_path.open("ab") as handle:
+                    handle.write(b"cratedigger-world-size-drift")
+        elif mutation == "file_count_drift":
+            if len(items) < 2:
+                raise AssertionError("file-count drift requires two Beets items")
+            items[-1].remove(delete=True)
+        elif mutation == "codec_replacement":
+            for index, item in enumerate(items, start=1):
+                old_path = Path(self._absolute_path(item.path))
+                codec = "mp3" if old_path.suffix.casefold() == ".opus" else "opus"
+                new_stem = (
+                    f"{old_path.stem} - ascii"
+                    if rename_codec_files
+                    else old_path.stem
+                )
+                new_path = old_path.with_name(f"{new_stem}.{codec}")
+                self._make_audio(
+                    new_path,
+                    codec=codec,
+                    frequency=900 + index,
+                )
+                fresh = beets_library.Item.from_path(str(new_path))
+                for field in (
+                    "format", "bitrate", "samplerate", "bitdepth",
+                    "channels", "length",
+                ):
+                    item[field] = fresh[field]
+                item.path = os.fsencode(new_path)
+                item.store()
+                old_path.unlink()
+        else:
+            raise ValueError(f"unknown evidence drift mutation: {mutation!r}")
+
+        return self.snapshot_album(album)
 
     def snapshot_album(self, album: object) -> LibraryAlbumSnapshot:
         raw_items = list(album.items())  # type: ignore[attr-defined]

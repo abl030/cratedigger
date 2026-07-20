@@ -3385,7 +3385,10 @@ class TestPinStatusDomainMigration(unittest.TestCase):
         dsn = _create_fresh_database(name)
         try:
             applied = apply_migrations(dsn, DEFAULT_MIGRATIONS_DIR)
-            self.assertEqual(applied[-1].version, 57)
+            self.assertEqual(
+                applied[-1].version,
+                discover_migrations(DEFAULT_MIGRATIONS_DIR)[-1].version,
+            )
             self.assertEqual(
                 self._query(
                     dsn,
@@ -4207,6 +4210,99 @@ class TestLosslessLineageSpectralSubjectMigration(unittest.TestCase):
                             (self._CONSTRAINT,),
                         )
                         self.assertIsNone(cur.fetchone())
+                finally:
+                    conn.close()
+        finally:
+            _drop_database(name)
+
+
+@requires_postgres
+class TestCurrentEvidenceEnrichmentGateMigration(unittest.TestCase):
+    """Migration 058 makes the changed-snapshot retry gate durable."""
+
+    def _copy_through(self, target: str, version: int) -> None:
+        for migration in discover_migrations(DEFAULT_MIGRATIONS_DIR):
+            if migration.version <= version:
+                shutil.copy2(migration.path, target)
+
+    def test_existing_rows_default_false_and_new_rows_can_require_enrichment(
+        self,
+    ) -> None:
+        name = "cratedigger_test_current_enrichment_gate_058"
+        dsn = _create_fresh_database(name)
+        try:
+            with tempfile.TemporaryDirectory() as migrations_dir:
+                self._copy_through(migrations_dir, 57)
+                apply_migrations(dsn, migrations_dir)
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO album_quality_evidence (
+                                mb_release_id, snapshot_fingerprint,
+                                source_path, measured_at
+                            ) VALUES ('pre-058', 'fp-pre-058', '/pre-058', NOW())
+                            """
+                        )
+                finally:
+                    conn.close()
+
+                self._copy_through(migrations_dir, 58)
+                applied = apply_migrations(dsn, migrations_dir)
+                self.assertEqual(
+                    [migration.version for migration in applied],
+                    [58],
+                )
+
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            SELECT is_nullable, column_default
+                            FROM information_schema.columns
+                            WHERE table_schema = 'public'
+                              AND table_name = 'album_quality_evidence'
+                              AND column_name = 'current_enrichment_required'
+                            """
+                        )
+                        column = cur.fetchone()
+                        assert column is not None
+                        is_nullable, column_default = column
+                        self.assertEqual(is_nullable, "NO")
+                        self.assertEqual(column_default, "false")
+                        cur.execute(
+                            """
+                            SELECT current_enrichment_required
+                            FROM album_quality_evidence
+                            WHERE mb_release_id = 'pre-058'
+                            """
+                        )
+                        self.assertEqual(cur.fetchone(), (False,))
+                        cur.execute(
+                            """
+                            INSERT INTO album_quality_evidence (
+                                mb_release_id, snapshot_fingerprint,
+                                source_path, measured_at,
+                                current_enrichment_required
+                            ) VALUES (
+                                'required-058', 'fp-required-058',
+                                '/required-058', NOW(), TRUE
+                            )
+                            RETURNING current_enrichment_required
+                            """
+                        )
+                        self.assertEqual(cur.fetchone(), (True,))
+                        cur.execute(
+                            "SELECT name FROM schema_migrations WHERE version = 58"
+                        )
+                        self.assertEqual(
+                            cur.fetchone(),
+                            ("current_evidence_enrichment_gate",),
+                        )
                 finally:
                     conn.close()
         finally:

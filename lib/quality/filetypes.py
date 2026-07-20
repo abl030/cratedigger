@@ -88,6 +88,23 @@ def resolve_user_requeue_override(existing_override: str | None) -> str:
     return existing_override or QUALITY_UPGRADE_TIERS
 
 
+def resolve_retained_search_override(
+    existing_override: str | None,
+    proposed_override: str | None,
+) -> str | None:
+    """Keep an existing lossless-only scope after a retained import.
+
+    A successful unverified import may narrow ordinary search to lossless, but
+    it may not re-open lossy tiers that an earlier quality decision already
+    removed. Verified-lossless terminal acceptance and explicit user intent
+    changes own their separate override-clearing paths.
+    """
+
+    if existing_override == QUALITY_LOSSLESS:
+        return QUALITY_LOSSLESS
+    return proposed_override
+
+
 def rejection_backfill_override(
     *,
     current_measurement: AudioQualityMeasurement | None,

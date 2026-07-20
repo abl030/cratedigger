@@ -37,7 +37,7 @@ Hunting — Generated-First".
 | Module | Target | Properties |
 |--------|--------|------------|
 | `tests/test_quality_generated.py` | the decision twins (`full_pipeline_decision` / `full_pipeline_decision_from_evidence`) | decisions are definitive (totality); raw verified-lossless FLAC never replaced by lossy; transparent lossy never accepts obvious downgrades; **twin parity** over the shared world language; evidence-only integrity facts (corrupt / bad-hash / nested / mixed) always reject in priority order; classification layer (`classify_full_pipeline_decision` / `evidence_decision_name` — cleanup eligibility) coherent with every generated decision; incomplete evidence fails closed |
-| `tests/test_search_override_generated.py` | `rejection_backfill_override` over codec measurements and attempt-local HAVE audits | lossless-only search narrowing occurs exactly for canonically TRANSPARENT measurements with a completed genuine HAVE audit; excellent, unknown/lossless codecs, missing/failed audits, and non-genuine grades fail open |
+| `tests/test_search_override_generated.py` | `rejection_backfill_override` over codec measurements and attempt-local HAVE audits, plus retained-import override resolution | lossless-only search narrowing occurs exactly for canonically TRANSPARENT measurements with a completed genuine HAVE audit; excellent, unknown/lossless codecs, missing/failed audits, and non-genuine grades fail open; a successful retained import never widens an existing lossless-only scope |
 | `tests/test_quality_lineage_generated.py` | target-quality contracts and measurement/evidence projection | `from_explicit_label` rejects bare MP3 across case/whitespace variants; `from_projection` requires a CBR/VBR boolean and preserves it for bare MP3; explicit V/numeric labels own their mode and gate policy even when the measured boolean contradicts them; exact single/equal/differing-track projections preserve mode; measurement-only early rejects never claim target policy |
 | `tests/test_evidence_generated.py` | `ensure_current_evidence_for_action` | converted current evidence requires a linked source V0 fact (fix `6cf26a4`): never `loaded` without it, request scalar mutations cannot change the result, and missing evidence fails closed; fingerprint rebuilds carry only source-subject facts with `carried` provenance |
 | `tests/test_lossless_lineage_check_generated.py` | migration 057's real PostgreSQL CHECK plus same-address FakePipelineDB upsert worlds | v4 installed-subject spectral is rejected exactly when source V0, verified-lossless proof, or a case-normalized lossless conversion source establishes lossless lineage; native installed facts, source-subject facts, M4A-container-only rows, and legacy v1/v3 rows remain valid; failures name the exact constraint; a same-key merge clears stale installed spectral when new lineage arrives while preserving a source-subject fact |
@@ -106,6 +106,35 @@ or paths. A deterministic pin proves that touching an installed lineage-1 seed
 through the production import path rebuilds current lineage-4 evidence; the
 state machine samples the coherent subset as its real initial state.
 
+The read-only #743 fingerprint-drift census adds a second anonymized vocabulary
+from all 238 live mismatches: 109 MP3→Opus replacements, two M4A→Opus
+replacements, 119 same-codec filename renames, seven same-name size changes,
+and one file-count change. Twenty-five of the codec replacements also changed
+filenames, so the real-store mutation vocabulary includes both codec-only and
+codec-plus-rename forms for each observed source container. It also contains
+every linked fact shape (206 carried source/source, 25
+carried-source/measured-source, two installed/installed, one
+installed-without-V0, and four with neither fact). Deterministic real-store
+pins execute every mutation and every fact shape. A generated property then
+crosses those vocabularies with one to three unchanged action retries. Each
+world mutates real tagged audio and the scratch Beets database without touching
+its linked PostgreSQL evidence, proves the production invariant checker reports
+`evidence_fingerprint_mismatch`, and requires the action loader to relink the
+exact new snapshot without allowing an unenriched retry to become
+authoritative. Ordinary and force-import pins then prove installed-only facts
+produce the expected `have_analysis_error`, keep the request wanted, and
+converge after the production enrichment path measures the exact new snapshot.
+
+The expanded lifecycle generator also shrank a separate counterexample from a
+live-census seed: a successful unverified retained FLAC import widened an
+existing lossless-only request back to the full tier set. Its deterministic
+real-store pin and pure generated invariant now require retained-import search
+policy to preserve the earlier narrowing.
+
+Fault injection qualifies the retry property: temporarily removing the durable
+gate makes the pinned installed/installed world become authoritative on its
+first touch, and the generated test fails on that explicit example.
+
 It is intentionally named outside unittest's `test*.py` discovery pattern.
 Run the deterministic pin and generated state machine directly:
 
@@ -116,10 +145,13 @@ nix-shell --run "python3 -m unittest tests.world_model.state_machine -v"
 The temporary PostgreSQL, Beets SQLite database, library tree, and generated
 audio are local and disposable; this runner never reads or mutates production.
 The deterministic direct budget is six examples of eight stateful steps. On
-doc1 on 2026-07-19, the census-seeded seven-test lifecycle module reported 10.431
-test-seconds (excluding dev-shell startup). That is a baseline, not a placement
-decision. Override the deterministic budget for a one-off run without changing
-code:
+doc1 on 2026-07-19, the initial census-seeded lifecycle module reported 10.431
+test-seconds (excluding dev-shell startup). That is a historical baseline, not
+a placement decision. With the #743 drift corpus, blocked/enriched import pins,
+and retained-search counterexample added, the 14-test deterministic module
+reported 20.396 test-seconds on doc1 on 2026-07-20. A 50-example drift-only pass
+reported 23.197 test-seconds (24.80 seconds runner wall time). Override the
+deterministic budget for a one-off run without changing code:
 
 ```bash
 CRATEDIGGER_WORLD_EXAMPLES=20 CRATEDIGGER_WORLD_STEPS=20 \
