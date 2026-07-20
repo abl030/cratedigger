@@ -501,7 +501,9 @@ def measured_import_decision(
     )
 
 
-def transcode_detection(converted_count, *, spectral_grade=None):
+def transcode_detection(
+    converted_count: int, *, spectral_grade: str | None = None,
+) -> bool:
     """Detect whether a FLAC→V0 conversion produced a transcode.
 
     Called in import_one.py after convert_flac_to_v0().

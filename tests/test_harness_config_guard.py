@@ -25,8 +25,11 @@ import os
 import sys
 import unittest
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock
+
+if TYPE_CHECKING:
+    from confuse import ConfigView
 
 
 # beets 2.x IS in the dev shell, but these unit tests mock it to isolate the
@@ -42,6 +45,9 @@ _beets_mocks = {
     "beets.importer.actions": MagicMock(),
     "beets.importer.session": MagicMock(),
     "beets.importer.tasks": MagicMock(),
+    "beets.autotag": MagicMock(),
+    "beets.dbcore": MagicMock(),
+    "beets.util": MagicMock(),
 }
 for name, mock in _beets_mocks.items():
     sys.modules.setdefault(name, mock)
@@ -54,13 +60,19 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from harness import beets_harness  # noqa: E402
 
 
-def _make_cfg(keys: list[str]):
+def _make_cfg(keys: list[str]) -> ConfigView:
     """Build a stand-in for the beets `config` object with
-    `config["import"]["duplicate_keys"]["album"].as_str_seq() -> keys`."""
+    `config["import"]["duplicate_keys"]["album"].as_str_seq() -> keys`.
+
+    Duck-typed nested dict/``SimpleNamespace`` — the guard only reads via
+    ``__getitem__``/``.as_str_seq()``, so this mirrors production shape
+    without depending on real ``confuse``; ``cast`` bridges the structural
+    stand-in to the real ``ConfigView`` type pyright expects.
+    """
     album_view = SimpleNamespace(as_str_seq=lambda: list(keys))
     dup_keys = {"album": album_view}
     import_section = {"duplicate_keys": dup_keys}
-    return {"import": import_section}
+    return cast("ConfigView", {"import": import_section})
 
 
 class TestDuplicateKeysGuard(unittest.TestCase):

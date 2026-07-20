@@ -31,8 +31,9 @@ import sys
 import shutil
 import tempfile
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field as dataclass_field
-from typing import NoReturn
+from typing import NoReturn, TypeGuard
 
 import msgspec
 
@@ -113,7 +114,28 @@ _import_total_start: float | None = None
 _rank_cfg: QualityRankConfig = QualityRankConfig.defaults()
 
 
-def _find_target_candidate(candidates: list, target_mbid) -> int | None:
+def _as_json_dict(value: object) -> TypeGuard[dict[str, object]]:
+    """Type guard: is this JSON-decoded value a ``dict[str, object]``?
+
+    Every value flowing through the beets-harness JSON protocol
+    (``json.loads`` output, and elements of its list-typed fields) is a
+    plain ``dict``/``list``/scalar. This narrows one such value to the
+    dict shape the ``.get(...)``-based parsing below expects, instead of
+    pyright collapsing a bare ``isinstance(value, dict)`` to
+    ``dict[Unknown, Unknown]``.
+    """
+    return isinstance(value, dict)
+
+
+def _as_json_list(value: object) -> TypeGuard[list[object]]:
+    """Type guard twin of ``_as_json_dict`` for list-typed message fields."""
+    return isinstance(value, list)
+
+
+def _find_target_candidate(
+    candidates: Sequence[object],
+    target_mbid: str,
+) -> int | None:
     """Return the index of the candidate whose `album_id` matches the
     target, or None. str() on both sides — beets' Discogs plugin emits
     int album_ids while target_mbid is the str DB column. Same int-vs-str
@@ -121,12 +143,12 @@ def _find_target_candidate(candidates: list, target_mbid) -> int | None:
     """
     target = str(target_mbid)
     for i, c in enumerate(candidates):
-        if str(c.get("album_id", "")) == target:
+        if _as_json_dict(c) and str(c.get("album_id", "")) == target:
             return i
     return None
 
 
-def _int_or_none(value) -> int | None:
+def _int_or_none(value: object) -> int | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
@@ -136,13 +158,15 @@ def _int_or_none(value) -> int | None:
     return None
 
 
-def _duplicate_candidates_from_message(msg: dict) -> list[DuplicateRemoveCandidate]:
+def _duplicate_candidates_from_message(
+    msg: dict[str, object],
+) -> list[DuplicateRemoveCandidate]:
     """Normalize a harness ``resolve_duplicate`` message into typed candidates."""
     raw_candidates = msg.get("duplicate_candidates")
-    if isinstance(raw_candidates, list):
+    if _as_json_list(raw_candidates):
         candidates: list[DuplicateRemoveCandidate] = []
         for raw in raw_candidates:
-            if not isinstance(raw, dict):
+            if not _as_json_dict(raw):
                 continue
             candidates.append(DuplicateRemoveCandidate(
                 beets_album_id=_int_or_none(raw.get("beets_album_id")),
@@ -156,13 +180,13 @@ def _duplicate_candidates_from_message(msg: dict) -> list[DuplicateRemoveCandida
         return candidates
 
     # Backward-compatible fallback for older harness messages and existing tests.
-    dup_mbids = msg.get("duplicate_mbids", [])
-    dup_album_ids = msg.get("duplicate_album_ids", [])
+    dup_mbids_raw = msg.get("duplicate_mbids", [])
+    dup_album_ids_raw = msg.get("duplicate_album_ids", [])
     count = msg.get("duplicate_count")
-    if not isinstance(dup_mbids, list):
-        dup_mbids = []
-    if not isinstance(dup_album_ids, list):
-        dup_album_ids = []
+    dup_mbids: list[object] = dup_mbids_raw if _as_json_list(dup_mbids_raw) else []
+    dup_album_ids: list[object] = (
+        dup_album_ids_raw if _as_json_list(dup_album_ids_raw) else []
+    )
     max_len = max(
         len(dup_mbids),
         len(dup_album_ids),
@@ -264,7 +288,7 @@ class RunImportOutcome:
     # Jellyfin pin capture can locate the pre-upgrade items after a
     # path-changing upgrade.
     replaced_albums: list[DuplicateRemoveCandidate] = dataclass_field(
-        default_factory=list)
+        default_factory=list[DuplicateRemoveCandidate])
 
 
 def preflight_decision(already_in_beets: bool, path_exists: bool) -> StageResult:
@@ -606,7 +630,7 @@ def parse_verified_lossless_target(spec: str) -> ConversionSpec:
 # ---------------------------------------------------------------------------
 
 
-def _get_folder_min_bitrate(folder_path,
+def _get_folder_min_bitrate(folder_path: str,
                             ext_filter: set[str] | None = None) -> int | None:
     """Legacy alias: minimum per-file bitrate (kbps), or None if none probed."""
     bitrates = _get_folder_bitrates(folder_path, ext_filter=ext_filter)
@@ -767,7 +791,12 @@ def _probe_source_channels(path: str) -> int | None:
     probe lets us log the source layout as a breadcrumb.
     """
     try:
-        from mutagen import File as _MutagenFile  # pyright: ignore[reportPrivateImportUsage]
+        # getattr (not `from mutagen import File`) keeps this Any-typed:
+        # mutagen's File() factory has an untyped `filething` parameter and
+        # a partially-unknown overloaded return (many mutagen format
+        # classes) — third-party, not ours to annotate.
+        import mutagen
+        _MutagenFile = getattr(mutagen, "File")
     except ImportError:
         return None
     try:
@@ -899,7 +928,7 @@ def convert_lossless(album_path: str, spec: ConversionSpec,
 # Beets harness controller (JSON protocol)
 # ---------------------------------------------------------------------------
 
-def run_import(path, mb_release_id):
+def run_import(path: str, mb_release_id: str) -> RunImportOutcome:
     """Drive the beets harness to import one album.
 
     Returns ``RunImportOutcome``.
@@ -943,7 +972,7 @@ def run_import(path, mb_release_id):
                 continue
 
             try:
-                msg = json.loads(line)
+                msg: dict[str, object] = json.loads(line)
             except json.JSONDecodeError:
                 continue
 
@@ -996,22 +1025,30 @@ def run_import(path, mb_release_id):
                 )
 
             elif msg_type in ("choose_match", "choose_item"):
-                candidates = msg.get("candidates", [])
-                matched_idx = _find_target_candidate(candidates, mb_release_id)
+                candidates_field = msg.get("candidates", [])
+                candidates_raw: list[object] = (
+                    candidates_field if _as_json_list(candidates_field) else []
+                )
+                matched_idx = _find_target_candidate(candidates_raw, mb_release_id)
 
                 if matched_idx is None:
                     proc.stdin.write(json.dumps({"action": "skip"}) + "\n")
                     proc.stdin.flush()
-                    avail = [str(c.get("album_id", "?")) for c in candidates]
-                    print(f"  [SKIP] MBID {mb_release_id} not in {len(candidates)} candidates: {avail}",
+                    avail = [
+                        str(c.get("album_id", "?")) for c in candidates_raw
+                        if _as_json_dict(c)
+                    ]
+                    print(f"  [SKIP] MBID {mb_release_id} not in {len(candidates_raw)} candidates: {avail}",
                           file=sys.stderr)
                     if proc.poll() is None:
                         proc.wait()
                     return RunImportOutcome(
                         4, [], replaced_albums=replaced_albums)
 
-                cand = candidates[matched_idx]
+                cand = candidates_raw[matched_idx]
+                assert _as_json_dict(cand)
                 dist = cand.get("distance", 1.0)
+                assert isinstance(dist, (int, float))
 
                 if dist > max_distance:
                     proc.stdin.write(json.dumps({"action": "skip"}) + "\n")
@@ -1062,8 +1099,11 @@ def run_import(path, mb_release_id):
 # ---------------------------------------------------------------------------
 
 def update_pipeline_db(
-    request_id, imported_path=None, distance=None, scenario=None,
-):
+    request_id: int,
+    imported_path: str | None = None,
+    distance: float | None = None,
+    scenario: str | None = None,
+) -> None:
     """Record a successful imported outcome through the finalization seam.
 
     Best-effort — failures are logged but do not block the import harness.
@@ -1072,7 +1112,7 @@ def update_pipeline_db(
         from lib.pipeline_db import PipelineDB
         dsn = os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localhost/cratedigger")
         db = PipelineDB(dsn)
-        extra = {}
+        extra: dict[str, object] = {}
         if imported_path:
             extra["imported_path"] = imported_path
         if distance is not None:
@@ -1101,7 +1141,7 @@ def update_pipeline_db(
 # Main
 # ---------------------------------------------------------------------------
 
-def _log(msg):
+def _log(msg: str) -> None:
     """Human-readable log to stderr (visible in journalctl)."""
     print(msg, file=sys.stderr, flush=True)
 
@@ -1111,7 +1151,7 @@ def _log_timing(stage: str, start: float) -> None:
     _log(f"[TIMING] {stage} elapsed_s={time.monotonic() - start:.1f}")
 
 
-def _emit_and_exit(r) -> NoReturn:
+def _emit_and_exit(r: ImportResult) -> NoReturn:
     """Emit ImportResult JSON on stdout and exit."""
     global _preview_temp_root  # noqa: PLW0603
     if _import_total_start is not None:
@@ -1838,14 +1878,15 @@ def main():
     # — ``work_path`` has already been mutated by conversion so it contains
     # the V0 outputs alongside the kept FLAC originals.
     try:
+        source_dir: str = args.path
         _source_audio_files = [
-            f for f in os.listdir(args.path)
+            f for f in os.listdir(source_dir)
             if os.path.splitext(f)[1].lower() in AUDIO_EXTENSIONS
         ]
         has_lossy_passthrough = (
-            any(_is_lossless_file(f, args.path) for f in _source_audio_files)
+            any(_is_lossless_file(f, source_dir) for f in _source_audio_files)
             and any(
-                not _is_lossless_file(f, args.path)
+                not _is_lossless_file(f, source_dir)
                 for f in _source_audio_files
             )
         )

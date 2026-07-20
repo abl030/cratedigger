@@ -163,6 +163,7 @@ class TestDatabaseSource(unittest.TestCase):
     def _make_source(self):
         """Create a DatabaseSource with test PostgreSQL DB."""
         from lib.pipeline_db import PipelineDB
+        assert TEST_DSN is not None, "conftest must set TEST_DB_DSN"
         db = PipelineDB(TEST_DSN)
         for table in ["source_denylist", "download_log", "album_tracks", "album_requests"]:
             db._execute(f"TRUNCATE {table} CASCADE")
