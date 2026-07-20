@@ -724,7 +724,8 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         )
 
         ambiguous_modes = {
-            "timeout", "pre_result_exception", "post_result_exception",
+            "no_json", "timeout", "pre_result_exception",
+            "post_result_exception",
         }
         if mode in ambiguous_modes:
             self.assertIsNone(audited["import_result"])

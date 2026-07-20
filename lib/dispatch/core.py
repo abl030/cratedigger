@@ -512,29 +512,18 @@ def dispatch_import_core(
                 ir = attempt_result.merge(ir)
             if ir is None:
                 logger.error(
-                    f"{mode} FAILED (no JSON, rc={run.returncode}): {label}")
+                    f"{mode} ACKNOWLEDGEMENT AMBIGUOUS "
+                    f"(no JSON, rc={run.returncode}): {label}")
                 for line in run.stdout.strip().split("\n"):
                     logger.error(f"  {line}")
-                pending = _record_rejection_and_maybe_requeue(
-                    db, request_id, dl_info,
-                    detail=f"import_one.py rc={run.returncode}, no JSON",
-                    error=f"rc={run.returncode}",
-                    requeue=requeue_on_failure,
-                    outcome_label="failed",
-                    validation_result=ValidationResult(
-                        distance=distance,
-                        scenario="no_json_result",
-                        detail=f"import_one.py rc={run.returncode}, no JSON",
-                        error=f"rc={run.returncode}",
-                        source_dirs=source_dirs,
-                    ).to_json(),
-                    staged_path=path,
-                    attempt_result=attempt_result,
-                    import_job_id=candidate_import_job_id,
-                    source_download_log_id=candidate_download_log_id)
-                if isinstance(pending, PendingImportTerminalOutcome):
-                    terminal_outcome = pending
-                outcome_message = f"No JSON result (rc={run.returncode})"
+                return DispatchOutcome(
+                    success=False,
+                    message=(
+                        "Beets returned without a terminal result; "
+                        "operator recovery is required"
+                    ),
+                    code="beets_acknowledgement_ambiguous",
+                )
             else:
                 _populate_dl_info_from_import_result(dl_info, ir)
                 _log_postflight_bad_extensions(

@@ -287,6 +287,9 @@ def _run_dispatch(
                     error=None if result.success else result.message,
                 ))
             )
+        else:
+            from tests.helpers import finalize_claimed_dispatch
+            finalize_claimed_dispatch(db, claimed, result)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
     return {"db": db, "result": result}
@@ -648,23 +651,25 @@ def assert_dispatch_outcome_matches_routing(
     landed in the DB — for the no-JSON crash path AND every known decision
     string.
     """
-    assert_download_log_row_created(db)
-    log = db.download_logs[-1]
     status = db.request(42)["status"]
 
     if world.mode == "no_json":
-        if log.outcome != "failed":
+        if db.download_logs:
             raise AssertionError(
-                f"no-JSON crash logged outcome={log.outcome!r}, want 'failed'")
-        expected_status = "wanted" if world.requeue_on_failure else "downloading"
-        if status != expected_status:
+                "no-JSON ambiguity wrote a terminal download audit")
+        if status != "downloading":
             raise AssertionError(
-                f"no-JSON crash requeue_on_failure={world.requeue_on_failure} "
-                f"left status={status!r}, want {expected_status!r}")
+                f"no-JSON ambiguity left status={status!r}, want 'downloading'")
+        job = db.get_import_job(1)
+        if job is None or job.status != "recovery_required":
+            raise AssertionError(
+                "no-JSON ambiguity did not stop in recovery_required")
         if outcome.success:
             raise AssertionError("no-JSON crash reported success=True")
         return
 
+    assert_download_log_row_created(db)
+    log = db.download_logs[-1]
     assert world.decision is not None
     action = dispatch_action(world.decision)
     if action.mark_done:
@@ -900,9 +905,12 @@ class TestGeneratedDispatchOutcomes(unittest.TestCase):
     """Properties over the legacy (subprocess-return) dispatch path."""
 
     @given(world=dispatch_worlds())
-    def test_every_outcome_creates_a_download_log_row(self, world):
+    def test_terminal_outcomes_are_audited_and_ambiguity_is_not(self, world):
         outcome = _run_dispatch(world)
-        assert_download_log_row_created(outcome["db"])
+        if world.mode == "no_json":
+            self.assertEqual(outcome["db"].download_logs, [])
+        else:
+            assert_download_log_row_created(outcome["db"])
 
     @given(world=dispatch_worlds())
     def test_outcome_matches_dispatch_action_routing(self, world):
@@ -1167,7 +1175,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     def test_routing_checker_trips_on_no_json_wrong_log_outcome(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
-        # A crash should log 'failed', not 'success'.
+        # Ambiguous no-JSON work must not write a terminal success audit.
         db.log_download(request_id=42, outcome="success")
         world = DispatchWorld(
             mode="no_json", decision=None, new_min_bitrate=None,

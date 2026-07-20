@@ -1557,7 +1557,7 @@ class TestLosslessSourceLockedSlice(unittest.TestCase):
 
 
 class TestDispatchNoJsonResult(unittest.TestCase):
-    """Integration slice: sp.run returns no sentinel -> record rejection."""
+    """Integration slice: missing terminal sentinel stops for recovery."""
 
     def test_success_preserves_full_import_result_and_exact_attempt_audit(self):
         from lib.dispatch import dispatch_import_core
@@ -1652,8 +1652,8 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         self.assertEqual(logged.postflight.beets_id, 77)
         self.assertIsNotNone(logged.comparison_basis)
 
-    def test_no_json_marks_failed_and_requeues(self):
-        """No __IMPORT_RESULT__ in stdout → scenario=no_json_result, requeue."""
+    def test_no_json_after_launch_requires_operator_recovery(self):
+        """No terminal sentinel cannot prove Beets left the library untouched."""
         from lib.dispatch import dispatch_import_core
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
 
@@ -1705,12 +1705,13 @@ class TestDispatchNoJsonResult(unittest.TestCase):
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-        row = db.request(42)
-        self.assertEqual(row["status"], "wanted")
-        self.assertEqual(len(db.download_logs), 1)
-        db.assert_log(self, 0, outcome="failed")
-        logged = ImportResult.from_json(db.download_logs[0].import_result)
-        self.assertEqual(logged.spectral, audit)
+        recovered = db.get_import_job(claimed.id)
+        assert recovered is not None
+        self.assertEqual(recovered.status, "recovery_required")
+        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(db.download_logs, [])
+        self.assertIsNone(db.claim_next_import_job(
+            worker_id="automatic-replay"))
 
     def test_timeout_after_launch_requires_operator_recovery(self):
         import subprocess as sp

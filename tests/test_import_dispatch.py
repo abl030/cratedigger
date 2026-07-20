@@ -1286,6 +1286,9 @@ class TestDispatchImport(unittest.TestCase):
                         error=None if outcome.success else outcome.message,
                     ))
                 )
+            else:
+                from tests.helpers import finalize_claimed_dispatch
+                finalize_claimed_dispatch(db, claimed, outcome)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1801,8 +1804,14 @@ class TestDispatchImport(unittest.TestCase):
 
     def test_no_json_result(self):
         r = self._dispatch(None)
-        self.assertEqual(len(r["db"].download_logs), 1)
-        self.assertEqual(r["db"].download_logs[0].outcome, "failed")
+        db = r["db"]
+        job = db.get_import_job(1)
+        assert job is not None
+        self.assertEqual(job.status, "recovery_required")
+        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(db.download_logs, [])
+        self.assertIsNone(db.claim_next_import_job(
+            worker_id="automatic-replay"))
 
     def test_timeout(self):
         from lib.dispatch import dispatch_import_core

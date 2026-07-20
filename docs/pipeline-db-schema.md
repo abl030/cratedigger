@@ -207,7 +207,7 @@ Key fields:
 - **Partial unique index `one_active_youtube_import_per_request` ON
   `import_jobs (request_id) WHERE job_type = 'youtube_import' AND status IN
   ('queued', 'running', 'recovery_required')`** — added by migration 038 and
-  widened by migration 059. Keeps the post-yt-dlp
+  widened by migration 060. Keeps the post-yt-dlp
   importer handoff request-scoped, so a second browse id cannot enqueue a
   parallel active YouTube import for the same request.
 - `attempts`, `worker_id`, `started_at`, `heartbeat_at`, `completed_at` —
