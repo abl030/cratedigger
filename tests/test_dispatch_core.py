@@ -83,20 +83,20 @@ _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
 
 def _patch_beets_album(album_path: str | None, *, min_bitrate: int = 128):
     beets = FakeBeetsDB()
-    beets._album_info_default = (
-        AlbumInfo(
-            album_id=1,
-            track_count=1,
-            min_bitrate_kbps=min_bitrate,
-            avg_bitrate_kbps=min_bitrate,
-            median_bitrate_kbps=min_bitrate,
-            is_cbr=False,
-            album_path=album_path,
-            format="MP3",
+    if album_path is not None:
+        beets.set_album_info(
+            "mbid-123",
+            AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=min_bitrate,
+                avg_bitrate_kbps=min_bitrate,
+                median_bitrate_kbps=min_bitrate,
+                is_cbr=True,
+                album_path=album_path,
+                format="MP3",
+            ),
         )
-        if album_path is not None
-        else None
-    )
     return patch("lib.beets_db.BeetsDB", return_value=beets)
 
 

@@ -277,26 +277,6 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
 
 
 class TestImporterWorker(unittest.TestCase):
-    def _patch_beets_album(self, album_path: str, *, min_bitrate: int):
-        from lib.beets_db import AlbumInfo
-
-        beets = FakeBeetsDB()
-        info = AlbumInfo(
-            album_id=1,
-            track_count=1,
-            min_bitrate_kbps=min_bitrate,
-            avg_bitrate_kbps=min_bitrate,
-            median_bitrate_kbps=min_bitrate,
-            is_cbr=False,
-            album_path=album_path,
-            format="MP3",
-        )
-        # Seed the same row for any release_id the test queries — the
-        # importer worker uses the request's mb_release_id, which the
-        # tests don't pin to a specific value.
-        beets._album_info_default = info
-        return patch("lib.beets_db.BeetsDB", return_value=beets)
-
     def _mark_importable(
         self,
         db: FakePipelineDB,
