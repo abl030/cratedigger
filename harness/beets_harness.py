@@ -21,13 +21,20 @@ import sys
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from collections.abc import Sequence
+
 from beets import config, library, plugins
+from beets.autotag import AlbumInfo, AlbumMatch, TrackInfo, TrackMatch
+from beets.dbcore import Query
 from beets.importer.actions import Action, DuplicateAction
 from beets.importer.session import ImportSession
 from beets.importer.tasks import ImportTask as BeetsImportTask
+from beets.util import PathBytes
 
 if TYPE_CHECKING:
+    from beets.autotag.hooks import JSONDict
     from beets.importer.tasks import ImportTask
+    from confuse import ConfigView
 
 
 def _mutations_log_path() -> str:
@@ -56,10 +63,13 @@ logging.basicConfig(
 logging.getLogger("musicbrainzngs").setLevel(logging.ERROR)
 
 
-def _serialize_item(item) -> dict:
+def _serialize_item(item: library.Item) -> dict[str, object]:
     """Serialize a beets Item to a JSON-safe dict. Captures everything
     useful for debugging match decisions."""
-    path = item.path
+    # getattr (not direct `.path`) keeps this Any-typed rather than the
+    # narrow `bytes` LibModel declares, so the bytes/str defensive check
+    # below stays meaningful to pyright instead of "always true."
+    path = getattr(item, "path")
     if isinstance(path, bytes):
         path = path.decode("utf-8", errors="replace")
     return {
@@ -77,7 +87,7 @@ def _serialize_item(item) -> dict:
     }
 
 
-def _id_str(value) -> str:
+def _id_str(value: object) -> str:
     """Coerce an ID-like value to str at the wire boundary.
 
     Beets' MusicBrainz plugin returns IDs as UUID strings; the Discogs
@@ -89,7 +99,7 @@ def _id_str(value) -> str:
     return str(value) if value else ""
 
 
-def _serialize_track_info(ti) -> dict:
+def _serialize_track_info(ti: TrackInfo) -> dict[str, object]:
     """Serialize a TrackInfo to a JSON-safe dict. Full detail for
     debugging track matching and distance calculations."""
     return {
@@ -108,18 +118,20 @@ def _serialize_track_info(ti) -> dict:
     }
 
 
-def _serialize_album_candidate(idx: int, candidate) -> dict:
+def _serialize_album_candidate(idx: int, candidate: AlbumMatch) -> dict[str, object]:
     """Serialize an AlbumMatch to a JSON-safe dict. Captures everything
     the harness knows: distance breakdown, full AlbumInfo metadata,
     track mapping, extra items/tracks with detail."""
-    info = candidate.info
+    info: AlbumInfo = candidate.info
     # Build the item→track mapping: which local file matched which MB track
-    mapping = []
+    mapping: list[dict[str, object]] = []
     for item, track in candidate.mapping.items():
         mapping.append({
             "item": _serialize_item(item),
             "track": _serialize_track_info(track),
         })
+
+    info_tracks: list[TrackInfo] = getattr(info, "tracks", []) or []
 
     return {
         "index": idx,
@@ -151,10 +163,8 @@ def _serialize_album_candidate(idx: int, candidate) -> dict:
         "barcode": getattr(info, "barcode", None) or "",
         "asin": getattr(info, "asin", None) or "",
         # Track/item counts and lists
-        "track_count": len(getattr(info, "tracks", []) or []),
-        "tracks": [
-            _serialize_track_info(t) for t in (getattr(info, "tracks", []) or [])
-        ],
+        "track_count": len(info_tracks),
+        "tracks": [_serialize_track_info(t) for t in info_tracks],
         # Mapping: which local item matched which MB track
         "mapping": mapping,
         # Extra items/tracks with full detail (not just counts)
@@ -163,9 +173,9 @@ def _serialize_album_candidate(idx: int, candidate) -> dict:
     }
 
 
-def _serialize_track_candidate(idx: int, candidate) -> dict:
+def _serialize_track_candidate(idx: int, candidate: TrackMatch) -> dict[str, object]:
     """Serialize a TrackMatch to a JSON-safe dict."""
-    info = candidate.info
+    info: TrackInfo = candidate.info
     return {
         "index": idx,
         "distance": round(float(candidate.distance), 4),
@@ -176,7 +186,10 @@ def _serialize_track_candidate(idx: int, candidate) -> dict:
     }
 
 
-def _mbid_swap_event(task, candidate) -> dict | None:
+def _mbid_swap_event(
+    task: ImportTask,
+    candidate: AlbumMatch | TrackMatch,
+) -> dict[str, object] | None:
     """Return an audit event if applying `candidate` would change the items'
     `mb_albumid`; return None if the mbids already match or there's no
     existing mbid to diff against.
@@ -218,7 +231,7 @@ def _mbid_swap_event(task, candidate) -> dict | None:
     }
 
 
-def _neutralize_discogs_provider_ids(candidate) -> bool:
+def _neutralize_discogs_provider_ids(candidate: object) -> bool:
     """Blank the mb_* mirrors of a Discogs candidate's numeric provider ids
     so beets does not poison mb_albumid / mb_releasegroupid (issue #570).
 
@@ -264,14 +277,16 @@ def _neutralize_discogs_provider_ids(candidate) -> bool:
         return False
     # bust beets' @cached_property caches so the neutralized values are what
     # apply_metadata / find_duplicates consume regardless of prior access.
-    cache = getattr(info, "__dict__", None)
+    cache: dict[str, object] | None = getattr(info, "__dict__", None)
     if isinstance(cache, dict):
         cache.pop("item_data", None)
         cache.pop("raw_data", None)
     return True
 
 
-def _append_mutation_log(event: dict, log_path: str | None = None) -> None:
+def _append_mutation_log(
+    event: dict[str, object], log_path: str | None = None,
+) -> None:
     """Append one JSONL event. Never raises — the audit log must not break
     the import itself. Failures are logged to stderr for operator visibility."""
     try:
@@ -284,7 +299,7 @@ def _append_mutation_log(event: dict, log_path: str | None = None) -> None:
               file=sys.stderr)
 
 
-def _assert_duplicate_keys_include_mb_albumid(cfg) -> None:
+def _assert_duplicate_keys_include_mb_albumid(cfg: ConfigView) -> None:
     """Fail loud unless beets duplicate detection uses exact release IDs only.
 
     Beets reads this strictly from `config["import"]["duplicate_keys"]["album"]`.
@@ -323,7 +338,7 @@ def _assert_duplicate_keys_include_mb_albumid(cfg) -> None:
         sys.exit(1)
 
 
-def _duplicate_lookup_metadata(task: "ImportTask") -> dict:
+def _duplicate_lookup_metadata(task: ImportTask) -> JSONDict:
     """Return album metadata in beets library field names for duplicate lookup.
 
     Beets 2.9 builds the duplicate query from ``AlbumInfo.copy()`` before
@@ -331,10 +346,24 @@ def _duplicate_lookup_metadata(task: "ImportTask") -> dict:
     but the library column and ``duplicate_keys`` field are ``mb_albumid``.
     Without applying AlbumInfo's media-field mapping, Beets queries
     ``albums.mb_albumid = ''`` and never reaches ``get_duplicate_action``.
+
+    Returns beets' own ``JSONDict`` (``dict[str, Any]``, ``beets.autotag.
+    hooks``) — this dict is fed straight into ``library.Album(lib, **info)``
+    as flexattr kwargs (see ``_find_duplicates_with_mapped_release_ids``),
+    the same dynamic-metadata boundary beets' own ``chosen_info()`` and
+    ``Info.item_data``/``raw_data`` use that type for.
     """
-    info = task.chosen_info()
-    if hasattr(info, "item_data"):
-        data = dict(info.item_data)  # pyright: ignore[reportAttributeAccessIssue]
+    info: JSONDict = task.chosen_info()
+    data: JSONDict
+    # getattr (not `hasattr` + direct `.item_data`) keeps this Any-typed:
+    # ``chosen_info()`` always returns a plain dict in the current beets
+    # version (no ``item_data`` attribute), so this branch is defensive
+    # dead code for an older/different ``chosen_info()`` shape — same
+    # None-sentinel semantics as `hasattr` since `item_data` is a dict
+    # property, never explicitly `None` when present.
+    raw_item_data = getattr(info, "item_data", None)
+    if raw_item_data is not None:
+        data = dict(raw_item_data)
     else:
         data = dict(info)
 
@@ -350,7 +379,7 @@ def _duplicate_lookup_metadata(task: "ImportTask") -> dict:
 
 
 def _find_duplicates_with_mapped_release_ids(
-    task: "ImportTask",
+    task: ImportTask,
     lib: library.Library,
 ) -> list[library.Album]:
     """Beets ``ImportTask.find_duplicates`` with provider IDs mapped first."""
@@ -365,7 +394,7 @@ def _find_duplicates_with_mapped_release_ids(
     # Same exclusion as upstream beets: a task re-importing exactly the same
     # file paths is not a duplicate replacement.
     task_paths = {i.path for i in task.items if i}
-    duplicates = []
+    duplicates: list[library.Album] = []
     for album in lib.albums(dup_query):
         album_paths = {i.path for i in album.items()}
         if not (album_paths <= task_paths):
@@ -379,20 +408,22 @@ def _install_release_id_duplicate_lookup() -> None:
     if getattr(current, "_cratedigger_release_id_mapping", False):
         return
 
-    def find_duplicates(self, lib):
+    def find_duplicates(
+        self: BeetsImportTask, lib: library.Library,
+    ) -> list[library.Album]:
         return _find_duplicates_with_mapped_release_ids(self, lib)
 
     setattr(find_duplicates, "_cratedigger_release_id_mapping", True)
     BeetsImportTask.find_duplicates = find_duplicates
 
 
-def _send(msg: dict):
+def _send(msg: dict[str, object]) -> None:
     """Write a JSON message to stdout."""
     sys.stdout.write(json.dumps(msg) + "\n")
     sys.stdout.flush()
 
 
-def _recv() -> dict:
+def _recv() -> dict[str, object]:
     """Read a JSON message from stdin. Blocks until a line is available."""
     line = sys.stdin.readline()
     if not line:
@@ -400,28 +431,41 @@ def _recv() -> dict:
     return json.loads(line.strip())
 
 
-def _path_str(path) -> str:
+def _path_str(path: object) -> str:
     """Convert a path (bytes or str) to str."""
     if isinstance(path, bytes):
         return path.decode("utf-8", errors="replace")
     return str(path)
 
 
-def _album_item_count(album) -> int:
+def _is_callable(obj: object) -> bool:
+    """``callable()`` without pyright's built-in TypeGuard narrowing.
+
+    Beets' dynamic accessor methods (``Album.items``, ``Album.item_dir``)
+    are looked up via ``getattr`` with no static type; pyright's special
+    ``callable()`` narrowing collapses any input — even ``Any`` — to a
+    synthesized ``(...) -> object`` signature, which turns the harmless
+    dynamic call below into a false ``list``/``len`` argument-type error.
+    Same boolean result as ``callable()``, without the narrowing side effect.
+    """
+    return callable(obj)
+
+
+def _album_item_count(album: object) -> int:
     """Best-effort item count for a beets Album-like object."""
     items = getattr(album, "items", None)
-    if callable(items):
-        try:
-            return len(list(items()))  # pyright: ignore[reportArgumentType]
-        except Exception:
-            return 0
-    return 0
+    if items is None or not _is_callable(items):
+        return 0
+    try:
+        return len(list(items()))
+    except Exception:
+        return 0
 
 
-def _album_path(album) -> str:
+def _album_path(album: object) -> str:
     """Best-effort directory path for a beets Album-like object."""
     item_dir = getattr(album, "item_dir", None)
-    if callable(item_dir):
+    if item_dir is not None and _is_callable(item_dir):
         try:
             path = item_dir()
             if path:
@@ -430,9 +474,9 @@ def _album_path(album) -> str:
             pass
 
     items = getattr(album, "items", None)
-    if callable(items):
+    if items is not None and _is_callable(items):
         try:
-            for item in items():  # pyright: ignore[reportGeneralTypeIssues]
+            for item in items():
                 path = getattr(item, "path", None)
                 if path:
                     return os.path.dirname(_path_str(path))
@@ -441,7 +485,7 @@ def _album_path(album) -> str:
     return ""
 
 
-def _serialize_duplicate_album(album) -> dict:
+def _serialize_duplicate_album(album: object) -> dict[str, object]:
     """Serialize a beets Album from ``found_duplicates``.
 
     This is the exact album object Beets will feed to ``duplicate_items()``
@@ -463,19 +507,34 @@ def _serialize_duplicate_album(album) -> dict:
 class HarnessImportSession(ImportSession):
     """ImportSession that communicates decisions over JSON stdin/stdout."""
 
-    def __init__(self, lib, loghandler, paths, query=None, pretend=False):
+    def __init__(
+        self,
+        lib: library.Library,
+        loghandler: logging.Handler | None,
+        paths: Sequence[PathBytes] | None,
+        query: Query | None = None,
+        pretend: bool = False,
+    ) -> None:
         super().__init__(lib, loghandler, paths, query)
         self._task_counter = 0
         self._pretend = pretend
 
-    def choose_match(self, task: ImportTask):
+    def choose_match(self, task: ImportTask) -> AlbumMatch | Action:
         """Present album match candidates as JSON; read decision from stdin."""
         task_id = self._task_counter
         self._task_counter += 1
 
-        # Build the task description
+        # Build the task description. ``task.candidates`` is declared
+        # ``Sequence[AlbumMatch | TrackMatch]`` on the shared ImportTask
+        # base, but beets always populates ALBUM tasks (this method's only
+        # caller) with AlbumMatch candidates exclusively — the assert
+        # documents that invariant for the type checker.
         candidates = task.candidates or []
-        msg = {
+        serialized_candidates: list[dict[str, object]] = []
+        for i, c in enumerate(candidates):
+            assert isinstance(c, AlbumMatch)
+            serialized_candidates.append(_serialize_album_candidate(i, c))
+        msg: dict[str, object] = {
             "type": "choose_match",
             "task_id": task_id,
             "path": _path_str(task.paths[0]) if task.paths else "",
@@ -485,24 +544,29 @@ class HarnessImportSession(ImportSession):
             "items": [_serialize_item(item) for item in task.items],
             "recommendation": task.rec.name if task.rec else "none",
             "candidate_count": len(candidates),
-            "candidates": [
-                _serialize_album_candidate(i, c)
-                for i, c in enumerate(candidates)
-            ],
+            "candidates": serialized_candidates,
         }
         _send(msg)
 
         # Wait for decision
         decision = _recv()
-        return self._apply_decision(task, decision)
+        result = self._apply_decision(task, decision)
+        assert isinstance(result, (AlbumMatch, Action))
+        return result
 
-    def choose_item(self, task: ImportTask):
+    def choose_item(self, task: ImportTask) -> TrackMatch | Action:
         """Present singleton track candidates as JSON; read decision from stdin."""
         task_id = self._task_counter
         self._task_counter += 1
 
+        # Same invariant as choose_match, mirrored for singleton tasks:
+        # beets always populates these with TrackMatch candidates only.
         candidates = task.candidates or []
-        msg = {
+        serialized_candidates: list[dict[str, object]] = []
+        for i, c in enumerate(candidates):
+            assert isinstance(c, TrackMatch)
+            serialized_candidates.append(_serialize_track_candidate(i, c))
+        msg: dict[str, object] = {
             "type": "choose_item",
             "task_id": task_id,
             "path": _path_str(task.paths[0]) if task.paths else "",
@@ -511,39 +575,44 @@ class HarnessImportSession(ImportSession):
             "item": _serialize_item(getattr(task, "item")) if hasattr(task, "item") else {},
             "recommendation": task.rec.name if task.rec else "none",
             "candidate_count": len(candidates),
-            "candidates": [
-                _serialize_track_candidate(i, c)
-                for i, c in enumerate(candidates)
-            ],
+            "candidates": serialized_candidates,
         }
         _send(msg)
 
         decision = _recv()
-        return self._apply_decision(task, decision)
+        result = self._apply_decision(task, decision)
+        assert isinstance(result, (TrackMatch, Action))
+        return result
 
-    def _apply_decision(self, task, decision: dict):
+    def _apply_decision(
+        self,
+        task: ImportTask,
+        decision: dict[str, object],
+    ) -> Action | AlbumMatch | TrackMatch:
         """Convert a JSON decision into a beets Action or match object."""
         action = decision.get("action", "skip")
+        candidates = task.candidates or []
 
         if action == "apply":
             idx = decision.get("candidate_index", 0)
-            if 0 <= idx < len(task.candidates):
+            assert isinstance(idx, int)
+            if 0 <= idx < len(candidates):
                 if self._pretend:
                     # In pretend mode, DON'T return the candidate — that would
                     # cause beets to apply it (DB write + scrub plugin strips
                     # tags from source files). Just skip after reporting.
                     return Action.SKIP
                 # Audit any MBID swap before apply mutates the album.
-                ev = _mbid_swap_event(task, task.candidates[idx])
+                ev = _mbid_swap_event(task, candidates[idx])
                 if ev is not None:
                     _append_mutation_log(ev)
                 # Keep Discogs numeric ids out of mb_albumid/mb_releasegroupid (#570).
-                _neutralize_discogs_provider_ids(task.candidates[idx])
-                return task.candidates[idx]
+                _neutralize_discogs_provider_ids(candidates[idx])
+                return candidates[idx]
             else:
                 _send({
                     "type": "error",
-                    "message": f"candidate_index {idx} out of range (0-{len(task.candidates)-1}), skipping",
+                    "message": f"candidate_index {idx} out of range (0-{len(candidates)-1}), skipping",
                 })
                 return Action.SKIP
         elif action == "skip":
@@ -564,7 +633,7 @@ class HarnessImportSession(ImportSession):
             return Action.SKIP
 
     def get_duplicate_action(
-        self, task: ImportTask, found_duplicates
+        self, task: ImportTask, found_duplicates: list[library.AnyLibModel]
     ) -> DuplicateAction:
         """Ask the controller how to handle duplicates (beets 2.x hook).
 
@@ -599,7 +668,7 @@ class HarnessImportSession(ImportSession):
         ]
         dup_mbids = [c["mb_albumid"] for c in duplicate_candidates]
         dup_album_ids = [c["beets_album_id"] for c in duplicate_candidates]
-        msg = {
+        msg: dict[str, object] = {
             "type": "resolve_duplicate",
             "path": _path_str(task.paths[0]) if task.paths else "",
             "cur_artist": task.cur_artist or "",
@@ -626,19 +695,21 @@ class HarnessImportSession(ImportSession):
             return DuplicateAction.REMOVE
         return DuplicateAction.SKIP
 
-    def should_resume(self, path):
+    def should_resume(self, path: PathBytes) -> bool:
         """Ask controller whether to resume a previously interrupted import."""
-        msg = {
+        msg: dict[str, object] = {
             "type": "should_resume",
             "path": _path_str(path),
         }
         _send(msg)
 
         decision = _recv()
-        return decision.get("resume", False)
+        resume = decision.get("resume", False)
+        assert isinstance(resume, bool)
+        return resume
 
 
-def main():
+def main() -> None:
     import argparse
 
     # Belt-and-suspenders for the group-writable import boundary — see

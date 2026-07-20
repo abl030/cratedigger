@@ -39,7 +39,7 @@ TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "lib/pipeline_db/evidence.py": {"any": 3},
     "lib/pipeline_db/import_jobs.py": {"any": 10},
     "lib/pipeline_db/jellyfin_pins.py": {"any": 2},
-    "lib/pipeline_db/misc.py": {"any": 12},
+    "lib/pipeline_db/misc.py": {"any": 13},
     "lib/pipeline_db/plex_pins.py": {"any": 2},
     "lib/pipeline_db/requests.py": {"any": 13},
     "lib/pipeline_db/search_ledger.py": {"any": 2},

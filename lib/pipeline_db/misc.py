@@ -195,7 +195,12 @@ class _MiscMixin(_PipelineDBBase):
 
     # --- Denylist ---
 
-    def add_denylist(self, request_id, username, reason=None):
+    def add_denylist(
+        self,
+        request_id: int,
+        username: str,
+        reason: str | None = None,
+    ) -> None:
         self._execute("""
             INSERT INTO source_denylist (request_id, username, reason)
             VALUES (%s, %s, %s)
@@ -204,7 +209,7 @@ class _MiscMixin(_PipelineDBBase):
         self.conn.commit()
 
 
-    def get_denylisted_users(self, request_id):
+    def get_denylisted_users(self, request_id: int) -> list[dict[str, Any]]:
         cur = self._execute("""
             SELECT username, reason, created_at
             FROM source_denylist

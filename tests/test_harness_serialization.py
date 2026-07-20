@@ -21,6 +21,7 @@ import os
 import sys
 import unittest
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 
@@ -37,6 +38,9 @@ _beets_mocks = {
     "beets.importer.actions": MagicMock(),
     "beets.importer.session": MagicMock(),
     "beets.importer.tasks": MagicMock(),
+    "beets.autotag": MagicMock(),
+    "beets.dbcore": MagicMock(),
+    "beets.util": MagicMock(),
 }
 for name, mock in _beets_mocks.items():
     sys.modules.setdefault(name, mock)
@@ -56,8 +60,14 @@ from harness import beets_harness  # noqa: E402
 class TestAlbumCandidateIdCoercion(unittest.TestCase):
     """Album-level IDs must always emit as str on the JSON wire."""
 
-    def _candidate(self, **info_overrides):
-        """Build a fake AlbumMatch with the given AlbumInfo attributes."""
+    def _candidate(self, **info_overrides) -> Any:
+        """Build a fake AlbumMatch with the given AlbumInfo attributes.
+
+        Duck-typed ``SimpleNamespace`` stand-in — the serializer only reads
+        attributes via direct access/getattr, so this mirrors production
+        shape without depending on real beets classes; typed ``Any`` so
+        pyright doesn't demand a real ``AlbumMatch``.
+        """
         info_attrs = dict(
             artist="Test Artist", album="Test Album",
             album_id="default-id", albumdisambig="",
@@ -122,7 +132,8 @@ class TestAlbumCandidateIdCoercion(unittest.TestCase):
 
 class TestTrackInfoIdCoercion(unittest.TestCase):
 
-    def _track_info(self, **overrides):
+    def _track_info(self, **overrides) -> Any:
+        """Duck-typed TrackInfo stand-in — see ``_candidate`` above."""
         attrs = dict(
             title="X", artist="A", index=1, medium=1, medium_index=1,
             medium_total=1, length=200.0,
@@ -162,7 +173,8 @@ class TestTrackInfoIdCoercion(unittest.TestCase):
 
 class TestTrackCandidateIdCoercion(unittest.TestCase):
 
-    def _track_candidate(self, **info_overrides):
+    def _track_candidate(self, **info_overrides) -> Any:
+        """Duck-typed TrackMatch stand-in — see ``_candidate`` above."""
         info_attrs = dict(
             title="X", artist="A", track_id="default-tid", length=200.0,
         )

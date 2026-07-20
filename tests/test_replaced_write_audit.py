@@ -107,11 +107,15 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/misc.py", 188, "12cfdd83a367c90e"): (
         "track-count batch IN list contains only psycopg value placeholders"
     ),
-    ("lib/pipeline_db/misc.py", 396, "0a14fd5e6252e398"): (
-        "bulk VALUES fragment contains only fixed value-placeholder tuples"
+    ("lib/pipeline_db/misc.py", 401, "0a14fd5e6252e398"): (
+        "bulk VALUES fragment contains only fixed value-placeholder tuples "
+        "(issue #784: add_denylist/get_denylisted_users annotated above, "
+        "shifting this line; no SQL change)"
     ),
-    ("lib/pipeline_db/misc.py", 570, "47e316b5c87e000f"): (
-        "triage joins and predicates are selected from closed service enums"
+    ("lib/pipeline_db/misc.py", 575, "47e316b5c87e000f"): (
+        "triage joins and predicates are selected from closed service enums "
+        "(issue #784: add_denylist/get_denylisted_users annotated above, "
+        "shifting this line; no SQL change)"
     ),
     ("lib/pipeline_db/requests.py", 70, "092ac19c7715cd88"): (
         "INSERT columns derive from the fixed AddRequestInput schema"
@@ -132,9 +136,11 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "metadata keys are validated identifiers, lifecycle fields are reserved, "
         "and values use one typed JSONB record parameter"
     ),
-    ("lib/pipeline_db/requests.py", 1330, "7db79742051b4f8f"): (
+    ("lib/pipeline_db/requests.py", 1330, "ef9d09dcf1118fd0"): (
         "optional LIMIT is normalized through int before interpolation "
-        "(issue #765: return type retyped to list[AlbumRequestRow], no SQL change)"
+        "(issue #765: return type retyped to list[AlbumRequestRow], no SQL "
+        "change; issue #784: `limit` parameter annotated `int | None`, "
+        "changing the enclosing-scope fingerprint, no SQL change)"
     ),
     ("lib/pipeline_db/requests.py", 1345, "a586333614f3b096"): (
         "ORDER is selected from two literals and LIMIT remains a value placeholder "

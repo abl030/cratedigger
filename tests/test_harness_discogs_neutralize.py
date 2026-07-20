@@ -40,6 +40,9 @@ _beets_mocks = {
     "beets.importer.actions": MagicMock(),
     "beets.importer.session": MagicMock(),
     "beets.importer.tasks": MagicMock(),
+    "beets.autotag": MagicMock(),
+    "beets.dbcore": MagicMock(),
+    "beets.util": MagicMock(),
 }
 for name, mock in _beets_mocks.items():
     sys.modules.setdefault(name, mock)

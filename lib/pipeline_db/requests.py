@@ -1317,7 +1317,7 @@ class _RequestsMixin(_PipelineDBBase):
 
     # --- Query methods ---
 
-    def get_wanted(self, limit=None) -> list[AlbumRequestRow]:
+    def get_wanted(self, limit: int | None = None) -> list[AlbumRequestRow]:
         now = datetime.now(timezone.utc)
         sql = """
             SELECT * FROM album_requests
