@@ -10,7 +10,10 @@ import json
 import logging
 import urllib.request
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Sequence, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from cratedigger import TrackRecord
 
 logger = logging.getLogger("cratedigger")
 
@@ -213,7 +216,7 @@ class DatabaseSource:
             records.append(record)
         return records
 
-    def get_tracks(self, album_record: AlbumRecord | object) -> list[dict[str, object]]:
+    def get_tracks(self, album_record: AlbumRecord | object) -> "list[TrackRecord]":
         """Get tracks for an album in normalized track format.
 
         Returns list of dicts with keys: title, trackNumber, mediumNumber, duration.

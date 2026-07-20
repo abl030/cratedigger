@@ -9,7 +9,7 @@ evidence reject helper. ``finalize_request`` is the module-local DI seam
 from __future__ import annotations
 
 import logging
-from typing import Any, Sequence, TYPE_CHECKING, cast
+from typing import Any, Sequence, TYPE_CHECKING
 
 import msgspec
 
@@ -327,9 +327,46 @@ def _do_mark_done(
         request_id,
         transition,
     ))
-    return cast(Any, db.log_download)(
+    # Explicit field-by-field bridge: pyright verifies every audit field
+    # against ``log_download``'s signature (names AND types), which the
+    # dynamic ``**as_log_kwargs()`` spread could not express.
+    return db.log_download(
         request_id=request_id,
-        **audit.as_log_kwargs(),
+        outcome=audit.outcome,
+        soulseek_username=audit.soulseek_username,
+        filetype=audit.filetype,
+        download_path=audit.download_path,
+        beets_distance=audit.beets_distance,
+        beets_scenario=audit.beets_scenario,
+        beets_detail=audit.beets_detail,
+        valid=audit.valid,
+        staged_path=audit.staged_path,
+        error_message=audit.error_message,
+        bitrate=audit.bitrate,
+        sample_rate=audit.sample_rate,
+        bit_depth=audit.bit_depth,
+        is_vbr=audit.is_vbr,
+        was_converted=audit.was_converted,
+        original_filetype=audit.original_filetype,
+        slskd_filetype=audit.slskd_filetype,
+        actual_filetype=audit.actual_filetype,
+        actual_min_bitrate=audit.actual_min_bitrate,
+        spectral_grade=audit.spectral_grade,
+        spectral_bitrate=audit.spectral_bitrate,
+        existing_min_bitrate=audit.existing_min_bitrate,
+        existing_spectral_bitrate=audit.existing_spectral_bitrate,
+        import_result=audit.import_result,
+        validation_result=audit.validation_result,
+        final_format=audit.final_format,
+        v0_probe_kind=audit.v0_probe_kind,
+        v0_probe_min_bitrate=audit.v0_probe_min_bitrate,
+        v0_probe_avg_bitrate=audit.v0_probe_avg_bitrate,
+        v0_probe_median_bitrate=audit.v0_probe_median_bitrate,
+        existing_v0_probe_kind=audit.existing_v0_probe_kind,
+        existing_v0_probe_min_bitrate=audit.existing_v0_probe_min_bitrate,
+        existing_v0_probe_avg_bitrate=audit.existing_v0_probe_avg_bitrate,
+        existing_v0_probe_median_bitrate=audit.existing_v0_probe_median_bitrate,
+        source_download_log_id=audit.source_download_log_id,
     )
 
 

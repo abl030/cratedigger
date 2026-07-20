@@ -6,7 +6,7 @@ import copy
 from dataclasses import dataclass, replace
 import logging
 import time
-from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal, Sequence, cast
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal, Sequence
 
 from lib.browse import _fanout_browse_users, download_filter, get_browse_coordinator
 from lib.download import build_active_download_state
@@ -126,7 +126,21 @@ class _WorkerPipelineDBSource:
     def _get_db(self) -> None:
         raise AssertionError("find_download worker attempted owner DB access")
 
-    def get_tracks(self, album: Any) -> list[Any]:
+    def get_tracks(self, album_record: object) -> "list[TrackRecord]":
+        raise AssertionError("find_download worker attempted owner DB access")
+
+    def get_wanted_searchable(
+        self, *args: object, **kwargs: object,
+    ) -> list[object]:
+        raise AssertionError("find_download worker attempted owner DB access")
+
+    def mark_done(self, *args: object, **kwargs: object) -> object:
+        raise AssertionError("find_download worker attempted owner DB access")
+
+    def reject_and_requeue(self, *args: object, **kwargs: object) -> object:
+        raise AssertionError("find_download worker attempted owner DB access")
+
+    def close(self) -> None:
         raise AssertionError("find_download worker attempted owner DB access")
 
 
@@ -192,7 +206,7 @@ def prepare_find_download_context(
     return CratediggerContext(
         cfg=ctx.cfg,
         slskd=ctx.slskd,
-        pipeline_db_source=cast(Any, _WorkerPipelineDBSource()),
+        pipeline_db_source=_WorkerPipelineDBSource(),
         search_cache={album_id: search_cache},
         folder_cache=ctx.folder_cache,
         user_upload_speed=user_upload_speed,
@@ -797,8 +811,8 @@ def _enqueue_with_claim_outcome(
 def get_album_tracks(album: Any, ctx: CratediggerContext) -> list[TrackRecord]:
     """Get tracks for an album from the pipeline DB source."""
     if album.id in ctx.prefetched_album_tracks:
-        return cast("list[TrackRecord]", ctx.prefetched_album_tracks[album.id])
-    return cast("list[TrackRecord]", ctx.pipeline_db_source.get_tracks(album))
+        return ctx.prefetched_album_tracks[album.id]
+    return ctx.pipeline_db_source.get_tracks(album)
 
 
 def _eligible_user_dirs(

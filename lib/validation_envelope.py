@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import msgspec
 
@@ -132,8 +132,9 @@ def derive_validation_log_columns(
         parsed = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
         # ``decode_validation_envelope`` above has already proved this is a
         # JSON object and raised its established msgspec.ValidationError for
-        # every non-object shape. The cast only records that fact for pyright.
-        raw_object = cast(dict[str, Any], parsed)
+        # every non-object shape; the assert records that fact for pyright.
+        assert isinstance(parsed, dict)
+        raw_object = parsed
 
     if DISTANCE_KEY in raw_object:
         if not isinstance(beets_distance, ValidationProjectionUnset):

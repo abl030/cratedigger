@@ -2,7 +2,7 @@
 
 import json
 import os
-from typing import Any, cast
+from typing import Any, TypedDict
 
 import msgspec
 from pydantic import BaseModel, Field, model_validator
@@ -638,6 +638,16 @@ def _wrong_match_delete_group_http_status(summary) -> int:
     return 409
 
 
+class _GreenCandidate(TypedDict):
+    """One green-distance force-import candidate assembled below."""
+
+    download_log_id: int
+    distance: float | None
+    failed_path: str
+    source_username: object
+    source_dirs: list[str]
+
+
 class WrongMatchConvergeRequest(BaseModel):
     request_id: int = Field(gt=0)
     threshold_milli: Any = None
@@ -684,7 +694,7 @@ def post_wrong_match_converge(h, body: dict) -> None:
 
     selected: list[dict[str, object]] = []
     unmatched: list[dict[str, object]] = []
-    green_candidates: list[dict[str, object]] = []
+    green_candidates: list[_GreenCandidate] = []
     skipped: list[dict[str, object]] = []
     jobs: list[dict[str, object]] = []
     unmatched_log_ids: list[int] = []
@@ -735,7 +745,7 @@ def post_wrong_match_converge(h, body: dict) -> None:
         unmatched_log_ids.append(lid)
 
     for candidate in green_candidates:
-        lid = cast(int, candidate["download_log_id"])
+        lid = candidate["download_log_id"]
         source_username_raw = candidate.get("source_username")
         source_username = (
             str(source_username_raw)
@@ -749,7 +759,7 @@ def post_wrong_match_converge(h, body: dict) -> None:
                 download_log_id=lid,
                 failed_path=str(candidate["failed_path"]),
                 source_username=source_username,
-                source_dirs=cast(list, candidate["source_dirs"]),
+                source_dirs=candidate["source_dirs"],
             ),
             message=(
                 f"Force import queued for "

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import datetime
-from typing import cast
+
 
 import msgspec
 
@@ -88,7 +88,7 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
         return ReleaseIdentity.from_id(self.mb_albumid)
 
     def to_dict(self) -> dict[str, object]:
-        return cast(dict[str, object], msgspec.to_builtins(self))
+        return msgspec.to_builtins(self)
 
     @classmethod
     def from_beets_album(

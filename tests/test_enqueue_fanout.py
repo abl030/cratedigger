@@ -421,11 +421,11 @@ class _PrefetchSource(FakePipelineDBSource):
     exact rows the source delivered without the production negative-ID
     transform interfering."""
 
-    def __init__(self, stub_tracks: list[dict[str, object]]) -> None:
+    def __init__(self, stub_tracks: list[TrackRecord]) -> None:
         super().__init__()
         self._stub_tracks = list(stub_tracks)
 
-    def get_tracks(self, album_record: object) -> list[dict[str, object]]:
+    def get_tracks(self, album_record: object) -> list[TrackRecord]:
         self.get_tracks_calls.append(album_record)
         return list(self._stub_tracks)
 
@@ -489,7 +489,7 @@ class TestFindDownloadWorkerContext(unittest.TestCase):
         ctx = CratediggerContext(
             cfg=_make_cfg(),
             slskd=FakeSlskdAPI(),
-            pipeline_db_source=_WorkerPipelineDBSource(),  # type: ignore[arg-type]
+            pipeline_db_source=_WorkerPipelineDBSource(),
         )
 
         with self.assertRaises(AssertionError):

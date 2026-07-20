@@ -10,7 +10,7 @@ import time
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Any, TYPE_CHECKING, TypedDict
+from typing import Any, NotRequired, TYPE_CHECKING, TypedDict
 
 from lib.slskd_client import (
     SLSKD_HTTP_TIMEOUT_S,
@@ -29,10 +29,17 @@ if TYPE_CHECKING:
 
 
 class TrackRecord(TypedDict):
-    """Track dict from pipeline DB — shape used by matching functions."""
+    """Track dict from pipeline DB — shape used by matching functions.
+
+    ``DatabaseSource.get_tracks`` also carries the display/duration keys;
+    they're NotRequired because matching only needs the first three.
+    """
     albumId: int
     title: str
     mediumNumber: int
+    trackNumber: NotRequired[str]
+    duration: NotRequired[int]
+    id: NotRequired[int]
 
 
 class _SlskdFileRequired(TypedDict):
