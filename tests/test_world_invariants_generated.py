@@ -6,10 +6,12 @@ import os
 import tempfile
 import unittest
 
+import msgspec
 from hypothesis import given, strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads active profile)
-from lib.quality import ValidationResult
+from lib.quality import dispatch_action
+from lib.quality.decisions import post_import_search_action_if_known
 from lib.world_invariants import (
     DenylistAuthoritySnapshot,
     EvidenceDiskSnapshot,
@@ -35,6 +37,14 @@ _SEGMENT = st.text(
     min_size=1,
     max_size=20,
 )
+
+
+def _decision_denylists_for_test(decision: str) -> bool:
+    search_action = post_import_search_action_if_known(decision)
+    return bool(
+        (search_action is not None and search_action.denylist)
+        or dispatch_action(decision).denylist
+    )
 
 
 class TestWorldInvariantGenerated(unittest.TestCase):
@@ -244,41 +254,119 @@ class TestWorldInvariantGenerated(unittest.TestCase):
         self.assertIn("denylist_without_authority", {v.code for v in violations})
 
     @given(
-        username=_SEGMENT,
-        reason=_SEGMENT,
+        denied_username=_SEGMENT,
+        history_username=_SEGMENT,
         scenario=_SEGMENT,
         as_jsonb=st.booleans(),
-        valid=st.booleans(),
+        valid=st.one_of(st.none(), st.booleans()),
+        canonical_reason=st.booleans(),
     )
-    def test_only_exact_peer_invalid_validation_authorizes_the_denylist(
+    def test_multi_peer_validation_authority_requires_rejection_provenance(
         self,
-        username: str,
-        reason: str,
+        denied_username: str,
+        history_username: str,
         scenario: str,
         as_jsonb: bool,
-        valid: bool,
+        valid: bool | None,
+        canonical_reason: bool,
     ) -> None:
-        result = ValidationResult(valid=valid, scenario=scenario)
+        payload = {"valid": valid, "scenario": scenario}
         validation_result: object = (
-            result.to_json()
+            msgspec.json.encode(payload).decode()
             if not as_jsonb
-            else {
-                "valid": valid,
-                "scenario": scenario,
-            }
+            else payload
         )
 
         authorities = derive_denylist_authorities(
-            username=username,
-            reason=reason,
+            username=denied_username,
+            reason=(
+                "beets validation rejected"
+                if canonical_reason
+                else "manual note"
+            ),
             history=[{
                 "outcome": "rejected",
-                "soulseek_username": username,
+                "soulseek_username": history_username,
                 "validation_result": validation_result,
             }],
         )
 
-        self.assertEqual("validation_reject" in authorities, not valid)
+        expected = (
+            valid is False and denied_username == history_username
+        ) or (
+            canonical_reason and valid is not True
+        )
+        self.assertEqual("validation_reject" in authorities, expected)
+
+    @given(
+        username=_SEGMENT,
+        decision=st.sampled_from((
+            "downgrade",
+            "audio_corrupt",
+            "bad_audio_hash",
+            "spectral_reject",
+            "mixed_source",
+            "nested_layout",
+            "empty_fileset",
+            "requeue_lossless",
+            "requeue_upgrade",
+            "transcode_upgrade",
+        )),
+    )
+    def test_preview_reason_authority_follows_current_denylist_policy(
+        self,
+        username: str,
+        decision: str,
+    ) -> None:
+        expected = _decision_denylists_for_test(decision)
+
+        authorities = derive_denylist_authorities(
+            username=username,
+            reason=f"import preview rejected: {decision}",
+            history=[],
+        )
+
+        self.assertEqual(decision in authorities, expected)
+
+    @given(
+        denied_username=_SEGMENT,
+        history_username=_SEGMENT,
+        decision=st.sampled_from((
+            "downgrade",
+            "audio_corrupt",
+            "spectral_reject",
+            "mixed_source",
+            "nested_layout",
+            "empty_fileset",
+        )),
+        canonical_reason=st.booleans(),
+    )
+    def test_multi_peer_import_authority_requires_canonical_source_reason(
+        self,
+        denied_username: str,
+        history_username: str,
+        decision: str,
+        canonical_reason: bool,
+    ) -> None:
+        authorities = derive_denylist_authorities(
+            username=denied_username,
+            reason=(
+                "beets validation rejected"
+                if canonical_reason
+                else "manual note"
+            ),
+            history=[{
+                "outcome": "rejected",
+                "soulseek_username": history_username,
+                "validation_result": {"valid": True},
+                "import_result": {"version": 4, "decision": decision},
+            }],
+        )
+        expected = _decision_denylists_for_test(decision) and (
+            canonical_reason or denied_username == history_username
+        )
+
+        self.assertEqual(decision in authorities, expected)
 
 
 if __name__ == "__main__":

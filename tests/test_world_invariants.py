@@ -8,7 +8,7 @@ import unittest
 
 import msgspec
 
-from lib.quality import ValidationResult
+from lib.quality import ImportResult, ValidationResult
 from lib.world_invariants import (
     DenylistAuthoritySnapshot,
     EvidenceDiskSnapshot,
@@ -126,7 +126,7 @@ class TestWorldInvariantPins(unittest.TestCase):
             ("requeue_lossless",),
         )
 
-    def test_invalid_validation_authorizes_only_its_exact_source_peer(self) -> None:
+    def test_multi_peer_validation_authorizes_every_rejected_source(self) -> None:
         validation = msgspec.to_builtins(ValidationResult(
             valid=False,
             scenario="high_distance",
@@ -151,6 +151,26 @@ class TestWorldInvariantPins(unittest.TestCase):
             derive_denylist_authorities(
                 username="different-peer",
                 reason="beets validation rejected",
+                history=history,
+            ),
+            ("validation_reject",),
+        )
+        self.assertEqual(
+            derive_denylist_authorities(
+                username="legacy-secondary-peer",
+                reason="beets validation rejected",
+                history=[{
+                    "outcome": "rejected",
+                    "soulseek_username": "legacy-primary-peer",
+                    "validation_result": None,
+                }],
+            ),
+            ("validation_reject",),
+        )
+        self.assertEqual(
+            derive_denylist_authorities(
+                username="different-peer",
+                reason="manual note",
                 history=history,
             ),
             (),
@@ -189,6 +209,62 @@ class TestWorldInvariantPins(unittest.TestCase):
             ),
             (),
         )
+
+    def test_historical_denylist_reasons_decode_only_denylisting_policy(self) -> None:
+        cases = (
+            ("quality downgrade prevented", ("downgrade",)),
+            ("lossless source locked", ("lossless_source_locked",)),
+            ("audio decode failures", ("audio_corrupt",)),
+            ("matched curated bad audio hash", ("bad_audio_hash",)),
+            ("spectral analysis rejected the source", ("spectral_reject",)),
+            ("mixed lossless+lossy source", ("mixed_source",)),
+            (
+                "suspect lossless source not an upgrade",
+                ("suspect_lossless_reject",),
+            ),
+            (
+                "provisional lossless source imported",
+                ("provisional_lossless_upgrade",),
+            ),
+            ("import preview rejected: audio_corrupt", ("audio_corrupt",)),
+            ("import preview rejected: spectral_reject", ("spectral_reject",)),
+            ("import preview rejected: downgrade", ("downgrade",)),
+            ("spectral: 96kbps <= existing 96kbps", ("spectral_reject",)),
+            ("transcode: 202kbps", ("legacy_transcode",)),
+            ("rejected: bad_audio_hash", ("bad_audio_hash",)),
+            ("import preview rejected: nested_layout", ()),
+            ("rejected: nested_layout", ()),
+            ("transcode: unknown", ()),
+            ("manual note", ()),
+        )
+
+        for reason, expected in cases:
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    derive_denylist_authorities(
+                        username="historical-peer",
+                        reason=reason,
+                        history=[],
+                    ),
+                    expected,
+                )
+
+    def test_multi_peer_beets_reject_uses_the_persisted_import_decision(self) -> None:
+        authorities = derive_denylist_authorities(
+            username="secondary-peer",
+            reason="beets validation rejected",
+            history=[{
+                "outcome": "rejected",
+                "soulseek_username": "primary-peer",
+                "validation_result": msgspec.to_builtins(ValidationResult(
+                    valid=True,
+                    scenario="strong_match",
+                )),
+                "import_result": ImportResult(decision="downgrade").to_json(),
+            }],
+        )
+
+        self.assertEqual(authorities, ("downgrade",))
 
 
 class TestWorldInvariantCheckersTripOnKnownBad(unittest.TestCase):
