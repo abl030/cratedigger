@@ -402,7 +402,7 @@ def configure_live_db(config: DevConfig) -> None:
     # the read-only session flag below. Leaving the DSN unset routes
     # every request through this single injected read-only handle.
     connect_readonly()
-    web_server._try_reconnect_db = connect_readonly  # type: ignore[assignment]
+    web_server._try_reconnect_db = connect_readonly
 
     # Only set the path — never inject a shared BeetsDB handle. sqlite3
     # connections are bound to their opening thread, and the dev server

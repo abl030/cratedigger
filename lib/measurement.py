@@ -343,7 +343,7 @@ def inspect_local_files(path: str) -> LocalFileInspection:
             if ext == "mp3":
                 full = os.path.join(root, name)
                 try:
-                    from mutagen.mp3 import MP3  # type: ignore[import-untyped]
+                    from mutagen.mp3 import MP3
                     mp3 = MP3(full)
                     br = getattr(mp3.info, "bitrate", None)
                     br_mode = getattr(mp3.info, "bitrate_mode", None)

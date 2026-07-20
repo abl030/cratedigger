@@ -81,7 +81,7 @@ def probe_duration_seconds(path: str) -> float | None:
     """Read source duration cheaply for a duration-scaled ffmpeg timeout."""
 
     try:
-        from mutagen import File as mutagen_file  # type: ignore[import-untyped,attr-defined]  # pyright: ignore[reportPrivateImportUsage]
+        from mutagen import File as mutagen_file  # type: ignore[import-untyped,attr-defined]
         media = mutagen_file(path)
     except Exception:  # noqa: BLE001 - absence/unreadable is a normal fallback
         return None

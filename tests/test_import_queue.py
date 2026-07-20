@@ -363,7 +363,7 @@ class TestImporterWorker(unittest.TestCase):
         source_path: str,
         request_id: int = 42,
     ) -> None:
-        if request_id not in db._requests:  # type: ignore[attr-defined]
+        if request_id not in db._requests:
             db.seed_request(make_request_row(
                 id=request_id,
                 mb_release_id="mbid-123",

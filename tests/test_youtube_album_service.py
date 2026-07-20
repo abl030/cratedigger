@@ -2460,7 +2460,7 @@ class TestYoutubeAlbumResolverIntegrationSlice(unittest.TestCase):
                 ],
             ),
         }
-        mb_leaf = _LookupSpy({rg: None, **mb_releases})  # type: ignore[arg-type]
+        mb_leaf = _LookupSpy({rg: None, **mb_releases})
         mb_group = _LookupSpy({
             rg: _ok_mb_rg_releases((MB_REL_A, 1996), (MB_REL_B, 2008)),
         })

@@ -8556,7 +8556,7 @@ class TestPipelineDBReconnectOnDeadConn(unittest.TestCase):
         # The retry happened on the live conn.
         self.assertEqual(len(live_conn.cursors), 1)
         self.assertIs(cur, live_conn.cursors[0])
-        self.assertEqual(cur.executed, [("SELECT 1", None)])  # type: ignore[attr-defined]
+        self.assertEqual(cur.executed, [("SELECT 1", None)])
 
     def test_does_not_retry_when_conn_still_open_after_error(self):
         """Statement-level OperationalError (e.g. statement_timeout) keeps

@@ -107,11 +107,11 @@ class TestHashAudioContentTagInvariance(unittest.TestCase):
             before = hash_audio_content(target)
 
             from mutagen.id3 import ID3, TIT2  # type: ignore[import-untyped]
-            from mutagen.mp3 import MP3  # type: ignore[import-untyped]
+            from mutagen.mp3 import MP3
 
             audio = MP3(str(target), ID3=ID3)
             try:
-                audio.add_tags()  # type: ignore[no-untyped-call]
+                audio.add_tags()
             except Exception:  # pragma: no cover — already has tags
                 pass
             assert audio.tags is not None

@@ -2041,14 +2041,14 @@ class _ForensicsDB(FakePipelineDB):
     def set_stub_search_history(self, rows: list[dict[str, object]]) -> None:
         self._stub_search_history = list(rows)
 
-    def get_search_history(self, request_id: int) -> list[dict[str, object]]:  # type: ignore[override]
+    def get_search_history(self, request_id: int) -> list[dict[str, object]]:
         return [row for row in self._stub_search_history
                 if row.get("request_id") == request_id]
 
     def set_stub_download_history(self, rows: list[dict[str, object]]) -> None:
         self._stub_download_history = list(rows)
 
-    def get_download_history(self, request_id: int) -> list[dict[str, object]]:  # type: ignore[override]
+    def get_download_history(self, request_id: int) -> list[dict[str, object]]:
         if self._stub_download_history is None:
             return super().get_download_history(request_id)
         return [row for row in self._stub_download_history

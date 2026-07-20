@@ -88,6 +88,22 @@ than just fixing it. **The repo is either 0-errors or it is not. Make it
 - For focused feedback during implementation, use
   `pyright --threads 4 <files>`; the final check still covers the whole repo
 
+### Production typing escape-hatch ratchet (issue #765)
+
+Production code (every production `.py` outside `tests/`; the generated
+vulture whitelist is excluded) is migrating to pyright strict. Explicit `Any`, `cast(...)`, `# type: ignore`, and bare
+`# pyright: ignore` are banned there — the scoped `# pyright: ignore[rule]`
+form is the single sanctioned escape hatch (and
+`reportUnnecessaryTypeIgnoreComment` flags it the moment it goes stale).
+Existing debt is held in `tests/_typing_ratchet_baseline.py`, which
+`tests/test_typing_ratchet.py` requires to match the live scan EXACTLY:
+new escape hatches fail the suite, and a PR that removes some must tighten
+the baseline in the same PR
+(`nix-shell --run "python3 -m tests._typing_ratchet_scanner" >
+tests/_typing_ratchet_baseline.py`). Counting is lexical (stdlib
+tokenizer) — mentions inside strings and docstrings don't count, and the
+scanner is deliberately not a semantic analyzer.
+
 ## HTTP request bodies — use `pydantic.BaseModel`
 
 Inbound HTTP request bodies in `web/routes/*.py` go through `pydantic.BaseModel` (v2) at the handler entry. Pydantic stops at the route layer; internal types stay `msgspec.Struct` / `@dataclass` per the next section. Enforced by `tests/test_pydantic_route_audit.py` — any `post_*` handler that reads the raw `body` dict instead of going through `parse_body` fails the audit (small allowlist with a rationale per entry).

@@ -1722,7 +1722,7 @@ class TestFullPipelineContract(unittest.TestCase):
         # dataclasses.replace since QualityRankConfig is frozen.
         import dataclasses
         foreign_cfg = dataclasses.replace(
-            cfg, bitrate_metric=ForeignRankBitrateMetric.AVG)  # type: ignore[arg-type]
+            cfg, bitrate_metric=ForeignRankBitrateMetric.AVG)
 
         m = AudioQualityMeasurement(
             min_bitrate_kbps=200,

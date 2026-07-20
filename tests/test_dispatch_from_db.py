@@ -420,7 +420,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 result = dispatch_import_from_db(
                     db,  # type: ignore[arg-type]
                     request_id=42,
-                    failed_path=tmpdir,  # type: ignore[arg-type]
+                    failed_path=tmpdir,
                     source_username="alice",
                     download_log_id=download_log_id,
                     quality_gate_fn=noop_quality_gate,
@@ -496,7 +496,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 result = dispatch_import_from_db(
                     db,  # type: ignore[arg-type]
                     request_id=42,
-                    failed_path=tmpdir,  # type: ignore[arg-type]
+                    failed_path=tmpdir,
                     source_username="alice",
                     import_job_id=job.id,
                 )
@@ -560,7 +560,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 result = dispatch_import_from_db(
                     db,  # type: ignore[arg-type]
                     request_id=42,
-                    failed_path=tmpdir,  # type: ignore[arg-type]
+                    failed_path=tmpdir,
                     source_username="alice",
                     import_job_id=job.id,
                 )
@@ -628,7 +628,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 result = dispatch_import_from_db(
                     db,  # type: ignore[arg-type]
                     request_id=42,
-                    failed_path=tmpdir,  # type: ignore[arg-type]
+                    failed_path=tmpdir,
                     source_username="alice",
                     import_job_id=job.id,
                 )
@@ -696,7 +696,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 result = dispatch_import_from_db(
                     db,  # type: ignore[arg-type]
                     request_id=42,
-                    failed_path=tmpdir,  # type: ignore[arg-type]
+                    failed_path=tmpdir,
                     source_username="alice",
                     import_job_id=job.id,
                 )

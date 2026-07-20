@@ -107,7 +107,7 @@ process.stdout.write(JSON.stringify(rows.map(row => ({
 }))));
 """, payload)
     assert isinstance(result, list)
-    return [value for value in result if isinstance(value, dict)]  # type: ignore[return-value]
+    return [value for value in result if isinstance(value, dict)]
 
 
 def _real_rolling_collision(payload: dict[str, object]) -> str:

@@ -21,7 +21,7 @@ import sys
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from beets import config, library, plugins  # type: ignore[attr-defined]
+from beets import config, library, plugins
 from beets.importer.actions import Action, DuplicateAction
 from beets.importer.session import ImportSession
 from beets.importer.tasks import ImportTask as BeetsImportTask

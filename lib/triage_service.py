@@ -141,7 +141,7 @@ def parse_filter(spec: str) -> ParsedTriageFilter:
     ``InvalidFilterError`` on anything else. The DB layer trusts the
     parser — invalid specs never reach SQL.
     """
-    if not isinstance(spec, str):  # type: ignore[unreachable]
+    if not isinstance(spec, str):
         raise InvalidFilterError(f"filter spec must be str, got {type(spec)!r}")
     raw = spec.strip().lower()
     if not raw:

@@ -374,7 +374,7 @@ class TestPerThreadDbHandles(unittest.TestCase):
         srv = self._srv
         srv._db_dsn = None
         sentinel = object()
-        srv.db = sentinel  # type: ignore[assignment]
+        srv.db = sentinel
         srv._close_thread_handles()
         self.assertIs(srv.db, sentinel)
 
@@ -382,7 +382,7 @@ class TestPerThreadDbHandles(unittest.TestCase):
         srv = self._srv
         srv._db_dsn = None
         sentinel = object()
-        srv.db = sentinel  # type: ignore[assignment]
+        srv.db = sentinel
 
         seen: list[object] = []
 

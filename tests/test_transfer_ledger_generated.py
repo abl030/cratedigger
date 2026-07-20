@@ -113,7 +113,7 @@ def _run_enqueue(world: EnqueueWorld) -> tuple[list[str], FakePipelineDB]:
         order.append(f"ledger:{len(rows)}")
         return real_record(rows)
 
-    db.record_transfer_enqueue = recording_record  # type: ignore[method-assign]
+    db.record_transfer_enqueue = recording_record
 
     real_enqueue = slskd.transfers.enqueue
 

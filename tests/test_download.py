@@ -736,7 +736,7 @@ class TestSlskdEnqueueWithOutcome(unittest.TestCase):
         import requests
 
         err = requests.HTTPError("500 Server Error")
-        err.response = SimpleNamespace(text=body)  # type: ignore[attr-defined]
+        err.response = SimpleNamespace(text=body)
         return err
 
     def _make_http_error(self, body: str, status_code: int = 500) -> Exception:
@@ -746,7 +746,7 @@ class TestSlskdEnqueueWithOutcome(unittest.TestCase):
         import requests
 
         err = requests.HTTPError(f"{status_code} Server Error")
-        err.response = SimpleNamespace(  # type: ignore[attr-defined]
+        err.response = SimpleNamespace(
             text=body, status_code=status_code)
         return err
 
@@ -972,7 +972,7 @@ class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
             order.append(f"ledger:{len(rows)}")
             return real_record(rows)
 
-        db.record_transfer_enqueue = recording_record  # type: ignore[method-assign]
+        db.record_transfer_enqueue = recording_record
 
         real_enqueue = slskd.transfers.enqueue
 
@@ -1045,7 +1045,7 @@ class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
         db = FakePipelineDB()
         slskd = FakeSlskdAPI()
         error = requests.HTTPError("500 Server Error")
-        error.response = SimpleNamespace(  # type: ignore[attr-defined]
+        error.response = SimpleNamespace(
             text="User peer1 appears to be offline",
         )
         slskd.transfers.enqueue_error = error
@@ -5082,7 +5082,7 @@ class TestPollActiveDownloads(unittest.TestCase):
             ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
             cfg = cast(Any, ctx.cfg)
             cfg.beets_staging_dir = staging_root
-            fake_db.abandon_auto_import_request = lambda **_kwargs: None  # type: ignore[method-assign]
+            fake_db.abandon_auto_import_request = lambda **_kwargs: None
 
             poll_active_downloads(ctx)
 
