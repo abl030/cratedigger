@@ -16,6 +16,7 @@ from unittest.mock import patch
 from beets import library
 
 from lib.destructive_release_service import (
+    BanSourceBeetsAmbiguous,
     BanSourceCleanupIncomplete,
     BanSourceImporterBusy,
     BanSourceLockContended,
@@ -24,6 +25,8 @@ from lib.destructive_release_service import (
     BanSourceSuccess,
     BanSourceTransitionConflict,
     DeleteImporterBusy,
+    DeleteAlbumAuthorityMismatch,
+    DeleteBeetsAmbiguous,
     DeleteLockContended,
     DeleteReleaseMismatch,
     DeleteRequest,
@@ -31,13 +34,13 @@ from lib.destructive_release_service import (
     ban_source,
     delete_release_from_library,
 )
-from lib.beets_db import BeetsDB
+from lib.beets_db import BeetsDB, CurrentBeetsMissing
 from lib.beets_delete import (
     BeetsDeleteCompleted,
+    BeetsDeleteFailed,
     BeetsDeleteRequest,
     run_beets_delete,
 )
-from lib.release_cleanup import ReleaseCleanupResult
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
     ADVISORY_LOCK_NAMESPACE_RELEASE,
@@ -46,7 +49,9 @@ from lib.pipeline_db import (
 )
 from lib.import_queue import IMPORT_JOB_AUTOMATION
 from lib.transitions import TransitionConflict, TransitionConflictKind
+from lib.release_identity import ReleaseIdentity
 from tests.fakes import FakeBeetsDB, FakePipelineDB
+from tests.beets_world import BeetsWorld, BeetsWorldRelease
 from tests.helpers import make_request_row
 from tests.test_pipeline_db import TEST_DSN, make_db, requires_postgres
 
@@ -55,6 +60,7 @@ RELEASE_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 RELEASE_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 DISCOGS_A = "12856590"
 MALFORMED_ID = "malformed-provider-id"
+REPO = Path(__file__).resolve().parent.parent
 
 
 def _album(album_id: int = 7, release_id: str = RELEASE_A) -> dict[str, object]:
@@ -242,41 +248,47 @@ class TestBanSourceAuthority(unittest.TestCase):
         )
         self.assertEqual(self.db.download_logs[-1].outcome, "curator_ban")
 
-    def test_injected_release_cleanup_runs_at_the_real_service_boundary(self) -> None:
-        calls: list[dict[str, object]] = []
+    def test_injected_exact_delete_runs_at_the_real_service_boundary(self) -> None:
+        self.beets.set_album_ids_for_release(RELEASE_A, [7])
+        calls: list[BeetsDeleteRequest] = []
 
-        def remove_release(**kwargs):
-            calls.append(kwargs)
-            return ReleaseCleanupResult(
-                beets_removed=True,
-                absent_after=True,
-                selector_failures=(),
+        def exact_delete(request: BeetsDeleteRequest) -> BeetsDeleteCompleted:
+            calls.append(request)
+            return BeetsDeleteCompleted(
+                album_id=request.album_id,
+                album_name="Album A",
+                artist_name="Artist A",
+                former_album_path="/library/Artist A/Album A",
+                deleted_tracks=1,
+                deleted_artifacts=1,
+                preserved_paths=(),
             )
 
         result = ban_source(
             pipeline_db=self.db,
             beets_db=self.beets,
             request=BanSourceRequest(request_id=41),
-            cleanup_release_fn=remove_release,
+            beets_delete_fn=exact_delete,
         )
 
         self.assertIsInstance(result, BanSourceSuccess)
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]["release_id"], RELEASE_A)
-        self.assertTrue(calls[0]["clear_pipeline_state"])
+        self.assertEqual(calls[0].album_id, 7)
+        self.assertEqual(calls[0].expected_release_id, RELEASE_A)
 
     def test_cleanup_that_leaves_exact_release_is_typed_incomplete(self) -> None:
-        failure = ReleaseCleanupResult(
-            beets_removed=False,
-            absent_after=False,
-            selector_failures=(),
-        )
+        self.beets.set_album_ids_for_release(RELEASE_A, [7])
 
         result = ban_source(
             pipeline_db=self.db,
             beets_db=self.beets,
             request=BanSourceRequest(request_id=41),
-            cleanup_release_fn=lambda **_kwargs: failure,
+            beets_delete_fn=lambda request: BeetsDeleteFailed(
+                album_id=request.album_id,
+                reason="filesystem_error",
+                detail="planted exact-delete failure",
+                album_still_present=True,
+            ),
         )
 
         self.assertIsInstance(result, BanSourceCleanupIncomplete)
@@ -287,6 +299,78 @@ class TestBanSourceAuthority(unittest.TestCase):
         self.assertEqual(self.db.download_logs[-1].outcome, "curator_ban")
         audit = json.loads(self.db.download_logs[-1].validation_result)
         self.assertIs(audit["cleanup_absent_after"], False)
+
+    def test_ambiguous_current_beets_authority_is_zero_mutation(self) -> None:
+        self.beets.set_album_ids_for_release(RELEASE_A, [7, 8])
+        before = self.db.request(41).copy()
+        delete_calls: list[BeetsDeleteRequest] = []
+
+        result = ban_source(
+            pipeline_db=self.db,
+            beets_db=self.beets,
+            request=BanSourceRequest(request_id=41),
+            beets_delete_fn=lambda request: (
+                delete_calls.append(request)
+                or BeetsDeleteCompleted(
+                    album_id=request.album_id,
+                    album_name="Album A",
+                    artist_name="Artist A",
+                    former_album_path="/library/Artist A/Album A",
+                    deleted_tracks=1,
+                    deleted_artifacts=1,
+                    preserved_paths=(),
+                )
+            ),
+        )
+
+        self.assertIsInstance(result, BanSourceBeetsAmbiguous)
+        self.assertEqual(self.db.request(41), before)
+        self.assertEqual(self.db.denylist, [])
+        self.assertEqual(self.db.bad_audio_hashes, [])
+        self.assertEqual(self.db.download_logs, [])
+        self.assertEqual(delete_calls, [])
+
+    def test_unique_snapshot_items_are_hashed_and_exact_album_id_is_deleted(
+        self,
+    ) -> None:
+        fresh_paths = [
+            (701, "/library/Fresh/01.flac"),
+            (702, "/library/Fresh/02.flac"),
+        ]
+        self.beets.set_album_ids_for_release(RELEASE_A, [7])
+        self.beets.set_item_paths(RELEASE_A, fresh_paths)
+        delete_calls: list[BeetsDeleteRequest] = []
+
+        def exact_delete(request: BeetsDeleteRequest) -> BeetsDeleteCompleted:
+            delete_calls.append(request)
+            return BeetsDeleteCompleted(
+                album_id=request.album_id,
+                album_name="Album A",
+                artist_name="Artist A",
+                former_album_path="/library/Fresh",
+                deleted_tracks=2,
+                deleted_artifacts=2,
+                preserved_paths=(),
+            )
+
+        with patch(
+            "lib.destructive_release_service.hash_audio_content",
+            side_effect=lambda path, _format: f"hash:{Path(path).name}",
+        ) as hash_audio:
+            result = ban_source(
+                pipeline_db=self.db,
+                beets_db=self.beets,
+                request=BanSourceRequest(request_id=41),
+                beets_delete_fn=exact_delete,
+            )
+
+        self.assertIsInstance(result, BanSourceSuccess)
+        self.assertEqual([call.album_id for call in delete_calls], [7])
+        self.assertEqual(
+            [str(call.args[0]) for call in hash_audio.call_args_list],
+            [path for _item_id, path in fresh_paths],
+        )
+        self.assertEqual(self.beets.get_item_paths_calls, [])
 
 
 class TestLibraryDeleteAuthority(unittest.TestCase):
@@ -449,6 +533,168 @@ class TestLibraryDeleteAuthority(unittest.TestCase):
                 self.assertIsNotNone(self.beets.get_album_detail(7))
                 self.assertIsNotNone(self.db.get_request(41))
 
+    def test_duplicate_current_release_is_typed_zero_mutation(self) -> None:
+        self.beets.set_album_ids_for_release(RELEASE_A, [7, 8])
+        delete_calls: list[BeetsDeleteRequest] = []
+
+        def unexpected_delete(
+            request: BeetsDeleteRequest,
+        ) -> BeetsDeleteCompleted:
+            delete_calls.append(request)
+            raise AssertionError("ambiguous authority reached pinned delete")
+
+        result = delete_release_from_library(
+            pipeline_db=self.db,
+            beets_db=self.beets,
+            request=DeleteRequest(album_id=7, purge_pipeline=True),
+            beets_delete_fn=unexpected_delete,
+        )
+
+        self.assertIsInstance(result, DeleteBeetsAmbiguous)
+        self.assertEqual(delete_calls, [])
+        self._assert_no_mutation()
+
+    def test_requested_album_pk_must_equal_fresh_unique_authority(self) -> None:
+        self.beets.set_item_paths(
+            RELEASE_A,
+            [(901, "/library/Fresh/01.flac")],
+        )
+        delete_calls: list[BeetsDeleteRequest] = []
+
+        def unexpected_delete(
+            request: BeetsDeleteRequest,
+        ) -> BeetsDeleteCompleted:
+            delete_calls.append(request)
+            raise AssertionError("mismatched album PK reached pinned delete")
+
+        result = delete_release_from_library(
+            pipeline_db=self.db,
+            beets_db=self.beets,
+            request=DeleteRequest(album_id=7, purge_pipeline=True),
+            beets_delete_fn=unexpected_delete,
+        )
+
+        self.assertIsInstance(result, DeleteAlbumAuthorityMismatch)
+        self.assertEqual(delete_calls, [])
+        self._assert_no_mutation()
+
+
+class TestDestructiveCurrentAuthorityRealBeets(unittest.TestCase):
+    def test_ban_source_hashes_moved_snapshot_and_pinned_deletes_each_identity(
+        self,
+    ) -> None:
+        worlds = (
+            ("mb", RELEASE_A, False),
+            ("discogs-modern", DISCOGS_A, False),
+            ("discogs-legacy", DISCOGS_A, True),
+        )
+        for name, release_id, legacy in worlds:
+            with self.subTest(identity=name):
+                with BeetsWorld(
+                    REPO,
+                    subprocess_mirror_url="http://127.0.0.1:9",
+                ) as world:
+                    world.import_release(BeetsWorldRelease(
+                        release_id=release_id,
+                        artist="Archive Artist",
+                        album="Exact Pressing",
+                        year=2001,
+                        track_count=2,
+                    ))
+                    if name.startswith("discogs"):
+                        world.set_discogs_identity_layout(
+                            release_id,
+                            legacy=legacy,
+                        )
+                    moved = world.relocate_release_out_of_band(
+                        release_id,
+                        world.library_root / name / "fresh moved album",
+                        store_relative_paths=True,
+                    )
+                    pipeline = FakePipelineDB()
+                    pipeline.seed_request(make_request_row(
+                        id=41,
+                        status="imported",
+                        mb_release_id=release_id,
+                        discogs_release_id=(
+                            release_id if name.startswith("discogs") else None
+                        ),
+                        imported_path="/poisoned/stale/request/path",
+                    ))
+                    hashed: list[str] = []
+                    with (
+                        world.subprocess_environment(),
+                        patch(
+                            "lib.destructive_release_service.hash_audio_content",
+                            side_effect=lambda path, _format: (
+                                hashed.append(str(path)) or f"hash:{Path(path).name}"
+                            ),
+                        ),
+                        BeetsDB(
+                            str(world.library_db),
+                            library_root=str(world.library_root),
+                        ) as beets,
+                    ):
+                        result = ban_source(
+                            pipeline_db=pipeline,
+                            beets_db=beets,
+                            request=BanSourceRequest(41),
+                        )
+
+                    self.assertIsInstance(result, BanSourceSuccess)
+                    self.assertEqual(hashed, list(moved.item_paths))
+                    self.assertTrue(
+                        all(not Path(path).exists() for path in moved.item_paths)
+                    )
+                    with BeetsDB(
+                        str(world.library_db),
+                        library_root=str(world.library_root),
+                    ) as beets:
+                        identity = ReleaseIdentity.from_id(release_id)
+                        assert identity is not None
+                        self.assertIsInstance(
+                            beets.resolve_current_release(identity),
+                            CurrentBeetsMissing,
+                        )
+
+    def test_library_delete_real_duplicate_authority_preserves_all_files(
+        self,
+    ) -> None:
+        with BeetsWorld(REPO) as world:
+            release = BeetsWorldRelease(
+                release_id=RELEASE_A,
+                artist="Archive Artist",
+                album="Duplicate Exact Pressing",
+                year=2001,
+                track_count=1,
+            )
+            first = world.import_release(release)
+            second = world.import_duplicate_release(release)
+            before = {
+                path: Path(path).read_bytes()
+                for path in first.item_paths + second.item_paths
+            }
+            with BeetsDB(
+                str(world.library_db),
+                library_root=str(world.library_root),
+            ) as beets:
+                result = delete_release_from_library(
+                    pipeline_db=FakePipelineDB(),
+                    beets_db=beets,
+                    request=DeleteRequest(album_id=first.album_id),
+                    beets_delete_fn=lambda _request: self.fail(
+                        "ambiguous authority reached pinned deletion"
+                    ),
+                    notify_fn=lambda _path: self.fail(
+                        "ambiguous authority reached media notification"
+                    ),
+                )
+
+            self.assertIsInstance(result, DeleteBeetsAmbiguous)
+            self.assertEqual(
+                {path: Path(path).read_bytes() for path in before},
+                before,
+            )
 
 @requires_postgres
 class TestDestructiveAuthorityRealPostgres(unittest.TestCase):
@@ -503,6 +749,7 @@ class TestDestructiveAuthorityRealPostgres(unittest.TestCase):
         db1 = make_db()
         beets = FakeBeetsDB()
         beets.set_album_detail(7, _album())
+        beets.set_album_ids_for_release(RELEASE_A, [7])
         barrier = threading.Barrier(2)
         try:
             with db1.advisory_lock(
@@ -615,6 +862,7 @@ class TestDestructiveAuthorityRealPostgres(unittest.TestCase):
 
         beets = FakeBeetsDB()
         beets.set_album_detail(7, _album())
+        beets.set_album_ids_for_release(RELEASE_A, [7])
         notifier_saw_released_locks = False
 
         def blocking_delete(request: BeetsDeleteRequest) -> BeetsDeleteCompleted:

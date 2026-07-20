@@ -11,6 +11,11 @@ import msgspec
 
 from lib.pipeline_db.rows import AlbumRequestRow
 from lib.beets_db import BeetsDB
+from lib.beets_delete import (
+    BeetsDeleteCompleted,
+    BeetsDeleteFailed,
+    BeetsDeleteRequest,
+)
 from lib.config import CratediggerConfig
 from lib.destructive_release_service import (
     BanSourceRequest,
@@ -53,7 +58,6 @@ from lib.quality import (
 )
 from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
 from lib.mbid_replace_service import MbidReplaceService, RESULT_REPLACED
-from lib.release_cleanup import ReleaseCleanupResult
 from lib.release_identity import ReleaseIdentity
 from lib.search_plan_service import SearchPlanService
 from lib.transitions import (
@@ -927,19 +931,23 @@ class LifecycleWorld:
         cfg = CratediggerConfig(
             beets_staging_dir=str(self.beets.incoming_root),
         )
-        service = MbidReplaceService(
-            db=self.db,
-            config=cfg,
-            beets_db_factory=lambda: self.beets,
-            mb_lookup=mb_lookup,
-            discogs_lookup=discogs_lookup,
-            search_plan_service=SearchPlanService(self.db, cfg),
-            remove_release_fn=self._remove_release,
-        )
-        result = service.replace_request_mbid(
-            request_id,
-            target_mb_release_id=target.release_id,
-        )
+        with BeetsDB(
+            str(self.beets.library_db),
+            library_root=str(self.beets.library_root),
+        ) as current_beets:
+            service = MbidReplaceService(
+                db=self.db,
+                config=cfg,
+                beets_db_factory=lambda: current_beets,
+                mb_lookup=mb_lookup,
+                discogs_lookup=discogs_lookup,
+                search_plan_service=SearchPlanService(self.db, cfg),
+                beets_delete_fn=self._delete_release,
+            )
+            result = service.replace_request_mbid(
+                request_id,
+                target_mb_release_id=target.release_id,
+            )
         if result.outcome != RESULT_REPLACED or result.new_request_id is None:
             raise AssertionError(
                 f"production Replace failed: {result!r}"
@@ -1000,7 +1008,7 @@ class LifecycleWorld:
                     request_id=request_id,
                     expected_release_id=release.release_id,
                 ),
-                cleanup_release_fn=self._remove_release,
+                beets_delete_fn=self._delete_release,
             )
         if isinstance(result, BanSourceReleaseMismatch):
             if not (
@@ -1334,17 +1342,31 @@ class LifecycleWorld:
             f"{self._operator_counter:012x}"
         )
 
-    def _remove_release(self, **kwargs: Any) -> ReleaseCleanupResult:
-        release_id = str(kwargs["release_id"])
-        request_id = int(kwargs["request_id"])
-        removed = self.beets.remove_release(release_id)
-        absent_after = self._album_for_release(release_id) is None
-        if absent_after and bool(kwargs.get("clear_pipeline_state", True)):
-            self.db.clear_on_disk_quality_fields(request_id)
-        return ReleaseCleanupResult(
-            beets_removed=removed > 0 and absent_after,
-            absent_after=absent_after,
-            selector_failures=(),
+    def _delete_release(
+        self,
+        request: BeetsDeleteRequest,
+    ) -> BeetsDeleteCompleted | BeetsDeleteFailed:
+        album = self.beets.library.get_album(request.album_id)
+        if album is None:
+            return BeetsDeleteFailed(
+                album_id=request.album_id,
+                reason="album_not_found",
+                detail="world-model exact album is absent",
+                album_still_present=False,
+            )
+        snapshot = self.beets.snapshot_album(album)
+        tracks = len(snapshot.item_paths)
+        album_name = str(album.get("album") or "")
+        artist_name = str(album.get("albumartist") or "")
+        album.remove(delete=True)
+        return BeetsDeleteCompleted(
+            album_id=request.album_id,
+            album_name=album_name,
+            artist_name=artist_name,
+            former_album_path=snapshot.album_path,
+            deleted_tracks=tracks,
+            deleted_artifacts=tracks,
+            preserved_paths=(),
         )
 
     def _run_beets_subprocess(self, **kwargs: Any) -> ImportOneRun:

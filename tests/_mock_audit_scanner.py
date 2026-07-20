@@ -452,7 +452,6 @@ MULTILINE_PATCH_BASELINE: dict[str, int] = {
     'lib.import_preview.preview_import_from_download_log': 1,
     'lib.matching._browse_directories': 1,
     'lib.mbid_replace_service.delete_wrong_match_group': 9,
-    'lib.mbid_replace_service.remove_and_reset_release': 6,
     'lib.quality.full_pipeline_decision_from_evidence': 1,
     'lib.quarantine_triage_service.os.scandir': 1,
     'lib.wrong_match_cleanup_service.cleanup_all_wrong_matches': 3,

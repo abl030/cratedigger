@@ -9997,8 +9997,7 @@ class TestReplaceFullPath(unittest.TestCase):
     - real ``FakePipelineDB.supersede_request_mbid`` (single-txn
       semantics over the in-memory store, mirrors PipelineDB's atomic
       block)
-    - real ``lib.release_cleanup.remove_and_reset_release`` with
-      ``clear_pipeline_state=False`` (subprocess + beets_db stubbed)
+    - fresh exact Beets resolution plus injected pinned album deletion
     - real ``lib.wrong_match_delete_service.delete_wrong_match_group``
     - real ``lib.processing_paths.stage_to_ai_path`` against a
       temporary staging directory
@@ -10091,20 +10090,33 @@ class TestReplaceFullPath(unittest.TestCase):
         }
 
         plan_svc = MagicMock()
+        from lib.beets_delete import BeetsDeleteCompleted
+        beets = FakeBeetsDB(library_root="/library")
+        beets.set_album_ids_for_release(self.PET_GRIEF_OLD, [77])
+        beets.set_item_paths(
+            self.PET_GRIEF_OLD,
+            [(701, "/library/Pet Grief/Current/01.flac")],
+        )
+        exact_delete = MagicMock(side_effect=lambda request: (
+            BeetsDeleteCompleted(
+                album_id=request.album_id,
+                album_name="Pet Grief",
+                artist_name="Pet Grief",
+                former_album_path="/library/Pet Grief/Current",
+                deleted_tracks=1,
+                deleted_artifacts=1,
+                preserved_paths=(),
+            )
+        ))
         with patch(
-            "lib.mbid_replace_service.remove_and_reset_release",
-            MagicMock(return_value=MagicMock(
-                beets_removed=True, absent_after=True,
-                selector_failures=(),
-            )),
-        ) as mock_remove, patch(
             "lib.mbid_replace_service.trigger_plex_scan", MagicMock(),
         ) as mock_plex, patch(
             "lib.mbid_replace_service.trigger_jellyfin_scan", MagicMock(),
         ) as mock_jellyfin:
             svc = MbidReplaceService(
                 db=db, config=cfg, slskd=MagicMock(),
-                beets_db_factory=lambda: MagicMock(),
+                beets_db_factory=lambda: beets,
+                beets_delete_fn=exact_delete,
                 mb_lookup=lambda mbid, *, fresh=False: target,
                 search_plan_service=plan_svc,
             )
@@ -10113,7 +10125,7 @@ class TestReplaceFullPath(unittest.TestCase):
                 4194, target_mb_release_id=self.PET_GRIEF_CANONICAL,
             )
         return db, result, tmpdir, plan_svc, {
-            "remove": mock_remove,
+            "delete": exact_delete,
             "plex": mock_plex,
             "jellyfin": mock_jellyfin,
             "stage_path": stage_path,
@@ -10147,10 +10159,9 @@ class TestReplaceFullPath(unittest.TestCase):
         self.assertEqual(len(tracks), 2)
         # Source inherited from old.
         self.assertEqual(new["source"], "request")
-        # Beets removal called with clear_pipeline_state=False.
-        mocks["remove"].assert_called_once()
-        _, kwargs = mocks["remove"].call_args
-        self.assertFalse(kwargs.get("clear_pipeline_state"))
+        # Beets mutation targets only the fresh exact album primary key.
+        mocks["delete"].assert_called_once()
+        self.assertEqual(mocks["delete"].call_args.args[0].album_id, 77)
         # Rescans triggered.
         mocks["plex"].assert_called_once()
         mocks["jellyfin"].assert_called_once()
@@ -10172,13 +10183,12 @@ class TestReplaceFullPath(unittest.TestCase):
         """``status='wanted'`` does NOT mean "nothing on disk" — library-
         backfill rows track pre-existing installs while still wanted
         (the Passenger regression, 2026-07-18). Replace displaces the
-        old release whenever its id resolves; the removal primitive is
-        a safe no-op when the release is absent from beets. Staging
+        old release whenever it resolves uniquely. Staging
         cleanup still runs."""
         from lib.mbid_replace_service import RESULT_REPLACED
         db, result, _, _, mocks = self._run(old_status="wanted")
         self.assertEqual(result.outcome, RESULT_REPLACED)
-        mocks["remove"].assert_called_once()
+        mocks["delete"].assert_called_once()
         if mocks["stage_path"]:
             self.assertFalse(
                 os.path.isdir(mocks["stage_path"]),
@@ -10221,7 +10231,7 @@ class TestReplaceFullPath(unittest.TestCase):
         from lib.mbid_replace_service import RESULT_REPLACED
         _db, result, _, _, mocks = self._run(old_status="unsearchable")
         self.assertEqual(result.outcome, RESULT_REPLACED)
-        mocks["remove"].assert_called_once()
+        mocks["delete"].assert_called_once()
 
 
 # ---------------------------------------------------------------------------

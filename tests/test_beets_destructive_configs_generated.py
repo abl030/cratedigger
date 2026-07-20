@@ -126,7 +126,7 @@ def assert_real_beets_contract(observation: RealBeetsObservation) -> None:
         raise AssertionError("exact-delete touched separately owned import sources")
 
     if observation.expected_config_failure:
-        if observation.cli_failure_reason != "exception":
+        if observation.cli_failure_reason != "configuration_error":
             raise AssertionError("invalid Beets config was not rejected by preflight")
         if not observation.cli_album_present or observation.cli_items_present == 0:
             raise AssertionError("CLI config rejection mutated Beets metadata")

@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 from urllib.error import URLError
@@ -22,8 +23,16 @@ import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from hypothesis import given, strategies as st
 
 from lib.config import CratediggerConfig
+from lib.beets_db import BeetsDB, CurrentBeetsMissing
+from lib.beets_delete import (
+    BeetsDeleteCompleted,
+    BeetsDeleteFailed,
+    BeetsDeleteRequest,
+    run_beets_delete,
+)
 from lib.mbid_replace_service import (
     MbidReplaceService,
+    REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
     ReplaceResult,
     REPLACE_REASON_CROSS_PATHWAY_TARGET,
     REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
@@ -42,9 +51,10 @@ from lib.mbid_replace_service import (
 )
 from web.discogs import DiscogsMirrorNotConfigured
 from lib.pipeline_db import MbidCollisionError, SupersedeRaceError
-from lib.release_cleanup import ReleaseCleanupResult
+from lib.release_identity import ReleaseIdentity
 from lib.wrong_match_delete_service import WrongMatchDeleteSummary
-from tests.fakes import FakePipelineDB, FakeSlskdAPI
+from tests.fakes import FakeBeetsDB, FakePipelineDB, FakeSlskdAPI
+from tests.beets_world import BeetsWorld, BeetsWorldRelease
 from tests.helpers import make_request_row
 
 
@@ -65,6 +75,7 @@ OLD_DISCOGS_ID = "1001"
 NEW_DISCOGS_ID = "1002"
 DISCOGS_MASTER = "5000"
 OTHER_DISCOGS_MASTER = "6000"
+REPO = Path(__file__).resolve().parent.parent
 
 
 def _empty_wrong_match_summary(_db, request_id: int) -> WrongMatchDeleteSummary:
@@ -225,7 +236,7 @@ class _ServiceCase(unittest.TestCase):
         discogs_lookup=None,
         search_plan_service=None,
         beets_db_factory=None,
-        remove_release_fn=None,
+        beets_delete_fn=None,
         cfg: CratediggerConfig | None = None,
     ) -> MbidReplaceService:
         if mb_lookup is None:
@@ -237,7 +248,7 @@ class _ServiceCase(unittest.TestCase):
         if search_plan_service is None:
             search_plan_service = MagicMock()
         if beets_db_factory is None:
-            beets_db_factory = lambda: MagicMock()
+            beets_db_factory = lambda: FakeBeetsDB()
         return MbidReplaceService(
             db=db,
             config=cfg or CratediggerConfig(),
@@ -246,24 +257,46 @@ class _ServiceCase(unittest.TestCase):
             mb_lookup=mb_lookup,
             discogs_lookup=discogs_lookup,
             search_plan_service=search_plan_service,
-            remove_release_fn=remove_release_fn,
+            beets_delete_fn=beets_delete_fn,
+        )
+
+    def _installed_beets(
+        self,
+        *,
+        release_id: str = OLD_MBID,
+        album_id: int = 77,
+        album_path: str = "/library/Current Artist/Current Album",
+    ) -> FakeBeetsDB:
+        beets = FakeBeetsDB(library_root="/library")
+        beets.set_album_ids_for_release(release_id, [album_id])
+        beets.set_item_paths(
+            release_id,
+            [(album_id * 10, f"{album_path}/01.flac")],
+        )
+        return beets
+
+    @staticmethod
+    def _completed_delete(request: BeetsDeleteRequest) -> BeetsDeleteCompleted:
+        return BeetsDeleteCompleted(
+            album_id=request.album_id,
+            album_name="Current Album",
+            artist_name="Current Artist",
+            former_album_path="/library/Current Artist/Current Album",
+            deleted_tracks=1,
+            deleted_artifacts=1,
+            preserved_paths=(),
         )
 
     def _patch_externals(self):
-        """Patch the four external edges (beets removal, wrong-match
-        cleanup, and the two rescan notifiers) and register cleanup via
+        """Patch wrong-match cleanup and the two rescan notifiers.
+
+        Beets deletion is injected through the service constructor; missing
+        current authority is the ordinary no-op default for unrelated tests.
+        Register cleanup via
         ``self.addCleanup``. Returns the patched mocks as a list so tests
         can assert on them. Scoped per-test — unlike ``patch.stopall``
         which would stop EVERY active patch in the process."""
         patches = [
-            patch(
-                "lib.mbid_replace_service.remove_and_reset_release",
-                MagicMock(return_value=ReleaseCleanupResult(
-                    beets_removed=True,
-                    absent_after=True,
-                    selector_failures=(),
-                )),
-            ),
             patch(
                 "lib.mbid_replace_service.delete_wrong_match_group",
                 MagicMock(side_effect=_empty_wrong_match_summary),
@@ -304,6 +337,29 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         result = svc.replace_request_mbid(99, target_mb_release_id=NEW_MBID)
         self.assertEqual(result.outcome, RESULT_NOT_FOUND)
         self.assertIsNone(result.new_request_id)
+
+    def test_ambiguous_current_beets_authority_is_zero_mutation(self):
+        db = FakePipelineDB()
+        self._seed_old(db, status="imported")
+        before = db.request(42).copy()
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release(OLD_MBID, [7, 8])
+        delete_calls: list[BeetsDeleteRequest] = []
+        svc = self._make_service(
+            db,
+            beets_db_factory=lambda: beets,
+            beets_delete_fn=lambda request: delete_calls.append(request),
+        )
+
+        result = svc.replace_request_mbid(
+            42,
+            target_mb_release_id=NEW_MBID,
+        )
+
+        self.assertEqual(result.outcome, RESULT_WRONG_STATE)
+        self.assertEqual(result.reason, REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS)
+        self.assertEqual(db.request(42), before)
+        self.assertEqual(delete_calls, [])
 
     def test_target_invalid_malformed_uuid(self):
         """Defense-in-depth: the service rejects a non-UUID
@@ -710,13 +766,15 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         )
         self.assertEqual(result.current_status, "imported")
 
-    def test_state_capture_under_lock_sees_fresh_imported_status(self):
+    def test_state_capture_under_lock_uses_fresh_beets_path_not_imported_path(
+        self,
+    ):
         """Race-window guard (P0 fix): the importer finishes between
         Phase 0 (source loaded as ``downloading``) and Phase 1 (lock
         acquired). Without the fix the service would see the stale
         ``downloading`` status and skip beets cleanup. With the fix
         the state-capture inside the lock re-reads the row and Phase 4
-        routes through ``remove_and_reset_release``."""
+        targets the freshly resolved album PK and current path."""
 
         db = FakePipelineDB()
         self._seed_old(db, status="downloading")
@@ -731,16 +789,29 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
 
         db.set_advisory_lock_result(lock_callable)
 
-        # Patch every external. ``remove_and_reset_release`` MUST be
-        # called — that's the assertion.
+        beets = FakeBeetsDB(library_root="/mnt/virtio/Music/Beets")
+        beets.set_album_ids_for_release(OLD_MBID, [77])
+        beets.set_item_paths(OLD_MBID, [(
+            701,
+            "/mnt/virtio/Music/Beets/Fresh Artist/Fresh Album/01.flac",
+        )])
+        delete_calls: list[BeetsDeleteRequest] = []
+
+        def exact_delete(request: BeetsDeleteRequest) -> BeetsDeleteCompleted:
+            delete_calls.append(request)
+            return BeetsDeleteCompleted(
+                album_id=request.album_id,
+                album_name="Fresh Album",
+                artist_name="Fresh Artist",
+                former_album_path=(
+                    "/mnt/virtio/Music/Beets/Fresh Artist/Fresh Album"
+                ),
+                deleted_tracks=1,
+                deleted_artifacts=1,
+                preserved_paths=(),
+            )
+
         with patch(
-            "lib.mbid_replace_service.remove_and_reset_release",
-            MagicMock(return_value=ReleaseCleanupResult(
-                beets_removed=True,
-                absent_after=True,
-                selector_failures=(),
-            )),
-        ) as mock_remove, patch(
             "lib.mbid_replace_service.delete_wrong_match_group",
             side_effect=_empty_wrong_match_summary,
         ), patch(
@@ -748,28 +819,28 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         ) as mock_plex, patch(
             "lib.mbid_replace_service.trigger_jellyfin_scan"
         ) as mock_jellyfin:
-            svc = self._make_service(db)
+            svc = self._make_service(
+                db,
+                beets_db_factory=lambda: beets,
+                beets_delete_fn=exact_delete,
+            )
             result = svc.replace_request_mbid(
                 42, target_mb_release_id=NEW_MBID,
             )
         self.assertEqual(result.outcome, RESULT_REPLACED)
-        # Fresh status was seen → beets removal ran.
-        mock_remove.assert_called_once()
-        _, kwargs = mock_remove.call_args
-        self.assertEqual(kwargs.get("clear_pipeline_state"), False)
-        self.assertEqual(kwargs.get("release_id"), OLD_MBID)
-        # Fresh imported_path was seen → Plex partial scan routed to it.
+        self.assertEqual([request.album_id for request in delete_calls], [77])
+        # The fresh Beets path wins over the freshly written stale request path.
         mock_plex.assert_called_once()
         _, plex_kwargs = mock_plex.call_args
         self.assertEqual(
             plex_kwargs.get("imported_path"),
-            "/mnt/virtio/Music/Beets/Pet Grief/Old Pressing",
+            "/mnt/virtio/Music/Beets/Fresh Artist/Fresh Album",
         )
         mock_jellyfin.assert_called_once()
         _, jellyfin_kwargs = mock_jellyfin.call_args
         self.assertEqual(
             jellyfin_kwargs.get("imported_path"),
-            "/mnt/virtio/Music/Beets/Pet Grief/Old Pressing",
+            "/mnt/virtio/Music/Beets/Fresh Artist/Fresh Album",
         )
 
 
@@ -1156,40 +1227,37 @@ class TestReplaceHappyPath(_ServiceCase):
         # slskd never touched.
         self._assert_slskd_untouched(slskd)
 
-    def test_happy_path_imported_calls_beets_with_clear_false(self):
+    def test_happy_path_imported_calls_pinned_exact_delete(self):
         self._patch_externals()
-        db, _, svc = self._replace(old_status="imported")
-        from lib import mbid_replace_service as svcmod
+        beets = self._installed_beets()
+        exact_delete = MagicMock(side_effect=self._completed_delete)
+        db, _, svc = self._replace(
+            old_status="imported",
+            beets_db_factory=lambda: beets,
+            beets_delete_fn=exact_delete,
+        )
         result = svc.replace_request_mbid(
             42, target_mb_release_id=NEW_MBID,
         )
         self.assertEqual(result.outcome, RESULT_REPLACED)
-        # Beets removal was called WITH clear_pipeline_state=False —
-        # regression guard so a future maintainer can't accidentally
-        # clear the OLD row's characteristic fields.
-        mock_remove = svcmod.remove_and_reset_release
-        assert isinstance(mock_remove, MagicMock)
-        mock_remove.assert_called_once()
-        _, kwargs = mock_remove.call_args
-        self.assertEqual(kwargs.get("clear_pipeline_state"), False)
-        self.assertEqual(kwargs.get("request_id"), 42)
-        self.assertEqual(kwargs.get("release_id"), OLD_MBID)
+        exact_delete.assert_called_once()
+        request = exact_delete.call_args.args[0]
+        self.assertEqual(request.album_id, 77)
+        self.assertEqual(request.expected_release_id, OLD_MBID)
 
-    def test_injected_release_cleanup_runs_at_the_real_service_boundary(self):
+    def test_injected_exact_delete_runs_at_the_real_service_boundary(self):
         self._patch_externals()
-        calls: list[dict[str, object]] = []
+        beets = self._installed_beets(album_id=91)
+        calls: list[BeetsDeleteRequest] = []
 
-        def remove_release(**kwargs):
-            calls.append(kwargs)
-            return ReleaseCleanupResult(
-                beets_removed=True,
-                absent_after=True,
-                selector_failures=(),
-            )
+        def exact_delete(request: BeetsDeleteRequest) -> BeetsDeleteCompleted:
+            calls.append(request)
+            return self._completed_delete(request)
 
         _db, _, svc = self._replace(
             old_status="imported",
-            remove_release_fn=remove_release,
+            beets_db_factory=lambda: beets,
+            beets_delete_fn=exact_delete,
         )
         result = svc.replace_request_mbid(
             42, target_mb_release_id=NEW_MBID,
@@ -1197,8 +1265,8 @@ class TestReplaceHappyPath(_ServiceCase):
 
         self.assertEqual(result.outcome, RESULT_REPLACED)
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]["release_id"], OLD_MBID)
-        self.assertFalse(calls[0]["clear_pipeline_state"])
+        self.assertEqual(calls[0].album_id, 91)
+        self.assertEqual(calls[0].expected_release_id, OLD_MBID)
 
     def test_replace_removes_preexisting_install_on_wanted_backfill_row(self):
         """The Passenger regression (2026-07-18): a library-backfill row is
@@ -1207,20 +1275,21 @@ class TestReplaceHappyPath(_ServiceCase):
         was true at U4 time and silently broke when the 2026-06-04 full-
         library backfill created wanted rows tracking on-disk installs.
         Replace REPLACES: the old release's install is displaced whenever
-        the old release id resolves, whatever the request status."""
+        the old release resolves uniquely, whatever the request status."""
         self._patch_externals()
-        db, _, svc = self._replace(old_status="wanted")
-        from lib import mbid_replace_service as svcmod
+        beets = self._installed_beets()
+        exact_delete = MagicMock(side_effect=self._completed_delete)
+        db, _, svc = self._replace(
+            old_status="wanted",
+            beets_db_factory=lambda: beets,
+            beets_delete_fn=exact_delete,
+        )
         result = svc.replace_request_mbid(
             42, target_mb_release_id=NEW_MBID,
         )
         self.assertEqual(result.outcome, RESULT_REPLACED)
-        mock_remove = svcmod.remove_and_reset_release
-        assert isinstance(mock_remove, MagicMock)
-        mock_remove.assert_called_once()
-        _, kwargs = mock_remove.call_args
-        self.assertEqual(kwargs.get("release_id"), OLD_MBID)
-        self.assertEqual(kwargs.get("clear_pipeline_state"), False)
+        exact_delete.assert_called_once()
+        self.assertEqual(exact_delete.call_args.args[0].album_id, 77)
 
     @given(old_status=st.sampled_from(
         ["wanted", "downloading", "unsearchable", "imported"]))
@@ -1228,20 +1297,23 @@ class TestReplaceHappyPath(_ServiceCase):
         self, old_status,
     ):
         """Generated pair for the pin above: over the complete source-status
-        space, Replace always routes the old release through
-        ``remove_and_reset_release`` (clear_pipeline_state=False). Status
-        is lifecycle; displacement keys on identity."""
-        mocks = self._patch_externals()
-        db, _, svc = self._replace(old_status=old_status)
+        space, Replace always routes a uniquely resolved current album through
+        pinned exact deletion. Status is lifecycle; displacement keys on the
+        fresh identity snapshot."""
+        self._patch_externals()
+        beets = self._installed_beets()
+        exact_delete = MagicMock(side_effect=self._completed_delete)
+        db, _, svc = self._replace(
+            old_status=old_status,
+            beets_db_factory=lambda: beets,
+            beets_delete_fn=exact_delete,
+        )
         result = svc.replace_request_mbid(
             42, target_mb_release_id=NEW_MBID,
         )
         self.assertEqual(result.outcome, RESULT_REPLACED)
-        mock_remove = mocks[0]
-        mock_remove.assert_called_once()
-        _, kwargs = mock_remove.call_args
-        self.assertEqual(kwargs.get("release_id"), OLD_MBID)
-        self.assertEqual(kwargs.get("clear_pipeline_state"), False)
+        exact_delete.assert_called_once()
+        self.assertEqual(exact_delete.call_args.args[0].album_id, 77)
 
     def test_happy_path_downloading_skips_staging_logs_warning(self):
         self._patch_externals()
@@ -1319,9 +1391,6 @@ class TestReplaceWarnings(_ServiceCase):
 
     def test_beets_removal_failure_warning(self):
         with patch(
-            "lib.mbid_replace_service.remove_and_reset_release",
-            side_effect=RuntimeError("beet remove crashed"),
-        ), patch(
             "lib.mbid_replace_service.delete_wrong_match_group",
             side_effect=_empty_wrong_match_summary,
         ), patch(
@@ -1334,7 +1403,14 @@ class TestReplaceWarnings(_ServiceCase):
                 db, status="imported",
                 imported_path="/mnt/virtio/Music/Beets/X",
             )
-            svc = self._make_service(db)
+            beets = self._installed_beets()
+            svc = self._make_service(
+                db,
+                beets_db_factory=lambda: beets,
+                beets_delete_fn=MagicMock(
+                    side_effect=RuntimeError("pinned delete crashed"),
+                ),
+            )
             result = svc.replace_request_mbid(
                 42, target_mb_release_id=NEW_MBID,
             )
@@ -1385,30 +1461,9 @@ class TestReplaceWarnings(_ServiceCase):
                     for w in result.warnings)
             )
 
-    def test_selector_failures_collected_as_warnings(self):
-        """``remove_and_reset_release`` returns selector_failures (e.g.
-        beets ``beet remove`` reported a timeout or nonzero rc). The
-        outcome is still RESULT_REPLACED — Phase 4 errors are
-        non-fatal — but each failure surfaces as a warning string."""
-        from lib.beets_album_op import BeetsOpFailure
-        result_with_failures = ReleaseCleanupResult(
-            beets_removed=True,
-            absent_after=True,
-            selector_failures=(
-                BeetsOpFailure(
-                    reason="timeout", detail="60s",
-                    selector="id:42",
-                ),
-                BeetsOpFailure(
-                    reason="nonzero_rc", detail="rc=1",
-                    selector="mb_albumid:abc",
-                ),
-            ),
-        )
+    def test_pinned_delete_failure_reason_is_preserved_in_warning(self):
+        """#777 configuration failures remain explicit and non-fatal."""
         with patch(
-            "lib.mbid_replace_service.remove_and_reset_release",
-            MagicMock(return_value=result_with_failures),
-        ), patch(
             "lib.mbid_replace_service.delete_wrong_match_group",
             side_effect=_empty_wrong_match_summary,
         ), patch(
@@ -1421,20 +1476,28 @@ class TestReplaceWarnings(_ServiceCase):
                 db, status="imported",
                 imported_path="/mnt/virtio/Music/Beets/X",
             )
-            svc = self._make_service(db)
+            beets = self._installed_beets()
+            svc = self._make_service(
+                db,
+                beets_db_factory=lambda: beets,
+                beets_delete_fn=lambda request: BeetsDeleteFailed(
+                    album_id=request.album_id,
+                    reason="configuration_mismatch",
+                    detail="active pinned config differs",
+                    album_still_present=True,
+                ),
+            )
             result = svc.replace_request_mbid(
                 42, target_mb_release_id=NEW_MBID,
             )
         self.assertEqual(result.outcome, RESULT_REPLACED)
-        # Both failures surfaced; assertion is order-independent.
         self.assertTrue(
-            any("id:42" in w for w in result.warnings),
-            f"selector id:42 missing from warnings: {result.warnings}",
-        )
-        self.assertTrue(
-            any("mb_albumid:abc" in w for w in result.warnings),
-            f"selector mb_albumid:abc missing from warnings: "
-            f"{result.warnings}",
+            any(
+                "id:77" in warning
+                and "configuration_mismatch" in warning
+                for warning in result.warnings
+            ),
+            f"exact pinned failure missing from warnings: {result.warnings}",
         )
 
     def test_staging_rmtree_permission_error_warns(self):
@@ -1602,16 +1665,13 @@ class TestReplaceCallOrder(_ServiceCase):
             manager.supersede(*args, **kwargs)
             return real_supersede(*args, **kwargs)
 
+        beets = self._installed_beets()
+        exact_delete = MagicMock(side_effect=self._completed_delete)
+
         with patch.object(
             db, "supersede_request_mbid",
             side_effect=supersede_recording,
         ), patch(
-            "lib.mbid_replace_service.remove_and_reset_release",
-            MagicMock(return_value=ReleaseCleanupResult(
-                beets_removed=True, absent_after=True,
-                selector_failures=(),
-            )),
-        ) as mock_remove, patch(
             "lib.mbid_replace_service.delete_wrong_match_group",
             side_effect=_empty_wrong_match_summary,
         ) as mock_wm_delete, patch(
@@ -1619,12 +1679,16 @@ class TestReplaceCallOrder(_ServiceCase):
         ) as mock_plex, patch(
             "lib.mbid_replace_service.trigger_jellyfin_scan",
         ) as mock_jelly:
-            manager.attach_mock(mock_remove, "remove_and_reset_release")
+            manager.attach_mock(exact_delete, "beets_delete")
             manager.attach_mock(mock_wm_delete, "delete_wrong_match_group")
             manager.attach_mock(mock_plex, "trigger_plex_scan")
             manager.attach_mock(mock_jelly, "trigger_jellyfin_scan")
 
-            svc = self._make_service(db)
+            svc = self._make_service(
+                db,
+                beets_db_factory=lambda: beets,
+                beets_delete_fn=exact_delete,
+            )
             result = svc.replace_request_mbid(
                 42, target_mb_release_id=NEW_MBID,
             )
@@ -1641,8 +1705,7 @@ class TestReplaceCallOrder(_ServiceCase):
                 "trigger_jellyfin_scan",
             )
         )
-        for fs_helper in ("remove_and_reset_release",
-                          "delete_wrong_match_group"):
+        for fs_helper in ("beets_delete", "delete_wrong_match_group"):
             self.assertLess(
                 call_names.index(fs_helper), first_rescan_idx,
                 f"{fs_helper} ran after a rescan helper "
@@ -1650,6 +1713,179 @@ class TestReplaceCallOrder(_ServiceCase):
             )
         # slskd was never touched (R23).
         self._assert_slskd_untouched(svc.slskd)
+
+
+class TestReplaceCurrentAuthorityRealBeets(_ServiceCase):
+    def test_moved_real_album_exact_delete_and_rescans_across_identities(self):
+        worlds = (
+            ("mb", OLD_MBID, NEW_MBID, RG_ID, False),
+            (
+                "discogs-modern",
+                OLD_DISCOGS_ID,
+                NEW_DISCOGS_ID,
+                DISCOGS_MASTER,
+                False,
+            ),
+            (
+                "discogs-legacy",
+                OLD_DISCOGS_ID,
+                NEW_DISCOGS_ID,
+                DISCOGS_MASTER,
+                True,
+            ),
+        )
+        for name, source_id, target_id, group_id, legacy in worlds:
+            with self.subTest(identity=name):
+                with BeetsWorld(
+                    REPO,
+                    subprocess_mirror_url="http://127.0.0.1:9",
+                ) as world:
+                    world.import_release(BeetsWorldRelease(
+                        release_id=source_id,
+                        artist="Archive Artist",
+                        album="Replace Source",
+                        year=2001,
+                        track_count=2,
+                    ))
+                    if name.startswith("discogs"):
+                        world.set_discogs_identity_layout(
+                            source_id,
+                            legacy=legacy,
+                        )
+                    moved = world.relocate_release_out_of_band(
+                        source_id,
+                        world.library_root / name / "fresh current path",
+                        store_relative_paths=True,
+                    )
+                    db = FakePipelineDB()
+                    if name == "mb":
+                        self._seed_old(
+                            db,
+                            status="imported",
+                            imported_path="/poisoned/request/cache",
+                        )
+                    else:
+                        self._seed_discogs(
+                            db,
+                            status="imported",
+                            imported_path="/poisoned/request/cache",
+                        )
+                    target = (
+                        _fake_target_payload(
+                            mbid=target_id,
+                            rg_id=group_id,
+                        )
+                        if name == "mb"
+                        else _fake_discogs_payload(
+                            release_id=target_id,
+                            master=group_id,
+                        )
+                    )
+                    scans: list[str | None] = []
+                    with (
+                        world.subprocess_environment(),
+                        BeetsDB(
+                            str(world.library_db),
+                            library_root=str(world.library_root),
+                        ) as beets,
+                        patch(
+                            "lib.mbid_replace_service.trigger_plex_scan",
+                            side_effect=lambda _cfg, imported_path=None: (
+                                scans.append(imported_path)
+                            ),
+                        ),
+                        patch(
+                            "lib.mbid_replace_service.trigger_jellyfin_scan",
+                            side_effect=lambda _cfg, imported_path=None: (
+                                scans.append(imported_path)
+                            ),
+                        ),
+                    ):
+                        service = self._make_service(
+                            db,
+                            beets_db_factory=lambda: beets,
+                            beets_delete_fn=run_beets_delete,
+                            mb_lookup=lambda _rid, *, fresh=False: target,
+                            discogs_lookup=lambda _rid, *, fresh=False: target,
+                        )
+                        result = service.replace_request_mbid(
+                            42,
+                            target_mb_release_id=target_id,
+                        )
+
+                    self.assertEqual(result.outcome, RESULT_REPLACED)
+                    self.assertEqual(scans, [moved.album_path, moved.album_path])
+                    self.assertTrue(
+                        all(not Path(path).exists() for path in moved.item_paths)
+                    )
+                    with BeetsDB(
+                        str(world.library_db),
+                        library_root=str(world.library_root),
+                    ) as beets:
+                        identity = ReleaseIdentity.from_id(source_id)
+                        assert identity is not None
+                        self.assertIsInstance(
+                            beets.resolve_current_release(identity),
+                            CurrentBeetsMissing,
+                        )
+
+    def test_real_missing_authority_proceeds_without_beets_mutation(self):
+        with BeetsWorld(REPO) as world:
+            sibling = world.import_release(BeetsWorldRelease(
+                release_id="cccccccc-cccc-cccc-cccc-cccccccccccc",
+                artist="Archive Artist",
+                album="Sibling Pressing",
+                year=2001,
+                track_count=1,
+            ))
+            before = {
+                path: Path(path).read_bytes() for path in sibling.item_paths
+            }
+            db = FakePipelineDB()
+            self._seed_old(
+                db,
+                status="imported",
+                imported_path="/poisoned/request/cache",
+            )
+            delete_op = MagicMock(side_effect=AssertionError(
+                "missing authority reached Beets mutation",
+            ))
+            scans: list[str | None] = []
+            with (
+                BeetsDB(
+                    str(world.library_db),
+                    library_root=str(world.library_root),
+                ) as beets,
+                patch(
+                    "lib.mbid_replace_service.trigger_plex_scan",
+                    side_effect=lambda _cfg, imported_path=None: scans.append(
+                        imported_path,
+                    ),
+                ),
+                patch(
+                    "lib.mbid_replace_service.trigger_jellyfin_scan",
+                    side_effect=lambda _cfg, imported_path=None: scans.append(
+                        imported_path,
+                    ),
+                ),
+            ):
+                service = self._make_service(
+                    db,
+                    beets_db_factory=lambda: beets,
+                    beets_delete_fn=delete_op,
+                )
+                result = service.replace_request_mbid(
+                    42,
+                    target_mb_release_id=NEW_MBID,
+                )
+
+            self.assertEqual(result.outcome, RESULT_REPLACED)
+            self.assertEqual(scans, [None, None])
+            delete_op.assert_not_called()
+            self.assertEqual(
+                {path: Path(path).read_bytes() for path in before},
+                before,
+            )
 
 
 if TYPE_CHECKING:
@@ -1680,14 +1916,12 @@ class TestReplaceDBProtocolParity(unittest.TestCase):
 
     def test_replace_protocol_extends_forwarded_surfaces(self) -> None:
         """Replace forwards its handle into wrong-match group delete,
-        release cleanup, and SearchPlanService."""
+        and SearchPlanService."""
         from lib.mbid_replace_service import MbidReplaceDB
-        from lib.release_cleanup import ReleaseCleanupDB
         from lib.search_plan_service import SearchPlanDB
         from lib.wrong_match_delete_service import WrongMatchDeleteDB
 
         self.assertTrue(issubclass(MbidReplaceDB, WrongMatchDeleteDB))
-        self.assertTrue(issubclass(MbidReplaceDB, ReleaseCleanupDB))
         self.assertTrue(issubclass(MbidReplaceDB, SearchPlanDB))
 
 

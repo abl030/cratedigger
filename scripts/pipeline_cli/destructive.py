@@ -11,6 +11,7 @@ import msgspec
 from lib.beets_db import BeetsDB, open_beets_db
 from lib.destructive_release_service import (
     BanSourceCleanupIncomplete,
+    BanSourceBeetsAmbiguous,
     BanSourceImporterBusy,
     BanSourceLockContended,
     BanSourceReleaseMismatch,
@@ -19,6 +20,8 @@ from lib.destructive_release_service import (
     BanSourceSuccess,
     BanSourceTransitionConflict,
     DeleteAlbumNotFound,
+    DeleteAlbumAuthorityMismatch,
+    DeleteBeetsAmbiguous,
     DeleteIncomplete,
     DeleteImporterBusy,
     DeleteLockContended,
@@ -53,7 +56,12 @@ def _open_beets(path: str | None, library_root: str | None) -> BeetsDB:
     return open_beets_db(db_path=path, library_root=library_root)
 
 
-def cmd_ban_source(db, args: object) -> int:
+def cmd_ban_source(
+    db,
+    args: object,
+    *,
+    beets_delete_fn: BeetsDeleteFn | None = None,
+) -> int:
     """Ban an exact source; preserve unsearchable or requeue as wanted."""
     typed_args = msgspec.convert(vars(args), type=_BanSourceArgs)
     try:
@@ -72,6 +80,7 @@ def cmd_ban_source(db, args: object) -> int:
                 request_id=typed_args.request_id,
                 expected_release_id=typed_args.release_id,
             ),
+            beets_delete_fn=beets_delete_fn,
         )
     if isinstance(result, BanSourceSuccess):
         print(json.dumps({
@@ -130,6 +139,14 @@ def cmd_ban_source(db, args: object) -> int:
         return 4
     if isinstance(result, BanSourceImporterBusy):
         print(json.dumps({"error": "destructive_operation_busy"}))
+        return 4
+    if isinstance(result, BanSourceBeetsAmbiguous):
+        print(json.dumps({
+            "error": "current_beets_ambiguous",
+            "release_id": result.release_id,
+            "album_ids": list(result.album_ids),
+            "reason": result.reason,
+        }))
         return 4
     match result:
         case BanSourceTransitionConflict():
@@ -206,6 +223,22 @@ def cmd_library_delete(
             "authoritative_pipeline_id": result.authoritative_pipeline_id,
         }))
         return 3
+    if isinstance(result, DeleteBeetsAmbiguous):
+        print(json.dumps({
+            "error": "current_beets_ambiguous",
+            "release_id": result.release_id,
+            "album_ids": list(result.album_ids),
+            "reason": result.reason,
+        }))
+        return 4
+    if isinstance(result, DeleteAlbumAuthorityMismatch):
+        print(json.dumps({
+            "error": "album_authority_mismatch",
+            "requested_album_id": result.album_id,
+            "authoritative_album_id": result.authoritative_album_id,
+            "release_id": result.release_id,
+        }))
+        return 4
     if isinstance(result, DeleteLockContended):
         print(json.dumps({
             "error": "destructive_operation_busy",

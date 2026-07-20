@@ -22,9 +22,17 @@ if TYPE_CHECKING:
 
 from lib import transitions
 from lib.audio_hash import AudioHashError, hash_audio_content
-from lib.beets_album_op import BeetsOpFailure
+from lib.beets_db import (
+    CurrentBeetsAmbiguityReason,
+    CurrentBeetsAmbiguous,
+    CurrentBeetsMissing,
+    CurrentBeetsResolution,
+    CurrentBeetsUnique,
+)
 from lib.beets_delete import (
+    BeetsDeleteCompleted,
     BeetsDeleteFailed,
+    BeetsDeleteFailureReason,
     BeetsDeleteOutcome,
     BeetsDeleteRequest,
     run_beets_delete,
@@ -38,7 +46,6 @@ from lib.pipeline_db import (
     release_id_to_lock_key,
 )
 from lib.quality import resolve_user_requeue_override
-from lib.release_cleanup import ReleaseCleanupResult, remove_and_reset_release
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 
 
@@ -96,8 +103,9 @@ class SupportsDestructiveBeetsDB(Protocol):
     def library_root(self) -> str: ...
     def get_album_detail(self, album_id: int) -> dict[str, object] | None: ...
     def album_and_items_absent(self, album_id: int) -> bool: ...
-    def get_item_paths(self, mb_release_id: str) -> list[tuple[int, str]]: ...
-    def locate(self, release_id: str) -> object: ...
+    def resolve_current_release(
+        self, identity: ReleaseIdentity,
+    ) -> CurrentBeetsResolution: ...
 
 
 class FinalizeRequestFn(Protocol):
@@ -109,7 +117,7 @@ class FinalizeRequestFn(Protocol):
     ) -> transitions.TransitionResult: ...
 
 
-CleanupReleaseFn = Callable[..., ReleaseCleanupResult]
+BeetsDeleteFn = Callable[[BeetsDeleteRequest], BeetsDeleteOutcome]
 
 
 def _distinct_identities(
@@ -171,6 +179,15 @@ class HashCaptureFailure:
 
 
 @dataclass(frozen=True)
+class BanSourceCleanupFailure:
+    """Exact pinned-delete failure surfaced to CLI, API, and audit."""
+
+    selector: str
+    reason: BeetsDeleteFailureReason
+    detail: str
+
+
+@dataclass(frozen=True)
 class BanSourceRequest:
     request_id: int
     expected_release_id: str | None = None
@@ -184,7 +201,7 @@ class BanSourceSuccess:
     username: str | None
     beets_removed: bool
     hashes_recorded: int
-    cleanup_errors: tuple[BeetsOpFailure, ...]
+    cleanup_errors: tuple[BanSourceCleanupFailure, ...]
     hash_capture_errors: tuple[HashCaptureFailure, ...]
 
 
@@ -198,7 +215,7 @@ class BanSourceCleanupIncomplete:
     username: str | None
     beets_removed: Literal[False]
     hashes_recorded: int
-    cleanup_errors: tuple[BeetsOpFailure, ...]
+    cleanup_errors: tuple[BanSourceCleanupFailure, ...]
     hash_capture_errors: tuple[HashCaptureFailure, ...]
 
 
@@ -231,6 +248,16 @@ class BanSourceTransitionConflict:
     conflict: transitions.TransitionConflict
 
 
+@dataclass(frozen=True)
+class BanSourceBeetsAmbiguous:
+    """Current Beets cardinality cannot authorize any bad-rip mutation."""
+
+    request_id: int
+    release_id: str
+    album_ids: tuple[int, ...]
+    reason: CurrentBeetsAmbiguityReason
+
+
 BanSourceResult: TypeAlias = (
     BanSourceSuccess
     | BanSourceCleanupIncomplete
@@ -239,6 +266,7 @@ BanSourceResult: TypeAlias = (
     | BanSourceLockContended
     | BanSourceImporterBusy
     | BanSourceTransitionConflict
+    | BanSourceBeetsAmbiguous
 )
 
 
@@ -256,7 +284,7 @@ def _ban_source_locked(
     request: BanSourceRequest,
     identity: ReleaseIdentity,
     finalize_request_fn: FinalizeRequestFn,
-    cleanup_release_fn: CleanupReleaseFn,
+    beets_delete_fn: BeetsDeleteFn,
 ) -> BanSourceResult:
     """Run every bad-rip effect while IMPORT and RELEASE are both held."""
     current = pipeline_db.get_request(request.request_id)
@@ -273,6 +301,15 @@ def _ban_source_locked(
         )
     if pipeline_db.get_active_import_job_for_request(request.request_id) is not None:
         return BanSourceImporterBusy(request.request_id)
+
+    current_beets = beets_db.resolve_current_release(identity)
+    if isinstance(current_beets, CurrentBeetsAmbiguous):
+        return BanSourceBeetsAmbiguous(
+            request_id=request.request_id,
+            release_id=identity.release_id,
+            album_ids=current_beets.album_ids,
+            reason=current_beets.reason,
+        )
 
     # Establish the lifecycle transition before any hash, denylist, beets, or
     # audit mutation. A stale/replaced row is therefore a true zero-effect
@@ -311,12 +348,16 @@ def _ban_source_locked(
     reason = "manually banned via operator action"
     hash_failures: list[HashCaptureFailure] = []
     hashes: list[BadAudioHashInput] = []
-    item_paths = beets_db.get_item_paths(release_id)
-    if not item_paths:
+    current_items = (
+        current_beets.items
+        if isinstance(current_beets, CurrentBeetsUnique)
+        else ()
+    )
+    if not current_items:
         hash_failures.append(HashCaptureFailure(None, "no_tracks_in_beets"))
     else:
-        for _item_id, raw_path in item_paths:
-            track_path = Path(raw_path)
+        for item in current_items:
+            track_path = Path(item.path)
             audio_format = track_path.suffix.lstrip(".").lower()
             try:
                 digest = hash_audio_content(track_path, audio_format)
@@ -339,21 +380,34 @@ def _ban_source_locked(
     if reported_username:
         pipeline_db.add_denylist(request.request_id, reported_username, reason)
 
-    cleanup = cleanup_release_fn(
-        beets_db=beets_db,
-        pipeline_db=pipeline_db,
-        release_id=release_id,
-        request_id=request.request_id,
-        clear_pipeline_state=True,
-    )
+    cleanup_errors: tuple[BanSourceCleanupFailure, ...] = ()
+    beets_removed = False
+    cleanup_absent_after = isinstance(current_beets, CurrentBeetsMissing)
+    if isinstance(current_beets, CurrentBeetsUnique):
+        delete_outcome = beets_delete_fn(BeetsDeleteRequest(
+            album_id=current_beets.album_id,
+            expected_release_id=release_id,
+            library_db_path=beets_db.library_db_path,
+            library_root=beets_db.library_root,
+        ))
+        if isinstance(delete_outcome, BeetsDeleteCompleted):
+            beets_removed = True
+            cleanup_absent_after = True
+        else:
+            cleanup_errors = (BanSourceCleanupFailure(
+                selector=f"id:{current_beets.album_id}",
+                reason=delete_outcome.reason,
+                detail=delete_outcome.detail,
+            ),)
+    if cleanup_absent_after:
+        pipeline_db.clear_on_disk_quality_fields(request.request_id)
 
-    cleanup_errors = tuple(cleanup.selector_failures)
     validation_result = json.dumps({
         "scenario": "curator_ban",
         "hashes_recorded": hashes_recorded,
         "denylisted_username": reported_username,
         "reason": reason,
-        "cleanup_absent_after": cleanup.absent_after,
+        "cleanup_absent_after": cleanup_absent_after,
         "cleanup_errors": [
             {
                 "selector": failure.selector,
@@ -375,7 +429,7 @@ def _ban_source_locked(
         beets_detail=detail,
         validation_result=validation_result,
     )
-    if not cleanup.absent_after:
+    if not cleanup_absent_after:
         return BanSourceCleanupIncomplete(
             request_id=request.request_id,
             release_id=release_id,
@@ -391,7 +445,7 @@ def _ban_source_locked(
         release_id=release_id,
         request_status=request_status,
         username=reported_username,
-        beets_removed=cleanup.beets_removed,
+        beets_removed=beets_removed,
         hashes_recorded=hashes_recorded,
         cleanup_errors=cleanup_errors,
         hash_capture_errors=tuple(hash_failures),
@@ -404,7 +458,7 @@ def ban_source(
     beets_db: SupportsDestructiveBeetsDB,
     request: BanSourceRequest,
     finalize_request_fn: FinalizeRequestFn = transitions.finalize_request,
-    cleanup_release_fn: CleanupReleaseFn | None = None,
+    beets_delete_fn: BeetsDeleteFn | None = None,
 ) -> BanSourceResult:
     """Mark one request's exact server-owned release as a bad rip."""
     # IMPORT is always outer when both namespaces are held.
@@ -439,9 +493,7 @@ def ban_source(
                 request=request,
                 identity=identity,
                 finalize_request_fn=finalize_request_fn,
-                cleanup_release_fn=(
-                    cleanup_release_fn or remove_and_reset_release
-                ),
+                beets_delete_fn=beets_delete_fn or run_beets_delete,
             )
 
 
@@ -479,6 +531,25 @@ class DeleteReleaseMismatch:
     expected_release_id: str | None
     authoritative_pipeline_id: int | None
     authoritative_release_id: str | None
+
+
+@dataclass(frozen=True)
+class DeleteBeetsAmbiguous:
+    """Current exact identity exists but cannot authorize one album."""
+
+    album_id: int
+    release_id: str
+    album_ids: tuple[int, ...]
+    reason: CurrentBeetsAmbiguityReason
+
+
+@dataclass(frozen=True)
+class DeleteAlbumAuthorityMismatch:
+    """The requested album PK is not the fresh exact-identity album PK."""
+
+    album_id: int
+    authoritative_album_id: int
+    release_id: str
 
 
 @dataclass(frozen=True)
@@ -528,6 +599,8 @@ DeleteResult: TypeAlias = (
     DeleteSuccess
     | DeleteAlbumNotFound
     | DeleteReleaseMismatch
+    | DeleteBeetsAmbiguous
+    | DeleteAlbumAuthorityMismatch
     | DeleteLockContended
     | DeleteImporterBusy
     | DeletePipelinePurgeFailure
@@ -535,7 +608,6 @@ DeleteResult: TypeAlias = (
 )
 
 
-BeetsDeleteFn = Callable[[BeetsDeleteRequest], BeetsDeleteOutcome]
 DeleteNotifyFn = Callable[[str], tuple[DeleteNotification, ...]]
 _ACK_AMBIGUOUS_DELETE_REASONS = frozenset({"subprocess_error", "protocol_error"})
 
@@ -667,46 +739,61 @@ def _delete_under_release_lock(
     request: DeleteRequest,
     identity: ReleaseIdentity,
     pipeline_row: Mapping[str, Any] | None,
+    preflight_detail: dict[str, object],
     beets_delete_fn: BeetsDeleteFn,
 ) -> DeleteResult:
-    # Both identities are re-read after lock acquisition. This is the final
-    # authority check before any DB, beets, or filesystem mutation.
-    detail = beets_db.get_album_detail(request.album_id)
-    current_identity = _album_identity(detail) if detail is not None else None
     current_pipeline = pipeline_db.get_request_by_release_id(identity.release_id)
-    if detail is None:
-        return DeleteAlbumNotFound(request.album_id)
-    if current_identity != identity or not _delete_confirmations_match(
-        request, current_identity, current_pipeline,
+    if not _delete_confirmations_match(
+        request, identity, current_pipeline,
     ):
-        return _delete_mismatch(request, current_identity, current_pipeline)
+        return _delete_mismatch(request, identity, current_pipeline)
     if (pipeline_row is None) != (current_pipeline is None):
-        return _delete_mismatch(request, current_identity, current_pipeline)
+        return _delete_mismatch(request, identity, current_pipeline)
     if pipeline_row is not None and current_pipeline is not None:
         if int(pipeline_row["id"]) != int(current_pipeline["id"]):
-            return _delete_mismatch(request, current_identity, current_pipeline)
+            return _delete_mismatch(request, identity, current_pipeline)
         if pipeline_db.get_active_import_job_for_request(
             int(current_pipeline["id"]),
         ) is not None:
             return DeleteImporterBusy(request.album_id, int(current_pipeline["id"]))
 
+    # This joined exact-identity snapshot is the final Beets authority before
+    # the pinned mutation. Missing is not an invitation to delete by the stale
+    # requested PK; every ambiguous topology is a typed zero-mutation result.
+    current_beets = beets_db.resolve_current_release(identity)
+    if isinstance(current_beets, CurrentBeetsMissing):
+        return DeleteAlbumNotFound(request.album_id)
+    if isinstance(current_beets, CurrentBeetsAmbiguous):
+        return DeleteBeetsAmbiguous(
+            album_id=request.album_id,
+            release_id=identity.release_id,
+            album_ids=current_beets.album_ids,
+            reason=current_beets.reason,
+        )
+    if current_beets.album_id != request.album_id:
+        return DeleteAlbumAuthorityMismatch(
+            album_id=request.album_id,
+            authoritative_album_id=current_beets.album_id,
+            release_id=identity.release_id,
+        )
+
     beets_outcome = beets_delete_fn(BeetsDeleteRequest(
-        album_id=request.album_id,
+        album_id=current_beets.album_id,
         expected_release_id=identity.release_id,
         library_db_path=beets_db.library_db_path,
         library_root=beets_db.library_root,
     ))
     if isinstance(beets_outcome, BeetsDeleteFailed):
         album_still_present = (
-            beets_db.get_album_detail(request.album_id) is not None
+            beets_db.get_album_detail(current_beets.album_id) is not None
         )
-        former_album_path = _preflight_former_album_path(detail)
+        former_album_path = current_beets.album_path
         acknowledgement_lost = (
             beets_outcome.reason in _ACK_AMBIGUOUS_DELETE_REASONS
         )
         return _delete_incomplete(
-            album_id=request.album_id,
-            preflight_detail=detail,
+            album_id=current_beets.album_id,
+            preflight_detail=preflight_detail,
             pipeline_row=current_pipeline,
             reason=beets_outcome.reason,
             detail=_incomplete_delete_detail(
@@ -724,15 +811,15 @@ def _delete_under_release_lock(
             remaining_owned_paths=beets_outcome.remaining_owned_paths,
             preserved_paths=beets_outcome.preserved_paths,
         )
-    if not beets_db.album_and_items_absent(request.album_id):
+    if not beets_db.album_and_items_absent(current_beets.album_id):
         return _delete_incomplete(
-            album_id=request.album_id,
-            preflight_detail=detail,
+            album_id=current_beets.album_id,
+            preflight_detail=preflight_detail,
             pipeline_row=current_pipeline,
             reason="postcondition_failed",
             detail="exact Beets album or item metadata survived the delete operation",
             album_still_present=(
-                beets_db.get_album_detail(request.album_id) is not None
+                beets_db.get_album_detail(current_beets.album_id) is not None
             ),
             deleted_files=beets_outcome.deleted_tracks,
             deleted_artifacts=beets_outcome.deleted_artifacts,
@@ -748,7 +835,7 @@ def _delete_under_release_lock(
         except Exception:  # noqa: BLE001 -- typed operator outcome
             log.exception("Failed to purge pipeline request %s", deleted_pipeline_id)
             return DeletePipelinePurgeFailure(
-                album_id=request.album_id,
+                album_id=current_beets.album_id,
                 pipeline_request_id=deleted_pipeline_id,
                 album_name=beets_outcome.album_name,
                 artist_name=beets_outcome.artist_name,
@@ -759,7 +846,7 @@ def _delete_under_release_lock(
             )
 
     return DeleteSuccess(
-        album_id=request.album_id,
+        album_id=current_beets.album_id,
         album_name=beets_outcome.album_name,
         artist_name=beets_outcome.artist_name,
         former_album_path=beets_outcome.former_album_path,
@@ -778,6 +865,7 @@ def _delete_with_release_lock(
     request: DeleteRequest,
     identity: ReleaseIdentity,
     pipeline_row: Mapping[str, Any] | None,
+    preflight_detail: dict[str, object],
     beets_delete_fn: BeetsDeleteFn,
 ) -> DeleteResult:
     with pipeline_db.advisory_lock(
@@ -792,6 +880,7 @@ def _delete_with_release_lock(
             request=request,
             identity=identity,
             pipeline_row=pipeline_row,
+            preflight_detail=preflight_detail,
             beets_delete_fn=beets_delete_fn,
         )
 
@@ -844,6 +933,7 @@ def delete_release_from_library(
             request=request,
             identity=identity,
             pipeline_row=None,
+            preflight_detail=detail,
             beets_delete_fn=delete_op,
         )
         return _notify_completed_delete(result, notifier)
@@ -870,6 +960,7 @@ def delete_release_from_library(
             request=request,
             identity=identity,
             pipeline_row=current_pipeline,
+            preflight_detail=detail,
             beets_delete_fn=delete_op,
         )
     return _notify_completed_delete(result, notifier)
