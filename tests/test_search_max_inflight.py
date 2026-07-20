@@ -21,6 +21,7 @@ from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import cratedigger
+from album_source import AlbumRecord
 from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.enqueue import (
@@ -123,7 +124,7 @@ class TestFindDownloadDoesNotBlockSearchRefill(unittest.TestCase):
         slskd.searches.search_text_id_sequence = [101, 102]
         source = FakePipelineDBSource()
         ctx = CratediggerContext(cfg=cfg, slskd=slskd, pipeline_db_source=source)
-        albums = [
+        albums: list[AlbumRecord] = [
             MagicMock(id=1, artist_name="Artist", title="One"),
             MagicMock(id=2, artist_name="Artist", title="Two"),
         ]
@@ -232,7 +233,7 @@ class TestFindDownloadDoesNotBlockSearchRefill(unittest.TestCase):
         plan_for = {-rid_found: plan_exec_found, -rid_miss: plan_exec_miss}
         source = FakePipelineDBSource(db)
         ctx = CratediggerContext(cfg=cfg, slskd=slskd, pipeline_db_source=source)
-        albums = [
+        albums: list[AlbumRecord] = [
             MagicMock(
                 id=-rid_found,
                 db_request_id=rid_found,
@@ -403,7 +404,7 @@ class TestFindDownloadDoesNotBlockSearchRefill(unittest.TestCase):
         plan_for = {-rid_found: plan_exec_found}
         source = FakePipelineDBSource(db)
         ctx = CratediggerContext(cfg=cfg, slskd=slskd, pipeline_db_source=source)
-        albums = [
+        albums: list[AlbumRecord] = [
             MagicMock(
                 id=-rid_found,
                 db_request_id=rid_found,
