@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from typing import Any, cast
 import unittest
 from unittest.mock import patch
@@ -12,9 +14,11 @@ from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
     IMPORT_JOB_RECOVERY_REQUIRED,
+    IMPORT_JOB_YOUTUBE,
     automation_import_dedupe_key,
     force_import_dedupe_key,
     force_import_payload,
+    youtube_import_payload,
 )
 from lib.pipeline_db import PipelineDB
 from lib.import_job_recovery_service import resolve_import_job_recovery
@@ -485,6 +489,116 @@ class TestImportOperationFence(unittest.TestCase):
             )
 
         self.assertEqual(events, ["terminal", "cleanup"])
+
+    def test_unlaunched_youtube_cleanup_waits_for_job_acknowledgement(self) -> None:
+        from scripts import importer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staged_path = os.path.join(tmpdir, "youtube-staged")
+            os.makedirs(staged_path)
+            with open(os.path.join(staged_path, "01.opus"), "wb") as handle:
+                handle.write(b"operator recovery evidence")
+
+            observations: list[tuple[str, bool]] = []
+
+            class OrderingDB(FakePipelineDB):
+                def mark_import_job_failed(
+                    self,
+                    job_id: int,
+                    *,
+                    error: str,
+                    result: dict[str, Any] | None = None,
+                    message: str | None = None,
+                ):
+                    observations.append(("terminal", os.path.exists(staged_path)))
+                    return super().mark_import_job_failed(
+                        job_id,
+                        error=error,
+                        result=result,
+                        message=message,
+                    )
+
+            db = OrderingDB()
+            db.seed_request(make_request_row(id=42, status="wanted"))
+            job = db.enqueue_import_job(
+                IMPORT_JOB_YOUTUBE,
+                request_id=42,
+                payload=youtube_import_payload(
+                    staged_path=staged_path,
+                    request_id=42,
+                    browse_id="MPREb_fence",
+                ),
+            )
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+            )
+            claimed = db.claim_next_import_job(worker_id="worker")
+            assert claimed is not None
+            db.request(42)["status"] = "imported"
+
+            terminal = importer.process_claimed_job(
+                cast(Any, db),
+                claimed,
+                ctx=object(),
+            )
+
+            assert terminal is not None
+            self.assertEqual(terminal.status, "failed")
+            self.assertEqual(observations, [("terminal", True)])
+            self.assertFalse(os.path.exists(staged_path))
+
+    def test_unlaunched_youtube_ack_failure_preserves_staged_source(self) -> None:
+        from scripts import importer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staged_path = os.path.join(tmpdir, "youtube-staged")
+            os.makedirs(staged_path)
+            with open(os.path.join(staged_path, "01.opus"), "wb") as handle:
+                handle.write(b"operator recovery evidence")
+
+            class FailingDB(FakePipelineDB):
+                def mark_import_job_failed(
+                    self,
+                    job_id: int,
+                    *,
+                    error: str,
+                    result: dict[str, Any] | None = None,
+                    message: str | None = None,
+                ):
+                    del job_id, error, result, message
+                    raise RuntimeError("terminal acknowledgement failed")
+
+            db = FailingDB()
+            db.seed_request(make_request_row(id=42, status="wanted"))
+            job = db.enqueue_import_job(
+                IMPORT_JOB_YOUTUBE,
+                request_id=42,
+                payload=youtube_import_payload(
+                    staged_path=staged_path,
+                    request_id=42,
+                    browse_id="MPREb_fence",
+                ),
+            )
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+            )
+            claimed = db.claim_next_import_job(worker_id="worker")
+            assert claimed is not None
+            db.request(42)["status"] = "imported"
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "terminal acknowledgement failed",
+            ):
+                importer.process_claimed_job(
+                    cast(Any, db),
+                    claimed,
+                    ctx=object(),
+                )
+
+            self.assertTrue(os.path.exists(staged_path))
 
     def test_automation_retry_clears_legacy_request_launch_guard(self) -> None:
         db = FakePipelineDB()

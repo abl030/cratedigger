@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import shutil
 import socket
 import sys
 import time
@@ -25,6 +24,7 @@ from lib.dispatch import (
     DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
     DispatchOutcome,
 )
+from lib.dispatch.types import PostCommitCleanup
 from lib.download_processing import (
     Completed,
     CompletionDeferred,
@@ -480,12 +480,14 @@ def execute_youtube_import_job(
         return DispatchOutcome(False, f"Album request {request_id} not found")
     status = str(row.get("status") or "")
     if status not in YOUTUBE_IMPORT_ALLOWED_REQUEST_STATUSES:
-        shutil.rmtree(payload.staged_path, ignore_errors=True)
         return DispatchOutcome(
             False,
             (
                 f"Album request {request_id} is status {status!r}; "
                 "YouTube import requires wanted/unsearchable"
+            ),
+            post_commit_cleanup=PostCommitCleanup(
+                staged_path=payload.staged_path,
             ),
         )
 
@@ -747,13 +749,22 @@ def process_claimed_job(
     )
     if failed is None:
         return None
+    terminal_job = failed
+    post_commit_cleanup = _run_post_commit_cleanup(outcome)
+    if post_commit_cleanup is not None:
+        merged = db.merge_import_job_result(
+            job.id,
+            {"post_commit_cleanup": post_commit_cleanup},
+        )
+        if merged is not None:
+            terminal_job = merged
     cleanup = _cleanup_failed_force_import(db, job, outcome)
     if cleanup is not None:
         return db.merge_import_job_result(
             job.id,
             {"cleanup": cleanup},
-        ) or failed
-    return failed
+        ) or terminal_job
+    return terminal_job
 
 
 def run_once(
