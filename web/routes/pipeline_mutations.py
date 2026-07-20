@@ -855,6 +855,7 @@ class PipelineBanSourceRequest(BaseModel):
 
 def post_pipeline_ban_source(h, body: dict) -> None:
     from lib.destructive_release_service import (
+        BanSourceCleanupIncomplete,
         BanSourceImporterBusy,
         BanSourceLockContended,
         BanSourceReleaseMismatch,
@@ -903,7 +904,7 @@ def post_pipeline_ban_source(h, body: dict) -> None:
     if isinstance(result, BanSourceTransitionConflict):
         _transition_applied_or_respond(h, result.conflict)
         return
-    assert isinstance(result, BanSourceSuccess)
+    assert isinstance(result, (BanSourceSuccess, BanSourceCleanupIncomplete))
 
     cleanup_errors: list[dict[str, object]] = [
         {
@@ -922,8 +923,9 @@ def post_pipeline_ban_source(h, body: dict) -> None:
         partial_failures["cleanup_errors"] = cleanup_errors
     if hash_capture_errors:
         partial_failures["hash_capture_errors"] = hash_capture_errors
+    incomplete = isinstance(result, BanSourceCleanupIncomplete)
     payload: dict[str, object] = {
-        "status": "ok",
+        "status": "partial" if incomplete else "ok",
         "request_status": result.request_status,
         "username": result.username,
         "beets_removed": result.beets_removed,
@@ -931,8 +933,10 @@ def post_pipeline_ban_source(h, body: dict) -> None:
     }
     if partial_failures:
         payload["partial_failures"] = partial_failures
+    if incomplete:
+        payload["error"] = "cleanup_incomplete"
 
-    h._json(payload)
+    h._json(payload, status=409 if incomplete else 200)
 
 
 class PipelineForceImportRequest(BaseModel):

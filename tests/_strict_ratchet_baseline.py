@@ -9,7 +9,7 @@ errors with:
 
 STRICT_RATCHET_BASELINE: dict[str, int] = {
     "album_source.py": 113,
-    "cratedigger.py": 505,
+    "cratedigger.py": 5,
     "harness/beets_harness.py": 245,
     "harness/import_one.py": 115,
     "lib/artist_compare.py": 31,
