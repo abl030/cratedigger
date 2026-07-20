@@ -22,7 +22,7 @@ The flake export is a wrapper that pins the module's package set to **cratedigge
 | `beets.package.lrclibUrl` | `null` | When set, build-time-patches the beets lyrics plugin's LRCLIB base to this URL. |
 | `beets.package.discogsTokenFile` | `null` | `*File` secret (issue #117): materialized into `${stateDir}/beets/secrets.yaml` + `include:` in the rendered config. Null = placeholder token (plugins load cleanly; public-Discogs lookups are token-required). |
 | `beets.package.discogsOperatorGroup` | `null` | Optional group allowed to read rendered `secrets.yaml` for operator-side Beets actions. Set with `discogsTokenFile` to render `cratedigger:<group>` mode 0440; the module creates the group and joins its non-root service user. Null keeps service-only mode 0400 and removes any stale rendered secret from a prior group-readable profile. |
-| `beets.config.{directory,library}` | production values | Rendered into the module-owned `config.yaml`. `beets.directory` (config.ini) follows `beets.config.directory` by default. |
+| `beets.config.{directory,library}` | production values | The single shipped Beets root/SQLite pair. Both values are rendered into module-owned `config.yaml` and `[Beets]` in `config.ini`; there is no second root override. |
 | `beets.config.fetchart.{maxwidth,minwidth}` | `500` / `300` | Load-bearing: library size (embedded art × every track) and the collection's artwork-quality floor. |
 | `beets.config.musicbrainz.{host,https,ratelimit}` | derived from `musicbrainz.apiBase` | mkDefault-derived (mirror ⇒ host:port/http/ratelimit 100; public ⇒ musicbrainz.org/https/1); override to pin explicitly. |
 | `musicbrainz.apiBase` | `https://musicbrainz.org` | ONE MB origin for web/mb.py (via config.ini, read at `cratedigger-web` startup), pipeline-cli lookups, and the rendered beets musicbrainz block (KTD6). Public default is functional but ~1 req/s. |
@@ -36,7 +36,7 @@ The flake export is a wrapper that pins the module's package set to **cratedigge
 | `redis.{enable,host,port,maxmemory}` | enabled, `127.0.0.1:6379`, `2gb` | App-owned local Redis server for the pipeline peer cache and web metadata cache. Uses `allkeys-lru`. |
 | `peerCache.{ttlSeconds,speedTtlSeconds,redisConnectTimeoutMs,redisOperationTimeoutMs}` | 7d, 24h, 200ms, 100ms | Redis TTL and timeout settings rendered into `[Peer Cache]`. |
 | `beets.validation.{enable,distanceThreshold,stagingDir,trackingFile,verifiedLosslessTarget}` | sensible defaults | Beets validation config. |
-| `web.{enable,port,beetsDb,redis.host,redis.port}` | port=8085 | Web UI config. `web.redis.*` follows the shared app Redis defaults unless explicitly overridden. |
+| `web.{enable,port,redis.host,redis.port}` | port=8085 | Web UI config. The web process reads the Beets DB/root pair from `beets.config.{library,directory}` through `[Beets]`; `web.redis.*` follows the shared app Redis defaults unless explicitly overridden. |
 | `notifiers.plex.{enable,url,tokenFile,librarySectionId,pathMap}` | disabled | Plex notifier. |
 | `notifiers.jellyfin.{enable,url,tokenFile,libraryId,pathMap}` | disabled | Jellyfin notifier. Every import reports only its mapped final album path through `POST /Library/Media/Updated`; `pathMap` supplies Jellyfin's view of that path and enables the upgrade DateCreated pin. `libraryId` is only a deletion-observation fallback (issues #574/#697, `docs/jellyfin-primer.md`). |
 | `healthCheck.{enable,onFailureCommand}` | enabled, no recovery | Pre-cycle slskd healthcheck. `onFailureCommand` runs to recover (e.g. `systemctl restart slskd.service`). |

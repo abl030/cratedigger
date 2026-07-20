@@ -1095,8 +1095,7 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         # Beets fake: update() only hits this via album_exists / get_min_bitrate.
         # A live beets DB is the usual preceding state for a requeue.
         self.beets_db = FakeBeetsDB()
-        self.beets_db._album_exists_default = True
-        self.beets_db._min_bitrate_default = 320
+        self.beets_db.set_min_bitrate(self.RELEASE_ID, 320)
         # Ban-source now also calls ``get_item_paths`` for the bad-rip
         # hash-capture step (plan 2026-04-29-005, U4). The fake defaults
         # to "no tracks" so legacy ban-source tests don't trip over the
@@ -1197,7 +1196,7 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
     def test_upgrade_omits_min_bitrate_when_beets_lookup_misses(
             self, mock_transition):
         """Missing Beets quality data must not clear the existing DB baseline."""
-        self.beets_db._min_bitrate_default = None
+        self.beets_db.set_album_info(self.RELEASE_ID, None)
         self.db.seed_request(make_request_row(
             id=1704, status="imported", min_bitrate=320,
             mb_release_id=self.RELEASE_ID,
@@ -1491,6 +1490,19 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         # ``remove_and_reset_release`` is a no-op unless a test seeds
         # album ids or queues locate results.
         srv._beets = self.beets_db
+        self._beet_run_patcher = patch("lib.beets_album_op.sp.run")
+        self.mock_beet_run = self._beet_run_patcher.start()
+        self.addCleanup(self._beet_run_patcher.stop)
+
+        def remove_current_album(*_args, **_kwargs):
+            # Model the successful subprocess through the same current-item
+            # store every public fake read uses. The postcondition lookup
+            # therefore observes a genuinely absent album rather than an
+            # impossible paths-present/locate-absent split world.
+            self.beets_db.set_album_info(self.RELEASE_ID, None)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        self.mock_beet_run.side_effect = remove_current_album
 
         self.db.seed_request(make_request_row(
             id=1704, status="imported", mb_release_id=self.RELEASE_ID,
@@ -1720,13 +1732,10 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         the DB layer). Response is 200 with ``hashes_recorded: 0`` and
         no ``partial_failures``.
 
-        Modeled timing window: the second click lands BEFORE the first
-        ban's beets removal completes — get_item_paths still returns
-        the track while locate reports absent. That impossible-looking
-        combination is deliberate: it isolates the real (hash, format)
-        dedupe in add_bad_audio_hashes. Do not "fix" the fixture to an
-        emptied library — that reroutes through no_tracks_in_beets and
-        silently loses the dedupe-path coverage.
+        The release is explicitly restored between actions, modeling a
+        later reacquisition of the same bytes. Each action sees a coherent
+        current Beets world: tracks exist before removal and are absent
+        after the successful subprocess.
         """
         self.db.log_download(
             1704, outcome="success", soulseek_username="Hxrco")
@@ -1743,7 +1752,12 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["hashes_recorded"], 1)
 
-        # ...the second click dedupes on (hash, format) and inserts 0.
+        # Reacquire the same bytes before the second operator action.
+        self.beets_db.set_item_paths(self.RELEASE_ID, [
+            (1, "/mnt/Music/Beets/A/track-01.flac"),
+        ])
+
+        # ...the second action dedupes on (hash, format) and inserts 0.
         status, data = self._post(
             "/api/pipeline/ban-source",
             {"request_id": 1704, "confirm": "BAN", "mb_release_id": self.RELEASE_ID},

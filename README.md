@@ -93,7 +93,6 @@ You need: **NixOS**, **a dedicated slskd instance** (`services.slskd` is in nixp
             };
             web = {
               enable = true;                    # UI on :8085
-              beetsDb = "/srv/music/beets-library.db";
             };
           };
         }

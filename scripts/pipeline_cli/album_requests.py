@@ -6,18 +6,25 @@
 needs.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
-import os
 import sys
 import urllib.error
 import urllib.request
-
 import msgspec
 
 from lib import transitions
 from lib.disk_coverage_service import disk_coverage
 from lib.release_identity import detect_release_source, normalize_release_id
+
+
+class _DiskCoverageArgs(msgspec.Struct, frozen=True):
+    beets_db: str | None = None
+    beets_directory: str | None = None
+    counts_only: bool = False
+    include_inverse: bool = False
 
 # Module-level DI seam for the operator transition service — see
 # ``lib.dispatch.outcome_actions.finalize_request`` for the rationale.
@@ -157,15 +164,19 @@ def cmd_list(db, args):
     print(f"\n  Total: {len(albums)}")
 
 
-def cmd_disk_coverage(db, args):
-    from lib.beets_db import BeetsDB
+def cmd_disk_coverage(db, args: object):
+    from lib.beets_db import open_beets_db
 
-    with BeetsDB(args.beets_db) as beets:
+    typed_args = msgspec.convert(vars(args), type=_DiskCoverageArgs)
+    with open_beets_db(
+        db_path=typed_args.beets_db,
+        library_root=typed_args.beets_directory,
+    ) as beets:
         result = disk_coverage(
             db,
             beets,
-            include_rows=not args.counts_only,
-            include_inverse=args.include_inverse,
+            include_rows=not typed_args.counts_only,
+            include_inverse=typed_args.include_inverse,
         )
     print(json.dumps(msgspec.to_builtins(result), indent=2, sort_keys=True))
 
@@ -557,7 +568,9 @@ def cmd_set_intent(db, args):
     return 0
 
 
-def add_album_requests_subparsers(sub: argparse._SubParsersAction) -> None:
+def add_album_requests_subparsers(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
     """Add ``list`` / ``add`` / ``status`` / ``disk-coverage`` / ``set`` /
     ``set-intent`` (#521 carve out of
     ``routes_meta._build_parser``, verbatim argument definitions)."""
@@ -586,8 +599,13 @@ def add_album_requests_subparsers(sub: argparse._SubParsersAction) -> None:
     )
     p_disk.add_argument(
         "--beets-db",
-        default=os.environ.get("BEETS_DB", "/mnt/virtio/Music/beets-library.db"),
-        help="Path to beets SQLite DB (default: BEETS_DB or production path)",
+        default=None,
+        help="Explicit Beets SQLite override; requires --beets-directory.",
+    )
+    p_disk.add_argument(
+        "--beets-directory",
+        default=None,
+        help="Library root paired with --beets-db.",
     )
     p_disk.add_argument(
         "--counts-only",

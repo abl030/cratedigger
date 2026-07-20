@@ -51,6 +51,18 @@ from lib.wrong_match_cleanup_service import (
 )
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
+
+
+def _coherent_three_track_metrics(
+    first: int,
+    second: int,
+    third: int,
+) -> tuple[int, int, int, bool]:
+    """Turn generated item bitrates into production-derived album metrics."""
+
+    minimum, median, maximum = sorted((first, second, third))
+    average = int((minimum + median + maximum) / 3)
+    return minimum, average, median, minimum == maximum
 from web.classify import LogEntry, classify_log_entry
 
 
@@ -333,6 +345,10 @@ class TestQualityLineagePins(unittest.TestCase):
         from lib.beets_db import AlbumInfo
         from tests.fakes import FakeBeetsDB
 
+        minimum, average, median, is_cbr = _coherent_three_track_metrics(
+            minimum, average, median,
+        )
+
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42,
@@ -346,11 +362,11 @@ class TestQualityLineagePins(unittest.TestCase):
             if album_present:
                 fake_beets.set_album_info("mbid-42", AlbumInfo(
                     album_id=1,
-                    track_count=1,
+                    track_count=3,
                     min_bitrate_kbps=minimum,
                     avg_bitrate_kbps=average,
                     median_bitrate_kbps=median,
-                    is_cbr=False,
+                    is_cbr=is_cbr,
                     album_path=source,
                     format="MP3",
                 ))
@@ -399,6 +415,10 @@ class TestQualityLineagePins(unittest.TestCase):
         from lib.beets_db import AlbumInfo
         from tests.fakes import FakeBeetsDB
 
+        minimum, average, median, is_cbr = _coherent_three_track_metrics(
+            minimum, average, median,
+        )
+
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42,
@@ -417,7 +437,7 @@ class TestQualityLineagePins(unittest.TestCase):
                     avg_bitrate_kbps=average,
                     median_bitrate_kbps=median,
                     format="AAC",
-                    is_cbr=False,
+                    is_cbr=is_cbr,
                     spectral_grade="genuine",
                 ),
                 lineage_version=1,
@@ -438,11 +458,11 @@ class TestQualityLineagePins(unittest.TestCase):
             fake_beets = FakeBeetsDB()
             fake_beets.set_album_info("mbid-42", AlbumInfo(
                 album_id=1,
-                track_count=1,
+                track_count=3,
                 min_bitrate_kbps=minimum,
                 avg_bitrate_kbps=average,
                 median_bitrate_kbps=median,
-                is_cbr=False,
+                is_cbr=is_cbr,
                 album_path=source,
                 format="AAC",
             ))
@@ -513,6 +533,10 @@ class TestQualityLineagePins(unittest.TestCase):
         from lib.beets_db import AlbumInfo
         from tests.fakes import FakeBeetsDB
 
+        minimum, average, median, is_cbr = _coherent_three_track_metrics(
+            minimum, average, median,
+        )
+
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42,
@@ -536,7 +560,7 @@ class TestQualityLineagePins(unittest.TestCase):
                     avg_bitrate_kbps=average,
                     median_bitrate_kbps=median,
                     format="AAC",
-                    is_cbr=False,
+                    is_cbr=is_cbr,
                     spectral_grade="likely_transcode",
                     spectral_bitrate_kbps=96,
                     was_converted_from="flac",
@@ -559,11 +583,11 @@ class TestQualityLineagePins(unittest.TestCase):
             fake_beets = FakeBeetsDB()
             fake_beets.set_album_info("mbid-42", AlbumInfo(
                 album_id=1,
-                track_count=1,
+                track_count=3,
                 min_bitrate_kbps=minimum,
                 avg_bitrate_kbps=average,
                 median_bitrate_kbps=median,
-                is_cbr=False,
+                is_cbr=is_cbr,
                 album_path=source,
                 format="AAC",
             ))
@@ -606,11 +630,11 @@ class TestQualityLineagePins(unittest.TestCase):
                 current_album_path=source,
                 album_info=AlbumInfo(
                     album_id=1,
-                    track_count=1,
+                    track_count=3,
                     min_bitrate_kbps=minimum,
                     avg_bitrate_kbps=average,
                     median_bitrate_kbps=median,
-                    is_cbr=False,
+                    is_cbr=is_cbr,
                     album_path=source,
                     format="AAC",
                 ),

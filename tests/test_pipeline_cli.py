@@ -4414,6 +4414,7 @@ class TestPipelineCliDiskCoverage(unittest.TestCase):
 
         args = MagicMock(
             beets_db="/tmp/beets.db",
+            beets_directory="/tmp/library",
             counts_only=False,
             include_inverse=False,
         )
@@ -4619,6 +4620,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
             request_id=41,
             release_id=RELEASE_B,
             beets_db=self.beets_path,
+            beets_directory=self.tmpdir.name,
         )
         output = io.StringIO()
         with self._env(), redirect_stdout(output):
@@ -4633,6 +4635,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
             request_id=41,
             release_id=RELEASE_A,
             beets_db=self.beets_path,
+            beets_directory=self.tmpdir.name,
         )
         with patch("lib.beets_album_op.sp.run") as mock_beet:
             mock_beet.return_value = SimpleNamespace(
@@ -4670,6 +4673,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
             pipeline_id=41,
             release_id=RELEASE_A,
             beets_db=self.beets_path,
+            beets_directory=self.tmpdir.name,
         )
         output = io.StringIO()
         with self._env(), redirect_stdout(output):
@@ -4693,6 +4697,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
             pipeline_id=None,
             release_id=RELEASE_A,
             beets_db=self.beets_path,
+            beets_directory=self.tmpdir.name,
         )
         outcome = BeetsDeleteCompleted(
             album_id=7,
@@ -4750,6 +4755,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
             pipeline_id=41,
             release_id=RELEASE_A,
             beets_db=self.beets_path,
+            beets_directory=self.tmpdir.name,
         )
         output = io.StringIO()
         failure = BeetsDeleteFailed(
@@ -4822,7 +4828,11 @@ class TestWorldAuditCLI(unittest.TestCase):
         ):
             rc = pipeline_cli.cmd_audit_world(
                 db,
-                argparse.Namespace(beets_db="unused.db", json=True),
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                ),
             )
 
         payload = json.loads(output.getvalue())

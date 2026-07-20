@@ -316,14 +316,23 @@ The upstream module declares the web options at `nix/module.nix` in this repo:
 services.cratedigger.web = {
   enable = mkOption { type = types.bool; default = false; };
   port = mkOption { type = types.port; default = 8085; };
-  beetsDb = mkOption { type = types.str; description = "Path to beets-library.db (read-only)"; };
   redis = {
     host = mkOption { type = types.str; default = "127.0.0.1"; };  # follows services.cratedigger.redis by default
     port = mkOption { type = types.port; default = 6379; };
   };
 };
+services.cratedigger.beets.config = {
+  directory = mkOption { type = types.str; };
+  library = mkOption { type = types.str; };
+};
 services.cratedigger.redis.enable = mkOption { type = types.bool; default = true; };
 ```
+
+The web service opens `beets.config.library` together with
+`beets.config.directory` through the module-rendered `[Beets]` runtime
+configuration. The paired `--beets-db` and `--beets-directory` flags on
+`web/server.py` remain explicit development/test overrides only; the NixOS
+service passes neither.
 
 Enabled in this homelab via `~/nixosconfig/hosts/doc2/configuration.nix` (the upstream module now owns `redis-cratedigger.service`; the homelab wrapper only supplies site-specific wiring such as reverse proxy defaults):
 

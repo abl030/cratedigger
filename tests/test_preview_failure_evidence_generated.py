@@ -141,6 +141,8 @@ class PreviewFailureWorld:
 @st.composite
 def preview_failure_worlds(draw: st.DrawFn) -> PreviewFailureWorld:
     minimum = draw(st.integers(min_value=1, max_value=2_000))
+    median = minimum + draw(st.integers(min_value=0, max_value=100))
+    maximum = median + draw(st.integers(min_value=0, max_value=100))
     return PreviewFailureWorld(
         stage=draw(st.sampled_from(FAILURE_STAGES)),
         job_type=draw(st.sampled_from((
@@ -155,8 +157,8 @@ def preview_failure_worlds(draw: st.DrawFn) -> PreviewFailureWorld:
         ))),
         storage_format=draw(st.sampled_from(("MP3", "Opus", "FLAC"))),
         minimum=minimum,
-        average=minimum + draw(st.integers(min_value=0, max_value=100)),
-        median=minimum + draw(st.integers(min_value=0, max_value=100)),
+        average=int((minimum + median + maximum) / 3),
+        median=median,
         hook_fault=draw(st.sampled_from(("none", "prepare", "enrich"))),
     )
 
@@ -400,11 +402,13 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
         if world.library == "installed":
             fake_beets.set_album_info(mbid, AlbumInfo(
                 album_id=1,
-                track_count=1,
+                track_count=3,
                 min_bitrate_kbps=world.minimum,
                 avg_bitrate_kbps=world.average,
                 median_bitrate_kbps=world.median,
-                is_cbr=False,
+                is_cbr=(
+                    world.minimum == world.average == world.median
+                ),
                 album_path=installed_path,
                 format=world.storage_format,
             ))
@@ -421,7 +425,9 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
                     avg_bitrate_kbps=world.average,
                     median_bitrate_kbps=world.median,
                     format=world.storage_format,
-                    is_cbr=False,
+                    is_cbr=(
+                        world.minimum == world.average == world.median
+                    ),
                     spectral_grade="suspect" if complete else None,
                     spectral_bitrate_kbps=96 if complete else None,
                 ),

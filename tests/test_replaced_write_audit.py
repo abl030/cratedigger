@@ -69,17 +69,8 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/terminal_outcomes.py", 306, "6cfaff9c6507c211"): (
         "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
     ),
-    ("lib/beets_db.py", 339, "8f86dc625b889913"): (
-        "SQLite IN list is generated only from '?' value placeholders"
-    ),
-    ("lib/beets_db.py", 350, "ee7a80c1900ded7e"): (
-        "SQLite IN list is generated only from '?' value placeholders"
-    ),
-    ("lib/beets_db.py", 579, "25f232934b82ec93"): (
-        "SQLite IN list is generated only from '?' value placeholders"
-    ),
-    ("lib/beets_db.py", 587, "b065a06e6e2e0d72"): (
-        "SQLite IN list is generated only from '?' value placeholders"
+    ("lib/beets_db.py", 408, "9f590a0174ed4a0f"): (
+        "joined Beets snapshot WHERE terms contain only '?' value placeholders"
     ),
     ("lib/pipeline_db/dashboard.py", 481, "5e3b8177198ccbed"): (
         "dashboard WHERE and ORDER fragments come from closed enum branches"

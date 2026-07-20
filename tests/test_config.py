@@ -421,12 +421,17 @@ class TestReadRuntimeConfig(unittest.TestCase):
         finally:
             os.unlink(config_path)
         self.assertEqual(cfg.beets_directory, "")
+        self.assertEqual(
+            cfg.beets_library_db,
+            "/mnt/virtio/Music/beets-library.db",
+        )
 
     def test_beets_directory_read_from_config(self):
         with tempfile.NamedTemporaryFile("w", delete=False, suffix=".ini") as tmp:
             tmp.write(
                 "[Beets]\n"
                 "directory = /srv/music/Beets\n"
+                "library = /srv/music/beets-library.db\n"
             )
             config_path = tmp.name
         try:
@@ -434,6 +439,7 @@ class TestReadRuntimeConfig(unittest.TestCase):
         finally:
             os.unlink(config_path)
         self.assertEqual(cfg.beets_directory, "/srv/music/Beets")
+        self.assertEqual(cfg.beets_library_db, "/srv/music/beets-library.db")
 
 
 class TestReadRuntimeRankConfig(unittest.TestCase):
