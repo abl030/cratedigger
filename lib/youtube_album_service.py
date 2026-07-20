@@ -1091,8 +1091,6 @@ def _pick_yt_seed(
     best_idx: Optional[int] = None
     best_score: Optional[tuple[int, int]] = None
     for idx, r in enumerate(search_results):
-        if not isinstance(r, dict):
-            continue
         if not r.get("browseId"):
             continue
         # Compute year proximity once. ``_parse_year`` normalises both
@@ -1116,7 +1114,7 @@ def _pick_yt_seed(
         # No entry had a browseId. Fall back to the top-ranked result
         # only if it carries one.
         for r in search_results:
-            if isinstance(r, dict) and r.get("browseId"):
+            if r.get("browseId"):
                 return str(r["browseId"])
         return None
     chosen = search_results[best_idx]
@@ -1403,9 +1401,7 @@ def _rows_to_youtube_releases(
         for t in row.yt_tracks:
             artists = t.artists or []
             primary_artist = (
-                str(artists[0].get("name") or "")
-                if artists and isinstance(artists[0], dict)
-                else ""
+                str(artists[0].get("name") or "") if artists else ""
             )
             # When the row was written pre-036 (no ``album_artist`` column),
             # fall back to the per-track artist so beets can still score.

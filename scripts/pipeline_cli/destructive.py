@@ -86,15 +86,16 @@ def cmd_ban_source(db, args) -> int:
     if isinstance(result, BanSourceImporterBusy):
         print(json.dumps({"error": "destructive_operation_busy"}))
         return 4
-    if isinstance(result, BanSourceTransitionConflict):
-        print(json.dumps({
-            "error": "transition_conflict",
-            "reason": result.conflict.kind.value,
-            "expected_status": result.conflict.expected_status,
-            "actual_status": result.conflict.actual_status,
-            "target_status": result.conflict.target_status,
-        }))
-        return 4
+    match result:
+        case BanSourceTransitionConflict():
+            print(json.dumps({
+                "error": "transition_conflict",
+                "reason": result.conflict.kind.value,
+                "expected_status": result.conflict.expected_status,
+                "actual_status": result.conflict.actual_status,
+                "target_status": result.conflict.target_status,
+            }))
+            return 4
     raise AssertionError(f"Unhandled ban-source result: {result!r}")
 
 
@@ -191,25 +192,26 @@ def cmd_library_delete(
             ],
         }), file=sys.stderr)
         return 1
-    if isinstance(result, DeleteIncomplete):
-        print(json.dumps({
-            "error": "delete_incomplete",
-            "id": result.album_id,
-            "album": result.album_name,
-            "artist": result.artist_name,
-            "former_album_path": result.former_album_path,
-            "pipeline_id": result.pipeline_request_id,
-            "pipeline_status": result.pipeline_status,
-            "acknowledgement_lost": result.acknowledgement_lost,
-            "reason": result.reason,
-            "detail": result.detail,
-            "album_still_present": result.album_still_present,
-            "deleted_files": result.deleted_files,
-            "deleted_artifacts": result.deleted_artifacts,
-            "remaining_owned_paths": list(result.remaining_owned_paths),
-            "preserved_paths": list(result.preserved_paths),
-        }), file=sys.stderr)
-        return 4
+    match result:
+        case DeleteIncomplete():
+            print(json.dumps({
+                "error": "delete_incomplete",
+                "id": result.album_id,
+                "album": result.album_name,
+                "artist": result.artist_name,
+                "former_album_path": result.former_album_path,
+                "pipeline_id": result.pipeline_request_id,
+                "pipeline_status": result.pipeline_status,
+                "acknowledgement_lost": result.acknowledgement_lost,
+                "reason": result.reason,
+                "detail": result.detail,
+                "album_still_present": result.album_still_present,
+                "deleted_files": result.deleted_files,
+                "deleted_artifacts": result.deleted_artifacts,
+                "remaining_owned_paths": list(result.remaining_owned_paths),
+                "preserved_paths": list(result.preserved_paths),
+            }), file=sys.stderr)
+            return 4
     raise AssertionError(f"Unhandled library-delete result: {result!r}")
 
 

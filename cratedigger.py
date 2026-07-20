@@ -94,7 +94,7 @@ def _warn_if_verified_lossless_target_below_transparent(
 # the top of this module.
 
 # === API client instances (set in main()) ===
-pipeline_db_source: "DatabaseSource" = None  # type: ignore[assignment]  # Set in main()
+pipeline_db_source: "DatabaseSource | None" = None  # Set in main()
 
 # === Runtime context (populated in main()) ===
 # Module-level reference for thin wrappers that can't receive ctx as a parameter.

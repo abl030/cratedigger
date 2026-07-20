@@ -1,7 +1,7 @@
 """Tests for force-import feature — CLI, DB, and import_one --force flag.
 
 Tests cover:
-- import_one.py --force flag (sets MAX_DISTANCE=999)
+- import_one.py --force flag (sets max_distance=999)
 - pipeline_cli.py force-import command
 - pipeline_db.py get_download_log_entry() method
 - 'force_import' outcome in download_log
@@ -35,7 +35,7 @@ def make_db():
 # ---------------------------------------------------------------------------
 
 class TestImportOneForceFlag(unittest.TestCase):
-    """Test that import_one.main() toggles MAX_DISTANCE from the real CLI flag."""
+    """Test that import_one.main() toggles max_distance from the real CLI flag."""
 
     def setUp(self) -> None:
         # import_one.main() calls reset_umask() (sets umask to 0o002 for the
@@ -45,13 +45,13 @@ class TestImportOneForceFlag(unittest.TestCase):
         self.addCleanup(os.umask, self._saved_umask)
 
     def test_force_flag_sets_max_distance_999(self) -> None:
-        """--force must set MAX_DISTANCE=999 in the real main() entry point."""
+        """--force must set max_distance=999 in the real main() entry point."""
         from harness import import_one
 
         class _StopAfterForce(Exception):
             pass
 
-        original = import_one.MAX_DISTANCE
+        original = import_one.max_distance
         try:
             with patch.object(
                 sys, "argv",
@@ -62,18 +62,18 @@ class TestImportOneForceFlag(unittest.TestCase):
                 with self.assertRaises(_StopAfterForce):
                     import_one.main()
 
-            self.assertEqual(import_one.MAX_DISTANCE, 999)
+            self.assertEqual(import_one.max_distance, 999)
         finally:
-            import_one.MAX_DISTANCE = original
+            import_one.max_distance = original
 
     def test_default_main_keeps_max_distance(self) -> None:
-        """Without --force, main() must leave MAX_DISTANCE at the default."""
+        """Without --force, main() must leave max_distance at the default."""
         from harness import import_one
 
         class _StopBeforeWork(Exception):
             pass
 
-        original = import_one.MAX_DISTANCE
+        original = import_one.max_distance
         try:
             with patch.object(
                 sys, "argv",
@@ -84,9 +84,9 @@ class TestImportOneForceFlag(unittest.TestCase):
                 with self.assertRaises(_StopBeforeWork):
                     import_one.main()
 
-            self.assertEqual(import_one.MAX_DISTANCE, original)
+            self.assertEqual(import_one.max_distance, original)
         finally:
-            import_one.MAX_DISTANCE = original
+            import_one.max_distance = original
 
 
 # ---------------------------------------------------------------------------

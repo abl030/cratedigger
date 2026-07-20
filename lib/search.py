@@ -1231,7 +1231,7 @@ def _build_va_track_artist_candidates(
         ta = artists[idx] if idx < len(artists) else None
         if ta is None:
             continue
-        ta_clean = ta.strip() if isinstance(ta, str) else ""
+        ta_clean = ta.strip()
         if not ta_clean:
             continue
         if not title:

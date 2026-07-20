@@ -171,6 +171,8 @@ finds a problem, fix it, run focused tests while reconverging, commit and review
 the new tree, then restart the final sequence. Do not repeat the final suite for
 an unchanged tree after pushing or merging. **ALWAYS `nix-shell --run` for
 Python** (`.claude/rules/nix-shell.md`). The suite gates JS syntax + JS tests,
+the production typing rules (`pyright -p pyrightconfig.production.json` —
+the four mode-independent strict checks over non-test code, #765 phase 2),
 Ruff's source-local `F401`/`F811` import check, the aggregate vulture sweep,
 then unittest discovery — which includes `tests/test_docs_audit.py`, so the
 suite **fails if a new beets plugin, module option, or `pipeline-cli` subcommand
