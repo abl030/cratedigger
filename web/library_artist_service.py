@@ -13,10 +13,13 @@ row instead of momentarily surfacing as pipeline-only.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import Protocol
+from typing import Protocol, TYPE_CHECKING
 
 from lib.release_identity import ReleaseIdentity
 from web.library_album_row import LibraryAlbumRow
+
+if TYPE_CHECKING:
+    from lib.pipeline_db.rows import AlbumRequestRow
 
 
 class SupportsLibraryArtistLookup(Protocol):
@@ -41,7 +44,7 @@ class SupportsLibraryArtistPipelineDB(Protocol):
         self,
         artist_name: str,
         mb_artist_id: str = "",
-    ) -> list[dict[str, object]]:
+    ) -> list[AlbumRequestRow]:
         ...
 
     def get_track_counts(self, request_ids: list[int]) -> dict[int, int]:

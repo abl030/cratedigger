@@ -1886,19 +1886,19 @@ class FakePipelineDB:
             cooled_down_users=frozenset(cooled),
         )
 
-    def get_request_by_mb_release_id(self, mb_release_id: str) -> dict[str, Any] | None:
+    def get_request_by_mb_release_id(self, mb_release_id: str) -> "AlbumRequestRow | None":
         for row in self._requests.values():
             if row.get("mb_release_id") == mb_release_id:
-                return copy.deepcopy(row)
+                return cast("AlbumRequestRow", copy.deepcopy(row))
         return None
 
-    def get_request_by_discogs_release_id(self, discogs_release_id: str) -> dict[str, Any] | None:
+    def get_request_by_discogs_release_id(self, discogs_release_id: str) -> "AlbumRequestRow | None":
         for row in self._requests.values():
             if row.get("discogs_release_id") == discogs_release_id:
-                return copy.deepcopy(row)
+                return cast("AlbumRequestRow", copy.deepcopy(row))
         return None
 
-    def get_request_by_release_id(self, release_id: object | None) -> dict[str, Any] | None:
+    def get_request_by_release_id(self, release_id: object | None) -> "AlbumRequestRow | None":
         normalized = normalize_release_id(release_id)
         if not normalized:
             return None
@@ -3354,9 +3354,12 @@ class FakePipelineDB:
         row["imported_path"] = None
         row["updated_at"] = _utcnow()
 
-    def get_downloading(self) -> list[dict[str, Any]]:
-        return [copy.deepcopy(r) for r in self._requests.values()
-                if r.get("status") == "downloading"]
+    def get_downloading(self) -> "list[AlbumRequestRow]":
+        return cast(
+            "list[AlbumRequestRow]",
+            [copy.deepcopy(r) for r in self._requests.values()
+             if r.get("status") == "downloading"],
+        )
 
     def update_request_fields(
         self,
@@ -3852,11 +3855,11 @@ class FakePipelineDB:
 
     def get_request_by_replaces_request_id(
         self, replaced_id: int
-    ) -> dict[str, Any] | None:
+    ) -> "AlbumRequestRow | None":
         """Reverse-lookup the descendant row of ``replaced_id``."""
         for row in self._requests.values():
             if row.get("replaces_request_id") == replaced_id:
-                return copy.deepcopy(row)
+                return cast("AlbumRequestRow", copy.deepcopy(row))
         return None
 
     def get_oldest_request_chain_created_at(
@@ -3887,7 +3890,7 @@ class FakePipelineDB:
         *,
         exclude_replaced: bool = True,
         exclude_request_id: int | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> "list[AlbumRequestRow]":
         """List rows in the same MB release group (newest id first)."""
         out: list[dict[str, Any]] = []
         for row in self._requests.values():
@@ -3899,7 +3902,7 @@ class FakePipelineDB:
                 continue
             out.append(copy.deepcopy(row))
         out.sort(key=lambda r: r["id"], reverse=True)
-        return out
+        return cast("list[AlbumRequestRow]", out)
 
     def list_active_release_group_ids(self) -> set[str]:
         """Distinct set of RG ids across non-replaced rows."""
@@ -3910,14 +3913,17 @@ class FakePipelineDB:
             and row.get("mb_release_group_id") is not None
         }
 
-    def list_non_replaced_requests(self) -> list[dict[str, Any]]:
+    def list_non_replaced_requests(self) -> "list[AlbumRequestRow]":
         """Return active request rows ordered like PipelineDB."""
         rows = [
             r for r in self._requests.values()
             if r.get("status") != "replaced"
         ]
         rows.sort(key=lambda r: int(r["id"]))
-        return [copy.deepcopy(r) for r in rows]
+        return cast(
+            "list[AlbumRequestRow]",
+            [copy.deepcopy(r) for r in rows],
+        )
 
     def delete_request(self, request_id: int) -> None:
         """Delete a request and cascade to child tables.
@@ -3953,7 +3959,7 @@ class FakePipelineDB:
             if item.plan_id not in plan_ids_to_drop
         }
 
-    def get_wanted(self, limit: int | None = None) -> list[dict[str, Any]]:
+    def get_wanted(self, limit: int | None = None) -> "list[AlbumRequestRow]":
         """Return wanted requests past their retry gate.
 
         Production randomizes the diagnostic result.  The fake keeps insertion
@@ -3969,7 +3975,10 @@ class FakePipelineDB:
         ]
         if limit is not None:
             eligible = eligible[:int(limit)]
-        return [copy.deepcopy(r) for r in eligible]
+        return cast(
+            "list[AlbumRequestRow]",
+            [copy.deepcopy(r) for r in eligible],
+        )
 
     def get_download_log_counts(self) -> DownloadLogCounts:
         """Mirror of ``PipelineDB.get_download_log_counts`` — computed
@@ -4152,7 +4161,7 @@ class FakePipelineDB:
         *,
         limit: int | None = None,
         newest_first: bool = False,
-    ) -> list[dict[str, Any]]:
+    ) -> "list[AlbumRequestRow]":
         if newest_first:
             rows = sorted(
                 (r for r in self._requests.values()
@@ -4166,11 +4175,11 @@ class FakePipelineDB:
                 key=lambda r: _as_datetime(r.get("created_at")))
         if limit is not None:
             rows = rows[:int(limit)]
-        return [copy.deepcopy(r) for r in rows]
+        return cast("list[AlbumRequestRow]", [copy.deepcopy(r) for r in rows])
 
     def search_requests(
         self, query: str, *, limit: int = 200, status: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> "list[AlbumRequestRow]":
         """Mirror ``PipelineDB.search_requests``: case-insensitive
         substring over artist/album, optionally narrowed to one status."""
         q = (query or "").strip().lower()
@@ -4188,7 +4197,10 @@ class FakePipelineDB:
             int(str(r.get("year") or 0)),
             int(str(r["id"])),
         ))
-        return [copy.deepcopy(r) for r in rows[:int(limit)]]
+        return cast(
+            "list[AlbumRequestRow]",
+            [copy.deepcopy(r) for r in rows[:int(limit)]],
+        )
 
     def _has_youtube_running(self, request_id: int) -> bool:
         """Mirror of the ``_LONG_TAIL_SELECT`` ``youtube_running`` EXISTS.
@@ -4267,7 +4279,7 @@ class FakePipelineDB:
         self,
         artist_name: str,
         mb_artist_id: str = "",
-    ) -> list[dict[str, Any]]:
+    ) -> "list[AlbumRequestRow]":
         needle = artist_name.lower()
 
         def _legacy_name_match(row: dict[str, Any]) -> bool:
@@ -4299,7 +4311,7 @@ class FakePipelineDB:
             return (year is not None, year_num, title)
 
         rows.sort(key=_sort_key)
-        return rows
+        return cast("list[AlbumRequestRow]", rows)
 
     # --- Track management ---
 

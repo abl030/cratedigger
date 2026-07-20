@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Sequence
-from typing import Any, Protocol, runtime_checkable
+from collections.abc import Mapping, Sequence
+from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
 
 import msgspec
+
+if TYPE_CHECKING:
+    from lib.pipeline_db.rows import AlbumRequestRow
 
 from lib.beets_db import BeetsWorldAlbum
 from lib.quality import AlbumQualityEvidence
@@ -60,7 +63,7 @@ class WorldAuditReport(msgspec.Struct, frozen=True):
 
 @runtime_checkable
 class WorldAuditPipelineDB(Protocol):
-    def list_non_replaced_requests(self) -> list[dict[str, Any]]: ...
+    def list_non_replaced_requests(self) -> list[AlbumRequestRow]: ...
 
     def load_album_quality_evidence_by_id(
         self,
@@ -80,7 +83,7 @@ class WorldAuditBeetsDB(Protocol):
     def list_world_albums(self) -> list[BeetsWorldAlbum]: ...
 
 
-def _release_id(row: dict[str, Any]) -> str | None:
+def _release_id(row: Mapping[str, Any]) -> str | None:
     identity = ReleaseIdentity.from_fields(
         row.get("mb_release_id"),
         row.get("discogs_release_id"),
@@ -88,7 +91,7 @@ def _release_id(row: dict[str, Any]) -> str | None:
     return identity.release_id if identity is not None else None
 
 
-def _current_evidence_id(row: dict[str, Any]) -> int | None:
+def _current_evidence_id(row: Mapping[str, Any]) -> int | None:
     raw = row.get("current_evidence_id")
     return int(raw) if isinstance(raw, int) else None
 

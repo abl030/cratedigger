@@ -40,6 +40,7 @@ from lib.import_queue import IMPORT_JOB_AUTOMATION
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
     ADVISORY_LOCK_NAMESPACE_RELEASE,
+    AlbumRequestRow,
 )
 from lib.release_identity import ReleaseIdentity
 from tests.fakes import DenylistEntry, FakeBeetsDB, FakePipelineDB
@@ -1112,7 +1113,7 @@ class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
 
             def get_request_by_release_id(
                 self, release_id: object | None,
-            ) -> dict[str, object] | None:
+            ) -> AlbumRequestRow | None:
                 row = super().get_request_by_release_id(release_id)
                 if self.inject_mutation:
                     self.inject_mutation = False

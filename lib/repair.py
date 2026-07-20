@@ -17,6 +17,7 @@ accepted ``(username, filename)`` queue key.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -141,7 +142,7 @@ class SlskdTransferOwnership:
 
 def find_slskd_orphans(
     downloads: list[DownloadUser],
-    db_rows: list[dict[str, Any]],
+    db_rows: Sequence[Mapping[str, Any]],
     owned_keys: set[tuple[str, str]],
 ) -> SlskdTransferOwnership:
     """Classify live slskd transfers against ledger ownership (#571

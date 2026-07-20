@@ -118,8 +118,9 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "badge-overlay batch IN list contains only psycopg value placeholders; "
         "the evidence JOIN and identity derivations are static SQL"
     ),
-    ("lib/pipeline_db/requests.py", 250, "dffc52ed3fcd380d"): (
-        "release-id lookup selects one of two fixed identity predicates"
+    ("lib/pipeline_db/requests.py", 250, "fd6c0bbbe61ee7e6"): (
+        "release-id lookup selects one of two fixed identity predicates "
+        "(issue #765: return type retyped to AlbumRequestRow, no SQL change)"
     ),
     ("lib/pipeline_db/requests.py", 464, "b73bda10a331e1c3"): (
         "metadata keys are validated identifiers, lifecycle fields are reserved, "
@@ -129,11 +130,13 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "metadata keys are validated identifiers, lifecycle fields are reserved, "
         "and values use one typed JSONB record parameter"
     ),
-    ("lib/pipeline_db/requests.py", 1330, "28d04a2e32db29d5"): (
-        "optional LIMIT is normalized through int before interpolation"
+    ("lib/pipeline_db/requests.py", 1330, "7db79742051b4f8f"): (
+        "optional LIMIT is normalized through int before interpolation "
+        "(issue #765: return type retyped to list[AlbumRequestRow], no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1345, "f027e891f4828e53"): (
-        "ORDER is selected from two literals and LIMIT remains a value placeholder"
+    ("lib/pipeline_db/requests.py", 1345, "a586333614f3b096"): (
+        "ORDER is selected from two literals and LIMIT remains a value placeholder "
+        "(issue #765: return type retyped to list[AlbumRequestRow], no SQL change)"
     ),
     ("lib/pipeline_db/requests.py", 1530, "714da98640ff84f0"): (
         "attempt kind is validated against the fixed retry-counter vocabulary"
