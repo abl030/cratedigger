@@ -27,6 +27,14 @@
   asynchronous build. A later timer invocation replacing the unit's current
   `InvocationID` is neither success nor failure evidence for the captured
   target; verify the target itself with `journalctl --invocation=<ID>`.
+- Strict migration holds use `scripts/cratedigger_deploy_hold.py`, never
+  `systemctl mask --runtime`: NixOS `/etc/systemd/system` units outrank the
+  ordinary `/run/systemd/system` mask location, and timer masking does not
+  cancel already-queued service starts. The helper owns exact
+  `/run/systemd/system.control` timer links plus a root-only receipt, drains
+  exact waiting/running jobs without ever masking a service, and releases in
+  controlled-cycle then ordinary-successor stages. Invocation proof remains
+  owned by `scripts/verify_cratedigger_cycle.sh`.
 - Always derive the active cratedigger wrapper from `systemctl show cratedigger.service --property=ExecStart --value`, extract its exact `*-source` path from the wrapper, and verify the unique source string there; never glob historical store generations, which can produce a false positive. For module changes, inspect `systemctl cat cratedigger.service` and the rendered `/var/lib/cratedigger/config.ini`.
 - Before deploying changes to `nix/module.nix`, run the VM check: `nix build .#checks.x86_64-linux.moduleVm`.
 - **Every `nix flake update` in cratedigger must re-run the real-beets drift gate** (`tests/test_harness_beets2_contract.py` inside the re-pinned shell, plus the full suite): since tier-2 packaging, the flake.lock — not the consumer's nixpkgs — decides the beets version production runs. A lock bump is a beets upgrade until proven otherwise.
