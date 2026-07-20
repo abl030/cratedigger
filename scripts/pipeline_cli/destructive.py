@@ -5,7 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from typing import Protocol, cast
+
+import msgspec
 
 from lib.beets_db import BeetsDB, open_beets_db
 from lib.destructive_release_service import (
@@ -32,29 +33,29 @@ from lib.destructive_release_service import (
 )
 
 
-class _BanSourceArgs(Protocol):
-    beets_db: str | None
-    beets_directory: str | None
+class _BanSourceArgs(msgspec.Struct, frozen=True):
     request_id: int
-    release_id: str | None
+    beets_db: str | None = None
+    beets_directory: str | None = None
+    release_id: str | None = None
 
 
-class _LibraryDeleteArgs(Protocol):
-    beets_db: str | None
-    beets_directory: str | None
+class _LibraryDeleteArgs(msgspec.Struct, frozen=True):
     album_id: int
-    purge_pipeline: bool
-    pipeline_id: int | None
-    release_id: str | None
+    beets_db: str | None = None
+    beets_directory: str | None = None
+    purge_pipeline: bool = False
+    pipeline_id: int | None = None
+    release_id: str | None = None
 
 
 def _open_beets(path: str | None, library_root: str | None) -> BeetsDB:
     return open_beets_db(db_path=path, library_root=library_root)
 
 
-def cmd_ban_source(db, args) -> int:
+def cmd_ban_source(db, args: object) -> int:
     """Ban an exact source; preserve unsearchable or requeue as wanted."""
-    typed_args = cast(_BanSourceArgs, args)
+    typed_args = msgspec.convert(vars(args), type=_BanSourceArgs)
     try:
         beets = _open_beets(
             typed_args.beets_db,
@@ -68,7 +69,7 @@ def cmd_ban_source(db, args) -> int:
             pipeline_db=db,
             beets_db=beets,
             request=BanSourceRequest(
-                request_id=int(typed_args.request_id),
+                request_id=typed_args.request_id,
                 expected_release_id=typed_args.release_id,
             ),
         )
@@ -145,13 +146,13 @@ def cmd_ban_source(db, args) -> int:
 
 def cmd_library_delete(
     db,
-    args,
+    args: object,
     *,
     beets_delete_fn: BeetsDeleteFn | None = None,
     notify_fn: DeleteNotifyFn | None = None,
 ) -> int:
     """Delete one exact beets album with optional pipeline purge."""
-    typed_args = cast(_LibraryDeleteArgs, args)
+    typed_args = msgspec.convert(vars(args), type=_LibraryDeleteArgs)
     try:
         beets = _open_beets(
             typed_args.beets_db,
@@ -165,8 +166,8 @@ def cmd_library_delete(
             pipeline_db=db,
             beets_db=beets,
             request=DeleteRequest(
-                album_id=int(typed_args.album_id),
-                purge_pipeline=bool(typed_args.purge_pipeline),
+                album_id=typed_args.album_id,
+                purge_pipeline=typed_args.purge_pipeline,
                 expected_pipeline_id=typed_args.pipeline_id,
                 expected_release_id=typed_args.release_id,
             ),

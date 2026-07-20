@@ -13,8 +13,6 @@ import json
 import sys
 import urllib.error
 import urllib.request
-from typing import Protocol, cast
-
 import msgspec
 
 from lib import transitions
@@ -22,11 +20,11 @@ from lib.disk_coverage_service import disk_coverage
 from lib.release_identity import detect_release_source, normalize_release_id
 
 
-class _DiskCoverageArgs(Protocol):
-    beets_db: str | None
-    beets_directory: str | None
-    counts_only: bool
-    include_inverse: bool
+class _DiskCoverageArgs(msgspec.Struct, frozen=True):
+    beets_db: str | None = None
+    beets_directory: str | None = None
+    counts_only: bool = False
+    include_inverse: bool = False
 
 # Module-level DI seam for the operator transition service — see
 # ``lib.dispatch.outcome_actions.finalize_request`` for the rationale.
@@ -166,10 +164,10 @@ def cmd_list(db, args):
     print(f"\n  Total: {len(albums)}")
 
 
-def cmd_disk_coverage(db, args):
+def cmd_disk_coverage(db, args: object):
     from lib.beets_db import open_beets_db
 
-    typed_args = cast(_DiskCoverageArgs, args)
+    typed_args = msgspec.convert(vars(args), type=_DiskCoverageArgs)
     with open_beets_db(
         db_path=typed_args.beets_db,
         library_root=typed_args.beets_directory,

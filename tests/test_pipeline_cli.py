@@ -4409,6 +4409,7 @@ class TestPipelineCliDiskCoverage(unittest.TestCase):
 
         args = MagicMock(
             beets_db="/tmp/beets.db",
+            beets_directory="/tmp/library",
             counts_only=False,
             include_inverse=False,
         )

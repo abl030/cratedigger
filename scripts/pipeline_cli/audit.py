@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from typing import Protocol, cast
 
 import msgspec
 
@@ -12,10 +11,10 @@ from lib.beets_db import BeetsDB, open_beets_db
 from lib.world_audit_service import WorldAuditReport, audit_world
 
 
-class _AuditWorldArgs(Protocol):
-    beets_db: str | None
-    beets_directory: str | None
-    json: bool
+class _AuditWorldArgs(msgspec.Struct, frozen=True):
+    beets_db: str | None = None
+    beets_directory: str | None = None
+    json: bool = False
 
 
 def _open_beets(path: str | None, library_root: str | None) -> BeetsDB:
@@ -42,9 +41,9 @@ def _render_text(report: WorldAuditReport) -> None:
         print(f"{violation.code}: {violation.detail}")
 
 
-def cmd_audit_world(db, args: argparse.Namespace) -> int:
+def cmd_audit_world(db, args: object) -> int:
     """Run the shared world invariant bank without mutating either store."""
-    typed_args = cast(_AuditWorldArgs, args)
+    typed_args = msgspec.convert(vars(args), type=_AuditWorldArgs)
     try:
         beets = _open_beets(
             typed_args.beets_db,
