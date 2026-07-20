@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -421,6 +422,59 @@ def check_denylist_authority(
     )
 
 
+_DENYLIST_REASON_DECISIONS: dict[str, str] = {
+    "quality downgrade prevented": "downgrade",
+    "lossless source locked": "lossless_source_locked",
+    "audio decode failures": "audio_corrupt",
+    "matched curated bad audio hash": "bad_audio_hash",
+    "spectral analysis rejected the source": "spectral_reject",
+    "mixed lossless+lossy source": "mixed_source",
+    "duplicate remove guard failed": "duplicate_remove_guard_failed",
+    "provisional lossless source imported": "provisional_lossless_upgrade",
+}
+_IMPORT_PREVIEW_REASON_PREFIX = "import preview rejected: "
+_REJECTED_REASON_PREFIX = "rejected: "
+_LEGACY_SPECTRAL_REASON = re.compile(
+    r"spectral: \d+kbps <= existing \d+kbps\Z"
+)
+_LEGACY_TRANSCODE_REASON = re.compile(r"transcode: \d+kbps\Z")
+
+
+def _decision_denylists(decision: str) -> bool:
+    search_action = post_import_search_action_if_known(decision)
+    return bool(
+        (search_action is not None and search_action.denylist)
+        or dispatch_action(decision).denylist
+    )
+
+
+def _denylist_reason_authorities(reason: str) -> tuple[str, ...]:
+    """Decode stable decision-bearing reasons across producer generations."""
+
+    if reason == "suspect lossless source not an upgrade":
+        return ("suspect_lossless_reject",)
+
+    decision = _DENYLIST_REASON_DECISIONS.get(reason)
+    if decision is not None and _decision_denylists(decision):
+        return (decision,)
+
+    if reason.startswith(_IMPORT_PREVIEW_REASON_PREFIX):
+        decision = reason.removeprefix(_IMPORT_PREVIEW_REASON_PREFIX)
+        if _decision_denylists(decision):
+            return (decision,)
+
+    if reason.startswith(_REJECTED_REASON_PREFIX):
+        decision = reason.removeprefix(_REJECTED_REASON_PREFIX)
+        if _decision_denylists(decision):
+            return (decision,)
+
+    if _LEGACY_SPECTRAL_REASON.fullmatch(reason):
+        return ("spectral_reject",)
+    if reason == "transcode detected" or _LEGACY_TRANSCODE_REASON.fullmatch(reason):
+        return ("legacy_transcode",)
+    return ()
+
+
 def derive_denylist_authorities(
     *,
     username: str,
@@ -428,7 +482,7 @@ def derive_denylist_authorities(
     history: Sequence[Mapping[str, Any]],
 ) -> tuple[str, ...]:
     """Find persisted decisions that authorize one source-denylist row."""
-    decisions: set[str] = set()
+    decisions = set(_denylist_reason_authorities(reason))
     if any(
         entry.get("outcome") == "curator_ban"
         and entry.get("soulseek_username") == username
@@ -447,8 +501,7 @@ def derive_denylist_authorities(
             decisions.add(decision)
 
     for entry in history:
-        if entry.get("soulseek_username") != username:
-            continue
+        exact_peer = entry.get("soulseek_username") == username
         try:
             validation = decode_validation_envelope(
                 entry.get("validation_result")
@@ -462,10 +515,22 @@ def derive_denylist_authorities(
         if (
             entry.get("outcome") == "rejected"
             and validation is not None
-            and validation.valid is False
+            and (
+                (exact_peer and validation.valid is False)
+                or (
+                    reason == "beets validation rejected"
+                    and validation.valid is not True
+                )
+            )
         ):
             decisions.add("validation_reject")
 
+        # One import/validation decision owns every peer that contributed to
+        # a multi-peer folder, while download_log retains only its primary
+        # username. The canonical Beets-reject reason is the binding from each
+        # secondary source_denylist row back to that request-level decision.
+        if not exact_peer and reason != "beets validation rejected":
+            continue
         raw_result = entry.get("import_result")
         if isinstance(raw_result, str):
             encoded_result = raw_result
@@ -479,11 +544,7 @@ def derive_denylist_authorities(
             continue
         if decision is None:
             continue
-        search_action = post_import_search_action_if_known(decision)
-        if (
-            (search_action is not None and search_action.denylist)
-            or dispatch_action(decision).denylist
-        ):
+        if _decision_denylists(decision):
             decisions.add(decision)
     return tuple(sorted(decisions))
 
