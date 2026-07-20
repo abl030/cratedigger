@@ -146,15 +146,17 @@ class FakeBeetsDB:
         self._albums_by_artist[name] = albums
 
     def set_album_exists(self, release_id: str, value: bool) -> None:
-        self._album_exists[release_id] = value
+        key = normalize_release_id(release_id)
+        self._album_exists[key] = value
         if value:
-            self._ensure_seeded_album(release_id)
+            self._ensure_seeded_album(key)
 
     def set_album_ids_for_release(
         self, release_id: str, ids: list[int],
     ) -> None:
-        self._clear_presence_override(release_id)
-        self._album_ids_for_release[release_id] = list(ids)
+        key = normalize_release_id(release_id)
+        self._clear_presence_override(key)
+        self._album_ids_for_release[key] = list(ids)
 
     def set_album_info(self, mb_release_id: str, info: Any) -> None:
         if isinstance(info, AlbumInfo):
@@ -178,16 +180,18 @@ class FakeBeetsDB:
                 ],
             )
         elif info is None:
-            self._album_ids_for_release[mb_release_id] = []
-            self._item_paths.pop(mb_release_id, None)
-            self._item_metadata.pop(normalize_release_id(mb_release_id), None)
+            key = normalize_release_id(mb_release_id)
+            self._album_ids_for_release[key] = []
+            self._item_paths.pop(key, None)
+            self._item_metadata.pop(key, None)
 
     def set_item_paths(
         self, release_id: str, paths: Sequence[tuple[int, str | None]],
     ) -> None:
-        self._item_paths[release_id] = list(paths)
-        self._clear_presence_override(release_id)
-        self._ensure_seeded_album(release_id)
+        key = normalize_release_id(release_id)
+        self._item_paths[key] = list(paths)
+        self._clear_presence_override(key)
+        self._ensure_seeded_album(key)
 
     def set_release_identities(self, rows: list[dict[str, Any]]) -> None:
         self._release_identities = [copy.deepcopy(r) for r in rows]
@@ -317,10 +321,11 @@ class FakeBeetsDB:
         album_id: int,
         items: Sequence[CurrentBeetsItem],
     ) -> None:
-        self._clear_presence_override(release_id)
-        self._album_ids_for_release[release_id] = [album_id]
-        self._item_paths[release_id] = [(item.id, item.path) for item in items]
-        self._item_metadata[normalize_release_id(release_id)] = {
+        key = normalize_release_id(release_id)
+        self._clear_presence_override(key)
+        self._album_ids_for_release[key] = [album_id]
+        self._item_paths[key] = [(item.id, item.path) for item in items]
+        self._item_metadata[key] = {
             item.id: item for item in items
         }
 
@@ -361,24 +366,16 @@ class FakeBeetsDB:
 
     def _ensure_seeded_album(self, release_id: str) -> None:
         key = normalize_release_id(release_id)
-        for seeded, ids in self._album_ids_for_release.items():
-            if normalize_release_id(seeded) != key:
-                continue
-            if ids:
-                return
-            album_id = self._next_synthetic_album_id
-            self._next_synthetic_album_id += 1
-            self._album_ids_for_release[seeded] = [album_id]
+        ids = self._album_ids_for_release.get(key)
+        if ids:
             return
         album_id = self._next_synthetic_album_id
         self._next_synthetic_album_id += 1
-        self._album_ids_for_release[release_id] = [album_id]
+        self._album_ids_for_release[key] = [album_id]
 
     def _clear_presence_override(self, release_id: str) -> None:
         key = normalize_release_id(release_id)
-        for seeded in tuple(self._album_exists):
-            if normalize_release_id(seeded) == key:
-                del self._album_exists[seeded]
+        self._album_exists.pop(key, None)
 
     def _album_ids_lookup(self, release_id: str) -> list[int] | None:
         """Normalized view of the ``set_album_ids_for_release`` store.
@@ -392,10 +389,7 @@ class FakeBeetsDB:
         key = normalize_release_id(release_id)
         if not key:
             return None
-        for seeded, ids in self._album_ids_for_release.items():
-            if normalize_release_id(seeded) == key:
-                return ids
-        return None
+        return self._album_ids_for_release.get(key)
 
     def _presence(self, release_id: str) -> bool:
         """Current presence per the locate seam (issue #121).
@@ -408,8 +402,9 @@ class FakeBeetsDB:
         """
         if self._locate_queue:
             return self._locate_queue[0].kind == "exact"
-        if release_id in self._album_exists:
-            return self._album_exists[release_id]
+        key = normalize_release_id(release_id)
+        if key in self._album_exists:
+            return self._album_exists[key]
         ids = self._album_ids_lookup(release_id)
         if ids:
             return True
@@ -566,9 +561,8 @@ class FakeBeetsDB:
         """State-respecting fake of the exact current-library resolver."""
 
         self.resolve_current_release_calls.append(identity)
-        for seeded, present in self._album_exists.items():
-            if normalize_release_id(seeded) == identity.release_id and not present:
-                return CurrentBeetsMissing(identity=identity)
+        if self._album_exists.get(identity.release_id) is False:
+            return CurrentBeetsMissing(identity=identity)
         ids = self._album_ids_lookup(identity.release_id)
         if ids is None:
             if self._album_exists_default and not self._album_ids_default:
@@ -587,11 +581,7 @@ class FakeBeetsDB:
                 reason="multiple_matches",
             )
 
-        seeded_paths = None
-        for seeded, paths in self._item_paths.items():
-            if normalize_release_id(seeded) == identity.release_id:
-                seeded_paths = paths
-                break
+        seeded_paths = self._item_paths.get(identity.release_id)
         if seeded_paths is None:
             album_id = album_ids[0]
             seeded_paths = [(

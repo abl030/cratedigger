@@ -5243,6 +5243,40 @@ class TestFakeBeetsDB(unittest.TestCase):
                 assert isinstance(poisoned, CurrentBeetsAmbiguous)
                 self.assertEqual(poisoned.reason, "invalid_path")
 
+    def test_discogs_alias_reseed_replaces_the_canonical_current_snapshot(
+        self,
+    ) -> None:
+        from lib.beets_db import AlbumInfo, CurrentBeetsUnique
+        from lib.release_identity import ReleaseIdentity
+
+        beets = FakeBeetsDB(library_root="/library")
+        for release_id, album_id, path in (
+            ("0012856590", 7, "/library/stale"),
+            ("12856590", 8, "/library/current"),
+        ):
+            beets.set_album_info(release_id, AlbumInfo(
+                album_id=album_id,
+                track_count=1,
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=245,
+                median_bitrate_kbps=245,
+                is_cbr=True,
+                album_path=path,
+                format="MP3",
+            ))
+
+        identity = ReleaseIdentity.from_id("0012856590")
+        assert identity is not None
+        current = beets.resolve_current_release(identity)
+        self.assertIsInstance(current, CurrentBeetsUnique)
+        assert isinstance(current, CurrentBeetsUnique)
+        self.assertEqual(current.album_id, 8)
+        self.assertEqual(current.album_path, "/library/current")
+        self.assertEqual(
+            beets.get_album_info("0012856590", None).album_id,
+            8,
+        )
+
     def test_check_mbids_detail_returns_seeded_rows_only(self) -> None:
         beets = FakeBeetsDB()
         beets.set_mbid_detail(
