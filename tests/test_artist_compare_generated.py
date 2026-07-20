@@ -20,7 +20,7 @@ from web.discogs import (
     _DiscogsArtistMasterEntry,
     _DiscogsArtistMastersResponse,
 )
-from web.routes.browse import _apply_rg_pipeline_overlay
+from web.routes.browse import _apply_rg_pipeline_overlay, _PipelineHit
 from web.mb import _normalize_artist_release_group
 
 
@@ -545,7 +545,7 @@ class TestArtistCompareGenerated(unittest.TestCase):
         )
         release.identity_kind = "release"
 
-        hit = {"status": "wanted", "id": 42}
+        hit: _PipelineHit = {"status": "wanted", "id": 42, "_prio": 0}
         _apply_rg_pipeline_overlay(
             [work, release],
             {("discogs", target_kind, catalogue_id): hit},
@@ -568,7 +568,7 @@ class TestArtistCompareGenerated(unittest.TestCase):
         discogs = _discogs(
             year=1964, types=["Album"], appearance=False, id_=catalogue_id,
         )
-        hit = {"status": "wanted", "id": 42}
+        hit: _PipelineHit = {"status": "wanted", "id": 42, "_prio": 0}
         _apply_rg_pipeline_overlay(
             [mb, discogs],
             {(target_source, "work", catalogue_id): hit},
@@ -732,7 +732,7 @@ class TestArtistCompareGenerated(unittest.TestCase):
     def test_title_collision_never_establishes_library_ownership(
         self, title: str, source: str,
     ) -> None:
-        library = [{
+        library: list[dict[str, object]] = [{
             "album": title,
             "mb_releasegroupid": "owned-rg",
             "mb_albumid": "owned-release",

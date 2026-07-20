@@ -8,14 +8,18 @@ requests-by-rg, active-rgs, import-jobs) stay in ``web/routes/pipeline.py``.
 
 import logging
 import urllib.error
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from lib.pipeline_db import PipelineDB
 from web.routes._pydantic import parse_body
-from web.routes._registry import RouteRegistration, route
+from web.routes._registry import RouteHandler, RouteRegistration, route
 from web.routes._server_access import _server
 from web.routes.pipeline import _serialize_import_job
+
+if TYPE_CHECKING:
+    from lib.field_resolver_service import ResolveAllResult
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +47,23 @@ from web import discogs as discogs_api
 from web.wrong_match_file_service import source_dirs_from_validation_result
 
 
-def _transition_applied_or_respond(h, result: transitions.TransitionResult) -> bool:
+def _release_tracks(release: dict[str, object]) -> list[dict[str, object]]:
+    """Narrow a mirror ``get_release()`` payload's ``tracks`` field.
+
+    Both ``mb_api.get_release()`` and ``discogs_api.get_release()`` type
+    their return as ``dict[str, object]`` — the boundary every caller in
+    this module already assumes carries a list of per-track dicts under
+    ``"tracks"`` (or omits the key entirely). This narrows that one field
+    back to the concrete shape ``set_tracks`` and the response payloads
+    consume.
+    """
+    tracks = release.get("tracks")
+    return tracks if isinstance(tracks, list) else []
+
+
+def _transition_applied_or_respond(
+    h: RouteHandler, result: transitions.TransitionResult,
+) -> bool:
     """Map lifecycle CAS conflicts identically for every HTTP adapter."""
     if not isinstance(result, transitions.TransitionConflict):
         return True
@@ -63,8 +83,8 @@ def _transition_applied_or_respond(h, result: transitions.TransitionResult) -> b
 
 
 def _request_fields_applied_or_respond(
-    h,
-    db,
+    h: RouteHandler,
+    db: PipelineDB,
     request_id: int,
     *,
     expected_status: str,
@@ -88,16 +108,16 @@ def _request_fields_applied_or_respond(
 
 
 def _resolve_and_update_after_add(
-    db,
+    db: PipelineDB,
     req_id: int,
     *,
     mb_release_id: str | None,
     discogs_release_id: str | None,
     mb_release_group_id: str | None,
     mb_artist_id: str | None,
-    mb_release_payload: dict | None = None,
-    discogs_release_payload: dict | None = None,
-):
+    mb_release_payload: dict[str, Any] | None = None,
+    discogs_release_payload: dict[str, Any] | None = None,
+) -> "ResolveAllResult | None":
     """U4 helper: run ``resolve_all`` against a freshly inserted request
     and persist the resolved fields plus the VA flag.
 
@@ -120,7 +140,7 @@ def _resolve_and_update_after_add(
         resolve_all,
     )
 
-    skeleton = {
+    skeleton: dict[str, Any] = {
         "id": req_id,
         "mb_release_id": mb_release_id,
         "discogs_release_id": discogs_release_id,
@@ -166,10 +186,18 @@ def _resolve_and_update_after_add(
     return result
 
 
-def _generate_plan_after_add(req_id, *, artist_name, album_title, year,
-                              tracks, source, release_group_year=None,
-                              is_va_compilation=False,
-                              catalog_number=None):
+def _generate_plan_after_add(
+    req_id: int,
+    *,
+    artist_name: str,
+    album_title: str,
+    year: object,
+    tracks: list[dict[str, Any]],
+    source: str,
+    release_group_year: object = None,
+    is_va_compilation: bool = False,
+    catalog_number: object = None,
+) -> None:
     """Run shared plan generation after `set_tracks()` on the add path.
 
     Failures are recorded but never bubble up — the request is repairable
@@ -234,7 +262,7 @@ class PipelineAddRequest(BaseModel):
         return self
 
 
-def post_pipeline_add(h, body: dict) -> None:
+def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
     req = parse_body(h, body, PipelineAddRequest)
     if req is None:
         return
@@ -278,8 +306,9 @@ def post_pipeline_add(h, body: dict) -> None:
             source=source,
         )
 
-        if release.get("tracks"):
-            s._db().set_tracks(req_id, release["tracks"])
+        discogs_tracks = _release_tracks(release)
+        if discogs_tracks:
+            s._db().set_tracks(req_id, discogs_tracks)
 
         # U4: inline field resolution + VA detection. Discogs branch
         # never has an MB release/release-group payload, so the
@@ -306,8 +335,8 @@ def post_pipeline_add(h, body: dict) -> None:
         post_resolve_tracks = s._db().get_tracks(req_id)
         _generate_plan_after_add(
             req_id,
-            artist_name=release["artist_name"],
-            album_title=release["title"],
+            artist_name=str(release["artist_name"]),
+            album_title=str(release["title"]),
             year=release.get("year"),
             tracks=post_resolve_tracks,
             source=source,
@@ -321,7 +350,7 @@ def post_pipeline_add(h, body: dict) -> None:
             "id": req_id,
             "artist": release["artist_name"],
             "album": release["title"],
-            "tracks": len(release.get("tracks", [])),
+            "tracks": len(discogs_tracks),
         })
         return
 
@@ -372,8 +401,9 @@ def post_pipeline_add(h, body: dict) -> None:
         source=source,
     )
 
-    if release.get("tracks"):
-        s._db().set_tracks(req_id, release["tracks"])
+    mb_tracks = _release_tracks(release)
+    if mb_tracks:
+        s._db().set_tracks(req_id, mb_tracks)
 
     # U4: inline field resolution + VA detection. The resolver service
     # is the single source of truth for ``release_group_year`` (and
@@ -385,8 +415,8 @@ def post_pipeline_add(h, body: dict) -> None:
         req_id,
         mb_release_id=mbid,
         discogs_release_id=None,
-        mb_release_group_id=rg_id,
-        mb_artist_id=release.get("artist_id"),
+        mb_release_group_id=str(rg_id or "") or None,
+        mb_artist_id=str(release.get("artist_id") or "") or None,
         mb_release_payload=release_raw,
     )
     if resolved is None:
@@ -400,8 +430,8 @@ def post_pipeline_add(h, body: dict) -> None:
     post_resolve_tracks = s._db().get_tracks(req_id)
     _generate_plan_after_add(
         req_id,
-        artist_name=release["artist_name"],
-        album_title=release["title"],
+        artist_name=str(release["artist_name"]),
+        album_title=str(release["title"]),
         year=release.get("year"),
         tracks=post_resolve_tracks,
         source=source,
@@ -415,7 +445,7 @@ def post_pipeline_add(h, body: dict) -> None:
         "id": req_id,
         "artist": release["artist_name"],
         "album": release["title"],
-        "tracks": len(release.get("tracks", [])),
+        "tracks": len(mb_tracks),
     })
 
 
@@ -424,7 +454,7 @@ class PipelineUpdateRequest(BaseModel):
     status: Literal["wanted", "imported", "unsearchable"]
 
 
-def post_pipeline_update(h, body: dict) -> None:
+def post_pipeline_update(h: RouteHandler, body: dict[str, object]) -> None:
     req_body = parse_body(h, body, PipelineUpdateRequest)
     if req_body is None:
         return
@@ -485,7 +515,7 @@ class PipelineUpgradeRequest(BaseModel):
     mb_release_id: str = Field(min_length=1)
 
 
-def post_pipeline_upgrade(h, body: dict) -> None:
+def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
     req = parse_body(h, body, PipelineUpgradeRequest)
     if req is None:
         return
@@ -569,7 +599,7 @@ def post_pipeline_upgrade(h, body: dict) -> None:
             if rg_id_upgrade:
                 try:
                     rg_year_upgrade = mb_api.get_release_group_year(
-                        rg_id_upgrade)
+                        str(rg_id_upgrade))
                 except urllib.error.HTTPError as exc:
                     if exc.code != 404:
                         raise
@@ -585,14 +615,15 @@ def post_pipeline_upgrade(h, body: dict) -> None:
                 country=release.get("country"),
                 source="request",
             )
-        if release.get("tracks"):
-            s._db().set_tracks(req_id, release["tracks"])
+        upgrade_tracks = _release_tracks(release)
+        if upgrade_tracks:
+            s._db().set_tracks(req_id, upgrade_tracks)
         _generate_plan_after_add(
             req_id,
-            artist_name=release["artist_name"],
-            album_title=release["title"],
+            artist_name=str(release["artist_name"]),
+            album_title=str(release["title"]),
             year=release.get("year"),
-            tracks=release.get("tracks") or [],
+            tracks=upgrade_tracks,
             source="request",
             release_group_year=rg_year_upgrade,
         )
@@ -623,7 +654,7 @@ class PipelineSetQualityRequest(BaseModel):
     min_bitrate: int | None = None
 
 
-def post_pipeline_set_quality(h, body: dict) -> None:
+def post_pipeline_set_quality(h: RouteHandler, body: dict[str, object]) -> None:
     req_body = parse_body(h, body, PipelineSetQualityRequest)
     if req_body is None:
         return
@@ -741,7 +772,7 @@ class PipelineSetIntentRequest(BaseModel):
     intent: str = ""
 
 
-def post_pipeline_set_intent(h, body: dict) -> None:
+def post_pipeline_set_intent(h: RouteHandler, body: dict[str, object]) -> None:
     """Toggle lossless-on-disk intent for a pipeline request.
 
     Accepts intent: "lossless" (keep lossless on disk) or "default" (pipeline decides).
@@ -853,7 +884,7 @@ class PipelineBanSourceRequest(BaseModel):
     mb_release_id: str | None = None
 
 
-def post_pipeline_ban_source(h, body: dict) -> None:
+def post_pipeline_ban_source(h: RouteHandler, body: dict[str, object]) -> None:
     from lib.destructive_release_service import (
         BanSourceCleanupIncomplete,
         BanSourceImporterBusy,
@@ -943,7 +974,7 @@ class PipelineForceImportRequest(BaseModel):
     download_log_id: int = Field(gt=0)
 
 
-def post_pipeline_force_import(h, body: dict) -> None:
+def post_pipeline_force_import(h: RouteHandler, body: dict[str, object]) -> None:
     req_body = parse_body(h, body, PipelineForceImportRequest)
     if req_body is None:
         return
@@ -1006,7 +1037,7 @@ class PipelineDeleteRequest(BaseModel):
     id: int = Field(gt=0)
 
 
-def post_pipeline_delete(h, body: dict) -> None:
+def post_pipeline_delete(h: RouteHandler, body: dict[str, object]) -> None:
     req_body = parse_body(h, body, PipelineDeleteRequest)
     if req_body is None:
         return

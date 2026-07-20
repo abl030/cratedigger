@@ -407,7 +407,8 @@ def _cmd_add_discogs(db, discogs_id, source):
         source=source,
     )
 
-    tracks = release.get("tracks", [])
+    tracks_raw = release.get("tracks", [])
+    tracks = tracks_raw if isinstance(tracks_raw, list) else []
     if tracks:
         db.set_tracks(req_id, tracks)
 

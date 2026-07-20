@@ -19,6 +19,7 @@ lives forever absent explicit ``refresh=true``.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import msgspec
 from pydantic import BaseModel
@@ -34,7 +35,12 @@ from lib.youtube_ingest_service import (
 from web import discogs as discogs_api
 from web import mb as mb_api
 from web.routes._pydantic import parse_body
-from web.routes._registry import RouteRegistration, pattern_route, route
+from web.routes._registry import (
+    RouteHandler,
+    RouteRegistration,
+    pattern_route,
+    route,
+)
 from web.routes._server_access import _server
 
 
@@ -130,10 +136,55 @@ def _build_youtube_client():
 
     # Bind a default (connect, read) timeout so unresponsive remotes don't
     # pin the worker forever. Per-call ``timeout=`` kwargs still override.
+    #
+    # ``_UNSET`` (rather than a plain ``None`` default) preserves the
+    # original ``kwargs.setdefault("timeout", ...)`` semantics exactly:
+    # a caller that never passes ``timeout=`` gets the default, but a
+    # caller that explicitly passes ``timeout=None`` (requests' spelling
+    # for "wait forever") still gets ``None`` through untouched. A plain
+    # ``= None`` default would conflate the two.
+    #
+    # The remaining keyword params (params/data/headers/.../json) are
+    # typed ``Any`` — requests.Session.request's stub types them via
+    # private stub-only aliases (``_Params``, ``_Data``, ... in
+    # typeshed's requests-stubs) that aren't part of the public API and
+    # can't be imported or reconstructed without duplicating typeshed
+    # internals. ``method``/``url``/``allow_redirects`` mirror the real
+    # base signature exactly since those are plain public types; the
+    # full named parameter list (matching the base method's arity) is
+    # required for ``reportIncompatibleMethodOverride``.
+    _UNSET: Any = object()
+
     class _DefaultTimeoutSession(requests.Session):
-        def request(self, *args, **kwargs):
-            kwargs.setdefault("timeout", (5, 30))
-            return super().request(*args, **kwargs)
+        def request(
+            self,
+            method: str | bytes,
+            url: str | bytes,
+            params: Any = None,
+            data: Any = None,
+            headers: Any = None,
+            cookies: Any = None,
+            files: Any = None,
+            auth: Any = None,
+            timeout: Any = _UNSET,
+            allow_redirects: bool = True,
+            proxies: Any = None,
+            hooks: Any = None,
+            stream: Any = None,
+            verify: Any = None,
+            cert: Any = None,
+            json: Any = None,
+        ) -> requests.Response:
+            if timeout is _UNSET:
+                timeout = (5, 30)
+            return super().request(
+                method, url,
+                params=params, data=data, headers=headers,
+                cookies=cookies, files=files, auth=auth,
+                timeout=timeout, allow_redirects=allow_redirects,
+                proxies=proxies, hooks=hooks, stream=stream,
+                verify=verify, cert=cert, json=json,
+            )
 
     session = _DefaultTimeoutSession()
     retry = Retry(
@@ -167,7 +218,7 @@ def _parse_bool(raw: str | None) -> bool:
     return raw.strip().lower() in ("true", "1")
 
 
-def get_youtube_album(h, params: dict[str, list[str]]) -> None:
+def get_youtube_album(h: RouteHandler, params: dict[str, list[str]]) -> None:
     """``GET /api/youtube-album?identifier=<id>&refresh=<true|false>``.
 
     Resolves any MB / Discogs release-or-group identifier into the
@@ -249,7 +300,9 @@ class YoutubeRescueRequest(BaseModel):
     browse_id: str
 
 
-def post_pipeline_youtube_rescue(h, body: dict, req_id_str: str) -> None:
+def post_pipeline_youtube_rescue(
+    h: RouteHandler, body: dict[str, object], req_id_str: str,
+) -> None:
     """``POST /api/pipeline/<id>/youtube-rescue``.
 
     Submit a YouTube-Music rescue ingest for one album request.

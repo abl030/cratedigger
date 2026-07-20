@@ -5,6 +5,7 @@ import os
 import sys
 import unittest
 import urllib.parse
+from typing import TypeGuard
 from unittest.mock import patch, MagicMock
 
 import msgspec
@@ -12,6 +13,18 @@ import msgspec
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import web.discogs
+
+
+def _is_dict(value: object) -> TypeGuard[dict[str, object]]:
+    """Narrow one of ``get_release()``/``get_master_releases()``'s
+    ``dict[str, object]`` nested values for a test assertion."""
+    return isinstance(value, dict)
+
+
+def _is_list(value: object) -> TypeGuard[list[object]]:
+    """Narrow one of ``get_release()``/``get_master_releases()``'s
+    ``dict[str, object]`` nested list values for a test assertion."""
+    return isinstance(value, list)
 
 
 def setUpModule() -> None:
@@ -136,11 +149,15 @@ class TestGetRelease(unittest.TestCase):
         self.assertEqual(result["release_group_id"], "21491")
         self.assertEqual(result["year"], 1997)
         self.assertEqual(result["country"], "Europe")
-        self.assertEqual(len(result["tracks"]), 2)
-        self.assertEqual(result["tracks"][0]["title"], "Airbag")
-        self.assertEqual(result["tracks"][0]["disc_number"], 1)
-        self.assertEqual(result["tracks"][0]["track_number"], 1)
-        self.assertEqual(result["tracks"][0]["length_seconds"], 284.0)
+        tracks = result["tracks"]
+        assert _is_list(tracks)
+        self.assertEqual(len(tracks), 2)
+        track0 = tracks[0]
+        assert _is_dict(track0)
+        self.assertEqual(track0["title"], "Airbag")
+        self.assertEqual(track0["disc_number"], 1)
+        self.assertEqual(track0["track_number"], 1)
+        self.assertEqual(track0["length_seconds"], 284.0)
 
 
 class TestGetMasterReleases(unittest.TestCase):
@@ -185,14 +202,20 @@ class TestGetMasterReleases(unittest.TestCase):
         self.assertEqual(result["first_release_date"], "1997")
         self.assertEqual(result["artist_credit"], "Radiohead")
         self.assertEqual(result["primary_artist_id"], "3840")
-        self.assertEqual(len(result["releases"]), 2)
-        self.assertEqual(result["releases"][0]["id"], "83182")
-        self.assertEqual(result["releases"][0]["country"], "Europe")
-        self.assertEqual(result["releases"][0]["format"], "CD")
-        self.assertEqual(result["releases"][0]["date"], "1997-06-16")
-        self.assertEqual(result["releases"][0]["track_count"], 12)
-        self.assertEqual(result["releases"][0]["status"], "Official")
-        self.assertEqual(result["releases"][1]["status"], "Promotion")
+        releases = result["releases"]
+        assert _is_list(releases)
+        self.assertEqual(len(releases), 2)
+        release0 = releases[0]
+        assert _is_dict(release0)
+        self.assertEqual(release0["id"], "83182")
+        self.assertEqual(release0["country"], "Europe")
+        self.assertEqual(release0["format"], "CD")
+        self.assertEqual(release0["date"], "1997-06-16")
+        self.assertEqual(release0["track_count"], 12)
+        self.assertEqual(release0["status"], "Official")
+        release1 = releases[1]
+        assert _is_dict(release1)
+        self.assertEqual(release1["status"], "Promotion")
 
     def test_master_children_derive_unofficial_and_mixed_status(self):
         master = {
@@ -215,8 +238,14 @@ class TestGetMasterReleases(unittest.TestCase):
         }
         with _mock_urlopen(master):
             result = get_master_releases(1)
+        releases = result["releases"]
+        assert _is_list(releases)
+        statuses: list[object] = []
+        for row in releases:
+            assert _is_dict(row)
+            statuses.append(row["status"])
         self.assertEqual(
-            [row["status"] for row in result["releases"]],
+            statuses,
             ["Bootleg", "Bootleg / Promo"],
         )
 
@@ -233,8 +262,12 @@ class TestGetMasterReleases(unittest.TestCase):
         }
         with _mock_urlopen(master):
             result = get_master_releases(1)
-        self.assertEqual(result["releases"][0]["track_count"], 0)
-        self.assertEqual(result["releases"][0]["date"], "")
+        releases = result["releases"]
+        assert _is_list(releases)
+        release0 = releases[0]
+        assert _is_dict(release0)
+        self.assertEqual(release0["track_count"], 0)
+        self.assertEqual(release0["date"], "")
 
 
 class TestSearchReleases(unittest.TestCase):
@@ -1114,12 +1147,16 @@ class TestGetLabelReleases(unittest.TestCase):
         self.assertIn("pagination", payload)
         self.assertIn("include_sublabels", payload)
         self.assertTrue(payload["include_sublabels"])
-        self.assertEqual(payload["pagination"]["items"], 2)
+        pagination = payload["pagination"]
+        assert _is_dict(pagination)
+        self.assertEqual(pagination["items"], 2)
 
         rows = payload["results"]
+        assert _is_list(rows)
         self.assertEqual(len(rows), 2)
 
         direct = rows[0]
+        assert _is_dict(direct)
         # Match shape used by web/discogs.py::get_master_releases / get_release
         # so the U4 route layer can overlay library/pipeline state without
         # renaming fields. ID is stringified, year derived from `released`,
@@ -1141,6 +1178,7 @@ class TestGetLabelReleases(unittest.TestCase):
         self.assertEqual(direct["format"], "CD")
 
         sub = rows[1]
+        assert _is_dict(sub)
         self.assertEqual(sub["id"], "999111")
         self.assertEqual(sub["sub_label_name"], "Parlophone Records Ltd.")
         self.assertEqual(sub["label_id"], "25693")
@@ -1157,8 +1195,12 @@ class TestGetLabelReleases(unittest.TestCase):
         with _mock_urlopen(legacy):
             payload = get_label_releases(112294, include_sublabels=True)
 
-        self.assertEqual(payload["results"][0]["label_id"], "2294")
-        self.assertEqual(payload["results"][0]["via_label_id"], "2294")
+        results = payload["results"]
+        assert _is_list(results)
+        result0 = results[0]
+        assert _is_dict(result0)
+        self.assertEqual(result0["label_id"], "2294")
+        self.assertEqual(result0["via_label_id"], "2294")
 
     def test_default_pagination_kwargs(self):
         with _mock_urlopen(self.RELEASES_DATA) as mock:
@@ -1224,7 +1266,9 @@ class TestGetLabelReleases(unittest.TestCase):
         self.assertTrue(payload["sub_labels_dropped"])
         # Fallback fetch ran and surfaced its successful payload
         self.assertFalse(payload["include_sublabels"])
-        self.assertEqual(len(payload["results"]), 2)
+        fallback_results = payload["results"]
+        assert _is_list(fallback_results)
+        self.assertEqual(len(fallback_results), 2)
         self.assertIn("include_sublabels=true", seen_urls[0])
         self.assertIn("page=3", seen_urls[0])
         self.assertIn("per_page=50", seen_urls[0])

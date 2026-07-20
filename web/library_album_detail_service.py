@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime
-from typing import Protocol, TYPE_CHECKING
+from typing import Protocol, TYPE_CHECKING, TypeGuard
 
 import msgspec
 
@@ -168,14 +168,28 @@ class LibraryAlbumDetail(msgspec.Struct, frozen=True):
         return msgspec.to_builtins(self)
 
 
+def _is_object_list(value: object) -> TypeGuard[list[object]]:
+    """Narrow to ``list[object]`` with a precise type, not the
+    generic-erased ``list[Unknown]`` a bare ``isinstance(value, list)``
+    narrows to under strict pyright."""
+    return isinstance(value, list)
+
+
+def _is_str_object_mapping(value: object) -> TypeGuard[Mapping[str, object]]:
+    """Narrow to ``Mapping[str, object]`` with a precise type, not the
+    generic-erased ``Mapping[Unknown, Unknown]`` a bare
+    ``isinstance(value, Mapping)`` narrows to under strict pyright."""
+    return isinstance(value, Mapping)
+
+
 def _detail_track_rows(
     detail_row: Mapping[str, object],
 ) -> list[Mapping[str, object]]:
     """Narrow the raw ``tracks`` value to the row mappings it carries."""
     raw = detail_row.get("tracks")
-    if not isinstance(raw, list):
+    if not _is_object_list(raw):
         return []
-    return [row for row in raw if isinstance(row, Mapping)]
+    return [row for row in raw if _is_str_object_mapping(row)]
 
 
 def build_library_album_detail(

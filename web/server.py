@@ -37,6 +37,8 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Callable
 from urllib.parse import urlparse, parse_qs
 
+import msgspec
+
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
@@ -270,7 +272,9 @@ def get_library_artist(
     return _overlay.get_library_artist(_beets_db(), artist_name, mb_artist_id)
 
 
-def check_pipeline(mbids):
+def check_pipeline(
+    mbids: list[str] | list[object],
+) -> dict[str, dict[str, object]]:
     return _overlay.check_pipeline(_db_or_none(), mbids)
 
 
@@ -315,7 +319,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         log.info(format % args)
 
-    def _json(self, data, status=200):
+    def _json(self, data: object, status: int = 200) -> None:
         body = json.dumps(data).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -324,7 +328,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _html(self, path):
+    def _html(self, path: str) -> None:
         html_path = os.path.join(os.path.dirname(__file__), path)
         with open(html_path, "rb") as f:
             body = f.read()
@@ -343,7 +347,7 @@ class Handler(BaseHTTPRequestHandler):
         "/apple-touch-icon.png": ("apple-touch-icon.png", "image/png"),
     }
 
-    def _static_asset(self, url_path):
+    def _static_asset(self, url_path: str) -> None:
         """Serve an allowlisted icon asset from web/assets/."""
         filename, content_type = self._STATIC_ASSETS[url_path]
         asset_path = os.path.join(os.path.dirname(__file__), "assets", filename)
@@ -356,7 +360,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _static_js(self, path):
+    def _static_js(self, path: str) -> None:
         """Serve a JS file from the web/js/ directory."""
         js_path = os.path.join(os.path.dirname(__file__), "js", os.path.basename(path))
         if not os.path.isfile(js_path):
@@ -371,7 +375,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _error(self, msg, status=400):
+    def _error(self, msg: str, status: int = 400) -> None:
         self._json({"error": msg}, status)
 
     # Routing-level response cache was removed by issue #101 — it used to
@@ -460,8 +464,14 @@ class Handler(BaseHTTPRequestHandler):
             # the swap). Tracked for cleanup in #234.
             if path == "/api/cache/invalidate":
                 length = int(self.headers.get("Content-Length", 0))
-                body = json.loads(self.rfile.read(length)) if length else {}
-                groups = body.get("groups", [])
+                body: dict[str, object] = (
+                    json.loads(self.rfile.read(length)) if length else {}
+                )
+                try:
+                    groups = msgspec.convert(
+                        body.get("groups", []), type=list[str])
+                except msgspec.ValidationError:
+                    groups = []
                 cache.invalidate_groups(*groups)
                 self._json({"status": "ok", "invalidated": groups})
                 return

@@ -87,8 +87,8 @@ class ValidationResultEnvelope(msgspec.Struct, frozen=True):
     failed_path: str | None = None
     soulseek_username: str | None = None
     source_dirs: list[str] = []
-    items: list[dict] = []
-    candidates: list[dict] = []
+    items: list[dict[str, object]] = []
+    candidates: list[dict[str, object]] = []
     wrong_match_triage: WrongMatchTriageAudit | None = None
 
 
