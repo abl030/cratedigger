@@ -10,7 +10,7 @@ import time
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Any, NotRequired, TYPE_CHECKING, TypedDict
+from typing import Any, Callable, NotRequired, Protocol, TYPE_CHECKING, TypedDict
 
 from lib.slskd_client import (
     SLSKD_HTTP_TIMEOUT_S,
@@ -24,8 +24,16 @@ from lib.search_exec import (
 )
 
 if TYPE_CHECKING:
-    from album_source import DatabaseSource
+    from concurrent.futures import Future
+
+    from album_source import AlbumRecord, DatabaseSource
     from lib.config import CratediggerConfig
+    from lib.context import CratediggerContext
+    from lib.grab_list import DownloadFile, GrabListEntry
+    from lib.pipeline_db import ActiveSearchPlan
+    from lib.quality import AudioFileSpec, CandidateScore
+    from lib.search import PlanExecutionContext, SearchResult
+    from lib.search_exec import SearchExecutionResult
 
 
 class TrackRecord(TypedDict):
@@ -130,8 +138,8 @@ from lib.quality import top_candidates_with_skip_split
 
 
 def _build_search_cache(
-    search_results: list[Any],
-    filter_specs: list[tuple[str, Any]],
+    search_results: list[dict[str, Any]],
+    filter_specs: "list[tuple[str, AudioFileSpec]]",
 ) -> tuple[dict[str, dict[str, list[str]]], dict[str, int], dict[str, dict[str, int]]]:
     """Build cache dicts from raw slskd search results.
 
@@ -182,7 +190,26 @@ def _build_search_cache(
     return cache_entries, upload_speeds, dir_audio_counts
 
 
-def _select_active_plan_item_for_album(album, db):
+class _SearchPlanExecutorDB(Protocol):
+    """Pipeline DB surface this module's search-plan executor touches
+    directly as a bare parameter (issue #784, the #409 narrow-protocol
+    pattern). Deliberately narrow -- distinct from the broader
+    ``SearchPlanDB`` in ``lib.search_plan_service``, which serves plan
+    generation/regeneration rather than per-cycle execution.
+    """
+
+    def get_active_search_plan(
+        self, request_id: int,
+    ) -> "ActiveSearchPlan | None": ...
+
+    def record_search_id(
+        self, search_id: str, purpose: str, request_id: int | None,
+    ) -> None: ...
+
+
+def _select_active_plan_item_for_album(
+    album: "AlbumRecord", db: _SearchPlanExecutorDB,
+) -> "tuple[str, PlanExecutionContext] | None":
     """Return ``(query, PlanExecutionContext)`` for the next plan-item to run.
 
     Plan-driven replacement for ``_select_variant_for_album``.
@@ -262,7 +289,9 @@ def _select_active_plan_item_for_album(album, db):
     )
 
 
-def _plan_search_submit_kwargs(query, search_cfg):
+def _plan_search_submit_kwargs(
+    query: str, search_cfg: "CratediggerConfig",
+) -> dict[str, str | int | bool]:
     """Build the ``searches.search_text`` kwargs for a plan-item search.
 
     Single source of truth for the pipeline's search params, shared by the
@@ -282,8 +311,14 @@ def _plan_search_submit_kwargs(query, search_cfg):
 
 
 def _search_result_from_execution(
-    exec_result, *, album_id, query, variant_tag, plan_execution, search_cfg,
-):
+    exec_result: "SearchExecutionResult",
+    *,
+    album_id: int,
+    query: str,
+    variant_tag: str | None,
+    plan_execution: "PlanExecutionContext | None",
+    search_cfg: "CratediggerConfig",
+) -> "SearchResult":
     """Build a pipeline ``SearchResult`` from a completed ``execute_search``.
 
     Shared by the serial (`search_for_album`) and parallel
@@ -325,7 +360,9 @@ def _search_result_from_execution(
     )
 
 
-def search_for_album(album, ctx):
+def search_for_album(
+    album: "AlbumRecord", ctx: "CratediggerContext",
+) -> "SearchResult":
     """Search slskd for an album. Returns SearchResult (always non-None).
 
     Thin adapter over the unified lifecycle (``lib.search_exec.execute_search``,
@@ -406,7 +443,8 @@ def search_for_album(album, ctx):
     logger.info(f"Search returned {len(exec_result.responses)} results")
     result = _search_result_from_execution(
         exec_result, album_id=album_id, query=query,
-        variant_tag=variant_tag, plan_execution=plan_execution, search_cfg=cfg,
+        variant_tag=variant_tag, plan_execution=plan_execution,
+        search_cfg=ctx.cfg,
     )
     if result.success:
         # Reuse the same merge path as the parallel pipeline
@@ -414,7 +452,17 @@ def search_for_album(album, ctx):
     return result
 
 
-def _submit_plan_search(album, query, strategy_tag, search_cfg, slskd_client, db):
+def _submit_plan_search(
+    album: "AlbumRecord",
+    query: str,
+    strategy_tag: str,
+    search_cfg: "CratediggerConfig",
+    # ``Any`` -- mirrors ``lib.context.CratediggerContext.slskd``: tests wire
+    # ``FakeSlskdAPI`` in place of the real ``SlskdClient``, and the two are
+    # not nominally related.
+    slskd_client: Any,
+    db: _SearchPlanExecutorDB,
+):
     """Submit a plan-item search to slskd and return ``(search_id, query, album_id, tag)``.
 
     slskd has a SemaphoreSlim(1,1) on POST /searches — one submission at a
@@ -475,8 +523,16 @@ def _submit_plan_search(album, query, strategy_tag, search_cfg, slskd_client, db
     return None
 
 
-def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client,
-                            variant_tag=None, clock_fn=time.monotonic):
+def _collect_search_results(
+    search_id: str,
+    query: str,
+    album_id: int,
+    search_cfg: "CratediggerConfig",
+    # ``Any`` -- see the matching note on ``_submit_plan_search``.
+    slskd_client: Any,
+    variant_tag: str | None = None,
+    clock_fn: Callable[[], float] = time.monotonic,
+) -> "SearchResult":
     """Wait for an already-submitted search to complete and collect results.
 
     Thin adapter over the unified lifecycle (``lib.search_exec.execute_search``,
@@ -508,7 +564,7 @@ def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client
     )
 
 
-def _merge_search_result(result, ctx):
+def _merge_search_result(result: "SearchResult", ctx: "CratediggerContext") -> None:
     """Merge a SearchResult into ctx caches.
 
     Called only from the main thread — no locking needed.
@@ -568,7 +624,25 @@ def _merge_search_result(result, ctx):
                 drain_stats_into_context(ctx, peer_cache)
 
 
-def _log_search_result(album, result, ctx) -> None:
+class _PlanKwargs(TypedDict, total=False):
+    """Optional plan-context kwargs splatted into ``NonConsumingAttemptInput``.
+
+    ``total=False`` mirrors that field group's own nullability there --
+    every key is either absent (no active plan at the pre-attempt failure)
+    or present with a concrete value.
+    """
+    plan_id: int
+    plan_item_id: int
+    plan_ordinal: int
+    plan_strategy: str
+    plan_canonical_query_key: str | None
+    plan_repeat_group: str | None
+    plan_generator_id: str
+
+
+def _log_search_result(
+    album: "AlbumRecord", result: "SearchResult", ctx: "CratediggerContext",
+) -> None:
     """Persist a search outcome via the plan-aware DB seams.
 
     Routes every SearchResult through one of two atomic DB methods:
@@ -632,7 +706,9 @@ def _log_search_result(album, result, ctx) -> None:
         # U2 of search-plan-entropy: split into scored + up to 5
         # pre-filter-skip samples so the blob keeps room for both
         # without exceeding the historical top-20 cap.
-        top: list | None = top_candidates_with_skip_split(result.candidates)
+        top: list[CandidateScore] | None = top_candidates_with_skip_split(
+            result.candidates
+        )
     elif outcome in OUTCOMES_WITH_CANDIDATE_CONCEPT:
         top = []
     else:
@@ -738,7 +814,7 @@ def _log_search_result(album, result, ctx) -> None:
         return
 
     # Non-consuming pre-attempt path.
-    plan_kwargs: dict[str, Any] = {}
+    plan_kwargs: _PlanKwargs = {}
     if plan_execution is not None:
         plan_kwargs = {
             "plan_id": plan_execution.plan_id,
@@ -777,13 +853,15 @@ def _log_search_result(album, result, ctx) -> None:
         )
 
 
-def _candidate_to_jsonable(c: Any) -> dict[str, Any]:
+def _candidate_to_jsonable(c: "CandidateScore") -> dict[str, object]:
     """Convert a CandidateScore (msgspec.Struct) to a plain dict for JSONB."""
     import msgspec
     return msgspec.to_builtins(c)
 
 
-def _is_consumed_outcome(result: Any, plan_execution: Any) -> bool:
+def _is_consumed_outcome(
+    result: "SearchResult", plan_execution: "PlanExecutionContext | None",
+) -> bool:
     """Decide whether this SearchResult represents an accepted-search slot.
 
     Consumption boundary: the slot is consumed once slskd accepted the
@@ -817,12 +895,12 @@ def _is_consumed_outcome(result: Any, plan_execution: Any) -> bool:
 
 
 def _apply_find_download_result(
-    album,
-    result,
-    find_result,
-    failed_grab,
-    grab_list=None,
-    ctx=None,
+    album: "AlbumRecord",
+    result: "SearchResult",
+    find_result: FindDownloadResult,
+    failed_grab: "list[AlbumRecord]",
+    grab_list: "dict[int, GrabListEntry] | None" = None,
+    ctx: "CratediggerContext | None" = None,
 ) -> None:
     """Translate matching/enqueue outcome into search_log telemetry."""
     # Forensic capture: copy the per-(user, dir, filetype) score list off the
@@ -832,7 +910,7 @@ def _apply_find_download_result(
     # Aggregate pre-filter skip count from the find_download walk gets
     # persisted on ``search_log.pre_filter_skip_count``.
     result.pre_filter_skip_count = find_result.pre_filter_skip_count
-    if ctx is not None and getattr(find_result, "metrics", None) is not None:
+    if ctx is not None and find_result.metrics is not None:
         metrics = find_result.metrics
         result.browse_time_s = metrics.browse_time_s
         result.match_time_s = metrics.match_time_s
@@ -847,7 +925,7 @@ def _apply_find_download_result(
         ctx.cache_pos_hits += metrics.cache_pos_hits
         ctx.cache_neg_hits += metrics.cache_neg_hits
         ctx.cache_misses += metrics.cache_misses
-    elif getattr(find_result, "metrics", None) is not None:
+    elif find_result.metrics is not None:
         raise AssertionError("find_download metrics require owner context merge")
     if find_result.outcome == "found":
         result.outcome = "found"
@@ -861,12 +939,14 @@ def _apply_find_download_result(
     failed_grab.append(album)
 
 
-def search_and_queue(albums, ctx):
+def search_and_queue(
+    albums: "list[AlbumRecord]", ctx: "CratediggerContext",
+) -> "tuple[dict[int, GrabListEntry], list[AlbumRecord], list[AlbumRecord]]":
     if ctx.cfg.parallel_searches > 1 and len(albums) > 1:
         return _search_and_queue_parallel(albums, ctx)
-    grab_list = {}
-    failed_grab = []
-    failed_search = []
+    grab_list: "dict[int, GrabListEntry]" = {}
+    failed_grab: "list[AlbumRecord]" = []
+    failed_search: "list[AlbumRecord]" = []
     total = len(albums)
     try:
         for i, album in enumerate(albums, 1):
@@ -886,7 +966,9 @@ def search_and_queue(albums, ctx):
         shutdown_browse_coordinator(ctx)
 
 
-def _search_and_queue_parallel(albums, ctx):
+def _search_and_queue_parallel(
+    albums: "list[AlbumRecord]", ctx: "CratediggerContext",
+) -> "tuple[dict[int, GrabListEntry], list[AlbumRecord], list[AlbumRecord]]":
     """Pipeline searches and hand successful results to find_download workers.
 
     slskd constraints (from source code):
@@ -905,9 +987,9 @@ def _search_and_queue_parallel(albums, ctx):
     search_cfg = ctx.cfg
     max_inflight = search_cfg.search_max_inflight
 
-    grab_list: dict[Any, Any] = {}
-    failed_grab: list[Any] = []
-    failed_search: list[Any] = []
+    grab_list: "dict[int, GrabListEntry]" = {}
+    failed_grab: "list[AlbumRecord]" = []
+    failed_search: "list[AlbumRecord]" = []
     total = len(albums)
     album_queue = list(albums)  # mutable copy we pop from
 
@@ -918,9 +1000,9 @@ def _search_and_queue_parallel(albums, ctx):
     # owner thread re-attaches plan_execution to the SearchResult when the
     # collect future returns; this avoids threading the snapshot through
     # `_collect_search_results` (whose worker has no DB handle).
-    inflight_plan_execution: dict[Any, Any] = {}
+    inflight_plan_execution: "dict[Future[SearchResult], PlanExecutionContext]" = {}
 
-    def _submit_next() -> tuple[Any, Any] | None:
+    def _submit_next() -> "tuple[Future[SearchResult], AlbumRecord] | None":
         """Submit the next album from the queue. Returns (future, album) or None.
 
         Plan-driven (U5): picks the next plan-item from the request's
@@ -989,17 +1071,19 @@ def _search_and_queue_parallel(albums, ctx):
             return (future, album)
         return None
 
-    def _attach_plan_execution(future, result) -> None:
+    def _attach_plan_execution(
+        future: "Future[SearchResult]", result: "SearchResult",
+    ) -> None:
         """Re-attach the submit-time plan_execution onto a returned result."""
         plan_exec = inflight_plan_execution.pop(future, None)
-        if plan_exec is not None and getattr(result, "plan_execution", None) is None:
+        if plan_exec is not None and result.plan_execution is None:
             result.plan_execution = plan_exec
 
     find_pool: ThreadPoolExecutor | None = None
-    find_inflight: dict[Any, tuple[Any, Any]] = {}
+    find_inflight: "dict[Future[FindDownloadResult], tuple[AlbumRecord, SearchResult]]" = {}
     find_merge_time_s = 0.0
 
-    def _submit_find_download(album, result) -> None:
+    def _submit_find_download(album: "AlbumRecord", result: "SearchResult") -> None:
         nonlocal find_pool
         if find_pool is None:
             find_pool = ThreadPoolExecutor(
@@ -1011,7 +1095,9 @@ def _search_and_queue_parallel(albums, ctx):
         find_inflight[future] = (album, result)
         ctx.find_download_queued += 1
 
-    def _apply_find_future(future, *, log_search: bool = True) -> None:
+    def _apply_find_future(
+        future: "Future[FindDownloadResult]", *, log_search: bool = True,
+    ) -> None:
         album, result = find_inflight.pop(future)
         try:
             find_result = future.result()
@@ -1073,7 +1159,7 @@ def _search_and_queue_parallel(albums, ctx):
     try:
         with ThreadPoolExecutor(max_workers=max_inflight) as pool:
             # Seed the pipeline with initial searches
-            inflight: dict[Any, Any] = {}
+            inflight: "dict[Future[SearchResult], AlbumRecord]" = {}
             for _ in range(min(max_inflight, len(album_queue))):
                 submitted = _submit_next()
                 if submitted:
@@ -1196,12 +1282,21 @@ def _make_ctx():
     return _module_ctx
 
 
-def cancel_and_delete(files):
+def cancel_and_delete(files: "list[DownloadFile]") -> None:
     _cancel_and_delete_impl(files, _make_ctx())
 
 
-def grab_most_wanted(albums):
-    return _grab_most_wanted_impl(albums, lambda albs: search_and_queue(albs, _module_ctx), _module_ctx)
+def grab_most_wanted(albums: "list[AlbumRecord]") -> int:
+    # A nested ``def`` (not a lambda) so ``albs`` can carry an explicit
+    # annotation -- Python lambdas cannot be annotated, and
+    # ``_grab_most_wanted_impl``'s ``search_and_queue: Callable[..., ...]``
+    # parameter has no positional signature to infer one from.
+    def _search_and_queue_fn(
+        albs: "list[AlbumRecord]",
+    ) -> "tuple[dict[int, GrabListEntry], list[AlbumRecord], list[AlbumRecord]]":
+        return search_and_queue(albs, _module_ctx)
+
+    return _grab_most_wanted_impl(albums, _search_and_queue_fn, _module_ctx)
 
 
 from lib.util import setup_logging

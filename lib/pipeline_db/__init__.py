@@ -9,6 +9,7 @@ from lib.pipeline_db.download_log import (
     DOWNLOAD_LOG_OUTCOMES,
     DownloadLogCounts,
     DownloadLogOutcome,
+    LatestDownloadSummary,
 )
 from lib.pipeline_db.terminal_outcomes import ImportJobTerminalConflict
 from lib.pipeline_db.pin_status import (
@@ -24,8 +25,16 @@ from lib.pipeline_db.pin_status import (
 from lib.pipeline_db.rows import (
     AlbumRequestRow,
     DownloadLogRow,
+    DownloadLogWithEvidenceRow,
+    DownloadLogWithOriginRow,
+    DownloadLogWithRequestRow,
+    WrongMatchCandidateRow,
     album_request_row,
     download_log_row,
+    download_log_with_evidence_row,
+    download_log_with_origin_row,
+    download_log_with_request_row,
+    wrong_match_candidate_row,
 )
 from lib.pipeline_db._shared import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
@@ -137,7 +146,16 @@ __all__ = [
     "DownloadLogCounts",
     "DownloadLogOutcome",
     "DownloadLogRow",
+    "DownloadLogWithEvidenceRow",
+    "DownloadLogWithOriginRow",
+    "DownloadLogWithRequestRow",
+    "LatestDownloadSummary",
     "download_log_row",
+    "download_log_with_evidence_row",
+    "download_log_with_origin_row",
+    "download_log_with_request_row",
+    "WrongMatchCandidateRow",
+    "wrong_match_candidate_row",
     "ImportJobTerminalConflict",
     "JellyfinPinStatus",
     "JellyfinTerminalPinStatus",

@@ -1,7 +1,7 @@
 """download_log audit rows and wrong-match bookkeeping."""
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal, get_args
+from typing import Any, Literal, TypedDict, get_args
 import msgspec
 import psycopg2
 import psycopg2.extras
@@ -9,6 +9,16 @@ import psycopg2.extras
 from lib.pipeline_db._shared import (
     BACKOFF_BASE_MINUTES,
     BACKOFF_MAX_MINUTES,
+)
+from lib.pipeline_db.rows import (
+    DownloadLogWithEvidenceRow,
+    DownloadLogWithOriginRow,
+    DownloadLogWithRequestRow,
+    WrongMatchCandidateRow,
+    download_log_with_evidence_row,
+    download_log_with_origin_row,
+    download_log_with_request_row,
+    wrong_match_candidate_row,
 )
 
 # Canonical ``download_log.outcome`` taxonomy — the Python mirror of the
@@ -47,6 +57,15 @@ class DownloadLogCounts:
     imported: int
     matches_24h: int
     matches_6h: int
+
+
+class LatestDownloadSummary(TypedDict):
+    """One ``get_latest_download_summaries`` entry: the newest row for a
+    request plus its total history count (#426 — the pipeline queue only
+    renders the latest verdict and a count, never the full history)."""
+
+    latest: DownloadLogWithEvidenceRow
+    count: int
 
 
 class _DownloadLogMixin(_PipelineDBBase):
@@ -96,7 +115,8 @@ class _DownloadLogMixin(_PipelineDBBase):
 
 
     def get_log(self, limit: int = 50,
-                outcome_filter: str | None = None) -> list[dict[str, object]]:
+                outcome_filter: str | None = None,
+                ) -> list[DownloadLogWithRequestRow]:
         """Get recent download_log entries joined with album_requests.
 
         Args:
@@ -241,7 +261,9 @@ class _DownloadLogMixin(_PipelineDBBase):
             """
         cur = self._execute(query, (limit,))
         return [
-            self._overlay_evidence_onto_download_log_row(dict(r))
+            download_log_with_request_row(
+                self._overlay_evidence_onto_download_log_row(dict(r))
+            )
             for r in cur.fetchall()
         ]
 
@@ -249,7 +271,7 @@ class _DownloadLogMixin(_PipelineDBBase):
     def get_linked_import_logs(
         self,
         source_log_ids: list[int],
-    ) -> list[dict[str, object]]:
+    ) -> list[DownloadLogWithOriginRow]:
         """Fetch mutating successors for an explicit set of audit rows.
 
         Recents filters select the rows which are displayed, but a kept
@@ -272,7 +294,7 @@ class _DownloadLogMixin(_PipelineDBBase):
             """,
             ([int(log_id) for log_id in source_log_ids],),
         )
-        return [dict(row) for row in cur.fetchall()]
+        return [download_log_with_origin_row(row) for row in cur.fetchall()]
 
 
     # --- Download logging ---
@@ -513,8 +535,8 @@ class _DownloadLogMixin(_PipelineDBBase):
 
     @classmethod
     def _overlay_evidence_onto_download_log_row(
-        cls, row: dict[str, Any]
-    ) -> dict[str, Any]:
+        cls, row: dict[str, object]
+    ) -> dict[str, object]:
         # Migration 050 deliberately marks historical evidence as lineage v1:
         # its measurement format/bitrates may be a projected target rather
         # than facts about the downloaded source. Only v3 proves those fields
@@ -535,10 +557,18 @@ class _DownloadLogMixin(_PipelineDBBase):
             ("v0_probe_median_bitrate", "_evidence_v0_probe_median_bitrate", False),
         ):
             evidence_value = row.pop(overlay, None)
-            if requires_source_semantic and not source_semantic:
-                continue
+            if requires_source_semantic:
+                # The four ``source_*`` legacy keys are NOT real
+                # ``download_log`` columns — this overlay is their SOLE
+                # producer (issue #784's DownloadLogWithEvidenceRow), so
+                # they must always end up present (nullable) for a
+                # stable row shape, never silently absent depending on
+                # whether candidate evidence happened to exist.
+                row.setdefault(legacy, None)
+                if not source_semantic:
+                    continue
             if row.get(legacy) is None and evidence_value is not None:
-                if legacy == "v0_probe_kind":
+                if legacy == "v0_probe_kind" and isinstance(evidence_value, str):
                     evidence_value = cls._EVIDENCE_LINEAGE_TO_PROBE_KIND.get(
                         evidence_value, evidence_value
                     )
@@ -546,7 +576,9 @@ class _DownloadLogMixin(_PipelineDBBase):
         return row
 
 
-    def get_download_log_entry(self, log_id: int) -> dict[str, Any] | None:
+    def get_download_log_entry(
+        self, log_id: int,
+    ) -> DownloadLogWithEvidenceRow | None:
         """Get a single download_log entry by its ID."""
         cur = self._execute(
             """
@@ -573,11 +605,14 @@ class _DownloadLogMixin(_PipelineDBBase):
             (log_id,),
         )
         row = cur.fetchone()
-        return self._overlay_evidence_onto_download_log_row(dict(row)) \
-            if row else None
+        return download_log_with_evidence_row(
+            self._overlay_evidence_onto_download_log_row(dict(row))
+        ) if row else None
 
 
-    def get_download_history(self, request_id):
+    def get_download_history(
+        self, request_id: int,
+    ) -> list[DownloadLogWithEvidenceRow]:
         cur = self._execute(
             """
             SELECT dl.*,
@@ -604,12 +639,16 @@ class _DownloadLogMixin(_PipelineDBBase):
             (request_id,),
         )
         return [
-            self._overlay_evidence_onto_download_log_row(dict(r))
+            download_log_with_evidence_row(
+                self._overlay_evidence_onto_download_log_row(dict(r))
+            )
             for r in cur.fetchall()
         ]
 
 
-    def get_download_history_batch(self, request_ids: list[int]) -> dict[int, list[dict]]:
+    def get_download_history_batch(
+        self, request_ids: list[int],
+    ) -> dict[int, list[DownloadLogWithEvidenceRow]]:
         """Batch fetch download history for multiple request IDs.
 
         Returns dict of request_id → list of history rows (most recent first).
@@ -641,9 +680,11 @@ class _DownloadLogMixin(_PipelineDBBase):
             """,
             ([int(request_id) for request_id in request_ids],),
         )
-        result: dict[int, list[dict]] = {}
+        result: dict[int, list[DownloadLogWithEvidenceRow]] = {}
         for row in cur.fetchall():
-            r = self._overlay_evidence_onto_download_log_row(dict(row))
+            r = download_log_with_evidence_row(
+                self._overlay_evidence_onto_download_log_row(dict(row))
+            )
             rid = r["request_id"]
             if rid not in result:
                 result[rid] = []
@@ -653,7 +694,7 @@ class _DownloadLogMixin(_PipelineDBBase):
 
     def get_latest_download_summaries(
         self, request_ids: list[int],
-    ) -> dict[int, dict]:
+    ) -> dict[int, LatestDownloadSummary]:
         """Batch fetch only the NEWEST download_log row + history count
         per request: ``{request_id: {"latest": row, "count": n}}``.
 
@@ -694,9 +735,11 @@ class _DownloadLogMixin(_PipelineDBBase):
             """,
             (ids,),
         )
-        result: dict[int, dict] = {}
+        result: dict[int, LatestDownloadSummary] = {}
         for row in latest_cur.fetchall():
-            r = self._overlay_evidence_onto_download_log_row(dict(row))
+            r = download_log_with_evidence_row(
+                self._overlay_evidence_onto_download_log_row(dict(row))
+            )
             result[int(r["request_id"])] = {"latest": r, "count": 0}
 
         count_cur = self._execute(
@@ -713,7 +756,7 @@ class _DownloadLogMixin(_PipelineDBBase):
 
     # -- Wrong matches ---------------------------------------------------------
 
-    def get_wrong_matches(self) -> list[dict[str, object]]:
+    def get_wrong_matches(self) -> list[WrongMatchCandidateRow]:
         """Return every rejected wrong-match candidate still on disk.
 
         Issue #113: one row per actionable folder, not one per request.
@@ -781,7 +824,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                    OR dl.validation_result->>'{SCENARIO_KEY}' <> ALL(%s))
             ORDER BY dl.request_id, dl.validation_result->>'{FAILED_PATH_KEY}', dl.id DESC
         """, (sorted(WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS),))
-        rows = [dict(r) for r in cur.fetchall()]
+        rows = [wrong_match_candidate_row(r) for r in cur.fetchall()]
         # DISTINCT ON sorts by path within a request; re-sort so the route
         # layer sees newest-first within each request, matching the frontend
         # expectation that the most-recent candidate appears first.

@@ -9,12 +9,16 @@ from __future__ import annotations
 import json
 import logging
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
-from typing import Sequence, TYPE_CHECKING
+from typing import Sequence, TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
     from cratedigger import TrackRecord
+    from lib.grab_list import GrabListEntry
+    from lib.pipeline_db import PipelineDB
+    from lib.quality import DownloadInfo, ValidationResult
+    from lib.terminal_outcomes import PendingImportTerminalOutcome
 
 logger = logging.getLogger("cratedigger")
 
@@ -22,6 +26,52 @@ from lib.release_identity import detect_release_source
 
 MB_API_BASE = "http://192.168.1.35:5200/ws/2"
 DISCOGS_API_BASE = "https://discogs.ablz.au"
+
+
+class _MBRecordingJSON(TypedDict, total=False):
+    """Slice of a MusicBrainz ``recording`` object this module reads."""
+    length: int
+
+
+class _MBTrackJSON(TypedDict, total=False):
+    """Slice of a MusicBrainz release-lookup ``track`` object."""
+    position: int
+    number: int
+    title: str
+    length: int
+    recording: _MBRecordingJSON
+
+
+class _MBMediumJSON(TypedDict, total=False):
+    """Slice of a MusicBrainz release-lookup ``medium`` object."""
+    position: int
+    tracks: list[_MBTrackJSON]
+
+
+class _MBReleaseJSON(TypedDict, total=False):
+    """Slice of the MusicBrainz ``/release/<mbid>?inc=recordings`` response.
+
+    Untyped (structural-only, no runtime validation) — mirrors the
+    pre-existing ``.get(..., default)`` tolerance for an external API
+    response, not a wire-boundary Struct. See ``_populate_tracks_mb``.
+    """
+    media: list[_MBMediumJSON]
+
+
+class _DiscogsTrackJSON(TypedDict, total=False):
+    """Slice of a Discogs release ``track`` object this module reads."""
+    position: str
+    duration: str
+    title: str
+
+
+class _DiscogsReleaseJSON(TypedDict, total=False):
+    """Slice of the Discogs mirror's ``/api/releases/<id>`` response.
+
+    Untyped (structural-only, no runtime validation) — same rationale as
+    ``_MBReleaseJSON``. See ``_populate_tracks_discogs``.
+    """
+    tracks: list[_DiscogsTrackJSON]
 
 
 @dataclass
@@ -81,7 +131,7 @@ class AlbumRecord:
                 discs[d] = []
             discs[d].append(t)
 
-        media = []
+        media: list[MediaRecord] = []
         for disc_num in sorted(discs.keys()):
             disc_tracks = discs[disc_num]
             base_fmt = row.get("format") or "Digital Media"
@@ -156,17 +206,17 @@ class AlbumRecord:
 class DatabaseSource:
     """Fetch wanted albums from pipeline.db."""
 
-    def __init__(self, dsn):
+    def __init__(self, dsn: str) -> None:
         self.dsn = dsn
-        self._db = None
+        self._db: PipelineDB | None = None
 
-    def _get_db(self):
+    def _get_db(self) -> PipelineDB:
         if self._db is None:
             from lib.pipeline_db import PipelineDB
             self._db = PipelineDB(self.dsn)
         return self._db
 
-    def get_wanted(self, limit=None):
+    def get_wanted(self, limit: int | None = None) -> list[AlbumRecord]:
         """Get wanted albums as normalized records.
 
         Forensic / dashboard / inspection callers should use this method
@@ -178,7 +228,7 @@ class DatabaseSource:
         """
         db = self._get_db()
         wanted = db.get_wanted(limit=limit)
-        records = []
+        records: list[AlbumRecord] = []
         for row in wanted:
             tracks = db.get_tracks(row["id"])
             if not tracks:
@@ -194,7 +244,7 @@ class DatabaseSource:
         limit: int | None = None,
         *,
         title_blacklist: Sequence[str] = (),
-    ):
+    ) -> list[AlbumRecord]:
         """Get wanted albums whose active plan matches ``generator_id``.
 
         This is the **execution-eligibility** filter for Phase 2 (U4).
@@ -208,7 +258,7 @@ class DatabaseSource:
             limit=limit,
             title_blacklist=title_blacklist,
         )
-        records = []
+        records: list[AlbumRecord] = []
         for row in wanted:
             tracks = db.get_tracks(row["id"])
             if not tracks:
@@ -241,14 +291,20 @@ class DatabaseSource:
             for t in tracks
         ]
 
-    def mark_done(self, album_record, bv_result, dest_path=None,
-                  download_info=None, import_job_id=None):
+    def mark_done(
+        self,
+        album_record: GrabListEntry,
+        bv_result: ValidationResult,
+        dest_path: str | None = None,
+        download_info: DownloadInfo | None = None,
+        import_job_id: int | None = None,
+    ) -> int | None | PendingImportTerminalOutcome:
         """Mark album as imported."""
         from lib.dispatch import _do_mark_done
         from lib.quality import DownloadInfo
         request_id = getattr(album_record, "db_request_id", None)
         if not request_id:
-            return
+            return None
 
         db = self._get_db()
         dl = download_info if isinstance(download_info, DownloadInfo) else DownloadInfo()
@@ -263,10 +319,16 @@ class DatabaseSource:
             import_job_id=import_job_id,
         )
 
-    def reject_and_requeue(self, album_record, bv_result, usernames=None,
-                           download_info=None, search_filetype_override=None,
-                           cooled_down_users: set[str] | None = None,
-                           import_job_id: int | None = None):
+    def reject_and_requeue(
+        self,
+        album_record: GrabListEntry,
+        bv_result: ValidationResult,
+        usernames: Collection[str] | None = None,
+        download_info: DownloadInfo | None = None,
+        search_filetype_override: str | None = None,
+        cooled_down_users: set[str] | None = None,
+        import_job_id: int | None = None,
+    ) -> int | None | PendingImportTerminalOutcome:
         """Record a rejected validation and keep the album wanted for retry."""
         from lib.quality import DownloadInfo
         request_id = getattr(album_record, "db_request_id", None)
@@ -354,7 +416,7 @@ class DatabaseSource:
                     cooled_down_users.add(username)
         return download_log_id
 
-    def get_denylisted_users(self, album_record):
+    def get_denylisted_users(self, album_record: GrabListEntry) -> set[str]:
         """Get denylisted usernames for an album."""
         request_id = getattr(album_record, "db_request_id", None)
         if not request_id:
@@ -363,34 +425,40 @@ class DatabaseSource:
         entries = db.get_denylisted_users(request_id)
         return {e["username"] for e in entries}
 
-    def _populate_tracks(self, row):
+    def _populate_tracks(self, row: Mapping[str, object]) -> list[dict[str, object]]:
         """Fetch tracks from MB or Discogs API and store in DB."""
         release_id = row.get("mb_release_id")
         if not release_id:
             return []
+        assert isinstance(release_id, str)
 
         source = detect_release_source(release_id)
         if source == "discogs":
             return self._populate_tracks_discogs(row, release_id)
         return self._populate_tracks_mb(row, release_id)
 
-    def _populate_tracks_mb(self, row, mb_id):
+    def _populate_tracks_mb(
+        self,
+        row: Mapping[str, object],
+        mb_id: str,
+    ) -> list[dict[str, object]]:
         """Fetch tracks from the MusicBrainz API."""
         try:
             url = f"{MB_API_BASE}/release/{mb_id}?inc=recordings&fmt=json"
             req = urllib.request.Request(url)
             req.add_header("User-Agent", "cratedigger-db/1.0")
             with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read())
+                data: _MBReleaseJSON = json.loads(resp.read())
         except Exception:
             logger.warning(f"Failed to fetch tracks from MB API for {mb_id}")
             return []
 
-        tracks = []
+        tracks: list[dict[str, object]] = []
         for medium in data.get("media", []):
             disc = medium.get("position", 1)
             for track in medium.get("tracks", []):
-                length_ms = track.get("length") or (track.get("recording") or {}).get("length")
+                recording: _MBRecordingJSON = track.get("recording") or {}
+                length_ms = track.get("length") or recording.get("length")
                 tracks.append({
                     "disc_number": disc,
                     "track_number": track.get("position", track.get("number", 0)),
@@ -399,12 +467,18 @@ class DatabaseSource:
                 })
 
         if tracks:
+            row_id = row["id"]
+            assert isinstance(row_id, int)
             db = self._get_db()
-            db.set_tracks(row["id"], tracks)
+            db.set_tracks(row_id, tracks)
 
         return tracks
 
-    def _populate_tracks_discogs(self, row, discogs_id):
+    def _populate_tracks_discogs(
+        self,
+        row: Mapping[str, object],
+        discogs_id: str,
+    ) -> list[dict[str, object]]:
         """Fetch tracks from the Discogs mirror API."""
         import re
         try:
@@ -412,12 +486,12 @@ class DatabaseSource:
             req = urllib.request.Request(url)
             req.add_header("User-Agent", "cratedigger-db/1.0")
             with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read())
+                data: _DiscogsReleaseJSON = json.loads(resp.read())
         except Exception:
             logger.warning(f"Failed to fetch tracks from Discogs API for {discogs_id}")
             return []
 
-        tracks = []
+        tracks: list[dict[str, object]] = []
         for track in data.get("tracks", []):
             pos = track.get("position", "")
             disc, track_num = 1, 0
@@ -428,7 +502,7 @@ class DatabaseSource:
                 track_num = int(pos)
 
             duration_str = track.get("duration", "")
-            length_seconds = None
+            length_seconds: float | None = None
             if duration_str:
                 parts = duration_str.split(":")
                 try:
@@ -445,12 +519,14 @@ class DatabaseSource:
             })
 
         if tracks:
+            row_id = row["id"]
+            assert isinstance(row_id, int)
             db = self._get_db()
-            db.set_tracks(row["id"], tracks)
+            db.set_tracks(row_id, tracks)
 
         return tracks
 
-    def close(self):
+    def close(self) -> None:
         if self._db:
             self._db.close()
             self._db = None

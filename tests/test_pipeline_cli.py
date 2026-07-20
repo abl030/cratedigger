@@ -20,7 +20,10 @@ sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from lib.pipeline_db import DownloadLogWithEvidenceRow
 
 import scripts.pipeline_cli.album_requests as pipeline_cli_album_requests
 import scripts.pipeline_cli.long_tail as pipeline_cli_long_tail
@@ -2137,11 +2140,13 @@ class _ForensicsDB(FakePipelineDB):
     def set_stub_download_history(self, rows: list[dict[str, object]]) -> None:
         self._stub_download_history = list(rows)
 
-    def get_download_history(self, request_id: int) -> list[dict[str, object]]:
+    def get_download_history(self, request_id: int) -> "list[DownloadLogWithEvidenceRow]":
         if self._stub_download_history is None:
             return super().get_download_history(request_id)
-        return [row for row in self._stub_download_history
-                if row.get("request_id") == request_id]
+        return cast("list[DownloadLogWithEvidenceRow]", [
+            row for row in self._stub_download_history
+            if row.get("request_id") == request_id
+        ])
 
 
 class TestCmdShowSearchForensics(unittest.TestCase):

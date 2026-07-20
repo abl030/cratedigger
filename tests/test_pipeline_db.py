@@ -15,6 +15,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -2189,7 +2190,7 @@ class TestDownloadLog(unittest.TestCase):
         history = self.db.get_download_history(self.req_id)
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0]["soulseek_username"], "user123")
-        self.assertAlmostEqual(history[0]["beets_distance"], 0.08)
+        self.assertAlmostEqual(cast(float, history[0]["beets_distance"]), 0.08)
         self.assertEqual(history[0]["outcome"], "success")
 
     def test_log_download_preserves_null_beets_distance(self):
@@ -2228,9 +2229,9 @@ class TestDownloadLog(unittest.TestCase):
 
         history = self.db.get_download_history(self.req_id)
         self.assertEqual(len(history), 1)
-        self.assertEqual(history[0]["validation_result"]["distance"], 0.0)
-        self.assertEqual(history[0]["validation_result"]["scenario"],
-                         "untracked_audio")
+        vr = cast(dict, history[0]["validation_result"])
+        self.assertEqual(vr["distance"], 0.0)
+        self.assertEqual(vr["scenario"], "untracked_audio")
         self.assertEqual(history[0]["beets_distance"], 0.0)
         self.assertEqual(history[0]["beets_scenario"], "untracked_audio")
 
@@ -2250,7 +2251,8 @@ class TestDownloadLog(unittest.TestCase):
         history = self.db.get_download_history(self.req_id)
         self.assertEqual(history[0]["beets_scenario"], "curator_ban")
         self.assertIsNone(history[0]["beets_distance"])
-        self.assertEqual(history[0]["validation_result"]["hashes_recorded"], 3)
+        vr = cast(dict, history[0]["validation_result"])
+        self.assertEqual(vr["hashes_recorded"], 3)
 
     def test_log_download_allows_explicit_metadata_only_when_envelope_omits_it(self):
         """MeasurementFailure has no distance/scenario projection keys."""
@@ -2272,8 +2274,8 @@ class TestDownloadLog(unittest.TestCase):
         history = self.db.get_download_history(self.req_id)
         self.assertEqual(history[0]["beets_scenario"], "measurement_failed")
         self.assertIsNone(history[0]["beets_distance"])
-        self.assertEqual(history[0]["validation_result"]["reason"],
-                         "measurement_crashed")
+        vr = cast(dict, history[0]["validation_result"])
+        self.assertEqual(vr["reason"], "measurement_crashed")
 
     def test_log_download_rejects_duplicate_validation_projection_inputs(self):
         """There is no precedence rule between evidence and denormalized args."""
@@ -3801,8 +3803,8 @@ class TestResetToWanted(unittest.TestCase):
         self.assertEqual(history[0]["beets_distance"], 0.12)
         self.assertEqual(history[0]["beets_scenario"],
                          "abandoned_auto_import")
-        self.assertEqual(history[0]["validation_result"]["failed_path"],
-                         "/tmp/failed")
+        vr = cast(dict, history[0]["validation_result"])
+        self.assertEqual(vr["failed_path"], "/tmp/failed")
 
     def test_get_wanted_returns_attempted_and_untried_rows(self):
         attempted_id = self.db.add_request(
@@ -9888,7 +9890,7 @@ class TestYoutubeIngestDownloadLog(unittest.TestCase):
         self.assertEqual(entry["outcome"], "youtube_running")
 
         # JSONB metadata: every supplied field round-trips through psycopg2.
-        meta = entry["youtube_metadata"]
+        meta = cast(dict, entry["youtube_metadata"])
         self.assertIsInstance(meta, dict)
         for key, expected in {
             "yt_url": payload["yt_url"],
@@ -9910,7 +9912,7 @@ class TestYoutubeIngestDownloadLog(unittest.TestCase):
 
         entry = self.db.get_download_log_entry(log_id)
         assert entry is not None
-        meta = entry["youtube_metadata"]
+        meta = cast(dict, entry["youtube_metadata"])
         self.assertEqual(meta["resolver_mapping_id"], 44)
         self.assertEqual(meta["per_track_video_ids"], ["v1", "v2"])
 
@@ -9956,7 +9958,7 @@ class TestYoutubeIngestDownloadLog(unittest.TestCase):
         entry = self.db.get_download_log_entry(log_id)
         assert entry is not None
         self.assertEqual(entry["outcome"], "youtube_success")
-        meta = entry["youtube_metadata"]
+        meta = cast(dict, entry["youtube_metadata"])
         self.assertIsInstance(meta, dict)
         # Merge: submission-time fields survive.
         self.assertEqual(meta["browse_id"], "MPREb_default")
@@ -9977,7 +9979,7 @@ class TestYoutubeIngestDownloadLog(unittest.TestCase):
         entry = self.db.get_download_log_entry(log_id)
         assert entry is not None
         self.assertEqual(entry["outcome"], "youtube_failed")
-        meta = entry["youtube_metadata"]
+        meta = cast(dict, entry["youtube_metadata"])
         self.assertIsInstance(meta, dict)
         self.assertEqual(meta["reason"], "track_count_mismatch")
         self.assertEqual(meta["observed_track_count"], 7)
@@ -10179,7 +10181,7 @@ class TestYoutubeIngestDownloadLog(unittest.TestCase):
         assert entry is not None
         self.assertEqual(entry["outcome"], "youtube_success")
         self.assertEqual(
-            entry["youtube_metadata"]["observed_track_count"], 10)
+            cast(dict, entry["youtube_metadata"])["observed_track_count"], 10)
 
     def test_read_seam_includes_source_and_youtube_metadata(self):
         """Every download_log read seam surfaces the new columns."""
@@ -10203,7 +10205,7 @@ class TestYoutubeIngestDownloadLog(unittest.TestCase):
         assert yt_entry is not None
         self.assertEqual(yt_entry["source"], "youtube")
         self.assertEqual(yt_entry["outcome"], "youtube_success")
-        yt_meta = yt_entry["youtube_metadata"]
+        yt_meta = cast(dict, yt_entry["youtube_metadata"])
         self.assertIsInstance(yt_meta, dict)
         self.assertEqual(yt_meta["observed_track_count"], 10)
 
@@ -11395,8 +11397,8 @@ class TestReadProjectionParity(unittest.TestCase):
     @staticmethod
     def _assert_keyset_parity(
         test: unittest.TestCase,
-        real_rows: "list[dict[str, Any]]",
-        fake_rows: "list[dict[str, Any]]",
+        real_rows: "Sequence[Mapping[str, Any]]",
+        fake_rows: "Sequence[Mapping[str, Any]]",
         label: str,
     ) -> None:
         """Assert real PG and FakePipelineDB return identically-keyed rows.

@@ -1285,8 +1285,9 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         for lid, path in ((100, "/fi/a"), (101, "/fi/b")):
             entry = self.db.get_download_log_entry(lid)
             assert entry is not None
-            self.assertEqual(
-                entry["validation_result"]["failed_path"], path)
+            vr = entry["validation_result"]
+            assert vr is not None
+            self.assertEqual(vr["failed_path"], path)
         self.assertEqual(
             jobs["force_import:download_log:100"]
             .payload["source_dirs"],
@@ -1371,7 +1372,9 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         # The row stays visible — failed_path survives.
         entry_100 = self.db.get_download_log_entry(100)
         assert entry_100 is not None
-        self.assertIn("failed_path", entry_100["validation_result"])
+        vr_100 = entry_100["validation_result"]
+        assert vr_100 is not None
+        self.assertIn("failed_path", vr_100)
         self.mock_cleanup.assert_not_called()
 
     def test_converge_reports_deduped_jobs(self):

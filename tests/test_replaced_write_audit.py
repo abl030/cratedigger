@@ -75,16 +75,18 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/dashboard.py", 481, "5e3b8177198ccbed"): (
         "dashboard WHERE and ORDER fragments come from closed enum branches"
     ),
-    ("lib/pipeline_db/download_log.py", 739, "d21a8be0a38ad4f3"): (
+    ("lib/pipeline_db/download_log.py", 782, "ac41f71665bf6826"): (
+        "validation key is selected from a closed server-owned vocabulary "
+        "(issue #784: return type retyped to list[WrongMatchCandidateRow], "
+        "no SQL change)"
+    ),
+    ("lib/pipeline_db/download_log.py", 840, "e0154e89026dc8ef"): (
         "validation key is selected from a closed server-owned vocabulary"
     ),
-    ("lib/pipeline_db/download_log.py", 797, "e0154e89026dc8ef"): (
-        "validation key is selected from a closed server-owned vocabulary"
-    ),
-    ("lib/pipeline_db/download_log.py", 815, "1ca75e0c21fa6d7e"): (
+    ("lib/pipeline_db/download_log.py", 858, "1ca75e0c21fa6d7e"): (
         "validation key is closed vocabulary and IN list is value placeholders"
     ),
-    ("lib/pipeline_db/download_log.py", 832, "d87a36ba1d1768e7"): (
+    ("lib/pipeline_db/download_log.py", 875, "d87a36ba1d1768e7"): (
         "JSON path key is selected from a closed server-owned vocabulary"
     ),
     ("lib/pipeline_db/import_jobs.py", 111, "ecf3d1844c67f653"): (
@@ -96,11 +98,15 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/misc.py", 188, "12cfdd83a367c90e"): (
         "track-count batch IN list contains only psycopg value placeholders"
     ),
-    ("lib/pipeline_db/misc.py", 396, "0a14fd5e6252e398"): (
-        "bulk VALUES fragment contains only fixed value-placeholder tuples"
+    ("lib/pipeline_db/misc.py", 401, "0a14fd5e6252e398"): (
+        "bulk VALUES fragment contains only fixed value-placeholder tuples "
+        "(issue #784: add_denylist/get_denylisted_users annotated above, "
+        "shifting this line; no SQL change)"
     ),
-    ("lib/pipeline_db/misc.py", 570, "47e316b5c87e000f"): (
-        "triage joins and predicates are selected from closed service enums"
+    ("lib/pipeline_db/misc.py", 575, "47e316b5c87e000f"): (
+        "triage joins and predicates are selected from closed service enums "
+        "(issue #784: add_denylist/get_denylisted_users annotated above, "
+        "shifting this line; no SQL change)"
     ),
     ("lib/pipeline_db/requests.py", 70, "092ac19c7715cd88"): (
         "INSERT columns derive from the fixed AddRequestInput schema"
@@ -121,9 +127,11 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "metadata keys are validated identifiers, lifecycle fields are reserved, "
         "and values use one typed JSONB record parameter"
     ),
-    ("lib/pipeline_db/requests.py", 1330, "7db79742051b4f8f"): (
+    ("lib/pipeline_db/requests.py", 1330, "ef9d09dcf1118fd0"): (
         "optional LIMIT is normalized through int before interpolation "
-        "(issue #765: return type retyped to list[AlbumRequestRow], no SQL change)"
+        "(issue #765: return type retyped to list[AlbumRequestRow], no SQL "
+        "change; issue #784: `limit` parameter annotated `int | None`, "
+        "changing the enclosing-scope fingerprint, no SQL change)"
     ),
     ("lib/pipeline_db/requests.py", 1345, "a586333614f3b096"): (
         "ORDER is selected from two literals and LIMIT remains a value placeholder "
@@ -153,7 +161,7 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/terminal_outcomes.py", 387, "0a9c4396d1185b94"): (
         "atomic terminal typed transition CASes the source status selected by the DAG"
     ),
-    ("lib/pipeline_db/download_log.py", 406, "6c7d7519e8c91827"): (
+    ("lib/pipeline_db/download_log.py", 428, "6c7d7519e8c91827"): (
         "atomic abandoned-import recovery performs downloading-to-wanted CAS"
     ),
     ("lib/pipeline_db/requests.py", 289, "558917722283199d"): (

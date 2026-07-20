@@ -209,8 +209,12 @@ def cleanup_all_wrong_matches(
 
     results: list[WrongMatchCleanupOutcome] = []
     for row in db.get_wrong_matches():
-        download_log_id = row.get("download_log_id")
-        if not isinstance(download_log_id, int) or isinstance(download_log_id, bool):
+        # ``download_log_id`` is a required, non-nullable ``download_log.id``
+        # column (WrongMatchCandidateRow), so the row type already proves
+        # this is an ``int`` — only the bool-subtype guard still needs a
+        # runtime check.
+        download_log_id = row["download_log_id"]
+        if isinstance(download_log_id, bool):
             results.append(WrongMatchCleanupOutcome(
                 download_log_id=0,
                 outcome=OUTCOME_SKIPPED_INVALID_ROW,

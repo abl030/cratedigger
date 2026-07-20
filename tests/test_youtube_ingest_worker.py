@@ -31,7 +31,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import msgspec
@@ -205,6 +205,7 @@ class TestSweepOrphanRunningRows(unittest.TestCase):
             row = pdb.get_download_log_entry(log_id)
             assert row is not None
             meta = row["youtube_metadata"]
+            assert meta is not None
             self.assertEqual(meta["reason"], "worker_interrupted")
             self.assertNotIn("cleanup_error", meta)
 
@@ -338,7 +339,7 @@ class TestDrainUnhandledException(unittest.TestCase):
         # The traceback excerpt is present and bounded.
         self.assertIsNotNone(meta.get("stderr_excerpt"))
         self.assertLessEqual(
-            len(meta["stderr_excerpt"]),
+            len(cast(str, meta["stderr_excerpt"])),
             worker.STDERR_EXCERPT_BYTES_LIMIT)
 
 

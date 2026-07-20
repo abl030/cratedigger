@@ -17,10 +17,13 @@ was split out (#546 W4) into ``web/routes/pipeline_mutations.py``.
 
 import logging
 from collections.abc import Mapping, Sequence
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import msgspec
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from lib.pipeline_db import LatestDownloadSummary
 
 from web.routes._registry import RouteRegistration, pattern_route, route
 from web.routes._pydantic import parse_body
@@ -222,7 +225,9 @@ def get_pipeline_log(h, params: dict[str, list[str]]) -> None:
         limit=_pipeline_log_limit(params),
         outcome_filter=outcome_filter,
     )
-    mbids = list(set(e["mb_release_id"] for e in entries if e.get("mb_release_id")))
+    mbids = list({
+        str(e["mb_release_id"]) for e in entries if e.get("mb_release_id")
+    })
     beets_info = _server().check_beets_library_detail(mbids) if mbids else {}
     result = []
     for e in entries:
@@ -283,7 +288,7 @@ def get_pipeline_status(h, params: dict[str, list[str]]) -> None:
 
 def _attach_latest_download_summaries(
     items: list[dict],
-    summaries: dict[int, dict],
+    summaries: "Mapping[int, LatestDownloadSummary]",
 ) -> list[dict]:
     """Stamp each request row with its newest download's verdict fields.
 

@@ -19,6 +19,7 @@ import json
 import os
 import tempfile
 import unittest
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 from unittest.mock import patch
@@ -172,7 +173,7 @@ class PreviewFailureObservation:
     job_status: str
     preview_status: str | None
     preview_result: dict[str, Any] | None
-    audit: dict[str, object] | None
+    audit: Mapping[str, object] | None
     current_evidence: AlbumQualityEvidence | None
     expected_mbid: str
     expected_path: str

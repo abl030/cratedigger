@@ -23,6 +23,7 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 
@@ -39,6 +40,9 @@ _beets_mocks = {
     "beets.importer.actions": MagicMock(),
     "beets.importer.session": MagicMock(),
     "beets.importer.tasks": MagicMock(),
+    "beets.autotag": MagicMock(),
+    "beets.dbcore": MagicMock(),
+    "beets.util": MagicMock(),
 }
 for name, mock in _beets_mocks.items():
     sys.modules.setdefault(name, mock)
@@ -55,11 +59,15 @@ def _make_item(mb_albumid: str | None):
     return SimpleNamespace(mb_albumid=mb_albumid)
 
 
-def _make_task(items, path: bytes | str = b"/Beets/Artist/Album"):
+def _make_task(items, path: bytes | str = b"/Beets/Artist/Album") -> Any:
+    """Duck-typed stand-in for an ImportTask — `_mbid_swap_event` only
+    reads `.items`/`.paths` via getattr, so a SimpleNamespace suffices at
+    runtime; typed `Any` here so pyright doesn't demand a real ImportTask."""
     return SimpleNamespace(items=items, paths=[path])
 
 
-def _make_candidate(album_id: str):
+def _make_candidate(album_id: str) -> Any:
+    """Duck-typed stand-in for an AlbumMatch/TrackMatch — see `_make_task`."""
     info = SimpleNamespace(album_id=album_id)
     return SimpleNamespace(info=info)
 

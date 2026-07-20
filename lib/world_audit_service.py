@@ -9,7 +9,7 @@ from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
 import msgspec
 
 if TYPE_CHECKING:
-    from lib.pipeline_db.rows import AlbumRequestRow
+    from lib.pipeline_db.rows import AlbumRequestRow, DownloadLogWithEvidenceRow
 
 from lib.beets_db import BeetsWorldAlbum
 from lib.quality import AlbumQualityEvidence
@@ -73,7 +73,7 @@ class WorldAuditPipelineDB(Protocol):
     def get_download_history_batch(
         self,
         request_ids: list[int],
-    ) -> dict[int, list[dict[str, Any]]]: ...
+    ) -> "dict[int, list[DownloadLogWithEvidenceRow]]": ...
 
     def list_denylist_rows(self) -> list[dict[str, Any]]: ...
 
