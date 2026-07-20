@@ -140,7 +140,7 @@ def parse_transfer_snapshot(raw: dict[str, Any]) -> TransferSnapshot | None:
     except msgspec.ValidationError:
         logger.warning(
             "slskd transfer snapshot: skipping malformed entry (keys=%s)",
-            sorted(raw.keys()) if isinstance(raw, dict) else type(raw).__name__,
+            sorted(raw.keys()),
             exc_info=True,
         )
         return None

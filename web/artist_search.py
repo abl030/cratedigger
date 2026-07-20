@@ -8,14 +8,26 @@ alternate identities discoverable beside an exact search hit.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import TypedDict
 
-def merge_exact_artist_identities(
-    base: list[dict],
+
+class ArtistHit(TypedDict):
+    """The normalized artist-hit shape both adapters produce."""
+
+    id: str
+    name: str
+    disambiguation: str
+    score: int
+
+
+def merge_exact_artist_identities[HitT: Mapping[str, object]](
+    base: list[HitT],
     *,
     exact_id: str,
-    related: list[dict],
+    related: list[HitT],
     limit: int = 20,
-) -> list[dict]:
+) -> list[HitT]:
     """Keep the exact hit first, then related identities, then other hits."""
     exact = next(
         (row for row in base if str(row.get("id", "")) == exact_id),
@@ -25,7 +37,7 @@ def merge_exact_artist_identities(
         return base[:limit]
 
     ordered = [exact, *related, *base]
-    merged: list[dict] = []
+    merged: list[HitT] = []
     seen: set[str] = set()
     for row in ordered:
         row_id = str(row.get("id", ""))

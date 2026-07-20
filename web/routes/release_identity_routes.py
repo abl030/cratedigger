@@ -194,10 +194,7 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
             }, status=422)
             return
 
-        master_id = (
-            discogs_data.get("release_group_id")
-            if isinstance(discogs_data, dict) else None
-        )
+        master_id = discogs_data.get("release_group_id")
         if not master_id:
             h._json({
                 "request_id": request_id,
@@ -242,7 +239,7 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
         }, status=422)
         return
 
-    rg_id = (data or {}).get("release_group_id") if isinstance(data, dict) else None
+    rg_id = (data or {}).get("release_group_id")
     if not rg_id:
         h._json({
             "request_id": request_id,

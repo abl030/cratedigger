@@ -151,26 +151,26 @@ def post_beets_delete(h, body: dict) -> None:
         }, status=500)
         return
 
-    if isinstance(result, DeleteIncomplete):
-        h._json({
-            "error": "delete_incomplete",
-            "id": result.album_id,
-            "album": result.album_name,
-            "artist": result.artist_name,
-            "former_album_path": result.former_album_path,
-            "pipeline_id": result.pipeline_request_id,
-            "pipeline_status": result.pipeline_status,
-            "acknowledgement_lost": result.acknowledgement_lost,
-            "reason": result.reason,
-            "detail": result.detail,
-            "album_still_present": result.album_still_present,
-            "deleted_files": result.deleted_files,
-            "deleted_artifacts": result.deleted_artifacts,
-            "remaining_owned_paths": list(result.remaining_owned_paths),
-            "preserved_paths": list(result.preserved_paths),
-        }, status=409)
-        return
-
+    match result:
+        case DeleteIncomplete():
+            h._json({
+                "error": "delete_incomplete",
+                "id": result.album_id,
+                "album": result.album_name,
+                "artist": result.artist_name,
+                "former_album_path": result.former_album_path,
+                "pipeline_id": result.pipeline_request_id,
+                "pipeline_status": result.pipeline_status,
+                "acknowledgement_lost": result.acknowledgement_lost,
+                "reason": result.reason,
+                "detail": result.detail,
+                "album_still_present": result.album_still_present,
+                "deleted_files": result.deleted_files,
+                "deleted_artifacts": result.deleted_artifacts,
+                "remaining_owned_paths": list(result.remaining_owned_paths),
+                "preserved_paths": list(result.preserved_paths),
+            }, status=409)
+            return
     assert_never(result)
 
 

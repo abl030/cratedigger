@@ -358,10 +358,7 @@ def _run_ytdlp(
             # marker so operators recognise it in triage.
             stderr_decoded = ""
             if exc.stderr is not None:
-                if isinstance(exc.stderr, bytes):
-                    stderr_decoded = exc.stderr.decode("utf-8", errors="replace")
-                else:
-                    stderr_decoded = str(exc.stderr)
+                stderr_decoded = exc.stderr.decode("utf-8", errors="replace")
             excerpt = _cap_stderr_excerpt(
                 f"ERROR: yt-dlp Read timed out after {timeout_sec}s\n"
                 f"{stderr_decoded}")

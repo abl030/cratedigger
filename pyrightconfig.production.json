@@ -1,0 +1,20 @@
+{
+  "extraPaths": ["."],
+  "venvPath": ".",
+  "venv": ".pyright-venv",
+  "pythonVersion": "3.13",
+  "reportMissingImports": "error",
+  "reportUnnecessaryTypeIgnoreComment": "error",
+  "reportUnnecessaryIsInstance": "error",
+  "reportUnnecessaryComparison": "error",
+  "reportConstantRedefinition": "error",
+  "reportDeprecated": "error",
+  "exclude": [
+    "build",
+    "tools/vulture",
+    ".pyright-venv",
+    ".nixpkgs-src",
+    ".claude/worktrees",
+    "tests"
+  ]
+}

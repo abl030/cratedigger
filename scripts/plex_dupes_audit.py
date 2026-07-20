@@ -18,6 +18,7 @@ import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import TypedDict
 import urllib.request
 
 XML_PATH = sys.argv[1]
@@ -53,7 +54,13 @@ dup_groups = {k: v for k, v in groups.items() if len(v) > 1}
 all_rks = [a['ratingKey'] for v in dup_groups.values() for a in v]
 print(f"total_albums={len(albums)} dup_groups={len(dup_groups)} rks_to_fetch={len(all_rks)}", file=sys.stderr)
 
-rk_data = {}
+class _RkInfo(TypedDict, total=False):
+    files: list[str]
+    folders: list[str]
+    track_count: int
+
+
+rk_data: dict[str, _RkInfo] = {}
 failures = []
 done = 0
 with ThreadPoolExecutor(max_workers=12) as ex:
@@ -95,12 +102,7 @@ if failures:
             except Exception as e:
                 failures.append({'ratingKey': rk, 'error': str(e)})
 
-out = {
-    'total_albums': len(albums),
-    'dup_groups_total': len(dup_groups),
-    'fetch_failures': failures,
-    'groups': []
-}
+group_rows: list[dict[str, object]] = []
 
 for key, members in sorted(dup_groups.items()):
     parent_title, title, year = key
@@ -108,7 +110,7 @@ for key, members in sorted(dup_groups.items()):
     for m in members:
         all_folders |= set(rk_data.get(m['ratingKey'], {}).get('folders', []))
     classification = 'same_folder' if len(all_folders) == 1 else ('diff_folder' if len(all_folders) > 1 else 'unknown')
-    out['groups'].append({
+    group_rows.append({
         'parent_title': parent_title,
         'title': title,
         'year': year,
@@ -127,7 +129,13 @@ for key, members in sorted(dup_groups.items()):
 
 # Sanity counts
 from collections import Counter
-class_counts = Counter(g['classification'] for g in out['groups'])
-out['summary'] = dict(class_counts)
+class_counts = Counter(g['classification'] for g in group_rows)
+out: dict[str, object] = {
+    'total_albums': len(albums),
+    'dup_groups_total': len(dup_groups),
+    'fetch_failures': failures,
+    'groups': group_rows,
+    'summary': dict(class_counts),
+}
 print(f"classification: {dict(class_counts)}", file=sys.stderr)
 print(json.dumps(out, indent=2, ensure_ascii=False))

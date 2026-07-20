@@ -20,6 +20,15 @@ for f in tests/test_js_*.mjs; do
 done
 echo ""
 
+# Production typing rules (#765 phase 2) — the four mode-independent strict
+# checks (unnecessary isinstance/comparison, constant redefinition,
+# deprecated APIs) run over production code only. Tests keep intentional
+# protocol-conformance issubclass pins, so they are excluded here; the main
+# pyrightconfig.json stays whole-repo and runs in pre-commit / final gates.
+echo "=== Pyright production typing rules ==="
+pyright -p pyrightconfig.production.json --threads 4
+echo ""
+
 # Production-liveness sweep — source-local Ruff F401/F811 runs first, then
 # aggregate vulture. Vulture's baseline lives at tools/vulture/whitelist.py;
 # intentional import exports, if any, require exact redundant-alias baselines

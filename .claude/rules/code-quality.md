@@ -104,6 +104,20 @@ tests/_typing_ratchet_baseline.py`). Counting is lexical (stdlib
 tokenizer) — mentions inside strings and docstrings don't count, and the
 scanner is deliberately not a semantic analyzer.
 
+Phase 2 additionally enforces four mode-independent strict rules on
+production code — `reportUnnecessaryIsInstance`,
+`reportUnnecessaryComparison`, `reportConstantRedefinition`,
+`reportDeprecated` — via `pyrightconfig.production.json`, gated in
+`scripts/run_tests.sh`. They are deliberately NOT in the main
+`pyrightconfig.json`: tests carry intentional protocol-conformance
+`issubclass` pins (the #430 parity-gate pattern) that the isinstance rule
+would flag, and a tests `executionEnvironments` split doesn't work here
+(`tests/web/` shadows the production `web` package once `tests` becomes an
+import root). For exhaustive result-union handling under these rules, use
+a `match` with class patterns and `assert_never(result)` (or the
+equivalent `raise AssertionError`) AFTER the match — a final
+`isinstance`/`case _` arm on a fully-narrowed subject trips the rules.
+
 ## HTTP request bodies — use `pydantic.BaseModel`
 
 Inbound HTTP request bodies in `web/routes/*.py` go through `pydantic.BaseModel` (v2) at the handler entry. Pydantic stops at the route layer; internal types stay `msgspec.Struct` / `@dataclass` per the next section. Enforced by `tests/test_pydantic_route_audit.py` — any `post_*` handler that reads the raw `body` dict instead of going through `parse_body` fails the audit (small allowlist with a rationale per entry).

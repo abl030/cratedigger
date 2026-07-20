@@ -600,8 +600,7 @@ def _materialize_processing_dir(
         staged_album.current_path,
         canonical_path,
     )
-    db = (ctx.pipeline_db_source._get_db()
-          if ctx.pipeline_db_source is not None else None)
+    db = ctx.pipeline_db_source._get_db()
     request_id = album_data.db_request_id
     if request_id is None and _is_request_scoped_auto_import_path(
         current_path=staged_album.current_path,

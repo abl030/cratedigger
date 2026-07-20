@@ -277,7 +277,7 @@ def _persist_terminal_dispatch_outcome(
     pending = outcome.terminal_outcome
     if pending is None or defer:
         return outcome
-    result = {
+    result: dict[str, object] = {
         "success": outcome.success,
         "message": outcome.message,
         "deferred": outcome.deferred,

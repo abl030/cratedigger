@@ -1,6 +1,7 @@
 """PipelineDB core primitives: connection, _execute, advisory_lock, _atomic."""
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any
 import psycopg2
 import psycopg2.extras
 
@@ -110,7 +111,7 @@ class _CoreMixin(_PipelineDBBase):
 
 
     @contextmanager
-    def advisory_lock(self, namespace: int, key: int) -> Iterator[bool]:
+    def advisory_lock(self, namespace: int, key: int) -> Generator[bool]:
         """Try to acquire a session-level PostgreSQL advisory lock. Non-blocking.
 
         Yields ``True`` if acquired, ``False`` if another session already
@@ -160,7 +161,7 @@ class _CoreMixin(_PipelineDBBase):
 
 
     @contextmanager
-    def _atomic(self) -> Iterator[Any]:
+    def _atomic(self) -> Generator[Any]:
         """Run a multi-row write in one explicit transaction.
 
         ``PipelineDB`` runs ``autocommit=True`` — one statement per implicit

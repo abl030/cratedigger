@@ -41,15 +41,10 @@ def _run_post_rejection_wrong_match_cleanup(
         return None
     if not rejection_scenario_is_wrong_match_candidate(scenario):
         return None
-    if ctx.pipeline_db_source is None:
-        return None
-    get_db = getattr(ctx.pipeline_db_source, "_get_db", None)
-    if get_db is None:
-        return None
     try:
         from lib.wrong_match_cleanup_service import cleanup_wrong_match
 
-        db = get_db()
+        db = ctx.pipeline_db_source._get_db()
         if import_job_id is not None:
             evidence_id = db.get_import_job_candidate_evidence_id(import_job_id)
             if evidence_id is not None:
@@ -80,14 +75,12 @@ def _resolved_request_rejection_id(
     ctx: CratediggerContext,
 ) -> tuple[Any | None, int | None]:
     """Resolve the backing request row for defensive auto-import rejects."""
-    if ctx.pipeline_db_source is None:
-        return None, None
     db = ctx.pipeline_db_source._get_db()
     if album_data.db_request_id is not None:
         return db, album_data.db_request_id
 
     candidate_request_id = album_data.album_id
-    if not isinstance(candidate_request_id, int) or isinstance(candidate_request_id, bool):
+    if isinstance(candidate_request_id, bool):
         return db, None
     if candidate_request_id <= 0:
         return db, None

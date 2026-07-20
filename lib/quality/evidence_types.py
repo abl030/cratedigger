@@ -214,9 +214,9 @@ class AlbumQualityEvidenceFile(msgspec.Struct, frozen=True):
         errors: list[str] = []
         if not self.relative_path or self.relative_path.startswith("/"):
             errors.append("relative_path must be a non-empty relative path")
-        if not isinstance(self.size_bytes, int) or self.size_bytes < 0:
+        if self.size_bytes < 0:
             errors.append(f"{self.relative_path}: size_bytes must be >= 0")
-        if not isinstance(self.mtime_ns, int) or self.mtime_ns < 0:
+        if self.mtime_ns < 0:
             errors.append(f"{self.relative_path}: mtime_ns must be >= 0")
         if not self.extension:
             errors.append(f"{self.relative_path}: extension is required")
@@ -382,8 +382,6 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
             errors.append("mb_release_id must be a non-empty string")
         if not self.snapshot_fingerprint:
             errors.append("snapshot_fingerprint must be a non-empty string")
-        if self.measured_at is None:
-            errors.append("measured_at is required")
         if self.lineage_version not in (1, 3, 4):
             errors.append("lineage_version must be 1, 3, or 4")
         if self.lineage_version >= 3:
@@ -421,7 +419,7 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
             errors.append(
                 f"folder_layout must be 'flat' or 'nested': {self.folder_layout!r}"
             )
-        if not isinstance(self.audio_file_count, int) or self.audio_file_count < 0:
+        if self.audio_file_count < 0:
             errors.append("audio_file_count must be >= 0")
         if (self.matched_bad_audio_hash_id is None) != (
             self.matched_bad_audio_hash_path is None

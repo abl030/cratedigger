@@ -132,7 +132,7 @@ def tracked_audio_paths_from_validation_items(
     root_abs = os.path.abspath(root)
     paths: list[str] = []
     for item in items:
-        raw_path = item.get("path") if isinstance(item, dict) else None
+        raw_path = item.get("path")
         if not isinstance(raw_path, str) or not raw_path:
             continue
         candidate = raw_path

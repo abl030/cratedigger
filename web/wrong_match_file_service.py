@@ -6,6 +6,7 @@ import mimetypes
 import os
 import re
 from urllib.parse import quote
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 from lib.processing_paths import normalize_source_dirs, path_is_within_root
@@ -215,6 +216,13 @@ def _mapping_sort_key(mapping_row: Mapping[str, Any], fallback_index: int) -> tu
     return medium, primary, fallback_index
 
 
+@dataclass
+class _FileEntry:
+    original_index: int
+    file: dict[str, object]
+    identity: tuple[str, str, int | None, int | None]
+
+
 def _reorder_files_by_match(
     files: list[dict[str, object]],
     validation_result: ValidationResultEnvelope,
@@ -228,11 +236,11 @@ def _reorder_files_by_match(
         return files, "folder"
 
     file_entries = [
-        {
-            "original_index": index,
-            "file": file_data,
-            "identity": _file_identity(file_data),
-        }
+        _FileEntry(
+            original_index=index,
+            file=file_data,
+            identity=_file_identity(file_data),
+        )
         for index, file_data in enumerate(files)
     ]
     unmatched_indexes = set(range(len(file_entries)))
@@ -251,31 +259,31 @@ def _reorder_files_by_match(
 
         exact_basename = [
             idx for idx in candidates
-            if basename and file_entries[idx]["identity"][0] == basename
+            if basename and file_entries[idx].identity[0] == basename
         ]
         if len(exact_basename) == 1:
             chosen = exact_basename[0]
         else:
             title_track_disc = [
                 idx for idx in candidates
-                if title and file_entries[idx]["identity"][1] == title
-                and file_entries[idx]["identity"][2] == track
-                and file_entries[idx]["identity"][3] == disc
+                if title and file_entries[idx].identity[1] == title
+                and file_entries[idx].identity[2] == track
+                and file_entries[idx].identity[3] == disc
             ]
             if len(title_track_disc) == 1:
                 chosen = title_track_disc[0]
             else:
                 title_track = [
                     idx for idx in candidates
-                    if title and file_entries[idx]["identity"][1] == title
-                    and file_entries[idx]["identity"][2] == track
+                    if title and file_entries[idx].identity[1] == title
+                    and file_entries[idx].identity[2] == track
                 ]
                 if len(title_track) == 1:
                     chosen = title_track[0]
                 else:
                     exact_title = [
                         idx for idx in candidates
-                        if title and file_entries[idx]["identity"][1] == title
+                        if title and file_entries[idx].identity[1] == title
                     ]
                     chosen = exact_title[0] if len(exact_title) == 1 else None
 
@@ -289,12 +297,12 @@ def _reorder_files_by_match(
 
     reordered_entries = sorted(
         file_entries,
-        key=lambda entry: matched_positions.get(entry["original_index"], 10**9),
+        key=lambda entry: matched_positions.get(entry.original_index, 10**9),
     )
     reordered: list[dict[str, object]] = []
     for entry in reordered_entries:
-        file_data = entry["file"]
-        file_data["matched_order"] = matched_positions.get(entry["original_index"])
+        file_data = entry.file
+        file_data["matched_order"] = matched_positions.get(entry.original_index)
         reordered.append(file_data)
     return reordered, "matched"
 

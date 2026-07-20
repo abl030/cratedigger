@@ -632,7 +632,7 @@ def _extract_disambiguation_failure(
     or the blob is missing/unreadable — callers render the chip conditionally.
     """
     ir = _parse_import_result(entry)
-    if ir is None or ir.postflight is None:
+    if ir is None:
         return (None, None)
     fail = ir.postflight.disambiguation_failure
     if fail is None:
@@ -643,7 +643,7 @@ def _extract_disambiguation_failure(
 def _extract_bad_extensions(entry: LogEntry) -> list[str]:
     """Pull postflight bad-extension filenames out of ImportResult JSONB."""
     ir = _parse_import_result(entry)
-    if ir is None or ir.postflight is None:
+    if ir is None:
         return []
     return list(ir.postflight.bad_extensions)
 

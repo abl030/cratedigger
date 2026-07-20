@@ -373,7 +373,7 @@ not exactly one same-release album.
 BEETS_DB = "/mnt/virtio/Music/beets-library.db"
 HARNESS_TIMEOUT = 300   # 5 min for match selection
 IMPORT_TIMEOUT = 1800   # 30 min for actual import (fetchart, embedart, lyrics can be slow)
-MAX_DISTANCE = 0.5      # Reject matches above this distance
+max_distance = 0.5      # Reject matches above this distance
 ```
 
 ## Beets Distance
