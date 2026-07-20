@@ -189,7 +189,7 @@ class TestPublicCachedDiscogsAdaptersFailClosed(unittest.TestCase):
                         surface, query="Deloris", entity_id=681,
                     )
                 self.assertTrue(mirror.urls, surface)
-                self.assertGreater(cache._redis.dbsize(), 0, surface)  # type: ignore[union-attr]
+                self.assertGreater(cache._redis.dbsize(), 0, surface)
 
                 discogs.DISCOGS_API_BASE = None
 

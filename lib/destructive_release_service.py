@@ -320,7 +320,7 @@ def _ban_source_locked(
         pipeline_db.add_denylist(request.request_id, reported_username, reason)
 
     cleanup = cleanup_release_fn(
-        beets_db=beets_db,  # type: ignore[arg-type] -- structural BeetsDB surface
+        beets_db=beets_db,
         pipeline_db=pipeline_db,
         release_id=release_id,
         request_id=request.request_id,

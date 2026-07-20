@@ -137,7 +137,7 @@ def make_search_result(username, files, upload_speed=1048576):
 
 def make_tracks(*track_defs: tuple[int, str, int]) -> list["cratedigger.TrackRecord"]:
     """Build a list of TrackRecord dicts from (albumId, title, mediumNumber) tuples."""
-    return [{"albumId": a, "title": t, "mediumNumber": m} for a, t, m in track_defs]  # type: ignore[misc]
+    return [{"albumId": a, "title": t, "mediumNumber": m} for a, t, m in track_defs]
 
 
 def make_directory(dir_path: str, files: list[dict[str, object]]) -> "cratedigger.SlskdDirectory":
@@ -1301,7 +1301,7 @@ class TestSearchResultPreFiltering(unittest.TestCase):
         }
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
-        tracks: list[cratedigger.TrackRecord] = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]  # type: ignore[misc]
+        tracks: list[cratedigger.TrackRecord] = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]
         matching_module.check_for_match(
             tracks, "flac", ["Music\\Album"], "user1", self.ctx
         )
@@ -1332,7 +1332,7 @@ class TestSearchResultPreFiltering(unittest.TestCase):
         tracks: list[cratedigger.TrackRecord] = [
             {"albumId": 1, "title": f"Track {i}", "mediumNumber": 1}
             for i in range(12)
-        ]  # type: ignore[misc]
+        ]
         matching_module.check_for_match(
             tracks, "flac", ["Music\\Album"], "user1", self.ctx)
 
@@ -1360,7 +1360,7 @@ class TestSearchResultPreFiltering(unittest.TestCase):
         ])
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
-        tracks: list[cratedigger.TrackRecord] = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]  # type: ignore[misc]
+        tracks: list[cratedigger.TrackRecord] = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]
         matching_module.check_for_match(
             tracks, "flac", ["Music\\Album"], "user1", self.ctx
         )
@@ -1379,7 +1379,7 @@ class TestSearchResultPreFiltering(unittest.TestCase):
         ])
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
-        tracks: list[cratedigger.TrackRecord] = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]  # type: ignore[misc]
+        tracks: list[cratedigger.TrackRecord] = [{"albumId": 1, "title": f"Track {i}", "mediumNumber": 1} for i in range(12)]
         matching_module.check_for_match(
             tracks, "flac", ["Music\\Album"], "user1", self.ctx
         )

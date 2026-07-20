@@ -42,7 +42,7 @@ def _extract_request_model(fn: object) -> str | None:
     import ast
     import inspect
     try:
-        source = inspect.getsource(fn)  # type: ignore[arg-type]
+        source = inspect.getsource(fn)
     except (OSError, TypeError):
         return None
     try:

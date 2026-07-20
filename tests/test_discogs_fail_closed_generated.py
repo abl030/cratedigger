@@ -53,7 +53,7 @@ class TestGeneratedPublicDiscogsFailClosed(unittest.TestCase):
                 call_public_cached_adapter(
                     surface, query=query, entity_id=entity_id,
                 )
-            if not mirror.urls or cache._redis.dbsize() == 0:  # type: ignore[union-attr]
+            if not mirror.urls or cache._redis.dbsize() == 0:
                 raise AssertionError(f"{surface} did not populate its metadata cache")
 
             discogs.DISCOGS_API_BASE = None

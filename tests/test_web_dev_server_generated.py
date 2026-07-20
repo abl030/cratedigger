@@ -295,7 +295,7 @@ class TestBrowseResolveWarmCacheGenerated(unittest.TestCase):
             "expand_id": str(discogs_id),
             "leaf_id": None if kind == "master" else str(discogs_id),
         })
-        self.assertIn(f"meta:{cache_key}", cache._redis._store)  # type: ignore[union-attr]
+        self.assertIn(f"meta:{cache_key}", cache._redis._store)
 
         url = (
             f"{self.base}/api/browse/resolve?source=discogs&"

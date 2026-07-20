@@ -55,7 +55,7 @@ class _RedisYoutubeCache:
         if self._redis is None:
             return None
         try:
-            raw = self._redis.get(key)  # type: ignore[union-attr]
+            raw = self._redis.get(key)
         except Exception:
             return None
         if raw is None:
@@ -70,7 +70,7 @@ class _RedisYoutubeCache:
         if self._redis is None:
             return
         try:
-            self._redis.setex(  # type: ignore[union-attr]
+            self._redis.setex(
                 key, ttl_seconds, value)
         except Exception:
             pass

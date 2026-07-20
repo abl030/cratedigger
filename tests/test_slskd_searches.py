@@ -151,7 +151,7 @@ class TestConvergeSlskdSearchesI1Pin(unittest.TestCase):
                 raise RuntimeError("slskd delete failed")
             real_delete(search_id)
 
-        slskd.searches.delete = flaky_delete  # type: ignore[method-assign]
+        slskd.searches.delete = flaky_delete
 
         summary = converge_slskd_searches(_ctx(db, slskd))
 
@@ -167,7 +167,7 @@ class TestConvergeSlskdSearchesI1Pin(unittest.TestCase):
         def boom() -> list[dict[str, Any]]:
             raise RuntimeError("slskd unreachable")
 
-        slskd.searches.get_all = boom  # type: ignore[method-assign]
+        slskd.searches.get_all = boom
         # A row confirmed swept long ago, past the prune retention window.
         db.record_search_id("old-swept", "plan_search", 1)
         db.mark_search_ids_deleted(["old-swept"])
@@ -320,7 +320,7 @@ class TestSubmitPlanSearchWriteAheadOrdering(unittest.TestCase):
             order.append(f"ledger:{search_id}")
             return real_record(search_id, purpose, request_id)
 
-        db.record_search_id = recording_record_search_id  # type: ignore[method-assign]
+        db.record_search_id = recording_record_search_id
 
         real_search_text = slskd.searches.search_text
 
@@ -329,7 +329,7 @@ class TestSubmitPlanSearchWriteAheadOrdering(unittest.TestCase):
             order.append(f"post:{result['id']}")
             return result
 
-        slskd.searches.search_text = recording_search_text  # type: ignore[method-assign]
+        slskd.searches.search_text = recording_search_text
 
         media = [MediaRecord(medium_number=1, medium_format="CD", track_count=1)]
         release = ReleaseRecord(
@@ -371,11 +371,11 @@ class TestSubmitPlanSearchWriteAheadOrdering(unittest.TestCase):
             if len(attempts) < 3:
                 err = requests.exceptions.HTTPError("busy")
                 fake_response = type("R", (), {"status_code": 409})()
-                err.response = fake_response  # type: ignore[attr-defined]
+                err.response = fake_response
                 raise err
             return {"id": kwargs["id"]}
 
-        slskd.searches.search_text = flaky_search_text  # type: ignore[method-assign]
+        slskd.searches.search_text = flaky_search_text
 
         media = [MediaRecord(medium_number=1, medium_format="CD", track_count=1)]
         release = ReleaseRecord(
@@ -393,12 +393,12 @@ class TestSubmitPlanSearchWriteAheadOrdering(unittest.TestCase):
 
         import time as _time
         real_sleep = _time.sleep
-        _time.sleep = lambda _s: None  # type: ignore[assignment]
+        _time.sleep = lambda _s: None
         try:
             result = cratedigger._submit_plan_search(
                 album, "Artist Album", "default", _cfg(), slskd, db)
         finally:
-            _time.sleep = real_sleep  # type: ignore[assignment]
+            _time.sleep = real_sleep
 
         assert result is not None
         # Three attempts, three DISTINCT minted ids, all three ledgered.
@@ -440,7 +440,7 @@ class TestSearchForAlbumWriteAheadOrdering(unittest.TestCase):
             order.append(f"ledger:{search_id}")
             return real_record(search_id, purpose, request_id)
 
-        db.record_search_id = recording_record_search_id  # type: ignore[method-assign]
+        db.record_search_id = recording_record_search_id
 
         real_search_text = slskd.searches.search_text
 
@@ -449,7 +449,7 @@ class TestSearchForAlbumWriteAheadOrdering(unittest.TestCase):
             order.append(f"post:{result['id']}")
             return result
 
-        slskd.searches.search_text = recording_search_text  # type: ignore[method-assign]
+        slskd.searches.search_text = recording_search_text
 
         media = [MediaRecord(medium_number=1, medium_format="CD", track_count=1)]
         release = ReleaseRecord(

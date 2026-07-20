@@ -767,7 +767,7 @@ def _probe_source_channels(path: str) -> int | None:
     probe lets us log the source layout as a breadcrumb.
     """
     try:
-        from mutagen import File as _MutagenFile  # type: ignore[import-untyped,attr-defined]  # pyright: ignore[reportPrivateImportUsage]
+        from mutagen import File as _MutagenFile  # type: ignore[import-untyped,attr-defined]
     except ImportError:
         return None
     try:

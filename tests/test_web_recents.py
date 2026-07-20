@@ -60,7 +60,7 @@ _DEFAULTS = LogEntry(
 
 def _entry(**overrides: object) -> LogEntry:
     """Build a LogEntry with sensible defaults, overridden as needed."""
-    return replace(_DEFAULTS, **overrides)  # type: ignore[arg-type]
+    return replace(_DEFAULTS, **overrides)
 
 
 # ============================================================================

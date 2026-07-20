@@ -78,10 +78,10 @@ def init(host: str, port: int = 6379) -> None:
     """Connect to Redis. Call once at startup."""
     global _redis
     try:
-        import redis  # type: ignore[import-untyped]
+        import redis
         _redis = redis.Redis(host=host, port=port, decode_responses=True,
                              socket_connect_timeout=1, socket_timeout=1)
-        _redis.ping()  # type: ignore[union-attr]
+        _redis.ping()
         log.info("Redis connected: %s:%d", host, port)
     except Exception as e:
         log.warning("Redis unavailable (%s), running without cache", e)

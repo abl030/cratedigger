@@ -177,7 +177,7 @@ def flac_streaminfo_md5(path: Path) -> bytes | None:
     FLAC re-encodes without decoding. Not used by :func:`hash_audio_content`.
     """
     try:
-        from mutagen.flac import FLAC  # type: ignore[import-untyped]
+        from mutagen.flac import FLAC
     except ImportError as e:  # pragma: no cover — mutagen ships in nix-shell
         raise AudioHashError(f"mutagen not available: {e}") from e
     try:

@@ -3637,7 +3637,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         db.seed_request(make_request_row(id=1))
         db.set_tracks(1, [{"track_number": 1, "title": "T"}])
         db.delete_request(1)
-        self.assertNotIn(1, db._requests)  # type: ignore[attr-defined]
+        self.assertNotIn(1, db._requests)
         self.assertEqual(db.get_tracks(1), [])
 
     def test_delete_request_cascades_to_child_tables(self):
@@ -4004,7 +4004,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
                             {"failed_path": "/p", "x": 1}))
         self.assertTrue(
             db.clear_wrong_match_path(db.download_logs[0].id))
-        stored = _json.loads(db.download_logs[0].validation_result)  # type: ignore[arg-type]
+        stored = _json.loads(db.download_logs[0].validation_result)
         self.assertNotIn("failed_path", stored)
 
     def test_record_wrong_match_triage_merges_typed_audit(self):
@@ -4073,7 +4073,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         cleared = db.clear_wrong_match_paths(1, ["/p"])
 
         self.assertEqual(cleared, 1)
-        stored = _json.loads(db.download_logs[0].validation_result)  # type: ignore[arg-type]
+        stored = _json.loads(db.download_logs[0].validation_result)
         self.assertNotIn("failed_path", stored)
         self.assertEqual(stored["x"], 1)
 

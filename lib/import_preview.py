@@ -1021,7 +1021,7 @@ class ImportPreviewResult(msgspec.Struct):
     failure: MeasurementFailure | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return msgspec.to_builtins(self)  # type: ignore[no-any-return]
+        return msgspec.to_builtins(self)
 
     def to_json(self) -> str:
         return msgspec.json.encode(self).decode()
