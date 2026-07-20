@@ -4215,8 +4215,7 @@ class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):
         self._cratedigger.pipeline_db_source = source
         ctx = CratediggerContext(
             cfg=cast(CratediggerConfig, self._cratedigger.cfg),
-            slskd=MagicMock(),
-            pipeline_db_source=source,
+            pipeline_db_source=source, slskd=MagicMock(),
         )
         self._cratedigger._module_ctx = ctx
         return ctx
