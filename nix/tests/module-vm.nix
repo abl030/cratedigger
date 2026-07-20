@@ -60,6 +60,54 @@ let
 
     print("BEETS_CONFIG_OK")
   '';
+  beetsDestructiveFixture = pkgs.writeText "beets-destructive-fixture.py" ''
+    import os
+    import sys
+    from pathlib import Path
+    from beets import library
+
+    root = Path("/var/lib/cratedigger-music")
+    db_path = root / "beets-library.db"
+    target_id = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    sibling_id = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+    target_dir = root / "Target" / "Album"
+    sibling_dir = root / "Sibling" / "Album"
+    sibling_path = sibling_dir / "01 Sibling.flac"
+
+    if sys.argv[1] == "seed":
+        os.umask(0o002)
+        target_dir.mkdir(parents=True)
+        sibling_dir.mkdir(parents=True)
+        root.chmod(0o2775)
+        items = []
+        for index in range(1, 13):
+            path = target_dir / f"{index:02d} Track.flac"
+            path.write_bytes(f"audio-{index}".encode())
+            items.append(library.Item(
+                path=str(path), title=f"Track {index}", artist="Target",
+                album="Album", albumartist="Target", mb_albumid=target_id,
+            ))
+        sibling_path.write_bytes(b"rare sibling")
+        lib = library.Library(str(db_path), str(root))
+        lib.add_album(items)
+        lib.add_album([library.Item(
+            path=str(sibling_path), title="Sibling", artist="Sibling",
+            album="Album", albumartist="Sibling", mb_albumid=sibling_id,
+        )])
+        lib._close()
+        db_path.chmod(0o664)
+    elif sys.argv[1] == "verify":
+        lib = library.Library(str(db_path), str(root))
+        assert not list(lib.albums(f"mb_albumid:{target_id}"))
+        sibling = list(lib.albums(f"mb_albumid:{sibling_id}"))
+        assert len(sibling) == 1, sibling
+        assert len(list(sibling[0].items())) == 1
+        lib._close()
+        assert not target_dir.exists(), target_dir
+        assert sibling_path.read_bytes() == b"rare sibling"
+    else:
+        raise AssertionError(sys.argv)
+  '';
 in
 pkgs.testers.nixosTest {
   name = "cratedigger-module-vm";
@@ -75,15 +123,18 @@ pkgs.testers.nixosTest {
     environment.etc."cratedigger/slskd-api-key" = {
       text = "test-api-key-do-not-use\n";
       mode = "0400";
+      user = "cratedigger";
+      group = "beets-library";
     };
     environment.etc."cratedigger/discogs-token" = {
       text = "test-discogs-token-do-not-use\n";
       mode = "0400";
+      user = "cratedigger";
+      group = "beets-library";
     };
-    users.groups.cratedigger-ops = {};
     users.users.beets-operator = {
       isNormalUser = true;
-      extraGroups = ["cratedigger-ops"];
+      extraGroups = ["cratedigger-ops" "beets-library"];
     };
     users.users.unrelated-user.isNormalUser = true;
 
@@ -96,13 +147,15 @@ pkgs.testers.nixosTest {
     services.cratedigger = {
       enable = true;
       src = cratediggerSrc;
+      user = "cratedigger";
+      group = "beets-library";
       slskd = {
         apiKeyFile = "/etc/cratedigger/slskd-api-key";
         hostUrl = "http://192.0.2.21:5030";
         downloadDir = "/var/lib/cratedigger-downloads";
       };
       # Stranger posture (U7/R10): the module provisions PostgreSQL —
-      # role + database named after cfg.user (root here), unix-socket
+      # role + database named after the non-root cfg.user, unix-socket
       # peer auth, DSN defaulted to the socket. No hand-rolled postgres
       # block, no manual unit ordering, no password material anywhere.
       pipelineDb.createLocally = true;
@@ -124,7 +177,7 @@ pkgs.testers.nixosTest {
       # exists by tmpfiles, so the library parent is guaranteed.
       beets.config = {
         directory = "/var/lib/cratedigger-music";
-        library = "/var/lib/cratedigger/beets-library.db";
+        library = "/var/lib/cratedigger-music/beets-library.db";
       };
       web = {
         enable = true;
@@ -151,7 +204,10 @@ pkgs.testers.nixosTest {
     # Simulate a downstream metadata gate holding every application unit.
     # Only the independent renderer may materialise runtime configuration on
     # first boot; the test removes this hold before exercising the apps.
-    systemd.tmpfiles.rules = ["f /run/cratedigger-test-config-hold 0644 root root - held"];
+    systemd.tmpfiles.rules = [
+      "d /var/lib/cratedigger-music 2775 cratedigger beets-library -"
+      "f /run/cratedigger-test-config-hold 0644 root root - held"
+    ];
     systemd.services = lib.genAttrs [
       "cratedigger"
       "cratedigger-unfindable"
@@ -217,7 +273,7 @@ pkgs.testers.nixosTest {
     machine.succeed("systemctl cat cratedigger.service | grep -q cratedigger-pipeline-prestart")
 
     # Migrations recorded
-    out = machine.succeed("sudo -u postgres psql root -At -c 'SELECT version FROM schema_migrations ORDER BY version'")
+    out = machine.succeed("sudo -u postgres psql cratedigger -At -c 'SELECT version FROM schema_migrations ORDER BY version'")
     versions = [v.strip() for v in out.strip().split() if v.strip()]
     assert "1" in versions, f"baseline migration missing, got {versions}"
     assert "2" in versions, f"002 migration missing, got {versions}"
@@ -226,8 +282,12 @@ pkgs.testers.nixosTest {
     # retained as a fallback and clears the test's deliberately stale lock. It
     # will fail because there is no real slskd.
     machine.succeed("rm /run/cratedigger-test-config-hold")
-    machine.succeed("systemctl start cratedigger.service || true")
-    machine.fail("test -f /var/lib/cratedigger/.cratedigger.lock")
+    machine.succeed("systemctl start --no-block cratedigger.service")
+    machine.wait_until_succeeds("test ! -f /var/lib/cratedigger/.cratedigger.lock")
+    machine.succeed(
+        "systemctl kill --kill-whom=all --signal=SIGKILL cratedigger.service || true"
+    )
+    machine.succeed("systemctl reset-failed cratedigger.service || true")
     machine.succeed("systemctl start cratedigger-importer.service cratedigger-import-preview-worker.service cratedigger-youtube-ingest.service cratedigger-web.service")
     # config.ini points at the out-of-band secret, never its plaintext value.
     machine.succeed("grep -q 'api_key_file = /etc/cratedigger/slskd-api-key' /var/lib/cratedigger/config.ini")
@@ -287,13 +347,13 @@ pkgs.testers.nixosTest {
 
     # Peer auth by construction (KTD5): the socket DSN carries no
     # password, and none exists in the rendered config or unit files.
-    machine.succeed("grep -q 'dsn = postgresql:///root?host=/run/postgresql' /var/lib/cratedigger/config.ini")
+    machine.succeed("grep -q 'dsn = postgresql:///cratedigger?host=/run/postgresql' /var/lib/cratedigger/config.ini")
     # (password_file *keys* are fine — they are the #117 *File pattern;
     # what must not exist is an actual credential value.)
     machine.fail("grep -Eqi 'password *= *[^ ]|pgpassword' /var/lib/cratedigger/config.ini")
     machine.succeed(
         "systemctl show cratedigger-db-migrate -p Environment"
-        " | grep -q 'PIPELINE_DB_DSN=postgresql:///root?host=/run/postgresql'"
+        " | grep -q 'PIPELINE_DB_DSN=postgresql:///cratedigger?host=/run/postgresql'"
     )
 
     # Module-owned first-boot ordering (U7/U10): migrate is serialised
@@ -303,7 +363,7 @@ pkgs.testers.nixosTest {
     machine.succeed("systemctl show -p Requires cratedigger-db-migrate.service | grep -q postgresql.service")
 
     # pipeline-cli on PATH and connects (over the peer-auth socket)
-    machine.succeed("pipeline-cli list wanted")
+    machine.succeed("sudo -u cratedigger pipeline-cli list wanted")
 
     # Web UI listens
     machine.wait_for_unit("cratedigger-web.service")
@@ -367,7 +427,7 @@ pkgs.testers.nixosTest {
     # must exit 0 (clean — duplicate-start is expected, not a crash)
     # and not respawn. The systemd unit holds the lock; this invocation
     # fails to acquire and returns 0 immediately.
-    machine.succeed("cratedigger-youtube-ingest --once")
+    machine.succeed("sudo -u cratedigger cratedigger-youtube-ingest --once")
 
     # U3+U4 (tier-2): cratedigger owns the beet runtime AND its config.
     # The module rendered config.yaml into BEETSDIR during ExecStartPre
@@ -390,7 +450,7 @@ pkgs.testers.nixosTest {
     # plugin list, public-MB defaults, included token).
     machine.succeed("${pyWithYaml}/bin/python3 ${checkRenderedBeetsConfig}")
 
-    version_out = machine.succeed("cratedigger-beet version")
+    version_out = machine.succeed("sudo -u cratedigger cratedigger-beet version")
     plugins_line = next(
         line for line in version_out.splitlines() if line.startswith("plugins:")
     )
@@ -407,5 +467,27 @@ pkgs.testers.nixosTest {
     )
     assert operator_plugins == plugins_line, (operator_plugins, plugins_line)
     machine.succeed("sudo -u beets-operator cratedigger-beet config > /dev/null")
+    service_groups = machine.succeed("id -nG cratedigger").split()
+    assert "cratedigger-ops" in service_groups, service_groups
+
+    # Execute a real 12-track removal through the actual module-rendered
+    # config as an authorized non-root operator. This crosses renderer,
+    # include permissions, every shipped plugin, and pinned Beets itself.
+    beets_python = machine.succeed(
+        "sed -n 's/^python = //p' /var/lib/cratedigger/config.ini"
+    ).strip()
+    machine.succeed(
+        f"sudo -u cratedigger env BEETSDIR=/var/lib/cratedigger/beets "
+        f"{beets_python} ${beetsDestructiveFixture} seed"
+    )
+    remove_out = machine.succeed(
+        "sudo -u beets-operator cratedigger-beet -P importsource "
+        "remove -a -f -d mb_albumid:cccccccc-cccc-cccc-cccc-cccccccccccc"
+    )
+    assert "Really?" not in remove_out, remove_out
+    machine.succeed(
+        f"sudo -u cratedigger env BEETSDIR=/var/lib/cratedigger/beets "
+        f"{beets_python} ${beetsDestructiveFixture} verify"
+    )
   '';
 }

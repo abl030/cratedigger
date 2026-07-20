@@ -62,9 +62,10 @@ Generated tests for destructive third-party integrations must cross the real
 runtime envelope, not only an idealized decision function. The permanent Beets
 matrix executes the pinned CLI and exact-delete child with:
 
-- minimal and complete module-rendered plugin configurations;
-- placeholder, readable included, and unreadable included Discogs secrets;
-- `importsource.suggest_removal` and automatic playlist hooks;
+- minimal and complete production plugin configurations;
+- placeholder, readable, unreadable, and invalid-UTF-8 included secrets;
+- independently combined `importsource.suggest_removal`, automatic playlist,
+  and missing-plugin worlds;
 - MusicBrainz and Discogs identities;
 - single-track, two-track, and twelve-track albums;
 - a sibling pressing that must survive every world.
@@ -74,11 +75,16 @@ configuration must fail before mutation. Child stdout must be exactly one
 canonical typed result frame. Lifecycle completion must be equivalent to the
 verified postcondition: the exact Beets authority is absent.
 
+The matrix drives the full real Ban Source cleanup chain as well as the exact
+child, and the module VM seeds and removes a 12-track album through the actual
+rendered configuration as a non-root operator.
+
 The implementation uses Beets' noninteractive `--force` contract, closes
 stdin, disables only `importsource` for selector removal because its source-file
 deletion is outside Cratedigger's authority, validates declared configuration
-includes before mutation, quarantines all child diagnostics to stderr, and
-reports retained Beets authority as typed partial failure.
+includes and confirms every configured plugin actually loaded before mutation,
+quarantines all child diagnostics to stderr, and reports retained Beets
+authority as typed partial failure.
 
 ## Qualification
 

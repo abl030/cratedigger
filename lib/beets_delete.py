@@ -406,7 +406,7 @@ def execute_pinned_beets_delete(request: BeetsDeleteRequest) -> BeetsDeleteOutco
 
     config_dir = os.environ.get("BEETSDIR", "")
     try:
-        validate_beets_config(config_dir)
+        configured_plugins = validate_beets_config(config_dir)
     except BeetsConfigError as exc:
         return BeetsDeleteFailed(
             album_id=request.album_id,
@@ -433,7 +433,6 @@ def execute_pinned_beets_delete(request: BeetsDeleteRequest) -> BeetsDeleteOutco
     # Cratedigger library delete, so force that common plugin profile into its
     # documented non-suggesting mode for this operation.
     config["importsource"]["suggest_removal"].set(False)
-    configured_plugins = set(config["plugins"].as_str_seq())
     plugins.load_plugins()
     loaded_plugins = {plugin.name for plugin in plugins.find_plugins()}
     missing_plugins = sorted(configured_plugins - loaded_plugins)

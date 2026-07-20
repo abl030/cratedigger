@@ -63,7 +63,11 @@ from typing import Literal
 
 import msgspec
 
-from lib.beets_config_contract import BeetsConfigError, validate_beets_config
+from lib.beets_config_contract import (
+    BeetsConfigError,
+    validate_beets_config,
+    validate_beets_plugins_loaded,
+)
 
 log = logging.getLogger("cratedigger")
 
@@ -175,7 +179,10 @@ def _run_beet_op(
         # contract holds for callers built around BeetsOpFailure.
         beet = beet_bin()
         beets_env = beets_subprocess_env()
-        validate_beets_config(beets_env["BEETSDIR"])
+        configured_plugins = validate_beets_config(beets_env["BEETSDIR"])
+        validate_beets_plugins_loaded(
+            beet, beets_env, configured_plugins, timeout=timeout,
+        )
     except (RuntimeError, BeetsConfigError) as exc:
         msg = str(exc)
         log.warning("beets_album_op: beet %s %s %s", verb, selector, msg)

@@ -487,6 +487,11 @@
       ${pkgs.coreutils}/bin/mv -f "$tmp_secrets" "$beets_dir/secrets.yaml"
       trap - EXIT
     ''}
+    ${optionalString (cfg.beets.package.discogsTokenFile == null) ''
+      # Declarative convergence: switching back to the placeholder-token
+      # profile must revoke any previously group-readable rendered secret.
+      ${pkgs.coreutils}/bin/rm -f "$beets_dir/secrets.yaml"
+    ''}
   '';
 
   # Only the main pipeline owns this singleton lock. Its start retains an
@@ -872,8 +877,9 @@ in {
             Optional UNIX group authorized to run operator-side Beets actions
             through the module-rendered config. When set with
             discogsTokenFile, secrets.yaml is owned by this group at 0440;
-            otherwise it remains service-only at 0400. The service user must
-            be a member of this group, as must every authorized CLI operator.
+            otherwise it remains service-only at 0400. The module creates the
+            group and adds a non-root service user; authorized CLI operators
+            must be added separately.
           '';
         };
       };
@@ -1389,12 +1395,18 @@ in {
       ${cfg.user} = {
         isSystemUser = true;
         group = cfg.group;
+        extraGroups = optional
+          (cfg.beets.package.discogsOperatorGroup != null)
+          cfg.beets.package.discogsOperatorGroup;
         description = "Cratedigger service user";
       };
     };
-    users.groups = mkIf (cfg.group != "root") {
-      ${cfg.group} = {};
-    };
+    users.groups = lib.mkMerge [
+      (mkIf (cfg.group != "root") { ${cfg.group} = {}; })
+      (mkIf (cfg.beets.package.discogsOperatorGroup != null) {
+        ${cfg.beets.package.discogsOperatorGroup} = {};
+      })
+    ];
 
     # Since config.ini no longer embeds plaintext secrets (issue #117), the
     # state directory and the rendered config can both be world-readable. The

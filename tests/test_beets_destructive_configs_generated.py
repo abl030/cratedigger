@@ -21,13 +21,21 @@ from beets import library
 from hypothesis import HealthCheck, example, given, settings, strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
-from lib.beets_album_op import remove_by_selector
+from lib.beets_db import BeetsDB
 from lib.beets_delete import (
     BeetsDeleteCompleted,
     BeetsDeleteFailed,
     BeetsDeleteOutcome,
     BeetsDeleteRequest,
 )
+from lib.destructive_release_service import (
+    BanSourceCleanupIncomplete,
+    BanSourceRequest,
+    BanSourceSuccess,
+    ban_source,
+)
+from tests.fakes import FakePipelineDB
+from tests.helpers import make_request_row
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -40,19 +48,34 @@ MB_RELEASE = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 MB_SIBLING = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 DISCOGS_RELEASE = "12856590"
 DISCOGS_SIBLING = "12856591"
+@dataclass(frozen=True)
+class ConfigProfile:
+    base: str
+    secret: str
+    importsource: bool = False
+    playlist: bool = False
+    missing_plugin: bool = False
+
+    @property
+    def expected_failure(self) -> bool:
+        return self.secret in {"unreadable", "invalid_utf8"} or self.missing_plugin
+
+
 PROFILES = (
-    "minimal",
-    "module_placeholder",
-    "module_include",
-    "module_unreadable_include",
-    "importsource",
-    "playlist_auto",
+    ConfigProfile("minimal", "placeholder"),
+    ConfigProfile("production", "placeholder"),
+    ConfigProfile("production", "readable"),
+    ConfigProfile("production", "unreadable"),
+    ConfigProfile("production", "invalid_utf8"),
+    ConfigProfile("minimal", "placeholder", importsource=True),
+    ConfigProfile("minimal", "placeholder", playlist=True),
+    ConfigProfile("minimal", "placeholder", missing_plugin=True),
 )
 
 
 @dataclass(frozen=True)
 class RealBeetsObservation:
-    profile: str
+    profile: ConfigProfile
     track_count: int
     source: str
     expected_config_failure: bool
@@ -62,6 +85,8 @@ class RealBeetsObservation:
     cli_files_present: int
     cli_import_sources_present: int
     cli_sibling_present: bool
+    cli_sibling_items: int
+    cli_sibling_bytes: bytes | None
     child_returncode: int
     child_stdout: bytes
     child_outcome: BeetsDeleteOutcome
@@ -70,6 +95,8 @@ class RealBeetsObservation:
     child_files_present: int
     child_import_sources_present: int
     child_sibling_present: bool
+    child_sibling_items: int
+    child_sibling_bytes: bytes | None
 
 
 def assert_real_beets_contract(observation: RealBeetsObservation) -> None:
@@ -80,6 +107,12 @@ def assert_real_beets_contract(observation: RealBeetsObservation) -> None:
         raise AssertionError("exact-delete child did not return a typed outcome")
     if not observation.cli_sibling_present or not observation.child_sibling_present:
         raise AssertionError("an exact destructive operation touched a sibling pressing")
+    if observation.cli_sibling_items != 1 or observation.child_sibling_items != 1:
+        raise AssertionError("an exact destructive operation touched sibling metadata")
+    if observation.cli_sibling_bytes != b"rare sibling":
+        raise AssertionError("Ban Source touched sibling file content")
+    if observation.child_sibling_bytes != b"rare sibling":
+        raise AssertionError("exact-delete touched sibling file content")
     if observation.cli_import_sources_present != observation.track_count:
         raise AssertionError("CLI removal touched separately owned import sources")
     if observation.child_import_sources_present != observation.track_count:
@@ -87,7 +120,7 @@ def assert_real_beets_contract(observation: RealBeetsObservation) -> None:
 
     if observation.expected_config_failure:
         if observation.cli_failure_reason != "exception":
-            raise AssertionError("unreadable include was not rejected by CLI preflight")
+            raise AssertionError("invalid Beets config was not rejected by preflight")
         if not observation.cli_album_present or observation.cli_items_present == 0:
             raise AssertionError("CLI config rejection mutated Beets metadata")
         if observation.cli_files_present != observation.track_count:
@@ -117,31 +150,39 @@ def assert_real_beets_contract(observation: RealBeetsObservation) -> None:
 
 
 def _profile_config(
-    profile: str,
+    profile: ConfigProfile,
     *,
     root: Path,
     db_path: Path,
     config_dir: Path,
 ) -> None:
-    plugins = ""
+    plugin_names = (
+        PRODUCTION_PLUGINS.split() if profile.base == "production" else []
+    )
+    if profile.importsource:
+        plugin_names.append("importsource")
+    if profile.playlist:
+        plugin_names.append("playlist")
+    if profile.missing_plugin:
+        plugin_names.append("definitely_missing_plugin")
+    plugins = " ".join(dict.fromkeys(plugin_names))
     extra: dict[str, object] = {}
-    if profile.startswith("module_"):
-        plugins = PRODUCTION_PLUGINS
-        if profile == "module_placeholder":
-            extra["discogs"] = {"user_token": "placeholder-token"}
+    if profile.secret == "placeholder":
+        extra["discogs"] = {"user_token": "placeholder-token"}
+    else:
+        extra["include"] = ["secrets.yaml"]
+        secret = config_dir / "secrets.yaml"
+        if profile.secret == "invalid_utf8":
+            secret.write_bytes(b"discogs:\n  user_token: \xff\n")
         else:
-            extra["include"] = ["secrets.yaml"]
-            secret = config_dir / "secrets.yaml"
             secret.write_text(
                 "discogs:\n  user_token: test-token\n", encoding="utf-8",
             )
-            if profile == "module_unreadable_include":
-                secret.chmod(0)
-    elif profile == "importsource":
-        plugins = "importsource"
+        if profile.secret == "unreadable":
+            secret.chmod(0)
+    if profile.importsource:
         extra["importsource"] = {"suggest_removal": True}
-    elif profile == "playlist_auto":
-        plugins = "playlist"
+    if profile.playlist:
         playlist_dir = config_dir / "playlists"
         playlist_dir.mkdir()
         extra["playlist"] = {
@@ -168,7 +209,7 @@ def _seed(
     db_path: Path,
     track_count: int,
     source: str,
-) -> tuple[int, Path, Path, int]:
+) -> tuple[int, Path, Path, int, Path]:
     target_dir = root / "Target" / "Album"
     sibling_dir = root / "Sibling" / "Album"
     source_dir = root.parent / "original-source"
@@ -216,7 +257,7 @@ def _seed(
     target_id = int(target.id)
     sibling_id = int(sibling.id)
     lib._close()
-    return target_id, target_dir, source_dir, sibling_id
+    return target_id, target_dir, source_dir, sibling_id, sibling_path
 
 
 def _metadata_state(db_path: Path, root: Path, album_id: int) -> tuple[bool, int]:
@@ -233,7 +274,7 @@ def _track_count(path: Path) -> int:
 
 @lru_cache(maxsize=None)
 def exercise_real_beets_world(
-    profile: str,
+    profile: ConfigProfile,
     track_count: int,
     source: str,
 ) -> RealBeetsObservation:
@@ -250,7 +291,13 @@ def exercise_real_beets_world(
         _profile_config(
             profile, root=cli_root, db_path=cli_db, config_dir=cli_config,
         )
-        cli_album_id, cli_album_dir, cli_source_dir, cli_sibling_id = _seed(
+        (
+            cli_album_id,
+            cli_album_dir,
+            cli_source_dir,
+            cli_sibling_id,
+            cli_sibling_path,
+        ) = _seed(
             root=cli_root, db_path=cli_db,
             track_count=track_count, source=source,
         )
@@ -261,20 +308,43 @@ def exercise_real_beets_world(
             f"config_dir = {cli_config}\n",
             encoding="utf-8",
         )
-        selector = (
-            f"mb_albumid:{MB_RELEASE}" if source == "mb"
-            else f"discogs_albumid:{DISCOGS_RELEASE}"
-        )
-        with patch.dict(
-            os.environ,
-            {"CRATEDIGGER_RUNTIME_CONFIG": str(runtime)},
-            clear=False,
+        expected_release = MB_RELEASE if source == "mb" else DISCOGS_RELEASE
+        pipeline = FakePipelineDB()
+        pipeline.seed_request(make_request_row(
+            id=41,
+            status="imported",
+            mb_release_id=expected_release,
+        ))
+        with (
+            patch.dict(
+                os.environ,
+                {"CRATEDIGGER_RUNTIME_CONFIG": str(runtime)},
+                clear=False,
+            ),
+            patch(
+                "lib.destructive_release_service.hash_audio_content",
+                return_value="generated-audio-hash",
+            ),
+            BeetsDB(str(cli_db), library_root=str(cli_root)) as cli_beets,
         ):
-            cli_failure = remove_by_selector(selector, timeout=30)
+            ban_result = ban_source(
+                pipeline_db=pipeline,
+                beets_db=cli_beets,
+                request=BanSourceRequest(41),
+            )
+        if isinstance(ban_result, BanSourceSuccess):
+            cli_failure_reason = None
+        elif isinstance(ban_result, BanSourceCleanupIncomplete):
+            cli_failure_reason = (
+                ban_result.cleanup_errors[0].reason
+                if ban_result.cleanup_errors else "incomplete"
+            )
+        else:
+            cli_failure_reason = type(ban_result).__name__
         cli_album_present, cli_items_present = _metadata_state(
             cli_db, cli_root, cli_album_id,
         )
-        cli_sibling_present, _ = _metadata_state(
+        cli_sibling_present, cli_sibling_items = _metadata_state(
             cli_db, cli_root, cli_sibling_id,
         )
 
@@ -288,11 +358,16 @@ def exercise_real_beets_world(
         _profile_config(
             profile, root=child_root, db_path=child_db, config_dir=child_config,
         )
-        child_album_id, child_album_dir, child_source_dir, child_sibling_id = _seed(
+        (
+            child_album_id,
+            child_album_dir,
+            child_source_dir,
+            child_sibling_id,
+            child_sibling_path,
+        ) = _seed(
             root=child_root, db_path=child_db,
             track_count=track_count, source=source,
         )
-        expected_release = MB_RELEASE if source == "mb" else DISCOGS_RELEASE
         request = BeetsDeleteRequest(
             album_id=child_album_id,
             expected_release_id=expected_release,
@@ -311,20 +386,25 @@ def exercise_real_beets_world(
         child_album_present, child_items_present = _metadata_state(
             child_db, child_root, child_album_id,
         )
-        child_sibling_present, _ = _metadata_state(
+        child_sibling_present, child_sibling_items = _metadata_state(
             child_db, child_root, child_sibling_id,
         )
         return RealBeetsObservation(
             profile=profile,
             track_count=track_count,
             source=source,
-            expected_config_failure=profile == "module_unreadable_include",
-            cli_failure_reason=(cli_failure.reason if cli_failure else None),
+            expected_config_failure=profile.expected_failure,
+            cli_failure_reason=cli_failure_reason,
             cli_album_present=cli_album_present,
             cli_items_present=cli_items_present,
             cli_files_present=_track_count(cli_album_dir),
             cli_import_sources_present=_track_count(cli_source_dir),
             cli_sibling_present=cli_sibling_present,
+            cli_sibling_items=cli_sibling_items,
+            cli_sibling_bytes=(
+                cli_sibling_path.read_bytes()
+                if cli_sibling_path.exists() else None
+            ),
             child_returncode=child.returncode,
             child_stdout=child.stdout,
             child_outcome=outcome,
@@ -333,6 +413,11 @@ def exercise_real_beets_world(
             child_files_present=_track_count(child_album_dir),
             child_import_sources_present=_track_count(child_source_dir),
             child_sibling_present=child_sibling_present,
+            child_sibling_items=child_sibling_items,
+            child_sibling_bytes=(
+                child_sibling_path.read_bytes()
+                if child_sibling_path.exists() else None
+            ),
         )
 
 
@@ -352,18 +437,45 @@ class TestGeneratedRealBeetsConfigMatrix(unittest.TestCase):
                             ),
                         )
 
-    @settings(suppress_health_check=[HealthCheck.too_slow])
-    @example(profile="module_include", track_count=12, source="mb")
-    @example(profile="module_unreadable_include", track_count=12, source="mb")
-    @example(profile="importsource", track_count=2, source="discogs")
+    @settings(
+        max_examples=18,
+        deadline=None,
+        suppress_health_check=[HealthCheck.too_slow],
+    )
+    @example(
+        profile=ConfigProfile("production", "readable"),
+        track_count=12,
+        source="mb",
+    )
+    @example(
+        profile=ConfigProfile("production", "unreadable"),
+        track_count=12,
+        source="mb",
+    )
+    @example(
+        profile=ConfigProfile(
+            "production", "readable", importsource=True, playlist=True,
+        ),
+        track_count=2,
+        source="discogs",
+    )
     @given(
-        profile=st.sampled_from(PROFILES),
+        profile=st.builds(
+            ConfigProfile,
+            base=st.sampled_from(("minimal", "production")),
+            secret=st.sampled_from(
+                ("placeholder", "readable", "unreadable", "invalid_utf8"),
+            ),
+            importsource=st.booleans(),
+            playlist=st.booleans(),
+            missing_plugin=st.booleans(),
+        ),
         track_count=st.sampled_from((1, 2, 12)),
         source=st.sampled_from(("mb", "discogs")),
     )
     def test_real_pinned_beets_common_config_worlds(
         self,
-        profile: str,
+        profile: ConfigProfile,
         track_count: int,
         source: str,
     ) -> None:
@@ -372,7 +484,8 @@ class TestGeneratedRealBeetsConfigMatrix(unittest.TestCase):
         )
 
     def test_checker_rejects_stdout_prefix_and_false_completion(self) -> None:
-        valid = exercise_real_beets_world("minimal", 1, "mb")
+        valid_profile = ConfigProfile("minimal", "placeholder")
+        valid = exercise_real_beets_world(valid_profile, 1, "mb")
         with self.assertRaisesRegex(AssertionError, "canonical outcome frame"):
             assert_real_beets_contract(replace(
                 valid,
@@ -380,7 +493,7 @@ class TestGeneratedRealBeetsConfigMatrix(unittest.TestCase):
             ))
         with self.assertRaisesRegex(AssertionError, "config rejection was promoted"):
             failed = exercise_real_beets_world(
-                "module_unreadable_include", 1, "mb",
+                ConfigProfile("production", "unreadable"), 1, "mb",
             )
             assert_real_beets_contract(replace(
                 failed,
