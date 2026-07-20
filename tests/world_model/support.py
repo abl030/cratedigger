@@ -30,6 +30,14 @@ from lib.import_evidence import (
     load_current_evidence_for_action,
 )
 from lib.import_preview import enrich_incomplete_current_evidence_for_request
+from lib.import_queue import (
+    IMPORT_JOB_AUTOMATION,
+    IMPORT_JOB_FORCE,
+    automation_import_dedupe_key,
+    automation_import_payload,
+    force_import_dedupe_key,
+    force_import_payload,
+)
 from lib.quality import (
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_SOURCE,
@@ -75,6 +83,7 @@ from lib.wrong_match_delete_service import (
 )
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
 from tests.helpers import (
+    finalize_claimed_dispatch,
     make_active_download_state_json,
     make_album_quality_evidence,
     make_import_result,
@@ -551,6 +560,28 @@ class LifecycleWorld:
             origin_download_log_id,
             persisted_candidate.id,
         )
+        self.db.update_download_state_current_path(
+            request_id,
+            str(staged_path),
+        )
+        import_job = self.db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=request_id,
+            dedupe_key=automation_import_dedupe_key(request_id),
+            payload=automation_import_payload(),
+            message="World-model automation import",
+        )
+        self.db.set_import_job_candidate_evidence(
+            import_job.id,
+            persisted_candidate.id,
+        )
+        self.db.mark_import_job_preview_importable(
+            import_job.id,
+            preview_result={"world_model": True},
+        )
+        claimed_job = self.db.claim_next_import_job(worker_id="world-model")
+        if claimed_job is None or claimed_job.id != import_job.id:
+            raise AssertionError("world automation import job was not claimable")
         candidate_result = CandidateEvidenceActionResult(
             evidence=persisted_candidate,
             provenance=ActionEvidenceProvenance(
@@ -616,12 +647,14 @@ class LifecycleWorld:
                 if self._import_engine == "mirror-harness"
                 else run_real_beets_import
             ),
+            candidate_import_job_id=claimed_job.id,
             candidate_download_log_id=origin_download_log_id,
             prevalidated_candidate_result=candidate_result,
             requeue_on_failure=True,
             beets_library_db_path=str(self.beets.library_db),
             beets_library_root=str(self.beets.library_root),
         )
+        finalize_claimed_dispatch(self.db, claimed_job, outcome)
         after_row = self._require_request(request_id)
         after_album = self._album_for_release(release.release_id)
         self._transitions.append(LifecycleTransitionSnapshot(
@@ -734,6 +767,25 @@ class LifecycleWorld:
             download_log_id,
             persisted.id,
         )
+        import_job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=request_id,
+            dedupe_key=force_import_dedupe_key(download_log_id),
+            payload=force_import_payload(
+                download_log_id=download_log_id,
+                failed_path=str(source),
+                source_username=f"force-peer-{self._dispatch_counter}",
+            ),
+            message="World-model force import",
+        )
+        self.db.set_import_job_candidate_evidence(import_job.id, persisted.id)
+        self.db.mark_import_job_preview_importable(
+            import_job.id,
+            preview_result={"world_model": True},
+        )
+        claimed_job = self.db.claim_next_import_job(worker_id="world-model")
+        if claimed_job is None or claimed_job.id != import_job.id:
+            raise AssertionError("world force-import job was not claimable")
         raw_previous_min_bitrate = row.get("min_bitrate")
         previous_min_bitrate = (
             int(raw_previous_min_bitrate)
@@ -773,6 +825,7 @@ class LifecycleWorld:
             request_id,
             str(source),
             source_username=f"force-peer-{self._dispatch_counter}",
+            import_job_id=claimed_job.id,
             download_log_id=download_log_id,
             cfg=CratediggerConfig(
                 beets_harness_path=(
@@ -789,6 +842,7 @@ class LifecycleWorld:
             beets_library_db_path=str(self.beets.library_db),
             beets_library_root=str(self.beets.library_root),
         )
+        finalize_claimed_dispatch(self.db, claimed_job, outcome)
         after = self._require_request(request_id)
         after_album = self._album_for_release(release.release_id)
         self._transitions.append(LifecycleTransitionSnapshot(
