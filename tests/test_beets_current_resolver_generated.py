@@ -13,6 +13,7 @@ from hypothesis import HealthCheck, example, given, settings, strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.beets_db import (
+    AlbumInfo,
     BeetsDB,
     CurrentBeetsAmbiguous,
     CurrentBeetsItem,
@@ -25,6 +26,7 @@ from lib.config import CratediggerConfig
 from lib.quality import QualityRankConfig
 from lib.release_identity import ReleaseIdentity
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
+from tests.fakes import FakeBeetsDB
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -286,6 +288,55 @@ class TestCurrentBeetsResolverPins(unittest.TestCase):
 
 
 class TestCurrentBeetsResolverGenerated(unittest.TestCase):
+    @given(
+        first=st.integers(min_value=32, max_value=320),
+        second=st.integers(min_value=32, max_value=320),
+        third=st.integers(min_value=32, max_value=320),
+        item_format=st.sampled_from(("MP3", "Opus", "AAC", "FLAC")),
+    )
+    @example(first=183, second=191, third=196, item_format="MP3")
+    def test_fake_public_reads_share_one_current_item_snapshot(
+        self,
+        first: int,
+        second: int,
+        third: int,
+        item_format: str,
+    ) -> None:
+        values = sorted((first, second, third))
+        minimum = values[0]
+        average = int(sum(values) / len(values))
+        median = values[1]
+        is_cbr = len(set(values)) == 1
+        fake = FakeBeetsDB(library_root="/library")
+        fake.set_album_info(MB_TARGET, AlbumInfo(
+            album_id=7,
+            track_count=3,
+            min_bitrate_kbps=minimum,
+            avg_bitrate_kbps=average,
+            median_bitrate_kbps=median,
+            is_cbr=is_cbr,
+            album_path="/library/current",
+            format=item_format,
+        ))
+
+        current = fake.resolve_current_release(_identity("mb"))
+        info = fake.get_album_info(MB_TARGET, QualityRankConfig.defaults())
+        detail = fake.check_mbids_detail([MB_TARGET])[MB_TARGET]
+        tracks = fake.get_tracks_by_mb_release_id(MB_TARGET)
+
+        self.assertIsInstance(current, CurrentBeetsUnique)
+        assert isinstance(current, CurrentBeetsUnique)
+        self.assertIsNotNone(info)
+        assert info is not None
+        item_bitrates = [item.bitrate for item in current.items]
+        self.assertTrue(all(value is not None for value in item_bitrates))
+        self.assertEqual(fake.get_min_bitrate(MB_TARGET), info.min_bitrate_kbps)
+        self.assertEqual(detail["beets_bitrate"], info.min_bitrate_kbps)
+        self.assertEqual(detail["beets_avg_bitrate"], info.avg_bitrate_kbps)
+        self.assertEqual(detail["beets_format"], info.format)
+        self.assertEqual(detail["beets_tracks"], info.track_count)
+        self.assertEqual(len(tracks or []), info.track_count)
+
     @settings(
         max_examples=(
             72

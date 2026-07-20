@@ -5256,8 +5256,11 @@ class TestFakeBeetsDB(unittest.TestCase):
         out = beets.check_mbids_detail(["mbid-1", "mbid-2"])
         self.assertEqual(out, {"mbid-1": {
             "beets_tracks": 11,
+            "beets_format": None,
             "beets_bitrate": 194,
             "beets_avg_bitrate": 288,
+            "beets_samplerate": None,
+            "beets_bitdepth": None,
         }})
         self.assertEqual(beets.check_mbids_detail_calls,
                          [["mbid-1", "mbid-2"]])
@@ -5290,7 +5293,11 @@ class TestFakeBeetsDB(unittest.TestCase):
         # reachable state, so the fake must not express it either.
         beets = FakeBeetsDB()
         beets.set_album_ids_for_release("mbid-1", [7])
-        self.assertEqual(beets.get_tracks_by_mb_release_id("mbid-1"), [])
+        self.assertEqual(beets.get_tracks_by_mb_release_id("mbid-1"), [{
+            "title": None, "track": None, "disc": None, "length": None,
+            "format": None, "bitrate": None, "samplerate": None,
+            "bitdepth": None,
+        }])
 
     def test_album_id_seeds_imply_presence(self) -> None:
         # Production derives presence and album-id mapping from one
@@ -5367,7 +5374,7 @@ class TestFakeBeetsDB(unittest.TestCase):
         beets.set_min_bitrate("mbid-1", 245)
         self.assertEqual(beets.get_min_bitrate("mbid-1"), 245)
         beets.set_album_ids_for_release("mbid-2", [2])
-        beets._min_bitrate_default = 320
+        beets.set_min_bitrate("mbid-2", 320)
         self.assertEqual(beets.get_min_bitrate("mbid-2"), 320)
         self.assertEqual(beets.get_min_bitrate_calls,
                          ["mbid-1", "mbid-2"])
@@ -5378,7 +5385,6 @@ class TestFakeBeetsDB(unittest.TestCase):
         from lib.beets_db import ReleaseLocation
 
         beets = FakeBeetsDB()
-        beets._min_bitrate_default = 320
         self.assertIsNone(beets.get_min_bitrate("mbid-absent"))
         beets.set_album_ids_for_release("12856590", [7])
         beets.set_min_bitrate("12856590", 245)
@@ -5471,12 +5477,12 @@ class TestFakeBeetsDB(unittest.TestCase):
             avg_bitrate_kbps=320,
             median_bitrate_kbps=320,
             format="MP3",
-            is_cbr=False,
+            is_cbr=True,
             album_path="/Beets/Artist/Album",
         )
         beets.set_album_info("mbid-1", info)
         beets.set_item_paths("mbid-1", [
-            (70 + index, f"/Beets/Moved/{index + 1:02d}.flac")
+            (700 + index, f"/Beets/Moved/{index + 1:02d}.flac")
             for index in range(info.track_count)
         ])
         # Two-arg form (matches real signature: mb_release_id + cfg).
@@ -5484,11 +5490,11 @@ class TestFakeBeetsDB(unittest.TestCase):
         self.assertIsNot(current, info)
         self.assertEqual(current.album_path, "/Beets/Moved")
 
-        beets.set_item_paths("mbid-1", [(70, "/Beets/Moved/01.flac")])
-        self.assertIsNone(
-            beets.get_album_info("mbid-1", None),
-            "summary metadata cannot survive a contradictory item topology",
-        )
+        beets.set_item_paths("mbid-1", [(700, "/Beets/Moved/01.flac")])
+        narrowed = beets.get_album_info("mbid-1", None)
+        self.assertIsNotNone(narrowed)
+        assert narrowed is not None
+        self.assertEqual(narrowed.track_count, 1)
         # Unseeded returns None.
         self.assertIsNone(beets.get_album_info("mbid-unknown"))
         self.assertEqual(

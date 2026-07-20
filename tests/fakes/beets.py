@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import os
+import statistics
 from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any
@@ -18,6 +19,7 @@ from lib.beets_db import (
     CurrentBeetsUnique,
     ReleaseLocation,
     _lookup_identity,
+    _reduce_album_format,
 )
 from lib.release_identity import (
     ReleaseIdentity,
@@ -56,8 +58,8 @@ class FakeBeetsDB:
         self.library_root = library_root
         self._album_exists: dict[str, bool] = {}
         self._album_ids_for_release: dict[str, list[int]] = {}
-        self._album_info: dict[str, Any] = {}
         self._item_paths: dict[str, list[tuple[int, str | None]]] = {}
+        self._item_metadata: dict[str, dict[int, CurrentBeetsItem]] = {}
         self._release_identities: list[dict[str, Any]] = []
         self._world_albums: list[BeetsWorldAlbum] = []
         # Default return values for unseeded keys — match the real
@@ -65,8 +67,6 @@ class FakeBeetsDB:
         # explicit seeds.
         self._album_exists_default = False
         self._album_ids_default: list[int] = []
-        self._album_info_default: Any = None
-        self._item_paths_default: list[tuple[int, str]] = []
         self.close_calls: int = 0
         self.album_exists_calls: list[str] = []
         self.get_album_info_calls: list[str] = []
@@ -76,9 +76,7 @@ class FakeBeetsDB:
         self.check_mbids_detail_calls: list[list[str]] = []
         self.get_album_ids_by_mbids_calls: list[list[str]] = []
         self.get_tracks_by_mb_release_id_calls: list[str] = []
-        self._tracks_by_release: dict[str, list[dict[str, Any]]] = {}
         self.get_albums_by_artist_calls: list[tuple[str, str]] = []
-        self._mbid_detail: dict[str, dict[str, Any]] = {}
         self._albums_by_artist: dict[str, list[dict[str, Any]]] = {}
         self.list_release_identities_calls: int = 0
         self._album_detail: dict[int, dict[str, Any]] = {}
@@ -86,8 +84,6 @@ class FakeBeetsDB:
         self.get_album_detail_calls: list[int] = []
         self._locate_queue: list[ReleaseLocation] = []
         self.locate_calls: list[str] = []
-        self._min_bitrate: dict[str, int | None] = {}
-        self._min_bitrate_default: int | None = None
         self.get_min_bitrate_calls: list[str] = []
         self.resolve_current_release_calls: list[ReleaseIdentity] = []
         self._next_synthetic_album_id = 1_000_000
@@ -95,9 +91,54 @@ class FakeBeetsDB:
     # --- Seeding helpers ---
 
     def set_mbid_detail(self, mbid: str, detail: dict[str, Any]) -> None:
-        self._mbid_detail[mbid] = detail
-        self._clear_presence_override(mbid)
-        self._ensure_seeded_album(mbid)
+        minimum = detail.get("beets_bitrate")
+        average = detail.get("beets_avg_bitrate")
+        track_count = int(detail.get("beets_tracks") or (3 if minimum else 1))
+        album_id = self._album_ids_lookup(mbid)
+        current_album_id = album_id[0] if album_id else self._next_synthetic_album_id
+        if not album_id:
+            self._next_synthetic_album_id += 1
+        if isinstance(minimum, int):
+            mean = int(average) if isinstance(average, int) else minimum
+            self.set_album_info(mbid, AlbumInfo(
+                album_id=current_album_id,
+                track_count=track_count,
+                min_bitrate_kbps=minimum,
+                avg_bitrate_kbps=mean,
+                median_bitrate_kbps=mean,
+                is_cbr=minimum == mean,
+                album_path=os.path.join(
+                    self.library_root, f"album-{current_album_id}",
+                ),
+                format=str(detail.get("beets_format") or ""),
+            ))
+        else:
+            self._seed_current_items(
+                mbid,
+                current_album_id,
+                [CurrentBeetsItem(
+                    id=current_album_id * 100,
+                    path=os.path.join(
+                        self.library_root,
+                        f"album-{current_album_id}",
+                        "01.fake",
+                    ),
+                )],
+            )
+        key = normalize_release_id(mbid)
+        samplerate = detail.get("beets_samplerate")
+        bitdepth = detail.get("beets_bitdepth")
+        if isinstance(samplerate, int) or isinstance(bitdepth, int):
+            self._item_metadata[key] = {
+                item_id: replace(
+                    item,
+                    samplerate=(samplerate if isinstance(
+                        samplerate, int) else item.samplerate),
+                    bitdepth=(bitdepth if isinstance(
+                        bitdepth, int) else item.bitdepth),
+                )
+                for item_id, item in self._item_metadata[key].items()
+            }
 
     def set_albums_by_artist(
         self, name: str, albums: list[dict[str, Any]],
@@ -116,25 +157,30 @@ class FakeBeetsDB:
         self._album_ids_for_release[release_id] = list(ids)
 
     def set_album_info(self, mb_release_id: str, info: Any) -> None:
-        self._album_info[mb_release_id] = info
         if isinstance(info, AlbumInfo):
-            self._clear_presence_override(mb_release_id)
-            self._album_ids_for_release[mb_release_id] = [info.album_id]
-            if not any(
-                normalize_release_id(seeded)
-                == normalize_release_id(mb_release_id)
-                for seeded in self._item_paths
-            ):
-                self._item_paths[mb_release_id] = [
-                    (
-                        info.album_id * 100 + index,
-                        os.path.join(
-                            info.album_path,
-                            f"{index + 1:02d}.fake",
+            bitrates = self._synthesize_bitrates(info)
+            self._seed_current_items(
+                mb_release_id,
+                info.album_id,
+                [
+                    CurrentBeetsItem(
+                        id=info.album_id * 100 + index,
+                        path=os.path.join(
+                            info.album_path, f"{index + 1:02d}.fake",
                         ),
+                        title=f"Track {index + 1}",
+                        track=index + 1,
+                        disc=1,
+                        format=info.format,
+                        bitrate=bitrate,
                     )
-                    for index in range(info.track_count)
-                ]
+                    for index, bitrate in enumerate(bitrates)
+                ],
+            )
+        elif info is None:
+            self._album_ids_for_release[mb_release_id] = []
+            self._item_paths.pop(mb_release_id, None)
+            self._item_metadata.pop(normalize_release_id(mb_release_id), None)
 
     def set_item_paths(
         self, release_id: str, paths: Sequence[tuple[int, str | None]],
@@ -152,10 +198,32 @@ class FakeBeetsDB:
     def set_tracks_for_release(
         self, release_id: str, tracks: list[dict[str, Any]],
     ) -> None:
-        self._tracks_by_release[release_id] = [
-            copy.deepcopy(t) for t in tracks]
-        self._clear_presence_override(release_id)
-        self._ensure_seeded_album(release_id)
+        ids = self._album_ids_lookup(release_id)
+        if ids:
+            album_id = ids[0]
+        else:
+            album_id = self._next_synthetic_album_id
+            self._next_synthetic_album_id += 1
+        self._seed_current_items(
+            release_id,
+            album_id,
+            [CurrentBeetsItem(
+                id=int(track.get("id") or album_id * 100 + index),
+                path=str(track.get("path") or os.path.join(
+                    self.library_root,
+                    f"album-{album_id}",
+                    f"{index + 1:02d}.fake",
+                )),
+                title=(str(track["title"]) if track.get("title") is not None else None),
+                track=(int(track["track"]) if track.get("track") is not None else None),
+                disc=(int(track["disc"]) if track.get("disc") is not None else None),
+                length=(float(track["length"]) if track.get("length") is not None else None),
+                format=(str(track["format"]) if track.get("format") is not None else None),
+                bitrate=(int(track["bitrate"]) if track.get("bitrate") is not None else None),
+                samplerate=(int(track["samplerate"]) if track.get("samplerate") is not None else None),
+                bitdepth=(int(track["bitdepth"]) if track.get("bitdepth") is not None else None),
+            ) for index, track in enumerate(tracks)],
+        )
 
     def set_album_detail(self, album_id: int, detail: dict[str, Any]) -> None:
         self._album_detail[album_id] = copy.deepcopy(detail)
@@ -169,9 +237,92 @@ class FakeBeetsDB:
     def set_min_bitrate(self, release_id: str, kbps: int | None) -> None:
         """Seed a per-release min bitrate. Keys are normalized like
         production's locate-backed lookup. The release must also be
-        present (album ids seeded, explicit album_exists, or the
-        default) — ``get_min_bitrate`` gates on presence first."""
-        self._min_bitrate[normalize_release_id(release_id)] = kbps
+        present (album ids seeded or explicit album_exists) —
+        ``get_min_bitrate`` gates on current unique topology first."""
+        ids = self._album_ids_lookup(release_id)
+        album_id = ids[0] if ids else self._next_synthetic_album_id
+        if not ids:
+            self._next_synthetic_album_id += 1
+        path = os.path.join(
+            self.library_root, f"album-{album_id}", "01.fake",
+        )
+        self._seed_current_items(
+            release_id,
+            album_id,
+            [CurrentBeetsItem(
+                id=album_id * 100,
+                path=path,
+                bitrate=(kbps * 1000 if kbps is not None else None),
+            )],
+        )
+
+    @staticmethod
+    def _synthesize_bitrates(info: AlbumInfo) -> list[int]:
+        """Construct per-item facts whose production reduction is ``info``."""
+
+        count = info.track_count
+        assert count > 0, "AlbumInfo with no items is not production-expressible"
+        minimum = info.min_bitrate_kbps
+        average = info.avg_bitrate_kbps or minimum
+        median = info.median_bitrate_kbps or minimum
+        assert minimum <= median, "minimum bitrate cannot exceed median"
+        if count == 1:
+            values = [minimum * 1000]
+            assert average == minimum and median == minimum, (
+                "one-item AlbumInfo must have identical min/avg/median"
+            )
+        elif count == 2:
+            assert average == median, (
+                "two-item AlbumInfo metrics are not jointly expressible"
+            )
+            low = minimum * 1000
+            target_total = max(2 * average * 1000, low * 2)
+            assert target_total <= 2 * (average + 1) * 1000 - 1
+            values = [low, target_total - low]
+        else:
+            low_count = (count - 1) // 2
+            middle_count = 1 if count % 2 else 2
+            high_count = count - low_count - middle_count
+            fixed = (
+                [minimum * 1000] * low_count
+                + [median * 1000] * middle_count
+            )
+            target_min = count * average * 1000
+            target_max = count * (average + 1) * 1000 - 1
+            target_total = max(
+                target_min,
+                sum(fixed) + high_count * median * 1000,
+            )
+            assert high_count > 0 and target_total <= target_max, (
+                "AlbumInfo min/avg/median are not jointly expressible"
+            )
+            remaining_total = target_total - sum(fixed)
+            base, remainder = divmod(remaining_total, high_count)
+            highs = [base + (1 if index < remainder else 0)
+                     for index in range(high_count)]
+            values = fixed + highs
+        if not info.is_cbr and len(values) > 1 and len(set(values)) == 1:
+            values[-1] += 1
+        assert int(min(values) / 1000) == minimum
+        assert int(sum(values) / len(values) / 1000) == average
+        assert int(statistics.median(values) / 1000) == median
+        assert (len(set(values)) == 1) == info.is_cbr, (
+            "AlbumInfo is_cbr disagrees with its per-item bitrates"
+        )
+        return values
+
+    def _seed_current_items(
+        self,
+        release_id: str,
+        album_id: int,
+        items: Sequence[CurrentBeetsItem],
+    ) -> None:
+        self._clear_presence_override(release_id)
+        self._album_ids_for_release[release_id] = [album_id]
+        self._item_paths[release_id] = [(item.id, item.path) for item in items]
+        self._item_metadata[normalize_release_id(release_id)] = {
+            item.id: item for item in items
+        }
 
     def queue_locate_results(self, entries: list[ReleaseLocation]) -> None:
         """Queue ``locate()`` outcomes for before/after-mutation flows.
@@ -278,18 +429,40 @@ class FakeBeetsDB:
         self.check_mbids_detail_calls.append(list(mbids))
         result: dict[str, dict[str, Any]] = {}
         for mbid in mbids:
-            if mbid not in self._mbid_detail:
-                continue
             identity = _lookup_identity(mbid)
             if identity is None:
                 continue
-            if isinstance(
-                self.resolve_current_release(identity),
-                CurrentBeetsUnique,
-            ):
-                result[identity.release_id] = copy.deepcopy(
-                    self._mbid_detail[mbid],
-                )
+            current = self.resolve_current_release(identity)
+            if not isinstance(current, CurrentBeetsUnique):
+                continue
+            formats = tuple(dict.fromkeys(
+                item.format for item in current.items if item.format
+            ))
+            bitrates = [
+                item.bitrate for item in current.items
+                if item.bitrate is not None and item.bitrate > 0
+            ]
+            samplerates = [
+                item.samplerate for item in current.items
+                if item.samplerate is not None
+            ]
+            bitdepths = [
+                item.bitdepth for item in current.items
+                if item.bitdepth is not None
+            ]
+            result[identity.release_id] = {
+                "beets_tracks": len(current.items),
+                "beets_format": ",".join(formats) if formats else None,
+                "beets_bitrate": (
+                    int(min(bitrates) / 1000) if bitrates else None
+                ),
+                "beets_avg_bitrate": (
+                    int(sum(bitrates) / len(bitrates) / 1000)
+                    if bitrates else None
+                ),
+                "beets_samplerate": min(samplerates) if samplerates else None,
+                "beets_bitdepth": max(bitdepths) if bitdepths else None,
+            }
         return result
 
     def get_albums_by_artist(
@@ -349,14 +522,21 @@ class FakeBeetsDB:
         self.get_tracks_by_mb_release_id_calls.append(mbid)
         key = normalize_release_id(mbid)
         identity = _lookup_identity(key)
-        if identity is None or not isinstance(
-            self.resolve_current_release(identity), CurrentBeetsUnique,
-        ):
+        if identity is None:
             return None
-        for seeded, tracks in self._tracks_by_release.items():
-            if normalize_release_id(seeded) == key:
-                return [copy.deepcopy(t) for t in tracks]
-        return []
+        current = self.resolve_current_release(identity)
+        if not isinstance(current, CurrentBeetsUnique):
+            return None
+        items = sorted(
+            current.items,
+            key=lambda item: (item.disc or 0, item.track or 0, item.id),
+        )
+        return [{
+            "title": item.title, "track": item.track, "disc": item.disc,
+            "length": item.length, "format": item.format,
+            "bitrate": item.bitrate, "samplerate": item.samplerate,
+            "bitdepth": item.bitdepth,
+        } for item in items]
 
     def get_album_detail(self, album_id: int) -> dict[str, Any] | None:
         """Mirror of ``BeetsDB.get_album_detail`` — None when missing."""
@@ -455,7 +635,14 @@ class FakeBeetsDB:
                         reason="invalid_path",
                     )
             absolute = os.path.abspath(path)
-            items.append(CurrentBeetsItem(id=item_id, path=absolute))
+            metadata = self._item_metadata.get(
+                normalize_release_id(identity.release_id), {},
+            ).get(item_id)
+            items.append(
+                replace(metadata, path=absolute)
+                if metadata is not None
+                else CurrentBeetsItem(id=item_id, path=absolute)
+            )
             directories.add(os.path.dirname(absolute))
         if len(directories) != 1:
             return CurrentBeetsAmbiguous(
@@ -516,21 +703,23 @@ class FakeBeetsDB:
     def get_min_bitrate(self, mb_release_id: str) -> int | None:
         """Mirror of ``BeetsDB.get_min_bitrate`` (kbps; None = no row).
 
-        Production resolves presence through ``locate`` first and
-        returns None for an absent release, so the fake gates on
-        ``_presence`` before consulting the (normalized-key) seed
-        store / ``_min_bitrate_default``.
+        Production derives this value from the same joined item snapshot as
+        every other current-release lookup; the fake does the same.
         """
         self.get_min_bitrate_calls.append(mb_release_id)
         if self._locate_queue and self._locate_queue[0].kind != "exact":
             return None
         identity = _lookup_identity(mb_release_id)
-        if identity is None or not isinstance(
-            self.resolve_current_release(identity), CurrentBeetsUnique,
-        ):
+        if identity is None:
             return None
-        key = normalize_release_id(mb_release_id)
-        return self._min_bitrate.get(key, self._min_bitrate_default)
+        current = self.resolve_current_release(identity)
+        if not isinstance(current, CurrentBeetsUnique):
+            return None
+        bitrates = [
+            item.bitrate for item in current.items
+            if item.bitrate is not None and item.bitrate > 0
+        ]
+        return int(min(bitrates) / 1000) if bitrates else None
 
     def get_album_info(
         self, mb_release_id: str, _cfg: Any = None,
@@ -542,24 +731,30 @@ class FakeBeetsDB:
         resolution = self.resolve_current_release(identity)
         if not isinstance(resolution, CurrentBeetsUnique):
             return None
-        seeded_info = self._album_info_default
-        key = normalize_release_id(mb_release_id)
-        for seeded, info in self._album_info.items():
-            if normalize_release_id(seeded) == key:
-                seeded_info = info
-                break
-        if isinstance(seeded_info, AlbumInfo):
-            # ``AlbumInfo`` is derived from the same joined item snapshot in
-            # production. Never let summary metadata survive a fake topology
-            # mutation that changed the number of current items.
-            if seeded_info.track_count != len(resolution.items):
-                return None
-            return replace(
-                seeded_info,
-                album_id=resolution.album_id,
-                album_path=resolution.album_path,
-            )
-        return seeded_info
+        measured = [
+            (item, bitrate)
+            for item in resolution.items
+            if (bitrate := item.bitrate) is not None and bitrate > 0
+        ]
+        if not measured:
+            return None
+        bitrates = [bitrate for _item, bitrate in measured]
+        from lib.quality import QualityRankConfig
+
+        cfg = _cfg if _cfg is not None else QualityRankConfig.defaults()
+        return AlbumInfo(
+            album_id=resolution.album_id,
+            track_count=len(measured),
+            min_bitrate_kbps=int(min(bitrates) / 1000),
+            avg_bitrate_kbps=int(sum(bitrates) / len(bitrates) / 1000),
+            median_bitrate_kbps=int(statistics.median(bitrates) / 1000),
+            is_cbr=len(set(bitrates)) == 1,
+            album_path=resolution.album_path,
+            format=_reduce_album_format(
+                {item.format for item, _bitrate in measured if item.format},
+                cfg,
+            ),
+        )
 
     def get_item_paths(self, mb_release_id: str) -> list[tuple[int, str]]:
         self.get_item_paths_calls.append(mb_release_id)

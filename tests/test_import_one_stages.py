@@ -1124,7 +1124,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
             beets.set_album_ids_for_release("mbid-123", [77])
             beets.set_album_info("mbid-123", AlbumInfo(
                 album_id=77,
-                track_count=1,
+                track_count=3,
                 min_bitrate_kbps=245,
                 is_cbr=False,
                 album_path=imported,
@@ -1218,7 +1218,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
             beets.set_album_ids_for_release("mbid-123", [77])
             beets.set_album_info("mbid-123", AlbumInfo(
                 album_id=77,
-                track_count=1,
+                track_count=3,
                 min_bitrate_kbps=245,
                 is_cbr=False,
                 album_path=imported,
@@ -1357,7 +1357,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
             beets.set_album_ids_for_release("mbid-123", [77])
             beets.set_album_info("mbid-123", AlbumInfo(
                 album_id=77,
-                track_count=1,
+                track_count=3,
                 min_bitrate_kbps=245,
                 is_cbr=False,
                 album_path=imported,
