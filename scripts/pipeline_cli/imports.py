@@ -1,6 +1,6 @@
 """pipeline-cli import commands (#495 carve).
 
-``force-import`` / ``import-jobs`` / ``import-preview``
+``force-import`` / ``import-jobs`` / ``import-job-recovery`` / ``import-preview``
 — the import-queue operator surface: force a rejected download through,
 list recent queue jobs, and preview
 whether an import would pass without actually running one.
@@ -120,6 +120,38 @@ def cmd_import_jobs(db, args):
             f"  [{job.id:4d}] {job.status:9s} {job.job_type:17s} "
             f"{request:12s} attempts={job.attempts} {msg}"
         )
+        if job.status == "recovery_required":
+            print(
+                "       launch: "
+                f"release={job.beets_launch_release_id or '-'} "
+                f"source={job.beets_launch_source_path or '-'} "
+                f"snapshot={job.beets_launch_snapshot_fingerprint or '-'} "
+                f"authorized={job.beets_launch_authorized_at or '-'}"
+            )
+
+
+def cmd_import_job_recovery(db, args) -> int:
+    """Resolve one ambiguous Beets operation by explicit operator choice."""
+    from lib.import_job_recovery_service import resolve_import_job_recovery
+
+    try:
+        result = resolve_import_job_recovery(
+            db,
+            args.job_id,
+            resolution=args.resolution,
+            reason=args.reason,
+        )
+    except ValueError as exc:
+        print(f"  {exc}", file=sys.stderr)
+        return 2
+    if result.outcome == "not_found":
+        print(f"  {result.message}", file=sys.stderr)
+        return 3
+    if result.outcome in ("wrong_state", "authority_changed"):
+        print(f"  {result.message}", file=sys.stderr)
+        return 4
+    print(f"  [OK] {result.message}")
+    return 0
 
 
 def _preview_values_from_args(args) -> ImportPreviewValues:
@@ -232,7 +264,7 @@ def cmd_import_preview(db, args):
 
 
 def add_imports_subparsers(sub: argparse._SubParsersAction) -> None:
-    """Add ``force-import`` / ``import-jobs`` /
+    """Add ``force-import`` / ``import-jobs`` / ``import-job-recovery`` /
     ``import-preview`` (#521 carve out of ``routes_meta._build_parser``,
     verbatim argument definitions)."""
     # force-import
@@ -243,8 +275,37 @@ def add_imports_subparsers(sub: argparse._SubParsersAction) -> None:
 
     # import-jobs
     p_jobs = sub.add_parser("import-jobs", help="List recent import queue jobs")
-    p_jobs.add_argument("--status", choices=["queued", "running", "completed", "failed"])
+    p_jobs.add_argument(
+        "--status",
+        choices=[
+            "queued",
+            "running",
+            "recovery_required",
+            "completed",
+            "failed",
+        ],
+    )
     p_jobs.add_argument("--limit", type=int, default=20)
+
+    p_recovery = sub.add_parser(
+        "import-job-recovery",
+        help="Resolve a recovery-required Beets import operation",
+    )
+    p_recovery.add_argument("job_id", type=int, help="Recovery import job ID")
+    p_recovery.add_argument(
+        "--resolution",
+        required=True,
+        choices=["retry", "close"],
+        help=(
+            "retry only after confirming Beets did not apply; close after "
+            "manual reconciliation without replay"
+        ),
+    )
+    p_recovery.add_argument(
+        "--reason",
+        required=True,
+        help="Operator audit reason for the resolution",
+    )
 
     # import-preview
     p_preview = sub.add_parser("import-preview", help="Preview whether an import would pass")

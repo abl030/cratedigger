@@ -1137,6 +1137,64 @@ class TestImportJobQueueAPI(unittest.TestCase):
         )
         self.assertIsNone(missing)
 
+    def test_mark_import_job_recovery_required_round_trip(self):
+        from lib.import_queue import IMPORT_JOB_FORCE
+
+        source_path = "/tmp/recovery-required-round-trip"
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.req_id,
+            payload={"failed_path": source_path},
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="queue-api-mbid",
+            source_path=source_path,
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.db.set_import_job_candidate_evidence(job.id, persisted.id)
+        self.db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"ready": True},
+        )
+        claimed = self.db.claim_next_import_job(worker_id="lost-worker")
+        assert claimed is not None
+        launched = self.db.authorize_import_job_launch(
+            claimed.id,
+            request_id=self.req_id,
+            release_id="queue-api-mbid",
+            source_path=source_path,
+        )
+        assert launched is not None
+
+        recovered = self.db.mark_import_job_recovery_required(
+            launched.id,
+            reason="worker acknowledgement lost",
+        )
+
+        assert recovered is not None
+        stored = self.db._execute(
+            """
+            SELECT status, message, error, worker_id, heartbeat_at
+            FROM import_jobs
+            WHERE id = %s
+            """,
+            (launched.id,),
+        ).fetchone()
+        assert stored is not None
+        reread = self.db.get_import_job(launched.id)
+        assert reread is not None
+        self.assertEqual(stored["status"], "recovery_required")
+        self.assertIn("worker acknowledgement lost", stored["message"] or "")
+        self.assertIn("may have mutated", stored["error"] or "")
+        self.assertIsNone(stored["worker_id"])
+        self.assertIsNone(stored["heartbeat_at"])
+        self.assertEqual(reread.status, stored["status"])
+
     def test_two_sessions_cannot_claim_same_job(self):
         from lib.import_queue import IMPORT_JOB_FORCE
         from lib import pipeline_db
@@ -1161,7 +1219,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
         finally:
             other.close()
 
-    def test_running_jobs_can_be_requeued_immediately_after_worker_restart(self):
+    def test_unlaunched_jobs_can_be_requeued_after_worker_restart(self):
         from lib.import_queue import IMPORT_JOB_FORCE
 
         job = self.db.enqueue_import_job(
@@ -1178,8 +1236,9 @@ class TestImportJobQueueAPI(unittest.TestCase):
         claimed = self.db.claim_next_import_job(worker_id="old-worker")
         assert claimed is not None
 
-        recovered = self.db.requeue_running_import_jobs(
-            message="worker restarted",
+        recovered = self.db.recover_running_import_jobs(
+            requeue_message="worker restarted",
+            recovery_message="operator recovery required",
         )
         self.assertEqual([job.id for job in recovered], [claimed.id])
         self.assertEqual(recovered[0].status, "queued")
@@ -1509,7 +1568,7 @@ class TestRequeueImportJobForPreview(unittest.TestCase):
 class TestRequeueRunningImportPreviewJobs(unittest.TestCase):
     """Startup self-heal for the async preview worker.
 
-    Mirrors the importer's ``requeue_running_import_jobs`` — when the
+    Mirrors the importer's running-job recovery — when the
     preview worker process restarts, it must immediately requeue every
     job in ``preview_status='running'`` regardless of heartbeat age,
     because by definition no preview worker is currently processing

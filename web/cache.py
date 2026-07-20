@@ -15,7 +15,7 @@ import copy
 import json
 import logging
 import threading
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +40,10 @@ _GROUP_PATTERNS: dict[str, list[str]] = {
     "discogs": ["web:/api/discogs*"],
 }
 
-_redis: object | None = None
+if TYPE_CHECKING:
+    import redis as _redis_mod
+
+_redis: "_redis_mod.Redis | None" = None
 
 
 class _MetadataFlight:
@@ -97,10 +100,14 @@ def redis_metrics() -> dict[str, Any]:
     if _redis is None:
         return {"enabled": False, "status": "disabled", "error": None}
     try:
-        memory = _redis.info("memory")  # type: ignore[union-attr]
-        keyspace = _redis.info("keyspace")  # type: ignore[union-attr]
-        clients = _redis.info("clients")  # type: ignore[union-attr]
-        dbsize = _redis.dbsize()  # type: ignore[union-attr]
+        # redis-py types sync command returns as ``ResponseT`` (an
+        # Awaitable union); narrow each to the sync shape we consume.
+        memory_resp = _redis.info("memory")
+        keyspace = _redis.info("keyspace")
+        clients_resp = _redis.info("clients")
+        dbsize = _redis.dbsize()
+        memory = memory_resp if isinstance(memory_resp, dict) else {}
+        clients = clients_resp if isinstance(clients_resp, dict) else {}
         db0 = keyspace.get("db0", {}) if isinstance(keyspace, dict) else {}
         if not isinstance(db0, dict):
             db0 = {}
@@ -148,8 +155,9 @@ def meta_get(key: str) -> Any:
     if _redis is None:
         return None
     try:
-        raw = _redis.get(f"{_META_PREFIX}{key}")  # type: ignore[union-attr]
-        if raw is None:
+        raw = _redis.get(f"{_META_PREFIX}{key}")
+        if not isinstance(raw, str):
+            # decode_responses=True yields str hits; None on miss.
             return None
         return json.loads(raw)
     except Exception:
@@ -161,7 +169,7 @@ def meta_set(key: str, value: Any, ttl: int = TTL_MB) -> None:
     if _redis is None:
         return
     try:
-        _redis.setex(  # type: ignore[union-attr]
+        _redis.setex(
             f"{_META_PREFIX}{key}", ttl, json.dumps(value))
     except Exception:
         pass
@@ -250,10 +258,12 @@ def invalidate_pattern(pattern: str) -> None:
     try:
         cursor = 0
         while True:
-            cursor, keys = _redis.scan(  # type: ignore[union-attr]
-                cursor=cursor, match=pattern, count=100)
+            resp = _redis.scan(cursor=cursor, match=pattern, count=100)
+            if not isinstance(resp, tuple):
+                break
+            cursor, keys = resp
             if keys:
-                _redis.delete(*keys)  # type: ignore[union-attr]
+                _redis.delete(*keys)
             if cursor == 0:
                 break
     except Exception:

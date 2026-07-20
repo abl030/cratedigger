@@ -23,7 +23,21 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Callable, Literal
+from types import ModuleType
+from typing import Callable, Literal, Protocol
+
+
+class RouteHandler(Protocol):
+    """The handler surface route functions may touch.
+
+    Implemented by ``web/server.py::Handler`` (and the dev-server handler);
+    route modules annotate their ``h`` parameter with this instead of
+    importing the concrete handler class, which would be circular.
+    """
+
+    def _json(self, data: object, status: int = 200) -> None: ...
+
+    def _error(self, msg: str, status: int = 400) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -90,7 +104,7 @@ def pattern_route(
     )
 
 
-def merge_registries(*modules: object) -> list[RouteRegistration]:
+def merge_registries(*modules: ModuleType) -> list[RouteRegistration]:
     """Flatten each route module's ``ROUTES`` list into one ordered list.
 
     ``modules`` are the imported ``web.routes.*`` modules themselves
@@ -98,11 +112,13 @@ def merge_registries(*modules: object) -> list[RouteRegistration]:
     """
     merged: list[RouteRegistration] = []
     for mod in modules:
-        merged.extend(mod.ROUTES)  # type: ignore[attr-defined]
+        merged.extend(mod.ROUTES)
     return merged
 
 
-def build_get_routes(routes: list[RouteRegistration]) -> dict[str, object]:
+def build_get_routes(
+    routes: list[RouteRegistration],
+) -> dict[str, Callable[..., None]]:
     return {
         r.path: r.handler for r in routes
         if r.method == "GET" and r.pattern is None
@@ -111,14 +127,16 @@ def build_get_routes(routes: list[RouteRegistration]) -> dict[str, object]:
 
 def build_get_patterns(
     routes: list[RouteRegistration],
-) -> list[tuple[re.Pattern[str], object]]:
+) -> list[tuple[re.Pattern[str], Callable[..., None]]]:
     return [
         (r.pattern, r.handler) for r in routes
         if r.method == "GET" and r.pattern is not None
     ]
 
 
-def build_post_routes(routes: list[RouteRegistration]) -> dict[str, object]:
+def build_post_routes(
+    routes: list[RouteRegistration],
+) -> dict[str, Callable[..., None]]:
     return {
         r.path: r.handler for r in routes
         if r.method == "POST" and r.pattern is None
@@ -127,7 +145,7 @@ def build_post_routes(routes: list[RouteRegistration]) -> dict[str, object]:
 
 def build_post_patterns(
     routes: list[RouteRegistration],
-) -> list[tuple[re.Pattern[str], object]]:
+) -> list[tuple[re.Pattern[str], Callable[..., None]]]:
     return [
         (r.pattern, r.handler) for r in routes
         if r.method == "POST" and r.pattern is not None

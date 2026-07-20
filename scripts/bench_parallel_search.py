@@ -148,7 +148,7 @@ def main():
     if not host:
         print("No --host provided, starting ephemeral slskd container...")
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tests"))
-        from ephemeral_slskd import EphemeralSlskd  # type: ignore[import-not-found]
+        from ephemeral_slskd import EphemeralSlskd  # pyright: ignore[reportMissingImports]
         creds_path = os.path.join(os.path.dirname(__file__), "..", "tests", ".slskd-creds.json")
         ephemeral = EphemeralSlskd(creds_path)
         ephemeral.start()

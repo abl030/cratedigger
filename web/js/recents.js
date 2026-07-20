@@ -240,7 +240,9 @@ function downloadingSummary(item) {
   const progress = counts.total ? `${counts.completed}/${counts.total} files` : 'no file state';
   const stateParts = [];
   if (importJob) {
-    const jobState = importJob.status === 'running' ? 'importing' : 'queued for import';
+    const jobState = importJob.status === 'recovery_required'
+      ? 'operator recovery required'
+      : (importJob.status === 'running' ? 'importing' : 'queued for import');
     stateParts.push(`${jobState} #${importJob.id}`);
   }
   if (counts.queued) stateParts.push(`${counts.queued} queued`);
@@ -276,6 +278,7 @@ function downloadingBadge(item) {
   if (isYoutubeIngestItem(item)) return ['youtube ingest', 'badge-new'];
   const job = item.active_import_job || null;
   if (!job) return ['downloading', 'badge-downloading'];
+  if (job.status === 'recovery_required') return ['recovery required', 'badge-failed'];
   if (job.status === 'running') return ['importing', 'badge-force'];
   return ['import queued', 'badge-new'];
 }
@@ -284,6 +287,7 @@ function downloadingBorderColor(item) {
   if (isYoutubeIngestItem(item)) return '#7a5a00';
   const job = item.active_import_job || null;
   if (!job) return '#1a3a5a';
+  if (job.status === 'recovery_required') return '#a33';
   return job.status === 'running' ? '#36c' : '#1a4a2a';
 }
 
@@ -363,7 +367,8 @@ async function loadImports() {
 function renderImportsHeader(jobs, counts) {
   const queued = Number(counts.queued || 0);
   const running = Number(counts.running || 0);
-  const activeTotal = queued + running || jobs.length;
+  const recovery = Number(counts.recovery_required || 0);
+  const activeTotal = queued + running + recovery || jobs.length;
   const shown = jobs.length;
   const windowText = activeTotal > shown
     ? `Showing ${shown} of ${activeTotal} active imports`
@@ -371,6 +376,7 @@ function renderImportsHeader(jobs, counts) {
   const parts = [];
   if (queued) parts.push(`${queued} queued`);
   if (running) parts.push(`${running} running`);
+  if (recovery) parts.push(`${recovery} recovery required`);
   return `<div class="r-date-header">${[windowText, ...parts].join(' · ')}</div>`;
 }
 

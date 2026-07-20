@@ -90,8 +90,8 @@ class TestImporterServiceContract(unittest.TestCase):
     def test_importer_service_restarts_on_switch(self) -> None:
         """Deploy should restart the importer worker.
 
-        requeue_running_import_jobs handles mid-job kills at startup; leaving a
-        worker dead after switch-to-configuration is worse than restarting it.
+        Launch-fence recovery handles mid-job kills at startup; leaving a worker
+        dead after switch-to-configuration is worse than restarting it.
         """
         text = MODULE_NIX.read_text(encoding="utf-8")
         # Find the importer service block and assert restartIfChanged=true

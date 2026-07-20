@@ -266,6 +266,35 @@ the staged destination. For blocked auto-import rows (flag set),
 operator recovery should inspect the staged path and either finish the
 import manually or reset the request explicitly.
 
+The import job is now the stronger operation fence. Enqueue captures the
+expected request status. Under the release lock, the importer atomically
+compares that stored precondition with the live row and records the exact
+release, observed request status, source path, and candidate snapshot
+immediately before Beets may start. Recovery follows
+four deliberately asymmetric crash cases:
+
+1. Crash before launch authorization commits: Beets was not allowed to start,
+   so startup may requeue the same job.
+2. Crash after authorization but before subprocess spawn: the marker is
+   conservative and startup stops at `recovery_required`.
+3. Crash while Beets runs, after it returns, or while its terminal PostgreSQL
+   bundle rolls back: startup also stops at `recovery_required`; code does not
+   infer whether the library mutation landed.
+4. Terminal bundle commits: the job is `completed` or `failed` and startup has
+   nothing to recover.
+
+Only an explicit operator resolution can leave case 2 or 3. A retry closes the
+ambiguous operation and creates a new job ID after rechecking the recorded
+authority; it never reclaims the possibly-applied operation.
+
+Filesystem convergence is sequenced after the PostgreSQL terminal
+acknowledgement. Dispatch may describe staged-folder removal, duplicate-guard
+quarantine, or disambiguation cleanup, but the importer performs it only after
+the request/audit/job transaction commits. The description is intentionally
+not a durable outbox: a crash after acknowledgement can leave debris for later
+operator cleanup, while a missing acknowledgement preserves the source for
+inspection.
+
 The 2026-05-04 wedge (5788 failed import_jobs, 3 albums stuck in
 `downloading` since Apr 27) was caused by the absence of this flag:
 the original guard fired regardless of whether the subprocess had

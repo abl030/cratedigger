@@ -1077,8 +1077,10 @@ function renderEntryDetail(e, job) {
   const sourceDirs = sourceDirsForEntry(e);
 
   // Action buttons up top: operators are usually here to act, not browse.
-  const active = job && (job.status === 'queued' || job.status === 'running');
-  const importLabel = active ? job.status[0].toUpperCase() + job.status.slice(1) : 'Force Import';
+  const active = job && ['queued', 'running', 'recovery_required'].includes(job.status);
+  const importLabel = job?.status === 'recovery_required'
+    ? 'Recovery required'
+    : (active ? job.status[0].toUpperCase() + job.status.slice(1) : 'Force Import');
   let html = '<div class="p-actions" style="margin-bottom:10px;">';
   html += `<button class="p-btn" style="border-color:#6a9;color:#6a9;" ${active ? 'disabled' : ''} onclick="event.stopPropagation(); window.forceImportWrongMatch(${e.download_log_id}, this)">${importLabel}</button>`;
   html += `<button class="p-btn delete" ${active ? 'disabled' : ''} onclick="event.stopPropagation(); window.deleteWrongMatch(${e.download_log_id}, this)">Delete</button>`;
@@ -1278,6 +1280,13 @@ async function _pollImportJob(jobId, btn, logId) {
       if (job.status === 'queued' || job.status === 'running') {
         btn.textContent = job.status[0].toUpperCase() + job.status.slice(1);
         continue;
+      }
+      if (job.status === 'recovery_required') {
+        btn.textContent = 'Recovery required';
+        btn.style.color = '#f88';
+        toast(job.message || 'Import needs operator recovery; it will not replay automatically', true);
+        invalidateWrongMatches();
+        return;
       }
       if (job.status === 'completed') {
         btn.textContent = 'Imported';

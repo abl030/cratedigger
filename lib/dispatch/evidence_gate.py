@@ -76,7 +76,7 @@ def _requeue_import_job_to_preview(
 
     If the requeue UPDATE itself raises (DB transient), we swallow and
     return ``DISPATCH_CODE_REQUEUE_FAILED`` — the job stays in
-    ``running`` for ``requeue_running_import_jobs`` on next importer
+    ``running`` for conservative startup recovery on next importer
     boot to recover.
 
     ``import_job_id=None`` covers the automation pre-import branch in

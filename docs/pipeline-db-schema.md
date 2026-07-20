@@ -190,10 +190,14 @@ processing, and YouTube rescue all share this table.
 Key fields:
 
 - `job_type TEXT` — active values are `force_import`, `automation_import`, and `youtube_import`. Historical `manual_import` rows remain readable but cannot be enqueued.
-- `status TEXT` — `queued`, `running`, `completed`, or `failed`.
+- `status TEXT` — `queued`, `running`, `recovery_required`, `completed`, or
+  `failed`. `recovery_required` means Beets launch was durably authorized but
+  no terminal acknowledgement committed; it is active for dedupe purposes but
+  is never claimable by the importer.
 - `request_id INTEGER` — the related `album_requests.id`.
 - `dedupe_key TEXT` — active queue dedupe key. A partial unique index prevents
-  duplicate queued/running jobs while allowing a later job after completion.
+  duplicate queued/running/recovery jobs while allowing a later job after an
+  explicit recovery resolution or ordinary completion.
 - `payload JSONB` — typed job input. Force jobs carry `failed_path`,
   `download_log_id`, and optional `source_username`.
   YouTube jobs carry `staged_path`, `request_id`, `browse_id`, and
@@ -202,11 +206,22 @@ Key fields:
   and CLI callers.
 - **Partial unique index `one_active_youtube_import_per_request` ON
   `import_jobs (request_id) WHERE job_type = 'youtube_import' AND status IN
-  ('queued', 'running')`** — added by migration 038. Keeps the post-yt-dlp
+  ('queued', 'running', 'recovery_required')`** — added by migration 038 and
+  widened by migration 060. Keeps the post-yt-dlp
   importer handoff request-scoped, so a second browse id cannot enqueue a
   parallel active YouTube import for the same request.
 - `attempts`, `worker_id`, `started_at`, `heartbeat_at`, `completed_at` —
   claim and recovery metadata.
+- `expected_request_status` — the request status captured atomically when the
+  job is enqueued. Launch authorization compares the live request row with
+  this stored precondition; the importer cannot make the check tautological by
+  rereading the live value immediately before launch.
+- `beets_launch_authorized_at`, `beets_launch_release_id`,
+  `beets_launch_source_path`, `beets_launch_request_status`, and
+  `beets_launch_snapshot_fingerprint` — the exact release/request/source
+  authority atomically recorded immediately before the Beets subprocess may
+  start. These are evidence for refusing an ambiguous replay, not evidence
+  that Beets did or did not finish.
 - `preview_status TEXT` — async readiness/audit stage: `waiting`, `running`,
   `evidence_ready`, legacy `would_import`, `confident_reject`, `uncertain`, or
   `error`. `evidence_ready` means candidate evidence exists for the final
@@ -228,11 +243,17 @@ Key fields:
   at enqueue time when the preview gate is disabled; the serial importer claims
   queued jobs with `evidence_ready` and legacy `would_import`.
 
-On importer startup, any pre-existing `running` job is treated as abandoned
-state from a previous worker process, reset to `queued`, and retried
-immediately. The importer also holds a DB advisory singleton lock while it
-runs, so an accidentally-started second worker exits instead of requeueing a
-live worker's job.
+On importer startup, a pre-existing `running` job is reset to `queued` only
+when `beets_launch_authorized_at IS NULL`, proving the prior process had not
+crossed the Beets launch fence. A marked job becomes `recovery_required` and
+waits for the operator. `pipeline-cli import-job-recovery` (or
+`POST /api/import-jobs/{id}/recovery`) can then close it without replay, or—if
+the operator has established that the mutation was not applied—close the
+ambiguous operation and mint a fresh job ID. Retry is refused if the recorded
+release, request status, source path, or candidate snapshot authority changed
+during inspection. The importer also holds a DB advisory singleton lock while
+it runs, so an accidentally-started second worker exits instead of recovering
+a live worker's job.
 
 Covered job-backed terminal outcomes cross one DB transaction boundary. This
 includes force-import and validated automation dispatch outcomes, automation's
@@ -244,6 +265,12 @@ and terminal `import_jobs` update commit together through the typed commands in
 compare-and-set conflict rolls back the entire bundle; callers must not perform
 a second job finalization. Direct/no-job poller transitions retain their
 existing non-queue behavior and are outside this job-owned transaction.
+Destructive staged-folder, duplicate-guard quarantine, and disambiguation
+cleanup returned by dispatch are performed only after that terminal commit.
+The cleanup description is process-local and best-effort: a crash after the
+terminal acknowledgement may leave harmless filesystem debris, but a failed
+or rolled-back acknowledgement cannot erase the source needed for operator
+recovery.
 
 Async preview workers run outside the beets mutation lane. They claim queued
 jobs with `preview_status='waiting'`, call the no-mutation import preview path,
@@ -262,9 +289,9 @@ Rollback to pre-018 code requires queue reconciliation first: stop import
 workers and reset queued or running `evidence_ready` rows to queued `waiting`
 rows so old preview code recomputes them. Do not bulk-convert them to
 `would_import`; that would restore preview-decision authority.
-The Recents Imports endpoint lists only active `queued`/`running` jobs; terminal
-`completed`/`failed` rows remain durable audit history and must not be rendered
-as live queue work.
+The Recents Imports endpoint lists active `queued`, `running`, and
+`recovery_required` jobs; terminal `completed`/`failed` rows remain durable
+audit history and must not be rendered as live queue work.
 
 ## `download_log.import_result` JSONB
 

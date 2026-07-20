@@ -10,6 +10,9 @@ pipeline-cli audit world --json             # read-only PipelineDB/Beets/disk in
 pipeline-cli ban-source <request_id> --confirm BAN  # bad-rip removal; optional --release-id is confirmation-only
 pipeline-cli library-delete <album_id> --confirm DELETE --purge-pipeline  # exact beets album delete
 pipeline-cli search-plan regenerate <request_id>  # operator repair path; resets cursor on success, preserves old plan on failure
+pipeline-cli import-jobs --status recovery_required  # Beets operations awaiting operator inspection
+pipeline-cli import-job-recovery <job_id> --resolution close --reason "<what was reconciled>"
+pipeline-cli import-job-recovery <job_id> --resolution retry --reason "<why Beets definitely did not apply it>"
 pipeline-cli query "SELECT ..."              # ad-hoc read-only SQL (add --json for machine output)
 pipeline-cli query - <<'SQL'                 # multi-line SQL without shell quoting
 SELECT id, artist_name, album_title, min_bitrate, current_spectral_bitrate
@@ -37,6 +40,26 @@ write the query to a temp file and pass it as an argument.
 
 `pipeline-cli query` sets `default_transaction_read_only = on` — safe for diagnostics. When debugging pipeline behavior, start with the simulator (`pipeline-cli quality`) and add scenarios that expose the bug FIRST — see `.claude/rules/code-quality.md` § "Pipeline Decision Debugging — Simulator-First TDD".
 
+## Beets operation recovery
+
+`recovery_required` deliberately means the external result is unknown: launch
+was authorized, but the terminal PostgreSQL acknowledgement did not commit.
+Cratedigger will not claim that job again and will not infer the answer from a
+missing source folder or a Beets lookup. Start with
+`pipeline-cli import-jobs --status recovery_required`; its launch line shows
+the request, release, source path, content snapshot, and authorization time.
+Inspect that exact pressing in the pinned Beets runtime plus the recorded
+source/request state. Then choose one explicit outcome:
+
+- `--resolution close` after manually reconciling an applied or otherwise
+  finished operation; this schedules nothing.
+- `--resolution retry` only after establishing that Beets did not apply the
+  mutation; this closes the ambiguous job and creates a new operation ID.
+
+Both require a reason for the audit record. Retry also rechecks the recorded
+release, request status, source path, and candidate snapshot; a concurrent
+authority change returns a conflict and requires a fresh inspection.
+
 For search-plan iter2 triage signals, `album_requests.failure_class` (5-bucket cycle classification, written at plan-wrap) and `album_requests.unfindable_category` (4-bucket cohort taxonomy, written by the daily detection service) are queryable via `pipeline-cli query` — `GROUP BY failure_class` surfaces stuck-pattern distribution; `GROUP BY unfindable_category` surfaces unfindable-cohort distribution. `search_log.rejection_reason` (PR3 R22) is the per-search scalar that lets `GROUP BY` skip JSONB introspection into `candidates`. Full column inventory in `docs/pipeline-db-schema.md` § "Search-plan iteration 2".
 
 ## Full command reference
@@ -52,6 +75,7 @@ Every top-level `pipeline-cli` subcommand, one line each. Run `pipeline-cli rout
 | `disk-coverage` | Show which active pipeline rows are actually present in beets |
 | `force-import` | Force-import a rejected download by download_log ID |
 | `import-jobs` | List recent import queue jobs |
+| `import-job-recovery` | Resolve an ambiguous Beets operation explicitly: close without replay, or retry only after operator verification |
 | `import-preview` | Preview whether an import would pass |
 | `list` | List album requests |
 | `long-tail` | Long-tail worklist — wanted cohort pre-banded by on-disk quality (missing / QualityRank / unknown) + in_flight_rescue |

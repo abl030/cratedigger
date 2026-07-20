@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import copy
 import urllib.error
-from typing import TYPE_CHECKING
 
 import msgspec
 
@@ -31,34 +30,36 @@ from lib.artist_compare import annotate_in_library, merge_discographies
 from lib.banding import current_library_bitrate
 from web.library_artist_service import list_library_artist_rows
 from web.routes._overlay import overlay_release_rows_in_place
-from web.routes._registry import RouteRegistration, pattern_route, route
+from web.routes._registry import (
+    RouteHandler,
+    RouteRegistration,
+    pattern_route,
+    route,
+)
 from web.routes._server_access import _server
 
-if TYPE_CHECKING:
-    from http.server import BaseHTTPRequestHandler
 
-
-def get_search(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) -> None:
+def get_search(h: RouteHandler, params: dict[str, list[str]]) -> None:
     srv = _server()
     q = params.get("q", [""])[0].strip()
     if not q:
-        h._error("Missing query parameter 'q'")  # type: ignore[attr-defined]
+        h._error("Missing query parameter 'q'")
         return
     search_type = params.get("type", ["artist"])[0]
     if search_type == "release":
         results = srv.mb_api.search_release_groups(q)
-        h._json({"release_groups": results})  # type: ignore[attr-defined]
+        h._json({"release_groups": results})
     else:
         artists = srv.mb_api.search_artists(q)
-        h._json({"artists": artists})  # type: ignore[attr-defined]
+        h._json({"artists": artists})
 
 
-def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) -> None:
+def get_library_artist(h: RouteHandler, params: dict[str, list[str]]) -> None:
     srv = _server()
     name = params.get("name", [""])[0].strip()
     mbid = params.get("mbid", [""])[0].strip()
     if not name:
-        h._error("Missing parameter 'name'")  # type: ignore[attr-defined]
+        h._error("Missing parameter 'name'")
         return
 
     albums = list_library_artist_rows(
@@ -68,7 +69,7 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
         mb_artist_id=mbid,
         rank_fn=srv.compute_library_rank,
     )
-    h._json({"albums": [row.to_dict() for row in albums]})  # type: ignore[attr-defined]
+    h._json({"albums": [row.to_dict() for row in albums]})
 
 
 # Badge priority when several requests map to one release group — show
@@ -135,7 +136,7 @@ def _apply_rg_pipeline_overlay(
             row.pipeline_id = hit["id"]
 
 
-def get_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], artist_id: str) -> None:
+def get_artist(h: RouteHandler, params: dict[str, list[str]], artist_id: str) -> None:
     srv = _server()
     try:
         rgs = srv.mb_api.get_artist_release_groups(artist_id)
@@ -160,10 +161,10 @@ def get_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], artist_i
             }
         else:
             raise
-        h._json(payload, status=status)  # type: ignore[attr-defined]
+        h._json(payload, status=status)
         return
     except urllib.error.URLError:
-        h._json({  # type: ignore[attr-defined]
+        h._json({
             "error": "MusicBrainz fallback unavailable, retry",
             "retryable": True,
         }, status=503)
@@ -179,7 +180,7 @@ def get_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], artist_i
         annotate_in_library(rgs, [], lib, rank_fn=srv.compute_library_rank)
         by_identity = _artist_pipeline_map(name, artist_id)
         _apply_rg_pipeline_overlay(rgs, by_identity)
-    h._json({  # type: ignore[attr-defined]
+    h._json({
         "release_groups": msgspec.to_builtins(rgs),
         "ungrouped_releases": [],
     })
@@ -311,7 +312,7 @@ def _overlay_disambiguate(skeleton: dict) -> dict:
     return response
 
 
-def get_artist_disambiguate(h: BaseHTTPRequestHandler, params: dict[str, list[str]], artist_id: str) -> None:
+def get_artist_disambiguate(h: RouteHandler, params: dict[str, list[str]], artist_id: str) -> None:
     # Cache the pure-metadata skeleton (analyse_artist_releases output
     # serialized to JSON-safe dicts) under meta:. Overlay runs per
     # request — see issue #101 Codex round 3 for why the split matters.
@@ -319,10 +320,10 @@ def get_artist_disambiguate(h: BaseHTTPRequestHandler, params: dict[str, list[st
         f"mb:artist:{artist_id}:disambiguate",
         lambda: _build_disambiguate_skeleton(artist_id),
     )
-    h._json(_overlay_disambiguate(skeleton))  # type: ignore[attr-defined]
+    h._json(_overlay_disambiguate(skeleton))
 
 
-def get_release_group(h: BaseHTTPRequestHandler, params: dict[str, list[str]], rg_id: str) -> None:
+def get_release_group(h: RouteHandler, params: dict[str, list[str]], rg_id: str) -> None:
     srv = _server()
     normalized_id = normalize_release_id(rg_id) or rg_id.strip()
     identity = ReleaseIdentity.from_id(normalized_id)
@@ -341,10 +342,10 @@ def get_release_group(h: BaseHTTPRequestHandler, params: dict[str, list[str]], r
     # + codec-aware rank) read these overlay fields per row, so route
     # them through the shared helper.
     overlay_release_rows_in_place(data["releases"], [r["id"] for r in data["releases"]])
-    h._json(data)  # type: ignore[attr-defined]
+    h._json(data)
 
 
-def get_release(h: BaseHTTPRequestHandler, params: dict[str, list[str]], release_id: str) -> None:
+def get_release(h: RouteHandler, params: dict[str, list[str]], release_id: str) -> None:
     srv = _server()
     normalized_id = normalize_release_id(release_id) or release_id.strip()
     identity = ReleaseIdentity.from_id(normalized_id)
@@ -377,27 +378,27 @@ def get_release(h: BaseHTTPRequestHandler, params: dict[str, list[str]], release
             data["beets_tracks"] = tracks
     else:
         data["beets_album_id"] = None
-    h._json(data)  # type: ignore[attr-defined]
+    h._json(data)
 
 
 # ── Discogs route handlers ───────────────────────────────────────────
 
 
-def get_discogs_search(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) -> None:
+def get_discogs_search(h: RouteHandler, params: dict[str, list[str]]) -> None:
     q = params.get("q", [""])[0].strip()
     if not q:
-        h._error("Missing query parameter 'q'")  # type: ignore[attr-defined]
+        h._error("Missing query parameter 'q'")
         return
     search_type = params.get("type", ["artist"])[0]
     if search_type == "release":
         results = discogs_api.search_releases(q)
-        h._json({"release_groups": results})  # type: ignore[attr-defined]
+        h._json({"release_groups": results})
     else:
         artists = discogs_api.search_artists(q)
-        h._json({"artists": artists})  # type: ignore[attr-defined]
+        h._json({"artists": artists})
 
 
-def get_discogs_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], artist_id: str) -> None:
+def get_discogs_artist(h: RouteHandler, params: dict[str, list[str]], artist_id: str) -> None:
     srv = _server()
     artist_name = discogs_api.get_artist_name(int(artist_id))
     catalogue = discogs_api.get_artist_releases(int(artist_id))
@@ -411,7 +412,7 @@ def get_discogs_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], 
         _apply_rg_pipeline_overlay(catalogue, by_identity)
     works = [row for row in catalogue if row.identity_kind == "work"]
     ungrouped = [row for row in catalogue if row.identity_kind == "release"]
-    h._json({  # type: ignore[attr-defined]
+    h._json({
         "artist_id": artist_id,
         "artist_name": artist_name,
         "release_groups": msgspec.to_builtins(works),
@@ -419,13 +420,13 @@ def get_discogs_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], 
     })
 
 
-def get_discogs_master(h: BaseHTTPRequestHandler, params: dict[str, list[str]], master_id: str) -> None:
+def get_discogs_master(h: RouteHandler, params: dict[str, list[str]], master_id: str) -> None:
     data = discogs_api.get_master_releases(int(master_id))
     overlay_release_rows_in_place(data["releases"], [r["id"] for r in data["releases"]])
-    h._json(data)  # type: ignore[attr-defined]
+    h._json(data)
 
 
-def get_discogs_release(h: BaseHTTPRequestHandler, params: dict[str, list[str]], release_id: str) -> None:
+def get_discogs_release(h: RouteHandler, params: dict[str, list[str]], release_id: str) -> None:
     srv = _server()
     normalized_id = normalize_release_id(release_id) or release_id.strip()
     data = discogs_api.get_release(int(normalized_id))
@@ -452,7 +453,7 @@ def get_discogs_release(h: BaseHTTPRequestHandler, params: dict[str, list[str]],
             data["beets_tracks"] = tracks
     else:
         data["beets_album_id"] = None
-    h._json(data)  # type: ignore[attr-defined]
+    h._json(data)
 
 
 def _resolve_compare_artist_ids(name: str, mbid: str,
@@ -574,7 +575,7 @@ def _overlay_compare(
     return response
 
 
-def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) -> None:
+def get_artist_compare(h: RouteHandler, params: dict[str, list[str]]) -> None:
     """Side-by-side discography from both MB and Discogs for one artist.
 
     Resolves both source artist IDs from the supplied name (and optional
@@ -596,7 +597,7 @@ def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     """
     name = params.get("name", [""])[0].strip()
     if not name:
-        h._error("Missing parameter 'name'")  # type: ignore[attr-defined]
+        h._error("Missing parameter 'name'")
         return
     discogs_api.require_mirror_configured()
     mbid = params.get("mbid", [""])[0].strip()
@@ -619,7 +620,7 @@ def get_artist_compare(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     payload = msgspec.to_builtins(response)
     payload["mb_artist"] = mb_artist
     payload["discogs_artist"] = discogs_artist
-    h._json(payload)  # type: ignore[attr-defined]
+    h._json(payload)
 
 
 # ── Search-by-ID resolver ────────────────────────────────────────────
@@ -722,7 +723,7 @@ def _resolve_discogs(raw_id: str, kind: str) -> dict:
     }
 
 
-def get_browse_resolve(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) -> None:
+def get_browse_resolve(h: RouteHandler, params: dict[str, list[str]]) -> None:
     """Resolve a pasted MBID / Discogs ID / URL-extracted ID into the
     artist-view drop-in target. See docs/plans/2026-05-01-002-feat-search-by-id-plan.md.
     """
@@ -732,18 +733,18 @@ def get_browse_resolve(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     kind = (params.get("kind", ["unknown"])[0]).strip() or "unknown"
 
     if not raw_id:
-        h._error("Missing 'id' parameter")  # type: ignore[attr-defined]
+        h._error("Missing 'id' parameter")
         return
     if source not in ("mb", "discogs"):
-        h._error("Missing or invalid 'source' (must be 'mb' or 'discogs')")  # type: ignore[attr-defined]
+        h._error("Missing or invalid 'source' (must be 'mb' or 'discogs')")
         return
     if kind not in _RESOLVE_VALID_KINDS:
-        h._error(f"Invalid 'kind' (must be one of {sorted(_RESOLVE_VALID_KINDS)})")  # type: ignore[attr-defined]
+        h._error(f"Invalid 'kind' (must be one of {sorted(_RESOLVE_VALID_KINDS)})")
         return
     # Discogs IDs must be all-digit. Frontend parsePastedId already enforces
     # this, but defense-in-depth so the resolver never hits int() on garbage.
     if source == "discogs" and not raw_id.isdigit():
-        h._error("Invalid Discogs ID (must be numeric)")  # type: ignore[attr-defined]
+        h._error("Invalid Discogs ID (must be numeric)")
         return
     if source == "discogs":
         discogs_api.require_mirror_configured()
@@ -761,15 +762,15 @@ def get_browse_resolve(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
         result = _cache.memoize_meta(cache_key, _run)
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            h._error("not_found", 404)  # type: ignore[attr-defined]
+            h._error("not_found", 404)
         else:
-            h._error(f"upstream_error: HTTP {e.code}", 502)  # type: ignore[attr-defined]
+            h._error(f"upstream_error: HTTP {e.code}", 502)
         return
     except urllib.error.URLError as e:
-        h._error(f"upstream_unreachable: {e}", 502)  # type: ignore[attr-defined]
+        h._error(f"upstream_unreachable: {e}", 502)
         return
 
-    h._json(result)  # type: ignore[attr-defined]
+    h._json(result)
 
 
 # ── Route tables ─────────────────────────────────────────────────────

@@ -1609,10 +1609,10 @@ in {
       # switch-to-configuration SIGTERM'd both workers anyway (units
       # changed transitively) and never brought them back, leaving the
       # pipeline silently dead for ~96 minutes. ``Restart=on-failure``
-      # doesn't help — SIGTERM is a clean exit. ``requeue_running_import_jobs``
-      # at startup is the belt-and-braces recovery for the mid-job kill
-      # case; that's the right place to handle in-flight work, not by
-      # leaving the worker dead.
+      # doesn't help — SIGTERM is a clean exit. The import-job launch fence
+      # safely requeues only pre-launch work and stops ambiguous Beets work
+      # for the operator; that's the right place to handle a mid-job kill,
+      # not by leaving the worker dead.
       restartIfChanged = true;
       path = [pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.curl pkgs.jq pkgs.ffmpeg pkgs.mp3val pkgs.flac pkgs.sox];
       serviceConfig = {

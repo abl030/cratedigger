@@ -41,6 +41,7 @@ from tests.fakes import (
 )
 from tests.helpers import (
     RecordingQualityGate,
+    finalize_claimed_dispatch,
     make_album_quality_evidence,
     make_ctx_with_fake_db,
     make_download_file,
@@ -102,6 +103,45 @@ def _seed_current_for_request(db, request_id: int, *, mb_release_id: str,
     assert persisted is not None and persisted.id is not None
     db.set_request_current_evidence(request_id, persisted.id)
     return persisted
+
+
+def _claim_dispatch_job(db, *, request_id: int, mb_release_id: str,
+                        source_path: str, force: bool = False):
+    """Give a direct dispatch slice the same launch authority as production."""
+    from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
+    from lib.quality_evidence import snapshot_audio_files
+
+    os.makedirs(source_path, exist_ok=True)
+    files = snapshot_audio_files(source_path)
+    if not files:
+        with open(os.path.join(source_path, "01.mp3"), "wb") as handle:
+            handle.write(b"audio")
+        files = snapshot_audio_files(source_path)
+
+    if not force:
+        request = db.request(request_id)
+        active_state = dict(request.get("active_download_state") or {})
+        active_state["current_path"] = source_path
+        request["active_download_state"] = active_state
+    job = db.enqueue_import_job(
+        IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
+        request_id=request_id,
+        payload={"failed_path": source_path} if force else {},
+    )
+    _seed_candidate_for_import_job(
+        db,
+        job.id,
+        mb_release_id=mb_release_id,
+        source_path=source_path,
+        files=files,
+    )
+    db.mark_import_job_preview_importable(
+        job.id,
+        preview_result={"ready": True},
+    )
+    claimed = db.claim_next_import_job(worker_id="integration-dispatch")
+    assert claimed is not None and claimed.id == job.id
+    return claimed
 
 
 def _download_ownership_cfg() -> CratediggerConfig:
@@ -519,6 +559,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         }
         db.seed_request(make_request_row(
             id=42, status="downloading",
+            mb_release_id="mbid-123",
             **request_overrides,
         ))
 
@@ -564,11 +605,18 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
                 ),
                 verified_lossless_proof=ir.verified_lossless_proof,
             )
+            claimed = _claim_dispatch_job(
+                db,
+                request_id=42,
+                mb_release_id="mbid-123",
+                source_path=tmpdir,
+                force=force,
+            )
             with patch_dispatch_externals() as ext, \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=stdout, stderr="")
-                dispatch_import_core(
+                outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
                     request_id=42,
@@ -582,6 +630,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
                     files=[MagicMock(username="user1",
                                      filename="01 - Track.mp3")],
                     cfg=cfg,
+                    candidate_import_job_id=claimed.id,
                     quality_gate_fn=(
                         quality_gate_fn
                         if quality_gate_fn is not None
@@ -593,6 +642,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
                         )
                     ),
                 )
+                finalize_claimed_dispatch(db, claimed, outcome)
         finally:
             beets_info.album_path = original_album_path
             import shutil
@@ -1459,11 +1509,17 @@ class TestLosslessSourceLockedSlice(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
+            claimed = _claim_dispatch_job(
+                db,
+                request_id=42,
+                mb_release_id="mbid-123",
+                source_path=tmpdir,
+            )
             with patch_dispatch_externals() as ext, \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db(None)):
                 ext.run.return_value = MagicMock(
                     returncode=5, stdout=_make_stdout(ir), stderr="")
-                dispatch_import_core(
+                outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
                     request_id=42,
@@ -1476,7 +1532,9 @@ class TestLosslessSourceLockedSlice(unittest.TestCase):
                     files=[MagicMock(username="user1",
                                      filename="01 - Track.mp3")],
                     cfg=cfg,
+                    candidate_import_job_id=claimed.id,
                 )
+                finalize_claimed_dispatch(db, claimed, outcome)
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -1499,7 +1557,7 @@ class TestLosslessSourceLockedSlice(unittest.TestCase):
 
 
 class TestDispatchNoJsonResult(unittest.TestCase):
-    """Integration slice: sp.run returns no sentinel -> record rejection."""
+    """Integration slice: missing terminal sentinel stops for recovery."""
 
     def test_success_preserves_full_import_result_and_exact_attempt_audit(self):
         from lib.dispatch import dispatch_import_core
@@ -1515,6 +1573,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             status="downloading",
+            mb_release_id="mbid-123",
             active_download_state={"files": [], "filetype": "mp3"},
         ))
         cfg = CratediggerConfig(
@@ -1556,8 +1615,14 @@ class TestDispatchNoJsonResult(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
+            claimed = _claim_dispatch_job(
+                db,
+                request_id=42,
+                mb_release_id="mbid-123",
+                source_path=tmpdir,
+            )
             with patch_dispatch_externals():
-                dispatch_import_core(
+                outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
                     request_id=42,
@@ -1569,7 +1634,9 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                     attempt_spectral_audit=audit,
                     run_import_fn=parsed_import,
                     quality_gate_fn=lambda **kwargs: None,
+                    candidate_import_job_id=claimed.id,
                 )
+                finalize_claimed_dispatch(db, claimed, outcome)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1585,8 +1652,8 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         self.assertEqual(logged.postflight.beets_id, 77)
         self.assertIsNotNone(logged.comparison_basis)
 
-    def test_no_json_marks_failed_and_requeues(self):
-        """No __IMPORT_RESULT__ in stdout → scenario=no_json_result, requeue."""
+    def test_no_json_after_launch_requires_operator_recovery(self):
+        """No terminal sentinel cannot prove Beets left the library untouched."""
         from lib.dispatch import dispatch_import_core
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
 
@@ -1594,6 +1661,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             status="downloading",
+            mb_release_id="mbid-123",
             active_download_state={"files": [], "filetype": "mp3"},
         ))
 
@@ -1610,11 +1678,17 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                 attempted=True, grade="genuine"),
         )
         try:
+            claimed = _claim_dispatch_job(
+                db,
+                request_id=42,
+                mb_release_id="mbid-123",
+                source_path=tmpdir,
+            )
             with patch_dispatch_externals() as ext, \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db(None)):
                 ext.run.return_value = MagicMock(
                     returncode=1, stdout="some error\n", stderr="")
-                dispatch_import_core(
+                outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
                     request_id=42,
@@ -1624,19 +1698,22 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                     dl_info=DownloadInfo(username="user1"),
                     cfg=cfg,
                     attempt_spectral_audit=audit,
+                    candidate_import_job_id=claimed.id,
                 )
+                finalize_claimed_dispatch(db, claimed, outcome)
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-        row = db.request(42)
-        self.assertEqual(row["status"], "wanted")
-        self.assertEqual(len(db.download_logs), 1)
-        db.assert_log(self, 0, outcome="failed")
-        logged = ImportResult.from_json(db.download_logs[0].import_result)
-        self.assertEqual(logged.spectral, audit)
+        recovered = db.get_import_job(claimed.id)
+        assert recovered is not None
+        self.assertEqual(recovered.status, "recovery_required")
+        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(db.download_logs, [])
+        self.assertIsNone(db.claim_next_import_job(
+            worker_id="automatic-replay"))
 
-    def test_timeout_preserves_attempt_spectral_audit(self):
+    def test_timeout_after_launch_requires_operator_recovery(self):
         import subprocess as sp
         from lib.dispatch import dispatch_import_core
         from lib.dispatch.types import ImportOneRun
@@ -1646,6 +1723,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             status="downloading",
+            mb_release_id="mbid-123",
             active_download_state={"files": [], "filetype": "mp3"},
         ))
         cfg = CratediggerConfig(
@@ -1661,8 +1739,14 @@ class TestDispatchNoJsonResult(unittest.TestCase):
             def timeout_import(*args: Any, **kwargs: Any) -> ImportOneRun:
                 raise sp.TimeoutExpired("import_one", 300)
 
+            claimed = _claim_dispatch_job(
+                db,
+                request_id=42,
+                mb_release_id="mbid-123",
+                source_path=tmpdir,
+            )
             with patch("lib.beets_db.BeetsDB", _mock_beets_db(None)):
-                dispatch_import_core(
+                outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
                     request_id=42,
@@ -1673,14 +1757,21 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                     cfg=cfg,
                     attempt_spectral_audit=audit,
                     run_import_fn=timeout_import,
+                    candidate_import_job_id=claimed.id,
                 )
+                finalize_claimed_dispatch(db, claimed, outcome)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-        logged = ImportResult.from_json(db.download_logs[0].import_result)
-        self.assertEqual(logged.spectral, audit)
+        recovered = db.get_import_job(claimed.id)
+        assert recovered is not None
+        self.assertEqual(recovered.status, "recovery_required")
+        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(db.download_logs, [])
+        self.assertIsNone(db.claim_next_import_job(
+            worker_id="automatic-replay"))
 
-    def test_exception_preserves_attempt_spectral_audit(self):
+    def test_exception_after_launch_requires_operator_recovery(self):
         from lib.dispatch import dispatch_import_core
         from lib.dispatch.types import ImportOneRun
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
@@ -1689,6 +1780,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             status="downloading",
+            mb_release_id="mbid-123",
             active_download_state={"files": [], "filetype": "mp3"},
         ))
         cfg = CratediggerConfig(
@@ -1704,8 +1796,14 @@ class TestDispatchNoJsonResult(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
+            claimed = _claim_dispatch_job(
+                db,
+                request_id=42,
+                mb_release_id="mbid-123",
+                source_path=tmpdir,
+            )
             with patch("lib.beets_db.BeetsDB", _mock_beets_db(None)):
-                dispatch_import_core(
+                outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
                     request_id=42,
@@ -1716,16 +1814,21 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                     cfg=cfg,
                     attempt_spectral_audit=audit,
                     run_import_fn=failed_import,
+                    candidate_import_job_id=claimed.id,
                 )
+                finalize_claimed_dispatch(db, claimed, outcome)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-        logged_raw = db.download_logs[0].import_result
-        assert logged_raw is not None
-        logged = ImportResult.from_json(logged_raw)
-        self.assertEqual(logged.spectral, audit)
+        recovered = db.get_import_job(claimed.id)
+        assert recovered is not None
+        self.assertEqual(recovered.status, "recovery_required")
+        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(db.download_logs, [])
+        self.assertIsNone(db.claim_next_import_job(
+            worker_id="automatic-replay"))
 
-    def test_post_result_exception_preserves_full_import_result_and_audit(self):
+    def test_post_result_exception_requires_operator_recovery(self):
         from lib.dispatch import dispatch_import_core
         from lib.dispatch.types import ImportOneRun
         from lib.quality import (
@@ -1738,6 +1841,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             status="downloading",
+            mb_release_id="mbid-123",
             active_download_state={"files": [], "filetype": "mp3"},
         ))
         cfg = CratediggerConfig(
@@ -1778,8 +1882,14 @@ class TestDispatchNoJsonResult(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
+            claimed = _claim_dispatch_job(
+                db,
+                request_id=42,
+                mb_release_id="mbid-123",
+                source_path=tmpdir,
+            )
             with patch("lib.beets_db.BeetsDB", _mock_beets_db(None)):
-                dispatch_import_core(
+                outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
                     request_id=42,
@@ -1791,24 +1901,19 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                     attempt_spectral_audit=audit,
                     run_import_fn=parsed_import,
                     quality_gate_fn=failed_quality_gate,
+                    candidate_import_job_id=claimed.id,
                 )
+                finalize_claimed_dispatch(db, claimed, outcome)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-        failure_log = db.download_logs[-1]
-        self.assertEqual(failure_log.outcome, "failed")
-        logged_raw = failure_log.import_result
-        assert logged_raw is not None
-        logged = ImportResult.from_json(logged_raw)
-        self.assertEqual(logged, result)
-        self.assertEqual(logged.spectral, audit)
-        self.assertEqual(logged.decision, "import")
-        self.assertIsNotNone(logged.source_measurement)
-        self.assertIsNotNone(logged.current_measurement)
-        self.assertTrue(logged.conversion.was_converted)
-        self.assertEqual(logged.postflight.beets_id, 77)
-        self.assertEqual(
-            logged.quality_evidence_provenance.candidate_status, "ready")
+        recovered = db.get_import_job(claimed.id)
+        assert recovered is not None
+        self.assertEqual(recovered.status, "recovery_required")
+        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(db.download_logs, [])
+        self.assertIsNone(db.claim_next_import_job(
+            worker_id="automatic-replay"))
 
 
 class TestForceImportSlice(unittest.TestCase):
@@ -1856,7 +1961,8 @@ class TestForceImportSlice(unittest.TestCase):
             )
             _seed_candidate_for_import_job(
                 db, job.id,
-                mb_release_id="mbid-candidate",
+                mb_release_id="mbid-123",
+                source_path=tmpdir,
                 files=snapshot_audio_files(tmpdir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=320, avg_bitrate_kbps=320,
@@ -1865,6 +1971,12 @@ class TestForceImportSlice(unittest.TestCase):
                 ),
                 codec="mp3", container="mp3", storage_format="MP3",
             )
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+            )
+            claimed = db.claim_next_import_job(worker_id="force-slice")
+            assert claimed is not None and claimed.id == job.id
             _seed_current_for_request(
                 db, 42,
                 mb_release_id="mbid-current",
@@ -1894,8 +2006,9 @@ class TestForceImportSlice(unittest.TestCase):
                 result = dispatch_import_from_db(
                     db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
                     source_username="user1",
-                    import_job_id=job.id,
+                    import_job_id=claimed.id,
                 )
+                finalize_claimed_dispatch(db, claimed, result)
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -1963,7 +2076,8 @@ class TestForceImportSlice(unittest.TestCase):
             )
             _seed_candidate_for_import_job(
                 db, job.id,
-                mb_release_id="mbid-go-team-cand",
+                mb_release_id="mbid-go-team",
+                source_path=tmpdir,
                 files=snapshot_audio_files(tmpdir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=320, avg_bitrate_kbps=320,
@@ -1972,6 +2086,12 @@ class TestForceImportSlice(unittest.TestCase):
                 ),
                 codec="mp3", container="mp3", storage_format="MP3",
             )
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+            )
+            claimed = db.claim_next_import_job(worker_id="force-path-slice")
+            assert claimed is not None and claimed.id == job.id
             _seed_current_for_request(
                 db, 833,
                 mb_release_id="mbid-go-team-current",
@@ -1992,11 +2112,12 @@ class TestForceImportSlice(unittest.TestCase):
                  patch("lib.config.read_runtime_config", return_value=cfg):
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=stdout, stderr="")
-                dispatch_import_from_db(
+                result = dispatch_import_from_db(
                     db, request_id=833, failed_path=tmpdir,  # type: ignore[arg-type]
                     source_username="ttttsv",
-                    import_job_id=job.id,
+                    import_job_id=claimed.id,
                 )
+                finalize_claimed_dispatch(db, claimed, result)
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -2241,6 +2362,7 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
         """Inline copy of TestDispatchThroughQualityGate._run_dispatch so
         this class is self-contained and doesn't inherit unrelated tests."""
         from lib.dispatch import dispatch_import_core
+        from lib.dispatch.types import EvidenceImportGate
 
         db = FakePipelineDB()
         request_overrides = {
@@ -2249,6 +2371,7 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
         }
         db.seed_request(make_request_row(
             id=42, status="downloading",
+            mb_release_id="mbid-biscay",
             **request_overrides,
         ))
         cfg = CratediggerConfig(
@@ -2260,11 +2383,27 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
+            candidate = make_album_quality_evidence(
+                mb_release_id="mbid-biscay",
+                source_path=tmpdir,
+                measurement=ir.source_measurement,
+            )
+            current = make_album_quality_evidence(
+                mb_release_id="mbid-biscay-current",
+                source_path="/Beets/Velella Velella",
+                measurement=ir.current_measurement,
+            )
+            claimed = _claim_dispatch_job(
+                db,
+                request_id=42,
+                mb_release_id="mbid-biscay",
+                source_path=tmpdir,
+            )
             with patch_dispatch_externals() as ext, \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=stdout, stderr="")
-                dispatch_import_core(
+                outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-biscay",
                     request_id=42,
@@ -2277,7 +2416,13 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
                     files=[MagicMock(username="user1",
                                      filename="01 - Do Not Fold.mp3")],
                     cfg=cfg,
+                    candidate_import_job_id=claimed.id,
+                    evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(
+                        candidate=candidate,
+                        current=current,
+                    ),
                 )
+                finalize_claimed_dispatch(db, claimed, outcome)
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -2704,11 +2849,17 @@ class TestReleaseLockContention(unittest.TestCase):
                 ),
                 verified_lossless_proof=ir.verified_lossless_proof,
             )
+            claimed = _claim_dispatch_job(
+                db,
+                request_id=42,
+                mb_release_id=self.MBID,
+                source_path=tmpdir,
+            )
             with patch_dispatch_externals() as ext, \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=_make_stdout(ir), stderr="")
-                dispatch_import_core(
+                outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id=self.MBID,
                     request_id=42,
@@ -2721,12 +2872,14 @@ class TestReleaseLockContention(unittest.TestCase):
                     files=[MagicMock(username="user1",
                                      filename="01 - Track.mp3")],
                     cfg=self._make_cfg(),
+                    candidate_import_job_id=claimed.id,
                     evidence_gate_fn=(
                         lambda *_args, **_kwargs: EvidenceImportGate(
                             candidate=candidate
                         )
                     ),
                 )
+                finalize_claimed_dispatch(db, claimed, outcome)
         finally:
             beets_info.album_path = original_album_path
             import shutil
@@ -2749,12 +2902,12 @@ class TestReleaseLockContention(unittest.TestCase):
              release_id_to_lock_key(self.MBID)),
             db.advisory_lock_calls)
 
-    def test_empty_mbid_skips_release_lock_but_still_imports(self):
+    def test_empty_mbid_skips_release_lock_and_refuses_beets_launch(self):
         """Defensive: a caller that somehow reaches ``dispatch_import_core``
         with an empty mb_release_id should not block on a lock keyed on
         empty string (``crc32(b"") == 0``), which would otherwise
-        serialise every empty-mbid import. The code skips the lock
-        entirely and logs a warning.
+        serialise every empty-mbid import. It also cannot construct the exact
+        release evidence required by the operation fence, so Beets is refused.
         """
         from lib.dispatch import dispatch_import_core
         from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_RELEASE
@@ -2780,7 +2933,7 @@ class TestReleaseLockContention(unittest.TestCase):
                  patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=_make_stdout(ir), stderr="")
-                dispatch_import_core(
+                outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="",
                     request_id=43,
@@ -2798,8 +2951,8 @@ class TestReleaseLockContention(unittest.TestCase):
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-        # Subprocess runs (no lock held us up).
-        ext.run.assert_called_once()
+        ext.run.assert_not_called()
+        self.assertEqual(outcome.code, "launch_authority_missing")
         # No RELEASE-namespace lock call — we skipped it entirely.
         namespaces_used = {ns for ns, _key in db.advisory_lock_calls}
         self.assertNotIn(ADVISORY_LOCK_NAMESPACE_RELEASE, namespaces_used)
@@ -4209,12 +4362,13 @@ class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):
         self._cratedigger._module_ctx = self._orig_module_ctx
 
     def _ctx_with_db(self, db):
+        from lib.config import CratediggerConfig
         from lib.context import CratediggerContext
         source = FakePipelineDBSource(db)
         self._cratedigger.pipeline_db_source = source
         ctx = CratediggerContext(
-            cfg=self._cratedigger.cfg, slskd=MagicMock(),
-            pipeline_db_source=source,
+            cfg=cast(CratediggerConfig, self._cratedigger.cfg),
+            pipeline_db_source=source, slskd=MagicMock(),
         )
         self._cratedigger._module_ctx = ctx
         return ctx
@@ -4321,7 +4475,9 @@ class TestImportSubprocessStartedFlag(unittest.TestCase):
 
     def test_flag_set_before_subprocess_launch_on_auto_import(self):
         from lib.dispatch import dispatch_import_core
+        from lib.dispatch.types import EvidenceImportGate
         from lib.quality import ActiveDownloadState
+        from lib.quality_evidence import snapshot_audio_files
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -4352,6 +4508,17 @@ class TestImportSubprocessStartedFlag(unittest.TestCase):
         stdout = _make_stdout(ir)
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            claimed = _claim_dispatch_job(
+                db,
+                request_id=42,
+                mb_release_id="mbid-123",
+                source_path=tmpdir,
+            )
+            candidate = make_album_quality_evidence(
+                mb_release_id="mbid-123",
+                source_path=tmpdir,
+                files=snapshot_audio_files(tmpdir),
+            )
             with patch_dispatch_externals() as ext, \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
 
@@ -4375,7 +4542,7 @@ class TestImportSubprocessStartedFlag(unittest.TestCase):
 
                 ext.run.side_effect = _record_state
 
-                dispatch_import_core(
+                outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
                     request_id=42,
@@ -4388,7 +4555,12 @@ class TestImportSubprocessStartedFlag(unittest.TestCase):
                     files=[MagicMock(username="user1",
                                      filename="01 - Track.mp3")],
                     cfg=cfg,
+                    candidate_import_job_id=claimed.id,
+                    evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(
+                        candidate=candidate,
+                    ),
                 )
+                finalize_claimed_dispatch(db, claimed, outcome)
 
         state_at_subprocess = captured["at_subprocess"]
         self.assertIsNotNone(
@@ -5775,7 +5947,8 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
         from lib.quality_evidence import snapshot_audio_files
         return _seed_candidate_for_download_log(
             db, log_id,
-            mb_release_id=f"mbid-front-gate-dl-{log_id}",
+            mb_release_id=db.request(42)["mb_release_id"],
+            source_path=source_path,
             files=snapshot_audio_files(source_path),
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245,
@@ -5793,7 +5966,8 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
         from lib.quality_evidence import snapshot_audio_files
         return _seed_candidate_for_import_job(
             db, job_id,
-            mb_release_id=f"mbid-front-gate-job-{job_id}",
+            mb_release_id=db.request(42)["mb_release_id"],
+            source_path=source_path,
             files=snapshot_audio_files(source_path),
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245,
@@ -5894,6 +6068,10 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 cast(dict[str, Any], updated.preview_result["import_result"])
             )
             self.assertEqual(preview_ir.spectral, audit)
+            import_claimed = db.claim_next_import_job(
+                worker_id="front-gate-importer"
+            )
+            assert import_claimed is not None and import_claimed.id == claimed.id
 
             ir = make_import_result(decision="import", new_min_bitrate=245)
             with patch_dispatch_externals(), patch(
@@ -5908,10 +6086,11 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             ):
                 outcome = dispatch_import_from_db(
                     cast(Any, db), 42, source,
-                    source_username="alice", import_job_id=claimed.id,
+                    source_username="alice", import_job_id=import_claimed.id,
                     download_log_id=log_id,
                     quality_gate_fn=noop_quality_gate,
                 )
+                finalize_claimed_dispatch(db, import_claimed, outcome)
             self.assertTrue(outcome.success)
             logged_ir = ImportResult.from_json(db.download_logs[-1].import_result)
             self.assertEqual(logged_ir.spectral, audit)

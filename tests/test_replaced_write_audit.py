@@ -96,10 +96,10 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/download_log.py", 832, "d87a36ba1d1768e7"): (
         "JSON path key is selected from a closed server-owned vocabulary"
     ),
-    ("lib/pipeline_db/import_jobs.py", 105, "ecf3d1844c67f653"): (
+    ("lib/pipeline_db/import_jobs.py", 111, "ecf3d1844c67f653"): (
         "optional job filter is a fixed literal WHERE clause"
     ),
-    ("lib/pipeline_db/import_jobs.py", 166, "5583c4b8f7ee9536"): (
+    ("lib/pipeline_db/import_jobs.py", 172, "d020bd0235c95c4a"): (
         "claim exclusion predicate is assembled from fixed literal clauses"
     ),
     ("lib/pipeline_db/misc.py", 188, "12cfdd83a367c90e"): (
