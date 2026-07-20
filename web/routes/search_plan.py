@@ -14,14 +14,14 @@ from pydantic import BaseModel, Field, model_validator
 
 from lib.quality import CandidateScore
 from web.routes._pydantic import parse_body
-from web.routes._registry import RouteRegistration, pattern_route
+from web.routes._registry import RouteHandler, RouteRegistration, pattern_route
 from web.routes._server_access import _server
 
 logger = logging.getLogger(__name__)
 
 
 def get_pipeline_search_plan(
-    h, params: dict[str, list[str]], req_id_str: str,
+    h: RouteHandler, params: dict[str, list[str]], req_id_str: str,
 ) -> None:
     """U6: read-only view of a request's persisted search plan.
 
@@ -45,7 +45,7 @@ def get_pipeline_search_plan(
 
 
 def get_pipeline_search_plan_dry_run(
-    h, params: dict[str, list[str]], req_id_str: str,
+    h: RouteHandler, params: dict[str, list[str]], req_id_str: str,
 ) -> None:
     """U6: ``GET /api/pipeline/<id>/search-plan/dry-run``.
 
@@ -120,7 +120,7 @@ def get_pipeline_search_plan_dry_run(
 
 
 def get_pipeline_search_plan_saturation(
-    h, params: dict[str, list[str]], req_id_str: str,
+    h: RouteHandler, params: dict[str, list[str]], req_id_str: str,
 ) -> None:
     """U7: ``GET /api/pipeline/<id>/search-plan/saturation``.
 
@@ -197,7 +197,7 @@ def get_pipeline_search_plan_saturation(
 
 
 def get_pipeline_search_plan_history(
-    h, params: dict[str, list[str]], req_id_str: str,
+    h: RouteHandler, params: dict[str, list[str]], req_id_str: str,
 ) -> None:
     """``GET /api/pipeline/<id>/search-plan/history``.
 
@@ -306,7 +306,7 @@ class PipelineSearchPlanRegenerateRequest(BaseModel):
 
 
 def post_pipeline_search_plan_regenerate(
-    h, body: dict, req_id_str: str,
+    h: RouteHandler, body: dict[str, object], req_id_str: str,
 ) -> None:
     """U8: ``POST /api/pipeline/<id>/search-plan/regenerate``.
 
@@ -417,7 +417,7 @@ class PipelineSearchPlanAdvanceRequest(BaseModel):
 
 
 def post_pipeline_search_plan_advance(
-    h, body: dict, req_id_str: str,
+    h: RouteHandler, body: dict[str, object], req_id_str: str,
 ) -> None:
     """``POST /api/pipeline/<id>/search-plan/advance``.
 

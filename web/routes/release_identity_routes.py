@@ -7,6 +7,7 @@ import json
 
 from pydantic import BaseModel, Field
 
+from lib.pipeline_db import PipelineDB
 from lib.release_identity import detect_release_source, normalize_release_id
 from lib.replace_status import (
     RESOLVE_STATUS_CONFLICT,
@@ -23,13 +24,13 @@ from lib.replace_status import (
 from web import discogs as discogs_api
 from web import mb as mb_api
 from web.routes._pydantic import parse_body
-from web.routes._registry import RouteRegistration, pattern_route
+from web.routes._registry import RouteHandler, RouteRegistration, pattern_route
 from web.routes._server_access import _server
 
 
 def _resolved_rg_applied_or_respond(
-    h,
-    db,
+    h: RouteHandler,
+    db: PipelineDB,
     request_id: int,
     release_group_id: str,
     *,
@@ -54,7 +55,9 @@ def _resolved_rg_applied_or_respond(
     return False
 
 
-def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
+def post_pipeline_resolve_rg(
+    h: RouteHandler, body: dict[str, object], req_id_str: str,
+) -> None:
     """``POST /api/pipeline/<id>/resolve-rg``.
 
     Lazy-backfill ``album_requests.mb_release_group_id`` for a single
@@ -270,7 +273,9 @@ class PipelineReplaceRequest(BaseModel):
     target_mb_release_id: str = Field(min_length=1)
 
 
-def post_pipeline_replace(h, body: dict, req_id_str: str) -> None:
+def post_pipeline_replace(
+    h: RouteHandler, body: dict[str, object], req_id_str: str,
+) -> None:
     """``POST /api/pipeline/<id>/replace``.
 
     Supersede the source request with a new row at ``target_mb_release_id``.

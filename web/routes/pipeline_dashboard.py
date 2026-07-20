@@ -8,20 +8,20 @@ import msgspec
 
 from lib.disk_coverage_service import disk_coverage
 from web import cache as cache_api
-from web.routes._registry import RouteRegistration, route
+from web.routes._registry import RouteHandler, RouteRegistration, route
 from web.routes._server_access import _server
 
 
-def get_pipeline_dashboard(h, params: dict[str, list[str]]) -> None:
+def get_pipeline_dashboard(h: RouteHandler, params: dict[str, list[str]]) -> None:
     """Return operational metrics for the Pipeline dashboard subtab."""
     s = _server()
     data = s._db().get_pipeline_dashboard_metrics()
     data["redis"] = cache_api.redis_metrics()
-    data["disk_coverage"] = _dashboard_disk_coverage(s)
+    data["disk_coverage"] = _dashboard_disk_coverage()
     h._json(data)
 
 
-def _dashboard_disk_coverage(s) -> dict[str, object] | None:
+def _dashboard_disk_coverage() -> dict[str, object] | None:
     """Pipeline-vs-beets coverage block for the dashboard, or None when
     no beets DB is configured.
 
@@ -30,6 +30,7 @@ def _dashboard_disk_coverage(s) -> dict[str, object] | None:
     is the Lucksmiths-class out-of-band drift signal). Off-disk wanted
     (not yet acquired), downloading (in flight), and unsearchable
     (operator search stop) rows are lifecycle-normal, not drift."""
+    s = _server()
     beets = s._beets_db()
     if beets is None:
         return None

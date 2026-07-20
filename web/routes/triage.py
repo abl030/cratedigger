@@ -12,7 +12,7 @@ the unrelated "wrong-match triage" console in web/routes/imports.py
 
 import msgspec
 
-from web.routes._registry import RouteRegistration, pattern_route, route
+from web.routes._registry import RouteHandler, RouteRegistration, pattern_route, route
 from web.routes._server_access import _server
 
 
@@ -59,7 +59,7 @@ from lib.triage_service import (  # noqa: E402
 
 
 def get_triage_quarantine(
-    h, params: dict[str, list[str]],
+    h: RouteHandler, params: dict[str, list[str]],
 ) -> None:
     """Return unreferenced immediate ``failed_imports`` album folders.
 
@@ -89,7 +89,7 @@ def get_triage_quarantine(
 
 
 def get_triage_for_request(
-    h, params: dict[str, list[str]], req_id_str: str,
+    h: RouteHandler, params: dict[str, list[str]], req_id_str: str,
 ) -> None:
     """U17: ``GET /api/triage/<id>``.
 
@@ -126,7 +126,7 @@ def get_triage_for_request(
 
 
 def get_triage_list(
-    h, params: dict[str, list[str]],
+    h: RouteHandler, params: dict[str, list[str]],
 ) -> None:
     """U17: ``GET /api/triage/list``.
 

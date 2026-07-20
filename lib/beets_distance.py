@@ -42,6 +42,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Mapping
 from typing import Callable, Optional, Protocol, Sequence
 
 import msgspec
@@ -115,6 +116,29 @@ class BeetsDistanceCache(Protocol):
 
     def get(self, key: str) -> Optional[bytes]: ...
     def set(self, key: str, value: bytes, ttl_seconds: int) -> None: ...
+
+
+# === Pipeline-DB protocol (#409 per-consumer pattern) ===================
+
+
+class BeetsDistancePipelineDB(Protocol):
+    """The slice of ``PipelineDB`` ``compute_beets_distance`` consumes.
+
+    Only the two reads the Replace-picker path touches — narrower than
+    the full ``PipelineDB`` so test stand-ins (``tests/test_beets_distance.py``
+    ``_StubPDB``/``_PDBExploder``) satisfy it structurally without
+    inheriting from or duck-typing the whole class. Return types are
+    ``Mapping[str, object]`` (not the full ``DownloadLogWithEvidenceRow``/
+    ``AlbumRequestRow`` TypedDicts) because this function only ever reads
+    a handful of keys via ``.get(...)`` — the real ``PipelineDB`` methods'
+    richer TypedDict returns are structurally compatible mappings.
+    """
+
+    def get_download_log_entry(
+        self, log_id: int,
+    ) -> "Mapping[str, object] | None": ...
+
+    def get_request(self, request_id: int) -> "Mapping[str, object] | None": ...
 
 
 # Reasonable defaults — folder reads are dominated by tag IO so a long
@@ -278,6 +302,12 @@ def _file_cache_key(path: str, mtime: float, size: int) -> str:
     return f"beets-distance:fp:{path}:{int(mtime)}:{size}"
 
 
+def _mb_release_tracks(mb_release: dict[str, object]) -> list[object]:
+    """Narrow ``mb_get_release()``'s ``tracks`` field for a bare length check."""
+    tracks = mb_release.get("tracks")
+    return tracks if isinstance(tracks, list) else []
+
+
 # === MB → AlbumInfo / TrackInfo conversion ==============================
 
 
@@ -387,8 +417,8 @@ def compute_beets_distance(
     *,
     items_override: Optional[list[SyntheticItem]] = None,
     mb_release_group_id: Optional[str] = None,
-    pdb,  # lib.pipeline_db.PipelineDB — duck-typed for test fakes
-    mb_get_release: Callable[[str], Optional[dict]],
+    pdb: "BeetsDistancePipelineDB",
+    mb_get_release: Callable[[str], Optional[dict[str, object]]],
     cache: Optional[BeetsDistanceCache] = None,
     resolve_failed_path: Optional[Callable[[str], Optional[str]]] = None,
 ) -> BeetsDistanceResult:
@@ -465,7 +495,7 @@ def compute_beets_distance(
         )
 
     # Branch: Replace-picker path loads DB rows; Override path skips them.
-    log_row: Optional[dict] = None
+    log_row: Optional[Mapping[str, object]] = None
     request_id: Optional[int] = None
     request_rg: Optional[str] = None
 
@@ -482,8 +512,8 @@ def compute_beets_distance(
             )
 
         # 2. Load the request for its release group.
-        request_id = log_row.get("request_id")
-        if not isinstance(request_id, int):
+        request_id_raw = log_row.get("request_id")
+        if not isinstance(request_id_raw, int):
             return _result(
                 "request_not_found",
                 error="download_log row has no request_id",
@@ -491,6 +521,7 @@ def compute_beets_distance(
                 candidate_mbid=mbid,
                 started=started,
             )
+        request_id = request_id_raw
         req = pdb.get_request(request_id)
         if not req:
             return _result(
@@ -501,7 +532,8 @@ def compute_beets_distance(
                 candidate_mbid=mbid,
                 started=started,
             )
-        request_rg = req.get("mb_release_group_id")
+        request_rg_raw = req.get("mb_release_group_id")
+        request_rg = request_rg_raw if isinstance(request_rg_raw, str) else None
     else:
         # Override mode: caller supplies the RG directly (or None to opt
         # out of the cross-RG guardrail). No DB consult.
@@ -530,7 +562,8 @@ def compute_beets_distance(
             candidate_mbid=mbid,
             started=started,
         )
-    candidate_rg = mb_release.get("release_group_id")
+    candidate_rg_raw = mb_release.get("release_group_id")
+    candidate_rg = candidate_rg_raw if isinstance(candidate_rg_raw, str) else None
 
     # 4. MB release must have a release group — but only when the caller
     # has an RG to compare against. With no caller RG, step 5 is skipped
@@ -639,7 +672,7 @@ def compute_beets_distance(
                 fingerprint_count if fingerprint_count is not None
                 else len(items)
             ),
-            total_mb_tracks=len(mb_release.get("tracks") or []),
+            total_mb_tracks=len(_mb_release_tracks(mb_release)),
             started=started,
         )
 

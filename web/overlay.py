@@ -77,7 +77,10 @@ def get_library_artist(
     return beets.get_albums_by_artist(artist_name, mb_artist_id)
 
 
-def check_pipeline(pdb: "OverlayPipelineDB | None", mbids) -> dict:
+def check_pipeline(
+    pdb: "OverlayPipelineDB | None",
+    mbids: list[str] | list[object],
+) -> dict[str, dict[str, object]]:
     """Check which MBIDs are already in the pipeline DB. Returns dict of mbid → info."""
     if not mbids or pdb is None:
         return {}

@@ -5,11 +5,11 @@ from __future__ import annotations
 import msgspec
 
 from lib.world_audit_service import audit_world
-from web.routes._registry import RouteRegistration, route
+from web.routes._registry import RouteHandler, RouteRegistration, route
 from web.routes._server_access import _server
 
 
-def get_world_audit(h, params: dict[str, list[str]]) -> None:
+def get_world_audit(h: RouteHandler, params: dict[str, list[str]]) -> None:
     del params
     server = _server()
     beets = server._beets_db()

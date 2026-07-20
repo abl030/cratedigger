@@ -7,7 +7,7 @@ import os
 import re
 from urllib.parse import quote
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence, TypeGuard
 
 from lib.processing_paths import normalize_source_dirs, path_is_within_root
 from lib.quality import AUDIO_EXTENSIONS_DOTTED
@@ -16,6 +16,41 @@ from lib.validation_envelope import (
     ValidationResultEnvelope,
     decode_validation_envelope,
 )
+
+
+def _is_str_object_dict(value: object) -> TypeGuard[dict[str, object]]:
+    """Narrow a decoded-JSON value to a string-keyed dict.
+
+    A plain ``isinstance(value, dict)`` check narrows to the generic-erased
+    ``dict[Unknown, Unknown]`` under strict pyright, which then poisons every
+    downstream use as "partially unknown". Declaring the narrowed type via
+    ``TypeGuard`` instead gives callers the precise ``dict[str, object]``
+    with the identical runtime check (JSONB objects always decode to
+    ``str``-keyed dicts).
+    """
+    return isinstance(value, dict)
+
+
+def _is_object_sequence(value: object) -> TypeGuard[Sequence[object]]:
+    """Narrow a decoded-JSON value to a list/tuple, precisely typed.
+
+    Same rationale as :func:`_is_str_object_dict` — bare
+    ``isinstance(value, (list, tuple))`` erases the element type to
+    ``Unknown``; the ``TypeGuard`` declares ``Sequence[object]`` instead
+    with no change to the runtime check.
+    """
+    return isinstance(value, (list, tuple))
+
+
+def _is_object_list(value: object) -> TypeGuard[list[object]]:
+    """Narrow a decoded-JSON value to a list only (not tuple), precisely typed.
+
+    Distinct from :func:`_is_object_sequence` because some call sites'
+    original ``isinstance(value, list)`` checks deliberately excluded
+    tuples — reusing the sequence guard there would silently widen
+    which values are accepted.
+    """
+    return isinstance(value, list)
 
 _PLAYABLE_AUDIO_EXTENSIONS: frozenset[str] = frozenset({
     ".aac",
@@ -119,8 +154,10 @@ def _audio_mime_type(path: str) -> str:
 def _safe_tag_values(raw: object) -> list[str]:
     values: list[str] = []
     text_values = getattr(raw, "text", None)
-    candidates = text_values if isinstance(text_values, (list, tuple)) else (
-        raw if isinstance(raw, (list, tuple)) else [raw]
+    candidates: Sequence[object] = (
+        text_values if _is_object_sequence(text_values)
+        else raw if _is_object_sequence(raw)
+        else [raw]
     )
     for candidate in candidates:
         if isinstance(candidate, bytes):
@@ -185,20 +222,29 @@ def _parse_position(value: object) -> int | None:
 
 def _file_identity(file_data: Mapping[str, Any]) -> tuple[str, str, int | None, int | None]:
     tags = file_data.get("tags")
-    tag_map = tags if isinstance(tags, dict) else {}
+    tag_map: dict[str, object] = tags if _is_str_object_dict(tags) else {}
     title_values = tag_map.get("title")
     track_values = tag_map.get("tracknumber")
     disc_values = tag_map.get("discnumber")
     basename = _normalized_file_basename(file_data.get("relative_path") or file_data.get("filename"))
-    title = _normalized_title(title_values[0] if isinstance(title_values, list) and title_values else "")
-    track = _parse_position(track_values[0] if isinstance(track_values, list) and track_values else None)
-    disc = _parse_position(disc_values[0] if isinstance(disc_values, list) and disc_values else None)
+    title_first: object = (
+        title_values[0]
+        if _is_object_list(title_values) and title_values else "")
+    track_first: object = (
+        track_values[0]
+        if _is_object_list(track_values) and track_values else None)
+    disc_first: object = (
+        disc_values[0]
+        if _is_object_list(disc_values) and disc_values else None)
+    title = _normalized_title(title_first)
+    track = _parse_position(track_first)
+    disc = _parse_position(disc_first)
     return basename, title, track, disc
 
 
 def _mapping_identity(mapping_row: Mapping[str, Any]) -> tuple[str, str, int | None, int | None]:
     item = mapping_row.get("item")
-    item_map = item if isinstance(item, dict) else {}
+    item_map: dict[str, object] = item if _is_str_object_dict(item) else {}
     basename = _normalized_file_basename(item_map.get("path"))
     title = _normalized_title(item_map.get("title"))
     track = _parse_position(item_map.get("track"))
@@ -208,7 +254,7 @@ def _mapping_identity(mapping_row: Mapping[str, Any]) -> tuple[str, str, int | N
 
 def _mapping_sort_key(mapping_row: Mapping[str, Any], fallback_index: int) -> tuple[int, int, int]:
     track = mapping_row.get("track")
-    track_map = track if isinstance(track, dict) else {}
+    track_map: dict[str, object] = track if _is_str_object_dict(track) else {}
     medium = _parse_position(track_map.get("medium")) or 1
     medium_index = _parse_position(track_map.get("medium_index"))
     index = _parse_position(track_map.get("index"))
@@ -232,7 +278,7 @@ def _reorder_files_by_match(
         return files, "folder"
 
     raw_mapping = target.get("mapping")
-    if not isinstance(raw_mapping, list) or not raw_mapping:
+    if not _is_object_list(raw_mapping) or not raw_mapping:
         return files, "folder"
 
     file_entries = [
@@ -246,10 +292,10 @@ def _reorder_files_by_match(
     unmatched_indexes = set(range(len(file_entries)))
     matched_positions: dict[int, int] = {}
 
-    mapping_rows = [
+    mapping_rows: list[tuple[int, dict[str, object]]] = [
         (fallback_index, mapping_row)
         for fallback_index, mapping_row in enumerate(raw_mapping)
-        if isinstance(mapping_row, dict)
+        if _is_str_object_dict(mapping_row)
     ]
     mapping_rows.sort(key=lambda row: _mapping_sort_key(row[1], row[0]))
 
@@ -309,12 +355,18 @@ def _reorder_files_by_match(
 
 def _inspect_audio_file(path: str) -> tuple[dict[str, list[str]], float | None, int | None]:
     try:
-        from mutagen import File as mutagen_file  # pyright: ignore[reportPrivateImportUsage]
+        # getattr (not `from mutagen import File`) keeps this Any-typed:
+        # mutagen's File() factory has an untyped `filething` parameter and
+        # a partially-unknown overloaded return (many mutagen format
+        # classes) — third-party, not ours to annotate. Same pattern as
+        # harness/import_one.py::_probe_source_channels.
+        import mutagen
+        _mutagen_file = getattr(mutagen, "File")
     except ImportError:
         return {}, None, None
 
     try:
-        audio = mutagen_file(path, easy=True)
+        audio = _mutagen_file(path, easy=True)
     except Exception:
         return {}, None, None
     if audio is None:

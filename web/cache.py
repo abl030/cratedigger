@@ -17,6 +17,8 @@ import logging
 import threading
 from typing import Any, Callable, TYPE_CHECKING
 
+import msgspec
+
 log = logging.getLogger(__name__)
 
 # TTL constants (seconds)
@@ -91,6 +93,21 @@ def init(host: str, port: int = 6379) -> None:
         _redis = None
 
 
+def _redis_dict(value: object) -> dict[str, object]:
+    """Best-effort validation of a redis-py ``INFO``-style reply.
+
+    redis-py types every sync command's return as ``Awaitable[Any] | Any``
+    (the same method also serves the async client), so this is the
+    wire-boundary decode site for this module. A malformed/non-dict shape
+    degrades to ``{}`` — the same per-field fail-open contract the rest of
+    this diagnostic-only endpoint already uses.
+    """
+    try:
+        return msgspec.convert(value, type=dict[str, object])
+    except msgspec.ValidationError:
+        return {}
+
+
 def redis_metrics() -> dict[str, Any]:
     """Return live Redis memory/key metrics for the pipeline dashboard.
 
@@ -103,14 +120,13 @@ def redis_metrics() -> dict[str, Any]:
         # redis-py types sync command returns as ``ResponseT`` (an
         # Awaitable union); narrow each to the sync shape we consume.
         memory_resp = _redis.info("memory")
-        keyspace = _redis.info("keyspace")
+        keyspace_resp = _redis.info("keyspace")
         clients_resp = _redis.info("clients")
         dbsize = _redis.dbsize()
-        memory = memory_resp if isinstance(memory_resp, dict) else {}
-        clients = clients_resp if isinstance(clients_resp, dict) else {}
-        db0 = keyspace.get("db0", {}) if isinstance(keyspace, dict) else {}
-        if not isinstance(db0, dict):
-            db0 = {}
+        memory = _redis_dict(memory_resp)
+        clients = _redis_dict(clients_resp)
+        keyspace = _redis_dict(keyspace_resp)
+        db0 = _redis_dict(keyspace.get("db0", {}))
         used_memory = _int_or_none(memory.get("used_memory"))
         maxmemory = _int_or_none(memory.get("maxmemory"))
         return {
@@ -175,8 +191,8 @@ def meta_set(key: str, value: Any, ttl: int = TTL_MB) -> None:
         pass
 
 
-def memoize_meta(key: str, fetch_fn: Callable[[], Any], ttl: int = TTL_MB,
-                 *, fresh: bool = False) -> Any:
+def memoize_meta[T](key: str, fetch_fn: Callable[[], T], ttl: int = TTL_MB,
+                 *, fresh: bool = False) -> T:
     """Return cached `meta:<key>` or call `fetch_fn()` and cache the result.
 
     Concurrent non-fresh misses for the same key share one process-local
@@ -259,9 +275,13 @@ def invalidate_pattern(pattern: str) -> None:
         cursor = 0
         while True:
             resp = _redis.scan(cursor=cursor, match=pattern, count=100)
-            if not isinstance(resp, tuple):
-                break
-            cursor, keys = resp
+            # ``scan``'s sync return shape is ``(next_cursor, keys)``; the
+            # redis-py stubs type it as ``Awaitable[Any] | Any`` (the same
+            # method serves the async client), so this is the wire-boundary
+            # decode site. A malformed shape raises and is swallowed by the
+            # outer fail-safe ``except`` below, same as the prior
+            # ``isinstance`` guard's silent break.
+            cursor, keys = msgspec.convert(resp, type=tuple[int, list[str]])
             if keys:
                 _redis.delete(*keys)
             if cursor == 0:

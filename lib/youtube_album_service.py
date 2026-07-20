@@ -339,16 +339,16 @@ class YoutubeAlbumResolverResult(msgspec.Struct, kw_only=True):
 
 
 # Type aliases for clarity.
-MBLookup = Callable[[str], Optional[dict]]
+MBLookup = Callable[[str], Optional[dict[str, object]]]
 """``mb_get_release(id) -> slim release dict | None`` (web/mb.py shape)."""
 
-MBRGReleases = Callable[[str], Optional[dict]]
+MBRGReleases = Callable[[str], Optional[dict[str, object]]]
 """``mb_get_release_group_releases(rg) -> {title, type, releases[]}``."""
 
-DiscogsLookup = Callable[[str], Optional[dict]]
+DiscogsLookup = Callable[[str], Optional[dict[str, object]]]
 """``discogs_get_release(id) -> slim release dict | None``."""
 
-DiscogsMasterReleases = Callable[[str], Optional[dict]]
+DiscogsMasterReleases = Callable[[str], Optional[dict[str, object]]]
 """``discogs_get_master_releases(master_id) -> {title, type, releases[]}``."""
 
 DistanceFn = Callable[..., BeetsDistanceResult]

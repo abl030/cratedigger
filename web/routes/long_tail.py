@@ -8,11 +8,11 @@ Split from web/routes/pipeline.py (#481 item 3). Wraps
 
 import msgspec
 
-from web.routes._registry import RouteRegistration, route
+from web.routes._registry import RouteHandler, RouteRegistration, route
 from web.routes._server_access import _server
 
 
-def get_pipeline_long_tail(h, params: dict[str, list[str]]) -> None:
+def get_pipeline_long_tail(h: RouteHandler, params: dict[str, list[str]]) -> None:
     """U1: ``GET /api/pipeline/long-tail`` — banded ``wanted`` worklist.
 
     Returns every ``wanted`` request pre-banded by on-disk quality

@@ -5,11 +5,13 @@ from typing import Literal, assert_never
 from pydantic import BaseModel, Field
 
 from web.routes._pydantic import parse_body
-from web.routes._registry import RouteRegistration, pattern_route, route
+from web.routes._registry import RouteHandler, RouteRegistration, pattern_route, route
 from web.routes._server_access import _server
 
 
-def get_beets_album(h, params: dict[str, list[str]], album_id_str: str) -> None:
+def get_beets_album(
+    h: RouteHandler, params: dict[str, list[str]], album_id_str: str,
+) -> None:
     from web.library_album_detail_service import load_library_album_detail
 
     album_id = int(album_id_str)
@@ -43,7 +45,7 @@ class BeetsDeleteRequest(BaseModel):
     release_id: str = ""
 
 
-def post_beets_delete(h, body: dict) -> None:
+def post_beets_delete(h: RouteHandler, body: dict[str, object]) -> None:
     from lib.destructive_release_service import (
         DeleteAlbumNotFound,
         DeleteAlbumAuthorityMismatch,

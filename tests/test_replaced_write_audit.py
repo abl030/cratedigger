@@ -133,12 +133,18 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "change; issue #784: `limit` parameter annotated `int | None`, "
         "changing the enclosing-scope fingerprint, no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1345, "a586333614f3b096"): (
+    ("lib/pipeline_db/requests.py", 1351, "042a7becce5f90f7"): (
         "ORDER is selected from two literals and LIMIT remains a value placeholder "
-        "(issue #765: return type retyped to list[AlbumRequestRow], no SQL change)"
+        "(issue #765: return type retyped to list[AlbumRequestRow], no SQL change; "
+        "issue #784: `status`/`limit`/`newest_first` parameters annotated, "
+        "changing the enclosing-scope fingerprint and shifting this line by +6 "
+        "lines; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1530, "714da98640ff84f0"): (
-        "attempt kind is validated against the fixed retry-counter vocabulary"
+    ("lib/pipeline_db/requests.py", 1536, "714da98640ff84f0"): (
+        "attempt kind is validated against the fixed retry-counter vocabulary "
+        "(issue #784: `get_by_status` parameters annotated above, shifting "
+        "this line by +6; hash unchanged — this statement is a plain string "
+        "constant, not scope-bound, so no SQL change)"
     ),
 }
 

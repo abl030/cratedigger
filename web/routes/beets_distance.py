@@ -8,7 +8,7 @@ import msgspec
 from lib.release_identity import detect_release_source
 from web import discogs as discogs_api
 from web import mb as mb_api
-from web.routes._registry import RouteRegistration, pattern_route
+from web.routes._registry import RouteHandler, RouteRegistration, pattern_route
 from web.routes._server_access import _server
 
 
@@ -65,7 +65,7 @@ _BEETS_DISTANCE_OUTCOME_STATUS: dict[str, int] = {
 
 
 def get_beets_distance(
-    h, params: dict[str, list[str]],
+    h: RouteHandler, params: dict[str, list[str]],
     download_log_id_str: str, mbid: str,
 ) -> None:
     """``GET /api/beets-distance/<download_log_id>/<mbid>``.
@@ -104,10 +104,12 @@ def get_beets_distance(
         h._error("Invalid download_log_id")
         return
 
-    if detect_release_source(mbid) == "discogs":
-        get_release_fn = lambda m: discogs_api.get_release(int(m), fresh=False)
-    else:
-        get_release_fn = lambda m: mb_api.get_release(m, fresh=False)
+    use_discogs = detect_release_source(mbid) == "discogs"
+
+    def get_release_fn(m: str) -> dict[str, object] | None:
+        if use_discogs:
+            return discogs_api.get_release(int(m), fresh=False)
+        return mb_api.get_release(m, fresh=False)
 
     s = _server()
     result = compute_beets_distance(

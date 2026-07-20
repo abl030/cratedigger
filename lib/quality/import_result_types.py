@@ -503,7 +503,7 @@ class ImportResult(msgspec.Struct):
         return projected
 
     @classmethod
-    def from_dict(cls, d: dict) -> "ImportResult":
+    def from_dict(cls, d: dict[str, object]) -> "ImportResult":
         """Construct from a dict (e.g. parsed JSON).
 
         Handles historical v1/v2/v3 rows through quarantined projections and

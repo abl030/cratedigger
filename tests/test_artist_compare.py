@@ -610,7 +610,7 @@ class TestAnnotateInLibrary(unittest.TestCase):
 
     def test_mb_row_unmatched(self):
         rg = _mb("Unowned", id="rg-uuid")
-        lib = [{"mb_releasegroupid": "other", "album": "Other Album"}]
+        lib: list[dict[str, object]] = [{"mb_releasegroupid": "other", "album": "Other Album"}]
         annotate_in_library([rg], [], lib)
         self.assertFalse(rg.in_library)
 
@@ -619,14 +619,14 @@ class TestAnnotateInLibrary(unittest.TestCase):
         # Discogs-imported albums.
         master = _dg("OK Computer", id="12345")
         master.identity_kind = "release"
-        lib = [{"mb_albumid": "12345", "album": "Different Title"}]
+        lib: list[dict[str, object]] = [{"mb_albumid": "12345", "album": "Different Title"}]
         annotate_in_library([], [master], lib)
         self.assertTrue(master.in_library)
 
     def test_discogs_row_is_not_matched_by_title(self):
         master = _dg("OK Computer", id="99999")
         master.identity_kind = "release"
-        lib = [{"mb_albumid": "different-uuid", "album": "OK Computer"}]
+        lib: list[dict[str, object]] = [{"mb_albumid": "different-uuid", "album": "OK Computer"}]
         annotate_in_library([], [master], lib)
         self.assertFalse(master.in_library)
 
@@ -716,7 +716,7 @@ class TestAnnotateInLibrary(unittest.TestCase):
 
     def test_discogs_master_does_not_claim_owned_leaf_release_id(self):
         master = _dg("The Rolling Stones", id="9715")
-        library_leaf = {
+        library_leaf: dict[str, object] = {
             "mb_albumid": "9715",
             "album": "Different release title",
         }
@@ -728,7 +728,7 @@ class TestAnnotateInLibrary(unittest.TestCase):
     def test_discogs_release_unit_matches_exact_release_id(self):
         release = _dg("A pressing", id="9715")
         release.identity_kind = "release"
-        library_leaf = {
+        library_leaf: dict[str, object] = {
             "mb_albumid": "9715",
             "album": "Different release title",
         }

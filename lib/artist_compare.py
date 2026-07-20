@@ -48,7 +48,7 @@ class CompareBuckets:
 def annotate_in_library(
     mb_groups: list[ArtistCatalogueRow],
     discogs_groups: list[ArtistCatalogueRow],
-    library_albums: list[dict],
+    library_albums: list[dict[str, object]],
     rank_fn: Callable[[str, int], str] | None = None,
 ) -> None:
     """Add identifier-backed ownership and quality overlays in place.
@@ -58,8 +58,8 @@ def annotate_in_library(
     ``mb_albumid``. Discogs masters never inherit a child release's ownership,
     and titles never act as identity.
     """
-    lib_by_rgid: dict[str, dict] = {}
-    lib_by_release_id: dict[str, dict] = {}
+    lib_by_rgid: dict[str, dict[str, object]] = {}
+    lib_by_release_id: dict[str, dict[str, object]] = {}
     for album in library_albums:
         rgid = album.get("mb_releasegroupid")
         if rgid and str(rgid) not in lib_by_rgid:
@@ -68,11 +68,14 @@ def annotate_in_library(
         if release_id and str(release_id) not in lib_by_release_id:
             lib_by_release_id[str(release_id)] = album
 
-    def attach(row: ArtistCatalogueRow, match: dict) -> None:
+    def attach(row: ArtistCatalogueRow, match: dict[str, object]) -> None:
         row.in_library = True
-        fmt = match.get("formats") or ""
-        min_br_bps = match.get("min_bitrate") or 0
-        avg_br_bps = match.get("avg_bitrate") or 0
+        fmt_raw = match.get("formats")
+        fmt = fmt_raw if isinstance(fmt_raw, str) else ""
+        min_br_raw = match.get("min_bitrate")
+        min_br_bps = min_br_raw if isinstance(min_br_raw, int) else 0
+        avg_br_raw = match.get("avg_bitrate")
+        avg_br_bps = avg_br_raw if isinstance(avg_br_raw, int) else 0
         min_kbps = (min_br_bps // 1000) if min_br_bps else 0
         avg_kbps = (avg_br_bps // 1000) if avg_br_bps else 0
         row.library_format = fmt
