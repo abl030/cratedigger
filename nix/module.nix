@@ -272,7 +272,6 @@
     exec ${pyRunner} ${src}/web/server.py \
       --port ${toString cfg.web.port} \
       --dsn "${pipelineDsn}" \
-      --beets-db "${cfg.web.beetsDb}" \
       --redis-host "${cfg.web.redis.host}" \
       --redis-port ${toString cfg.web.redis.port} \
       "$@"
@@ -380,6 +379,7 @@
 
     [Beets]
     directory = ${cfg.beets.directory}
+    library = ${cfg.beets.config.library}
     config_dir = ${beetsConfigDir}
     beet_binary = ${pythonEnv}/bin/beet
     python = ${pythonEnv}/bin/python
@@ -1047,10 +1047,6 @@ in {
       port = mkOption {
         type = types.port;
         default = 8085;
-      };
-      beetsDb = mkOption {
-        type = types.str;
-        description = "Path to the beets library SQLite database (read-only).";
       };
       redis = {
         host = mkOption {

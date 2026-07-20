@@ -439,6 +439,27 @@ class TestPerThreadBeetsHandles(unittest.TestCase):
                 "/mnt/virtio/Music/Beets",
             )
 
+    def test_production_uses_runtime_library_and_root_pair(self):
+        from lib.config import CratediggerConfig
+
+        srv = self._srv
+        with tempfile.NamedTemporaryFile() as db_file:
+            ini = configparser.ConfigParser()
+            ini["Beets"] = {
+                "directory": "/runtime/Music/Beets",
+                "library": db_file.name,
+            }
+            cfg = CratediggerConfig.from_ini(ini)
+            srv.beets_db_path = None
+            srv._beets = None
+            with patch("lib.config.read_runtime_config", return_value=cfg):
+                handle = srv._beets_db()
+
+            self.assertIsNotNone(handle)
+            assert handle is not None
+            self.assertEqual(handle.library_db_path, db_file.name)
+            self.assertEqual(handle.library_root, "/runtime/Music/Beets")
+
     def test_main_executes_runtime_root_wiring(self):
         """Production boot must load the root before opening the server."""
         from lib.config import CratediggerConfig

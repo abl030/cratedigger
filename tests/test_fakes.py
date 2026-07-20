@@ -5212,6 +5212,28 @@ class TestPipelineDBFakeContractInternals(unittest.TestCase):
 class TestFakeBeetsDB(unittest.TestCase):
     """Self-tests for FakeBeetsDB — the minimal in-memory BeetsDB stand-in."""
 
+    def test_current_resolver_preserves_cardinality_and_topology(self) -> None:
+        from lib.beets_db import CurrentBeetsAmbiguous, CurrentBeetsUnique
+        from lib.release_identity import ReleaseIdentity
+
+        identity = ReleaseIdentity(
+            source="musicbrainz",
+            release_id="11111111-1111-1111-1111-111111111111",
+        )
+        beets = FakeBeetsDB(library_root="/library")
+        beets.set_album_ids_for_release(identity.release_id, [7])
+        beets.set_item_paths(identity.release_id, [(70, "Artist/Album/01.flac")])
+        unique = beets.resolve_current_release(identity)
+        self.assertIsInstance(unique, CurrentBeetsUnique)
+        assert isinstance(unique, CurrentBeetsUnique)
+        self.assertEqual(unique.album_path, "/library/Artist/Album")
+
+        beets.set_album_ids_for_release(identity.release_id, [7, 8])
+        ambiguous = beets.resolve_current_release(identity)
+        self.assertIsInstance(ambiguous, CurrentBeetsAmbiguous)
+        assert isinstance(ambiguous, CurrentBeetsAmbiguous)
+        self.assertEqual(ambiguous.reason, "multiple_matches")
+
     def test_check_mbids_detail_returns_seeded_rows_only(self) -> None:
         beets = FakeBeetsDB()
         beets.set_mbid_detail(
@@ -5332,9 +5354,10 @@ class TestFakeBeetsDB(unittest.TestCase):
 
     def test_get_min_bitrate_seeded_and_default(self) -> None:
         beets = FakeBeetsDB()
-        beets._album_exists_default = True  # presence gate (see below)
+        beets.set_album_ids_for_release("mbid-1", [1])
         beets.set_min_bitrate("mbid-1", 245)
         self.assertEqual(beets.get_min_bitrate("mbid-1"), 245)
+        beets.set_album_ids_for_release("mbid-2", [2])
         beets._min_bitrate_default = 320
         self.assertEqual(beets.get_min_bitrate("mbid-2"), 320)
         self.assertEqual(beets.get_min_bitrate_calls,
@@ -5407,12 +5430,12 @@ class TestFakeBeetsDB(unittest.TestCase):
         # Shares the set_album_ids_for_release seed store so presence
         # and album-id mapping can't disagree (the paired-consistency
         # concern from issue #121 the real _batch_lookup_album_ids
-        # exists to solve). Exact hit → first seeded album id.
+        # exists to solve). Multiple exact rows are ambiguous, never first-wins.
         beets = FakeBeetsDB()
         beets.set_album_ids_for_release("mbid-1", [17, 18])
         beets.set_album_ids_for_release("mbid-empty", [])
         out = beets.get_album_ids_by_mbids(["mbid-1", "mbid-empty", "mbid-2"])
-        self.assertEqual(out, {"mbid-1": 17})
+        self.assertEqual(out, {})
         self.assertEqual(beets.get_album_ids_by_mbids_calls,
                          [["mbid-1", "mbid-empty", "mbid-2"]])
 

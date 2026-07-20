@@ -3,10 +3,24 @@
 from __future__ import annotations
 
 import copy
+import os
 from typing import Any
 
-from lib.beets_db import BeetsWorldAlbum, ReleaseLocation
-from lib.release_identity import detect_release_source, normalize_release_id
+from lib.beets_db import (
+    BeetsWorldAlbum,
+    CurrentBeetsAmbiguous,
+    CurrentBeetsItem,
+    CurrentBeetsMissing,
+    CurrentBeetsResolution,
+    CurrentBeetsUnique,
+    ReleaseLocation,
+    _lookup_identity,
+)
+from lib.release_identity import (
+    ReleaseIdentity,
+    detect_release_source,
+    normalize_release_id,
+)
 
 
 class FakeBeetsDB:
@@ -72,11 +86,14 @@ class FakeBeetsDB:
         self._min_bitrate: dict[str, int | None] = {}
         self._min_bitrate_default: int | None = None
         self.get_min_bitrate_calls: list[str] = []
+        self.resolve_current_release_calls: list[ReleaseIdentity] = []
+        self._next_synthetic_album_id = 1_000_000
 
     # --- Seeding helpers ---
 
     def set_mbid_detail(self, mbid: str, detail: dict[str, Any]) -> None:
         self._mbid_detail[mbid] = detail
+        self._ensure_seeded_album(mbid)
 
     def set_albums_by_artist(
         self, name: str, albums: list[dict[str, Any]],
@@ -85,6 +102,8 @@ class FakeBeetsDB:
 
     def set_album_exists(self, release_id: str, value: bool) -> None:
         self._album_exists[release_id] = value
+        if value:
+            self._ensure_seeded_album(release_id)
 
     def set_album_ids_for_release(
         self, release_id: str, ids: list[int],
@@ -93,11 +112,13 @@ class FakeBeetsDB:
 
     def set_album_info(self, mb_release_id: str, info: Any) -> None:
         self._album_info[mb_release_id] = info
+        self._ensure_seeded_album(mb_release_id)
 
     def set_item_paths(
         self, release_id: str, paths: list[tuple[int, str]],
     ) -> None:
         self._item_paths[release_id] = list(paths)
+        self._ensure_seeded_album(release_id)
 
     def set_release_identities(self, rows: list[dict[str, Any]]) -> None:
         self._release_identities = [copy.deepcopy(r) for r in rows]
@@ -110,6 +131,7 @@ class FakeBeetsDB:
     ) -> None:
         self._tracks_by_release[release_id] = [
             copy.deepcopy(t) for t in tracks]
+        self._ensure_seeded_album(release_id)
 
     def set_album_detail(self, album_id: int, detail: dict[str, Any]) -> None:
         self._album_detail[album_id] = copy.deepcopy(detail)
@@ -149,13 +171,33 @@ class FakeBeetsDB:
                         and not isinstance(entry.album_id, bool)), (
                     f"exact ReleaseLocation needs an int album_id, got "
                     f"{entry.album_id!r} — production cannot construct this")
-            else:
+            elif entry.kind == "absent":
                 assert entry.album_id is None and entry.selectors == (), (
                     f"absent ReleaseLocation is always (None, ()), got "
                     f"({entry.album_id!r}, {entry.selectors!r})")
+            else:
+                assert entry.album_id is None and entry.selectors, (
+                    "ambiguous ReleaseLocation needs no album id and explicit "
+                    "identity selectors"
+                )
         self._locate_queue = list(entries)
 
     # --- Real-method surface ---
+
+    def _ensure_seeded_album(self, release_id: str) -> None:
+        key = normalize_release_id(release_id)
+        for seeded, ids in self._album_ids_for_release.items():
+            if normalize_release_id(seeded) != key:
+                continue
+            if ids:
+                return
+            album_id = self._next_synthetic_album_id
+            self._next_synthetic_album_id += 1
+            self._album_ids_for_release[seeded] = [album_id]
+            return
+        album_id = self._next_synthetic_album_id
+        self._next_synthetic_album_id += 1
+        self._album_ids_for_release[release_id] = [album_id]
 
     def _album_ids_lookup(self, release_id: str) -> list[int] | None:
         """Normalized view of the ``set_album_ids_for_release`` store.
@@ -194,20 +236,31 @@ class FakeBeetsDB:
 
     def album_exists(self, release_id: str) -> bool:
         self.album_exists_calls.append(release_id)
-        return self._presence(release_id)
+        return self.locate(release_id).kind == "exact"
 
     def check_mbids(self, mbids: list[str]) -> set[str]:
         self.check_mbids_calls.append(list(mbids))
-        return {mbid for mbid in mbids if self.album_exists(mbid)}
+        return set(self.get_album_ids_by_mbids(mbids))
 
     def check_mbids_detail(
         self, mbids: list[str],
     ) -> dict[str, dict[str, Any]]:
         self.check_mbids_detail_calls.append(list(mbids))
-        return {
-            mbid: copy.deepcopy(self._mbid_detail[mbid])
-            for mbid in mbids if mbid in self._mbid_detail
-        }
+        result: dict[str, dict[str, Any]] = {}
+        for mbid in mbids:
+            if mbid not in self._mbid_detail:
+                continue
+            identity = _lookup_identity(mbid)
+            if identity is None:
+                continue
+            if isinstance(
+                self.resolve_current_release(identity),
+                CurrentBeetsUnique,
+            ):
+                result[identity.release_id] = copy.deepcopy(
+                    self._mbid_detail[mbid],
+                )
+        return result
 
     def get_albums_by_artist(
         self, name: str, mbid: str = "",
@@ -224,8 +277,8 @@ class FakeBeetsDB:
 
     def get_all_album_ids_for_release(self, release_id: str) -> list[int]:
         self.get_all_album_ids_for_release_calls.append(release_id)
-        return self._album_ids_for_release.get(
-            release_id, list(self._album_ids_default))
+        ids = self._album_ids_lookup(release_id)
+        return list(self._album_ids_default) if ids is None else list(ids)
 
     def get_album_ids_by_mbids(self, mbids: list[str]) -> dict[str, int]:
         """Mirror of ``BeetsDB.get_album_ids_by_mbids`` — exact hits only.
@@ -244,11 +297,12 @@ class FakeBeetsDB:
             key = normalize_release_id(mbid)
             if not key:
                 continue
-            ids = self._album_ids_lookup(key)
-            if ids is None:
-                ids = list(self._album_ids_default)
-            if ids:
-                result[key] = ids[0]
+            identity = _lookup_identity(key)
+            if identity is None:
+                continue
+            resolution = self.resolve_current_release(identity)
+            if isinstance(resolution, CurrentBeetsUnique):
+                result[key] = resolution.album_id
         return result
 
     def get_tracks_by_mb_release_id(
@@ -264,12 +318,15 @@ class FakeBeetsDB:
         """
         self.get_tracks_by_mb_release_id_calls.append(mbid)
         key = normalize_release_id(mbid)
+        identity = _lookup_identity(key)
+        if identity is None or not isinstance(
+            self.resolve_current_release(identity), CurrentBeetsUnique,
+        ):
+            return None
         for seeded, tracks in self._tracks_by_release.items():
             if normalize_release_id(seeded) == key:
                 return [copy.deepcopy(t) for t in tracks]
-        if self._album_ids_lookup(key):
-            return []
-        return None
+        return []
 
     def get_album_detail(self, album_id: int) -> dict[str, Any] | None:
         """Mirror of ``BeetsDB.get_album_detail`` — None when missing."""
@@ -292,6 +349,96 @@ class FakeBeetsDB:
             return (f"discogs_albumid:{key}", f"mb_albumid:{key}")
         return (f"mb_albumid:{key}",)
 
+    def resolve_current_release(
+        self,
+        identity: ReleaseIdentity,
+    ) -> CurrentBeetsResolution:
+        """State-respecting fake of the exact current-library resolver."""
+
+        self.resolve_current_release_calls.append(identity)
+        for seeded, present in self._album_exists.items():
+            if normalize_release_id(seeded) == identity.release_id and not present:
+                return CurrentBeetsMissing(identity=identity)
+        ids = self._album_ids_lookup(identity.release_id)
+        if ids is None:
+            if self._album_exists_default and not self._album_ids_default:
+                self._ensure_seeded_album(identity.release_id)
+                ids = self._album_ids_lookup(identity.release_id)
+            else:
+                ids = list(self._album_ids_default)
+        assert ids is not None
+        album_ids = tuple(ids)
+        if not album_ids:
+            return CurrentBeetsMissing(identity=identity)
+        if len(album_ids) != 1:
+            return CurrentBeetsAmbiguous(
+                identity=identity,
+                album_ids=album_ids,
+                reason="multiple_matches",
+            )
+
+        seeded_paths = None
+        for seeded, paths in self._item_paths.items():
+            if normalize_release_id(seeded) == identity.release_id:
+                seeded_paths = paths
+                break
+        if seeded_paths is None:
+            album_id = album_ids[0]
+            seeded_paths = [(
+                album_id * 100,
+                os.path.join(
+                    self.library_root,
+                    f"album-{album_id}",
+                    "01.fake",
+                ),
+            )]
+        if not seeded_paths:
+            return CurrentBeetsAmbiguous(
+                identity=identity,
+                album_ids=album_ids,
+                reason="empty_topology",
+            )
+
+        items: list[CurrentBeetsItem] = []
+        directories: set[str] = set()
+        for item_id, raw_path in seeded_paths:
+            path = raw_path
+            if not os.path.isabs(path):
+                if not self.library_root:
+                    return CurrentBeetsAmbiguous(
+                        identity=identity,
+                        album_ids=album_ids,
+                        reason="unresolved_relative_path",
+                    )
+                path = os.path.join(self.library_root, path)
+            absolute = os.path.abspath(path)
+            items.append(CurrentBeetsItem(id=item_id, path=absolute))
+            directories.add(os.path.dirname(absolute))
+        if len(directories) != 1:
+            return CurrentBeetsAmbiguous(
+                identity=identity,
+                album_ids=album_ids,
+                reason="split_topology",
+            )
+        return CurrentBeetsUnique(
+            identity=identity,
+            album_id=album_ids[0],
+            album_path=next(iter(directories)),
+            items=tuple(items),
+            selectors=self._selectors_for(identity.release_id),
+        )
+
+    def resolve_current_releases(
+        self,
+        identities: list[ReleaseIdentity],
+    ) -> dict[ReleaseIdentity, CurrentBeetsResolution]:
+        """Batch facade with the same cardinality semantics as production."""
+
+        return {
+            identity: self.resolve_current_release(identity)
+            for identity in dict.fromkeys(identities)
+        }
+
     def locate(self, release_id: str) -> ReleaseLocation:
         """Mirror of ``BeetsDB.locate`` — the issue-#121 presence seam.
 
@@ -309,12 +456,18 @@ class FakeBeetsDB:
                     kind="exact", album_id=entry.album_id,
                     selectors=self._selectors_for(release_id))
             return entry
-        key = normalize_release_id(release_id)
-        ids = self._album_ids_lookup(key)
-        if ids:
+        identity = _lookup_identity(release_id)
+        if identity is None:
+            return ReleaseLocation(kind="absent", album_id=None, selectors=())
+        resolution = self.resolve_current_release(identity)
+        if isinstance(resolution, CurrentBeetsUnique):
             return ReleaseLocation(
-                kind="exact", album_id=ids[0],
-                selectors=self._selectors_for(key))
+                kind="exact", album_id=resolution.album_id,
+                selectors=resolution.selectors)
+        if isinstance(resolution, CurrentBeetsAmbiguous):
+            return ReleaseLocation(
+                kind="ambiguous", album_id=None,
+                selectors=self._selectors_for(identity.release_id))
         return ReleaseLocation(kind="absent", album_id=None, selectors=())
 
     def get_min_bitrate(self, mb_release_id: str) -> int | None:
@@ -326,7 +479,12 @@ class FakeBeetsDB:
         store / ``_min_bitrate_default``.
         """
         self.get_min_bitrate_calls.append(mb_release_id)
-        if not self._presence(mb_release_id):
+        if self._locate_queue and self._locate_queue[0].kind != "exact":
+            return None
+        identity = _lookup_identity(mb_release_id)
+        if identity is None or not isinstance(
+            self.resolve_current_release(identity), CurrentBeetsUnique,
+        ):
             return None
         key = normalize_release_id(mb_release_id)
         return self._min_bitrate.get(key, self._min_bitrate_default)
@@ -335,12 +493,22 @@ class FakeBeetsDB:
         self, mb_release_id: str, _cfg: Any = None,
     ) -> Any:
         self.get_album_info_calls.append(mb_release_id)
+        identity = _lookup_identity(mb_release_id)
+        if identity is None or not isinstance(
+            self.resolve_current_release(identity), CurrentBeetsUnique,
+        ):
+            return None
         return self._album_info.get(mb_release_id, self._album_info_default)
 
     def get_item_paths(self, mb_release_id: str) -> list[tuple[int, str]]:
         self.get_item_paths_calls.append(mb_release_id)
-        return self._item_paths.get(
-            mb_release_id, list(self._item_paths_default))
+        identity = _lookup_identity(mb_release_id)
+        if identity is None:
+            return []
+        resolution = self.resolve_current_release(identity)
+        if not isinstance(resolution, CurrentBeetsUnique):
+            return []
+        return [(item.id, item.path) for item in resolution.items]
 
     def close(self) -> None:
         self.close_calls += 1

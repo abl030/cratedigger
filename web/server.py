@@ -53,7 +53,7 @@ from web import cache as cache
 from web import discogs as _discogs
 from web import mb as mb_api
 from web import overlay as _overlay
-from lib.beets_db import BeetsDB
+from lib.beets_db import BeetsDB, open_beets_db
 from lib.pipeline_db import AlbumRequestRow, PipelineDB
 from web.routes import api_index as _api_index_routes
 from web.routes import beets_distance as _beets_distance_routes
@@ -113,6 +113,8 @@ _db_dsn = None
 # unset (tests, web_dev_server live-db mode), `db` is the injected
 # shared handle and the caller owns its thread-safety.
 db: PipelineDB | None = None
+# Explicit dev/test override only. Production leaves this unset and opens the
+# runtime [Beets] library+directory pair through ``open_beets_db``.
 beets_db_path: str | None = None
 beets_library_root: str = ""
 _beets: BeetsDB | None = None
@@ -186,14 +188,18 @@ def _beets_db() -> BeetsDB | None:
     handle on first use. An injected `_beets` (tests) wins."""
     if _beets is not None:
         return _beets
-    if not beets_db_path or not os.path.exists(beets_db_path):
-        return None
     handle = getattr(_thread_state, "beets", None)
     if handle is None:
-        handle = BeetsDB(
-            beets_db_path,
-            library_root=beets_library_root,
-        )
+        try:
+            if beets_db_path is not None:
+                handle = BeetsDB(
+                    beets_db_path,
+                    library_root=beets_library_root,
+                )
+            else:
+                handle = open_beets_db()
+        except FileNotFoundError:
+            return None
         _thread_state.beets = handle
     return handle
 
@@ -530,7 +536,14 @@ def main():
     parser = argparse.ArgumentParser(description="Cratedigger Web UI")
     parser.add_argument("--port", type=int, default=8085)
     parser.add_argument("--dsn", default=os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localhost/cratedigger"))
-    parser.add_argument("--beets-db", default="/mnt/virtio/Music/beets-library.db")
+    parser.add_argument(
+        "--beets-db",
+        default=None,
+        help=(
+            "Dev/test-only Beets SQLite override. Production reads the paired "
+            "[Beets] library and directory values from config.ini."
+        ),
+    )
     parser.add_argument("--mb-api", default=None,
                         help="MusicBrainz API base URL (full base incl. /ws/2). Dev-only override — "
                              "production reads config.ini [MusicBrainz] api_base (issue #497); the "
@@ -582,13 +595,19 @@ def main():
     # their own handles via `_db()`, so this one is connect-check only.
     PipelineDB(args.dsn).close()
     beets_db_path = args.beets_db
-    if beets_db_path and not os.path.exists(beets_db_path):
+    if beets_db_path is not None and not os.path.exists(beets_db_path):
         log.warning("Beets DB not found at %s; library routes degrade", beets_db_path)
 
     server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
     print(f"Cratedigger Web UI listening on http://0.0.0.0:{args.port}")
     print(f"  Pipeline DB: {args.dsn}")
-    print(f"  Beets DB: {beets_db_path}")
+    if beets_db_path is not None:
+        beets_display = f"{beets_db_path} (dev/test override)"
+    else:
+        from lib.config import read_runtime_config
+
+        beets_display = read_runtime_config().beets_library_db
+    print(f"  Beets DB: {beets_display}")
     print(f"  MB API: {mb_api.MB_API_BASE}")
     print(f"  Redis: {args.redis_host or 'disabled'}")
     try:

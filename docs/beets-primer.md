@@ -271,6 +271,29 @@ The harness communicates over stdin/stdout using newline-delimited JSON (NDJSON)
 {"action": "skip"}     // Skip (don't import)
 ```
 
+### Current library membership and paths
+
+`lib.beets_db.BeetsDB.resolve_current_release()` is the one read authority for
+current installed membership and location. It accepts a typed
+`ReleaseIdentity`, enumerates every exact Beets album row, and returns one of
+three frozen outcomes: `CurrentBeetsUnique`, `CurrentBeetsMissing`, or
+`CurrentBeetsAmbiguous`. A unique result includes the album primary key, every
+item primary key and absolute path, the single album directory, and the exact
+MB/Discogs selectors. Empty albums, split-directory albums, and duplicate exact
+identities are ambiguous and therefore cannot authorize a path-dependent
+operation.
+
+Discogs IDs are queried in both `discogs_albumid` (current layout) and numeric
+`mb_albumid` (legacy layout). No title, artist, release-group, folder, or sibling
+fallback exists. Batch presence/detail APIs expose only usable unique results;
+they never collapse two exact rows by `LIMIT 1` or dictionary overwrite.
+
+The NixOS module renders `beets.config.library` and
+`beets.config.directory` into the runtime `[Beets]` section as one pair.
+`open_beets_db()` and the zero-argument `BeetsDB()` constructor both open that
+runtime pair. Passing paths directly to `BeetsDB(...)` or web `--beets-db` is
+for explicit development/test injection.
+
 ### CRITICAL: Always Match by candidate_id, Never candidate_index
 
 Candidate ordering is **NOT stable** between beets runs. MB mirror updates, timing, and internal sorting change the order. Using `candidate_index` has caused wrong imports in the past. Always find the candidate whose `album_id` matches your target MB release ID.

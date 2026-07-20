@@ -38,7 +38,7 @@ from tests.fakes import FakePipelineDB
 
 @dataclass
 class _StubLocation:
-    kind: Literal["exact", "absent"]
+    kind: Literal["exact", "absent", "ambiguous"]
     album_id: Optional[int]
     selectors: tuple[str, ...]
 
@@ -335,6 +335,28 @@ class TestAlreadyGoneBeforeCall(unittest.TestCase):
         self.assertTrue(result.absent_after)
         self.assertEqual(result.selector_failures, ())
         self.assertEqual(pdb.clear_on_disk_quality_fields_calls, [42])
+
+    @patch("lib.beets_album_op.sp.run")
+    def test_ambiguous_membership_is_never_treated_as_absence(
+        self,
+        mock_run: MagicMock,
+    ) -> None:
+        selectors = (f"mb_albumid:{RELEASE_UUID}",)
+        beets = _StubBeetsDB([
+            _StubLocation("ambiguous", None, selectors),
+            _StubLocation("ambiguous", None, selectors),
+        ])
+        pdb = FakePipelineDB()
+
+        result = remove_and_reset_release(
+            beets_db=cast(Any, beets), pipeline_db=cast(Any, pdb),
+            release_id=RELEASE_UUID, request_id=42,
+        )
+
+        mock_run.assert_not_called()
+        self.assertFalse(result.beets_removed)
+        self.assertFalse(result.absent_after)
+        self.assertEqual(pdb.clear_on_disk_quality_fields_calls, [])
 
 
 class TestEmptyReleaseIdRejected(unittest.TestCase):

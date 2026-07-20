@@ -14,7 +14,7 @@ import os
 import sqlite3
 import statistics
 from dataclasses import dataclass
-from typing import Literal, Optional, TYPE_CHECKING
+from typing import Literal, Optional, TYPE_CHECKING, TypeAlias
 
 from lib.release_identity import (
     ReleaseIdentity,
@@ -24,6 +24,7 @@ from lib.release_identity import (
 )
 
 if TYPE_CHECKING:
+    from lib.config import CratediggerConfig
     from lib.quality import QualityRankConfig
 
 
@@ -43,12 +44,15 @@ class ReleaseLocation:
       ``release_id``. Quality / cleanup decisions may rely on this.
     - ``kind="absent"``: nothing matches. ``album_id is None`` and
       ``selectors == ()``.
+    - ``kind="ambiguous"``: multiple exact rows or an unusable item topology.
+      ``album_id is None`` so legacy callers fail closed.
 
-    Issue #123 collapsed the older 3-state Literal (``exact`` / ``fuzzy``
-    / ``absent``) down to 2. The fuzzy artist+album fallback conflated
+    Issue #123 removed the old ``fuzzy`` state. The artist+album fallback conflated
     identity with presence — a sibling pressing title-match would
     silently attribute another release's quality fields to the badge.
-    'In library' now means exact-ID match, period.
+    The later ``ambiguous`` state represents exact-ID rows whose cardinality
+    or item topology cannot authorize one current album; it never reintroduces
+    metadata matching.
 
     ``selectors`` is the set of ``beet remove -d`` queries the ID
     could live under. Iterating every selector turns a selector-
@@ -56,9 +60,59 @@ class ReleaseLocation:
     the banned copy on disk — see
     ``web/routes/pipeline.py::post_pipeline_ban_source``.
     """
-    kind: Literal["exact", "absent"]
+    kind: Literal["exact", "absent", "ambiguous"]
     album_id: int | None
     selectors: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CurrentBeetsItem:
+    """One current item primary key and absolute Beets-owned path."""
+
+    id: int
+    path: str
+
+
+@dataclass(frozen=True)
+class CurrentBeetsUnique:
+    """Exactly one usable current Beets album for an exact release."""
+
+    identity: ReleaseIdentity
+    album_id: int
+    album_path: str
+    items: tuple[CurrentBeetsItem, ...]
+    selectors: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CurrentBeetsMissing:
+    """No current Beets album has the exact release identity."""
+
+    identity: ReleaseIdentity
+
+
+CurrentBeetsAmbiguityReason: TypeAlias = Literal[
+    "multiple_matches",
+    "conflicting_identity",
+    "empty_topology",
+    "split_topology",
+    "invalid_path",
+    "unresolved_relative_path",
+]
+
+
+@dataclass(frozen=True)
+class CurrentBeetsAmbiguous:
+    """Exact membership exists but cannot authorize one current album path."""
+
+    identity: ReleaseIdentity
+    album_ids: tuple[int, ...]
+    reason: CurrentBeetsAmbiguityReason
+
+
+CurrentBeetsResolution: TypeAlias = (
+    CurrentBeetsUnique | CurrentBeetsMissing | CurrentBeetsAmbiguous
+)
 
 DEFAULT_BEETS_DB = os.environ.get("BEETS_DB", "/mnt/virtio/Music/beets-library.db")
 
@@ -68,6 +122,36 @@ def _resolve_library_path(path: str, library_root: str) -> str:
     if library_root and not os.path.isabs(path):
         return os.path.join(library_root, path)
     return path
+
+
+def _lookup_identity(raw: object | None) -> ReleaseIdentity | None:
+    """Translate a legacy string lookup into an exact typed identity.
+
+    Runtime requests are UUIDs or Discogs numerics. Keeping nonempty malformed
+    values on the MusicBrainz column path makes audit/dev callers able to
+    inspect bad historical rows without introducing any metadata fallback.
+    """
+
+    identity = ReleaseIdentity.from_id(raw)
+    if identity is not None:
+        return identity
+    normalized = normalize_release_id(raw)
+    if not normalized:
+        return None
+    return ReleaseIdentity(source="musicbrainz", release_id=normalized)
+
+
+def open_beets_db(config: "CratediggerConfig | None" = None) -> "BeetsDB":
+    """Open the runtime-configured shipped Beets database/root pair."""
+
+    if config is None:
+        from lib.config import read_runtime_config
+
+        config = read_runtime_config()
+    return BeetsDB(
+        config.beets_library_db,
+        library_root=config.beets_directory,
+    )
 
 
 def _reduce_album_format(
@@ -130,22 +214,27 @@ class BeetsDB:
 
     def __init__(
         self,
-        db_path: str = DEFAULT_BEETS_DB,
+        db_path: str | None = None,
         *,
-        library_root: str = "",
+        library_root: str | None = None,
     ) -> None:
         """Open the library DB.
 
         ``library_root`` is the absolute filesystem path that beets'
         ``items.path`` values are stored relative to (matches the
-        ``directory:`` setting in the beets config). When set,
-        :meth:`get_album_info` returns an absolute ``album_path``;
-        otherwise it returns whatever beets stored, which in production
-        is a path relative to ``library_root`` and breaks any consumer
-        that does host-side filesystem ops (see
-        ``evidence_from_album_info`` → ``snapshot_audio_files`` →
-        bogus ``empty_fileset / "no audio files found"``).
+        ``directory:`` setting in the beets config). A unique current release
+        always exposes absolute paths. A relative stored path with no root is
+        an explicit ambiguous result and every legacy lookup fails closed.
         """
+        if db_path is None:
+            from lib.config import read_runtime_config
+
+            runtime_config = read_runtime_config()
+            db_path = runtime_config.beets_library_db
+            if library_root is None:
+                library_root = runtime_config.beets_directory
+        if library_root is None:
+            library_root = ""
         if not os.path.exists(db_path):
             raise FileNotFoundError(f"Beets DB not found: {db_path}")
         self._db_path = db_path
@@ -175,7 +264,7 @@ class BeetsDB:
     def _decode_path(raw: object) -> str:
         """Decode a beets path (stored as bytes or str) to a string."""
         if isinstance(raw, bytes):
-            return raw.decode("utf-8", errors="replace")
+            return os.fsdecode(raw)
         return str(raw)
 
     def _resolve_path(self, raw: object) -> str:
@@ -184,6 +273,217 @@ class BeetsDB:
             self._decode_path(raw),
             self._library_root,
         )
+
+    @staticmethod
+    def _selectors_for(identity: ReleaseIdentity) -> tuple[str, ...]:
+        if identity.source == "discogs":
+            return (
+                f"discogs_albumid:{identity.release_id}",
+                f"mb_albumid:{identity.release_id}",
+            )
+        return (f"mb_albumid:{identity.release_id}",)
+
+    def _matching_album_ids(self, identity: ReleaseIdentity) -> tuple[int, ...]:
+        """Enumerate every album primary key for one exact identity."""
+
+        if identity.source == "discogs":
+            rows = self._conn.execute(
+                "SELECT id FROM albums "
+                "WHERE discogs_albumid = ? OR mb_albumid = ? "
+                "ORDER BY id",
+                (int(identity.release_id), identity.release_id),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT id FROM albums WHERE mb_albumid = ? ORDER BY id",
+                (identity.release_id,),
+            ).fetchall()
+        return tuple(int(row[0]) for row in rows)
+
+    def resolve_current_release(
+        self,
+        identity: ReleaseIdentity,
+    ) -> CurrentBeetsResolution:
+        """Resolve one exact identity to unique, missing, or ambiguous.
+
+        This is the sole current-library membership/path authority. It reads
+        every matching album row, accepts both Discogs storage generations,
+        and only returns ``unique`` when every item has an absolute path in
+        one directory.
+        """
+
+        return self.resolve_current_releases([identity])[identity]
+
+    def resolve_current_releases(
+        self,
+        identities: list[ReleaseIdentity],
+    ) -> dict[ReleaseIdentity, CurrentBeetsResolution]:
+        """Batch the same exact resolver contract without cardinality loss."""
+
+        unique_identities = tuple(dict.fromkeys(identities))
+        album_ids_by_identity: dict[ReleaseIdentity, set[int]] = {
+            identity: set() for identity in unique_identities
+        }
+        mb_by_release_id = {
+            identity.release_id: identity
+            for identity in unique_identities
+        }
+        discogs_by_release_id = {
+            identity.release_id: identity
+            for identity in unique_identities
+            if identity.source == "discogs"
+        }
+
+        conditions: list[str] = []
+        parameters: list[object] = []
+        if mb_by_release_id:
+            mb_values = tuple(mb_by_release_id)
+            conditions.append(
+                f"a.mb_albumid IN ({','.join('?' for _ in mb_values)})"
+            )
+            parameters.extend(mb_values)
+        if discogs_by_release_id:
+            discogs_values = tuple(
+                int(release_id) for release_id in discogs_by_release_id
+            )
+            conditions.append(
+                f"a.discogs_albumid IN "
+                f"({','.join('?' for _ in discogs_values)})"
+            )
+            parameters.extend(discogs_values)
+
+        # One joined SELECT is the snapshot boundary. Beets can move an album
+        # concurrently; separate album and item queries could otherwise return
+        # a cardinality from before the move and paths from after it.
+        item_rows_by_album_id: dict[int, list[tuple[int, object]]] = {}
+        conflicting_album_ids: set[int] = set()
+        if conditions:
+            rows = self._conn.execute(
+                "SELECT a.id, a.mb_albumid, a.discogs_albumid, i.id, i.path "
+                "FROM albums a LEFT JOIN items i ON i.album_id = a.id "
+                f"WHERE {' OR '.join(conditions)} ORDER BY a.id, i.id",
+                parameters,
+            ).fetchall()
+            for (
+                raw_album_id,
+                raw_mb_release_id,
+                raw_discogs_release_id,
+                raw_item_id,
+                raw_path,
+            ) in rows:
+                album_id = int(raw_album_id)
+                item_rows_by_album_id.setdefault(album_id, [])
+
+                mb_release_id = normalize_release_id(raw_mb_release_id)
+                mb_identity = mb_by_release_id.get(mb_release_id)
+                if mb_identity is not None:
+                    album_ids_by_identity[mb_identity].add(album_id)
+
+                discogs_release_id = normalize_release_id(
+                    raw_discogs_release_id,
+                )
+                discogs_identity = discogs_by_release_id.get(
+                    discogs_release_id,
+                )
+                if discogs_identity is not None:
+                    album_ids_by_identity[discogs_identity].add(album_id)
+
+                # UUID + numeric Discogs is a valid cross-source identity pair.
+                # Two different numeric values claim two Discogs pressings for
+                # one album row and cannot authorize either destructive path.
+                if (
+                    detect_release_source(mb_release_id) == "discogs"
+                    and discogs_release_id
+                    and mb_release_id != discogs_release_id
+                ):
+                    conflicting_album_ids.add(album_id)
+
+                if raw_item_id is not None:
+                    item_rows_by_album_id[album_id].append(
+                        (int(raw_item_id), raw_path),
+                    )
+
+        resolutions: dict[ReleaseIdentity, CurrentBeetsResolution] = {}
+        for identity in unique_identities:
+            album_ids = tuple(sorted(album_ids_by_identity[identity]))
+            if not album_ids:
+                resolutions[identity] = CurrentBeetsMissing(identity=identity)
+                continue
+            if any(
+                album_id in conflicting_album_ids for album_id in album_ids
+            ):
+                resolutions[identity] = CurrentBeetsAmbiguous(
+                    identity=identity,
+                    album_ids=album_ids,
+                    reason="conflicting_identity",
+                )
+                continue
+            if len(album_ids) != 1:
+                resolutions[identity] = CurrentBeetsAmbiguous(
+                    identity=identity,
+                    album_ids=album_ids,
+                    reason="multiple_matches",
+                )
+                continue
+
+            album_id = album_ids[0]
+            rows = item_rows_by_album_id[album_id]
+            if not rows:
+                resolutions[identity] = CurrentBeetsAmbiguous(
+                    identity=identity,
+                    album_ids=album_ids,
+                    reason="empty_topology",
+                )
+                continue
+
+            items: list[CurrentBeetsItem] = []
+            directories: set[str] = set()
+            unresolved_relative_path = False
+            invalid_path = False
+            for item_id, raw_path in rows:
+                decoded = self._decode_path(raw_path)
+                if not decoded:
+                    invalid_path = True
+                    break
+                if not os.path.isabs(decoded):
+                    if not self._library_root:
+                        unresolved_relative_path = True
+                        break
+                    root = os.path.abspath(self._library_root)
+                    decoded = os.path.abspath(os.path.join(root, decoded))
+                    if os.path.commonpath((root, decoded)) != root:
+                        invalid_path = True
+                        break
+                absolute = os.path.abspath(decoded)
+                items.append(CurrentBeetsItem(id=item_id, path=absolute))
+                directories.add(os.path.dirname(absolute))
+            if invalid_path:
+                resolutions[identity] = CurrentBeetsAmbiguous(
+                    identity=identity,
+                    album_ids=album_ids,
+                    reason="invalid_path",
+                )
+            elif unresolved_relative_path:
+                resolutions[identity] = CurrentBeetsAmbiguous(
+                    identity=identity,
+                    album_ids=album_ids,
+                    reason="unresolved_relative_path",
+                )
+            elif len(directories) != 1:
+                resolutions[identity] = CurrentBeetsAmbiguous(
+                    identity=identity,
+                    album_ids=album_ids,
+                    reason="split_topology",
+                )
+            else:
+                resolutions[identity] = CurrentBeetsUnique(
+                    identity=identity,
+                    album_id=album_id,
+                    album_path=next(iter(directories)),
+                    items=tuple(items),
+                    selectors=self._selectors_for(identity),
+                )
+        return resolutions
 
     def locate(self, release_id: str) -> ReleaseLocation:
         """Resolve a pipeline ``mb_release_id`` to a ``ReleaseLocation``.
@@ -206,54 +506,29 @@ class BeetsDB:
         UI for a legacy untagged album is 'not in library' — re-tag it
         or add the release to the pipeline.
         """
-        release_key = normalize_release_id(release_id)
-        if not release_key:
+        identity = _lookup_identity(release_id)
+        if identity is None:
             return ReleaseLocation(kind="absent", album_id=None, selectors=())
-
-        source = detect_release_source(release_key)
-        numeric: int | None = None
-        if source == "discogs":
-            try:
-                numeric = int(release_key)
-            except ValueError:
-                numeric = None
-
-        album_id: Optional[int] = None
-        if numeric is not None:
-            row = self._conn.execute(
-                "SELECT id FROM albums "
-                "WHERE discogs_albumid = ? OR mb_albumid = ? "
-                "LIMIT 1",
-                (numeric, release_key),
-            ).fetchone()
-            if row:
-                album_id = row[0]
-        elif release_key:
-            row = self._conn.execute(
-                "SELECT id FROM albums WHERE mb_albumid = ?",
-                (release_key,),
-            ).fetchone()
-            if row:
-                album_id = row[0]
-
-        if album_id is not None:
-            if numeric is not None:
-                selectors: tuple[str, ...] = (
-                    f"discogs_albumid:{release_key}",
-                    f"mb_albumid:{release_key}",
-                )
-            else:
-                selectors = (f"mb_albumid:{release_key}",)
+        result = self.resolve_current_release(identity)
+        if isinstance(result, CurrentBeetsUnique):
             return ReleaseLocation(
-                kind="exact", album_id=album_id, selectors=selectors)
-
+                kind="exact",
+                album_id=result.album_id,
+                selectors=result.selectors,
+            )
+        if isinstance(result, CurrentBeetsAmbiguous):
+            return ReleaseLocation(
+                kind="ambiguous",
+                album_id=None,
+                selectors=self._selectors_for(identity),
+            )
         return ReleaseLocation(kind="absent", album_id=None, selectors=())
 
     def get_all_album_ids_for_release(self, release_id: str) -> list[int]:
         """Return every album id whose mb/discogs id matches ``release_id``.
 
-        Unlike ``locate()`` (which returns a single id via ``LIMIT 1``),
-        this enumerates *every* row — needed so post-import stale
+        This raw cardinality helper enumerates *every* row — needed so
+        post-import stale
         cleanup can detect the split-brain "multiple same-MBID rows
         already exist" state and fail-fast rather than delete just
         one while the others survive (Codex PR #131 round 3 P2).
@@ -266,31 +541,10 @@ class BeetsDB:
 
         Returns an empty list if the release is absent.
         """
-        release_key = normalize_release_id(release_id)
-        if not release_key:
+        identity = _lookup_identity(release_id)
+        if identity is None:
             return []
-        source = detect_release_source(release_key)
-        numeric: int | None = None
-        if source == "discogs":
-            try:
-                numeric = int(release_key)
-            except ValueError:
-                numeric = None
-
-        if numeric is not None:
-            rows = self._conn.execute(
-                "SELECT id FROM albums "
-                "WHERE discogs_albumid = ? OR mb_albumid = ? "
-                "ORDER BY id",
-                (numeric, release_key),
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT id FROM albums WHERE mb_albumid = ? "
-                "ORDER BY id",
-                (release_key,),
-            ).fetchall()
-        return [int(r[0]) for r in rows]
+        return list(self._matching_album_ids(identity))
 
     def _batch_lookup_album_ids(
         self, release_ids: list[str]
@@ -298,64 +552,30 @@ class BeetsDB:
         """Batched version of ``locate(id).album_id`` for exact hits only.
 
         Single source of truth for 'which of these release IDs has an
-        exact beets row, and what's its album_id?'. Two ``IN (...)``
-        queries — one against ``mb_albumid`` (covers UUIDs AND legacy
-        Discogs numerics stored there), one against ``discogs_albumid``
-        (new-layout Discogs numerics). Returns a dict keyed by the
-        canonical normalized release ID.
+        usable unique beets row, and what's its album_id?'. Two identity
+        ``IN (...)`` queries enumerate both storage generations and one item
+        query validates every candidate topology. Returns a dict keyed by the
+        canonical normalized release ID; missing and ambiguous identities are
+        omitted.
 
         Used by ``check_mbids`` and ``get_album_ids_by_mbids`` so they
         stay in sync without either falling into an N+1 pattern — the
         paired-consistency concern Codex round 1 + round 2 kept circling
         (issue #121).
         """
-        if not release_ids:
-            return {}
-
-        # Split by ID shape. UUIDs only ever live in ``mb_albumid``.
-        # Numerics can live in ``discogs_albumid`` (new layout) OR
-        # ``mb_albumid`` (legacy pre-plugin-patch imports), so we
-        # include them in both queries.
-        mb_candidates: list[str] = []
-        discogs_candidates: list[int] = []
-        for rid in release_ids:
-            release_key = normalize_release_id(rid)
-            if not release_key:
-                continue
-            if detect_release_source(release_key) == "discogs":
-                try:
-                    discogs_candidates.append(int(release_key))
-                except ValueError:
-                    pass
-                # Also check mb_albumid as TEXT (legacy layout).
-                mb_candidates.append(release_key)
-            else:
-                mb_candidates.append(release_key)
-
+        identities_by_release_id: dict[str, ReleaseIdentity] = {}
+        for release_id in release_ids:
+            identity = _lookup_identity(release_id)
+            if identity is not None:
+                identities_by_release_id.setdefault(identity.release_id, identity)
+        resolutions = self.resolve_current_releases(
+            list(identities_by_release_id.values()),
+        )
         result: dict[str, int] = {}
-
-        if mb_candidates:
-            ph = ",".join("?" for _ in mb_candidates)
-            rows = self._conn.execute(
-                f"SELECT mb_albumid, id FROM albums "
-                f"WHERE mb_albumid IN ({ph})",
-                mb_candidates,
-            ).fetchall()
-            for mb_albumid, album_id in rows:
-                if mb_albumid:
-                    result[mb_albumid] = album_id
-
-        if discogs_candidates:
-            ph = ",".join("?" for _ in discogs_candidates)
-            rows = self._conn.execute(
-                f"SELECT discogs_albumid, id FROM albums "
-                f"WHERE discogs_albumid IN ({ph})",
-                discogs_candidates,
-            ).fetchall()
-            for discogs_id, album_id in rows:
-                # Key by the original string form so callers can
-                # round-trip their input back.
-                result[str(discogs_id)] = album_id
+        for release_id, identity in identities_by_release_id.items():
+            resolution = resolutions[identity]
+            if isinstance(resolution, CurrentBeetsUnique):
+                result[release_id] = resolution.album_id
 
         return result
 
@@ -514,55 +734,9 @@ class BeetsDB:
         if not mbids:
             return {}
 
-        # Split by ID shape so each id queries the columns it could possibly
-        # live in:
-        # - UUIDs → ``mb_albumid`` only (UUID format can't land in
-        #   ``discogs_albumid``, which is INTEGER).
-        # - Numerics → both ``discogs_albumid`` (newer imports) and
-        #   ``mb_albumid`` (legacy Discogs imports that predate
-        #   ``discogs_albumid`` being populated). Skipping ``mb_albumid``
-        #   for numerics would silently drop real on-disk matches for
-        #   older libraries — see lib/artist_compare.py and
-        #   docs/webui-primer.md for the duality contract.
-        # - Anything else falls through to ``mb_albumid`` (synthetic
-        #   fixture strings, manual edits).
-        mb_ids: list[str] = []
-        discogs_ids: list[int] = []
-        for raw in mbids:
-            source = detect_release_source(raw)
-            if source == "discogs":
-                try:
-                    discogs_ids.append(int(raw))
-                except ValueError:
-                    continue
-                # Also check mb_albumid as the TEXT value; covers legacy
-                # Discogs imports that stored the numeric ID there.
-                mb_ids.append(raw)
-            else:
-                mb_ids.append(raw)
-
-        result: dict[str, dict[str, object]] = {}
-
-        def _add_rows(rows: list[tuple[object, ...]]) -> None:
-            for r in rows:
-                if r[0] is None:
-                    continue
-                bitrate = r[3]
-                kbps = int(bitrate / 1000) if isinstance(bitrate, (int, float)) else None
-                avg_bitrate = r[4]
-                avg_kbps = (
-                    int(avg_bitrate / 1000)
-                    if isinstance(avg_bitrate, (int, float))
-                    else None
-                )
-                result[str(r[0])] = {
-                    "beets_tracks": r[1],
-                    "beets_format": r[2],
-                    "beets_bitrate": kbps,
-                    "beets_avg_bitrate": avg_kbps,
-                    "beets_samplerate": r[5],
-                    "beets_bitdepth": r[6],
-                }
+        album_ids_by_release = self._batch_lookup_album_ids(mbids)
+        if not album_ids_by_release:
+            return {}
 
         detail_cols = (
             "  (SELECT COUNT(*) FROM items WHERE album_id = a.id) AS track_count, "
@@ -574,23 +748,40 @@ class BeetsDB:
             "  (SELECT MAX(i.bitdepth) FROM items i WHERE i.album_id = a.id) AS bitdepth "
         )
 
-        if mb_ids:
-            ph = ",".join("?" for _ in mb_ids)
-            _add_rows(self._conn.execute(
-                f"SELECT a.mb_albumid, {detail_cols}"
-                f"FROM albums a WHERE a.mb_albumid IN ({ph})",
-                mb_ids,
-            ).fetchall())
-
-        if discogs_ids:
-            ph = ",".join("?" for _ in discogs_ids)
-            _add_rows(self._conn.execute(
-                f"SELECT a.discogs_albumid, {detail_cols}"
-                f"FROM albums a WHERE a.discogs_albumid IN ({ph})",
-                discogs_ids,
-            ).fetchall())
-
-        return result
+        album_ids = tuple(album_ids_by_release.values())
+        placeholders = ",".join("?" for _ in album_ids)
+        rows = self._conn.execute(
+            f"SELECT a.id, {detail_cols}"
+            f"FROM albums a WHERE a.id IN ({placeholders})",
+            album_ids,
+        ).fetchall()
+        detail_by_album_id: dict[int, dict[str, object]] = {}
+        for row in rows:
+            bitrate = row[3]
+            kbps = (
+                int(bitrate / 1000)
+                if isinstance(bitrate, (int, float))
+                else None
+            )
+            avg_bitrate = row[4]
+            avg_kbps = (
+                int(avg_bitrate / 1000)
+                if isinstance(avg_bitrate, (int, float))
+                else None
+            )
+            detail_by_album_id[int(row[0])] = {
+                "beets_tracks": row[1],
+                "beets_format": row[2],
+                "beets_bitrate": kbps,
+                "beets_avg_bitrate": avg_kbps,
+                "beets_samplerate": row[5],
+                "beets_bitdepth": row[6],
+            }
+        return {
+            release_id: detail_by_album_id[album_id]
+            for release_id, album_id in album_ids_by_release.items()
+            if album_id in detail_by_album_id
+        }
 
     def get_album_detail(self, album_id: int) -> Optional[dict[str, object]]:
         """Get full album metadata + track list. Returns None if not found."""
