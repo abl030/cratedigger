@@ -135,6 +135,10 @@ class CratediggerConfig:
     # absolutization is provided via `plex_path_map` instead.
     # See docs/solutions/runtime-errors/plex-partial-scan-silent-200.md.
     beets_directory: str = ""
+    # SQLite database paired with ``beets_directory`` by the shipped Beets
+    # config. Production readers must open both through ``open_beets_db``;
+    # neither path is independently authoritative.
+    beets_library_db: str = "/mnt/virtio/Music/beets-library.db"
 
     # Module-rendered beets runtime (tier-2 plan U5, R6). The NixOS module
     # renders these into config.ini so every beets subprocess resolves the
@@ -326,6 +330,9 @@ class CratediggerConfig:
             # Top-level `[Beets]` section (separate from `[Beets Validation]`
             # which exists for legacy reasons). Empty string → unset.
             beets_directory=get("Beets", "directory", ""),
+            beets_library_db=get(
+                "Beets", "library", "/mnt/virtio/Music/beets-library.db",
+            ),
             beets_config_dir=get("Beets", "config_dir", ""),
             beet_binary=get("Beets", "beet_binary", ""),
             beets_python=get("Beets", "python", ""),

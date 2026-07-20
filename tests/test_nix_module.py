@@ -339,9 +339,11 @@ class TestRenderedBeetsConfigContract(unittest.TestCase):
         self.assertIn("cratedigger-placeholder-token", text)
 
     def test_beets_runtime_keys_rendered_into_config_ini(self) -> None:
-        """[Beets] config_dir / beet_binary / python — the U5 seam values
-        every beets subprocess resolves (BEETSDIR + pinned interpreter)."""
+        """[Beets] carries the one DB/root pair plus the pinned runtime."""
         text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn("directory = ${cfg.beets.config.directory}", text)
+        self.assertNotIn("services.cratedigger.beets.directory", text)
+        self.assertIn("library = ${cfg.beets.config.library}", text)
         self.assertIn("config_dir = ${beetsConfigDir}", text)
         self.assertIn("beet_binary = ${pythonEnv}/bin/beet", text)
         self.assertIn("python = ${pythonEnv}/bin/python", text)
@@ -353,6 +355,7 @@ class TestRenderedBeetsConfigContract(unittest.TestCase):
         web_start = text.index('writeShellScriptBin "cratedigger-web"')
         web_block = text[web_start:web_start + 1200]
         self.assertIn('export BEETSDIR="${beetsConfigDir}"', web_block)
+        self.assertNotIn("--beets-db", web_block)
 
     def test_musicbrainz_defaults_are_public(self) -> None:
         """Stranger default = public MB (functional-but-slow, R13/U4 leg)."""

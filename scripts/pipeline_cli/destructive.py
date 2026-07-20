@@ -6,7 +6,9 @@ import argparse
 import json
 import sys
 
-from lib.beets_db import BeetsDB, DEFAULT_BEETS_DB
+import msgspec
+
+from lib.beets_db import BeetsDB, open_beets_db
 from lib.destructive_release_service import (
     BanSourceCleanupIncomplete,
     BanSourceImporterBusy,
@@ -31,20 +33,35 @@ from lib.destructive_release_service import (
 )
 
 
-def _beets_library_root() -> str:
-    from lib.config import read_runtime_config
-    return read_runtime_config().beets_directory
+class _BanSourceArgs(msgspec.Struct, frozen=True):
+    request_id: int
+    beets_db: str | None = None
+    beets_directory: str | None = None
+    release_id: str | None = None
 
 
-def _open_beets(path: str) -> BeetsDB:
-    return BeetsDB(path, library_root=_beets_library_root())
+class _LibraryDeleteArgs(msgspec.Struct, frozen=True):
+    album_id: int
+    beets_db: str | None = None
+    beets_directory: str | None = None
+    purge_pipeline: bool = False
+    pipeline_id: int | None = None
+    release_id: str | None = None
 
 
-def cmd_ban_source(db, args) -> int:
+def _open_beets(path: str | None, library_root: str | None) -> BeetsDB:
+    return open_beets_db(db_path=path, library_root=library_root)
+
+
+def cmd_ban_source(db, args: object) -> int:
     """Ban an exact source; preserve unsearchable or requeue as wanted."""
+    typed_args = msgspec.convert(vars(args), type=_BanSourceArgs)
     try:
-        beets = _open_beets(args.beets_db)
-    except FileNotFoundError as exc:
+        beets = _open_beets(
+            typed_args.beets_db,
+            typed_args.beets_directory,
+        )
+    except (FileNotFoundError, ValueError) as exc:
         print(json.dumps({"error": "beets_db_unavailable", "detail": str(exc)}))
         return 5
     with beets:
@@ -52,8 +69,8 @@ def cmd_ban_source(db, args) -> int:
             pipeline_db=db,
             beets_db=beets,
             request=BanSourceRequest(
-                request_id=int(args.request_id),
-                expected_release_id=args.release_id,
+                request_id=typed_args.request_id,
+                expected_release_id=typed_args.release_id,
             ),
         )
     if isinstance(result, BanSourceSuccess):
@@ -129,15 +146,19 @@ def cmd_ban_source(db, args) -> int:
 
 def cmd_library_delete(
     db,
-    args,
+    args: object,
     *,
     beets_delete_fn: BeetsDeleteFn | None = None,
     notify_fn: DeleteNotifyFn | None = None,
 ) -> int:
     """Delete one exact beets album with optional pipeline purge."""
+    typed_args = msgspec.convert(vars(args), type=_LibraryDeleteArgs)
     try:
-        beets = _open_beets(args.beets_db)
-    except FileNotFoundError as exc:
+        beets = _open_beets(
+            typed_args.beets_db,
+            typed_args.beets_directory,
+        )
+    except (FileNotFoundError, ValueError) as exc:
         print(json.dumps({"error": "beets_db_unavailable", "detail": str(exc)}))
         return 5
     with beets:
@@ -145,10 +166,10 @@ def cmd_library_delete(
             pipeline_db=db,
             beets_db=beets,
             request=DeleteRequest(
-                album_id=int(args.album_id),
-                purge_pipeline=bool(args.purge_pipeline),
-                expected_pipeline_id=args.pipeline_id,
-                expected_release_id=args.release_id,
+                album_id=typed_args.album_id,
+                purge_pipeline=typed_args.purge_pipeline,
+                expected_pipeline_id=typed_args.pipeline_id,
+                expected_release_id=typed_args.release_id,
             ),
             beets_delete_fn=beets_delete_fn,
             notify_fn=notify_fn,
@@ -243,7 +264,9 @@ def cmd_library_delete(
     raise AssertionError(f"Unhandled library-delete result: {result!r}")
 
 
-def add_destructive_subparsers(sub: argparse._SubParsersAction) -> None:
+def add_destructive_subparsers(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
     ban = sub.add_parser(
         "ban-source",
         help="Mark a request's server-resolved exact release as a bad rip, "
@@ -257,7 +280,14 @@ def add_destructive_subparsers(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Optional confirmation-only release ID; mismatch is rejected.",
     )
-    ban.add_argument("--beets-db", default=DEFAULT_BEETS_DB)
+    ban.add_argument(
+        "--beets-db", default=None,
+        help="Explicit Beets SQLite override; requires --beets-directory.",
+    )
+    ban.add_argument(
+        "--beets-directory", default=None,
+        help="Library root paired with --beets-db.",
+    )
 
     delete = sub.add_parser(
         "library-delete",
@@ -277,4 +307,11 @@ def add_destructive_subparsers(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Optional confirmation-only release ID.",
     )
-    delete.add_argument("--beets-db", default=DEFAULT_BEETS_DB)
+    delete.add_argument(
+        "--beets-db", default=None,
+        help="Explicit Beets SQLite override; requires --beets-directory.",
+    )
+    delete.add_argument(
+        "--beets-directory", default=None,
+        help="Library root paired with --beets-db.",
+    )

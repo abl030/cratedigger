@@ -766,7 +766,7 @@ class TestImportPreviewPath(unittest.TestCase):
             fake_beets = FakeBeetsDB()
             fake_beets.set_album_info("mbid-42", AlbumInfo(
                 album_id=1,
-                track_count=1,
+                track_count=3,
                 min_bitrate_kbps=186,
                 avg_bitrate_kbps=194,
                 median_bitrate_kbps=194,

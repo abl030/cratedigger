@@ -458,6 +458,36 @@ class BeetsWorld:
     ) -> LibraryAlbumSnapshot:
         """Import an already-staged candidate through real Beets models."""
 
+        return self._import_staged_release(
+            release,
+            source_dir,
+            replace_duplicates=True,
+        )
+
+    def import_duplicate_release(
+        self,
+        release: BeetsWorldRelease,
+        *,
+        source_dir: str | os.PathLike[str] | None = None,
+    ) -> LibraryAlbumSnapshot:
+        """Add another exact-identity album without duplicate convergence."""
+
+        source_path = self.stage_release(release, source_dir=source_dir)
+        return self._import_staged_release(
+            release,
+            source_path,
+            replace_duplicates=False,
+        )
+
+    def _import_staged_release(
+        self,
+        release: BeetsWorldRelease,
+        source_dir: str | os.PathLike[str],
+        *,
+        replace_duplicates: bool,
+    ) -> LibraryAlbumSnapshot:
+        """Shared real-Beets add/move operation for ordinary and duplicate worlds."""
+
         source_path = Path(source_dir)
         identity_values = self._release_identity_values(release.release_id)
         items: list[beets_library.Item] = []
@@ -491,10 +521,180 @@ class BeetsWorld:
             if self._album_release_id(album) == release.release_id
         ]
         album = self.library.add_album(items)
-        for duplicate in duplicate_albums:
-            duplicate.remove(delete=True)
+        if replace_duplicates:
+            for duplicate in duplicate_albums:
+                duplicate.remove(delete=True)
         album.move(MoveOperation.MOVE)
         return self.snapshot_album(album)
+
+    def set_discogs_identity_layout(
+        self,
+        release_id: str,
+        *,
+        legacy: bool,
+    ) -> None:
+        """Store one Discogs identity in its modern or legacy Beets column."""
+
+        matches = [
+            album
+            for album in self.library.albums()
+            if self._album_release_id(album) == release_id
+        ]
+        if len(matches) != 1:
+            raise AssertionError(
+                f"identity layout release must resolve once: "
+                f"{release_id!r} -> {len(matches)}"
+            )
+        album = matches[0]
+        if legacy:
+            album.mb_albumid = release_id
+            album.discogs_albumid = 0
+        else:
+            album.mb_albumid = ""
+            album.discogs_albumid = int(release_id)
+        album.store()
+
+    def set_conflicting_discogs_identities(
+        self,
+        release_id: str,
+        *,
+        conflicting_release_id: str,
+    ) -> None:
+        """Poison one album with two different numeric Discogs identities."""
+
+        matches = [
+            album
+            for album in self.library.albums()
+            if self._album_release_id(album) == release_id
+        ]
+        if not matches:
+            raise AssertionError(
+                f"conflict release must resolve at least once: "
+                f"{release_id!r} -> {len(matches)}"
+            )
+        album = sorted(matches, key=lambda candidate: int(candidate.id))[0]
+        album.mb_albumid = release_id
+        album.discogs_albumid = int(conflicting_release_id)
+        album.store()
+
+    def set_release_item_path(
+        self,
+        release_id: str,
+        path: bytes | None,
+    ) -> None:
+        """Store an exact raw Beets item path for poisoned-topology worlds."""
+
+        matches = [
+            album
+            for album in self.library.albums()
+            if self._album_release_id(album) == release_id
+        ]
+        if len(matches) != 1:
+            raise AssertionError(
+                f"path release must resolve once: "
+                f"{release_id!r} -> {len(matches)}"
+            )
+        items = list(matches[0].items())
+        if not items:
+            raise AssertionError("path mutation release has no Beets items")
+        items[0].path = path  # type: ignore[assignment]
+        items[0].store()
+
+    def set_release_paths_relative(self, release_id: str) -> None:
+        """Rewrite one exact album's item rows to Beets-root-relative paths."""
+
+        matches = [
+            album
+            for album in self.library.albums()
+            if self._album_release_id(album) == release_id
+        ]
+        if len(matches) != 1:
+            raise AssertionError(
+                f"relative-path release must resolve once: "
+                f"{release_id!r} -> {len(matches)}"
+            )
+        for item in matches[0].items():
+            absolute = Path(self._absolute_path(item.path))
+            item.path = os.fsencode(absolute.relative_to(self.library_root))
+            item.store()
+
+    def relocate_release_out_of_band(
+        self,
+        release_id: str,
+        destination: str | os.PathLike[str],
+        *,
+        store_relative_paths: bool,
+    ) -> LibraryAlbumSnapshot:
+        """Move one exact album and update Beets without pipeline participation."""
+
+        matches = [
+            album
+            for album in self.library.albums()
+            if self._album_release_id(album) == release_id
+        ]
+        if len(matches) != 1:
+            raise AssertionError(
+                f"relocation release must resolve once: "
+                f"{release_id!r} -> {len(matches)}"
+            )
+        album = matches[0]
+        items = list(album.items())
+        if not items:
+            raise AssertionError("relocation release has no Beets items")
+        old_parent = Path(self._absolute_path(items[0].path)).parent
+        destination_path = Path(destination)
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        old_parent.rename(destination_path)
+        for item in items:
+            old_path = Path(self._absolute_path(item.path))
+            moved = destination_path / old_path.name
+            stored = (
+                moved.relative_to(self.library_root)
+                if store_relative_paths
+                else moved
+            )
+            item.path = os.fsencode(stored)
+            item.store()
+        return self.snapshot_album(album)
+
+    def split_release_topology(self, release_id: str) -> None:
+        """Move one item to another directory, leaving a split exact album."""
+
+        matches = [
+            album
+            for album in self.library.albums()
+            if self._album_release_id(album) == release_id
+        ]
+        if len(matches) != 1:
+            raise AssertionError(
+                f"split release must resolve once: {release_id!r} -> {len(matches)}"
+            )
+        items = list(matches[0].items())
+        if len(items) < 2:
+            raise AssertionError("split topology requires at least two items")
+        item = items[-1]
+        old_path = Path(self._absolute_path(item.path))
+        split_dir = self.library_root / "split-topology" / release_id
+        split_dir.mkdir(parents=True, exist_ok=True)
+        new_path = split_dir / old_path.name
+        old_path.rename(new_path)
+        item.path = os.fsencode(new_path)
+        item.store()
+
+    def empty_release_topology(self, release_id: str) -> None:
+        """Remove every item row while retaining the exact album row."""
+
+        matches = [
+            album
+            for album in self.library.albums()
+            if self._album_release_id(album) == release_id
+        ]
+        if len(matches) != 1:
+            raise AssertionError(
+                f"empty release must resolve once: {release_id!r} -> {len(matches)}"
+            )
+        for item in list(matches[0].items()):
+            item.remove(delete=False, with_album=False)
 
     def remove_release(self, release_id: str) -> int:
         """Delete every exact-release album through Beets' real model API."""

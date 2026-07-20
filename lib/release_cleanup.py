@@ -176,7 +176,10 @@ def remove_album_by_selectors(
                 failures.append(failure)
 
     after = beets_db.locate(release_id)
-    absent_after = after.kind != "exact"
+    # Ambiguity is not absence. Treating any non-exact result as absent would
+    # let a duplicate or unusable topology clear pipeline state even though
+    # Beets still owns matching rows.
+    absent_after = after.kind == "absent"
     beets_removed = album_was_in_beets and absent_after
 
     return ReleaseCleanupResult(

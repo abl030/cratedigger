@@ -11,10 +11,12 @@ import sys
 import tempfile
 import unittest
 from contextlib import closing
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from lib.beets_db import BeetsDB, AlbumInfo
+from lib.beets_db import AlbumInfo, BeetsDB, open_beets_db
+from lib.config import CratediggerConfig
 from lib.quality import QualityRankConfig
 
 
@@ -137,6 +139,42 @@ class TestBeetsDBConnection(unittest.TestCase):
     def test_context_manager(self) -> None:
         with BeetsDB(self.db_path) as db:
             self.assertIsNotNone(db)
+
+    def test_zero_argument_constructor_opens_runtime_db_root_pair(self) -> None:
+        cfg = CratediggerConfig(
+            beets_library_db=self.db_path,
+            beets_directory="/runtime/library",
+        )
+        with patch("lib.config.read_runtime_config", return_value=cfg):
+            with BeetsDB() as db:
+                self.assertEqual(db.library_db_path, self.db_path)
+                self.assertEqual(db.library_root, "/runtime/library")
+
+    def test_factory_rejects_each_half_of_an_explicit_override(self) -> None:
+        with self.assertRaisesRegex(ValueError, "supplied together"):
+            open_beets_db(db_path=self.db_path)
+        with self.assertRaisesRegex(ValueError, "supplied together"):
+            open_beets_db(library_root="/explicit/library")
+
+    def test_factory_rejects_runtime_config_mixed_with_explicit_paths(self) -> None:
+        cfg = CratediggerConfig(
+            beets_library_db=self.db_path,
+            beets_directory="/runtime/library",
+        )
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            open_beets_db(
+                cfg,
+                db_path=self.db_path,
+                library_root="/explicit/library",
+            )
+
+    def test_factory_opens_an_explicit_database_root_pair(self) -> None:
+        with open_beets_db(
+            db_path=self.db_path,
+            library_root="/explicit/library",
+        ) as db:
+            self.assertEqual(db.library_db_path, self.db_path)
+            self.assertEqual(db.library_root, "/explicit/library")
 
 
 class TestAlbumAndItemsAbsent(unittest.TestCase):
@@ -441,8 +479,8 @@ class TestLocate(unittest.TestCase):
         self.assertEqual(loc.kind, "absent")
         self.assertEqual(loc.selectors, ())
 
-    def test_release_location_kind_literal_is_exact_or_absent(self) -> None:
-        """``ReleaseLocation.kind`` is narrowed to 2 states (issue #123).
+    def test_release_location_kind_literal_includes_ambiguity(self) -> None:
+        """``ReleaseLocation.kind`` includes fail-closed exact ambiguity.
 
         Pyright enforces the Literal at static time; this runtime guard
         asserts the ``__args__`` of the annotation so a future
@@ -453,7 +491,7 @@ class TestLocate(unittest.TestCase):
         from lib.beets_db import ReleaseLocation
         hints = get_type_hints(ReleaseLocation)
         kind_args = get_args(hints["kind"])
-        self.assertEqual(set(kind_args), {"exact", "absent"})
+        self.assertEqual(set(kind_args), {"exact", "absent", "ambiguous"})
 
 
 class TestCheckMbidsDiscogsAware(unittest.TestCase):
@@ -549,9 +587,12 @@ class TestBatchLookupAlbumIds(unittest.TestCase):
             "12856590": 3,
         })
 
-    def test_uses_at_most_two_queries(self) -> None:
-        """No N+1: regardless of batch size, at most 2 SQL round-trips
-        (one ``mb_albumid IN (...)``, one ``discogs_albumid IN (...)``).
+    def test_public_identity_wrappers_use_one_joined_snapshot_query(self) -> None:
+        """No N+1 or torn read: every identity lookup uses one SELECT.
+
+        Identity cardinality and item topology must come from the same SQLite
+        statement. Separate SELECTs could straddle a concurrent Beets move and
+        return a path set that never existed with the observed album rows.
 
         This is the Codex round 2 latency guard — the browse overlays
         call ``check_beets_library`` on whole release-group result sets,
@@ -573,14 +614,29 @@ class TestBatchLookupAlbumIds(unittest.TestCase):
 
         with BeetsDB(self.db_path) as db:
             db._conn = _TrackingConn(db._conn)  # type: ignore[assignment]
-            db._batch_lookup_album_ids(
-                ["aaa-111", "bbb-222", "12856590", "5555555",
-                 "missing-1", "missing-2", "missing-3"])
-
-        self.assertLessEqual(
-            len(calls), 2,
-            f"_batch_lookup_album_ids must issue at most 2 queries, "
-            f"got {len(calls)}: {calls}")
+            operations = {
+                "batch ids": lambda: db._batch_lookup_album_ids([
+                    "aaa-111", "bbb-222", "12856590", "5555555",
+                    "missing-1", "missing-2", "missing-3",
+                ]),
+                "album info": lambda: db.get_album_info(
+                    "aaa-111", QualityRankConfig.defaults(),
+                ),
+                "minimum bitrate": lambda: db.get_min_bitrate("aaa-111"),
+                "average bitrate": lambda: db.get_avg_bitrate_kbps("aaa-111"),
+                "item paths": lambda: db.get_item_paths("aaa-111"),
+                "tracks": lambda: db.get_tracks_by_mb_release_id("aaa-111"),
+                "batch detail": lambda: db.check_mbids_detail(["aaa-111"]),
+            }
+            for label, operation in operations.items():
+                with self.subTest(operation=label):
+                    calls.clear()
+                    operation()
+                    self.assertEqual(
+                        len(calls), 1,
+                        f"{label} must issue one snapshot query, "
+                        f"got {len(calls)}: {calls}",
+                    )
 
     def test_empty_input(self) -> None:
         with BeetsDB(self.db_path) as db:
@@ -704,19 +760,16 @@ class TestGetAlbumInfo(unittest.TestCase):
         assert info is not None
         self.assertEqual(info.album_path, "/music/Foo/Bar")
 
-    def test_relative_paths_unchanged_without_library_root(self) -> None:
-        """Backwards compat: no library_root means no absolutization.
-
-        Existing call sites that don't pass ``library_root`` keep the
-        old contract — they still get whatever beets stored.
-        """
+    def test_relative_paths_without_library_root_fail_closed(self) -> None:
+        """A relative item cannot authorize a current path without its root."""
         _insert_album(self.db_path, 9, "rel-2", [
             (192000, "Artist/Album/01.mp3"),
         ])
         with BeetsDB(self.db_path) as db:
             info = db.get_album_info("rel-2", self.cfg)
-        assert info is not None
-        self.assertEqual(info.album_path, "Artist/Album")
+        self.assertIsNone(info)
+        with BeetsDB(self.db_path) as db:
+            self.assertEqual(db.locate("rel-2").kind, "ambiguous")
 
     def test_vbr_album(self) -> None:
         _insert_album(self.db_path, 2, "def-456", [

@@ -69,7 +69,6 @@
     web = {
       enable = true;
       port = 8085;
-      beetsDb = "/srv/music/beets-library.db";
     };
 
     # --- Mirrors: all optional ----------------------------------------

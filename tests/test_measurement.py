@@ -161,7 +161,7 @@ class TestAttemptSpectralAudit(unittest.TestCase):
             beets = FakeBeetsDB()
             beets.set_album_info("mbid", AlbumInfo(
                 album_id=1,
-                track_count=1,
+                track_count=3,
                 min_bitrate_kbps=122,
                 avg_bitrate_kbps=127,
                 median_bitrate_kbps=127,

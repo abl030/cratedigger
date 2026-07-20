@@ -18,7 +18,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from lib.beets_db import BeetsDB
+from lib.beets_db import BeetsDB, open_beets_db
 from lib.pipeline_db import PipelineDB
 
 # No hardcoded fallback (#479): the nspawn DB has moved before (last time
@@ -86,8 +86,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dsn", default=DEFAULT_DSN,
                         help="PostgreSQL DSN for the pipeline DB")
-    parser.add_argument("--beets-db", default="/mnt/virtio/Music/beets-library.db",
-                        help="Path to beets-library.db")
+    parser.add_argument(
+        "--beets-db", default=None,
+        help="Explicit Beets SQLite override; requires --beets-directory.",
+    )
+    parser.add_argument(
+        "--beets-directory", default=None,
+        help="Library root paired with --beets-db.",
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true",
                       help="Print ghost rows without deleting them (default)")
@@ -102,7 +108,10 @@ def main() -> int:
 
     db = PipelineDB(args.dsn)
     try:
-        with BeetsDB(args.beets_db) as beets:
+        with open_beets_db(
+            db_path=args.beets_db,
+            library_root=args.beets_directory,
+        ) as beets:
             if args.apply:
                 return cmd_apply(db, beets)
             return cmd_scan(db, beets)

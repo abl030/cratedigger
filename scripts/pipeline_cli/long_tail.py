@@ -29,7 +29,7 @@ def _cli_band_fn(release_ids):
     unreachable every id bands ``"missing"`` (no on-disk copy to upgrade
     is the honest fallback).
     """
-    from lib.beets_db import BeetsDB
+    from lib.beets_db import open_beets_db
     from lib.banding import band_from_detail, load_rank_config
 
     ids_list = [str(rid) for rid in release_ids]
@@ -37,7 +37,7 @@ def _cli_band_fn(release_ids):
         return {}
     cfg = load_rank_config()
     try:
-        with BeetsDB() as beets:
+        with open_beets_db() as beets:
             in_library = beets.check_mbids(ids_list)
             quality = (
                 beets.check_mbids_detail(list(in_library))

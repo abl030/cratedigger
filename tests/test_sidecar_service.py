@@ -73,7 +73,7 @@ class _SidecarServiceCase(unittest.TestCase):
                 album_id=1,
                 track_count=2,
                 min_bitrate_kbps=900,
-                is_cbr=False,
+                is_cbr=True,
                 album_path=self.album_path,
             ),
         )
@@ -239,7 +239,7 @@ class TestWriteSidecarSkips(_SidecarServiceCase):
                 album_id=1,
                 track_count=1,
                 min_bitrate_kbps=900,
-                is_cbr=False,
+                is_cbr=True,
                 album_path=os.path.join(self.tmp.name, "does", "not", "exist"),
             ),
         )

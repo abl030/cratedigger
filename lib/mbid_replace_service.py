@@ -215,8 +215,8 @@ def _default_discogs_lookup(
 def _default_beets_db_factory() -> Any:
     """Default beets DB factory — production callers pass an explicit
     factory but tests and CLI scripts use this fallback."""
-    from lib.beets_db import BeetsDB
-    return BeetsDB()
+    from lib.beets_db import open_beets_db
+    return open_beets_db()
 
 
 class MbidReplaceService:

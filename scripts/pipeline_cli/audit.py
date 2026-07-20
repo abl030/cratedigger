@@ -7,18 +7,18 @@ import json
 
 import msgspec
 
-from lib.beets_db import BeetsDB, DEFAULT_BEETS_DB
+from lib.beets_db import BeetsDB, open_beets_db
 from lib.world_audit_service import WorldAuditReport, audit_world
 
 
-def _beets_library_root() -> str:
-    from lib.config import read_runtime_config
+class _AuditWorldArgs(msgspec.Struct, frozen=True):
+    beets_db: str | None = None
+    beets_directory: str | None = None
+    json: bool = False
 
-    return read_runtime_config().beets_directory
 
-
-def _open_beets(path: str) -> BeetsDB:
-    return BeetsDB(path, library_root=_beets_library_root())
+def _open_beets(path: str | None, library_root: str | None) -> BeetsDB:
+    return open_beets_db(db_path=path, library_root=library_root)
 
 
 def _render_text(report: WorldAuditReport) -> None:
@@ -41,11 +41,15 @@ def _render_text(report: WorldAuditReport) -> None:
         print(f"{violation.code}: {violation.detail}")
 
 
-def cmd_audit_world(db, args: argparse.Namespace) -> int:
+def cmd_audit_world(db, args: object) -> int:
     """Run the shared world invariant bank without mutating either store."""
+    typed_args = msgspec.convert(vars(args), type=_AuditWorldArgs)
     try:
-        beets = _open_beets(args.beets_db)
-    except FileNotFoundError as exc:
+        beets = _open_beets(
+            typed_args.beets_db,
+            typed_args.beets_directory,
+        )
+    except (FileNotFoundError, ValueError) as exc:
         print(json.dumps({
             "error": "beets_db_unavailable",
             "detail": str(exc),
@@ -53,14 +57,16 @@ def cmd_audit_world(db, args: argparse.Namespace) -> int:
         return 5
     with beets:
         report = audit_world(db, beets)
-    if args.json:
+    if typed_args.json:
         print(json.dumps(msgspec.to_builtins(report), indent=2))
     else:
         _render_text(report)
     return 0 if report.status == "clean" else 1
 
 
-def add_audit_subparser(sub: argparse._SubParsersAction) -> None:
+def add_audit_subparser(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
     audit = sub.add_parser(
         "audit",
         help="Run read-only cross-engine invariant audits.",
@@ -70,7 +76,16 @@ def add_audit_subparser(sub: argparse._SubParsersAction) -> None:
         "world",
         help="Audit PipelineDB, Beets, and library-disk coherence.",
     )
-    world.add_argument("--beets-db", default=DEFAULT_BEETS_DB)
+    world.add_argument(
+        "--beets-db",
+        default=None,
+        help="Explicit Beets SQLite override; requires --beets-directory.",
+    )
+    world.add_argument(
+        "--beets-directory",
+        default=None,
+        help="Library root paired with --beets-db.",
+    )
     world.add_argument(
         "--json",
         action="store_true",

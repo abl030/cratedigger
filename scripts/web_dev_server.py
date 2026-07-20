@@ -75,6 +75,7 @@ class DevConfig:
     discogs_api: str | None
     redis_host: str | None
     redis_port: int
+    beets_directory: str | None = None
 
     @property
     def badge_text(self) -> str:
@@ -412,6 +413,9 @@ def configure_live_db(config: DevConfig) -> None:
     # None and the path set, `_beets_db()` opens per-thread read-only
     # handles exactly like production.
     web_server.beets_db_path = config.beets_db
+    if config.beets_db is not None:
+        assert config.beets_directory is not None
+        web_server.beets_library_root = config.beets_directory
     web_server._beets = None
 
     if config.redis_host:
@@ -429,6 +433,7 @@ def build_config(args: argparse.Namespace) -> DevConfig:
         discogs_api=args.discogs_api,
         redis_host=args.redis_host,
         redis_port=args.redis_port,
+        beets_directory=getattr(args, "beets_directory", None),
     )
 
 
@@ -457,6 +462,14 @@ def main() -> None:
     parser.add_argument("--dsn", default=os.environ.get("PIPELINE_DB_DSN"))
     parser.add_argument("--beets-db", default=os.environ.get("BEETS_DB_PATH"))
     parser.add_argument(
+        "--beets-directory",
+        default=os.environ.get("BEETS_DIRECTORY"),
+        help=(
+            "Library root paired with --beets-db. Defaults to the runtime "
+            "[Beets] directory when an explicit DB override is supplied."
+        ),
+    )
+    parser.add_argument(
         "--mb-api",
         default=None,
         help=(
@@ -475,6 +488,10 @@ def main() -> None:
     parser.add_argument("--redis-host", default=None)
     parser.add_argument("--redis-port", type=int, default=6379)
     args = parser.parse_args()
+    if (args.beets_db is None) != (args.beets_directory is None):
+        parser.error(
+            "--beets-db and --beets-directory must be supplied together"
+        )
 
     config = build_config(args)
     server = create_server(args.host, args.port, config)

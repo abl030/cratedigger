@@ -317,6 +317,7 @@ class WebDevServerLiveDbMetadataIntegrationTest(unittest.TestCase):
             web.server.db,
             web.server._try_reconnect_db,
             web.server.beets_db_path,
+            web.server.beets_library_root,
             web.server._beets,
         )
         self.running: list[tuple[ThreadingHTTPServer, threading.Thread]] = []
@@ -337,6 +338,7 @@ class WebDevServerLiveDbMetadataIntegrationTest(unittest.TestCase):
             self.web_server.db,
             self.web_server._try_reconnect_db,
             self.web_server.beets_db_path,
+            self.web_server.beets_library_root,
             self.web_server._beets,
         ) = self.saved_server
         (
@@ -463,7 +465,8 @@ class ConfigureLiveDbReadOnlyTest(unittest.TestCase):
         self.web_server = web_server
         self._saved = (
             web_server._db_dsn, web_server.db, web_server._try_reconnect_db,
-            web_server.beets_db_path, web_server._beets,
+            web_server.beets_db_path, web_server.beets_library_root,
+            web_server._beets,
         )
 
     def tearDown(self) -> None:
@@ -474,7 +477,7 @@ class ConfigureLiveDbReadOnlyTest(unittest.TestCase):
             except Exception:
                 pass
         (ws._db_dsn, ws.db, ws._try_reconnect_db,
-         ws.beets_db_path, ws._beets) = self._saved
+         ws.beets_db_path, ws.beets_library_root, ws._beets) = self._saved
 
     def test_live_db_session_rejects_writes_through_db_accessor(self):
         import psycopg2
@@ -485,11 +488,12 @@ class ConfigureLiveDbReadOnlyTest(unittest.TestCase):
             scenario="peers",
             prod_base_url="https://music.ablz.au",
             dsn=self.dsn,
-            beets_db=None,
+            beets_db="/tmp/dev-beets.db",
             mb_api=None,
             discogs_api=None,
             redis_host=None,
             redis_port=6379,
+            beets_directory="/tmp/dev-library",
         )
         configure_live_db(config)
         ws = self.web_server
@@ -498,6 +502,8 @@ class ConfigureLiveDbReadOnlyTest(unittest.TestCase):
         # read-only handle instead of opening per-thread connections.
         self.assertEqual(ws._db_dsn, self._saved[0])
         self.assertIs(ws._db(), ws.db)
+        self.assertEqual(ws.beets_db_path, "/tmp/dev-beets.db")
+        self.assertEqual(ws.beets_library_root, "/tmp/dev-library")
 
         with self.assertRaises(psycopg2.Error):
             ws._db()._execute(
