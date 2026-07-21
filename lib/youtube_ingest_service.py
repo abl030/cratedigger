@@ -64,6 +64,62 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def _json_list(value: object) -> list[object]:
+    """Narrow an untyped MB/YT JSON (or JSONB row) value to a plain list.
+
+    ``isinstance(value, list)`` alone leaves pyright with a partially-
+    unknown ``list[Unknown]`` even when ``value`` was already fully
+    known — strict mode never lets an ``isinstance`` narrowing inherit
+    a generic's type argument. Routing through ``msgspec.convert`` gives
+    every caller a fully known ``list[object]`` back, with no change to
+    the elements themselves (each stays the exact same object —
+    verified: ``msgspec.convert`` does not copy or coerce elements at
+    ``object`` value type). A non-list value returns ``[]`` — graceful
+    narrowing, never an assertion, per this module's external-JSON
+    contract (a malformed field degrades to absent, it never crashes
+    the ingest path).
+
+    Callers must pass a freshly-evaluated expression (e.g. a ``dict``
+    subscript/``.get()``), not an already ``isinstance``-narrowed local
+    — the narrowing taint survives even at this declared ``object``
+    parameter, same as it survives at the call site itself. Use
+    ``_is_dict_like``/an explicit re-check when a loop needs to gate on
+    dict-ness before calling this helper.
+    """
+    if not isinstance(value, list):
+        return []
+    return msgspec.convert(value, type=list[object])
+
+
+def _json_dict(value: object) -> dict[str, object]:
+    """Narrow an untyped MB/YT JSON (or JSONB row) value to a plain
+    string-keyed dict.
+
+    Dict counterpart of ``_json_list`` — see its docstring for why the
+    ``msgspec.convert`` indirection is needed, why callers must pass a
+    fresh expression rather than an already-narrowed local, and why a
+    non-dict value gracefully returns ``{}`` rather than asserting.
+    """
+    if not isinstance(value, dict):
+        return {}
+    return msgspec.convert(value, type=dict[str, object])
+
+
+def _is_dict_like(value: object) -> bool:
+    """``isinstance(value, dict)`` behind a plain function boundary.
+
+    A loop that needs to gate on "is this entry a dict" *before* calling
+    ``_json_dict`` can't use a bare ``isinstance`` check as the gate:
+    pyright narrows the loop variable to a partially-unknown
+    ``dict[Unknown, Unknown]``, which then taints the ``_json_dict``
+    call even at its declared ``object`` parameter. A plain (non-
+    ``TypeGuard``) function does the identical runtime check without
+    pyright narrowing the caller's variable, so the loop variable stays
+    cleanly ``object``-typed all the way into ``_json_dict``.
+    """
+    return isinstance(value, dict)
+
+
 # ---------------------------------------------------------------------------
 # Outcome vocabulary — shared with CLI (U4) and HTTP route (U5).
 # ---------------------------------------------------------------------------
@@ -473,7 +529,7 @@ def default_mb_track_count_from_mirror(mbid: str) -> Optional[int]:
     tracks = release.get("tracks")
     if not isinstance(tracks, list):
         return None
-    return len(tracks)
+    return len(_json_list(release.get("tracks")))
 
 
 def default_youtube_ingest_service_factory(pdb: _PipelineDB) -> "YoutubeIngestService":
@@ -1237,10 +1293,11 @@ class YoutubeIngestService:
         whose historical ``mbid`` key matches ``target_release_id``. The
         key name is retained by the resolver for both MB and Discogs rows.
         """
-        distances = mapping_row.get("distances") or []
-        for entry in distances:
-            if not isinstance(entry, dict):
+        distances = _json_list(mapping_row.get("distances"))
+        for entry_raw in distances:
+            if not _is_dict_like(entry_raw):
                 continue
+            entry = _json_dict(entry_raw)
             if str(entry.get("mbid") or "") == target_release_id:
                 return entry
         return None
@@ -1384,9 +1441,10 @@ def _mapping_row_id(mapping_row: dict[str, Any]) -> Optional[int]:
 
 def _per_track_video_ids(mapping_row: dict[str, Any]) -> Optional[list[str]]:
     ids: list[str] = []
-    for track in mapping_row.get("yt_tracks") or []:
-        if not isinstance(track, dict):
+    for track_raw in _json_list(mapping_row.get("yt_tracks")):
+        if not _is_dict_like(track_raw):
             continue
+        track = _json_dict(track_raw)
         raw = track.get("video_id")
         if raw is None:
             raw = track.get("videoId")
@@ -1397,11 +1455,11 @@ def _per_track_video_ids(mapping_row: dict[str, Any]) -> Optional[list[str]]:
 
 def _download_log_id_from_import_job(job: Any) -> Optional[int]:
     payload = getattr(job, "payload", None)
-    if isinstance(payload, dict):
-        raw = payload.get("download_log_id")
+    if _is_dict_like(payload):
+        raw = _json_dict(payload).get("download_log_id")
         if isinstance(raw, int):
             return raw
-        if raw is not None:
+        if isinstance(raw, (str, float)):
             try:
                 return int(raw)
             except (TypeError, ValueError):

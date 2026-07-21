@@ -45,11 +45,15 @@ class SearchResult:
     album_id: int
     success: bool
     # username -> filetype -> [dirs] (same shape as search_cache[album_id])
-    cache_entries: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    cache_entries: dict[str, dict[str, list[str]]] = field(
+        default_factory=dict[str, dict[str, list[str]]]
+    )
     # username -> upload speed
-    upload_speeds: dict[str, int] = field(default_factory=dict)
+    upload_speeds: dict[str, int] = field(default_factory=dict[str, int])
     # username -> dir -> audio file count (for pre-filtering before browse)
-    dir_audio_counts: dict[str, dict[str, int]] = field(default_factory=dict)
+    dir_audio_counts: dict[str, dict[str, int]] = field(
+        default_factory=dict[str, dict[str, int]]
+    )
     query: str = ""
     result_count: int | None = None
     elapsed_s: float = 0.0
@@ -151,7 +155,7 @@ def strip_stopwords(tokens: list[str]) -> list[str]:
     return [t for t in tokens if t.lower() not in STOPWORDS]
 
 
-def strip_special_chars(text):
+def strip_special_chars(text: str) -> str:
     """Remove punctuation that poisons Soulseek searches.
 
     Keeps only alphanumeric characters, hyphens, and whitespace.
@@ -196,7 +200,7 @@ def _normalize_query_tokens(
     return fallback
 
 
-def wildcard_artist_tokens(artist_tokens):
+def wildcard_artist_tokens(artist_tokens: list[str]) -> list[str]:
     """Replace the first character of each artist token with *.
 
     Bypasses Soulseek's server-side artist name bans.
@@ -214,7 +218,7 @@ def wildcard_artist_tokens(artist_tokens):
     ``docs/brainstorms/2026-05-25-search-plan-iteration-2-requirements.md``
     for the full discussion and the trade-off against precision loss.
     """
-    result = []
+    result: list[str] = []
     for t in artist_tokens:
         if len(t) > 1:
             result.append("*" + t[1:])
@@ -222,7 +226,9 @@ def wildcard_artist_tokens(artist_tokens):
     return result
 
 
-def cap_tokens(tokens, max_tokens=MAX_SEARCH_TOKENS):
+def cap_tokens(
+    tokens: list[str], max_tokens: int = MAX_SEARCH_TOKENS,
+) -> list[str]:
     """Keep the most distinctive tokens, cap at max count.
 
     Drops the shortest (most common/ambiguous) tokens first,
@@ -235,8 +241,8 @@ def cap_tokens(tokens, max_tokens=MAX_SEARCH_TOKENS):
     kept = sorted(tokens, key=len, reverse=True)[:max_tokens]
 
     # Restore original order, handling duplicates
-    seen = {}
-    ordered = []
+    seen: dict[str, int] = {}
+    ordered: list[str] = []
     for t in tokens:
         count = seen.get(t, 0)
         if count < kept.count(t):
@@ -523,7 +529,7 @@ class SearchPlanItem:
     # Per-item provenance (e.g. source_track_index for track slots, repeat
     # ordinal within the repeat group for default slots). Bounded — small
     # JSON-serialisable dict.
-    provenance: dict[str, Any] = field(default_factory=dict)
+    provenance: dict[str, Any] = field(default_factory=dict[str, object])
 
 
 @dataclass(frozen=True)
@@ -553,7 +559,7 @@ class SearchPlan:
     #     digging into per-item provenance.
     #   - `snapshot_signature`: small subset of input (artist, title, year,
     #     track_count, redownload) so failed plans remain debuggable.
-    provenance: dict[str, Any] = field(default_factory=dict)
+    provenance: dict[str, Any] = field(default_factory=dict[str, object])
     failure_reason: str | None = None
 
 
@@ -565,7 +571,7 @@ class _Candidate:
     repeat_group: str
     query: str | None  # None when generation produced no runnable query
     omit_reason: str | None  # None when query is runnable
-    extra_provenance: dict[str, Any] = field(default_factory=dict)
+    extra_provenance: dict[str, Any] = field(default_factory=dict[str, object])
 
 
 def _canonical_query_key(query: str) -> str:
