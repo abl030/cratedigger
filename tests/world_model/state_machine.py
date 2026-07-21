@@ -206,6 +206,108 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
             self.assertEqual(linked.source_path, capture_path)
             world.assert_invariants()
 
+    def test_import_and_force_route_through_preview_ownership(self) -> None:
+        """Both lifecycle imports reach the importer via the real preview worker.
+
+        The ordinary and force paths enqueue, then hand the job to the real
+        ``process_claimed_preview_job``; a matching content snapshot must take
+        the front-gate reuse fast path (no full preview, no candidate
+        re-analysis) before the importer can claim it. This is the pin half of
+        the reuse pair whose generated property is
+        ``TestGeneratedCandidateEvidenceReuseWorld``.
+        """
+
+        assert TEST_DSN is not None
+        with LifecycleWorld(TEST_DSN, repository_root()) as world:
+            automation_id = world.add_release(BeetsWorldRelease(
+                release_id="23000000-0000-4000-8000-000000000001",
+                artist="Preview Ownership",
+                album="Automation Reuse",
+                year=2003,
+                codec="mp3",
+            ))
+            self.assertTrue(world.import_request(automation_id, codec="mp3"))
+            automation_boundary = world._last_preview_boundary
+            assert automation_boundary is not None
+            self.assertEqual(automation_boundary.candidate_status, "reused")
+            self.assertEqual(automation_boundary.full_preview_calls, 0)
+            self.assertEqual(automation_boundary.analyzer_paths, ())
+
+            force_id = world.add_release(BeetsWorldRelease(
+                release_id="23000000-0000-4000-8000-000000000002",
+                artist="Preview Ownership",
+                album="Force Reuse",
+                year=2003,
+                codec="mp3",
+            ))
+            self.assertTrue(world.force_import_request(force_id, codec="mp3"))
+            force_boundary = world._last_preview_boundary
+            assert force_boundary is not None
+            self.assertEqual(force_boundary.candidate_status, "reused")
+            self.assertEqual(force_boundary.full_preview_calls, 0)
+            self.assertEqual(force_boundary.analyzer_paths, ())
+
+            world.assert_invariants()
+
+    def test_changed_snapshot_gates_importer_ownership(self) -> None:
+        """A changed snapshot reaches the importer only after fresh evidence.
+
+        The positive world runs a full preview that persists fresh evidence,
+        so the importer may claim the job. The known-bad world runs the same
+        full preview but withholds the fresh persist; the real worker's
+        belt-and-braces then keeps the job unclaimable — the exact
+        acceptance-#3 law that ``full_preview_calls`` alone cannot prove.
+        """
+
+        assert TEST_DSN is not None
+        with LifecycleWorld(TEST_DSN, repository_root()) as world:
+            request_id = world.add_release(BeetsWorldRelease(
+                release_id="24000000-0000-4000-8000-000000000001",
+                artist="Snapshot Gate",
+                album="Fresh Evidence Persisted",
+                year=2004,
+                codec="mp3",
+            ))
+            observation = world.probe_candidate_preview_boundary(
+                request_id,
+                job_mode="force",
+                snapshot_changed=True,
+                codec="mp3",
+                spectral_grade="genuine",
+            )
+            self.assertEqual(observation.full_preview_calls, 1)
+            self.assertNotEqual(observation.candidate_status, "reused")
+            self.assertIsNotNone(
+                world.db.claim_next_import_job(worker_id="probe-gate"),
+                "fresh evidence must unlock importer ownership",
+            )
+            world.assert_invariants()
+
+        with LifecycleWorld(TEST_DSN, repository_root()) as world:
+            request_id = world.add_release(BeetsWorldRelease(
+                release_id="24000000-0000-4000-8000-000000000002",
+                artist="Snapshot Gate",
+                album="No Fresh Evidence",
+                year=2004,
+                codec="mp3",
+            ))
+            observation = world.probe_candidate_preview_boundary(
+                request_id,
+                job_mode="force",
+                snapshot_changed=True,
+                codec="mp3",
+                spectral_grade="genuine",
+                persist_fresh_on_change=False,
+            )
+            self.assertEqual(observation.full_preview_calls, 1)
+            self.assertNotEqual(observation.candidate_status, "reused")
+            self.assertIsNone(
+                world.db.claim_next_import_job(worker_id="probe-gate"),
+                "a changed snapshot without fresh evidence must not reach "
+                "the importer",
+            )
+            world.assert_invariants()
+
     def test_operator_lifecycles_preserve_world_authority(self) -> None:
         assert TEST_DSN is not None
         with LifecycleWorld(TEST_DSN, repository_root()) as world:
@@ -907,11 +1009,7 @@ class TestGeneratedCandidateEvidenceReuseWorld(unittest.TestCase):
                 year=1965,
                 codec=codec,
             ))
-            (
-                full_preview_calls,
-                analyzer_paths,
-                candidate_status,
-            ) = world.exercise_candidate_preview_boundary(
+            observation = world.probe_candidate_preview_boundary(
                 request_id,
                 job_mode=job_mode,
                 snapshot_changed=snapshot_changed,
@@ -920,16 +1018,16 @@ class TestGeneratedCandidateEvidenceReuseWorld(unittest.TestCase):
             )
 
             if snapshot_changed:
-                self.assertEqual(full_preview_calls, 1)
-                self.assertNotEqual(candidate_status, "reused")
+                self.assertEqual(observation.full_preview_calls, 1)
+                self.assertNotEqual(observation.candidate_status, "reused")
             else:
-                self.assertEqual(full_preview_calls, 0)
+                self.assertEqual(observation.full_preview_calls, 0)
                 self.assertEqual(
-                    analyzer_paths,
-                    [],
-                    "matching candidate evidence was analyzed again",
+                    observation.analyzer_paths,
+                    (),
+                    "reuse fast path invoked the spectral analyzer",
                 )
-                self.assertEqual(candidate_status, "reused")
+                self.assertEqual(observation.candidate_status, "reused")
             world.assert_invariants()
 
 
