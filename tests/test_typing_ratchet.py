@@ -13,10 +13,12 @@ import os
 import unittest
 
 from tests._typing_ratchet_baseline import TYPING_RATCHET_BASELINE
+from tests._tests_typing_ratchet_baseline import TESTS_TYPING_RATCHET_BASELINE
 from tests._typing_ratchet_scanner import (
     count_escape_hatches,
     iter_production_paths,
     scan_production_tree,
+    scan_tests_tree,
 )
 
 _REGEN = (
@@ -155,6 +157,45 @@ class TestProductionWalk(unittest.TestCase):
             self.assertFalse(
                 rel.startswith(os.path.join("tools", "vulture")), rel)
 
+
+
+class TestTestsEscapeHatchFreeze(unittest.TestCase):
+    """Tests escape-hatch debt (Any/cast/type-ignore) may only DECREASE.
+
+    Tests are never strict-annotated (issue #784 decision), but freezing
+    their hatch counts stops the debt growing. Exact-match: a new hatch in
+    any tests file fails; removing hatches must tighten the baseline.
+    """
+
+    def test_tests_counts_match_baseline_exactly(self) -> None:
+        live = scan_tests_tree()
+        if live == TESTS_TYPING_RATCHET_BASELINE:
+            return
+        regressions: list[str] = []
+        improvements: list[str] = []
+        for rel in sorted(set(live) | set(TESTS_TYPING_RATCHET_BASELINE)):
+            lc = live.get(rel, {})
+            bc = TESTS_TYPING_RATCHET_BASELINE.get(rel, {})
+            for key in sorted(set(lc) | set(bc)):
+                nl, nb = lc.get(key, 0), bc.get(key, 0)
+                if nl > nb:
+                    regressions.append(f"{rel}: {key} {nb} -> {nl}")
+                elif nl < nb:
+                    improvements.append(f"{rel}: {key} {nb} -> {nl}")
+        msg = ["Tests escape-hatch freeze mismatch (issue #784)."]
+        if regressions:
+            msg.append(
+                "NEW escape hatches in tests — write typed test code "
+                "instead (Any/cast/type-ignore are frozen, only-decrease):"
+                "\n  " + "\n  ".join(regressions))
+        if improvements:
+            msg.append(
+                "Hatches removed from tests — tighten the baseline in this "
+                "same PR:\n  nix-shell --run \"python3 -m "
+                "tests._typing_ratchet_scanner tests\" > "
+                "tests/_tests_typing_ratchet_baseline.py\nImproved:\n  "
+                + "\n  ".join(improvements))
+        self.fail("\n".join(msg))
 
 if __name__ == "__main__":
     unittest.main()

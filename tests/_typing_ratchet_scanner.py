@@ -126,5 +126,62 @@ def render_baseline_module(scan: Dict[str, Dict[str, int]]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def iter_tests_paths():
+    """Yield ``(relpath, abspath)`` for every ``.py`` file under ``tests/``.
+
+    The escape-hatch freeze (issue #784) counts the same hatches in tests
+    that the production ratchet bans in production — not to drive tests to
+    zero (they are never strict-annotated), but to stop their debt GROWING.
+    """
+    tests_root = os.path.join(REPO_ROOT, "tests")
+    for dirpath, dirnames, filenames in os.walk(tests_root):
+        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+        for fname in sorted(filenames):
+            if not fname.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, fname)
+            yield os.path.relpath(path, REPO_ROOT), path
+
+
+def scan_tests_tree() -> Dict[str, Dict[str, int]]:
+    """Return ``{relpath: {finding_key: count}}`` for offending tests files."""
+    result: Dict[str, Dict[str, int]] = {}
+    for rel, path in iter_tests_paths():
+        with open(path, encoding="utf-8") as f:
+            counts = count_escape_hatches(f.read())
+        if counts:
+            result[rel] = counts
+    return result
+
+
+def render_tests_baseline_module(scan: Dict[str, Dict[str, int]]) -> str:
+    """Render the tests escape-hatch baseline module source."""
+    lines = [
+        '"""GENERATED tests escape-hatch freeze baseline (#784).',
+        "",
+        "Frozen at campaign end; may only DECREASE. Tests are never",
+        "strict-annotated, but their Any/cast/type-ignore debt must not grow.",
+        "Regenerate after REMOVING hatches from tests with:",
+        "",
+        '    nix-shell --run "python3 -m tests._typing_ratchet_scanner tests" \\',
+        "        > tests/_tests_typing_ratchet_baseline.py",
+        '"""',
+        "",
+        "TESTS_TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {",
+    ]
+    for rel in sorted(scan):
+        counts = ", ".join(
+            f'"{key}": {scan[rel][key]}'
+            for key in FINDING_KEYS if key in scan[rel]
+        )
+        lines.append(f'    "{rel}": {{{counts}}},')
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
 if __name__ == "__main__":
-    print(render_baseline_module(scan_production_tree()), end="")
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "tests":
+        print(render_tests_baseline_module(scan_tests_tree()), end="")
+    else:
+        print(render_baseline_module(scan_production_tree()), end="")
