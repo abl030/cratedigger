@@ -33,7 +33,8 @@ from lib.quality_evidence import (
 from lib.sidecar import SIDECAR_FILENAME, build_sidecar, should_write_sidecar
 
 if TYPE_CHECKING:
-    from lib.beets_db import AlbumInfo
+    from lib.beets_db import CurrentBeetsResolution
+    from lib.release_identity import ReleaseIdentity
 
 logger = logging.getLogger("cratedigger")
 
@@ -41,6 +42,8 @@ OUTCOME_WRITTEN = "written"
 OUTCOME_SKIPPED_NO_EVIDENCE = "skipped_no_evidence"
 OUTCOME_SKIPPED_NOT_VERIFIED_LOSSLESS = "skipped_not_verified_lossless"
 OUTCOME_SKIPPED_NO_ALBUM_PATH = "skipped_no_album_path"
+OUTCOME_SKIPPED_CURRENT_AMBIGUOUS = "skipped_current_ambiguous"
+OUTCOME_SKIPPED_EVIDENCE_IDENTITY = "skipped_evidence_identity_mismatch"
 OUTCOME_SKIPPED_EVIDENCE_STALE = "skipped_evidence_stale"
 
 
@@ -55,9 +58,9 @@ class SidecarBeets(Protocol):
     """BeetsDB surface this service reads (positional-only to ignore the
     ``cfg``/``_cfg`` param-name split between real and fake)."""
 
-    def get_album_info(
-        self, mb_release_id: str, cfg: QualityRankConfig, /,
-    ) -> "AlbumInfo | None": ...
+    def resolve_current_release(
+        self, identity: "ReleaseIdentity", /,
+    ) -> "CurrentBeetsResolution": ...
 
 
 @dataclass(frozen=True)
@@ -86,13 +89,26 @@ def write_sidecar_for_request(
     if not should_write_sidecar(evidence):
         return SidecarWriteResult(OUTCOME_SKIPPED_NOT_VERIFIED_LOSSLESS)
 
-    cfg = quality_ranks if quality_ranks is not None else QualityRankConfig.defaults()
-    album_info = beets.get_album_info(mb_release_id, cfg)
-    if (
-        album_info is None
-        or not album_info.album_path
-        or not os.path.isdir(album_info.album_path)
+    from lib.beets_db import (
+        CurrentBeetsAmbiguous,
+        CurrentBeetsMissing,
+        exact_release_identity_matches,
+        release_identity_for_lookup,
+    )
+
+    identity = release_identity_for_lookup(mb_release_id)
+    if identity is None or not exact_release_identity_matches(
+        mb_release_id,
+        evidence.mb_release_id,
     ):
+        return SidecarWriteResult(OUTCOME_SKIPPED_EVIDENCE_IDENTITY)
+    current = beets.resolve_current_release(identity)
+    if isinstance(current, CurrentBeetsMissing):
+        return SidecarWriteResult(OUTCOME_SKIPPED_NO_ALBUM_PATH)
+    if isinstance(current, CurrentBeetsAmbiguous):
+        return SidecarWriteResult(OUTCOME_SKIPPED_CURRENT_AMBIGUOUS)
+    album_path = current.album_path
+    if not album_path or not os.path.isdir(album_path):
         return SidecarWriteResult(OUTCOME_SKIPPED_NO_ALBUM_PATH)
 
     # Self-validate against disk: the sidecar must faithfully describe the
@@ -102,7 +118,7 @@ def write_sidecar_for_request(
     # publish a stale payload. snapshot_fingerprint mirrors how
     # propagate_candidate_evidence_to_current derived the row's fingerprint.
     try:
-        on_disk = snapshot_audio_files(album_info.album_path)
+        on_disk = snapshot_audio_files(album_path)
     except SnapshotAudioFilesError:
         return SidecarWriteResult(OUTCOME_SKIPPED_NO_ALBUM_PATH)
     if snapshot_fingerprint(on_disk) != evidence.snapshot_fingerprint:
@@ -116,7 +132,7 @@ def write_sidecar_for_request(
             else datetime.now(timezone.utc)
         ),
     )
-    path = os.path.join(album_info.album_path, SIDECAR_FILENAME)
+    path = os.path.join(album_path, SIDECAR_FILENAME)
     _atomic_write_bytes(path, msgspec.json.encode(sidecar))
     return SidecarWriteResult(OUTCOME_WRITTEN, path)
 

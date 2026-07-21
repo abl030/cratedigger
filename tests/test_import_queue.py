@@ -2185,17 +2185,22 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
     def test_force_job_valid_evidence_skips_measurement(self):
         """AE4 force: matching snapshot + valid evidence → no measurement."""
         from scripts import import_preview_worker
+        from lib.beets_db import AlbumInfo
         from lib.quality import SpectralAnalysisDetail
 
-        with tempfile.TemporaryDirectory() as source:
-            with open(os.path.join(source, "01.mp3"), "wb") as handle:
-                handle.write(b"audio")
+        with tempfile.TemporaryDirectory() as source, \
+             tempfile.TemporaryDirectory() as existing:
+            for root in (source, existing):
+                with open(os.path.join(root, "01.mp3"), "wb") as handle:
+                    handle.write(b"audio")
             db = FakePipelineDB()
             db.seed_request(make_request_row(id=42))
             _seed_current_for_request(
                 db,
                 42,
                 mb_release_id="test-mbid-0042",
+                source_path=existing,
+                files=snapshot_audio_files(existing),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=122,
                     avg_bitrate_kbps=127,
@@ -2210,6 +2215,17 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 container="opus",
                 storage_format="Opus",
             )
+            fake_beets = FakeBeetsDB()
+            fake_beets.set_album_info("test-mbid-0042", AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=127,
+                avg_bitrate_kbps=127,
+                median_bitrate_kbps=127,
+                is_cbr=True,
+                album_path=existing,
+                format="Opus",
+            ))
             download_log_id = db.log_download(42, outcome="rejected")
             db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
@@ -2238,7 +2254,10 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
             ) as preview, patch(
                 "lib.measurement.measure_preimport_state",
-            ) as preimport:
+            ) as preimport, patch(
+                "lib.beets_db.BeetsDB",
+                lambda *_args, **_kwargs: fake_beets,
+            ):
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,
                     claimed,
@@ -2267,6 +2286,105 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             "likely_transcode",
         )
         self.assertIsNotNone(updated.importable_at)
+
+    def test_reused_candidate_fails_when_have_enrichment_loses_authority(self):
+        """The front gate cannot reinterpret stale HAVE as library absence."""
+        from scripts import import_preview_worker
+        from lib.quality_evidence import EvidenceBuildResult
+
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=42, status="wanted"))
+            download_log_id = db.log_download(42, outcome="rejected")
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+            self._seed_evidence_for_download_log(db, download_log_id, source)
+
+            with patch(
+                "scripts.import_preview_worker.load_current_evidence_for_preview",
+                return_value=EvidenceBuildResult(
+                    None,
+                    "stale",
+                    "current files changed during V0 probe",
+                ),
+            ):
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                    prepare_failure_have_fn=(
+                        lambda *_args, **_kwargs: "no_current_evidence"
+                    ),
+                )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(updated.preview_status, "measurement_failed")
+        assert updated.preview_result is not None
+        self.assertEqual(
+            updated.preview_result["decision"],
+            "current_evidence_failed",
+        )
+
+    def test_reused_candidate_fails_when_have_authority_loader_raises(self):
+        """An authority adapter exception cannot authorize candidate reuse."""
+        from scripts import import_preview_worker
+
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=42, status="wanted"))
+            download_log_id = db.log_download(42, outcome="rejected")
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+            self._seed_evidence_for_download_log(db, download_log_id, source)
+
+            with patch(
+                "scripts.import_preview_worker.load_current_evidence_for_preview",
+                side_effect=RuntimeError("Beets authority unavailable"),
+            ):
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                    prepare_failure_have_fn=(
+                        lambda *_args, **_kwargs: "no_current_evidence"
+                    ),
+                )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(updated.preview_status, "measurement_failed")
+        assert updated.preview_result is not None
+        self.assertEqual(
+            updated.preview_result["decision"],
+            "current_evidence_failed",
+        )
+        self.assertIn(
+            "Beets authority unavailable",
+            str(updated.preview_result["detail"]),
+        )
 
     def test_reused_evidence_scans_ordinary_have_path(self):
         """Front-gate reuse still analyzes non-lossless-converted HAVE."""
@@ -2352,6 +2470,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         HAVE side and called a ~96k transcode an upgrade.
         """
         from scripts import import_preview_worker
+        from lib.beets_db import AlbumInfo
         from lib.measurement import ExistingSpectralAuditLookup
         from lib.quality import SpectralAnalysisDetail
 
@@ -2379,6 +2498,17 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 container="mp3",
                 storage_format="MP3",
             )
+            fake_beets = FakeBeetsDB()
+            fake_beets.set_album_info("mbid-42", AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                is_cbr=True,
+                album_path=existing,
+                format="MP3",
+            ))
             download_log_id = db.log_download(42, outcome="rejected")
             db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
@@ -2404,6 +2534,9 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             with patch(
                 "scripts.import_preview_worker.read_runtime_config",
                 return_value=CratediggerConfig(audio_check_mode="off"),
+            ), patch(
+                "lib.beets_db.BeetsDB",
+                lambda *_args, **_kwargs: fake_beets,
             ):
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,

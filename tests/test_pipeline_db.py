@@ -4911,6 +4911,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         # current-evidence repair relies on this exact v1 -> v3 in-place path.
         replaced = msgspec.structs.replace(
             first,
+            source_path="/different/current/location",
             storage_format="mp3",
             lineage_version=3,
         )
@@ -4922,6 +4923,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         )
         assert loaded is not None
         self.assertEqual(loaded.id, original.id)
+        self.assertEqual(loaded.source_path, original.source_path)
         self.assertEqual(loaded.storage_format, "mp3")
         self.assertEqual(loaded.lineage_version, 3)
 

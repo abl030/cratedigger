@@ -170,13 +170,71 @@ def _make_stdout(ir: ImportResult) -> str:
 
 
 def _mock_beets_db(beets_info):
-    """Configure a mocked BeetsDB context manager returning beets_info."""
-    mock_beets_instance = MagicMock()
-    mock_beets_instance.get_album_info.return_value = beets_info
-    mock_cls = MagicMock()
-    mock_cls.return_value.__enter__ = MagicMock(return_value=mock_beets_instance)
-    mock_cls.return_value.__exit__ = MagicMock(return_value=False)
+    """Configure a state-respecting exact resolver for one album shape."""
+
+    library_root = beets_info.album_path if beets_info is not None else "/tmp"
+    fake = FakeBeetsDB(library_root=library_root)
+    resolve = fake.resolve_current_release
+
+    def resolve_any(identity):
+        if beets_info is None:
+            fake.set_album_info(identity.release_id, None)
+            return resolve(identity)
+        seeded = False
+        for count in range(3, 102, 2):
+            representable = AlbumInfo(
+                album_id=beets_info.album_id,
+                track_count=count,
+                min_bitrate_kbps=beets_info.min_bitrate_kbps,
+                avg_bitrate_kbps=beets_info.avg_bitrate_kbps,
+                median_bitrate_kbps=beets_info.median_bitrate_kbps,
+                is_cbr=beets_info.is_cbr,
+                album_path=beets_info.album_path,
+                format=beets_info.format,
+            )
+            try:
+                fake.set_album_info(identity.release_id, representable)
+            except AssertionError:
+                continue
+            seeded = True
+            break
+        assert seeded, "test AlbumInfo must be representable by Beets items"
+        return resolve(identity)
+
+    fake.resolve_current_release = MagicMock(side_effect=resolve_any)
+    mock_cls = MagicMock(return_value=fake)
     return mock_cls
+
+
+@contextmanager
+def _patch_linked_current_beets(
+    db: FakePipelineDB,
+    request_id: int,
+    beets_info: AlbumInfo,
+):
+    """Materialize the linked snapshot behind a real exact fake resolver."""
+
+    evidence_id = db.get_request_current_evidence_id(request_id)
+    evidence = db.load_album_quality_evidence_by_id(evidence_id)
+    assert evidence is not None
+    with tempfile.TemporaryDirectory() as current_dir:
+        for file in evidence.files:
+            path = os.path.join(current_dir, file.relative_path)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as handle:
+                handle.truncate(file.size_bytes)
+        current_info = AlbumInfo(
+            album_id=beets_info.album_id,
+            track_count=beets_info.track_count,
+            min_bitrate_kbps=beets_info.min_bitrate_kbps,
+            avg_bitrate_kbps=beets_info.avg_bitrate_kbps,
+            median_bitrate_kbps=beets_info.median_bitrate_kbps,
+            is_cbr=beets_info.is_cbr,
+            album_path=current_dir,
+            format=beets_info.format,
+        )
+        with patch("lib.beets_db.BeetsDB", _mock_beets_db(current_info)):
+            yield
 
 
 class TestDownloadOwnershipPreclaimRecoverySlice(unittest.TestCase):
@@ -1980,7 +2038,7 @@ class TestForceImportSlice(unittest.TestCase):
             assert claimed is not None and claimed.id == job.id
             _seed_current_for_request(
                 db, 42,
-                mb_release_id="mbid-current",
+                mb_release_id="mbid-123",
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=180, avg_bitrate_kbps=180,
                     median_bitrate_kbps=180, format="MP3",
@@ -1989,17 +2047,8 @@ class TestForceImportSlice(unittest.TestCase):
                 ),
                 codec="mp3", container="mp3", storage_format="mp3",
             )
-            # album_path=None makes ensure_current_evidence_for_action
-            # skip the audio-snapshot guard and trust the seeded
-            # _REQUEST_CURRENT row directly.
-            beets_info_no_path = AlbumInfo(
-                album_id=1, track_count=10, min_bitrate_kbps=320,
-                avg_bitrate_kbps=320, format="MP3",
-                is_cbr=False,
-                album_path=None,  # type: ignore[arg-type]
-            )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info_no_path)), \
+                 _patch_linked_current_beets(db, 42, beets_info), \
                  patch("lib.config.read_runtime_config",
                        return_value=cfg):
                 ext.run.return_value = MagicMock(
@@ -2095,21 +2144,15 @@ class TestForceImportSlice(unittest.TestCase):
             assert claimed is not None and claimed.id == job.id
             _seed_current_for_request(
                 db, 833,
-                mb_release_id="mbid-go-team-current",
+                mb_release_id="mbid-go-team",
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=192, avg_bitrate_kbps=192,
                     median_bitrate_kbps=192, format="MP3",
                 ),
                 codec="mp3", container="mp3", storage_format="mp3",
             )
-            beets_info_no_path = AlbumInfo(
-                album_id=1, track_count=10, min_bitrate_kbps=320,
-                avg_bitrate_kbps=320, format="MP3",
-                is_cbr=False,
-                album_path=None,  # type: ignore[arg-type]
-            )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info_no_path)), \
+                 _patch_linked_current_beets(db, 833, beets_info), \
                  patch("lib.config.read_runtime_config", return_value=cfg):
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=stdout, stderr="")
@@ -6949,6 +6992,12 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
 
     def _wire_current(self, db, request_id, evidence):
         """Upsert ``evidence`` and wire ``album_requests.current_evidence_id``."""
+        import msgspec
+
+        evidence = msgspec.structs.replace(
+            evidence,
+            mb_release_id=str(db.request(request_id)["mb_release_id"]),
+        )
         db.upsert_album_quality_evidence(evidence)
         persisted = db.find_album_quality_evidence(
             mb_release_id=evidence.mb_release_id,
@@ -6960,15 +7009,18 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
     def _drive_dispatch(self, db, *, request_id, tmpdir, import_job_id, cfg):
         from lib.dispatch import dispatch_import_from_db
 
-        # album_path=None makes the current-evidence guard trust the
-        # seeded REQUEST_CURRENT row without an audio-snapshot probe.
-        beets_info_no_path = AlbumInfo(
-            album_id=1, track_count=10, min_bitrate_kbps=128,
-            avg_bitrate_kbps=128, format="MP3",
-            is_cbr=False, album_path=None,  # type: ignore[arg-type]
+        beets_info = AlbumInfo(
+            album_id=1,
+            track_count=3,
+            min_bitrate_kbps=128,
+            avg_bitrate_kbps=128,
+            median_bitrate_kbps=128,
+            format="MP3",
+            is_cbr=False,
+            album_path="/replaced-by-linked-current-fixture",
         )
         with patch_dispatch_externals() as ext, \
-                patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info_no_path)), \
+                _patch_linked_current_beets(db, request_id, beets_info), \
                 patch("lib.config.read_runtime_config", return_value=cfg):
             result = dispatch_import_from_db(
                 db,
@@ -9903,11 +9955,13 @@ class TestRefreshCurrentEvidenceUsesBeetsLibraryRoot(unittest.TestCase):
             def __exit__(self, *args):
                 return False
 
-            def get_album_info(self, mb_release_id, cfg):
-                # Returning None short-circuits the function before any
+            def resolve_current_release(self, identity):
+                # Returning missing short-circuits the function before any
                 # snapshotting — we only care that BeetsDB was constructed
                 # with the right library_root kwarg.
-                return None
+                from lib.beets_db import CurrentBeetsMissing
+
+                return CurrentBeetsMissing(identity=identity)
 
         with patch("lib.beets_db.BeetsDB", FakeBeetsDB):
             _refresh_current_evidence_after_import(
@@ -9944,8 +9998,10 @@ class TestRefreshCurrentEvidenceUsesBeetsLibraryRoot(unittest.TestCase):
             def __exit__(self, *args):
                 return False
 
-            def get_album_info(self, mb_release_id, cfg):
-                return None
+            def resolve_current_release(self, identity):
+                from lib.beets_db import CurrentBeetsMissing
+
+                return CurrentBeetsMissing(identity=identity)
 
         with patch("lib.beets_db.BeetsDB", FakeBeetsDB):
             _refresh_current_evidence_after_import(

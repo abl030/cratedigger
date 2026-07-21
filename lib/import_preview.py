@@ -44,6 +44,7 @@ from lib.quality_evidence import (
     persist_candidate_evidence_from_import_result,
     persist_candidate_evidence_from_measurement,
     snapshot_audio_files,
+    snapshot_fingerprint,
 )
 from lib.quality import (
     LOSSLESS_CODECS,
@@ -248,15 +249,29 @@ def persist_exact_current_spectral_from_attempt(
             "incomplete",
             reason,
         )
+    if not measured_existing_path:
+        return EvidenceBuildResult(
+            current_evidence,
+            "stale",
+            "attempt did not resolve a current Beets path",
+        )
+    try:
+        measured_files = snapshot_audio_files(measured_existing_path)
+    except OSError as exc:
+        return EvidenceBuildResult(
+            current_evidence,
+            "failed",
+            f"{type(exc).__name__}: {exc}",
+        )
     if (
-        not measured_existing_path
-        or os.path.realpath(measured_existing_path)
-        != os.path.realpath(current_evidence.source_path)
+        not measured_files
+        or snapshot_fingerprint(measured_files)
+            != current_evidence.snapshot_fingerprint
     ):
         return EvidenceBuildResult(
             current_evidence,
             "stale",
-            "attempt HAVE path does not match current evidence path",
+            "attempt HAVE path does not match current evidence fingerprint",
         )
     try:
         current_id = db.get_request_current_evidence_id(request_id)
@@ -269,9 +284,7 @@ def persist_exact_current_spectral_from_attempt(
         or refreshed.id != current_evidence.id
         or refreshed.mb_release_id != current_evidence.mb_release_id
         or refreshed.snapshot_fingerprint != current_evidence.snapshot_fingerprint
-        or os.path.realpath(refreshed.source_path)
-            != os.path.realpath(measured_existing_path)
-        or not audio_snapshot_matches(refreshed.source_path, refreshed.files)
+        or not audio_snapshot_matches(measured_existing_path, refreshed.files)
     ):
         return EvidenceBuildResult(
             current_evidence,
@@ -380,6 +393,7 @@ def enrich_current_v0_research_for_preview(
     request_id: int,
     expected_evidence_id: int,
     expected_snapshot_fingerprint: str,
+    current_album_path: str,
     probe_fn: Callable[[str], V0ProbeEvidence | None] = (
         probe_installed_album_as_v0
     ),
@@ -421,7 +435,7 @@ def enrich_current_v0_research_for_preview(
             "stale",
             "current evidence fingerprint no longer matches expected snapshot",
         )
-    if not audio_snapshot_matches(evidence.source_path, evidence.files):
+    if not audio_snapshot_matches(current_album_path, evidence.files):
         return EvidenceBuildResult(
             None,
             "stale",
@@ -494,11 +508,11 @@ def enrich_current_v0_research_for_preview(
 
     metric = None
     try:
-        metric = neutral_v0_metric_from_probe(probe_fn(evidence.source_path))
+        metric = neutral_v0_metric_from_probe(probe_fn(current_album_path))
     except Exception:  # noqa: BLE001 - neutral research must remain fail-soft
         logger.warning(
             "Current on-disk V0 research probe failed for %s",
-            evidence.source_path,
+            current_album_path,
             exc_info=True,
         )
 
@@ -515,7 +529,7 @@ def enrich_current_v0_research_for_preview(
             and refreshed.id == expected_evidence_id
             and refreshed.mb_release_id == evidence.mb_release_id
             and refreshed.snapshot_fingerprint == expected_snapshot_fingerprint
-            and audio_snapshot_matches(refreshed.source_path, refreshed.files)
+            and audio_snapshot_matches(current_album_path, refreshed.files)
         )
     except Exception as exc:
         try:
@@ -650,15 +664,13 @@ def prepare_current_evidence_for_failure(
     beets_library_root: str,
     load_fn: Callable[..., EvidenceBuildResult] = load_or_backfill_current_evidence,
 ) -> str:
-    """Link usable HAVE before failure logging without refreshing complete v1.
+    """Freshly resolve and link usable HAVE before failure logging.
 
     Returns ``ready`` only when the request FK resolves to the surviving
     evidence row, ``no_current_evidence`` only when Beets authoritatively says
     the exact release is absent, and ``failed`` for adapter, snapshot, or
-    persistence failures. A policy-complete v1 row is already historical
-    evidence for the failure card, so this latency-sensitive phase preserves
-    it. The bounded post-failure phase rebuilds that exact snapshot as v3 after
-    the request has converged to ``wanted``.
+    persistence failures. Even a linked row is re-authorized against a fresh
+    exact Beets resolution and current fingerprint before it can be reused.
     """
     try:
         current_id = db.get_request_current_evidence_id(request_id)
@@ -674,19 +686,14 @@ def prepare_current_evidence_for_failure(
             exc_info=True,
         )
         return "failed"
-    if (
-        current is not None
-        and current.id is not None
-        and not current.policy_incomplete_reasons()
-    ):
-        return "ready"
-
     try:
         result = load_fn(
             db,
             request_id=request_id,
             mb_release_id=mb_release_id,
             quality_ranks=quality_ranks,
+            preloaded_evidence=current,
+            preloaded=current is not None,
             beets_library_root=beets_library_root,
         )
     except Exception:
@@ -726,6 +733,20 @@ def prepare_current_evidence_for_failure(
             request_id,
         )
         return "failed"
+    if (
+        (
+            result.evidence.id is not None
+            and evidence.id != result.evidence.id
+        )
+        or evidence.mb_release_id != result.evidence.mb_release_id
+        or evidence.snapshot_fingerprint
+            != result.evidence.snapshot_fingerprint
+    ):
+        logger.warning(
+            "Prepared current evidence link changed for request %s",
+            request_id,
+        )
+        return "failed"
     return "ready"
 
 
@@ -736,18 +757,19 @@ def enrich_incomplete_current_evidence_for_request(
     mb_release_id: str,
     quality_ranks: QualityRankConfig,
     beets_library_root: str,
+    beets_library_db_path: str | None = None,
     spectral_analyzer: SpectralDetailAnalyzer = analyze_spectral_audit_path,
     probe_fn: Callable[[str], V0ProbeEvidence | None] = (
         probe_installed_album_as_v0
     ),
+    load_fn: Callable[..., EvidenceBuildResult] = load_or_backfill_current_evidence,
 ) -> str:
     """Opportunistically complete a request's HAVE evidence in place.
 
     Driven from the download-failure path after its canonical HAVE snapshot
-    has been prepared and failure bookkeeping has completed. Legacy v1 is
-    rebuilt here, after the request is already ``wanted``; normal import
-    attempts rebuild v1 synchronously in their preview loader instead. All
-    writes go through the preview-owned helpers, so the once-only,
+    has been prepared and failure bookkeeping has completed. It repeats the
+    exact current-Beets resolution before measuring any remaining enrichment.
+    All writes go through the preview-owned helpers, so the once-only,
     exact-snapshot, and never-overwrite guards hold unchanged.
 
     Returns "no_current_evidence" (nothing linked), "stale" (files changed
@@ -757,7 +779,7 @@ def enrich_incomplete_current_evidence_for_request(
     """
     try:
         current_id = db.get_request_current_evidence_id(request_id)
-        evidence = (
+        initial_evidence = (
             db.load_album_quality_evidence_by_id(current_id)
             if current_id is not None
             else None
@@ -768,69 +790,65 @@ def enrich_incomplete_current_evidence_for_request(
             request_id,
             exc_info=True,
         )
+        return "partial"
+    try:
+        result = load_fn(
+            db,
+            request_id=request_id,
+            mb_release_id=mb_release_id,
+            quality_ranks=quality_ranks,
+            preloaded_evidence=initial_evidence,
+            preloaded=initial_evidence is not None,
+            beets_library_db_path=beets_library_db_path,
+            beets_library_root=beets_library_root,
+        )
+    except Exception:
+        logger.warning(
+            "Could not resolve current evidence for request %s",
+            request_id,
+            exc_info=True,
+        )
+        return "partial"
+    if result.status == "empty_current":
         return "no_current_evidence"
-    if evidence is None or evidence.id is None:
-        return "no_current_evidence"
-    rebuilt = False
-    if current_evidence_rebuild_reasons(evidence):
-        try:
-            result = load_or_backfill_current_evidence(
-                db,
-                request_id=request_id,
-                mb_release_id=mb_release_id,
-                quality_ranks=quality_ranks,
-                preloaded_evidence=evidence,
-                preloaded=True,
-                beets_library_root=beets_library_root,
-            )
-        except Exception:
-            logger.warning(
-                "Could not rebuild current evidence for request %s",
-                request_id,
-                exc_info=True,
-            )
-            return "partial"
-        if result.status != "ready" or result.evidence is None:
-            logger.warning(
-                "Could not rebuild current evidence for request %s: %s%s",
-                request_id,
-                result.status,
-                f" ({result.reason})" if result.reason else "",
-            )
-            return "partial"
-        try:
-            current_id = db.get_request_current_evidence_id(request_id)
-            evidence = (
-                db.load_album_quality_evidence_by_id(current_id)
-                if current_id is not None
-                else None
-            )
-        except Exception:
-            logger.warning(
-                "Could not resolve rebuilt current evidence for request %s",
-                request_id,
-                exc_info=True,
-            )
-            return "partial"
-        if evidence is None or evidence.id is None:
-            return "partial"
-        rebuilt = True
+    if (
+        result.status != "ready"
+        or result.evidence is None
+        or result.evidence.id is None
+        or result.current_album_path is None
+    ):
+        logger.warning(
+            "Could not authorize current evidence for request %s: %s%s",
+            request_id,
+            result.status,
+            f" ({result.reason})" if result.reason else "",
+        )
+        return "partial"
+    evidence = result.evidence
+    assert evidence.id is not None
+    current_album_path = result.current_album_path
+    rebuilt = (
+        initial_evidence is None
+        or bool(current_evidence_rebuild_reasons(initial_evidence))
+        or initial_evidence.id != evidence.id
+        or initial_evidence.snapshot_fingerprint != evidence.snapshot_fingerprint
+    )
     plan = plan_current_evidence_enrichment(evidence)
     if not plan.any:
         return "enriched" if rebuilt else "complete"
     # Cheap freshness pre-check before any expensive measurement; the
     # persist/claim helpers each re-verify under their own authority.
-    if not audio_snapshot_matches(evidence.source_path, evidence.files):
+    if not audio_snapshot_matches(current_album_path, evidence.files):
         return "stale"
     all_ok = True
     if plan.spectral:
-        detail = spectral_analyzer(evidence.source_path)
+        detail = spectral_analyzer(current_album_path)
         spectral_result = persist_exact_current_spectral_from_attempt(
             db,
             request_id=request_id,
             current_evidence=evidence,
             measured_existing=detail,
-            measured_existing_path=evidence.source_path,
+            measured_existing_path=current_album_path,
         )
         all_ok = all_ok and spectral_result.status == "ready"
     if plan.v0:
@@ -839,10 +857,105 @@ def enrich_incomplete_current_evidence_for_request(
             request_id=request_id,
             expected_evidence_id=evidence.id,
             expected_snapshot_fingerprint=evidence.snapshot_fingerprint,
+            current_album_path=current_album_path,
             probe_fn=probe_fn,
         )
         all_ok = all_ok and v0_result.status == "ready"
     return "enriched" if all_ok else "partial"
+
+
+def _authorize_current_evidence_for_preview(
+    db: ImportPreviewDB,
+    *,
+    request_id: int,
+    mb_release_id: str,
+    quality_ranks: QualityRankConfig,
+    beets_library_root: str,
+    preloaded_evidence: AlbumQualityEvidence | None,
+) -> EvidenceBuildResult:
+    """Resolve and re-link the fresh exact Beets snapshot for preview use."""
+
+    try:
+        load_result = load_or_backfill_current_evidence(
+            db,
+            request_id=request_id,
+            mb_release_id=mb_release_id,
+            quality_ranks=quality_ranks,
+            preloaded_evidence=preloaded_evidence,
+            preloaded=preloaded_evidence is not None,
+            beets_library_root=beets_library_root,
+        )
+    except Exception:
+        logger.warning(
+            "Unable to load/backfill preview HAVE evidence for request %s",
+            request_id,
+            exc_info=True,
+        )
+        return EvidenceBuildResult(
+            None,
+            "failed",
+            "current Beets authority resolution raised",
+        )
+    if load_result.status != "ready" or load_result.evidence is None:
+        return load_result
+    current = load_result.evidence
+    current_album_path = load_result.current_album_path
+    if current_album_path is None:
+        logger.warning(
+            "Current Beets path was not returned for request %s",
+            request_id,
+        )
+        return EvidenceBuildResult(
+            None,
+            "failed",
+            "current Beets path was not returned",
+        )
+
+    # Backfill returns its pre-upsert value; reload through the exact request
+    # FK so the public enrichment helper always receives the surviving id.
+    try:
+        evidence_id = db.get_request_current_evidence_id(request_id)
+        linked = (
+            db.load_album_quality_evidence_by_id(evidence_id)
+            if evidence_id is not None
+            else None
+        )
+        if (
+            linked is None
+            or (
+                current.id is not None
+                and linked.id != current.id
+            )
+            or linked.mb_release_id != current.mb_release_id
+            or linked.snapshot_fingerprint != current.snapshot_fingerprint
+        ):
+            logger.warning(
+                "Preview current evidence link changed for request %s",
+                request_id,
+            )
+            return EvidenceBuildResult(
+                None,
+                "stale",
+                "preview current evidence link changed",
+            )
+        current = linked
+    except Exception as exc:
+        logger.warning(
+            "Unable to resolve preview HAVE evidence for request %s",
+            request_id,
+            exc_info=True,
+        )
+        return EvidenceBuildResult(
+            None,
+            "failed",
+            f"{type(exc).__name__}: {exc}",
+        )
+
+    return EvidenceBuildResult(
+        current,
+        "ready",
+        current_album_path=current_album_path,
+    )
 
 
 def load_current_evidence_for_preview(
@@ -853,67 +966,46 @@ def load_current_evidence_for_preview(
     quality_ranks: QualityRankConfig,
     beets_library_root: str,
     preloaded_evidence: AlbumQualityEvidence | None,
-    preloaded_authoritative: bool,
-) -> AlbumQualityEvidence | None:
+) -> EvidenceBuildResult:
     """Load/backfill HAVE and perform preview-owned neutral enrichment."""
 
-    current = preloaded_evidence
-    should_load = current is None and not preloaded_authoritative
-    # An authoritative linked row that is policy-incomplete (canonical case:
-    # a legacy backfill with a blank ``source_path``) can never be enriched
-    # in place — rebuild it from beets so this same preview's enrichment can
-    # complete it before the importer decides.
-    should_rebuild = (
-        current is not None and bool(current_evidence_rebuild_reasons(current))
+    authorized = _authorize_current_evidence_for_preview(
+        db,
+        request_id=request_id,
+        mb_release_id=mb_release_id,
+        quality_ranks=quality_ranks,
+        beets_library_root=beets_library_root,
+        preloaded_evidence=preloaded_evidence,
     )
-    if should_load or should_rebuild:
-        try:
-            load_result = load_or_backfill_current_evidence(
-                db,
-                request_id=request_id,
-                mb_release_id=mb_release_id,
-                quality_ranks=quality_ranks,
-                preloaded_evidence=current,
-                preloaded=should_rebuild,
-                beets_library_root=beets_library_root,
-            )
-        except Exception:
-            logger.warning(
-                "Unable to load/backfill preview HAVE evidence for request %s",
-                request_id,
-                exc_info=True,
-            )
-            if should_load:
-                return None
-            load_result = None
-        if load_result is not None and load_result.evidence is not None:
-            current = load_result.evidence
-
-    # Backfill returns its pre-upsert value; reload through the exact request
-    # FK so the public enrichment helper always receives the surviving id.
-    try:
-        evidence_id = db.get_request_current_evidence_id(request_id)
-        if evidence_id is not None:
-            linked = db.load_album_quality_evidence_by_id(evidence_id)
-            if linked is not None:
-                current = linked
-    except Exception:
+    if authorized.status != "ready" or authorized.evidence is None:
         logger.warning(
-            "Unable to resolve preview HAVE evidence for request %s",
+            "Unable to authorize preview HAVE evidence for request %s: %s%s",
             request_id,
-            exc_info=True,
+            authorized.status,
+            f" ({authorized.reason})" if authorized.reason else "",
         )
-        return current
+        return authorized
+    current = authorized.evidence
+    current_album_path = authorized.current_album_path
+    assert current_album_path is not None
 
-    if current is None or current.id is None:
-        return current
+    if current.id is None:
+        return authorized
     enriched = enrich_current_v0_research_for_preview(
         db,
         request_id=request_id,
         expected_evidence_id=current.id,
         expected_snapshot_fingerprint=current.snapshot_fingerprint,
+        current_album_path=current_album_path,
     )
-    return enriched.evidence if enriched.evidence is not None else current
+    if enriched.status != "ready" or enriched.evidence is None:
+        logger.warning(
+            "Preview HAVE enrichment lost authority for request %s: %s%s",
+            request_id,
+            enriched.status,
+            f" ({enriched.reason})" if enriched.reason else "",
+        )
+    return enriched
 
 
 def preserve_existing_source_spectral(
@@ -1459,18 +1551,34 @@ def measure_and_persist_candidate_evidence(
     (
         current_evidence,
         existing_spectral_evidence,
-        current_evidence_authoritative,
+        _current_evidence_authoritative,
     ) = load_persisted_existing_spectral(db, request_id)
-    current_evidence = load_current_evidence_for_preview(
+    current_result = load_current_evidence_for_preview(
         db,
         request_id=request_id,
         mb_release_id=mbid,
         quality_ranks=cfg.quality_ranks,
         beets_library_root=getattr(cfg, "beets_directory", ""),
         preloaded_evidence=current_evidence,
-        preloaded_authoritative=current_evidence_authoritative,
     )
-    if current_evidence is not None:
+    if current_result.status == "empty_current":
+        current_evidence = None
+        existing_spectral_evidence = SpectralAnalysisDetail(attempted=False)
+    elif current_result.status != "ready" or current_result.evidence is None:
+        return _measurement_failed_result(
+            mode="path",
+            reason="measurement_crashed",
+            decision="current_evidence_failed",
+            detail=(
+                f"{current_result.status}: "
+                f"{current_result.reason or 'current authority unavailable'}"
+            ),
+            request_id=request_id,
+            download_log_id=download_log_id,
+            source_path=path,
+        )
+    else:
+        current_evidence = current_result.evidence
         current_m = current_evidence.measurement
         existing_spectral_evidence = spectral_detail_from_persisted_source(
             current_m.spectral_grade,
@@ -1905,10 +2013,46 @@ def preview_import_from_path(
 
     cfg = read_runtime_config()
     (
-        current_evidence,
-        existing_spectral_evidence,
-        current_evidence_authoritative,
+        preloaded_current_evidence,
+        _,
+        _,
     ) = load_persisted_existing_spectral(db, request_id)
+    current_authority = _authorize_current_evidence_for_preview(
+        db,
+        request_id=request_id,
+        mb_release_id=mbid,
+        quality_ranks=cfg.quality_ranks,
+        beets_library_root=getattr(cfg, "beets_directory", ""),
+        preloaded_evidence=preloaded_current_evidence,
+    )
+    if current_authority.status == "empty_current":
+        # Authoritative absence: stale linked HAVE facts describe no current
+        # bytes and cannot influence candidate measurement or decision inputs.
+        current_evidence = None
+        existing_spectral_evidence = SpectralAnalysisDetail(attempted=False)
+    elif (
+        current_authority.status != "ready"
+        or current_authority.evidence is None
+    ):
+        return _measurement_failed_result(
+            mode="path",
+            reason="measurement_crashed",
+            decision="current_evidence_failed",
+            detail=(
+                f"{current_authority.status}: "
+                f"{current_authority.reason or 'current authority unavailable'}"
+            ),
+            request_id=request_id,
+            download_log_id=download_log_id,
+            source_path=path,
+        )
+    else:
+        current_evidence = current_authority.evidence
+        current_measurement = current_evidence.measurement
+        existing_spectral_evidence = spectral_detail_from_persisted_source(
+            current_measurement.spectral_grade,
+            current_measurement.spectral_bitrate_kbps,
+        )
     preserve_have_source = preserve_existing_source_spectral(current_evidence)
 
     # --- Source cleanup BEFORE snapshot ---
@@ -2091,22 +2235,6 @@ def preview_import_from_path(
             if existing_spectral is not None
             else existing_spectral_evidence.bitrate_kbps
         )
-        if (
-            persist_candidate_evidence
-            and current_evidence is None
-            and not current_evidence_authoritative
-        ):
-            try:
-                current_result = load_or_backfill_current_evidence(
-                    db,
-                    request_id=request_id,
-                    mb_release_id=mbid,
-                    quality_ranks=cfg.quality_ranks,
-                    beets_library_root=getattr(cfg, "beets_directory", ""),
-                )
-                current_evidence = current_result.evidence
-            except Exception:
-                current_evidence = None
         if current_evidence is not None:
             current_m = current_evidence.measurement
             existing_grade = current_m.spectral_grade

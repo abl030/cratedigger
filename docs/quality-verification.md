@@ -377,6 +377,17 @@ them via `import_jobs.candidate_evidence_id`,
 cross-walk via `request_id` → measure as last resort). Evidence is never
 deleted unless the files actually change.
 
+**`source_path` is immutable capture provenance, not live path authority.**
+It records where the evidence snapshot was first measured. A same-address
+upsert may fill a legacy blank value, but it never replaces an existing
+nonblank path when the same bytes are later observed in staging, quarantine,
+or the Beets library. Candidate actions validate their active job path against
+the stored file manifest and carry that transient path separately from the
+evidence row. Current-library consumers resolve the exact release through the
+fresh typed Beets authority, then validate that current path against the same
+fingerprint. Neither boundary treats historical `source_path` as the location
+to launch or scan.
+
 When an exact release leaves Beets, `clear_on_disk_quality_fields` unlinks
 `album_requests.current_evidence_id` together with the other installed-state
 fields. The content-addressed evidence row remains as audit history; only its
@@ -440,9 +451,11 @@ failure finalizers (`_timeout_album` and the materialize-grace reset in
 `lib/download.py`) therefore perform two fail-soft steps. Before recording
 the failed attempt, `prepare_current_evidence_for_failure`
 (`lib/import_preview.py`) loads or backfills only the exact release's
-canonical current snapshot; an already-linked complete row returns without
-opening Beets or rewriting evidence. After the download log and request-state
-reset are safely persisted, `enrich_incomplete_current_evidence_for_request`
+canonical current snapshot. Even an already-linked complete row is freshly
+reauthorized against the exact Beets identity and current fingerprint; when
+both still match, the immutable evidence row is reused without rewriting it.
+After the download log and request-state reset are safely persisted,
+`enrich_incomplete_current_evidence_for_request`
 plans exactly the missing pieces (`plan_current_evidence_enrichment`, pure),
 measures the on-disk copy directly, and persists through the same
 preview-owned once-only helpers — never overwriting present evidence, never
@@ -459,10 +472,11 @@ stop. An operator lifecycle command already waiting behind that lock retries
 against the committed status, so neither concurrency ordering loses the
 operator action.
 
-**A blank `source_path` is policy-incomplete.** Every enrichment
-helper verifies the scanned path against the row's recorded
-`source_path`, so a row without one (legacy 2026-05 library backfills
-wrote `source_path=''`) could never be completed. Before issue #711, that
+**A blank `source_path` is policy-incomplete.** The field is required capture
+provenance, even though live path authority comes from the active job or fresh
+Beets resolution. Legacy 2026-05 library backfills wrote `source_path=''` and
+therefore left evidence without an auditable capture location. Before issue
+#711, that
 incomplete HAVE side silently disabled all three spectral protections in the
 import comparison (download_log 37206: a ~96k transcode replaced a better copy
 as a "better" avg-bitrate tiebreak). Fresh HAVE analysis is now a prerequisite;
@@ -472,8 +486,10 @@ therefore rejects blank paths; the action loader
 (`load_current_evidence_for_preview`) rebuild such rows from beets.
 When the on-disk files are unchanged (the legacy-backfill case) the
 rebuilt row shares the `(mb_release_id, snapshot_fingerprint)` content
-address, so the upsert repairs `source_path` in place — same row id,
-FK untouched; if the files have changed since capture, backfill writes
+address, so the upsert fills the blank `source_path` in place — same row id,
+FK untouched. A nonblank capture path is immutable and is never rewritten by
+another observation of that address. If the files have changed since capture,
+backfill writes
 a fresh row, repoints the FK, and persists the changed-snapshot enrichment
 gate described above. Either way enrichment can then complete the surviving
 row. The candidate-reuse preview fast path also

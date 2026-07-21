@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 from beets import config as beets_config
 from hypothesis import HealthCheck, example, given, settings
@@ -40,6 +41,7 @@ from tests.beets_world import (  # noqa: E402
     BeetsWorldRelease,
     HISTORICAL_PASSENGER_PATH_TEMPLATE,
 )
+from lib.mbid_replace_service import MbidReplaceService  # noqa: E402
 from tests.world_model.support import LifecycleWorld, repository_root  # noqa: E402
 from tests.world_model.census_seeds import (  # noqa: E402
     EVIDENCE_DRIFT_FACT_SEEDS,
@@ -144,7 +146,7 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
                 "folder collision",
             )
 
-    def test_rejected_identical_retry_rebinds_current_evidence_path(self) -> None:
+    def test_rejected_identical_retry_preserves_evidence_capture_path(self) -> None:
         """Shrunk #743 world: candidate/current share one content address."""
 
         assert TEST_DSN is not None
@@ -162,12 +164,22 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
                 request_id
             )
             self.assertIsNotNone(first_evidence_id)
+            first_evidence = world.db.load_album_quality_evidence_by_id(
+                first_evidence_id
+            )
+            assert first_evidence is not None
+            capture_path = first_evidence.source_path
             self.assertFalse(world.import_request(request_id, codec="mp3"))
             self.assertEqual(
                 world.db.get_request_current_evidence_id(request_id),
                 first_evidence_id,
                 "identical retry must collide on the installed content address",
             )
+            linked = world.db.load_album_quality_evidence_by_id(
+                first_evidence_id
+            )
+            assert linked is not None
+            self.assertEqual(linked.source_path, capture_path)
             world.assert_invariants()
 
     def test_operator_lifecycles_preserve_world_authority(self) -> None:
@@ -204,6 +216,87 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
                 [replacement_id],
             )
             self.assertEqual(world.beets.snapshots(), ())
+
+    def test_conflicting_dual_identity_replace_is_zero_mutation(self) -> None:
+        """Shrunk #762 world: legacy dual identity cannot authorize Replace."""
+
+        assert TEST_DSN is not None
+        seed = next(
+            candidate
+            for candidate in STATEFUL_WORLD_CENSUS_SEEDS
+            if candidate.name == "imported_dual_lineage1_verified_v0"
+        )
+        with LifecycleWorld(TEST_DSN, repository_root()) as world:
+            request_id = world.seed_census_release(BeetsWorldRelease(
+                release_id="20000000-0000-4000-8000-000000000762",
+                artist="Conflicting Authority",
+                album="Two Providers Are Not One Identity",
+                year=2000,
+                codec="flac",
+            ), seed)
+            before = world.db.get_request(request_id)
+            before_database = world.database_snapshot()
+            before_albums = world.beets.snapshots()
+
+            self.assertEqual(world.replace_request(request_id), request_id)
+
+            self.assertEqual(world.db.get_request(request_id), before)
+            self.assertEqual(world.database_snapshot(), before_database)
+            self.assertEqual(world.beets.snapshots(), before_albums)
+            world.assert_invariants()
+
+    def test_conflicting_replace_checker_rejects_hidden_insert(self) -> None:
+        """Known-bad mutant: an unrelated insert still violates zero mutation."""
+
+        assert TEST_DSN is not None
+        seed = next(
+            candidate
+            for candidate in STATEFUL_WORLD_CENSUS_SEEDS
+            if candidate.name == "imported_dual_lineage1_verified_v0"
+        )
+        with LifecycleWorld(TEST_DSN, repository_root()) as world:
+            request_id = world.seed_census_release(BeetsWorldRelease(
+                release_id="20000000-0000-4000-8000-000000000763",
+                artist="Conflicting Authority",
+                album="A Hidden Insert Is Still A Mutation",
+                year=2000,
+                codec="flac",
+            ), seed)
+            production_replace = MbidReplaceService.replace_request_mbid
+
+            def insert_after_rejection(
+                service: MbidReplaceService,
+                source_request_id: int,
+                *,
+                target_mb_release_id: str,
+            ):
+                result = production_replace(
+                    service,
+                    source_request_id,
+                    target_mb_release_id=target_mb_release_id,
+                )
+                world.db.add_request(
+                    artist_name="Mutation Mutant",
+                    album_title="Unauthorized Descendant",
+                    source="request",
+                    year=2001,
+                    mb_release_id="20000000-0000-4000-8000-000000000764",
+                    mb_release_group_id=(
+                        "20000000-0000-4000-8000-000000000765"
+                    ),
+                )
+                return result
+
+            with patch.object(
+                MbidReplaceService,
+                "replace_request_mbid",
+                insert_after_rejection,
+            ):
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    "conflicting-identity Replace mutated database",
+                ):
+                    world.replace_request(request_id)
 
     def test_force_import_refreshes_relocated_candidate_authority(self) -> None:
         """A rejected source move cannot create a force-only launch failure."""

@@ -30,6 +30,7 @@ from lib.quality import (
 )
 
 if TYPE_CHECKING:
+    from lib.beets_db import CurrentBeetsUnique
     from lib.pipeline_db.rows import AlbumRequestRow
     from lib.measurement import PreimportMeasurement
 
@@ -121,6 +122,7 @@ class EvidenceBuildResult:
     evidence: AlbumQualityEvidence | None
     status: str
     reason: str | None = None
+    current_album_path: str | None = None
 
     @property
     def available(self) -> bool:
@@ -831,6 +833,29 @@ def propagate_candidate_evidence_to_current(
     * Verified-lossless proof carries with provenance ``carried``.
     """
 
+    from lib.beets_db import exact_release_identity_matches
+
+    # Validate ownership before observing the installed files, and most
+    # importantly before either evidence mutation below. A candidate FK is
+    # not authority for a different exact pressing.
+    request_row = db.get_request(request_id)
+    if request_row is None:
+        return EvidenceBuildResult(
+            None,
+            "stale_request",
+            "request disappeared before current evidence propagation",
+        )
+    requested_release_id = str(request_row.get("mb_release_id") or "")
+    if not exact_release_identity_matches(
+        requested_release_id,
+        candidate_evidence.mb_release_id,
+    ):
+        return EvidenceBuildResult(
+            None,
+            "identity_mismatch",
+            "candidate evidence exact release identity does not match request",
+        )
+
     album_path = getattr(album_info, "album_path", "")
     try:
         files = snapshot_audio_files(str(album_path))
@@ -898,7 +923,7 @@ def propagate_candidate_evidence_to_current(
     library_container_from_files = files[0].container
 
     evidence = AlbumQualityEvidence(
-        mb_release_id=candidate_evidence.mb_release_id,
+        mb_release_id=requested_release_id,
         snapshot_fingerprint=snapshot_fingerprint(files),
         source_path=str(album_path) or "",
         measurement=measurement,
@@ -928,13 +953,6 @@ def propagate_candidate_evidence_to_current(
         snapshot_fingerprint=evidence.snapshot_fingerprint,
     )
     if persisted is not None and persisted.id is not None:
-        request_row = db.get_request(request_id)
-        if request_row is None:
-            return EvidenceBuildResult(
-                evidence,
-                "stale_request",
-                "request disappeared before current evidence link",
-            )
         expected_status = str(request_row["status"])
         if expected_status == "replaced" or not db.set_request_current_evidence(
             request_id,
@@ -971,6 +989,15 @@ def backfill_current_evidence_from_album_info(
         if existing_id is not None
         else None
     )
+    from lib.beets_db import exact_release_identity_matches
+
+    if existing is not None and not exact_release_identity_matches(
+        mb_release_id,
+        existing.mb_release_id,
+    ):
+        # A poisoned/stale FK contributes no facts whatsoever, even when its
+        # byte fingerprint happens to equal the requested album's snapshot.
+        existing = None
     if verified_lossless_proof is None and preserve_existing_verified_lossless_proof:
         if (
             existing is not None
@@ -1172,15 +1199,88 @@ def load_or_backfill_current_evidence(
     quality_ranks: Any = None,
     preloaded_evidence: AlbumQualityEvidence | None = None,
     preloaded: bool = False,
+    beets_library_db_path: str | None = None,
     beets_library_root: str = "",
+    current_release: "CurrentBeetsUnique | None" = None,
 ) -> EvidenceBuildResult:
-    """Load current Beets evidence, backfilling when absent or incomplete."""
+    """Resolve Beets freshly, then load or rebuild the exact current snapshot."""
 
-    from lib.beets_db import BeetsDB
+    from lib.beets_db import (
+        BeetsDB,
+        CurrentBeetsAmbiguous,
+        CurrentBeetsMissing,
+        album_info_from_current,
+        exact_release_identity_matches,
+        release_identity_for_lookup,
+    )
     from lib.quality import QualityRankConfig
+
+    if current_release is None:
+        identity = release_identity_for_lookup(mb_release_id)
+        if identity is None:
+            return EvidenceBuildResult(
+                None,
+                "failed",
+                f"invalid exact release identity {mb_release_id!r}",
+            )
+        if beets_library_db_path is None:
+            beets_handle = BeetsDB(library_root=beets_library_root)
+        else:
+            beets_handle = BeetsDB(
+                beets_library_db_path,
+                library_root=beets_library_root,
+            )
+        with beets_handle as beets:
+            resolution = beets.resolve_current_release(identity)
+        if isinstance(resolution, CurrentBeetsMissing):
+            return EvidenceBuildResult(
+                None,
+                "empty_current",
+                "exact album not in beets",
+            )
+        if isinstance(resolution, CurrentBeetsAmbiguous):
+            return EvidenceBuildResult(
+                None,
+                "ambiguous_current",
+                "ambiguous current Beets authority: "
+                f"{resolution.reason}; album_ids={resolution.album_ids}",
+            )
+        current_release = resolution
+
+    expected_identity = release_identity_for_lookup(mb_release_id)
+    if expected_identity is None or current_release.identity != expected_identity:
+        return EvidenceBuildResult(
+            None,
+            "failed",
+            "current Beets resolution identity does not match evidence request",
+            current_album_path=current_release.album_path,
+        )
+
+    current_album_path = current_release.album_path
+    try:
+        current_files = snapshot_audio_files(current_album_path)
+    except OSError as exc:
+        return EvidenceBuildResult(
+            None,
+            "failed",
+            f"{type(exc).__name__}: {exc}",
+            current_album_path=current_album_path,
+        )
+    if not current_files:
+        return EvidenceBuildResult(
+            None,
+            "failed",
+            "current Beets album has no audio files",
+            current_album_path=current_album_path,
+        )
+    current_fingerprint = snapshot_fingerprint(current_files)
 
     if preloaded:
         existing = preloaded_evidence
+        if existing is not None:
+            linked_id = db.get_request_current_evidence_id(request_id)
+            if existing.id is None or linked_id != existing.id:
+                existing = None
     else:
         existing_id = db.get_request_current_evidence_id(request_id)
         existing = (
@@ -1190,18 +1290,49 @@ def load_or_backfill_current_evidence(
         )
     if existing is not None:
         errors = current_evidence_rebuild_reasons(existing)
-        if not errors:
-            return EvidenceBuildResult(existing, "ready")
+        if (
+            not errors
+            and exact_release_identity_matches(
+                mb_release_id,
+                existing.mb_release_id,
+            )
+            and existing.snapshot_fingerprint == current_fingerprint
+        ):
+            return EvidenceBuildResult(
+                existing,
+                "ready",
+                current_album_path=current_album_path,
+            )
 
     cfg = quality_ranks if quality_ranks is not None else QualityRankConfig.defaults()
-    with BeetsDB(library_root=beets_library_root) as beets:
-        album_info = beets.get_album_info(mb_release_id, cfg)
+    album_info = album_info_from_current(current_release, cfg)
     if album_info is None:
-        return EvidenceBuildResult(None, "empty_current", "album not in beets")
+        return EvidenceBuildResult(
+            None,
+            "failed",
+            "unique current Beets album has no usable bitrate metadata",
+            current_album_path=current_album_path,
+        )
 
-    return backfill_current_evidence_from_album_info(
+    rebuilt = backfill_current_evidence_from_album_info(
         db,
         request_id=request_id,
         mb_release_id=mb_release_id,
         album_info=album_info,
+    )
+    if (
+        rebuilt.evidence is not None
+        and rebuilt.evidence.snapshot_fingerprint != current_fingerprint
+    ):
+        return EvidenceBuildResult(
+            None,
+            "stale",
+            "current Beets snapshot changed during evidence rebuild",
+            current_album_path=current_album_path,
+        )
+    return EvidenceBuildResult(
+        rebuilt.evidence,
+        rebuilt.status,
+        rebuilt.reason,
+        current_album_path=current_album_path,
     )

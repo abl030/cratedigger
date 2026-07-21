@@ -3131,6 +3131,15 @@ class FakePipelineDB:
                 evidence,
                 current_enrichment_required=True,
             )
+        if (
+            existing is not None
+            and existing.source_path.strip()
+            and evidence.source_path != existing.source_path
+        ):
+            evidence = msgspec.structs.replace(
+                evidence,
+                source_path=existing.source_path,
+            )
         if existing is not None and existing.id is not None:
             evidence_id = existing.id
         else:

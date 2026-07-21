@@ -281,10 +281,10 @@ class _ImportJobsMixin(_PipelineDBBase):
         This is the final authorization immediately before ``import_one.py``.
         It runs while the caller holds the release advisory lock.  The linked
         candidate-evidence row binds the release and content fingerprint. Its
-        ``source_path`` is mutable observation metadata, so path authority
-        belongs exclusively to the job-type-specific predicate below. The
-        caller and harness verify the current files against the evidence
-        snapshot before Beets may mutate the library.
+        ``source_path`` is immutable capture provenance, never launch
+        authority. The active path belongs exclusively to the job-type-specific
+        predicate below; the caller and harness verify those current files
+        against the evidence snapshot before Beets may mutate the library.
         """
         cur = self._execute("""
             UPDATE import_jobs AS job

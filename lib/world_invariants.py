@@ -260,7 +260,7 @@ def check_status_membership(
 def check_evidence_disk_coherence(
     snapshots: Sequence[EvidenceDiskSnapshot],
 ) -> tuple[WorldViolation, ...]:
-    """Require each active installed request to link its exact disk evidence."""
+    """Require exact linked bytes plus nonblank historical capture metadata."""
 
     violations: list[WorldViolation] = []
     for snapshot in snapshots:
@@ -313,17 +313,12 @@ def check_evidence_disk_coherence(
                 request_id=snapshot.request_id,
                 release_id=snapshot.release_id,
             ))
-        if (
-            snapshot.evidence_source_path is None
-            or _normal_path(snapshot.evidence_source_path)
-            != _normal_path(snapshot.album_path)
-        ):
+        if not (snapshot.evidence_source_path or "").strip():
             violations.append(WorldViolation(
-                code="evidence_path_mismatch",
+                code="evidence_capture_path_missing",
                 detail=(
-                    f"request {snapshot.request_id} evidence path "
-                    f"{snapshot.evidence_source_path!r} does not match "
-                    f"Beets path {snapshot.album_path!r}"
+                    f"request {snapshot.request_id} linked evidence has no "
+                    "capture-time source path"
                 ),
                 request_id=snapshot.request_id,
                 release_id=snapshot.release_id,

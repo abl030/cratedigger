@@ -57,7 +57,12 @@ from lib.quality import (
     resolve_user_requeue_override,
 )
 from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
-from lib.mbid_replace_service import MbidReplaceService, RESULT_REPLACED
+from lib.mbid_replace_service import (
+    MbidReplaceService,
+    REPLACE_REASON_SOURCE_IDENTITY_INVALID,
+    RESULT_REPLACED,
+    RESULT_WRONG_STATE,
+)
 from lib.release_identity import ReleaseIdentity
 from lib.search_plan_service import SearchPlanService
 from lib.transitions import (
@@ -438,6 +443,7 @@ class LifecycleWorld:
             request_id=request_id,
             mb_release_id=release.release_id,
             quality_ranks=QualityRankConfig.defaults(),
+            beets_library_db_path=str(self.beets.library_db),
             beets_library_root=str(self.beets.library_root),
             spectral_analyzer=lambda _path: SpectralAnalysisDetail(
                 attempted=True,
@@ -893,6 +899,13 @@ class LifecycleWorld:
         before_verified_proof = self._request_has_verified_proof(request_id)
         source = self._release_by_request[request_id]
         before_album = self._album_for_release(source.release_id)
+        source_identity = ReleaseIdentity.from_strict_fields(
+            before.get("mb_release_id"),
+            before.get("discogs_release_id"),
+        )
+        before_database = (
+            self.database_snapshot() if source_identity is None else None
+        )
         target = replace(
             source,
             release_id=self._next_replacement_id(source.release_id),
@@ -955,6 +968,30 @@ class LifecycleWorld:
                 request_id,
                 target_mb_release_id=target.release_id,
             )
+        if source_identity is None:
+            if not (
+                result.outcome == RESULT_WRONG_STATE
+                and result.reason == REPLACE_REASON_SOURCE_IDENTITY_INVALID
+            ):
+                raise AssertionError(
+                    "conflicting-identity Replace did not fail closed: "
+                    f"{result!r}"
+                )
+            if self._require_request(request_id) != before:
+                raise AssertionError(
+                    "failed-closed conflicting-identity Replace mutated request"
+                )
+            if self.database_snapshot() != before_database:
+                raise AssertionError(
+                    "failed-closed conflicting-identity Replace mutated database"
+                )
+            if self._album_fingerprint(
+                self._album_for_release(source.release_id)
+            ) != self._album_fingerprint(before_album):
+                raise AssertionError(
+                    "failed-closed conflicting-identity Replace mutated Beets"
+                )
+            return request_id
         if result.outcome != RESULT_REPLACED or result.new_request_id is None:
             raise AssertionError(
                 f"production Replace failed: {result!r}"
@@ -1106,6 +1143,49 @@ class LifecycleWorld:
             for request_id in sorted(self._release_by_request)
             if self._require_request(request_id)["status"] == status
         ]
+
+    def database_snapshot(
+        self,
+    ) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        """Capture every public table and sequence for zero-mutation laws."""
+
+        table_rows = self.db._execute(
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+            ORDER BY table_name
+            """
+        ).fetchall()
+        snapshot: list[tuple[str, tuple[str, ...]]] = []
+        for table_row in table_rows:
+            table_name = str(table_row["table_name"])
+            if not table_name.replace("_", "").isalnum():
+                raise AssertionError(f"unsafe generated table name: {table_name!r}")
+            rows = self.db._execute(
+                f'SELECT to_jsonb(snapshot_row)::text AS row_json '
+                f'FROM "{table_name}" AS snapshot_row ORDER BY 1'
+            ).fetchall()
+            snapshot.append((
+                f"table:{table_name}",
+                tuple(str(row["row_json"]) for row in rows),
+            ))
+        sequence_rows = self.db._execute(
+            """
+            SELECT sequencename, last_value
+            FROM pg_sequences
+            WHERE schemaname = 'public'
+            ORDER BY sequencename
+            """
+        ).fetchall()
+        snapshot.append((
+            "sequences",
+            tuple(
+                f"{row['sequencename']}={row['last_value']}"
+                for row in sequence_rows
+            ),
+        ))
+        return tuple(snapshot)
 
     def request_ids_with_album(self) -> list[int]:
         return [

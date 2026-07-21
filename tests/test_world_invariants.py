@@ -105,6 +105,22 @@ class TestWorldInvariantPins(unittest.TestCase):
         self.assertEqual(check_no_lossy_tier_widening((transition,)), ())
         self.assertEqual(check_denylist_authority((authority,)), ())
 
+    def test_historical_evidence_capture_path_is_coherent(self) -> None:
+        violations = check_evidence_disk_coherence((EvidenceDiskSnapshot(
+            request_id=10,
+            release_id="release-a",
+            status="imported",
+            album_path="/library/A",
+            current_evidence_id=4,
+            evidence_id=4,
+            evidence_release_id="release-a",
+            evidence_source_path="/incoming/original-capture",
+            evidence_fingerprint="sha256:current",
+            actual_fingerprint="sha256:current",
+        ),))
+
+        self.assertEqual(violations, ())
+
     def test_denylist_authority_is_derived_from_persisted_decisions(self) -> None:
         self.assertEqual(
             derive_denylist_authorities(
@@ -399,6 +415,25 @@ class TestWorldInvariantCheckersTripOnKnownBad(unittest.TestCase):
         ),))
 
         self.assertIn("evidence_fingerprint_mismatch", {v.code for v in violations})
+
+    def test_evidence_checker_trips_on_blank_capture_path(self) -> None:
+        violations = check_evidence_disk_coherence((EvidenceDiskSnapshot(
+            request_id=10,
+            release_id="release-a",
+            status="imported",
+            album_path="/library/A",
+            current_evidence_id=4,
+            evidence_id=4,
+            evidence_release_id="release-a",
+            evidence_source_path="",
+            evidence_fingerprint="sha256:current",
+            actual_fingerprint="sha256:current",
+        ),))
+
+        self.assertIn(
+            "evidence_capture_path_missing",
+            {violation.code for violation in violations},
+        )
 
     def test_evidence_checker_trips_on_dangling_link(self) -> None:
         violations = check_evidence_disk_coherence((EvidenceDiskSnapshot(
