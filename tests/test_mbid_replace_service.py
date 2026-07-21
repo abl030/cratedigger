@@ -33,6 +33,7 @@ from lib.beets_delete import (
 from lib.mbid_replace_service import (
     MbidReplaceService,
     REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
+    REPLACE_REASON_SOURCE_IDENTITY_INVALID,
     ReplaceResult,
     REPLACE_REASON_CROSS_PATHWAY_TARGET,
     REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
@@ -360,6 +361,38 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         self.assertEqual(result.reason, REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS)
         self.assertEqual(db.request(42), before)
         self.assertEqual(delete_calls, [])
+
+    def test_conflicting_source_identities_are_typed_zero_mutation(self):
+        db = FakePipelineDB()
+        self._seed_old(db, status="imported")
+        db.request(42)["discogs_release_id"] = OLD_DISCOGS_ID
+        before = db.request(42).copy()
+        mb_lookup = MagicMock(side_effect=AssertionError("lookup reached"))
+        discogs_lookup = MagicMock(
+            side_effect=AssertionError("lookup reached"),
+        )
+        beets_factory = MagicMock(
+            side_effect=AssertionError("Beets authority reached"),
+        )
+        svc = self._make_service(
+            db,
+            mb_lookup=mb_lookup,
+            discogs_lookup=discogs_lookup,
+            beets_db_factory=beets_factory,
+        )
+
+        result = svc.replace_request_mbid(
+            42,
+            target_mb_release_id=NEW_MBID,
+        )
+
+        self.assertEqual(result.outcome, RESULT_WRONG_STATE)
+        self.assertEqual(result.reason, REPLACE_REASON_SOURCE_IDENTITY_INVALID)
+        self.assertEqual(db.request(42), before)
+        self.assertEqual(db.advisory_lock_calls, [])
+        mb_lookup.assert_not_called()
+        discogs_lookup.assert_not_called()
+        beets_factory.assert_not_called()
 
     def test_target_invalid_malformed_uuid(self):
         """Defense-in-depth: the service rejects a non-UUID

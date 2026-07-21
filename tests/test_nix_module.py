@@ -345,7 +345,6 @@ class TestRenderedBeetsConfigContract(unittest.TestCase):
         self.assertNotIn("services.cratedigger.beets.directory", text)
         self.assertIn("library = ${cfg.beets.config.library}", text)
         self.assertIn("config_dir = ${beetsConfigDir}", text)
-        self.assertIn("beet_binary = ${pythonEnv}/bin/beet", text)
         self.assertIn("python = ${pythonEnv}/bin/python", text)
 
     def test_web_wrapper_exports_beetsdir(self) -> None:

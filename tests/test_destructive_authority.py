@@ -27,6 +27,7 @@ from lib.destructive_release_service import (
     DeleteImporterBusy,
     DeleteAlbumAuthorityMismatch,
     DeleteBeetsAmbiguous,
+    DeleteIncomplete,
     DeleteLockContended,
     DeleteReleaseMismatch,
     DeleteRequest,
@@ -577,6 +578,59 @@ class TestLibraryDeleteAuthority(unittest.TestCase):
         self.assertIsInstance(result, DeleteAlbumAuthorityMismatch)
         self.assertEqual(delete_calls, [])
         self._assert_no_mutation()
+
+    def test_incomplete_delete_always_reports_fresh_resolver_path(self) -> None:
+        stale_path = "/library/Stale Cached Path"
+        fresh_path = "/library/Fresh Resolver Path"
+        self.beets.set_album_detail(7, {
+            **_album(),
+            "path": stale_path,
+            "tracks": [{"id": 701, "path": f"{stale_path}/01.flac"}],
+        })
+        self.beets.set_album_ids_for_release(RELEASE_A, [7])
+        self.beets.set_item_paths(
+            RELEASE_A,
+            [(701, f"{fresh_path}/01.flac")],
+        )
+
+        outcomes = (
+            (
+                BeetsDeleteFailed(
+                    album_id=7,
+                    reason="filesystem_error",
+                    detail="planted failure after current resolution",
+                    album_still_present=True,
+                ),
+                "filesystem_error",
+            ),
+            (
+                BeetsDeleteCompleted(
+                    album_id=7,
+                    album_name="Album A",
+                    artist_name="Artist A",
+                    former_album_path="/child/stale/path",
+                    deleted_tracks=1,
+                    deleted_artifacts=1,
+                    preserved_paths=(),
+                ),
+                "postcondition_failed",
+            ),
+        )
+        for child_outcome, expected_reason in outcomes:
+            with self.subTest(child_outcome=type(child_outcome).__name__):
+                result = delete_release_from_library(
+                    pipeline_db=self.db,
+                    beets_db=self.beets,
+                    request=DeleteRequest(album_id=7),
+                    beets_delete_fn=lambda _request, value=child_outcome: value,
+                    notify_fn=lambda _path: (),
+                )
+
+                self.assertIsInstance(result, DeleteIncomplete)
+                assert isinstance(result, DeleteIncomplete)
+                self.assertEqual(result.reason, expected_reason)
+                self.assertEqual(result.former_album_path, fresh_path)
+                self.assertNotEqual(result.former_album_path, stale_path)
 
 
 class TestDestructiveCurrentAuthorityRealBeets(unittest.TestCase):

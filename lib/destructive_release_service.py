@@ -120,45 +120,19 @@ class FinalizeRequestFn(Protocol):
 BeetsDeleteFn = Callable[[BeetsDeleteRequest], BeetsDeleteOutcome]
 
 
-def _distinct_identities(
-    *values: object | None,
-) -> tuple[ReleaseIdentity, ...] | None:
-    """Return distinct identities, or ``None`` for malformed server state."""
-    identities: list[ReleaseIdentity] = []
-    for value in values:
-        normalized = normalize_release_id(value)
-        if not normalized:
-            continue
-        identity = ReleaseIdentity.from_id(normalized)
-        if identity is None:
-            # A nonempty field is authority-bearing even when malformed.  It
-            # cannot be silently treated as absent: importer code may still
-            # use the raw truthy value to choose a different RELEASE lock.
-            return None
-        if identity not in identities:
-            identities.append(identity)
-    return tuple(identities)
-
-
 def _request_identity(row: Mapping[str, Any]) -> ReleaseIdentity | None:
-    identities = _distinct_identities(
+    return ReleaseIdentity.from_strict_fields(
         row.get("mb_release_id"),
         row.get("discogs_release_id"),
     )
-    if identities is None or len(identities) != 1:
-        return None
-    return identities[0]
 
 
 def _album_identity(row: dict[str, object]) -> ReleaseIdentity | None:
     """Return one unambiguous identity; dual-source rows fail closed."""
-    identities = _distinct_identities(
+    return ReleaseIdentity.from_strict_fields(
         row.get("mb_albumid"),
         row.get("discogs_albumid"),
     )
-    if identities is None or len(identities) != 1:
-        return None
-    return identities[0]
 
 
 def resolve_pipeline_request(
@@ -647,25 +621,6 @@ def _delete_confirmations_match(
     return _request_identity(pipeline_row) == identity
 
 
-def _preflight_former_album_path(detail: dict[str, object]) -> str:
-    """Retain the exact album directory for incomplete operator recovery."""
-    direct = detail.get("path")
-    if isinstance(direct, str) and direct:
-        return direct
-    tracks = detail.get("tracks")
-    if isinstance(tracks, list):
-        for track in tracks:
-            if not isinstance(track, dict):
-                continue
-            path = track.get("path")
-            if isinstance(path, str) and path:
-                return str(Path(path).parent)
-    artpath = detail.get("artpath")
-    if isinstance(artpath, str) and artpath:
-        return str(Path(artpath).parent)
-    return ""
-
-
 def _incomplete_delete_detail(
     *,
     failed: BeetsDeleteFailed,
@@ -699,6 +654,7 @@ def _delete_incomplete(
     *,
     album_id: int,
     preflight_detail: dict[str, object],
+    former_album_path: str,
     pipeline_row: Mapping[str, Any] | None,
     reason: str,
     detail: str,
@@ -712,7 +668,7 @@ def _delete_incomplete(
         album_id=album_id,
         album_name=str(preflight_detail.get("album") or ""),
         artist_name=str(preflight_detail.get("artist") or ""),
-        former_album_path=_preflight_former_album_path(preflight_detail),
+        former_album_path=former_album_path,
         pipeline_request_id=(
             int(pipeline_row["id"]) if pipeline_row is not None else None
         ),
@@ -794,6 +750,7 @@ def _delete_under_release_lock(
         return _delete_incomplete(
             album_id=current_beets.album_id,
             preflight_detail=preflight_detail,
+            former_album_path=current_beets.album_path,
             pipeline_row=current_pipeline,
             reason=beets_outcome.reason,
             detail=_incomplete_delete_detail(
@@ -815,6 +772,7 @@ def _delete_under_release_lock(
         return _delete_incomplete(
             album_id=current_beets.album_id,
             preflight_detail=preflight_detail,
+            former_album_path=current_beets.album_path,
             pipeline_row=current_pipeline,
             reason="postcondition_failed",
             detail="exact Beets album or item metadata survived the delete operation",

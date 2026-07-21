@@ -1,316 +1,75 @@
-"""Tests for ``lib.beets_album_op`` (issue #133).
-
-Two groups:
-
-1. **Behavior tests** on ``remove_album`` / ``remove_by_selector``:
-   subprocess clean exit, timeout, OSError, non-zero rc.
-   Subprocess mocked via ``patch('lib.beets_album_op.sp.run', ...)``
-   following the pattern from ``tests/test_release_cleanup.py``.
-
-2. **Contract guard** (``TestBeetOpArgvIsCentralised``): greps every
-   ``.py`` file in the repo for ``"beet", "remove"`` / ``"beet", "move"``
-   argv fragments. The only hits allowed are this module and tests.
-   (``move`` is retained in the pattern for defence-in-depth even
-   though ``move_album`` was retired; future ``beet move`` callers must
-   still route through this module.) The acceptance criterion from
-   issue #133: "No callsite constructs its own
-   ``beet remove -a -d id:<N>`` argv."
-"""
+"""Pins the retained wire type and retirement of selector destruction."""
 
 from __future__ import annotations
 
-import os
 import re
-import subprocess as sp
 import unittest
 from pathlib import Path
-from typing import Any, cast
-from unittest.mock import MagicMock, patch
 
-from tests.fakes import FakeBeetsDB
-from lib.beets_album_op import (BeetsAlbumHandle, BeetsOpFailure,
-                                BeetsOpResult, remove_album,
-                                remove_by_selector)
+import lib.beets_album_op as beets_album_op
+from lib.beets_album_op import BeetsOpFailure
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _ok(stdout: str = "", stderr: str = "") -> MagicMock:
-    return MagicMock(returncode=0, stdout=stdout, stderr=stderr)
-
-
-def _rc(rc: int, stderr: str = "") -> MagicMock:
-    return MagicMock(returncode=rc, stdout="", stderr=stderr)
-
-
-# ---------------------------------------------------------------------------
-# Typed return contract
-# ---------------------------------------------------------------------------
-
-
 class TestTypedReturnContract(unittest.TestCase):
-
-    def test_op_failure_fields(self) -> None:
-        """``BeetsOpFailure`` exposes reason, detail, selector."""
-        f = BeetsOpFailure(
-            reason="timeout", detail="timed out after 30s", selector="id:42")
-        self.assertEqual(f.reason, "timeout")
-        self.assertEqual(f.detail, "timed out after 30s")
-        self.assertEqual(f.selector, "id:42")
-
-    def test_op_failure_selector_defaults_to_empty(self) -> None:
-        """Default ``selector=""`` keeps JSON round-trip backwards compatible
-        with old ``PostflightInfo.disambiguation_failure`` rows that
-        predate the field being added."""
-        f = BeetsOpFailure(reason="nonzero_rc", detail="rc=1")
-        self.assertEqual(f.selector, "")
+    def test_op_failure_fields_and_legacy_selector_default(self) -> None:
+        failure = BeetsOpFailure(
+            reason="timeout",
+            detail="timed out after 30s",
+            selector="id:42",
+        )
+        self.assertEqual(failure.reason, "timeout")
+        self.assertEqual(failure.detail, "timed out after 30s")
+        self.assertEqual(failure.selector, "id:42")
+        self.assertEqual(
+            BeetsOpFailure(reason="nonzero_rc", detail="rc=1").selector,
+            "",
+        )
 
     def test_op_failure_is_frozen(self) -> None:
-        f = BeetsOpFailure(reason="timeout", detail="x")
+        failure = BeetsOpFailure(reason="timeout", detail="x")
         with self.assertRaises(Exception):
-            # FrozenInstanceError subclasses AttributeError
-            f.detail = "y"  # type: ignore[misc]
-
-    def test_handle_wraps_album_id(self) -> None:
-        """``BeetsAlbumHandle`` is a typed wrapper for the beets numeric
-        primary key. The class exists (vs. a bare int) so callsites
-        are self-documenting and future field additions don't break
-        callsite signatures."""
-        h = BeetsAlbumHandle(album_id=42)
-        self.assertEqual(h.album_id, 42)
-
-    def test_result_ok(self) -> None:
-        r = BeetsOpResult(success=True)
-        self.assertTrue(r.success)
-        self.assertIsNone(r.failure)
-
-    def test_result_failure(self) -> None:
-        f = BeetsOpFailure(reason="timeout", detail="x", selector="id:1")
-        r = BeetsOpResult(success=False, failure=f)
-        self.assertFalse(r.success)
-        self.assertIs(r.failure, f)
+            failure.detail = "y"  # type: ignore[misc]
 
 
-# ---------------------------------------------------------------------------
-# remove_album
-# ---------------------------------------------------------------------------
-
-
-class TestRemoveAlbum(unittest.TestCase):
-
-    @patch("lib.beets_album_op.sp.run")
-    def test_clean_exit_returns_success(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = _ok()
-        r = remove_album(BeetsAlbumHandle(album_id=42))
-        self.assertTrue(r.success)
-        self.assertIsNone(r.failure)
-
-    @patch("lib.beets_album_op.sp.run")
-    def test_argv_uses_album_mode_and_delete_by_default(
-            self, mock_run: MagicMock) -> None:
-        """Remove is album-scoped, forced, and deletes files by default."""
-        mock_run.return_value = _ok()
-        remove_album(BeetsAlbumHandle(album_id=42))
-        argv = mock_run.call_args.args[0]
-        self.assertEqual(
-            argv[1:],
-            ["-P", "importsource", "remove", "-a", "-f", "-d", "id:42"],
-        )
-
-    @patch("lib.beets_album_op.sp.run")
-    def test_closes_stdin_instead_of_scripting_beets_prompts(
-            self, mock_run: MagicMock) -> None:
-        """No plugin or command prompt may consume operator/protocol stdin."""
-        mock_run.return_value = _ok()
-        remove_album(BeetsAlbumHandle(album_id=42))
-        self.assertIs(mock_run.call_args.kwargs.get("stdin"), sp.DEVNULL)
-        self.assertNotIn("input", mock_run.call_args.kwargs)
-
-    @patch("lib.beets_album_op.sp.run")
-    def test_delete_files_false_omits_dash_d(
-            self, mock_run: MagicMock) -> None:
-        """Untag-only mode is available even though no production caller uses it."""
-        mock_run.return_value = _ok()
-        remove_album(BeetsAlbumHandle(album_id=42), delete_files=False)
-        argv = mock_run.call_args.args[0]
-        self.assertNotIn("-d", argv)
-        self.assertEqual(
-            argv[1:],
-            ["-P", "importsource", "remove", "-a", "-f", "id:42"],
-        )
-
-    @patch("lib.beets_album_op.sp.run")
-    def test_timeout_is_typed_failure(self, mock_run: MagicMock) -> None:
-        mock_run.side_effect = sp.TimeoutExpired(
-            cmd=["beet", "remove"], timeout=30)
-        r = remove_album(BeetsAlbumHandle(album_id=42))
-        self.assertFalse(r.success)
-        assert r.failure is not None
-        self.assertEqual(r.failure.reason, "timeout")
-        self.assertEqual(r.failure.selector, "id:42")
-        self.assertIn("30s", r.failure.detail)
-
-    @patch("lib.beets_album_op.sp.run")
-    def test_oserror_is_typed_failure(self, mock_run: MagicMock) -> None:
-        mock_run.side_effect = FileNotFoundError("beet")
-        r = remove_album(BeetsAlbumHandle(album_id=42))
-        self.assertFalse(r.success)
-        assert r.failure is not None
-        self.assertEqual(r.failure.reason, "exception")
-        self.assertEqual(r.failure.selector, "id:42")
-        self.assertIn("FileNotFoundError", r.failure.detail)
-
-    @patch("lib.beets_album_op.sp.run")
-    def test_nonzero_rc_is_typed_failure(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = _rc(1, stderr="bad selector\n")
-        r = remove_album(BeetsAlbumHandle(album_id=42))
-        self.assertFalse(r.success)
-        assert r.failure is not None
-        self.assertEqual(r.failure.reason, "nonzero_rc")
-        self.assertIn("rc=1", r.failure.detail)
-        self.assertEqual(r.failure.selector, "id:42")
-
-
-# ---------------------------------------------------------------------------
-# remove_by_selector
-# ---------------------------------------------------------------------------
-
-
-class TestRemoveBySelector(unittest.TestCase):
-
-    @patch("lib.beets_album_op.sp.run")
-    def test_passes_arbitrary_selector_and_uses_album_mode(
-            self, mock_run: MagicMock) -> None:
-        mock_run.return_value = _ok()
-        result = remove_by_selector("mb_albumid:abc-uuid")
-        self.assertIsNone(result)
-        argv = mock_run.call_args.args[0]
-        self.assertEqual(
-            argv[1:],
-            [
-                "-P", "importsource", "remove", "-a", "-f", "-d",
-                "mb_albumid:abc-uuid",
-            ],
-        )
-
-    @patch("lib.beets_album_op.sp.run")
-    def test_non_id_selector_failure_records_selector(
-            self, mock_run: MagicMock) -> None:
-        mock_run.return_value = _rc(1, stderr="boom\n")
-        f = remove_by_selector("discogs_albumid:12856590")
-        assert f is not None
-        self.assertEqual(f.reason, "nonzero_rc")
-        self.assertEqual(f.selector, "discogs_albumid:12856590")
-
-
-# ---------------------------------------------------------------------------
-# Argv centralisation contract guard
-# ---------------------------------------------------------------------------
-
-
-class TestBeetOpArgvIsCentralised(unittest.TestCase):
-    """Issue #133 acceptance: grep the repo for raw ``beet remove``/``beet move``
-    argv construction. The only allowed callsites are this module and
-    tests (tests intentionally write argv as literals to verify shapes).
-
-    Enforcement mechanism: walk the Python source tree and fail if any
-    file outside the allowlist contains a matching pattern. New callers
-    must route through ``lib.beets_album_op``.
-
-    Patterns matched (each catches a different natural construction):
-    - Literal string:   ``"beet", "remove"`` or ``'beet', 'move'``
-    - Wrapper function: ``beet_bin(), "remove"`` / ``beet_bin(), "move"``
-    - Wrapper constant: ``BEET_BIN, "remove"`` / ``BEET_BIN, "move"``
-
-    ``beet_bin()`` is the canonical way most of the codebase resolves the
-    binary (``lib/util.py::beet_bin``), so catching that shape too was
-    the most likely bypass (the first version of this guard only
-    matched the literal ``"beet"`` form — the entire production code
-    base used ``beet_bin()`` and would have slipped through silently).
-
-    Inevitable gaps: fully-dynamic argv (``[cmd, verb, *flags]`` where
-    cmd/verb are variables) can't be caught by grep. That's fine — the
-    guard covers every natural-looking new callsite; a truly obfuscated
-    argv construction would require deliberate effort to add and stand
-    out in code review on its own.
-    """
-
-    PATTERNS = [
-        # Literal "beet" / 'beet' — shape used by test argv assertions.
+class TestSelectorDestructiveBypassRetired(unittest.TestCase):
+    PATTERNS = (
         re.compile(r'["\']beet["\']\s*,\s*["\'](?:remove|move)["\']'),
-        # beet_bin() wrapper — the production code's canonical form.
         re.compile(r'beet_bin\s*\(\s*\)\s*,\s*["\'](?:remove|move)["\']'),
-        # BEET_BIN constant alias — legacy, may still live in some
-        # harness-adjacent code paths.
         re.compile(r'BEET_BIN\s*,\s*["\'](?:remove|move)["\']'),
-    ]
+    )
 
-    # Files allowed to construct raw ``beet remove``/``beet move`` argv.
-    # The op module itself is the only production allowlist entry.
-    # Test modules are allowed to write argv literals in assertions —
-    # they document the expected shape and would be unreadable forced
-    # through the op wrapper.
-    ALLOWED_FILES = frozenset({
-        "lib/beets_album_op.py",
-        # Tests that assert argv shapes — intentional literals:
-        "tests/test_beets_album_op.py",
-        "tests/test_release_cleanup.py",
-        "tests/test_disambiguation.py",
-    })
+    def test_selector_helpers_and_cleanup_module_are_absent(self) -> None:
+        self.assertFalse((REPO_ROOT / "lib" / "release_cleanup.py").exists())
+        for name in (
+            "BeetsAlbumHandle",
+            "BeetsOpResult",
+            "remove_album",
+            "remove_by_selector",
+        ):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(beets_album_op, name))
 
-    # Directories ignored entirely (not Python source we own).
-    # ``.claude`` holds agent git worktrees (``.claude/worktrees/``) —
-    # nested checkouts of this repo. Without pruning it, ``os.walk`` from
-    # REPO_ROOT descends into every stale worktree and flags their copies
-    # of allowlisted files (whose paths aren't in ALLOWED_FILES), failing
-    # this test in a shared checkout. Same class of bug as the pyright
-    # ``.claude/worktrees`` exclude (#520).
-    IGNORE_DIRS = {
-        ".git", "__pycache__", ".venv", "venv", "result",
-        "node_modules", ".mypy_cache", ".pytest_cache", ".claude",
-    }
-
-    def test_allowlist_entries_still_exist(self) -> None:
-        """Fail loud if an allowlist entry is stale (file renamed or
-        removed). Prevents the allowlist silently protecting a file
-        that no longer exists while the rename now bypasses the guard
-        with a new path."""
-        for rel in self.ALLOWED_FILES:
-            abs_path = REPO_ROOT / rel
-            self.assertTrue(
-                abs_path.is_file(),
-                f"ALLOWED_FILES entry {rel!r} does not exist. Remove "
-                f"stale entries; the file may have been renamed.")
-
-    def test_no_file_outside_allowlist_constructs_beet_argv(self) -> None:
-        offending: list[tuple[str, int, str]] = []
-        for root, dirs, files in os.walk(REPO_ROOT):
-            dirs[:] = [d for d in dirs if d not in self.IGNORE_DIRS]
-            for name in files:
-                if not name.endswith(".py"):
-                    continue
-                abs_path = Path(root) / name
-                rel = abs_path.relative_to(REPO_ROOT).as_posix()
-                if rel in self.ALLOWED_FILES:
-                    continue
-                try:
-                    text = abs_path.read_text(encoding="utf-8")
-                except (OSError, UnicodeDecodeError):
-                    continue
-                for lineno, line in enumerate(text.splitlines(), start=1):
-                    for pat in self.PATTERNS:
-                        if pat.search(line):
-                            offending.append((rel, lineno, line.strip()))
-        if offending:
-            lines = [
-                f"  {rel}:{lineno}: {text}" for rel, lineno, text in offending]
-            self.fail(
-                "The following files construct raw `beet remove` / "
-                "`beet move` argv outside the allowlist. Route them "
-                "through lib.beets_album_op (remove_album / "
-                "remove_by_selector) or, if the grep is a false positive, "
-                "add the file to ALLOWED_FILES with a comment.\n"
-                + "\n".join(lines))
+    def test_production_never_constructs_raw_beet_remove_or_move(self) -> None:
+        paths = [REPO_ROOT / "cratedigger.py"]
+        for directory in ("lib", "harness", "scripts", "web"):
+            paths.extend((REPO_ROOT / directory).rglob("*.py"))
+        offending: list[str] = []
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                if any(pattern.search(line) for pattern in self.PATTERNS):
+                    offending.append(
+                        f"{path.relative_to(REPO_ROOT)}:{lineno}: {line.strip()}",
+                    )
+        self.assertEqual(
+            offending,
+            [],
+            "selector-based Beets mutation bypasses pinned exact delete:\n"
+            + "\n".join(offending),
+        )
 
 
 if __name__ == "__main__":

@@ -1282,49 +1282,5 @@ class TestBeetsSubprocessEnv(unittest.TestCase):
         ), patch.dict(os.environ, {sentinel: "present"}, clear=False):
             env = beets_subprocess_env()
         self.assertEqual(env.get(sentinel), "present")
-
-
-class TestBeetBin(unittest.TestCase):
-    """beet_bin(): configured [Beets] beet_binary wins; PATH is the dev
-    fallback; there is NO per-user-profile fallback (tier-2 plan R6)."""
-
-    def _with_runtime_config(self, ini_text: str):
-        import contextlib
-        import tempfile
-
-        @contextlib.contextmanager
-        def cm():
-            with tempfile.TemporaryDirectory() as d:
-                path = os.path.join(d, "config.ini")
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(ini_text)
-                with patch.dict(os.environ,
-                                {"CRATEDIGGER_RUNTIME_CONFIG": path},
-                                clear=False):
-                    yield
-        return cm()
-
-    def test_configured_binary_wins(self) -> None:
-        from lib.util import beet_bin
-        with self._with_runtime_config(
-            "[Beets]\nbeet_binary = /nix/store/x/bin/beet\n"
-        ), patch("shutil.which", return_value="/usr/bin/beet"):
-            self.assertEqual(beet_bin(), "/nix/store/x/bin/beet")
-
-    def test_path_fallback(self) -> None:
-        from lib.util import beet_bin
-        with self._with_runtime_config("[Slskd]\nhost_url = http://x\n"), \
-                patch("shutil.which", return_value="/dev-shell/bin/beet"):
-            self.assertEqual(beet_bin(), "/dev-shell/bin/beet")
-
-    def test_missing_everywhere_raises_actionable_error(self) -> None:
-        from lib.util import beet_bin
-        with self._with_runtime_config("[Slskd]\nhost_url = http://x\n"), \
-                patch("shutil.which", return_value=None):
-            with self.assertRaises(RuntimeError) as ctx:
-                beet_bin()
-        self.assertIn("beet_binary", str(ctx.exception))
-
-
 if __name__ == "__main__":
     unittest.main()

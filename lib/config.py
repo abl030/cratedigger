@@ -142,11 +142,10 @@ class CratediggerConfig:
 
     # Module-rendered beets runtime (tier-2 plan U5, R6). The NixOS module
     # renders these into config.ini so every beets subprocess resolves the
-    # SAME pinned interpreter/binary and the SAME rendered config dir
+    # SAME pinned interpreter and the SAME rendered config dir
     # (BEETSDIR) — no Home-Manager per-user profile involved anywhere.
     # Empty string -> unset (dev shells / tests provide env fallbacks).
     beets_config_dir: str = ""
-    beet_binary: str = ""
     beets_python: str = ""
 
     # One MB value, three consumers (tier-2 plan U6 / KTD6): web/mb.py,
@@ -334,7 +333,6 @@ class CratediggerConfig:
                 "Beets", "library", "/mnt/virtio/Music/beets-library.db",
             ),
             beets_config_dir=get("Beets", "config_dir", ""),
-            beet_binary=get("Beets", "beet_binary", ""),
             beets_python=get("Beets", "python", ""),
             musicbrainz_api_base=get("MusicBrainz", "api_base", "https://musicbrainz.org"),
             discogs_api_base=get("Discogs", "api_base", ""),

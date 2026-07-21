@@ -121,8 +121,8 @@ session, token, or origin check, and every JSON response sends
 parses the body with `json.loads` regardless of `Content-Type`, so even a
 preflight-free `text/plain` "simple request" reaches handlers. Destructive sinks
 reachable with no credential include `/api/beets/delete` (removes library
-files), `/api/pipeline/ban-source` (routes to `beet remove -d` via
-`lib/release_cleanup.py`), `/api/pipeline/delete`, and the `/api/wrong-matches/*`
+files), `/api/pipeline/ban-source` (routes through the typed destructive service
+and pinned exact-album child), `/api/pipeline/delete`, and the `/api/wrong-matches/*`
 family. The `confirm: "DELETE"` fields are input validation, not authorization —
 an attacker simply supplies the constant.
 

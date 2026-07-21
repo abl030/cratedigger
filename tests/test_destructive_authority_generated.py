@@ -48,7 +48,9 @@ from lib.config import CratediggerConfig
 from lib.mbid_replace_service import (
     MbidReplaceService,
     REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
+    REPLACE_REASON_SOURCE_IDENTITY_INVALID,
     RESULT_REPLACED,
+    RESULT_WRONG_STATE,
 )
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
@@ -233,6 +235,24 @@ def assert_presence_probe_failure_fails_closed(
         raise AssertionError("presence-probe failure purged pipeline authority")
     if notification_count:
         raise AssertionError("presence-probe failure notified media servers")
+
+
+def assert_replace_identity_conflict_fails_closed(
+    *,
+    outcome: str,
+    reason: str | None,
+    state_preserved: bool,
+    authority_boundary_reached: bool,
+) -> None:
+    """Conflicting source identities are a typed pre-mutation rejection."""
+    if outcome != RESULT_WRONG_STATE:
+        raise AssertionError("Replace identity conflict was not rejected")
+    if reason != REPLACE_REASON_SOURCE_IDENTITY_INVALID:
+        raise AssertionError("Replace identity conflict lost its typed reason")
+    if not state_preserved:
+        raise AssertionError("Replace identity conflict mutated pipeline state")
+    if authority_boundary_reached:
+        raise AssertionError("Replace identity conflict reached mutation authority")
 
 
 def _different_release(release_id: str) -> str:
@@ -507,6 +527,64 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
             beets_delete_album_ids=tuple(delete_album_ids),
             expected_album_id=(album_id if authority == "unique" else None),
             destructive_result=destructive_result,
+        )
+
+    @example(
+        mb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        discogs_id="12856590",
+        status="imported",
+    )
+    @given(
+        mb_id=MB_RELEASE_IDS,
+        discogs_id=DISCOGS_RELEASE_IDS,
+        status=st.sampled_from(("wanted", "imported", "unsearchable")),
+    )
+    def test_replace_conflicting_source_identities_are_zero_mutation(
+        self,
+        mb_id: str,
+        discogs_id: str,
+        status: str,
+    ) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41,
+            status=status,
+            mb_release_id=mb_id,
+            discogs_release_id=discogs_id,
+            mb_release_group_id="11111111-1111-1111-1111-111111111111",
+        ))
+        before = copy.deepcopy(db.get_request(41))
+        mb_lookup = MagicMock()
+        discogs_lookup = MagicMock()
+        beets_factory = MagicMock()
+        service = MbidReplaceService(
+            db=db,
+            config=CratediggerConfig(),
+            beets_db_factory=beets_factory,
+            mb_lookup=mb_lookup,
+            discogs_lookup=discogs_lookup,
+            search_plan_service=MagicMock(),
+        )
+        mb_lookup.reset_mock()
+        discogs_lookup.reset_mock()
+        beets_factory.reset_mock()
+
+        result = service.replace_request_mbid(
+            41,
+            target_mb_release_id=_different_release(mb_id),
+        )
+
+        after = db.get_request(41)
+        assert_replace_identity_conflict_fails_closed(
+            outcome=result.outcome,
+            reason=result.reason,
+            state_preserved=before == after,
+            authority_boundary_reached=bool(
+                db.advisory_lock_calls
+                or mb_lookup.mock_calls
+                or discogs_lookup.mock_calls
+                or beets_factory.mock_calls
+            ),
         )
 
     @example(
@@ -1118,7 +1196,9 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
         finally:
             logging.disable(previous_disable)
 
-        expected_path = str(album_dir) if path_source != "none" else ""
+        # The fresh joined resolver sees the current item path even when the
+        # earlier album-detail projection had no recovery path at all.
+        expected_path = str(album_dir)
         context_retained = (
             isinstance(result, DeleteIncomplete)
             and result.album_name == "Album"
@@ -1475,6 +1555,36 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
 
 
 class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
+    def test_replace_conflict_checker_kills_each_fail_open_mutant(self) -> None:
+        mutants: tuple[tuple[str, str | None, bool, bool], ...] = (
+            (
+                RESULT_REPLACED, REPLACE_REASON_SOURCE_IDENTITY_INVALID,
+                True, False,
+            ),
+            (RESULT_WRONG_STATE, None, True, False),
+            (
+                RESULT_WRONG_STATE, REPLACE_REASON_SOURCE_IDENTITY_INVALID,
+                False, False,
+            ),
+            (
+                RESULT_WRONG_STATE, REPLACE_REASON_SOURCE_IDENTITY_INVALID,
+                True, True,
+            ),
+        )
+        for outcome, reason, state_preserved, boundary_reached in mutants:
+            with self.subTest(
+                outcome=outcome,
+                reason=reason,
+                state_preserved=state_preserved,
+                boundary_reached=boundary_reached,
+            ), self.assertRaises(AssertionError):
+                assert_replace_identity_conflict_fails_closed(
+                    outcome=outcome,
+                    reason=reason,
+                    state_preserved=state_preserved,
+                    authority_boundary_reached=boundary_reached,
+                )
+
     def test_fresh_authority_checker_kills_cardinality_and_target_mutants(
         self,
     ) -> None:

@@ -257,7 +257,7 @@ For quality-decision bugs the simulator is the tool within the method: `pipeline
 
 ## Critical rules
 
-1. **NEVER `beet remove -d`** — deletes files permanently (exceptions: ban-source and Replace, both explicit operator actions via `lib/release_cleanup.py::remove_and_reset_release`).
+1. **NEVER `beet remove -d`** — deletes files permanently. Explicit Bad Rip, Replace, and library-delete actions use the pinned exact-album child in `lib/beets_delete.py`; selector-based deletion is retired.
 2. **NEVER import without inspecting the match** — always through the harness.
 3. **NEVER match by `candidate_index`** — always by MB release ID.
 4. **NEVER match by release group** — release groups conflate pressings.

@@ -241,7 +241,7 @@ def _neutralize_discogs_provider_ids(candidate: object) -> bool:
     into MUSICBRAINZ_ALBUMID and Jellyfin's `new Guid()` throws. The id is
     preserved in discogs_albumid (a flexattr the plugin already set), which is
     the layout the rest of cratedigger assumes (duplicate_keys = [mb_albumid,
-    discogs_albumid], lib/beets_album_op.py, lib/beets_db.py).
+    discogs_albumid], lib/beets_db.py).
 
     We set the mirrors to "" (not None) so beets' item_data KEEPS and APPLIES
     the empty value, overwriting any previously-poisoned mb_albumid on

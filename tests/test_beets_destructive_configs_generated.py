@@ -121,7 +121,7 @@ def assert_real_beets_contract(observation: RealBeetsObservation) -> None:
     if observation.child_sibling_bytes != b"rare sibling":
         raise AssertionError("exact-delete touched sibling file content")
     if observation.cli_import_sources_present != observation.track_count:
-        raise AssertionError("CLI removal touched separately owned import sources")
+        raise AssertionError("Ban Source touched separately owned import sources")
     if observation.child_import_sources_present != observation.track_count:
         raise AssertionError("exact-delete touched separately owned import sources")
 
@@ -129,9 +129,9 @@ def assert_real_beets_contract(observation: RealBeetsObservation) -> None:
         if observation.cli_failure_reason != "configuration_error":
             raise AssertionError("invalid Beets config was not rejected by preflight")
         if not observation.cli_album_present or observation.cli_items_present == 0:
-            raise AssertionError("CLI config rejection mutated Beets metadata")
+            raise AssertionError("Ban Source config rejection mutated Beets metadata")
         if observation.cli_files_present != observation.track_count:
-            raise AssertionError("CLI config rejection mutated library files")
+            raise AssertionError("Ban Source config rejection mutated library files")
         if not isinstance(observation.child_outcome, BeetsDeleteFailed):
             raise AssertionError("child config rejection was promoted to completion")
         if observation.child_outcome.reason != "configuration_error":
@@ -143,11 +143,13 @@ def assert_real_beets_contract(observation: RealBeetsObservation) -> None:
         return
 
     if observation.cli_failure_reason is not None:
-        raise AssertionError(f"real beet remove failed: {observation.cli_failure_reason}")
+        raise AssertionError(
+            f"Ban Source exact delete failed: {observation.cli_failure_reason}",
+        )
     if observation.cli_album_present or observation.cli_items_present:
-        raise AssertionError("real beet remove left metadata behind")
+        raise AssertionError("Ban Source exact delete left metadata behind")
     if observation.cli_files_present:
-        raise AssertionError("real beet remove left owned tracks behind")
+        raise AssertionError("Ban Source exact delete left owned tracks behind")
     if not isinstance(observation.child_outcome, BeetsDeleteCompleted):
         raise AssertionError(f"exact-delete failed: {observation.child_outcome!r}")
     if observation.child_album_present or observation.child_items_present:

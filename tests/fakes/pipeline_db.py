@@ -387,9 +387,7 @@ class FakePipelineDB:
         # on the MagicMock-source can now inspect these instead.
         self.has_any_bad_audio_hashes_calls: int = 0
         self.lookup_bad_audio_hash_calls: list[tuple[bytes, str]] = []
-        # ``clear_on_disk_quality_fields`` is invoked when a release is
-        # purged from beets; tests on lib.release_cleanup assert the
-        # exact request_id flushed (and whether it fired at all).
+        # Track callers that clear the request's installed-quality pointers.
         self.clear_on_disk_quality_fields_calls: list[int] = []
         # ``close()`` call count — pipeline_cli main() must close the
         # DB exactly once per invocation, regardless of subcommand exit

@@ -80,6 +80,7 @@ from lib.replace_status import (
     REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
     REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE,
     REPLACE_REASON_CROSS_PATHWAY_TARGET,
+    REPLACE_REASON_SOURCE_IDENTITY_INVALID,
     REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
     REPLACE_REASON_TARGET_NO_RELEASE_GROUP,
     REPLACE_REASON_UNEXPECTED_LOOKUP_ERROR,
@@ -168,13 +169,12 @@ class ReplaceResult(msgspec.Struct, frozen=True):
     - ``descendant_request_id``: set on ``RESULT_WRONG_STATE`` when the
       source row is itself already ``status='replaced'`` — so the UI
       can deep-link to "the new request is at /pipeline/{id}".
-    - ``reason``: set on ``RESULT_TARGET_INVALID`` — one of the
-      ``REPLACE_REASON_*`` constants, distinguishing the several distinct
-      rejections that outcome collapses (#501 item 2). ``error_message``
-      stays free-text for operator-facing detail; ``reason`` is the
-      stable code CLI/API/tests assert on. ``msgspec.Struct`` per the
-      wire-boundary rule (CLI ``--json`` output and the HTTP response
-      body both surface every field).
+    - ``reason``: a ``REPLACE_REASON_*`` constant on typed rejection
+      outcomes, distinguishing failures that an outcome alone collapses.
+      ``error_message`` stays free-text for operator-facing detail;
+      ``reason`` is the stable code CLI/API/tests assert on.
+      ``msgspec.Struct`` per the wire-boundary rule (CLI ``--json`` output
+      and the HTTP response body both surface every field).
     - ``warnings``: filesystem-cleanup failures that did NOT roll back
       the DB change (R26 non-fatal semantics).
     """
@@ -345,7 +345,21 @@ class MbidReplaceService:
                 ),
             )
 
-        source_mbid = source.get("mb_release_id")
+        source_identity = ReleaseIdentity.from_strict_fields(
+            source.get("mb_release_id"),
+            source.get("discogs_release_id"),
+        )
+        if source_identity is None:
+            return ReplaceResult(
+                outcome=RESULT_WRONG_STATE,
+                request_id=request_id,
+                reason=REPLACE_REASON_SOURCE_IDENTITY_INVALID,
+                error_message=(
+                    f"request {request_id} has missing, malformed, or "
+                    "conflicting exact release identity fields"
+                ),
+            )
+        source_mbid = source_identity.release_id
 
         # Pathway-aware target gate (replaces the old step-0a UUID gate).
         # The target must be a valid release id in the SAME identity space
@@ -355,7 +369,7 @@ class MbidReplaceService:
         # (R4 / AE2). ``detect_release_source`` is the single authority for
         # the pathway (KTD-2); the branch below dispatches on the source's
         # own shape, so MB×MB flows through the original path untouched.
-        source_source = detect_release_source(source_mbid)
+        source_source = source_identity.source
         target_source = detect_release_source(target_mb_release_id)
         if (
             target_source not in ("musicbrainz", "discogs")
@@ -851,7 +865,7 @@ class MbidReplaceService:
             old_title = source_locked.get("album_title") or ""
             old_status = source_locked.get("status")
 
-            old_identity = ReleaseIdentity.from_fields(
+            old_identity = ReleaseIdentity.from_strict_fields(
                 source_locked.get("mb_release_id"),
                 source_locked.get("discogs_release_id"),
             )
@@ -859,10 +873,10 @@ class MbidReplaceService:
                 return ReplaceResult(
                     outcome=RESULT_WRONG_STATE,
                     request_id=request_id,
-                    reason=REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE,
+                    reason=REPLACE_REASON_SOURCE_IDENTITY_INVALID,
                     error_message=(
-                        f"request {request_id} has no valid exact release "
-                        "identity for current Beets resolution"
+                        f"request {request_id} has missing, malformed, or "
+                        "conflicting exact release identity fields"
                     ),
                 )
             try:
