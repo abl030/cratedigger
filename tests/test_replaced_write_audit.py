@@ -63,14 +63,20 @@ class _AlbumRequestUpdate:
 # The ratchet does not infer parameter dataflow: transition SQL must use the
 # canonical direct call grammar below.
 _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/terminal_outcomes.py", 91, "741f55b2f7eee516"): (
-        "terminal metadata keys use the existing validated request-field vocabulary"
+    ("lib/pipeline_db/terminal_outcomes.py", 91, "5fa18d2c1737583f"): (
+        "terminal metadata keys use the existing validated request-field "
+        "vocabulary (issue #784: `dumps=lambda value: msgspec.json.encode("
+        "value).decode()` replaced with the shared `_msgspec_json_dumps` "
+        "helper from `_shared.py` — same encoder, same output, no SQL change)"
     ),
     ("lib/pipeline_db/terminal_outcomes.py", 306, "6cfaff9c6507c211"): (
         "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
     ),
-    ("lib/pipeline_db/dashboard.py", 481, "5e3b8177198ccbed"): (
-        "dashboard WHERE and ORDER fragments come from closed enum branches"
+    ("lib/pipeline_db/dashboard.py", 490, "5e3b8177198ccbed"): (
+        "dashboard WHERE and ORDER fragments come from closed enum branches "
+        "(issue #784: lib group B annotation sweep shifted this line by +9; "
+        "hash unchanged since this call sits outside every edited scope — "
+        "no SQL change)"
     ),
     ("lib/pipeline_db/download_log.py", 782, "8fea92f576d79b49"): (
         "validation key is selected from a closed server-owned vocabulary "
@@ -106,45 +112,59 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "(issue #784: add_denylist/get_denylisted_users annotated above, "
         "shifting this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 70, "092ac19c7715cd88"): (
-        "INSERT columns derive from the fixed AddRequestInput schema"
+    ("lib/pipeline_db/requests.py", 80, "4d6fa5b5b4572953"): (
+        "INSERT columns derive from the fixed AddRequestInput schema "
+        "(issue #784: `add_request` parameters annotated and its return "
+        "wrapped in `int(...)`, changing the enclosing-scope fingerprint "
+        "and shifting this line by +10; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 104, "723856dd7a3eba80"): (
+    ("lib/pipeline_db/requests.py", 114, "723856dd7a3eba80"): (
         "badge-overlay batch IN list contains only psycopg value placeholders; "
-        "the evidence JOIN and identity derivations are static SQL"
+        "the evidence JOIN and identity derivations are static SQL "
+        "(issue #784: `add_request` annotated above, shifting this line by "
+        "+10; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 250, "fd6c0bbbe61ee7e6"): (
+    ("lib/pipeline_db/requests.py", 260, "fd6c0bbbe61ee7e6"): (
         "release-id lookup selects one of two fixed identity predicates "
-        "(issue #765: return type retyped to AlbumRequestRow, no SQL change)"
+        "(issue #765: return type retyped to AlbumRequestRow, no SQL change; "
+        "issue #784: `add_request` annotated above, shifting this line by "
+        "+10; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 461, "b73bda10a331e1c3"): (
+    ("lib/pipeline_db/requests.py", 471, "44234eb14b8ecd52"): (
         "metadata keys are validated identifiers, lifecycle fields are reserved, "
-        "and values use one typed JSONB record parameter; issue #762 shifted the "
-        "unchanged statement while removing the request path cache"
+        "and values use one typed JSONB record parameter "
+        "(issue #784: `dumps=lambda value: msgspec.json.encode(value).decode()` "
+        "replaced with the shared `_msgspec_json_dumps` helper from "
+        "`_shared.py`, while issue #762 removed the obsolete request path cache; "
+        "same encoder, same output, no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 479, "86eaf6b403f76820"): (
+    ("lib/pipeline_db/requests.py", 489, "d969cab8f56eead9"): (
         "metadata keys are validated identifiers, lifecycle fields are reserved, "
-        "and values use one typed JSONB record parameter; issue #762 shifted the "
-        "unchanged statement while removing the request path cache"
+        "and values use one typed JSONB record parameter "
+        "(issue #784: `dumps=lambda value: msgspec.json.encode(value).decode()` "
+        "replaced with the shared `_msgspec_json_dumps` helper from "
+        "`_shared.py`, while issue #762 removed the obsolete request path cache; "
+        "same encoder, same output, no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1321, "ef9d09dcf1118fd0"): (
+    ("lib/pipeline_db/requests.py", 1331, "ef9d09dcf1118fd0"): (
         "optional LIMIT is normalized through int before interpolation "
         "(issue #765: return type retyped to list[AlbumRequestRow], no SQL "
         "change; issue #784: `limit` parameter annotated `int | None`, "
-        "changing the enclosing-scope fingerprint; issue #762 removed the path "
-        "cache above this statement; no SQL change)"
+        "changing the enclosing-scope fingerprint; issues #784 and #762 shifted "
+        "the final merged line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1342, "042a7becce5f90f7"): (
+    ("lib/pipeline_db/requests.py", 1352, "042a7becce5f90f7"): (
         "ORDER is selected from two literals and LIMIT remains a value placeholder "
         "(issue #765: return type retyped to list[AlbumRequestRow], no SQL change; "
         "issue #784: `status`/`limit`/`newest_first` parameters annotated, "
-        "changing the enclosing-scope fingerprint; issue #762 removed the path "
-        "cache above this statement; no SQL change)"
+        "changing the enclosing-scope fingerprint; issues #784 and #762 shifted "
+        "the final merged line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1527, "714da98640ff84f0"): (
+    ("lib/pipeline_db/requests.py", 1537, "714da98640ff84f0"): (
         "attempt kind is validated against the fixed retry-counter vocabulary "
-        "(issues #784 and #762 shifted this line without changing the hash; this "
-        "statement is a plain string constant, not scope-bound, so no SQL change)"
+        "(issues #784 and #762 shifted this line without changing the hash; "
+        "this statement is a plain string constant, not scope-bound, so no SQL "
+        "change)"
     ),
 }
 
@@ -170,30 +190,38 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/download_log.py", 428, "6c7d7519e8c91827"): (
         "atomic abandoned-import recovery performs downloading-to-wanted CAS"
     ),
-    ("lib/pipeline_db/requests.py", 289, "b3d1cf06b29bd1d6"): (
-        "Replace holds the row lock and CASes the captured active source status; "
-        "issue #762 removed the obsolete imported-path assignment"
+    ("lib/pipeline_db/requests.py", 299, "b3d1cf06b29bd1d6"): (
+        "Replace holds the row lock and CASes the captured active source status "
+        "(issue #784 shifted the line and issue #762 removed the obsolete "
+        "imported-path assignment from this lifecycle scope; SQL unchanged)"
     ),
-    ("lib/pipeline_db/requests.py", 769, "3c900d15e8bfd2b2"): (
-        "operator idempotence uses a no-op CAS against the observed status"
+    ("lib/pipeline_db/requests.py", 779, "3c900d15e8bfd2b2"): (
+        "operator idempotence uses a no-op CAS against the observed status "
+        "(issues #784 and #762 shifted this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 804, "cb4bc190bb194188"): (
-        "ordinary typed transitions CAS the source status selected by the DAG"
+    ("lib/pipeline_db/requests.py", 814, "cb4bc190bb194188"): (
+        "ordinary typed transitions CAS the source status selected by the DAG "
+        "(issues #784 and #762 shifted this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 902, "c99b75cd27718b63"): (
-        "typed imported transition CASes status with rescue audit atomically"
+    ("lib/pipeline_db/requests.py", 912, "c99b75cd27718b63"): (
+        "typed imported transition CASes status with rescue audit atomically "
+        "(issues #784 and #762 shifted this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1034, "c062c0704de758f9"): (
-        "typed reset-to-wanted transition CASes its captured source status"
+    ("lib/pipeline_db/requests.py", 1044, "c062c0704de758f9"): (
+        "typed reset-to-wanted transition CASes its captured source status "
+        "(issues #784 and #762 shifted this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1103, "cfedc69363af13f0"): (
-        "automatic recovery accepts only downloading as its exact source"
+    ("lib/pipeline_db/requests.py", 1113, "cfedc69363af13f0"): (
+        "automatic recovery accepts only downloading as its exact source "
+        "(issues #784 and #762 shifted this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1148, "2b2c27302b2ab78e"): (
-        "typed download claim accepts only the explicit wanted source status"
+    ("lib/pipeline_db/requests.py", 1158, "2b2c27302b2ab78e"): (
+        "typed download claim accepts only the explicit wanted source status "
+        "(issues #784 and #762 shifted this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1184, "186e1c3ba3188478"): (
-        "plan-aware download claim uses an exact wanted source predicate"
+    ("lib/pipeline_db/requests.py", 1194, "186e1c3ba3188478"): (
+        "plan-aware download claim uses an exact wanted source predicate "
+        "(issues #784 and #762 shifted this line; no SQL change)"
     ),
 }
 

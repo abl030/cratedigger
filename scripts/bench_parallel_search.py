@@ -55,9 +55,23 @@ class _EphemeralSlskdHandle(Protocol):
 
 
 def _build_ephemeral(creds_path: str) -> _EphemeralSlskdHandle:
-    """Construct the ephemeral slskd test fixture (see class docstring)."""
-    from ephemeral_slskd import EphemeralSlskd  # pyright: ignore[reportMissingImports]
-    return EphemeralSlskd(creds_path)
+    """Construct the ephemeral slskd test fixture (see class docstring).
+
+    Imported via ``importlib`` (not a static ``from ephemeral_slskd import
+    EphemeralSlskd``) so pyright never tries to statically resolve a
+    module that only exists via the ``sys.path`` insert above — a static
+    import left the name (and this function's inferred return) genuinely
+    ``Unknown`` even behind the ``_EphemeralSlskdHandle`` Protocol.
+    ``importlib.import_module`` returns a real ``ModuleType``, and
+    ``getattr`` on it types as ``Any`` (typeshed's two-argument
+    ``getattr`` overload), so the Protocol return annotation below is
+    what actually types this boundary — same technique as
+    ``lib.pipeline_db._shared.pg_execute_values``.
+    """
+    import importlib
+    module = importlib.import_module("ephemeral_slskd")
+    ephemeral_cls = getattr(module, "EphemeralSlskd")
+    return ephemeral_cls(creds_path)
 
 
 # Diverse queries: mix of popular (guaranteed results) and less common artists.

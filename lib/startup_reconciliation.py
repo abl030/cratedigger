@@ -315,7 +315,7 @@ def reconcile_search_plans(
 def _reconcile_one(
     db: "PipelineDB | _DBProto",
     service: SearchPlanService | None,
-    candidate,  # WantedReconciliationCandidate
+    candidate: "WantedReconciliationCandidate",
     *,
     generator_id: str,
     dry_run: bool,
@@ -412,7 +412,7 @@ def _classify_live_sticky_failure(
 
 def _classify_dry_run(
     db: "PipelineDB | _DBProto",
-    candidate,  # WantedReconciliationCandidate
+    candidate: "WantedReconciliationCandidate",
     *,
     generator_id: str,
     classification: "DryRunPlanClassification | None" = None,

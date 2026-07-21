@@ -6,6 +6,7 @@ Requires a PostgreSQL server. Set TEST_DB_DSN env var to run, e.g.:
 Tests create/drop tables in the target database — use a dedicated test DB.
 """
 
+import dataclasses
 import json
 import os
 import sys
@@ -8218,8 +8219,17 @@ class TestRecordConsumedSearchAttempt(unittest.TestCase):
     def tearDown(self):
         self.db.close()
 
-    def _attempt(self, ordinal: int, **overrides):
-        kwargs = dict(
+    def _attempt(self, ordinal: int, **overrides: object):
+        # ``dataclasses.replace`` (not a merged-dict-then-``**kwargs``
+        # unpack) because ``ConsumedAttemptInput`` has heterogeneous
+        # per-field types — a ``dict[str, <single value type>]`` can never
+        # type-check against a dataclass constructor with mixed
+        # int/str/float/bool/None fields once the constructor's own
+        # argument types are precisely known (issue #784: fixing
+        # lib.pipeline_db.search_plan's return types made
+        # ``self.active.items[...]``'s attributes precisely typed for the
+        # first time, which is what surfaces this).
+        base = self.ConsumedAttemptInput(
             request_id=self.req_id,
             plan_id=self.plan_id,
             plan_item_id=self.item_ids[ordinal],
@@ -8235,8 +8245,7 @@ class TestRecordConsumedSearchAttempt(unittest.TestCase):
             apply_scheduler_attempt=True,
             scheduler_success=False,
         )
-        kwargs.update(overrides)
-        return self.ConsumedAttemptInput(**kwargs)
+        return dataclasses.replace(base, **overrides)
 
     def test_advance_ordinal_writes_log_and_updates_cursor(self):
         result = self.db.record_consumed_search_attempt(

@@ -2,7 +2,6 @@
 import dataclasses
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
-import msgspec
 import psycopg2
 import psycopg2.extras
 
@@ -21,6 +20,7 @@ from lib.pipeline_db._shared import (
     RequestSpectralStateUpdate,
     SupersedeRaceError,
     _escape_like_pattern,
+    _msgspec_json_dumps,
     validate_request_metadata_fields,
 )
 
@@ -33,14 +33,24 @@ class _RequestsMixin(_PipelineDBBase):
 
     # --- album_requests CRUD ---
 
-    def add_request(self, artist_name, album_title, source,
-                    mb_release_id=None, mb_release_group_id=None,
-                    mb_artist_id=None, discogs_release_id=None,
-                    year=None, country=None, format=None,
-                    source_path=None, reasoning=None,
-                    status="wanted",
-                    release_group_year=None,
-                    is_va_compilation=False):
+    def add_request(
+        self,
+        artist_name: str,
+        album_title: str,
+        source: str,
+        mb_release_id: str | None = None,
+        mb_release_group_id: str | None = None,
+        mb_artist_id: str | None = None,
+        discogs_release_id: str | None = None,
+        year: int | None = None,
+        country: str | None = None,
+        format: str | None = None,
+        source_path: str | None = None,
+        reasoning: str | None = None,
+        status: str = "wanted",
+        release_group_year: int | None = None,
+        is_va_compilation: bool = False,
+    ) -> int:
         """Insert one ``album_requests`` row.
 
         The kwargs are funnelled through the typed ``AddRequestInput`` payload
@@ -75,7 +85,7 @@ class _RequestsMixin(_PipelineDBBase):
         row = cur.fetchone()
         self.conn.commit()
         assert row is not None, "INSERT RETURNING should always return a row"
-        return row["id"]
+        return int(row["id"])
 
 
     def get_request(self, request_id: int) -> AlbumRequestRow | None:
@@ -469,7 +479,7 @@ class _RequestsMixin(_PipelineDBBase):
                     now,
                     psycopg2.extras.Json(
                         fields,
-                        dumps=lambda value: msgspec.json.encode(value).decode(),
+                        dumps=_msgspec_json_dumps,
                     ),
                     request_id,
                     expected_status,
@@ -486,7 +496,7 @@ class _RequestsMixin(_PipelineDBBase):
                     now,
                     psycopg2.extras.Json(
                         fields,
-                        dumps=lambda value: msgspec.json.encode(value).decode(),
+                        dumps=_msgspec_json_dumps,
                     ),
                     request_id,
                 ),

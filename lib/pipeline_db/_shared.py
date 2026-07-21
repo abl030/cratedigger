@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import zlib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -117,6 +118,41 @@ def _float_or_none(value: Any) -> float | None:
     if value is None:
         return None
     return float(value)
+
+
+# ``psycopg2.extras.execute_values`` is untyped in the upstream typeshed
+# stub (every parameter and the return are bare ``Unknown``), so any direct
+# reference propagates Unknown through pyright strict mode at every call
+# site. ``getattr`` retrieves the exact same function object at runtime
+# (behaviorally identical to a direct attribute reference) but types as
+# ``Any`` under typeshed's two-argument ``getattr`` overload, breaking the
+# Unknown cascade without a suppression comment. One typed wrapper here is
+# shared by every INSERT ... VALUES %s batch-insert call site.
+_execute_values_fn = getattr(psycopg2.extras, "execute_values")
+
+
+def pg_execute_values(
+    cur: object,
+    sql: str,
+    argslist: Sequence[object],
+) -> None:
+    """Typed wrapper for ``psycopg2.extras.execute_values`` (batch INSERT).
+
+    Only the three positional args every call site in this package uses
+    (``cur``, ``sql``, ``argslist``) are exposed — none pass ``template``/
+    ``page_size``/``fetch``, so this wrapper doesn't need to carry them.
+    """
+    _execute_values_fn(cur, sql, argslist)
+
+
+def _msgspec_json_dumps(value: object) -> str:
+    """``dumps=`` callable for ``psycopg2.extras.Json`` using msgspec's encoder.
+
+    A named function (not a lambda) so its parameter carries an explicit
+    type — ``psycopg2.extras.Json.__init__``'s ``dumps: Callable[..., str]``
+    stub gives pyright no per-parameter type to infer a lambda's arg from.
+    """
+    return msgspec.json.encode(value).decode()
 
 
 def _stable_hash(label: str, *parts: str) -> str:
@@ -386,7 +422,7 @@ class SearchPlanProvenance(
 ):
     """Typed JSONB boundary for free-form plan generator provenance."""
 
-    values: dict[str, Any] = msgspec.field(default_factory=dict)
+    values: dict[str, Any] = msgspec.field(default_factory=dict[str, object])
 
 
 class SearchPlanItemProvenance(
@@ -394,7 +430,7 @@ class SearchPlanItemProvenance(
 ):
     """Typed JSONB boundary for free-form plan-item provenance."""
 
-    values: dict[str, Any] = msgspec.field(default_factory=dict)
+    values: dict[str, Any] = msgspec.field(default_factory=dict[str, object])
 
 
 def _metadata_snapshot_from_jsonb(
@@ -1110,8 +1146,8 @@ class PersistedYoutubeRow(msgspec.Struct, kw_only=True):
     # in production yet, but the column is nullable per the migration).
     album_title: Optional[str] = None
     album_artist: Optional[str] = None
-    yt_tracks: list[PersistedTrack] = msgspec.field(default_factory=list)
-    distances: list[PersistedDistance] = msgspec.field(default_factory=list)
+    yt_tracks: list[PersistedTrack] = msgspec.field(default_factory=list[PersistedTrack])
+    distances: list[PersistedDistance] = msgspec.field(default_factory=list[PersistedDistance])
 
 
 class TransferLedgerRow(msgspec.Struct, kw_only=True):

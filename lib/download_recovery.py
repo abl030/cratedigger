@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Literal
+from typing import Callable, Literal, TypeGuard
 
 from lib.processing_paths import (
     attempt_fingerprint,
@@ -12,6 +12,27 @@ from lib.processing_paths import (
     path_is_within_root,
     stage_to_ai_path,
 )
+
+
+def _is_str_object_dict(value: object) -> TypeGuard[dict[str, object]]:
+    """Narrow a decoded-JSONB value to a string-keyed dict.
+
+    A plain ``isinstance(value, dict)`` check narrows to the generic-erased
+    ``dict[Unknown, Unknown]`` under strict pyright, which then poisons
+    every downstream use as "partially unknown". Declaring the narrowed
+    type via ``TypeGuard`` instead gives callers the precise
+    ``dict[str, object]`` with the identical runtime check (JSONB objects
+    always decode to ``str``-keyed dicts). Mirrors
+    ``web.wrong_match_file_service._is_str_object_dict``.
+    """
+    return isinstance(value, dict)
+
+
+def _is_object_list(value: object) -> TypeGuard[list[object]]:
+    """Narrow a decoded-JSONB value to a list, same rationale as
+    ``_is_str_object_dict`` (bare ``isinstance(value, list)`` erases to
+    ``list[Unknown]`` under strict pyright)."""
+    return isinstance(value, list)
 
 ProcessingPathKind = Literal[
     "canonical",
@@ -350,7 +371,7 @@ def _row_files_fingerprint(files: list[object]) -> str:
     return attempt_fingerprint([
         (str(f.get("username") or ""), str(f.get("filename") or ""))
         for f in files
-        if isinstance(f, dict)
+        if _is_str_object_dict(f)
     ])
 
 
@@ -368,14 +389,14 @@ def find_blocked_recovery_issues(
         if row.get("status") != "downloading":
             continue
         state = row.get("active_download_state")
-        if not isinstance(state, dict):
+        if not _is_str_object_dict(state):
             continue
         if state.get("processing_started_at") is None:
             continue
         if state.get("current_path") is not None:
             continue
         files = state.get("files")
-        if not isinstance(files, list) or not files:
+        if not _is_object_list(files) or not files:
             continue
         has_active = any(
             (
@@ -383,7 +404,7 @@ def find_blocked_recovery_issues(
                 str(file_state.get("filename") or ""),
             ) in active_transfers
             for file_state in files
-            if isinstance(file_state, dict)
+            if _is_str_object_dict(file_state)
         )
         if has_active:
             continue
@@ -441,7 +462,7 @@ def find_blocked_processing_path_issues(
         if row.get("status") != "downloading":
             continue
         state = row.get("active_download_state")
-        if not isinstance(state, dict):
+        if not _is_str_object_dict(state):
             continue
         if state.get("processing_started_at") is None:
             continue
@@ -449,7 +470,7 @@ def find_blocked_processing_path_issues(
         if not isinstance(current_path, str) or not current_path:
             continue
         files = state.get("files")
-        if not isinstance(files, list) or not files:
+        if not _is_object_list(files) or not files:
             continue
         has_active = any(
             (
@@ -457,7 +478,7 @@ def find_blocked_processing_path_issues(
                 str(file_state.get("filename") or ""),
             ) in active_transfers
             for file_state in files
-            if isinstance(file_state, dict)
+            if _is_str_object_dict(file_state)
         )
         if has_active:
             continue
@@ -506,7 +527,7 @@ def find_blocked_processing_path_issues(
         if location.kind == "request_scoped_auto_import_staged":
             state = row.get("active_download_state")
             subprocess_started = (
-                isinstance(state, dict)
+                _is_str_object_dict(state)
                 and state.get("import_subprocess_started_at") is not None
             )
             if not subprocess_started:

@@ -1,6 +1,6 @@
 """Search-plan lifecycle, cursor, search_log, attempts, saturation."""
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence, TypedDict
 import psycopg2
 import psycopg2.extras
 
@@ -57,9 +57,34 @@ from lib.pipeline_db._shared import (
     _json_param,
     _metadata_snapshot_from_jsonb,
     _plan_provenance_from_jsonb,
+    pg_execute_values,
 )
 
 from lib.pipeline_db._core import _PipelineDBBase
+
+
+class _ReadinessBucketRow(TypedDict):
+    """One ``get_search_plan_readiness`` aggregate row: bucket counts for
+    the wanted cohort under one generator id. The CTE always returns
+    exactly one row (no ``GROUP BY``); the empty-fallback below only
+    matters if the query somehow returns zero rows."""
+
+    wanted_total: int
+    wanted_searchable: int
+    wanted_legacy: int
+    wanted_failed_deterministic: int
+    wanted_failed_transient: int
+    wanted_no_plan: int
+
+
+_EMPTY_READINESS_BUCKET_ROW: _ReadinessBucketRow = {
+    "wanted_total": 0,
+    "wanted_searchable": 0,
+    "wanted_legacy": 0,
+    "wanted_failed_deterministic": 0,
+    "wanted_failed_transient": 0,
+    "wanted_no_plan": 0,
+}
 
 
 class _SearchPlanMixin(_PipelineDBBase):
@@ -397,7 +422,8 @@ class _SearchPlanMixin(_PipelineDBBase):
             """,
             (generator_id, generator_id, generator_id, generator_id),
         )
-        row = cur.fetchone() or {}
+        fetched: _ReadinessBucketRow | None = cur.fetchone()
+        row = fetched or _EMPTY_READINESS_BUCKET_ROW
         return {
             "generator_id": generator_id,
             "wanted_total": int(row.get("wanted_total") or 0),
@@ -486,7 +512,7 @@ class _SearchPlanMixin(_PipelineDBBase):
                 assert row is not None, "INSERT RETURNING must produce a row"
                 plan_id = int(row["id"])
 
-                psycopg2.extras.execute_values(
+                pg_execute_values(
                     cur,
                     """
                     INSERT INTO search_plan_items
@@ -686,7 +712,7 @@ class _SearchPlanMixin(_PipelineDBBase):
                         (new_plan_id, old_active_id),
                     )
 
-                psycopg2.extras.execute_values(
+                pg_execute_values(
                     cur,
                     """
                     INSERT INTO search_plan_items

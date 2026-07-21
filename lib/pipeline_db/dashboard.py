@@ -1,8 +1,6 @@
 """Pipeline dashboard metrics, cycle telemetry, peer roster counters."""
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
-import psycopg2
-import psycopg2.extras
 
 from lib.pipeline_db._shared import (
     CACHE_ATTRIBUTION_CYCLE_ONLY,
@@ -12,6 +10,7 @@ from lib.pipeline_db._shared import (
     _float_or_none,
     _isoformat_or_none,
     _peer_hash,
+    pg_execute_values,
 )
 
 from lib.pipeline_db._core import _PipelineDBBase
@@ -89,8 +88,8 @@ class _DashboardMixin(_PipelineDBBase):
             FROM album_requests
             WHERE status = ANY(%s)
         """, (list(DASHBOARD_WANTED_BACKLOG_STATUSES),))
-        row = cur.fetchone() or {}
-        return int(row.get("wanted_total") or 0)
+        row = cur.fetchone()
+        return int((row.get("wanted_total") if row else None) or 0)
 
 
     def record_peer_observations(
@@ -126,7 +125,7 @@ class _DashboardMixin(_PipelineDBBase):
 
         self._ensure_conn()
         with self.conn.cursor() as cur:
-            psycopg2.extras.execute_values(
+            pg_execute_values(
                 cur,
                 """
                 INSERT INTO peer_observations (
@@ -168,7 +167,7 @@ class _DashboardMixin(_PipelineDBBase):
                 MIN(first_seen_at) AS tracked_since
             FROM peer_observations
         """)
-        totals_row = totals_cur.fetchone() or {}
+        totals_row = totals_cur.fetchone()
 
         days_cur = self._execute(
             """
@@ -224,11 +223,17 @@ class _DashboardMixin(_PipelineDBBase):
         return {
             "days": day_dicts,
             "totals": {
-                "known_peers": int(totals_row.get("known_peers") or 0),
-                "new_24h": int(totals_row.get("new_24h") or 0),
-                "seen_24h": int(totals_row.get("seen_24h") or 0),
+                "known_peers": int(
+                    (totals_row.get("known_peers") if totals_row else None) or 0
+                ),
+                "new_24h": int(
+                    (totals_row.get("new_24h") if totals_row else None) or 0
+                ),
+                "seen_24h": int(
+                    (totals_row.get("seen_24h") if totals_row else None) or 0
+                ),
                 "tracked_since": _isoformat_or_none(
-                    totals_row.get("tracked_since")
+                    totals_row.get("tracked_since") if totals_row else None
                 ),
             },
         }
@@ -384,38 +389,40 @@ class _DashboardMixin(_PipelineDBBase):
             FROM search_log
             WHERE created_at >= NOW() - %s::interval
         """, (f"{hours} hours",))
-        row = cur.fetchone() or {}
-        searches = int(row.get("searches") or 0)
+        row = cur.fetchone()
+        def _get(key: str) -> int | float | None:
+            return row.get(key) if row else None
+        searches = int(_get("searches") or 0)
         return {
             "label": label,
             "hours": hours,
             "searches": searches,
-            "distinct_requests": int(row.get("distinct_requests") or 0),
+            "distinct_requests": int(_get("distinct_requests") or 0),
             "searches_per_hour": searches / hours if hours else 0,
             "searches_per_24h": (searches / hours * 24) if hours else 0,
-            "avg_elapsed_s": _float_or_none(row.get("avg_elapsed_s")),
-            "median_elapsed_s": _float_or_none(row.get("median_elapsed_s")),
-            "p95_elapsed_s": _float_or_none(row.get("p95_elapsed_s")),
-            "max_elapsed_s": _float_or_none(row.get("max_elapsed_s")),
+            "avg_elapsed_s": _float_or_none(_get("avg_elapsed_s")),
+            "median_elapsed_s": _float_or_none(_get("median_elapsed_s")),
+            "p95_elapsed_s": _float_or_none(_get("p95_elapsed_s")),
+            "max_elapsed_s": _float_or_none(_get("max_elapsed_s")),
             "outcomes": {
-                "found": int(row.get("found") or 0),
-                "no_match": int(row.get("no_match") or 0),
-                "no_results": int(row.get("no_results") or 0),
+                "found": int(_get("found") or 0),
+                "no_match": int(_get("no_match") or 0),
+                "no_results": int(_get("no_results") or 0),
                 # Historical only -- preserved so legacy rows still render
                 # in their existing position. Any non-zero count for rows
                 # newer than the persisted-search-plans deploy timestamp is
                 # a regression; see docs/persisted-search-plans-rollout.md.
-                "exhausted": int(row.get("exhausted") or 0),
-                "errors": int(row.get("errors") or 0),
+                "exhausted": int(_get("exhausted") or 0),
+                "errors": int(_get("errors") or 0),
             },
             # Plan-driven cycle metrics. ``cursor_wraps`` replaces the
             # ``exhausted`` reset signal: it is one-per-cycle per request
             # and increments ``plan_cycle_count``. ``stale_completions``
             # are post-regeneration log-only rows. ``non_consuming`` are
             # pre-attempt setup failures that did not advance the cursor.
-            "cursor_wraps": int(row.get("cursor_wraps") or 0),
-            "stale_completions": int(row.get("stale_completions") or 0),
-            "non_consuming": int(row.get("non_consuming") or 0),
+            "cursor_wraps": int(_get("cursor_wraps") or 0),
+            "stale_completions": int(_get("stale_completions") or 0),
+            "non_consuming": int(_get("non_consuming") or 0),
             # Cache attribution honesty: surface that ``search_log`` has
             # no per-search cache columns today; only cycle-level counters
             # exist. See ``CACHE_ATTRIBUTION_CYCLE_ONLY``.
@@ -447,25 +454,27 @@ class _DashboardMixin(_PipelineDBBase):
             FROM cycle_metrics
             WHERE created_at >= NOW() - %s::interval
         """, (f"{hours} hours",))
-        row = cur.fetchone() or {}
+        row = cur.fetchone()
+        def _get(key: str) -> int | float | None:
+            return row.get(key) if row else None
         return {
             "label": label,
             "hours": hours,
-            "cycles": int(row.get("cycles") or 0),
-            "avg_cycle_s": _float_or_none(row.get("avg_cycle_s")),
-            "median_cycle_s": _float_or_none(row.get("median_cycle_s")),
-            "p95_cycle_s": _float_or_none(row.get("p95_cycle_s")),
-            "max_cycle_s": _float_or_none(row.get("max_cycle_s")),
-            "median_search_s": _float_or_none(row.get("median_search_s")),
-            "watchdog_kills": int(row.get("watchdog_kills") or 0),
-            "find_download_queued": int(row.get("find_download_queued") or 0),
-            "find_download_completed": int(row.get("find_download_completed") or 0),
-            "cache_errors": int(row.get("cache_errors") or 0),
-            "cache_write_errors": int(row.get("cache_write_errors") or 0),
-            "cache_fuse_tripped": int(row.get("cache_fuse_tripped") or 0),
-            "peers_browsed": int(row.get("peers_browsed") or 0),
-            "peers_browsed_lazy": int(row.get("peers_browsed_lazy") or 0),
-            "fanout_waves": int(row.get("fanout_waves") or 0),
+            "cycles": int(_get("cycles") or 0),
+            "avg_cycle_s": _float_or_none(_get("avg_cycle_s")),
+            "median_cycle_s": _float_or_none(_get("median_cycle_s")),
+            "p95_cycle_s": _float_or_none(_get("p95_cycle_s")),
+            "max_cycle_s": _float_or_none(_get("max_cycle_s")),
+            "median_search_s": _float_or_none(_get("median_search_s")),
+            "watchdog_kills": int(_get("watchdog_kills") or 0),
+            "find_download_queued": int(_get("find_download_queued") or 0),
+            "find_download_completed": int(_get("find_download_completed") or 0),
+            "cache_errors": int(_get("cache_errors") or 0),
+            "cache_write_errors": int(_get("cache_write_errors") or 0),
+            "cache_fuse_tripped": int(_get("cache_fuse_tripped") or 0),
+            "peers_browsed": int(_get("peers_browsed") or 0),
+            "peers_browsed_lazy": int(_get("peers_browsed_lazy") or 0),
+            "fanout_waves": int(_get("fanout_waves") or 0),
         }
 
 
@@ -788,27 +797,30 @@ class _DashboardMixin(_PipelineDBBase):
             LEFT JOIN per_request pr ON pr.request_id = w.id
             CROSS JOIN match_rates
         """, (list(DASHBOARD_WANTED_BACKLOG_STATUSES),))
-        row = cur.fetchone() or {}
-        wanted_total = int(row.get("wanted_total") or 0)
-        searched_24h = int(row.get("wanted_searched_24h") or 0)
-        searched_6h = int(row.get("wanted_searched_6h") or 0)
-        matches_24h = int(row.get("matches_24h") or 0)
-        matches_6h = int(row.get("matches_6h") or 0)
+        row = cur.fetchone()
+        def _get(key: str) -> int | float | None:
+            return row.get(key) if row else None
+        oldest_last_search_at = row.get("oldest_last_search_at") if row else None
+        wanted_total = int(_get("wanted_total") or 0)
+        searched_24h = int(_get("wanted_searched_24h") or 0)
+        searched_6h = int(_get("wanted_searched_6h") or 0)
+        matches_24h = int(_get("matches_24h") or 0)
+        matches_6h = int(_get("matches_6h") or 0)
         return {
             "wanted_total": wanted_total,
             "wanted_searched_24h": searched_24h,
             "wanted_searched_6h": searched_6h,
             "wanted_unsearched_24h": max(wanted_total - searched_24h, 0),
             "wanted_unsearched_6h": max(wanted_total - searched_6h, 0),
-            "wanted_never_searched": int(row.get("wanted_never_searched") or 0),
+            "wanted_never_searched": int(_get("wanted_never_searched") or 0),
             "active_wanted_searches_24h": int(
-                row.get("active_wanted_searches_24h") or 0
+                _get("active_wanted_searches_24h") or 0
             ),
             "active_wanted_searches_6h": int(
-                row.get("active_wanted_searches_6h") or 0
+                _get("active_wanted_searches_6h") or 0
             ),
             "oldest_last_search_at": _isoformat_or_none(
-                row.get("oldest_last_search_at")
+                oldest_last_search_at
             ),
             "matches_24h": matches_24h,
             "matches_6h": matches_6h,
@@ -911,12 +923,13 @@ class _DashboardMixin(_PipelineDBBase):
             ORDER BY pr.last_search_at ASC NULLS FIRST, w.created_at ASC, w.id ASC
             LIMIT 12
         """, (list(DASHBOARD_WANTED_BACKLOG_STATUSES),))
-        rows = []
-        for row in cur.fetchall():
-            item = self._serialize_dashboard_request_row(dict(row))
-            item["hours_since_search"] = _float_or_none(row["hours_since_search"])
-            rows.append(item)
-        return rows
+        return [
+            {
+                **self._serialize_dashboard_request_row(dict(row)),
+                "hours_since_search": _float_or_none(row["hours_since_search"]),
+            }
+            for row in cur.fetchall()
+        ]
 
 
     def _serialize_dashboard_request_row(self, row: dict[str, Any]) -> dict[str, Any]:

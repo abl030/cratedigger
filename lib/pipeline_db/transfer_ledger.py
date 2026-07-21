@@ -31,10 +31,9 @@ from datetime import datetime
 from typing import Any
 
 import msgspec
-import psycopg2.extras
 
 from lib.pipeline_db._core import _PipelineDBBase
-from lib.pipeline_db._shared import TransferLedgerRow
+from lib.pipeline_db._shared import TransferLedgerRow, pg_execute_values
 
 # Accepted rows for active requests cannot be pruned regardless of age: the
 # reaper/convergence paths may still need their ownership evidence while the
@@ -70,7 +69,7 @@ class _TransferLedgerMixin(_PipelineDBBase):
         ]
         self._ensure_conn()
         with self.conn.cursor() as cur:
-            psycopg2.extras.execute_values(
+            pg_execute_values(
                 cur,
                 f"INSERT INTO slskd_transfer_ledger ({col_sql}) VALUES %s",
                 values,
