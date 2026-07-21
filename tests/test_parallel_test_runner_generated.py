@@ -11,8 +11,10 @@ from hypothesis import strategies as st
 import tests._hypothesis_profiles  # noqa: F401 - registers active profile
 from scripts.run_python_tests import (
     TestModule,
+    assert_exact_target_coverage,
     assert_exact_schedule,
     schedule_modules,
+    shard_test_ids,
 )
 
 
@@ -47,6 +49,37 @@ class TestParallelScheduleCheckerKnownBad(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "missing"):
             assert_exact_schedule((first, second), (first,))
+
+
+class TestGeneratedTargetSharding(unittest.TestCase):
+    @given(
+        class_sizes=st.lists(
+            st.integers(min_value=1, max_value=20),
+            min_size=1,
+            max_size=30,
+        ),
+        granularity=st.sampled_from(("class", "class_batch", "method", "method_batch")),
+    )
+    def test_every_hotspot_test_id_is_scheduled_exactly_once(
+        self,
+        class_sizes: list[int],
+        granularity: str,
+    ) -> None:
+        module = TestModule("tests.test_hotspot", Path("/test_hotspot.py"), 1)
+        test_ids = tuple(
+            f"{module.name}.Test{class_index}.test_{test_index}"
+            for class_index, class_size in enumerate(class_sizes)
+            for test_index in range(class_size)
+        )
+
+        targets = shard_test_ids(module, test_ids, granularity=granularity)
+
+        assert_exact_target_coverage(module, test_ids, targets)
+        scheduled_ids = tuple(
+            test_id for target in targets for test_id in target.expected_test_ids
+        )
+        self.assertEqual(set(scheduled_ids), set(test_ids))
+        self.assertEqual(len(scheduled_ids), len(test_ids))
 
 
 if __name__ == "__main__":

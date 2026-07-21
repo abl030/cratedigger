@@ -10,10 +10,17 @@ import unittest
 from pathlib import Path
 
 from scripts.run_python_tests import (
+    HOTSPOT_SHARD_POLICIES,
+    WORLD_MODEL_MODULE,
     TestModule,
+    assert_exact_target_coverage,
     assert_exact_schedule,
+    complete_test_modules,
     discover_test_modules,
+    list_module_test_ids,
     schedule_modules,
+    shard_test_ids,
+    test_subprocess_environment,
     worker_environment,
 )
 
@@ -97,6 +104,103 @@ class TestModuleScheduling(unittest.TestCase):
         self.assertNotIn("CRATEDIGGER_TEST_SCHEMA_READY", env)
         self.assertEqual(env["CRATEDIGGER_TEST_WORKER"], "3")
         self.assertEqual(env["PATH"], "/bin")
+
+    def test_audited_hotspots_split_at_the_narrowest_safe_boundary(self) -> None:
+        self.assertEqual(
+            HOTSPOT_SHARD_POLICIES,
+            {
+                "tests.test_beets_destructive_configs_generated": "method_batch",
+                "tests.test_pipeline_db": "class_batch",
+            },
+        )
+
+    def test_class_batching_is_exact_and_bounds_repeated_imports(self) -> None:
+        module = TestModule("tests.test_hotspot", Path("/test_hotspot.py"), 90)
+        test_ids = tuple(
+            f"{module.name}.Test{class_index}.test_{test_index}"
+            for class_index in range(12)
+            for test_index in range((class_index % 4) + 1)
+        )
+
+        targets = shard_test_ids(module, test_ids, granularity="class_batch")
+
+        assert_exact_target_coverage(module, test_ids, targets)
+        self.assertEqual(len(targets), 8)
+        self.assertLessEqual(
+            max(len(target.expected_test_ids) for target in targets)
+            - min(len(target.expected_test_ids) for target in targets),
+            1,
+        )
+
+    def test_method_sharding_is_exact(self) -> None:
+        module = TestModule("tests.test_hotspot", Path("/test_hotspot.py"), 90)
+        test_ids = (
+            "tests.test_hotspot.TestCases.test_one",
+            "tests.test_hotspot.TestCases.test_two",
+        )
+
+        targets = shard_test_ids(module, test_ids, granularity="method")
+
+        assert_exact_target_coverage(module, test_ids, targets)
+        self.assertEqual(
+            tuple(target.test_name for target in targets),
+            test_ids,
+        )
+
+    def test_target_coverage_rejects_an_omitted_test(self) -> None:
+        module = TestModule("tests.test_hotspot", Path("/test_hotspot.py"), 1)
+        test_ids = (
+            "tests.test_hotspot.TestCases.test_one",
+            "tests.test_hotspot.TestCases.test_two",
+        )
+        targets = shard_test_ids(module, test_ids[:1], granularity="method")
+
+        with self.assertRaisesRegex(ValueError, "missing test target"):
+            assert_exact_target_coverage(module, test_ids, targets)
+
+    def test_world_model_is_frontloaded_with_its_isolated_budget(self) -> None:
+        modules = complete_test_modules((), REPO_ROOT)
+        world = next(module for module in modules if module.name == WORLD_MODEL_MODULE)
+        env = test_subprocess_environment(
+            {
+                "TEST_DB_DSN": "postgresql://worker",
+                "CRATEDIGGER_TEST_SCHEMA_READY": "1",
+                "CRATEDIGGER_WORLD_RANDOMIZED": "1",
+            },
+            world,
+        )
+
+        self.assertEqual(schedule_modules(modules)[0], world)
+        self.assertNotIn("TEST_DB_DSN", env)
+        self.assertNotIn("CRATEDIGGER_TEST_SCHEMA_READY", env)
+        self.assertEqual(env["CRATEDIGGER_WORLD_RANDOMIZED"], "0")
+        self.assertEqual(env["CRATEDIGGER_WORLD_EXAMPLES"], "6")
+        self.assertEqual(env["CRATEDIGGER_WORLD_STEPS"], "8")
+
+    def test_real_beets_matrix_exposes_every_cell_as_a_queue_target(self) -> None:
+        test_ids = list_module_test_ids(
+            "tests.test_beets_destructive_configs_generated",
+            REPO_ROOT,
+        )
+        matrix_ids = tuple(
+            test_id for test_id in test_ids if ".test_common_config_" in test_id
+        )
+
+        self.assertEqual(len(matrix_ids), 54)
+        self.assertNotIn(
+            "tests.test_beets_destructive_configs_generated."
+            "TestGeneratedRealBeetsConfigMatrix."
+            "test_every_declared_common_config_cell",
+            test_ids,
+        )
+        module = TestModule(
+            "tests.test_beets_destructive_configs_generated",
+            REPO_ROOT / "tests" / "test_beets_destructive_configs_generated.py",
+            1,
+        )
+        targets = shard_test_ids(module, test_ids, granularity="method_batch")
+        assert_exact_target_coverage(module, test_ids, targets)
+        self.assertEqual(len(targets), 12)
 
 
 class TestRunnerProcessContract(unittest.TestCase):
@@ -221,12 +325,44 @@ class TestRunnerProcessContract(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Ran 2 tests", result.stdout)
 
+    def test_zero_test_contract_module_still_reports_a_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            tests_dir = root / "fixture_tests"
+            tests_dir.mkdir()
+            (tests_dir / "__init__.py").write_text("", encoding="utf-8")
+            (tests_dir / "test_contract_only.py").write_text(
+                "CONTRACT_SENTINEL = True\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(RUNNER),
+                    "--start-directory",
+                    str(tests_dir),
+                    "--top-level-directory",
+                    str(root),
+                    "--jobs",
+                    "1",
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Ran 0 tests", result.stdout)
+
 
 class TestRunTestsWiring(unittest.TestCase):
     def test_full_suite_uses_parallel_python_runner(self) -> None:
         source = RUN_TESTS_SH.read_text(encoding="utf-8")
         self.assertIn("python3 scripts/run_python_tests.py", source)
         self.assertNotIn("python3 -m unittest discover", source)
+        self.assertNotIn("python3 -m unittest tests.world_model.state_machine", source)
 
 
 if __name__ == "__main__":

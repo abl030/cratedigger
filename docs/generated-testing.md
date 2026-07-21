@@ -155,9 +155,10 @@ first touch, and the generated test fails on that explicit example.
 
 It is intentionally named outside unittest's `test*.py` discovery pattern so
 raw discovery cannot accidentally inherit a randomized hammer environment.
-The canonical `scripts/run_tests.sh` explicitly fixes the six-example,
-eight-step deterministic budget, scrubs `TEST_DB_DSN`, and runs the module as
-part of every normal suite. It can also be run directly while iterating:
+The canonical `scripts/run_python_tests.py` runner adds it as an explicit
+front-loaded queue target, fixes the six-example/eight-step deterministic
+budget, and scrubs `TEST_DB_DSN`; `scripts/run_tests.sh` reaches it through
+that runner on every normal suite. It can also be run directly while iterating:
 
 ```bash
 nix-shell --run "python3 -m unittest tests.world_model.state_machine -v"
