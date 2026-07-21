@@ -10,7 +10,7 @@ from typing import Any
 import msgspec
 
 from lib.pipeline_db.rows import AlbumRequestRow
-from lib.beets_db import BeetsDB
+from lib.beets_db import BeetsDB, CurrentBeetsUnique
 from lib.beets_delete import (
     BeetsDeleteCompleted,
     BeetsDeleteFailed,
@@ -57,7 +57,12 @@ from lib.quality import (
     resolve_user_requeue_override,
 )
 from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
-from lib.mbid_replace_service import MbidReplaceService, RESULT_REPLACED
+from lib.mbid_replace_service import (
+    MbidReplaceService,
+    REPLACE_REASON_SOURCE_IDENTITY_INVALID,
+    RESULT_REPLACED,
+    RESULT_WRONG_STATE,
+)
 from lib.release_identity import ReleaseIdentity
 from lib.search_plan_service import SearchPlanService
 from lib.transitions import (
@@ -228,29 +233,15 @@ class LifecycleWorld:
                 request_id,
                 RequestTransition.to_imported(
                     from_status=str(row["status"]),
-                    imported_path=album.album_path,
                 ),
             ))
         elif seed.status == "wanted" and row["status"] != "wanted":
             self.reset_to_wanted(request_id)
 
-        imported_path: str | None
-        if seed.has_imported_path:
-            imported_path = (
-                album.album_path
-                if album is not None
-                else str(
-                    self.beets.library_root
-                    / f"legacy-installed-marker-{request_id}"
-                )
-            )
-        else:
-            imported_path = None
         if not self.db.update_request_fields(
             request_id,
             expected_status=seed.status,
             search_filetype_override=seed.search_override,
-            imported_path=imported_path,
             final_format=seed.final_format,
             current_spectral_grade=seed.spectral_grade,
             verified_lossless=seed.verified_lossless,
@@ -438,6 +429,7 @@ class LifecycleWorld:
             request_id=request_id,
             mb_release_id=release.release_id,
             quality_ranks=QualityRankConfig.defaults(),
+            beets_library_db_path=str(self.beets.library_db),
             beets_library_root=str(self.beets.library_root),
             spectral_analyzer=lambda _path: SpectralAnalysisDetail(
                 attempted=True,
@@ -893,6 +885,13 @@ class LifecycleWorld:
         before_verified_proof = self._request_has_verified_proof(request_id)
         source = self._release_by_request[request_id]
         before_album = self._album_for_release(source.release_id)
+        source_identity = ReleaseIdentity.from_strict_fields(
+            before.get("mb_release_id"),
+            before.get("discogs_release_id"),
+        )
+        before_database = (
+            self.database_snapshot() if source_identity is None else None
+        )
         target = replace(
             source,
             release_id=self._next_replacement_id(source.release_id),
@@ -955,6 +954,30 @@ class LifecycleWorld:
                 request_id,
                 target_mb_release_id=target.release_id,
             )
+        if source_identity is None:
+            if not (
+                result.outcome == RESULT_WRONG_STATE
+                and result.reason == REPLACE_REASON_SOURCE_IDENTITY_INVALID
+            ):
+                raise AssertionError(
+                    "conflicting-identity Replace did not fail closed: "
+                    f"{result!r}"
+                )
+            if self._require_request(request_id) != before:
+                raise AssertionError(
+                    "failed-closed conflicting-identity Replace mutated request"
+                )
+            if self.database_snapshot() != before_database:
+                raise AssertionError(
+                    "failed-closed conflicting-identity Replace mutated database"
+                )
+            if self._album_fingerprint(
+                self._album_for_release(source.release_id)
+            ) != self._album_fingerprint(before_album):
+                raise AssertionError(
+                    "failed-closed conflicting-identity Replace mutated Beets"
+                )
+            return request_id
         if result.outcome != RESULT_REPLACED or result.new_request_id is None:
             raise AssertionError(
                 f"production Replace failed: {result!r}"
@@ -1107,6 +1130,49 @@ class LifecycleWorld:
             if self._require_request(request_id)["status"] == status
         ]
 
+    def database_snapshot(
+        self,
+    ) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        """Capture every public table and sequence for zero-mutation laws."""
+
+        table_rows = self.db._execute(
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+            ORDER BY table_name
+            """
+        ).fetchall()
+        snapshot: list[tuple[str, tuple[str, ...]]] = []
+        for table_row in table_rows:
+            table_name = str(table_row["table_name"])
+            if not table_name.replace("_", "").isalnum():
+                raise AssertionError(f"unsafe generated table name: {table_name!r}")
+            rows = self.db._execute(
+                f'SELECT to_jsonb(snapshot_row)::text AS row_json '
+                f'FROM "{table_name}" AS snapshot_row ORDER BY 1'
+            ).fetchall()
+            snapshot.append((
+                f"table:{table_name}",
+                tuple(str(row["row_json"]) for row in rows),
+            ))
+        sequence_rows = self.db._execute(
+            """
+            SELECT sequencename, last_value
+            FROM pg_sequences
+            WHERE schemaname = 'public'
+            ORDER BY sequencename
+            """
+        ).fetchall()
+        snapshot.append((
+            "sequences",
+            tuple(
+                f"{row['sequencename']}={row['last_value']}"
+                for row in sequence_rows
+            ),
+        ))
+        return tuple(snapshot)
+
     def request_ids_with_album(self) -> list[int]:
         return [
             request_id
@@ -1214,8 +1280,9 @@ class LifecycleWorld:
         requests: list[RequestMembershipSnapshot] = []
         evidence: list[EvidenceDiskSnapshot] = []
         denylist_rows: list[DenylistAuthoritySnapshot] = []
+        identified_rows: list[tuple[AlbumRequestRow, ReleaseIdentity]] = []
         for row in self.db.list_non_replaced_requests():
-            identity = ReleaseIdentity.from_fields(
+            identity = ReleaseIdentity.from_strict_fields(
                 row.get("mb_release_id"),
                 row.get("discogs_release_id"),
             )
@@ -1227,16 +1294,19 @@ class LifecycleWorld:
                 request_id=int(row["id"]),
                 release_id=identity.release_id,
                 status=str(row["status"]),
-                imported_path=(
-                    str(row["imported_path"])
-                    if row.get("imported_path") is not None
-                    else None
-                ),
             ))
-            album = next(
-                (a for a in albums if a.release_id == identity.release_id),
-                None,
-            )
+            identified_rows.append((row, identity))
+
+        with BeetsDB(
+            str(self.beets.library_db),
+            library_root=str(self.beets.library_root),
+        ) as current_beets:
+            resolutions = current_beets.resolve_current_releases([
+                identity for _row, identity in identified_rows
+            ])
+
+        for row, identity in identified_rows:
+            current = resolutions[identity]
             current_id_raw = row.get("current_evidence_id")
             current_id = (
                 int(current_id_raw)
@@ -1248,7 +1318,11 @@ class LifecycleWorld:
                 request_id=int(row["id"]),
                 release_id=identity.release_id,
                 status=str(row["status"]),
-                album_path=album.album_path if album is not None else None,
+                album_path=(
+                    current.album_path
+                    if isinstance(current, CurrentBeetsUnique)
+                    else None
+                ),
                 current_evidence_id=current_id,
                 evidence_id=linked.id if linked is not None else None,
                 evidence_release_id=(
@@ -1261,8 +1335,10 @@ class LifecycleWorld:
                     linked.snapshot_fingerprint if linked is not None else None
                 ),
                 actual_fingerprint=(
-                    self._album_fingerprint(album)
-                    if album is not None
+                    snapshot_fingerprint(snapshot_audio_files(
+                        current.album_path,
+                    ))
+                    if isinstance(current, CurrentBeetsUnique)
                     else None
                 ),
             ))
@@ -1287,7 +1363,13 @@ class LifecycleWorld:
         return (
             *check_folder_exclusivity(albums),
             *check_library_filesystem(albums),
-            *check_status_membership(tuple(requests), albums),
+            *check_status_membership(
+                tuple(requests),
+                {
+                    identity.release_id: resolution
+                    for identity, resolution in resolutions.items()
+                },
+            ),
             *check_evidence_disk_coherence(tuple(evidence)),
             *check_proof_lock_terminality(tuple(self._transitions)),
             *check_no_lossy_tier_widening(tuple(self._transitions)),

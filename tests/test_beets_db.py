@@ -648,8 +648,8 @@ class TestPostflightLookupsSupportDiscogs(unittest.TestCase):
     postflight lookups called during import (``get_album_info``,
     ``get_min_bitrate``, ``get_item_paths``) must
     agree — otherwise ``import_dispatch`` sees a preflight hit with an
-    empty postflight, marks the import successful against vanished
-    metadata, and persists a stale ``imported_path``.
+    empty postflight and marks the import successful against vanished
+    metadata.
     """
 
     def setUp(self) -> None:

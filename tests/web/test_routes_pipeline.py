@@ -48,7 +48,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         # (R7) can render — both the standard-mode source label and
         # the picker's inverted-row sibling lookup need it.
         "mb_release_group_id",
-        "imported_path", "current_spectral_bitrate",
+        "current_spectral_bitrate",
         "last_download_spectral_bitrate", "current_spectral_grade",
         "last_download_spectral_grade", "verified_lossless",
     }
@@ -142,7 +142,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         # a real success download row, plus one wanted request.
         self.db.seed_request(make_request_row(
             id=100, status="imported", min_bitrate=320,
-            imported_path="/mnt/virtio/Music/Beets/Test",
         ))
         self.db.set_tracks(100, [
             {"disc_number": 1, "track_number": 1, "title": "Track",
@@ -1089,7 +1088,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["items"], [])
 
     DETAIL_RESPONSE_REQUIRED_FIELDS = {
-        "request", "history", "tracks", "last_search",
+        "request", "history", "tracks", "last_search", "current_library",
     }
     LAST_SEARCH_REQUIRED_FIELDS = {
         "variant", "final_state", "outcome", "top_candidates",
@@ -1111,6 +1110,97 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
                                 "pipeline detail history item")
         # Default mock state: no search history → last_search is None.
         self.assertIsNone(data["last_search"])
+
+    def test_pipeline_detail_uses_fresh_typed_beets_path(self):
+        """The request cache is never a current-library display authority."""
+        import web.server as srv
+
+        self.db.request(100)["mb_release_id"] = (
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        )
+        beets = FakeBeetsDB(library_root="/current/library")
+        beets.set_album_ids_for_release(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", [9001],
+        )
+        beets.set_item_paths(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            [(91, "/current/library/Moved/01 Track.flac")],
+        )
+        prior_beets = srv._beets
+        srv._beets = beets
+        try:
+            status, data = self._get("/api/pipeline/100")
+        finally:
+            srv._beets = prior_beets
+
+        self.assertEqual(status, 200)
+        self.assertNotIn("imported_path", data["request"])
+        self.assertEqual(data["current_library"], {
+            "state": "unique",
+            "release_source": "musicbrainz",
+            "release_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "album_id": 9001,
+            "path": "/current/library/Moved",
+        })
+
+    def test_pipeline_detail_exposes_missing_and_ambiguous_authority(self):
+        """Missing and ambiguous are operator-visible, never empty paths."""
+        import web.server as srv
+
+        self.db.request(100)["mb_release_id"] = (
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        )
+        beets = FakeBeetsDB()
+        prior_beets = srv._beets
+        srv._beets = beets
+        try:
+            status, missing = self._get("/api/pipeline/100")
+        finally:
+            srv._beets = prior_beets
+        self.assertEqual(status, 200)
+        self.assertEqual(missing["current_library"]["state"], "missing")
+        self.assertNotIn("path", missing["current_library"])
+
+        beets.set_album_ids_for_release(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", [7, 8],
+        )
+        prior_beets = srv._beets
+        srv._beets = beets
+        try:
+            status, ambiguous = self._get("/api/pipeline/100")
+        finally:
+            srv._beets = prior_beets
+        self.assertEqual(status, 200)
+        self.assertEqual(ambiguous["current_library"], {
+            "state": "ambiguous",
+            "release_source": "musicbrainz",
+            "release_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "reason": "multiple_matches",
+            "album_ids": [7, 8],
+        })
+
+    def test_pipeline_detail_conflicting_request_identity_is_unavailable(self):
+        """Two distinct request identities require manual review."""
+        import web.server as srv
+
+        self.db.request(100)["mb_release_id"] = (
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        )
+        self.db.request(100)["discogs_release_id"] = "12856590"
+        beets = FakeBeetsDB()
+        prior_beets = srv._beets
+        srv._beets = beets
+        try:
+            status, data = self._get("/api/pipeline/100")
+        finally:
+            srv._beets = prior_beets
+        self.assertEqual(status, 200)
+        self.assertEqual(data["current_library"], {
+            "state": "unavailable",
+            "reason": "conflicting_request_identity",
+            "manual_review": True,
+        })
+        self.assertEqual(beets.resolve_current_release_calls, [])
 
     def test_pipeline_detail_surfaces_last_search_top_candidates(self):
         """When the latest search_log row has candidates, the route emits the

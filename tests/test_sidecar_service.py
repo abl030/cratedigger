@@ -150,6 +150,34 @@ class TestWriteSidecarHappyPath(_SidecarServiceCase):
         assert result.path is not None
         self.assertEqual(os.stat(result.path).st_mode & 0o777, 0o644)
 
+    def test_writes_at_fresh_moved_beets_path(self):
+        evidence = self._verified_lossless_evidence()
+        evidence = msgspec.structs.replace(
+            evidence,
+            source_path="/historical/capture/path",
+        )
+        self._seed_current_evidence(evidence)
+        moved = os.path.join(self.tmp.name, "Moved", "Album")
+        os.makedirs(os.path.dirname(moved), exist_ok=True)
+        os.rename(self.album_path, moved)
+        self.beets.set_album_info(
+            MBID,
+            AlbumInfo(
+                album_id=1,
+                track_count=2,
+                min_bitrate_kbps=900,
+                is_cbr=True,
+                album_path=moved,
+            ),
+        )
+
+        result = write_sidecar_for_request(
+            self.db, self.beets, REQUEST_ID, mb_release_id=MBID
+        )
+
+        self.assertEqual(result.outcome, "written")
+        self.assertEqual(result.path, os.path.join(moved, SIDECAR_FILENAME))
+
 
 class TestImportDispatchSidecarHook(_SidecarServiceCase):
     """The importer success hook writes the sidecar via the shared service."""
@@ -272,6 +300,35 @@ class TestWriteSidecarSkips(_SidecarServiceCase):
             self.db, self.beets, REQUEST_ID, mb_release_id=MBID
         )
         self.assertEqual(result.outcome, "skipped_evidence_stale")
+        self.assertFalse(
+            os.path.exists(os.path.join(self.album_path, SIDECAR_FILENAME))
+        )
+
+    def test_skips_poisoned_linked_evidence_identity(self):
+        poisoned = msgspec.structs.replace(
+            self._verified_lossless_evidence(),
+            mb_release_id="other-release",
+        )
+        self._seed_current_evidence(poisoned)
+
+        result = write_sidecar_for_request(
+            self.db, self.beets, REQUEST_ID, mb_release_id=MBID
+        )
+
+        self.assertEqual(result.outcome, "skipped_evidence_identity_mismatch")
+        self.assertFalse(
+            os.path.exists(os.path.join(self.album_path, SIDECAR_FILENAME))
+        )
+
+    def test_skips_ambiguous_exact_beets_membership(self):
+        self._seed_current_evidence(self._verified_lossless_evidence())
+        self.beets.set_album_ids_for_release(MBID, [1, 2])
+
+        result = write_sidecar_for_request(
+            self.db, self.beets, REQUEST_ID, mb_release_id=MBID
+        )
+
+        self.assertEqual(result.outcome, "skipped_current_ambiguous")
         self.assertFalse(
             os.path.exists(os.path.join(self.album_path, SIDECAR_FILENAME))
         )

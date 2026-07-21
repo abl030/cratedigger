@@ -170,13 +170,71 @@ def _make_stdout(ir: ImportResult) -> str:
 
 
 def _mock_beets_db(beets_info):
-    """Configure a mocked BeetsDB context manager returning beets_info."""
-    mock_beets_instance = MagicMock()
-    mock_beets_instance.get_album_info.return_value = beets_info
-    mock_cls = MagicMock()
-    mock_cls.return_value.__enter__ = MagicMock(return_value=mock_beets_instance)
-    mock_cls.return_value.__exit__ = MagicMock(return_value=False)
+    """Configure a state-respecting exact resolver for one album shape."""
+
+    library_root = beets_info.album_path if beets_info is not None else "/tmp"
+    fake = FakeBeetsDB(library_root=library_root)
+    resolve = fake.resolve_current_release
+
+    def resolve_any(identity):
+        if beets_info is None:
+            fake.set_album_info(identity.release_id, None)
+            return resolve(identity)
+        seeded = False
+        for count in range(3, 102, 2):
+            representable = AlbumInfo(
+                album_id=beets_info.album_id,
+                track_count=count,
+                min_bitrate_kbps=beets_info.min_bitrate_kbps,
+                avg_bitrate_kbps=beets_info.avg_bitrate_kbps,
+                median_bitrate_kbps=beets_info.median_bitrate_kbps,
+                is_cbr=beets_info.is_cbr,
+                album_path=beets_info.album_path,
+                format=beets_info.format,
+            )
+            try:
+                fake.set_album_info(identity.release_id, representable)
+            except AssertionError:
+                continue
+            seeded = True
+            break
+        assert seeded, "test AlbumInfo must be representable by Beets items"
+        return resolve(identity)
+
+    fake.resolve_current_release = MagicMock(side_effect=resolve_any)
+    mock_cls = MagicMock(return_value=fake)
     return mock_cls
+
+
+@contextmanager
+def _patch_linked_current_beets(
+    db: FakePipelineDB,
+    request_id: int,
+    beets_info: AlbumInfo,
+):
+    """Materialize the linked snapshot behind a real exact fake resolver."""
+
+    evidence_id = db.get_request_current_evidence_id(request_id)
+    evidence = db.load_album_quality_evidence_by_id(evidence_id)
+    assert evidence is not None
+    with tempfile.TemporaryDirectory() as current_dir:
+        for file in evidence.files:
+            path = os.path.join(current_dir, file.relative_path)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as handle:
+                handle.truncate(file.size_bytes)
+        current_info = AlbumInfo(
+            album_id=beets_info.album_id,
+            track_count=beets_info.track_count,
+            min_bitrate_kbps=beets_info.min_bitrate_kbps,
+            avg_bitrate_kbps=beets_info.avg_bitrate_kbps,
+            median_bitrate_kbps=beets_info.median_bitrate_kbps,
+            is_cbr=beets_info.is_cbr,
+            album_path=current_dir,
+            format=beets_info.format,
+        )
+        with patch("lib.beets_db.BeetsDB", _mock_beets_db(current_info)):
+            yield
 
 
 class TestDownloadOwnershipPreclaimRecoverySlice(unittest.TestCase):
@@ -723,16 +781,8 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         self.assertEqual(len(db.download_logs), 1)
         db.assert_log(self, 0, outcome="success", request_id=42)
 
-    def test_imported_path_reflects_beets_destination(self):
-        """Issue #93: ``album_requests.imported_path`` must be the beets
-        destination (``ir.postflight.imported_path``), not the source/staging
-        path passed to dispatch_import_core.
-
-        Pre-fix: ``imported_path`` stored the source
-        ``/mnt/virtio/music/slskd/failed_imports/...`` even though beets
-        moved files to ``/mnt/virtio/Music/Beets/...``. UI's "Imported to"
-        label displayed the source, confusing users.
-        """
+    def test_import_result_path_is_not_copied_to_request(self):
+        """The harness path remains event data, never request authority."""
         ir = make_import_result(
             decision="import",
             new_min_bitrate=245,
@@ -746,12 +796,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         db = self._run_dispatch(ir, beets_info)
 
         row = db.request(42)
-        self.assertEqual(
-            row["imported_path"],
-            "/Beets/Test Artist/2005 - Test Album_",
-            "album_requests.imported_path must reflect the beets "
-            "destination from ImportResult.postflight, not dispatch's "
-            "source path (the /tmp staging/failed_imports dir)")
+        self.assertNotIn("imported_path", row)
 
     def test_unverified_subtransparent_import_keeps_full_tier_search(self):
         """VBR 180 is retained but stays wanted on the full search surface."""
@@ -1980,7 +2025,7 @@ class TestForceImportSlice(unittest.TestCase):
             assert claimed is not None and claimed.id == job.id
             _seed_current_for_request(
                 db, 42,
-                mb_release_id="mbid-current",
+                mb_release_id="mbid-123",
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=180, avg_bitrate_kbps=180,
                     median_bitrate_kbps=180, format="MP3",
@@ -1989,17 +2034,8 @@ class TestForceImportSlice(unittest.TestCase):
                 ),
                 codec="mp3", container="mp3", storage_format="mp3",
             )
-            # album_path=None makes ensure_current_evidence_for_action
-            # skip the audio-snapshot guard and trust the seeded
-            # _REQUEST_CURRENT row directly.
-            beets_info_no_path = AlbumInfo(
-                album_id=1, track_count=10, min_bitrate_kbps=320,
-                avg_bitrate_kbps=320, format="MP3",
-                is_cbr=False,
-                album_path=None,  # type: ignore[arg-type]
-            )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info_no_path)), \
+                 _patch_linked_current_beets(db, 42, beets_info), \
                  patch("lib.config.read_runtime_config",
                        return_value=cfg):
                 ext.run.return_value = MagicMock(
@@ -2028,16 +2064,8 @@ class TestForceImportSlice(unittest.TestCase):
             "must record NULL on the request row, not a fabricated number")
         db.assert_log(self, 0, outcome="force_import", beets_distance=None)
 
-    def test_force_import_imported_path_reflects_beets_destination(self):
-        """Issue #93 was reported against force-import specifically:
-        album_requests.imported_path must reflect the beets destination
-        (ir.postflight.imported_path), not the source failed_imports/ path.
-
-        Guards that the fix propagates through dispatch_import_from_db →
-        dispatch_import_core → _do_mark_done end-to-end. Parallel to
-        TestDispatchThroughQualityGate.test_imported_path_reflects_beets_destination
-        which covers the auto path.
-        """
+    def test_force_import_does_not_copy_postflight_path_to_request(self):
+        """Force import also keeps the harness path out of request state."""
         from lib.dispatch import dispatch_import_from_db
         from lib.import_queue import IMPORT_JOB_FORCE
         from lib.quality import AudioQualityMeasurement
@@ -2046,7 +2074,6 @@ class TestForceImportSlice(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=833, status="unsearchable", mb_release_id="mbid-go-team",
-            imported_path="/mnt/virtio/music/slskd/failed_imports/stale-source",
         ))
         # Track rows satisfy the force-import untracked-audio guard.
         db.set_tracks(833, [{"track_number": 1, "title": "Track"}])
@@ -2095,21 +2122,15 @@ class TestForceImportSlice(unittest.TestCase):
             assert claimed is not None and claimed.id == job.id
             _seed_current_for_request(
                 db, 833,
-                mb_release_id="mbid-go-team-current",
+                mb_release_id="mbid-go-team",
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=192, avg_bitrate_kbps=192,
                     median_bitrate_kbps=192, format="MP3",
                 ),
                 codec="mp3", container="mp3", storage_format="mp3",
             )
-            beets_info_no_path = AlbumInfo(
-                album_id=1, track_count=10, min_bitrate_kbps=320,
-                avg_bitrate_kbps=320, format="MP3",
-                is_cbr=False,
-                album_path=None,  # type: ignore[arg-type]
-            )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info_no_path)), \
+                 _patch_linked_current_beets(db, 833, beets_info), \
                  patch("lib.config.read_runtime_config", return_value=cfg):
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=stdout, stderr="")
@@ -2124,11 +2145,7 @@ class TestForceImportSlice(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
         row = db.request(833)
-        self.assertEqual(
-            row["imported_path"],
-            "/Beets/The Go! Team/2005 - Are You Ready for More_",
-            "force-import must overwrite the stale source path with "
-            "ir.postflight.imported_path (the actual beets destination)")
+        self.assertNotIn("imported_path", row)
 
 
 class TestPreserveSourceSlice(unittest.TestCase):
@@ -6949,6 +6966,12 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
 
     def _wire_current(self, db, request_id, evidence):
         """Upsert ``evidence`` and wire ``album_requests.current_evidence_id``."""
+        import msgspec
+
+        evidence = msgspec.structs.replace(
+            evidence,
+            mb_release_id=str(db.request(request_id)["mb_release_id"]),
+        )
         db.upsert_album_quality_evidence(evidence)
         persisted = db.find_album_quality_evidence(
             mb_release_id=evidence.mb_release_id,
@@ -6960,15 +6983,18 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
     def _drive_dispatch(self, db, *, request_id, tmpdir, import_job_id, cfg):
         from lib.dispatch import dispatch_import_from_db
 
-        # album_path=None makes the current-evidence guard trust the
-        # seeded REQUEST_CURRENT row without an audio-snapshot probe.
-        beets_info_no_path = AlbumInfo(
-            album_id=1, track_count=10, min_bitrate_kbps=128,
-            avg_bitrate_kbps=128, format="MP3",
-            is_cbr=False, album_path=None,  # type: ignore[arg-type]
+        beets_info = AlbumInfo(
+            album_id=1,
+            track_count=3,
+            min_bitrate_kbps=128,
+            avg_bitrate_kbps=128,
+            median_bitrate_kbps=128,
+            format="MP3",
+            is_cbr=False,
+            album_path="/replaced-by-linked-current-fixture",
         )
         with patch_dispatch_externals() as ext, \
-                patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info_no_path)), \
+                _patch_linked_current_beets(db, request_id, beets_info), \
                 patch("lib.config.read_runtime_config", return_value=cfg):
             result = dispatch_import_from_db(
                 db,
@@ -9903,11 +9929,13 @@ class TestRefreshCurrentEvidenceUsesBeetsLibraryRoot(unittest.TestCase):
             def __exit__(self, *args):
                 return False
 
-            def get_album_info(self, mb_release_id, cfg):
-                # Returning None short-circuits the function before any
+            def resolve_current_release(self, identity):
+                # Returning missing short-circuits the function before any
                 # snapshotting — we only care that BeetsDB was constructed
                 # with the right library_root kwarg.
-                return None
+                from lib.beets_db import CurrentBeetsMissing
+
+                return CurrentBeetsMissing(identity=identity)
 
         with patch("lib.beets_db.BeetsDB", FakeBeetsDB):
             _refresh_current_evidence_after_import(
@@ -9944,8 +9972,10 @@ class TestRefreshCurrentEvidenceUsesBeetsLibraryRoot(unittest.TestCase):
             def __exit__(self, *args):
                 return False
 
-            def get_album_info(self, mb_release_id, cfg):
-                return None
+            def resolve_current_release(self, identity):
+                from lib.beets_db import CurrentBeetsMissing
+
+                return CurrentBeetsMissing(identity=identity)
 
         with patch("lib.beets_db.BeetsDB", FakeBeetsDB):
             _refresh_current_evidence_after_import(
@@ -10015,8 +10045,7 @@ class TestReplaceFullPath(unittest.TestCase):
     PET_GRIEF_RG = "abcdabcd-1111-2222-3333-444444444444"
 
     def _make_target_payload(
-        self, status="wanted", imported_path=None,
-        active_download_state=None,
+        self, status="wanted", active_download_state=None,
     ):
         from tests.fakes import FakePipelineDB
         from tests.helpers import make_request_row
@@ -10031,7 +10060,6 @@ class TestReplaceFullPath(unittest.TestCase):
             year=2024,
             country="US",
             status=status,
-            imported_path=imported_path,
             active_download_state=active_download_state,
             verified_lossless=True,
             current_spectral_grade="A",
@@ -10047,10 +10075,6 @@ class TestReplaceFullPath(unittest.TestCase):
 
         db = self._make_target_payload(
             status=old_status,
-            imported_path=(
-                "/mnt/virtio/Music/Beets/Pet Grief/Pet Grief"
-                if old_status == "imported" else None
-            ),
             active_download_state=active_download_state,
         )
         tmpdir = tempfile.mkdtemp()
@@ -10143,7 +10167,6 @@ class TestReplaceFullPath(unittest.TestCase):
         old = db.get_request(4194)
         assert old is not None
         self.assertEqual(old["status"], "replaced")
-        self.assertIsNone(old["imported_path"])  # R14 carve-out
         # Characteristic fields preserved.
         self.assertTrue(old["verified_lossless"])
         self.assertEqual(old["current_spectral_grade"], "A")

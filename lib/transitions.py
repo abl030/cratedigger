@@ -167,7 +167,6 @@ _IMPORTED_FIELDS = frozenset({
     "current_lossless_source_v0_probe_median_bitrate",
     "current_lossless_source_v0_probe_min_bitrate",
     "final_format",
-    "imported_path",
     "last_download_spectral_bitrate",
     "last_download_spectral_grade",
     "min_bitrate",
@@ -307,7 +306,6 @@ class RequestTransition:
         current_lossless_source_v0_probe_median_bitrate: object = _OMITTED,
         current_lossless_source_v0_probe_min_bitrate: object = _OMITTED,
         final_format: object = _OMITTED,
-        imported_path: object = _OMITTED,
         last_download_spectral_bitrate: object = _OMITTED,
         last_download_spectral_grade: object = _OMITTED,
         min_bitrate: object = _OMITTED,
@@ -333,7 +331,6 @@ class RequestTransition:
                     current_lossless_source_v0_probe_min_bitrate
                 ),
                 final_format=final_format,
-                imported_path=imported_path,
                 last_download_spectral_bitrate=last_download_spectral_bitrate,
                 last_download_spectral_grade=last_download_spectral_grade,
                 min_bitrate=min_bitrate,
@@ -366,7 +363,6 @@ class RequestTransition:
             current_lossless_source_v0_probe_min_bitrate=_field_or_omitted(
                 fields, "current_lossless_source_v0_probe_min_bitrate"),
             final_format=_field_or_omitted(fields, "final_format"),
-            imported_path=_field_or_omitted(fields, "imported_path"),
             last_download_spectral_bitrate=_field_or_omitted(
                 fields, "last_download_spectral_bitrate"),
             last_download_spectral_grade=_field_or_omitted(

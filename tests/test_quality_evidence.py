@@ -13,6 +13,7 @@ import shutil
 import tempfile
 import unittest
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import msgspec
 
@@ -33,6 +34,7 @@ from lib.quality_evidence import (
     evidence_from_album_info,
     evidence_from_import_result,
     evidence_from_measurement,
+    propagate_candidate_evidence_to_current,
     snapshot_audio_files,
 )
 from tests.fakes import FakePipelineDB
@@ -250,6 +252,115 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         self.assertEqual(loaded.measurement.min_bitrate_kbps, 121)
         assert loaded.verified_lossless_proof is not None
         self.assertEqual(loaded.verified_lossless_proof.provenance, "carried")
+
+    def test_current_backfill_discards_every_fact_from_poisoned_link(self):
+        requested = "11111111-1111-1111-1111-111111111111"
+        poisoned = "22222222-2222-2222-2222-222222222222"
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id=requested,
+            verified_lossless=False,
+        ))
+        linked = make_album_quality_evidence(
+            mb_release_id=poisoned,
+            source_path="/historical/wrong-release",
+            files=snapshot_audio_files(self.root),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=252,
+                format="MP3",
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=228,
+                spectral_subject="source",
+                spectral_provenance="measured",
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                subject="source",
+                provenance="measured",
+                avg_bitrate_kbps=245,
+            ),
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="measured",
+                source="flac",
+                classifier="spectral_verified_lossless",
+            ),
+            on_disk_v0_research_attempted=True,
+        )
+        db.upsert_album_quality_evidence(linked)
+        stored = db.find_album_quality_evidence(
+            mb_release_id=poisoned,
+            snapshot_fingerprint=linked.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        db.set_request_current_evidence(42, stored.id)
+
+        result = backfill_current_evidence_from_album_info(
+            db,
+            request_id=42,
+            mb_release_id=requested,
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=2,
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=130,
+                median_bitrate_kbps=129,
+                is_cbr=False,
+                album_path=self.root,
+                format="Opus",
+            ),
+        )
+
+        self.assertEqual(result.status, "ready")
+        current_id = db.get_request_current_evidence_id(42)
+        current = db.load_album_quality_evidence_by_id(current_id)
+        assert current is not None
+        self.assertEqual(current.mb_release_id, requested)
+        self.assertIsNone(current.measurement.spectral_grade)
+        self.assertIsNone(current.measurement.spectral_bitrate_kbps)
+        self.assertIsNone(current.measurement.spectral_subject)
+        self.assertIsNone(current.measurement.spectral_provenance)
+        self.assertIsNone(current.v0_metric)
+        self.assertIsNone(current.verified_lossless_proof)
+        self.assertFalse(current.on_disk_v0_research_attempted)
+        self.assertNotEqual(current.measured_at, linked.measured_at)
+
+    def test_post_import_identity_mismatch_mutates_nothing(self):
+        requested = "11111111-1111-1111-1111-111111111111"
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id=requested,
+            status="imported",
+        ))
+        original_upsert = db.upsert_album_quality_evidence
+        original_link = db.set_request_current_evidence
+        db.upsert_album_quality_evidence = MagicMock(wraps=original_upsert)
+        db.set_request_current_evidence = MagicMock(wraps=original_link)
+        candidate = make_album_quality_evidence(
+            mb_release_id="22222222-2222-2222-2222-222222222222",
+            files=snapshot_audio_files(self.root),
+        )
+
+        result = propagate_candidate_evidence_to_current(
+            db,
+            request_id=42,
+            candidate_evidence=candidate,
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=2,
+                min_bitrate_kbps=128,
+                is_cbr=False,
+                album_path=self.root,
+                format="MP3",
+            ),
+        )
+
+        self.assertEqual(result.status, "identity_mismatch")
+        self.assertIsNone(result.evidence)
+        db.upsert_album_quality_evidence.assert_not_called()
+        db.set_request_current_evidence.assert_not_called()
 
     def test_current_backfill_cannot_relink_replaced_request(self):
         db = FakePipelineDB()

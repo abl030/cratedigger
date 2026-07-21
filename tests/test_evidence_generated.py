@@ -38,7 +38,12 @@ import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from hypothesis import example, given
 from hypothesis import strategies as st
 
-from lib.beets_db import AlbumInfo
+from lib.beets_db import (
+    AlbumInfo,
+    CurrentBeetsItem,
+    CurrentBeetsUnique,
+    release_identity_for_lookup,
+)
 from lib.import_evidence import ensure_current_evidence_for_action
 from lib.import_preview import measure_and_persist_candidate_evidence
 from lib.measurement import ExistingSpectralAuditLookup
@@ -67,6 +72,33 @@ _CHANGED_SNAPSHOT_FACT_SHAPES: tuple[
     ("installed", None),
     (None, None),
 )
+
+
+def _current_release(
+    release_id: str,
+    root: str,
+    *,
+    audio_format: str = "MP3",
+    bitrate_kbps: int = 250,
+) -> CurrentBeetsUnique:
+    identity = release_identity_for_lookup(release_id)
+    assert identity is not None
+    filename = next(
+        name for name in os.listdir(root)
+        if os.path.splitext(name)[1].lower() in {".mp3", ".opus", ".flac"}
+    )
+    return CurrentBeetsUnique(
+        identity=identity,
+        album_id=1,
+        album_path=root,
+        items=(CurrentBeetsItem(
+            id=1,
+            path=os.path.join(root, filename),
+            format=audio_format,
+            bitrate=bitrate_kbps * 1000,
+        ),),
+        selectors=(f"mb_albumid:{release_id}",),
+    )
 
 
 @dataclass(frozen=True)
@@ -170,7 +202,12 @@ def _run_world(
             db,
             request_id=request_id,
             mb_release_id=mbid,
-            current_album_path=root,
+            current_release=_current_release(
+                mbid,
+                root,
+                audio_format=world.storage_format,
+                bitrate_kbps=world.stale_avg_bitrate,
+            ),
             album_info=AlbumInfo(
                 album_id=1,
                 track_count=1,
@@ -299,14 +336,14 @@ class TestGeneratedEvidenceLifecycle(unittest.TestCase):
                 db,
                 request_id=1,
                 mb_release_id="drift-mbid",
-                current_album_path=root,
+                current_release=_current_release("drift-mbid", root),
                 album_info=album_info,
             )
             second = ensure_current_evidence_for_action(
                 db,
                 request_id=1,
                 mb_release_id="drift-mbid",
-                current_album_path=root,
+                current_release=_current_release("drift-mbid", root),
                 album_info=album_info,
             )
 
@@ -469,7 +506,11 @@ def _run_blank_path_world(
             db,
             request_id=request_id,
             mb_release_id=mbid,
-            current_album_path=root,
+            current_release=_current_release(
+                mbid,
+                root,
+                bitrate_kbps=world.avg_bitrate,
+            ),
             album_info=AlbumInfo(
                 album_id=1,
                 track_count=1,
@@ -1044,6 +1085,105 @@ class TestTwoAxisCarryCheckerTripsOnViolations(unittest.TestCase):
                 evidence=known_bad,
             )
 
+
+_POISONED_LINK_IDENTITIES = (
+    (
+        "11111111-1111-1111-1111-111111111111",
+        "22222222-2222-2222-2222-222222222222",
+    ),
+    ("12345", "54321"),
+    ("legacy-release-a", "legacy-release-b"),
+)
+
+
+def assert_no_poisoned_link_facts(evidence: AlbumQualityEvidence) -> None:
+    measurement = evidence.measurement
+    if any((
+        measurement.spectral_grade is not None,
+        measurement.spectral_bitrate_kbps is not None,
+        measurement.spectral_subject is not None,
+        measurement.spectral_provenance is not None,
+        evidence.v0_metric is not None,
+        evidence.verified_lossless_proof is not None,
+        evidence.on_disk_v0_research_attempted,
+    )):
+        raise AssertionError("poisoned linked HAVE facts crossed exact identity")
+
+
+class TestGeneratedPoisonedCurrentLink(unittest.TestCase):
+    @given(identities=st.sampled_from(_POISONED_LINK_IDENTITIES))
+    @example(identities=_POISONED_LINK_IDENTITIES[0])
+    @example(identities=_POISONED_LINK_IDENTITIES[1])
+    def test_mismatched_exact_identity_carries_no_linked_facts(self, identities):
+        requested, poisoned = identities
+        root = tempfile.mkdtemp(prefix="cratedigger-poisoned-link-gen-")
+        try:
+            with open(os.path.join(root, "01.mp3"), "wb") as handle:
+                handle.write(b"same-address-bytes")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=1,
+                mb_release_id=requested,
+                status="imported",
+            ))
+            linked = make_album_quality_evidence(
+                mb_release_id=poisoned,
+                files=snapshot_audio_files(root),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    format="MP3",
+                    spectral_grade="genuine",
+                    spectral_bitrate_kbps=228,
+                    spectral_subject="source",
+                    spectral_provenance="measured",
+                ),
+                v0_metric=AlbumQualityV0Metric(
+                    subject="source",
+                    provenance="measured",
+                    avg_bitrate_kbps=245,
+                ),
+                verified_lossless_proof=VerifiedLosslessProof(
+                    provenance="measured",
+                    source="flac",
+                    classifier="spectral_verified_lossless",
+                ),
+                on_disk_v0_research_attempted=True,
+            )
+            db.upsert_album_quality_evidence(linked)
+            stored = db.find_album_quality_evidence(
+                mb_release_id=poisoned,
+                snapshot_fingerprint=linked.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            db.set_request_current_evidence(1, stored.id)
+            result = backfill_current_evidence_from_album_info(
+                db,
+                request_id=1,
+                mb_release_id=requested,
+                album_info=AlbumInfo(
+                    album_id=1,
+                    track_count=1,
+                    min_bitrate_kbps=128,
+                    is_cbr=False,
+                    album_path=root,
+                    format="MP3",
+                ),
+            )
+            assert result.evidence is not None
+            assert_no_poisoned_link_facts(result.evidence)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_checker_rejects_a_known_bad_poisoned_carry(self):
+        known_bad = make_album_quality_evidence(
+            measurement=AudioQualityMeasurement(
+                spectral_grade="genuine",
+                spectral_subject="source",
+                spectral_provenance="carried",
+            ),
+        )
+        with self.assertRaises(AssertionError):
+            assert_no_poisoned_link_facts(known_bad)
 
 # ---------------------------------------------------------------------------
 # 2026-07-18 proof-mint incident (Passenger / request 8877) — two invariants:

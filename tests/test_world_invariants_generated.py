@@ -10,8 +10,15 @@ import msgspec
 from hypothesis import given, strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads active profile)
+from lib.beets_db import (
+    CurrentBeetsAmbiguous,
+    CurrentBeetsItem,
+    CurrentBeetsMissing,
+    CurrentBeetsUnique,
+)
 from lib.quality import dispatch_action
 from lib.quality.decisions import post_import_search_action_if_known
+from lib.release_identity import ReleaseIdentity
 from lib.world_invariants import (
     DenylistAuthoritySnapshot,
     EvidenceDiskSnapshot,
@@ -47,6 +54,27 @@ def _decision_denylists_for_test(decision: str) -> bool:
     )
 
 
+def _identity(release_id: str) -> ReleaseIdentity:
+    identity = ReleaseIdentity.from_id(release_id)
+    if identity is not None:
+        return identity
+    return ReleaseIdentity(source="musicbrainz", release_id=release_id)
+
+
+def _unique(release_id: str, album_id: int, folder: str) -> CurrentBeetsUnique:
+    identity = _identity(release_id)
+    return CurrentBeetsUnique(
+        identity=identity,
+        album_id=album_id,
+        album_path=folder,
+        items=(CurrentBeetsItem(
+            id=album_id * 100,
+            path=os.path.join(folder, "01 Track.flac"),
+        ),),
+        selectors=(f"mb_albumid:{release_id}",),
+    )
+
+
 class TestWorldInvariantGenerated(unittest.TestCase):
     @given(release_ids=st.lists(_SEGMENT, min_size=1, max_size=8, unique=True))
     def test_unique_release_folders_are_coherent(self, release_ids: list[str]) -> None:
@@ -64,12 +92,19 @@ class TestWorldInvariantGenerated(unittest.TestCase):
                 request_id=index,
                 release_id=release_id,
                 status="imported",
-                imported_path=folder,
             ))
 
         self.assertEqual(check_folder_exclusivity(tuple(albums)), ())
         self.assertEqual(
-            check_status_membership(tuple(requests), tuple(albums)),
+            check_status_membership(
+                tuple(requests),
+                {
+                    release_id: _unique(release_id, index, os.path.join(
+                        "/library", f"album-{index}",
+                    ))
+                    for index, release_id in enumerate(release_ids, start=1)
+                },
+            ),
             (),
         )
 
@@ -132,23 +167,81 @@ class TestWorldInvariantGenerated(unittest.TestCase):
 
     @given(
         release_id=_SEGMENT,
-        imported_path=_SEGMENT,
     )
     def test_imported_without_exact_release_is_always_rejected(
         self,
         release_id: str,
-        imported_path: str,
     ) -> None:
+        identity = _identity(release_id)
         violations = check_status_membership((
             RequestMembershipSnapshot(
                 1,
                 release_id,
                 "imported",
-                os.path.join("/library", imported_path),
             ),
-        ), ())
+        ), {release_id: CurrentBeetsMissing(identity=identity)})
 
-        self.assertIn("imported_release_missing", {v.code for v in violations})
+        self.assertIn("current_beets_missing", {v.code for v in violations})
+
+    @given(
+        request_id=st.integers(min_value=1),
+        release_id=_SEGMENT,
+        album_ids=st.lists(
+            st.integers(min_value=1), min_size=2, max_size=6, unique=True,
+        ),
+        status=st.sampled_from(("wanted", "unsearchable", "imported")),
+    )
+    def test_any_typed_ambiguity_is_rejected(
+        self,
+        request_id: int,
+        release_id: str,
+        album_ids: list[int],
+        status: str,
+    ) -> None:
+        identity = _identity(release_id)
+        violations = check_status_membership((RequestMembershipSnapshot(
+            request_id=request_id,
+            release_id=release_id,
+            status=status,
+        ),), {
+            release_id: CurrentBeetsAmbiguous(
+                identity=identity,
+                album_ids=tuple(sorted(album_ids)),
+                reason="multiple_matches",
+            ),
+        })
+
+        self.assertIn("current_beets_ambiguous", {v.code for v in violations})
+
+    @given(
+        request_id=st.integers(min_value=1),
+        release_id=_SEGMENT,
+        historical_path=_SEGMENT,
+        current_path=_SEGMENT,
+        fingerprint=_SEGMENT,
+    )
+    def test_historical_evidence_path_never_invalidates_current_fingerprint(
+        self,
+        request_id: int,
+        release_id: str,
+        historical_path: str,
+        current_path: str,
+        fingerprint: str,
+    ) -> None:
+        violations = check_evidence_disk_coherence((EvidenceDiskSnapshot(
+            request_id=request_id,
+            release_id=release_id,
+            status="imported",
+            album_path=os.path.join("/library", current_path),
+            current_evidence_id=1,
+            evidence_id=1,
+            evidence_release_id=release_id,
+            evidence_source_path=os.path.join("/historical", historical_path),
+            evidence_fingerprint=fingerprint,
+            actual_fingerprint=fingerprint,
+        ),))
+
+        self.assertEqual(violations, ())
 
     @given(
         request_id=st.integers(min_value=1),
