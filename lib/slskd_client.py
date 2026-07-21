@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
-from typing import Any, TypeGuard
+from typing import Any
 import uuid
 from urllib.parse import quote
 
@@ -28,6 +28,10 @@ import requests
 from requests.adapters import HTTPAdapter
 
 from lib.config import CratediggerConfig
+from lib.json_narrow import (
+    is_dict_like as _is_dict,
+    is_str_object_dict as _is_dict_typed,
+)
 
 
 logger = logging.getLogger("cratedigger")
@@ -169,36 +173,6 @@ class DownloadUser(msgspec.Struct, rename="camel", frozen=True):
     username: str = ""
     directories: list[DownloadDirectory] = msgspec.field(
         default_factory=list[DownloadDirectory])
-
-
-def _is_dict(value: object) -> bool:
-    """``isinstance(value, dict)`` wrapped behind a plain-``bool`` return.
-
-    A bare ``isinstance(raw, dict)`` on an ``Any``-typed parameter
-    permanently flow-narrows that name to bare ``dict[Unknown, Unknown]``
-    for the rest of the function (pyright tracks the narrowed type, not
-    the original ``Any``), which then propagates Unknown through every
-    later ``.get(...)`` on it. Routing the check through a helper with no
-    ``TypeGuard`` return type keeps pyright from narrowing on the call,
-    so ``raw`` stays ``Any`` — the graceful ``.get(key, default)``
-    tolerance this external-envelope parser already relies on. The
-    parameter itself is ``object`` (not ``Any``) — a function call never
-    narrows its argument's type in the caller's scope regardless of the
-    callee's parameter type, so ``object`` here costs no new escape hatch.
-    """
-    return isinstance(value, dict)
-
-
-def _is_dict_typed(value: object) -> TypeGuard[dict[str, object]]:
-    """``isinstance`` check that DOES narrow, for call sites that need a
-    concrete ``dict[str, object]`` argument (e.g. ``parse_transfer_snapshot``).
-    A plain ``isinstance(value, dict)`` on an already-``object``-typed
-    value narrows to bare ``dict[Unknown, Unknown]`` (generic args are
-    erased at runtime, so pyright can't recover them from the class
-    check alone); declaring the full target type on a ``TypeGuard``
-    return makes the narrowed type exactly ``dict[str, object]`` instead.
-    """
-    return isinstance(value, dict)
 
 
 def _parse_download_directory(raw: Any) -> DownloadDirectory | None:

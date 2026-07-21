@@ -9,6 +9,10 @@ from urllib.parse import quote
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence, TypeGuard
 
+from lib.json_narrow import (
+    is_object_list as _is_object_list,
+    is_str_object_dict as _is_str_object_dict,
+)
 from lib.processing_paths import normalize_source_dirs, path_is_within_root
 from lib.quality import AUDIO_EXTENSIONS_DOTTED
 from lib.util import resolve_failed_path
@@ -16,19 +20,6 @@ from lib.validation_envelope import (
     ValidationResultEnvelope,
     decode_validation_envelope,
 )
-
-
-def _is_str_object_dict(value: object) -> TypeGuard[dict[str, object]]:
-    """Narrow a decoded-JSON value to a string-keyed dict.
-
-    A plain ``isinstance(value, dict)`` check narrows to the generic-erased
-    ``dict[Unknown, Unknown]`` under strict pyright, which then poisons every
-    downstream use as "partially unknown". Declaring the narrowed type via
-    ``TypeGuard`` instead gives callers the precise ``dict[str, object]``
-    with the identical runtime check (JSONB objects always decode to
-    ``str``-keyed dicts).
-    """
-    return isinstance(value, dict)
 
 
 def _is_object_sequence(value: object) -> TypeGuard[Sequence[object]]:
@@ -41,16 +32,6 @@ def _is_object_sequence(value: object) -> TypeGuard[Sequence[object]]:
     """
     return isinstance(value, (list, tuple))
 
-
-def _is_object_list(value: object) -> TypeGuard[list[object]]:
-    """Narrow a decoded-JSON value to a list only (not tuple), precisely typed.
-
-    Distinct from :func:`_is_object_sequence` because some call sites'
-    original ``isinstance(value, list)`` checks deliberately excluded
-    tuples — reusing the sequence guard there would silently widen
-    which values are accepted.
-    """
-    return isinstance(value, list)
 
 _PLAYABLE_AUDIO_EXTENSIONS: frozenset[str] = frozenset({
     ".aac",

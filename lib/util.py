@@ -18,7 +18,12 @@ import difflib
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Iterator, Sequence, TYPE_CHECKING, TypeGuard
+from typing import Any, Callable, Iterator, Sequence, TYPE_CHECKING
+
+from lib.json_narrow import (
+    is_object_list as _is_object_list,
+    is_str_object_dict as _is_str_object_dict,
+)
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
@@ -26,27 +31,6 @@ if TYPE_CHECKING:
     from lib.quality import ValidationResult
 
 logger = logging.getLogger("cratedigger")
-
-
-def _is_str_object_dict(value: object) -> TypeGuard[dict[str, object]]:
-    """Narrow a decoded-JSON value (Plex/Jellyfin API responses) to a
-    string-keyed dict.
-
-    A plain ``isinstance(value, dict)`` check narrows to the generic-erased
-    ``dict[Unknown, Unknown]`` under strict pyright, which then poisons
-    every downstream use as "partially unknown". Declaring the narrowed
-    type via ``TypeGuard`` instead gives callers the precise
-    ``dict[str, object]`` with the identical runtime check. Mirrors
-    ``lib.download_recovery._is_str_object_dict`` /
-    ``web.wrong_match_file_service._is_str_object_dict``.
-    """
-    return isinstance(value, dict)
-
-
-def _is_object_list(value: object) -> TypeGuard[list[object]]:
-    """Narrow a decoded-JSON value to a list, same rationale as
-    ``_is_str_object_dict``."""
-    return isinstance(value, list)
 
 
 @dataclass

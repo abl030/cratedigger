@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Literal, TypeGuard
+from typing import Callable, Literal
 
+from lib.json_narrow import (
+    is_object_list as _is_object_list,
+    is_str_object_dict as _is_str_object_dict,
+)
 from lib.processing_paths import (
     attempt_fingerprint,
     canonical_processing_path,
@@ -13,26 +17,6 @@ from lib.processing_paths import (
     stage_to_ai_path,
 )
 
-
-def _is_str_object_dict(value: object) -> TypeGuard[dict[str, object]]:
-    """Narrow a decoded-JSONB value to a string-keyed dict.
-
-    A plain ``isinstance(value, dict)`` check narrows to the generic-erased
-    ``dict[Unknown, Unknown]`` under strict pyright, which then poisons
-    every downstream use as "partially unknown". Declaring the narrowed
-    type via ``TypeGuard`` instead gives callers the precise
-    ``dict[str, object]`` with the identical runtime check (JSONB objects
-    always decode to ``str``-keyed dicts). Mirrors
-    ``web.wrong_match_file_service._is_str_object_dict``.
-    """
-    return isinstance(value, dict)
-
-
-def _is_object_list(value: object) -> TypeGuard[list[object]]:
-    """Narrow a decoded-JSONB value to a list, same rationale as
-    ``_is_str_object_dict`` (bare ``isinstance(value, list)`` erases to
-    ``list[Unknown]`` under strict pyright)."""
-    return isinstance(value, list)
 
 ProcessingPathKind = Literal[
     "canonical",

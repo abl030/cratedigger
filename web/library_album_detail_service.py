@@ -17,6 +17,7 @@ from lib.destructive_release_service import (
     SupportsReleaseLookupDB,
     resolve_pipeline_request,
 )
+from lib.json_narrow import is_object_list as _is_object_list
 from lib.release_identity import (
     detect_release_source,
     frontend_release_id,
@@ -166,13 +167,6 @@ class LibraryAlbumDetail(msgspec.Struct, frozen=True):
 
     def to_dict(self) -> dict[str, object]:
         return msgspec.to_builtins(self)
-
-
-def _is_object_list(value: object) -> TypeGuard[list[object]]:
-    """Narrow to ``list[object]`` with a precise type, not the
-    generic-erased ``list[Unknown]`` a bare ``isinstance(value, list)``
-    narrows to under strict pyright."""
-    return isinstance(value, list)
 
 
 def _is_str_object_mapping(value: object) -> TypeGuard[Mapping[str, object]]:
