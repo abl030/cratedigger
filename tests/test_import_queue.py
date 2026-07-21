@@ -2264,8 +2264,11 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
 
         preview.assert_not_called()
         preimport.assert_not_called()
-        self.assertEqual(len(audit_calls), 1)
-        self.assertEqual(audit_calls[0], source)
+        self.assertEqual(
+            audit_calls,
+            [],
+            "matching candidate evidence must not trigger another source scan",
+        )
         assert updated is not None
         self.assertEqual(updated.status, "queued")
         self.assertEqual(updated.preview_status, "evidence_ready")
@@ -2449,7 +2452,11 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     ),
                 )
 
-        self.assertEqual(calls, [source, existing])
+        self.assertEqual(
+            calls,
+            [existing],
+            "candidate reuse must not suppress the separate HAVE scan",
+        )
         assert updated is not None and updated.preview_result is not None
         import_result = ImportResult.from_dict(cast(
             dict[str, Any],
@@ -2629,8 +2636,8 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         self.assertEqual(linked.measurement.spectral_grade, "genuine")
         self.assertIsNone(linked.measurement.spectral_bitrate_kbps)
 
-    def test_have_lookup_failure_still_analyzes_candidate(self):
-        """A DB failure on HAVE provenance must not suppress the WANT scan."""
+    def test_have_lookup_failure_does_not_reanalyze_reused_candidate(self):
+        """A HAVE lookup failure cannot revoke matching candidate evidence."""
         from scripts import import_preview_worker
         from lib.measurement import ExistingSpectralAuditLookup
         from lib.quality import SpectralAnalysisDetail
@@ -2677,7 +2684,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 ),
             )
 
-        self.assertEqual(calls, [source])
+        self.assertEqual(calls, [])
         assert updated is not None
         assert updated.preview_result is not None
         import_result = ImportResult.from_dict(cast(
@@ -2687,13 +2694,13 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         assert import_result.spectral.candidate is not None
         self.assertEqual(
             import_result.spectral.candidate.grade,
-            "likely_transcode",
+            "genuine",
         )
         self.assertEqual(updated.status, "queued")
         self.assertEqual(updated.preview_status, "evidence_ready")
         self.assertIsNotNone(updated.importable_at)
 
-    def test_reused_evidence_audit_failure_is_fail_soft(self):
+    def test_reused_evidence_does_not_call_candidate_analyzer(self):
         from scripts import import_preview_worker
 
         with tempfile.TemporaryDirectory() as source:
@@ -2716,8 +2723,10 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             assert claimed is not None
             self._seed_evidence_for_download_log(db, download_log_id, source)
 
+            analyzer_calls: list[str] = []
+
             def raising_analyzer(path: str):
-                del path
+                analyzer_calls.append(path)
                 raise RuntimeError("spectral backend unavailable")
 
             updated = import_preview_worker.process_claimed_preview_job(
@@ -2735,11 +2744,10 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         )
         assert result.spectral.candidate is not None
         assert result.spectral.existing is not None
+        self.assertEqual(analyzer_calls, [])
         self.assertTrue(result.spectral.candidate.attempted)
-        self.assertIn(
-            "spectral backend unavailable",
-            result.spectral.candidate.error or "",
-        )
+        self.assertEqual(result.spectral.candidate.grade, "genuine")
+        self.assertIsNone(result.spectral.candidate.error)
         self.assertFalse(result.spectral.existing.attempted)
         self.assertIsNone(result.spectral.existing.error)
 
@@ -2750,6 +2758,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         not invoke _materialize_processing_dir.
         """
         from scripts import import_preview_worker
+        from lib.quality import SpectralAnalysisDetail
 
         with tempfile.TemporaryDirectory() as staged:
             with open(os.path.join(staged, "01.flac"), "wb") as handle:
@@ -2780,6 +2789,15 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             assert claimed is not None
             self._seed_evidence_for_job(db, claimed.id, staged)
 
+            candidate_audit_calls: list[str] = []
+
+            def analyze(path: str):
+                candidate_audit_calls.append(path)
+                return SpectralAnalysisDetail(
+                    attempted=True,
+                    grade="genuine",
+                )
+
             with patch(
                 "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
             ) as preview, patch(
@@ -2790,11 +2808,13 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,
                     claimed,
+                    spectral_detail_analyzer=analyze,
                 )
 
         preview.assert_not_called()
         preimport.assert_not_called()
         materialize.assert_not_called()
+        self.assertEqual(candidate_audit_calls, [])
         assert updated is not None
         self.assertEqual(updated.preview_status, "evidence_ready")
         assert updated.preview_result is not None
@@ -2947,6 +2967,97 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         assert evidence is not None
         self.assertEqual(len(evidence.files), 1)
         self.assertEqual(evidence.files[0].relative_path, "01.mp3")
+
+    def test_rolling_stones_force_reuses_all_twelve_unchanged_flacs(self):
+        """Live dl 37709: unchanged force-import candidate is measured once."""
+        from lib.quality_evidence import EvidenceBuildResult
+        from lib.measurement import ExistingSpectralAuditLookup
+        from lib.quality import SpectralAnalysisDetail
+        from scripts import import_preview_worker
+
+        with tempfile.TemporaryDirectory() as source:
+            for track in range(1, 13):
+                with open(
+                    os.path.join(source, f"{track:02d}.flac"),
+                    "wb",
+                ) as handle:
+                    handle.write(f"rolling-stones-track-{track}".encode())
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=8883,
+                status="wanted",
+                mb_release_id="1f9fdeeb-59b4-4751-91b6-be38fb76c380",
+                artist_name="The Rolling Stones",
+                album_title="The Rolling Stones No. 2",
+            ))
+            download_log_id = db.log_download(8883, outcome="rejected")
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=8883,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=source,
+                    source_username="buckwheat8404",
+                ),
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+            _seed_candidate_for_download_log(
+                db,
+                download_log_id,
+                mb_release_id="1f9fdeeb-59b4-4751-91b6-be38fb76c380",
+                source_path=source,
+                files=snapshot_audio_files(source),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=3301,
+                    avg_bitrate_kbps=3505,
+                    median_bitrate_kbps=3515,
+                    format="FLAC",
+                    spectral_grade="genuine",
+                    spectral_subject="source",
+                    spectral_provenance="measured",
+                ),
+                codec="flac",
+                container="flac",
+                storage_format="FLAC",
+                target_format="opus 128",
+            )
+            candidate_scans: list[str] = []
+            preview_calls = 0
+
+            def analyze(path: str) -> SpectralAnalysisDetail:
+                candidate_scans.append(path)
+                return SpectralAnalysisDetail(attempted=True, grade="genuine")
+
+            def full_preview(*_args: Any, **_kwargs: Any):
+                nonlocal preview_calls
+                preview_calls += 1
+                raise AssertionError("matching evidence must skip full preview")
+
+            updated = import_preview_worker.process_claimed_preview_job(
+                db,
+                claimed,
+                spectral_detail_analyzer=analyze,
+                existing_spectral_resolver=(
+                    lambda _release_id: ExistingSpectralAuditLookup()
+                ),
+                preview_fn=full_preview,
+                current_evidence_loader=(
+                    lambda *_args, **_kwargs: EvidenceBuildResult(
+                        None,
+                        "empty_current",
+                        "exact album not in beets",
+                    )
+                ),
+            )
+
+        self.assertEqual(preview_calls, 0)
+        self.assertEqual(candidate_scans, [])
+        assert updated is not None and updated.preview_result is not None
+        self.assertEqual(updated.preview_status, "evidence_ready")
+        self.assertEqual(updated.preview_result["candidate_status"], "reused")
 
 
 class TestYoutubeImportJobType(unittest.TestCase):

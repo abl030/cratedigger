@@ -55,6 +55,7 @@ Hunting — Generated-First".
 | `tests/test_quality_lineage_generated.py` | target-quality contracts and measurement/evidence projection | `from_explicit_label` rejects bare MP3 across case/whitespace variants; `from_projection` requires a CBR/VBR boolean and preserves it for bare MP3; explicit V/numeric labels own their mode and gate policy even when the measured boolean contradicts them; exact single/equal/differing-track projections preserve mode; measurement-only early rejects never claim target policy |
 | `tests/test_evidence_generated.py` | `ensure_current_evidence_for_action` | converted current evidence requires a linked source V0 fact (fix `6cf26a4`): never `loaded` without it, request scalar mutations cannot change the result, and missing evidence fails closed; fingerprint rebuilds carry only source-subject facts with `carried` provenance |
 | `tests/test_preview_failure_evidence_generated.py` | `process_claimed_preview_job` plus failure-point current-evidence preparation/enrichment | every producer stage that terminates as `measurement_failed` reaches one lifecycle owner: request-owned failures always persist their job/audit and diagnostic; an exact readable installed release links a complete pre-attempt HAVE snapshot regardless of stage or job type; missing identity, absent/unreadable HAVE, and preparation/enrichment faults stay fail-soft without fabricating evidence |
+| `tests/test_spectral_attempt_audit_generated.py` | both attempt-audit adapters plus `process_claimed_preview_job` | candidate measurement is once per content snapshot across automation and force jobs: a matching snapshot projects the persisted spectral fact without another candidate scan, a changed snapshot runs full preview exactly once, and the installed HAVE scan remains an independent authority boundary |
 | `tests/test_lossless_lineage_check_generated.py` | migration 057's real PostgreSQL CHECK plus same-address FakePipelineDB upsert worlds | v4 installed-subject spectral is rejected exactly when source V0, verified-lossless proof, or a case-normalized lossless conversion source establishes lossless lineage; native installed facts, source-subject facts, M4A-container-only rows, and legacy v1/v3 rows remain valid; failures name the exact constraint; a same-key merge clears stale installed spectral when new lineage arrives while preserving a source-subject fact |
 | `tests/test_slskd_events_generated.py` | `ingest_download_file_events` (event stamping — the ONLY source of completed-file locations) | stamping oracle (newest decodable event per key in the new-events window, nothing else); totality + exactly-once over wild feeds (dup ids, garbage timestamps, undecodable payloads, pruned/absent cursors, rows leaving `downloading` mid-ingest); duplicate-id invariance (mid-pagination shape) |
 | `tests/test_completed_purge_generated.py` | `purge_completed_transfers` | a write-ahead intent becomes ownership only after POST acceptance; pending and foreign keys are never mutated; 1-N successor IDs for each confirmed `(username, filename)` key remain owned across every terminal state; terminal accounting conserves every row through successful removals, false returns, and exceptions (`removed + removal_failed + foreign`); failed removals remain resident, a successful second pass is idempotent, and every removal uses `remove=true` |
@@ -142,6 +143,14 @@ exact new snapshot without allowing an unenriched retry to become
 authoritative. Ordinary and force-import pins then prove installed-only facts
 produce the expected `have_analysis_error`, keep the request wanted, and
 converge after the production enrichment path measures the exact new snapshot.
+
+Candidate evidence reuse is also crossed through the real PostgreSQL preview
+queue for both automation and force jobs. Generated worlds vary provider
+identity, codec, spectral grade, and whether the candidate snapshot changes.
+An unchanged snapshot must reach `candidate_status=reused` with no full preview
+and no candidate analyzer call; a changed snapshot must run full preview once.
+The explicit unchanged force example uses the Rolling Stones incident identity;
+the exact 12-FLAC detail is pinned in the faster generated module.
 
 The expanded lifecycle generator also shrank a separate counterexample from a
 live-census seed: a successful unverified retained FLAC import widened an

@@ -492,11 +492,14 @@ another observation of that address. If the files have changed since capture,
 backfill writes
 a fresh row, repoints the FK, and persists the changed-snapshot enrichment
 gate described above. Either way enrichment can then complete the surviving
-row. The candidate-reuse preview fast path also
-persists its attempt-time HAVE scan through
+row. The candidate-reuse preview fast path first verifies the content
+snapshot, then projects the candidate spectral fact from that content-addressed
+evidence without scanning those bytes again. It separately persists any
+required attempt-time HAVE scan through
 `persist_exact_current_spectral_from_attempt` before marking the job
-importable, so a reused-evidence force import decides against the same
-completed HAVE the full measurement path would see.
+importable, so reused-evidence force and automation imports decide against the
+same completed HAVE the full measurement path would see. A changed candidate
+snapshot misses the front gate and runs full preview measurement again.
 
 **Search narrowing companion.** When `lossless_source_locked` fires —
 in the importer (`lib/dispatch/core.py`) or wrong-match cleanup

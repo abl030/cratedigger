@@ -674,6 +674,15 @@ def process_claimed_preview_job(
                 spectral_detail_analyzer or analyze_spectral_audit_path
             ),
             existing_resolver=audit_resolver,
+            # The front-gate already proved this exact content snapshot owns
+            # complete candidate evidence. Re-project its persisted spectral
+            # fact into the attempt audit instead of analyzing the same bytes
+            # again. HAVE remains separate below: ordinary installed bytes
+            # are still freshly analyzed for this replacement attempt.
+            candidate_detail=spectral_detail_from_persisted_source(
+                front_gate_result.evidence.measurement.spectral_grade,
+                front_gate_result.evidence.measurement.spectral_bitrate_kbps,
+            ),
         )
         # The reuse fast path skips measurement but must still make its
         # HAVE scan durable BEFORE the importer decides — an audit-only

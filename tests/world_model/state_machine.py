@@ -863,6 +863,90 @@ TestGeneratedRelocatedForceImportWorld \
     )
 
 
+class TestGeneratedCandidateEvidenceReuseWorld(unittest.TestCase):
+    """Candidate measurement is once per content snapshot in both job modes."""
+
+    @given(
+        identity_source=st.sampled_from(("mb", "discogs")),
+        job_mode=st.sampled_from(("automation", "force")),
+        snapshot_changed=st.booleans(),
+        codec=st.sampled_from(("mp3", "flac")),
+        spectral_grade=st.sampled_from((
+            "genuine",
+            "marginal",
+            "suspect",
+            "likely_transcode",
+        )),
+    )
+    @example(
+        identity_source="mb",
+        job_mode="force",
+        snapshot_changed=False,
+        codec="flac",
+        spectral_grade="genuine",
+    )
+    def test_candidate_measurement_is_once_per_snapshot(
+        self,
+        identity_source: str,
+        job_mode: str,
+        snapshot_changed: bool,
+        codec: str,
+        spectral_grade: str,
+    ) -> None:
+        assert TEST_DSN is not None
+        release_id = (
+            "1f9fdeeb-59b4-4751-91b6-be38fb76c380"
+            if identity_source == "mb"
+            else "7220808"
+        )
+        with LifecycleWorld(TEST_DSN, repository_root()) as world:
+            request_id = world.add_release(BeetsWorldRelease(
+                release_id=release_id,
+                artist="The Rolling Stones",
+                album="The Rolling Stones No. 2",
+                year=1965,
+                codec=codec,
+            ))
+            (
+                full_preview_calls,
+                analyzer_paths,
+                candidate_status,
+            ) = world.exercise_candidate_preview_boundary(
+                request_id,
+                job_mode=job_mode,
+                snapshot_changed=snapshot_changed,
+                codec=codec,
+                spectral_grade=spectral_grade,
+            )
+
+            if snapshot_changed:
+                self.assertEqual(full_preview_calls, 1)
+                self.assertNotEqual(candidate_status, "reused")
+            else:
+                self.assertEqual(full_preview_calls, 0)
+                self.assertEqual(
+                    analyzer_paths,
+                    [],
+                    "matching candidate evidence was analyzed again",
+                )
+                self.assertEqual(candidate_status, "reused")
+            world.assert_invariants()
+
+
+TestGeneratedCandidateEvidenceReuseWorld \
+    .test_candidate_measurement_is_once_per_snapshot = settings(
+        max_examples=int(os.environ.get("CRATEDIGGER_WORLD_EXAMPLES", "6")),
+        deadline=None,
+        derandomize=not _RANDOMIZED,
+        database=_DATABASE,
+        print_blob=_RANDOMIZED,
+        suppress_health_check=(HealthCheck.too_slow,),
+    )(
+        TestGeneratedCandidateEvidenceReuseWorld
+        .test_candidate_measurement_is_once_per_snapshot
+    )
+
+
 class TestGeneratedEvidenceDriftWorld(unittest.TestCase):
     """Cross the live mutation and evidence-fact vocabularies in real stores."""
 

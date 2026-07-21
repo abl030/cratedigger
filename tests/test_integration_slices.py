@@ -6038,7 +6038,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             }
             audit = SpectralDetail(
                 candidate=SpectralAnalysisDetail(
-                    attempted=True, grade="suspect", bitrate_kbps=160),
+                    attempted=True, grade="genuine", bitrate_kbps=None),
                 existing=SpectralAnalysisDetail(
                     attempted=True, grade="genuine", bitrate_kbps=None),
             )
@@ -6079,7 +6079,11 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                     ),
                 )
 
-            self.assertEqual(audit_calls, [source, "existing"])
+            self.assertEqual(
+                audit_calls,
+                ["existing"],
+                "candidate reuse must preserve the separate HAVE scan",
+            )
             assert updated is not None
             assert updated.preview_result is not None
             preview_ir = ImportResult.from_dict(
@@ -6214,7 +6218,11 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                     spectral_detail_analyzer=analyze,
                 )
 
-            self.assertEqual(len(audit_calls), 1)
+            self.assertEqual(
+                audit_calls,
+                [],
+                "automation must not reanalyze a matching candidate snapshot",
+            )
 
         self.assertFalse(sentinels["preview_called"])
         self.assertFalse(sentinels["measure_called"])
