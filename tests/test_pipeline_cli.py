@@ -2182,7 +2182,6 @@ class TestCmdShowSearchForensics(unittest.TestCase):
             id=1844,
             status="imported",
             mb_release_id=RELEASE_A,
-            imported_path="/stale/request/cache",
         ))
         beets = FakeBeetsDB(library_root="/current/library")
         beets.set_album_ids_for_release(RELEASE_A, [44])
@@ -4936,7 +4935,6 @@ class TestWorldAuditCLI(unittest.TestCase):
             id=743,
             mb_release_id=RELEASE_A,
             status="imported",
-            imported_path="/missing/world-audit-cli",
         ))
         output = io.StringIO()
         with (

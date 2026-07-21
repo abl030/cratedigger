@@ -483,8 +483,6 @@ class TestImportOperationFence(unittest.TestCase):
                 terminal_outcome=pending,
                 post_commit_cleanup=PostCommitCleanup(
                     staged_path="/tmp/operator-copy",
-                    disambiguation_imported_path="/library/Artist/Album",
-                    beets_directory="/library",
                 ),
             )
 

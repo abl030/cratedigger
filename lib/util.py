@@ -198,55 +198,6 @@ def repair_mp3_headers(folder_path: str) -> None:
 from lib.quality import AUDIO_EXTENSIONS as _AUDIO_EXTS
 
 
-def cleanup_disambiguation_orphans(
-    imported_path: str, beets_directory: str = ""
-) -> list[str]:
-    """Remove sibling directories that contain no audio files.
-
-    After beets disambiguates an album path (e.g. renames '2009 - Blood Bank'
-    to '2009 - Blood Bank [2009]'), the original directory may be left behind
-    containing only non-audio clutter (cover.jpg, Thumbs.DB). This function
-    scans the parent (artist) directory and removes any sibling dirs that
-    have zero audio files.
-
-    ``imported_path`` is absolutized against ``beets_directory`` if it's
-    relative (``BeetsDB.get_album_info()`` returns paths relative to the
-    beets library root). When ``beets_directory`` is empty and the path
-    is relative, warn-and-skip rather than silently no-op.
-    Returns the list of removed directory paths.
-    """
-    if not os.path.isabs(imported_path):
-        if beets_directory:
-            imported_path = os.path.join(beets_directory, imported_path)
-        else:
-            # Symmetric defense with trigger_plex_scan: silent no-ops on a
-            # path-translation gap is exactly how PR #236 lurked for 5 weeks.
-            # See docs/solutions/runtime-errors/plex-partial-scan-silent-200.md
-            logger.warning(
-                f"cleanup_disambiguation_orphans: imported_path {imported_path!r} "
-                "is relative and beets_directory is unset; cannot resolve "
-                "siblings. Skipping (no orphans removed).")
-            return []
-    artist_dir = os.path.dirname(imported_path)
-    if not os.path.isdir(artist_dir):
-        return []
-    removed: list[str] = []
-    for entry in os.listdir(artist_dir):
-        sibling = os.path.join(artist_dir, entry)
-        if sibling == imported_path or not os.path.isdir(sibling):
-            continue
-        has_audio = any(
-            f.rsplit(".", 1)[-1].lower() in _AUDIO_EXTS
-            for f in os.listdir(sibling)
-            if os.path.isfile(os.path.join(sibling, f)) and "." in f
-        )
-        if not has_audio:
-            shutil.rmtree(sibling)
-            logger.info(f"Removed disambiguation orphan: {sibling}")
-            removed.append(sibling)
-    return removed
-
-
 def validate_audio(folder_path: str, mode: str = "normal") -> AudioValidationResult:
     """Check audio integrity of downloaded files via ffmpeg full decode.
 

@@ -497,7 +497,6 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
             label="import target")
         ok = finalize_request(self.db, rid, RequestTransition.to_imported(
             from_status="downloading",
-            imported_path=f"/Beets/lifecycle/{rid}",
             min_bitrate=245,
         ))
         row = self._row(rid)

@@ -65,9 +65,16 @@ REQUEST_METADATA_RESERVED_FIELDS: frozenset[str] = frozenset({
     "prior_unfindable_category",
 })
 
+REMOVED_REQUEST_FIELDS: frozenset[str] = frozenset({"imported_path"})
+
 
 def validate_request_metadata_fields(fields: dict[str, Any]) -> None:
     """Reject lifecycle columns and non-canonical SQL identifiers."""
+    removed = sorted(set(fields) & REMOVED_REQUEST_FIELDS)
+    if removed:
+        raise ValueError(
+            "album_requests fields no longer exist: " + ", ".join(removed)
+        )
     reserved = sorted(set(fields) & REQUEST_METADATA_RESERVED_FIELDS)
     if reserved:
         raise ValueError(

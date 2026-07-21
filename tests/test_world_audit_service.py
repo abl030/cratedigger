@@ -108,7 +108,6 @@ class TestWorldAuditService(unittest.TestCase):
                 id=1,
                 mb_release_id=RELEASE_A,
                 status="imported",
-                imported_path=album_path,
             ))
             evidence = make_album_quality_evidence(
                 mb_release_id=RELEASE_A,
@@ -152,7 +151,6 @@ class TestWorldAuditService(unittest.TestCase):
             id=2,
             mb_release_id=RELEASE_A,
             status="imported",
-            imported_path="/missing/imported/path",
         ))
         db.add_denylist(2, "unowned-peer", "manual note")
         beets = FakeBeetsDB()
@@ -191,6 +189,24 @@ class TestWorldAuditService(unittest.TestCase):
             {violation.code for violation in report.violations},
         )
 
+    def test_conflicting_request_identity_is_reported_without_resolution(self) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=4,
+            mb_release_id=RELEASE_A,
+            discogs_release_id=DISCOGS_MODERN,
+            status="imported",
+        ))
+        beets = FakeBeetsDB()
+
+        report = audit_world(db, beets)
+
+        self.assertIn(
+            "request_identity_missing",
+            {violation.code for violation in report.violations},
+        )
+        self.assertEqual(beets.resolve_current_release_calls, [])
+
     def test_real_beets_authority_ignores_historical_paths_and_types_failures(
         self,
     ) -> None:
@@ -226,33 +242,28 @@ class TestWorldAuditService(unittest.TestCase):
                     id=1,
                     mb_release_id=RELEASE_A,
                     status="imported",
-                    imported_path="/poisoned/request/cache",
                 ),
                 make_request_row(
                     id=2,
                     mb_release_id=None,
                     discogs_release_id=DISCOGS_MODERN,
                     status="imported",
-                    imported_path="/stale/modern/cache",
                 ),
                 make_request_row(
                     id=3,
                     mb_release_id=None,
                     discogs_release_id=DISCOGS_LEGACY,
                     status="imported",
-                    imported_path=None,
                 ),
                 make_request_row(
                     id=4,
                     mb_release_id=RELEASE_MISSING,
                     status="imported",
-                    imported_path="/invented/missing/path",
                 ),
                 make_request_row(
                     id=5,
                     mb_release_id=RELEASE_AMBIGUOUS,
                     status="imported",
-                    imported_path="/invented/ambiguous/path",
                 ),
             )
             for request in requests:
@@ -280,8 +291,6 @@ class TestWorldAuditService(unittest.TestCase):
             "current_beets_ambiguous",
             "current_beets_missing",
         ])
-        self.assertNotIn("imported_path_missing", codes)
-        self.assertNotIn("imported_path_mismatch", codes)
         self.assertNotIn("evidence_path_mismatch", codes)
         ambiguous = report.violations[0]
         self.assertIn("multiple_matches", ambiguous.detail)

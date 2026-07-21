@@ -35,7 +35,7 @@ ImportedRow = Mapping[str, object]
 
 
 def _row_identity(row: ImportedRow) -> ReleaseIdentity | None:
-    return ReleaseIdentity.from_fields(
+    return ReleaseIdentity.from_strict_fields(
         row.get("mb_release_id"),
         row.get("discogs_release_id"),
     )

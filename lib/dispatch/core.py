@@ -144,7 +144,6 @@ def dispatch_import_core(
     outcome_message = ""
     terminal_outcome: PendingImportTerminalOutcome | None = None
     post_commit_staged_path: str | None = None
-    post_commit_disambiguation_path: str | None = None
     post_commit_duplicate_guard_path: str | None = None
     post_commit_duplicate_guard_staging_dir: str | None = None
     beets_launch_authorized = False
@@ -565,7 +564,6 @@ def dispatch_import_core(
                         db, request_id, dl_info,
                         distance=distance, scenario=mark_scenario,
                         dest_path=path, outcome_label=outcome_label,
-                        imported_path=ir.postflight.imported_path,
                         clear_stale_v0_probe=(
                             decision != "preflight_existing"
                         ),
@@ -930,8 +928,6 @@ def dispatch_import_core(
                     # clean — their staging dir under ``/Incoming`` is
                     # disposable by design.
                     post_commit_staged_path = path
-                if action.mark_done and ir.postflight.disambiguated and ir.postflight.imported_path:
-                    post_commit_disambiguation_path = ir.postflight.imported_path
         except sp.TimeoutExpired:
             logger.error(f"{mode} TIMEOUT: {label}")
             if beets_launch_authorized:
@@ -1000,10 +996,6 @@ def dispatch_import_core(
         post_commit_cleanup=(
             PostCommitCleanup(
                 staged_path=post_commit_staged_path,
-                disambiguation_imported_path=post_commit_disambiguation_path,
-                beets_directory=(
-                    cfg.beets_directory if cfg is not None else ""
-                ),
                 duplicate_guard_source_path=post_commit_duplicate_guard_path,
                 duplicate_guard_staging_dir=(
                     post_commit_duplicate_guard_staging_dir
@@ -1016,7 +1008,6 @@ def dispatch_import_core(
             )
             if any((
                 post_commit_staged_path,
-                post_commit_disambiguation_path,
                 post_commit_duplicate_guard_path,
             ))
             else None

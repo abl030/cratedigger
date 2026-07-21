@@ -142,7 +142,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         # a real success download row, plus one wanted request.
         self.db.seed_request(make_request_row(
             id=100, status="imported", min_bitrate=320,
-            imported_path="/mnt/virtio/Music/Beets/Test",
         ))
         self.db.set_tracks(100, [
             {"disc_number": 1, "track_number": 1, "title": "Track",

@@ -233,29 +233,15 @@ class LifecycleWorld:
                 request_id,
                 RequestTransition.to_imported(
                     from_status=str(row["status"]),
-                    imported_path=album.album_path,
                 ),
             ))
         elif seed.status == "wanted" and row["status"] != "wanted":
             self.reset_to_wanted(request_id)
 
-        imported_path: str | None
-        if seed.has_imported_path:
-            imported_path = (
-                album.album_path
-                if album is not None
-                else str(
-                    self.beets.library_root
-                    / f"legacy-installed-marker-{request_id}"
-                )
-            )
-        else:
-            imported_path = None
         if not self.db.update_request_fields(
             request_id,
             expected_status=seed.status,
             search_filetype_override=seed.search_override,
-            imported_path=imported_path,
             final_format=seed.final_format,
             current_spectral_grade=seed.spectral_grade,
             verified_lossless=seed.verified_lossless,
@@ -1296,7 +1282,7 @@ class LifecycleWorld:
         denylist_rows: list[DenylistAuthoritySnapshot] = []
         identified_rows: list[tuple[AlbumRequestRow, ReleaseIdentity]] = []
         for row in self.db.list_non_replaced_requests():
-            identity = ReleaseIdentity.from_fields(
+            identity = ReleaseIdentity.from_strict_fields(
                 row.get("mb_release_id"),
                 row.get("discogs_release_id"),
             )

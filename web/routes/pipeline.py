@@ -453,7 +453,6 @@ def get_pipeline_detail(h: RouteHandler, params: dict[str, list[str]], req_id_st
     search_history = s._db().get_search_history(req_id)
     last_search = _build_last_search_payload(search_history)
     request_payload = s._serialize_row(req)
-    request_payload.pop("imported_path", None)
     try:
         b = s._beets_db()
         current = resolve_request_current_library(req, b)

@@ -18,7 +18,6 @@ class TestWorldAuditRoute(_FakeDbWebServerCase):
             id=31,
             mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             status="imported",
-            imported_path="/missing/world-audit-album",
         ))
         with patch.object(server, "_beets_db", return_value=FakeBeetsDB()):
             status, payload = self._get("/api/audit/world")

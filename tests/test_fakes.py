@@ -750,7 +750,7 @@ class TestFakePipelineDB(unittest.TestCase):
 
     def test_clear_on_disk_quality_fields_matches_real_db(self):
         """FakePipelineDB must mirror PipelineDB.clear_on_disk_quality_fields:
-        zero current evidence + on-disk spectral + verified_lossless + path,
+        zero current evidence + on-disk spectral + verified_lossless,
         preserve min_bitrate and last_download_spectral_* (those aren't
         on-disk state).
         """
@@ -764,7 +764,6 @@ class TestFakePipelineDB(unittest.TestCase):
             last_download_spectral_grade="suspect",
             last_download_spectral_bitrate=192,
             current_evidence_id=743,
-            imported_path="/mnt/virtio/Music/Beets/Stale/Path",
         ))
 
         db.clear_on_disk_quality_fields(42)
@@ -774,10 +773,6 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertIsNone(row["current_spectral_grade"])
         self.assertIsNone(row["current_spectral_bitrate"])
         self.assertIsNone(row["current_evidence_id"])
-        self.assertIsNone(row["imported_path"],
-                          "imported_path must clear — the web UI renders it "
-                          "directly and a stale path after beet rm is worse "
-                          "than no path at all.")
         # min_bitrate preserved as baseline for next gate.
         self.assertEqual(row["min_bitrate"], 320)
         # Recent download's spectral is an audit trail, not on-disk state.
@@ -3019,7 +3014,6 @@ class TestFakeSupersedeRequestMbid(unittest.TestCase):
             year=2024,
             country="US",
             status="imported",
-            imported_path="/mnt/virtio/Music/Beets/Pet Grief/Old Album",
             verified_lossless=True,
             current_spectral_grade="A",
             current_spectral_bitrate=900,
@@ -3100,23 +3094,6 @@ class TestFakeSupersedeRequestMbid(unittest.TestCase):
         new = db.get_request(new_id)
         assert new is not None
         self.assertIsNone(new["discogs_release_id"])
-
-    def test_imported_path_cleared_on_old_row(self):
-        db = self._seed_old()
-        db.supersede_request_mbid(
-            42,
-            new_mb_release_id="new-mbid",
-            new_mb_release_group_id="rg-1",
-            new_mb_artist_id="art-1",
-            new_artist_name="Pet Grief",
-            new_album_title="New Album",
-            new_year=2025,
-            new_country="JP",
-            new_tracks=[],
-        )
-        old = db.get_request(42)
-        assert old is not None
-        self.assertIsNone(old["imported_path"])
 
     def test_characteristic_fields_preserved_on_old_row(self):
         db = self._seed_old()
@@ -3718,14 +3695,14 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
     def test_add_request_seeds_full_row_shape(self):
         """Codex R7: rows must carry the DB-defaulted columns
         production readers index directly (``beets_distance``,
-        ``imported_path``, ``*_attempts``, spectral + verified_lossless)
+        ``*_attempts``, spectral + verified_lossless)
         so fake-backed tests don't raise ``KeyError`` where Postgres
         would return NULL/0."""
         db = FakePipelineDB()
         rid = db.add_request("X", "Y", source="request")
         row = db.request(rid)
         for key in (
-            "beets_distance", "beets_scenario", "imported_path",
+            "beets_distance", "beets_scenario",
             "search_attempts", "download_attempts", "validation_attempts",
             "last_download_spectral_grade", "current_spectral_grade",
             "current_lossless_source_v0_probe_avg_bitrate",
@@ -4763,12 +4740,8 @@ class TestPipelineDBFakeContract(unittest.TestCase):
     a self-test in tests/test_fakes.py" — is enforced at test time, not
     at review time.
 
-    Silent drift was possible before this test existed. In PR #136
-    ``update_imported_path_by_release_id`` only got its direct self-test
-    after the final-review agent flagged it; any orchestration test
-    that tried to call the method via a fake that lacked it would have
-    crashed with ``AttributeError``. A new kwarg on a real method would
-    be silently swallowed if the fake accepted ``**kwargs``.
+    A new kwarg on a real method can otherwise be silently swallowed if the
+    fake accepts ``**kwargs``.
     """
 
     def test_fake_exposes_every_public_method_of_real(self) -> None:

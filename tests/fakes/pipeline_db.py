@@ -3362,7 +3362,6 @@ class FakePipelineDB:
         row["current_lossless_source_v0_probe_avg_bitrate"] = None
         row["current_lossless_source_v0_probe_median_bitrate"] = None
         row["current_evidence_id"] = None
-        row["imported_path"] = None
         row["updated_at"] = _utcnow()
 
     def get_downloading(self) -> "list[AlbumRequestRow]":
@@ -3746,7 +3745,6 @@ class FakePipelineDB:
             "next_retry_after": None,
             "beets_distance": None,
             "beets_scenario": None,
-            "imported_path": None,
             "search_filetype_override": None,
             "target_format": None,
             "min_bitrate": None,
@@ -3829,10 +3827,9 @@ class FakePipelineDB:
 
         now = _utcnow()
         old_source = old_row.get("source", "request")
-        # Flip old row: status=replaced + clear imported_path. Nothing
-        # else is mutated — characteristic fields stay frozen.
+        # Flip the old row. Nothing else is mutated — characteristic fields
+        # stay frozen.
         old_row["status"] = "replaced"
-        old_row["imported_path"] = None
         old_row["updated_at"] = now
 
         # Insert new row via add_request to inherit the seeded defaults,
@@ -5356,7 +5353,6 @@ class FakePipelineDB:
                     "current_spectral_grade"),
                 "request_current_spectral_bitrate": req.get(
                     "current_spectral_bitrate"),
-                "request_imported_path": req.get("imported_path"),
             })
         rows.sort(key=lambda r: (
             r["request_id"], -int(r["download_log_id"])))  # type: ignore[arg-type, operator]

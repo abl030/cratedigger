@@ -167,7 +167,7 @@ def audit_world(
 
     for row in requests:
         request_id = int(row["id"])
-        identity = ReleaseIdentity.from_fields(
+        identity = ReleaseIdentity.from_strict_fields(
             row.get("mb_release_id"),
             row.get("discogs_release_id"),
         )

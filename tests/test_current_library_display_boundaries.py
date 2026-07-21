@@ -96,8 +96,6 @@ def _release(release_id: str, *, suffix: str = "") -> BeetsWorldRelease:
 def _request(
     request_id: int,
     release_id: str,
-    *,
-    imported_path: str = "/poisoned/request/cache",
 ) -> dict[str, object]:
     return make_request_row(
         id=request_id,
@@ -106,7 +104,6 @@ def _request(
         discogs_release_id=(
             release_id if release_id == DISCOGS_TARGET else None
         ),
-        imported_path=imported_path,
     )
 
 
@@ -122,7 +119,7 @@ def _show(db: FakePipelineDB, request_id: int, world: BeetsWorld) -> str:
 
 
 class TestCurrentLibraryCliRealBeets(unittest.TestCase):
-    def test_mb_moved_path_wins_over_poisoned_request_cache(self) -> None:
+    def test_mb_moved_path_is_resolved_from_current_beets(self) -> None:
         with BeetsWorld(REPO) as world:
             initial = world.import_release(_release(MB_TARGET))
             moved = world.relocate_release_out_of_band(
@@ -132,9 +129,7 @@ class TestCurrentLibraryCliRealBeets(unittest.TestCase):
             )
             self.assertNotEqual(initial.album_path, moved.album_path)
             db = FakePipelineDB()
-            db.seed_request(_request(
-                1, MB_TARGET, imported_path=initial.album_path,
-            ))
+            db.seed_request(_request(1, MB_TARGET))
 
             output = _show(db, 1, world)
 
@@ -264,7 +259,7 @@ class TestCurrentLibraryApiRealBeets(_FakeDbWebServerCase):
         finally:
             srv._beets, srv.beets_db_path, srv.beets_library_root = prior
 
-    def test_api_returns_fresh_path_and_tracks_without_cached_column(self) -> None:
+    def test_api_returns_fresh_path_and_tracks_without_request_cache(self) -> None:
         with BeetsWorld(REPO) as world:
             initial = world.import_release(_release(MB_TARGET))
             moved = world.relocate_release_out_of_band(
@@ -272,9 +267,7 @@ class TestCurrentLibraryApiRealBeets(_FakeDbWebServerCase):
                 world.library_root / "API" / "moved-current",
                 store_relative_paths=True,
             )
-            self.db.seed_request(_request(
-                10, MB_TARGET, imported_path=initial.album_path,
-            ))
+            self.db.seed_request(_request(10, MB_TARGET))
 
             status, data = self._get_detail(world, 10)
 

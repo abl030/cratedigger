@@ -1682,15 +1682,21 @@ class TestUpdateStatus(unittest.TestCase):
 
     def test_update_status_with_extra_fields(self):
         self.db.update_status(self.req_id, "imported",
-                              beets_distance=0.05,
-                              imported_path="/Beets/A/2020 - B")
+                              beets_distance=0.05)
         req = self.db.get_request(self.req_id)
         assert req is not None
         self.assertEqual(req["status"], "imported")
         distance = req["beets_distance"]
         assert distance is not None
         self.assertAlmostEqual(distance, 0.05)
-        self.assertEqual(req["imported_path"], "/Beets/A/2020 - B")
+
+    def test_removed_imported_path_field_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "no longer exist"):
+            self.db.update_status(
+                self.req_id,
+                "imported",
+                imported_path="/Beets/A/2020 - B",
+            )
 
     def test_update_status_metadata_rejects_lifecycle_and_malformed_fields(self):
         before = self.db.get_request(self.req_id)
@@ -3944,24 +3950,6 @@ class TestClearOnDiskQualityFields(unittest.TestCase):
         self.assertIsNone(req["current_lossless_source_v0_probe_min_bitrate"])
         self.assertIsNone(req["current_lossless_source_v0_probe_avg_bitrate"])
         self.assertIsNone(req["current_lossless_source_v0_probe_median_bitrate"])
-
-    def test_clears_imported_path(self):
-        """After ``beet remove -d`` the on-disk path is stale — the pipeline
-        tab renders ``imported_path`` directly, so leaving it populated
-        would claim the album is imported at a directory that has just
-        been deleted.
-        """
-        req_id = self._make_request("path")
-        self.db.update_request_fields(
-            req_id,
-            imported_path="/mnt/virtio/Music/Beets/Stale/Path",
-        )
-
-        self.db.clear_on_disk_quality_fields(req_id)
-
-        req = self.db.get_request(req_id)
-        assert req is not None
-        self.assertIsNone(req["imported_path"])
 
     def test_clears_current_evidence_link_but_preserves_audit_row(self):
         req_id = self._make_request("evidence")
@@ -6682,10 +6670,9 @@ class TestGetWrongMatches(unittest.TestCase):
         self.db._execute(
             "UPDATE album_requests SET status = %s, min_bitrate = %s, "
             "verified_lossless = %s, current_spectral_grade = %s, "
-            "current_spectral_bitrate = %s, imported_path = %s "
+            "current_spectral_bitrate = %s "
             "WHERE id = %s",
-            ("imported", 207, True, "genuine", None,
-             "/mnt/virtio/Music/Beets/Artist/Album", self.req1),
+            ("imported", 207, True, "genuine", None, self.req1),
         )
         self._log_rejected(self.req1, "alice", "/fi/a")
 
@@ -6696,8 +6683,6 @@ class TestGetWrongMatches(unittest.TestCase):
         self.assertTrue(row["request_verified_lossless"])
         self.assertEqual(row["request_current_spectral_grade"], "genuine")
         self.assertIsNone(row["request_current_spectral_bitrate"])
-        self.assertEqual(row["request_imported_path"],
-                         "/mnt/virtio/Music/Beets/Artist/Album")
 
     def test_get_wrong_matches_keyset_parity(self):
         """#523 -- fake<->production parity for the widest read projection.

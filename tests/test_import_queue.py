@@ -348,7 +348,6 @@ class TestImporterWorker(unittest.TestCase):
                 id=request_id,
                 mb_release_id="mbid-123",
                 status="imported",
-                imported_path=source_path,
             ))
         else:
             row = db.get_request(request_id)
@@ -356,7 +355,6 @@ class TestImporterWorker(unittest.TestCase):
             db.seed_request({
                 **row,
                 "status": "imported",
-                "imported_path": source_path,
             })
         _seed_candidate_for_download_log(
             db, log_id,

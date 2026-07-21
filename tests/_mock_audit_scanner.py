@@ -251,7 +251,6 @@ _LEAF_SEAM_PATTERNS = [
     # (core + outcome_actions); both bindings are allowlisted.
     re.compile(r"^lib\.dispatch\.core\._cleanup_staged_dir$"),
     re.compile(r"^lib\.dispatch\.outcome_actions\._cleanup_staged_dir$"),
-    re.compile(r"^lib\.dispatch\.core\.cleanup_disambiguation_orphans$"),
 
     # BeetsDB class itself — patching the class replaces the SQLite
     # boundary at the constructor. Specific methods whose bodies are

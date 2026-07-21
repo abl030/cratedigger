@@ -288,8 +288,7 @@ class _RequestsMixin(_PipelineDBBase):
         """Canonical locked-row status CAS used only by Replace."""
         cur.execute(
             "UPDATE album_requests "
-            "SET status = 'replaced', imported_path = NULL, "
-            "updated_at = %s "
+            "SET status = 'replaced', updated_at = %s "
             "WHERE id = %s AND status = %s "
             "RETURNING id",
             (now, request_id, expected_status),
@@ -316,10 +315,8 @@ class _RequestsMixin(_PipelineDBBase):
         In one ``autocommit=False`` transaction:
 
         1. ``SELECT ... FOR UPDATE`` on the old row (acquire row lock).
-        2. ``UPDATE`` old row's ``status`` to ``'replaced'``, clear
-           ``imported_path`` (R14 carve-out — Phase 4 deletes the files
-           at that path so the pointer would dangle). All other columns
-           on the old row stay untouched as historical truth.
+        2. ``UPDATE`` old row's ``status`` to ``'replaced'``. All other
+           columns on the old row stay untouched as historical truth.
         3. ``INSERT`` a new ``album_requests`` row with the target MBID,
            ``status='wanted'``, ``replaces_request_id=old_request_id``,
            and the source inherited from the old row.
@@ -360,7 +357,7 @@ class _RequestsMixin(_PipelineDBBase):
                         f"old request {old_request_id} was already replaced"
                     )
 
-                # 2. Flip old row's status; clear imported_path (R14).
+                # 2. Flip the old row's status.
                 if not self._mark_request_replaced(
                     cur,
                     old_request_id,
@@ -963,11 +960,6 @@ class _RequestsMixin(_PipelineDBBase):
         - ``current_spectral_*`` (spectral grade of files currently in
           beets)
         - ``current_evidence_id`` (content-addressed snapshot of those files)
-        - ``imported_path`` (beets filesystem path for the release, shown
-          directly by the web UI — leaving it populated after a remove
-          means the pipeline tab still claims the album is imported at a
-          path that has just been deleted)
-
         ``min_bitrate`` and ``prev_min_bitrate`` are preserved deliberately
         — they still act as a conservative baseline for the next quality-
         gate comparison. ``last_download_spectral_*`` is also preserved:
@@ -984,7 +976,6 @@ class _RequestsMixin(_PipelineDBBase):
                    current_lossless_source_v0_probe_avg_bitrate = NULL,
                    current_lossless_source_v0_probe_median_bitrate = NULL,
                    current_evidence_id = NULL,
-                   imported_path = NULL,
                    updated_at = %s
                WHERE id = %s AND status != 'replaced'""",
             (now, request_id),

@@ -78,7 +78,6 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         "next_retry_after": None,
         "beets_distance": None,
         "beets_scenario": None,
-        "imported_path": None,
         "search_filetype_override": None,
         "target_format": None,
         "final_format": None,

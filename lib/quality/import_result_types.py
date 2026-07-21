@@ -112,13 +112,11 @@ class MovedSibling(msgspec.Struct, frozen=True):
     ``album_id`` is the beets numeric primary key for the sibling.
     ``new_path`` is the on-disk directory after the move.
     ``mb_albumid`` / ``discogs_albumid`` are the two columns from
-    beets' ``albums`` table at emit time — the harness resolves them
-    so the dispatcher doesn't need a second beets DB connection when
-    propagating the new path to the pipeline DB.
+    beets' ``albums`` table at emit time. Historically the harness resolved
+    them so the dispatcher could propagate the new path to the pipeline DB.
 
-    Every field mattered for propagation: if the sibling's release id
-    matched a tracked ``album_requests`` row, its ``imported_path`` was
-    updated so the UI stopped pointing at the pre-move directory.
+    These fields remain only to decode historical audit rows. Current library
+    paths are resolved from Beets and are never propagated onto requests.
 
     Wire-boundary type per ``.claude/rules/code-quality.md`` §
     "Wire-boundary types". Decoded from harness stdout JSON AND from

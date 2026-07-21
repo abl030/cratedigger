@@ -405,7 +405,7 @@ def _get_all_rows(db: _RepairDB) -> list[dict[str, object]]:
     """Fetch all album_requests rows for inspection."""
     cur = db._execute(
         "SELECT id, status, artist_name, album_title, year, mb_release_id, "
-        "active_download_state, imported_path "
+        "active_download_state "
         "FROM album_requests ORDER BY id"
     )
     return [dict(r) for r in cur.fetchall()]

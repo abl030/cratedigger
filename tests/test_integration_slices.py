@@ -781,16 +781,8 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         self.assertEqual(len(db.download_logs), 1)
         db.assert_log(self, 0, outcome="success", request_id=42)
 
-    def test_imported_path_reflects_beets_destination(self):
-        """Issue #93: ``album_requests.imported_path`` must be the beets
-        destination (``ir.postflight.imported_path``), not the source/staging
-        path passed to dispatch_import_core.
-
-        Pre-fix: ``imported_path`` stored the source
-        ``/mnt/virtio/music/slskd/failed_imports/...`` even though beets
-        moved files to ``/mnt/virtio/Music/Beets/...``. UI's "Imported to"
-        label displayed the source, confusing users.
-        """
+    def test_import_result_path_is_not_copied_to_request(self):
+        """The harness path remains event data, never request authority."""
         ir = make_import_result(
             decision="import",
             new_min_bitrate=245,
@@ -804,12 +796,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         db = self._run_dispatch(ir, beets_info)
 
         row = db.request(42)
-        self.assertEqual(
-            row["imported_path"],
-            "/Beets/Test Artist/2005 - Test Album_",
-            "album_requests.imported_path must reflect the beets "
-            "destination from ImportResult.postflight, not dispatch's "
-            "source path (the /tmp staging/failed_imports dir)")
+        self.assertNotIn("imported_path", row)
 
     def test_unverified_subtransparent_import_keeps_full_tier_search(self):
         """VBR 180 is retained but stays wanted on the full search surface."""
@@ -2077,16 +2064,8 @@ class TestForceImportSlice(unittest.TestCase):
             "must record NULL on the request row, not a fabricated number")
         db.assert_log(self, 0, outcome="force_import", beets_distance=None)
 
-    def test_force_import_imported_path_reflects_beets_destination(self):
-        """Issue #93 was reported against force-import specifically:
-        album_requests.imported_path must reflect the beets destination
-        (ir.postflight.imported_path), not the source failed_imports/ path.
-
-        Guards that the fix propagates through dispatch_import_from_db →
-        dispatch_import_core → _do_mark_done end-to-end. Parallel to
-        TestDispatchThroughQualityGate.test_imported_path_reflects_beets_destination
-        which covers the auto path.
-        """
+    def test_force_import_does_not_copy_postflight_path_to_request(self):
+        """Force import also keeps the harness path out of request state."""
         from lib.dispatch import dispatch_import_from_db
         from lib.import_queue import IMPORT_JOB_FORCE
         from lib.quality import AudioQualityMeasurement
@@ -2095,7 +2074,6 @@ class TestForceImportSlice(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=833, status="unsearchable", mb_release_id="mbid-go-team",
-            imported_path="/mnt/virtio/music/slskd/failed_imports/stale-source",
         ))
         # Track rows satisfy the force-import untracked-audio guard.
         db.set_tracks(833, [{"track_number": 1, "title": "Track"}])
@@ -2167,11 +2145,7 @@ class TestForceImportSlice(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
         row = db.request(833)
-        self.assertEqual(
-            row["imported_path"],
-            "/Beets/The Go! Team/2005 - Are You Ready for More_",
-            "force-import must overwrite the stale source path with "
-            "ir.postflight.imported_path (the actual beets destination)")
+        self.assertNotIn("imported_path", row)
 
 
 class TestPreserveSourceSlice(unittest.TestCase):
@@ -10071,8 +10045,7 @@ class TestReplaceFullPath(unittest.TestCase):
     PET_GRIEF_RG = "abcdabcd-1111-2222-3333-444444444444"
 
     def _make_target_payload(
-        self, status="wanted", imported_path=None,
-        active_download_state=None,
+        self, status="wanted", active_download_state=None,
     ):
         from tests.fakes import FakePipelineDB
         from tests.helpers import make_request_row
@@ -10087,7 +10060,6 @@ class TestReplaceFullPath(unittest.TestCase):
             year=2024,
             country="US",
             status=status,
-            imported_path=imported_path,
             active_download_state=active_download_state,
             verified_lossless=True,
             current_spectral_grade="A",
@@ -10103,10 +10075,6 @@ class TestReplaceFullPath(unittest.TestCase):
 
         db = self._make_target_payload(
             status=old_status,
-            imported_path=(
-                "/mnt/virtio/Music/Beets/Pet Grief/Pet Grief"
-                if old_status == "imported" else None
-            ),
             active_download_state=active_download_state,
         )
         tmpdir = tempfile.mkdtemp()
@@ -10199,7 +10167,6 @@ class TestReplaceFullPath(unittest.TestCase):
         old = db.get_request(4194)
         assert old is not None
         self.assertEqual(old["status"], "replaced")
-        self.assertIsNone(old["imported_path"])  # R14 carve-out
         # Characteristic fields preserved.
         self.assertTrue(old["verified_lossless"])
         self.assertEqual(old["current_spectral_grade"], "A")

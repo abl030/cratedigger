@@ -117,7 +117,6 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.db.seed_request(make_request_row(
             id=100, status="imported", min_bitrate=320,
             mb_release_id="abc-123",
-            imported_path="/mnt/virtio/Music/Beets/Test",
         ))
         # MB add path also calls ``get_release_raw`` (for the resolver's
         # raw payload) alongside the existing ``get_release`` (for slim
@@ -1293,7 +1292,7 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         self.assertIsNone(row["current_spectral_grade"])
         self.assertIsNone(row["current_spectral_bitrate"])
         self.assertFalse(row["verified_lossless"])
-        self.assertIsNone(row["imported_path"])
+        self.assertNotIn("imported_path", row)
 
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_ban_source_skips_clear_when_beet_remove_failed(
@@ -1363,7 +1362,7 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
             self, _mock_transition):
         """Ghost state can pre-date the handler: the album is already absent
         when the fresh typed lookup runs, but the pipeline DB still carries
-        the old ``current_spectral_*`` / ``imported_path``.
+        the old ``current_spectral_*`` values.
         The handler must still clear those fields so ``dispatch_import_core``
         doesn't keep deriving ``--override-min-bitrate`` from phantom
         baselines on the next import attempt.
@@ -1373,7 +1372,6 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
             min_bitrate=320,
             current_spectral_grade="likely_transcode",
             current_spectral_bitrate=160,
-            imported_path="/mnt/virtio/Music/Beets/Stale/Path",
         ))
         self.beets_db.set_album_info(self.RELEASE_ID, None)
         self.delete_requests.clear()
@@ -1384,13 +1382,13 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         })
 
         self.assertEqual(status, 200)
-        # Phantom baselines wiped on the row itself — INCLUDING the
-        # stale imported_path that misleads every downstream consumer.
+        # Phantom baselines are wiped on the row itself.  A request path
+        # cache no longer exists; current location comes from Beets.
         self.assertEqual(self.db.clear_on_disk_quality_fields_calls, [1704])
         row = self.db.request(1704)
         self.assertIsNone(row["current_spectral_grade"])
         self.assertIsNone(row["current_spectral_bitrate"])
-        self.assertIsNone(row["imported_path"])
+        self.assertNotIn("imported_path", row)
         # No pinned delete ran — the joined current snapshot was missing.
         self.assertEqual(self.delete_requests, [])
 

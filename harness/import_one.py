@@ -1100,7 +1100,6 @@ def run_import(path: str, mb_release_id: str) -> RunImportOutcome:
 
 def update_pipeline_db(
     request_id: int,
-    imported_path: str | None = None,
     distance: float | None = None,
     scenario: str | None = None,
 ) -> None:
@@ -1113,8 +1112,6 @@ def update_pipeline_db(
         dsn = os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localhost/cratedigger")
         db = PipelineDB(dsn)
         extra: dict[str, object] = {}
-        if imported_path:
-            extra["imported_path"] = imported_path
         if distance is not None:
             extra["beets_distance"] = distance
         if scenario:
@@ -1530,7 +1527,7 @@ def _run_quality_evidence_authorized_import(
 
     if request_id:
         stage_start = time.monotonic()
-        update_pipeline_db(request_id, imported_path=album_path)
+        update_pipeline_db(request_id)
         _log_timing("pipeline_db_update", stage_start)
 
     beets.close()
@@ -1646,8 +1643,7 @@ def main():
                         beets_id=info.album_id,
                         track_count=info.track_count,
                         imported_path=info.album_path)
-                    update_pipeline_db(request_id,
-                                       imported_path=info.album_path)
+                    update_pipeline_db(request_id)
         else:
             _log(f"[ERROR] {r.error}")
         beets.close()
@@ -2273,7 +2269,7 @@ def main():
     # --- Pipeline DB: imported ---
     if request_id:
         stage_start = time.monotonic()
-        update_pipeline_db(request_id, imported_path=album_path)
+        update_pipeline_db(request_id)
         _log_timing("pipeline_db_update", stage_start)
 
     # --- Final exit ---

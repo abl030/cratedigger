@@ -223,7 +223,6 @@ class TestBanSourceAuthority(unittest.TestCase):
             id=41,
             status="unsearchable",
             mb_release_id=RELEASE_A,
-            imported_path="/Beets/Artist/Album",
         ))
         self.db.log_download(
             request_id=41,
@@ -242,7 +241,6 @@ class TestBanSourceAuthority(unittest.TestCase):
         self.assertEqual(result.request_status, "unsearchable")
         row = self.db.request(41)
         self.assertEqual(row["status"], "unsearchable")
-        self.assertIsNone(row["imported_path"])
         self.assertEqual(
             [(entry.request_id, entry.username) for entry in self.db.denylist],
             [(41, "bad-peer")],
@@ -673,7 +671,6 @@ class TestDestructiveCurrentAuthorityRealBeets(unittest.TestCase):
                         discogs_release_id=(
                             release_id if name.startswith("discogs") else None
                         ),
-                        imported_path="/poisoned/stale/request/path",
                     ))
                     hashed: list[str] = []
                     with (
