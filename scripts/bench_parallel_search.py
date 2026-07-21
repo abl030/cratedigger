@@ -40,7 +40,7 @@ class _EphemeralSlskdHandle(Protocol):
     """Narrow structural contract for ``tests/ephemeral_slskd.py::EphemeralSlskd``.
 
     ``tests/`` is excluded from strict pyright (see
-    ``pyrightconfig.strict-production.json``), so the dynamically
+    ``pyrightconfig.production.json``), so the dynamically
     path-inserted import below is untyped at its source; this Protocol
     plus ``_build_ephemeral`` (the one place the untyped import happens)
     keeps that Unknown-ness from leaking into the rest of this module.
