@@ -4956,7 +4956,7 @@ class TestWorldAuditCLI(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(payload["status"], "violations")
         self.assertIn(
-            "imported_release_missing",
+            "current_beets_missing",
             {row["code"] for row in payload["violations"]},
         )
 

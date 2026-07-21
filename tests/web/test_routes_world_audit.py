@@ -32,7 +32,7 @@ class TestWorldAuditRoute(_FakeDbWebServerCase):
             payload["temporal_invariants_not_auditable"],
         )
         self.assertIn(
-            "imported_release_missing",
+            "current_beets_missing",
             {row["code"] for row in payload["violations"]},
         )
 

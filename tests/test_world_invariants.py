@@ -8,7 +8,14 @@ import unittest
 
 import msgspec
 
+from lib.beets_db import (
+    CurrentBeetsAmbiguous,
+    CurrentBeetsItem,
+    CurrentBeetsMissing,
+    CurrentBeetsUnique,
+)
 from lib.quality import ImportResult, ValidationResult
+from lib.release_identity import ReleaseIdentity
 from lib.world_invariants import (
     DenylistAuthoritySnapshot,
     EvidenceDiskSnapshot,
@@ -25,6 +32,23 @@ from lib.world_invariants import (
     check_status_membership,
     derive_denylist_authorities,
 )
+
+
+def _identity(release_id: str) -> ReleaseIdentity:
+    return ReleaseIdentity(source="musicbrainz", release_id=release_id)
+
+
+def _unique(album: LibraryAlbumSnapshot) -> CurrentBeetsUnique:
+    return CurrentBeetsUnique(
+        identity=_identity(album.release_id),
+        album_id=album.album_id,
+        album_path=album.album_path,
+        items=tuple(
+            CurrentBeetsItem(id=index, path=path)
+            for index, path in enumerate(album.item_paths, start=1)
+        ),
+        selectors=(f"mb_albumid:{album.release_id}",),
+    )
 
 
 class TestWorldInvariantPins(unittest.TestCase):
@@ -53,7 +77,6 @@ class TestWorldInvariantPins(unittest.TestCase):
                 request_id=10,
                 release_id="release-a",
                 status="imported",
-                imported_path="/library/Artist/2001 - Album",
             ),
             # Backfill/upgrade worlds legitimately remain wanted while an
             # exact pressing is already installed.
@@ -61,12 +84,14 @@ class TestWorldInvariantPins(unittest.TestCase):
                 request_id=11,
                 release_id="release-b",
                 status="wanted",
-                imported_path="/library/Artist/2001 - Album [2002]",
             ),
         )
 
         self.assertEqual(check_folder_exclusivity(albums), ())
-        self.assertEqual(check_status_membership(requests, albums), ())
+        self.assertEqual(check_status_membership(
+            requests,
+            {album.release_id: _unique(album) for album in albums},
+        ), ())
 
     def test_evidence_proof_policy_and_authority_are_coherent(self) -> None:
         evidence = EvidenceDiskSnapshot(
@@ -373,32 +398,27 @@ class TestWorldInvariantCheckersTripOnKnownBad(unittest.TestCase):
                 request_id=10,
                 release_id="missing-release",
                 status="imported",
-                imported_path="/library/Artist/Album",
             ),
-        ), ())
+        ), {
+            "missing-release": CurrentBeetsMissing(
+                identity=_identity("missing-release"),
+            ),
+        })
 
-        self.assertIn("imported_release_missing", {v.code for v in violations})
+        self.assertIn("current_beets_missing", {v.code for v in violations})
 
     def test_membership_checker_trips_on_duplicate_exact_release(self) -> None:
-        albums = (
-            LibraryAlbumSnapshot(1, "release-a", "/library/A", ("/library/A/1.flac",)),
-            LibraryAlbumSnapshot(2, "release-a", "/library/B", ("/library/B/1.flac",)),
-        )
         violations = check_status_membership((
-            RequestMembershipSnapshot(10, "release-a", "imported", "/library/A"),
-        ), albums)
+            RequestMembershipSnapshot(10, "release-a", "imported"),
+        ), {
+            "release-a": CurrentBeetsAmbiguous(
+                identity=_identity("release-a"),
+                album_ids=(1, 2),
+                reason="multiple_matches",
+            ),
+        })
 
-        self.assertIn("imported_release_duplicate", {v.code for v in violations})
-
-    def test_membership_checker_trips_on_imported_path_drift(self) -> None:
-        albums = (
-            LibraryAlbumSnapshot(1, "release-a", "/library/Actual", ("/library/Actual/1.flac",)),
-        )
-        violations = check_status_membership((
-            RequestMembershipSnapshot(10, "release-a", "imported", "/library/Stale"),
-        ), albums)
-
-        self.assertIn("imported_path_mismatch", {v.code for v in violations})
+        self.assertIn("current_beets_ambiguous", {v.code for v in violations})
 
     def test_evidence_checker_trips_on_stale_disk_fingerprint(self) -> None:
         violations = check_evidence_disk_coherence((EvidenceDiskSnapshot(

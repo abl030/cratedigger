@@ -10,7 +10,7 @@ from typing import Any
 import msgspec
 
 from lib.pipeline_db.rows import AlbumRequestRow
-from lib.beets_db import BeetsDB
+from lib.beets_db import BeetsDB, CurrentBeetsUnique
 from lib.beets_delete import (
     BeetsDeleteCompleted,
     BeetsDeleteFailed,
@@ -1294,6 +1294,7 @@ class LifecycleWorld:
         requests: list[RequestMembershipSnapshot] = []
         evidence: list[EvidenceDiskSnapshot] = []
         denylist_rows: list[DenylistAuthoritySnapshot] = []
+        identified_rows: list[tuple[AlbumRequestRow, ReleaseIdentity]] = []
         for row in self.db.list_non_replaced_requests():
             identity = ReleaseIdentity.from_fields(
                 row.get("mb_release_id"),
@@ -1307,16 +1308,19 @@ class LifecycleWorld:
                 request_id=int(row["id"]),
                 release_id=identity.release_id,
                 status=str(row["status"]),
-                imported_path=(
-                    str(row["imported_path"])
-                    if row.get("imported_path") is not None
-                    else None
-                ),
             ))
-            album = next(
-                (a for a in albums if a.release_id == identity.release_id),
-                None,
-            )
+            identified_rows.append((row, identity))
+
+        with BeetsDB(
+            str(self.beets.library_db),
+            library_root=str(self.beets.library_root),
+        ) as current_beets:
+            resolutions = current_beets.resolve_current_releases([
+                identity for _row, identity in identified_rows
+            ])
+
+        for row, identity in identified_rows:
+            current = resolutions[identity]
             current_id_raw = row.get("current_evidence_id")
             current_id = (
                 int(current_id_raw)
@@ -1328,7 +1332,11 @@ class LifecycleWorld:
                 request_id=int(row["id"]),
                 release_id=identity.release_id,
                 status=str(row["status"]),
-                album_path=album.album_path if album is not None else None,
+                album_path=(
+                    current.album_path
+                    if isinstance(current, CurrentBeetsUnique)
+                    else None
+                ),
                 current_evidence_id=current_id,
                 evidence_id=linked.id if linked is not None else None,
                 evidence_release_id=(
@@ -1341,8 +1349,10 @@ class LifecycleWorld:
                     linked.snapshot_fingerprint if linked is not None else None
                 ),
                 actual_fingerprint=(
-                    self._album_fingerprint(album)
-                    if album is not None
+                    snapshot_fingerprint(snapshot_audio_files(
+                        current.album_path,
+                    ))
+                    if isinstance(current, CurrentBeetsUnique)
                     else None
                 ),
             ))
@@ -1367,7 +1377,13 @@ class LifecycleWorld:
         return (
             *check_folder_exclusivity(albums),
             *check_library_filesystem(albums),
-            *check_status_membership(tuple(requests), albums),
+            *check_status_membership(
+                tuple(requests),
+                {
+                    identity.release_id: resolution
+                    for identity, resolution in resolutions.items()
+                },
+            ),
             *check_evidence_disk_coherence(tuple(evidence)),
             *check_proof_lock_terminality(tuple(self._transitions)),
             *check_no_lossy_tier_widening(tuple(self._transitions)),

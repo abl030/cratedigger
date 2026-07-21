@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
 
@@ -11,7 +10,12 @@ import msgspec
 if TYPE_CHECKING:
     from lib.pipeline_db.rows import AlbumRequestRow, DownloadLogWithEvidenceRow
 
-from lib.beets_db import BeetsWorldAlbum
+from lib.beets_db import (
+    BeetsWorldAlbum,
+    CurrentBeetsAmbiguous,
+    CurrentBeetsResolution,
+    CurrentBeetsUnique,
+)
 from lib.quality import AlbumQualityEvidence
 from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
 from lib.release_identity import ReleaseIdentity
@@ -82,13 +86,10 @@ class WorldAuditPipelineDB(Protocol):
 class WorldAuditBeetsDB(Protocol):
     def list_world_albums(self) -> list[BeetsWorldAlbum]: ...
 
-
-def _release_id(row: Mapping[str, Any]) -> str | None:
-    identity = ReleaseIdentity.from_fields(
-        row.get("mb_release_id"),
-        row.get("discogs_release_id"),
-    )
-    return identity.release_id if identity is not None else None
+    def resolve_current_releases(
+        self,
+        identities: list[ReleaseIdentity],
+    ) -> dict[ReleaseIdentity, CurrentBeetsResolution]: ...
 
 
 def _current_evidence_id(row: Mapping[str, Any]) -> int | None:
@@ -96,8 +97,8 @@ def _current_evidence_id(row: Mapping[str, Any]) -> int | None:
     return int(raw) if isinstance(raw, int) else None
 
 
-def _fingerprint(album: BeetsWorldAlbum) -> str:
-    return snapshot_fingerprint(snapshot_audio_files(album.album_path))
+def _fingerprint(album_path: str) -> str:
+    return snapshot_fingerprint(snapshot_audio_files(album_path))
 
 
 def _sorted_violations(
@@ -128,8 +129,6 @@ def audit_world(
     raw_albums = beets_db.list_world_albums()
     violations: list[WorldViolation] = []
     albums: list[LibraryAlbumSnapshot] = []
-    membership_albums: list[LibraryAlbumSnapshot] = []
-    by_release_id: dict[str, list[BeetsWorldAlbum]] = defaultdict(list)
 
     for album in raw_albums:
         if not album.release_ids:
@@ -151,14 +150,6 @@ def audit_world(
             item_paths=album.item_paths,
         )
         albums.append(snapshot)
-        for release_id in album.release_ids:
-            by_release_id[release_id].append(album)
-            membership_albums.append(LibraryAlbumSnapshot(
-                album_id=album.album_id,
-                release_id=release_id,
-                album_path=album.album_path,
-                item_paths=album.item_paths,
-            ))
 
     requests = pipeline_db.list_non_replaced_requests()
     denylist_rows = pipeline_db.list_denylist_rows()
@@ -172,72 +163,73 @@ def audit_world(
     fingerprint_failures: set[int] = set()
     fingerprint_cache: dict[int, str] = {}
     linked_evidence_count = 0
+    identified_requests: list[tuple[Mapping[str, Any], int, ReleaseIdentity]] = []
 
     for row in requests:
         request_id = int(row["id"])
-        release_id = _release_id(row)
-        if release_id is None:
+        identity = ReleaseIdentity.from_fields(
+            row.get("mb_release_id"),
+            row.get("discogs_release_id"),
+        )
+        if identity is None:
             violations.append(WorldViolation(
                 code="request_identity_missing",
                 detail=f"active request {request_id} has no exact release identity",
                 request_id=request_id,
             ))
             continue
+        identified_requests.append((row, request_id, identity))
+
+    resolutions = beets_db.resolve_current_releases([
+        identity for _row, _request_id, identity in identified_requests
+    ])
+    resolutions_by_release_id = {
+        identity.release_id: resolution
+        for identity, resolution in resolutions.items()
+    }
+
+    for row, request_id, identity in identified_requests:
+        release_id = identity.release_id
         memberships.append(RequestMembershipSnapshot(
             request_id=request_id,
             release_id=release_id,
             status=str(row.get("status") or ""),
-            imported_path=(
-                str(row["imported_path"])
-                if row.get("imported_path") is not None
-                else None
-            ),
         ))
 
-        matches = by_release_id.get(release_id, [])
-        if len(matches) > 1:
-            violations.append(WorldViolation(
-                code="evidence_audit_ambiguous",
-                detail=(
-                    f"request {request_id} release {release_id!r} resolves "
-                    f"to multiple Beets albums {tuple(a.album_id for a in matches)!r}"
-                ),
-                request_id=request_id,
-                release_id=release_id,
-                album_ids=tuple(sorted(album.album_id for album in matches)),
-            ))
+        resolution = resolutions[identity]
+        if isinstance(resolution, CurrentBeetsAmbiguous):
             continue
-        album = matches[0] if matches else None
+        current = resolution if isinstance(resolution, CurrentBeetsUnique) else None
         current_id = _current_evidence_id(row)
         linked = pipeline_db.load_album_quality_evidence_by_id(current_id)
         if current_id is not None:
             linked_evidence_count += 1
 
         actual_fingerprint: str | None = None
-        if album is not None:
+        if current is not None:
             try:
-                actual_fingerprint = fingerprint_cache.get(album.album_id)
+                actual_fingerprint = fingerprint_cache.get(current.album_id)
                 if actual_fingerprint is None:
-                    actual_fingerprint = _fingerprint(album)
-                    fingerprint_cache[album.album_id] = actual_fingerprint
+                    actual_fingerprint = _fingerprint(current.album_path)
+                    fingerprint_cache[current.album_id] = actual_fingerprint
             except OSError as exc:
                 fingerprint_failures.add(request_id)
                 violations.append(WorldViolation(
                     code="album_fingerprint_unavailable",
                     detail=(
-                        f"request {request_id} album {album.album_id} could "
+                        f"request {request_id} album {current.album_id} could "
                         f"not be snapshotted: {exc}"
                     ),
                     request_id=request_id,
                     release_id=release_id,
-                    album_ids=(album.album_id,),
+                    album_ids=(current.album_id,),
                 ))
 
         evidence_snapshots.append(EvidenceDiskSnapshot(
             request_id=request_id,
             release_id=release_id,
             status=str(row.get("status") or ""),
-            album_path=album.album_path if album is not None else None,
+            album_path=current.album_path if current is not None else None,
             current_evidence_id=current_id,
             evidence_id=linked.id if linked is not None else None,
             evidence_release_id=(
@@ -267,7 +259,10 @@ def audit_world(
 
     violations.extend(check_folder_exclusivity(albums))
     violations.extend(check_library_filesystem(albums))
-    violations.extend(check_status_membership(memberships, membership_albums))
+    violations.extend(check_status_membership(
+        memberships,
+        resolutions_by_release_id,
+    ))
     violations.extend(
         violation
         for violation in check_evidence_disk_coherence(evidence_snapshots)
