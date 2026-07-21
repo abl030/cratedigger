@@ -708,7 +708,7 @@ console.log('Import failures retain the grabbed candidate in IN');
   assertExcludes(strip, 'a/m', 'the cryptic a/m shorthand is dead');
 }
 
-console.log('renderEvidenceStrip() collapses equal avg/min pairs to one number on mobile');
+console.log('renderEvidenceStrip() keeps a CBR metric pair explicit but still collapses the V0 cell');
 {
   const strip = renderEvidenceFixture({
     source_format: 'MP3',
@@ -721,9 +721,11 @@ console.log('renderEvidenceStrip() collapses equal avg/min pairs to one number o
     existing_v0_probe_min_bitrate: 245,
   });
   assertContains(strip, '320k avg (min 320k)', 'desktop wording keeps both numbers');
-  assertContains(strip, '>320k<', 'mobile collapses a CBR pair to one number');
-  assertExcludes(strip, '320k avg/320k min', 'no redundant equal pair on mobile');
-  assertContains(strip, '>V0 245k<', 'an equal V0 pair collapses too');
+  // A CBR metric cell keeps its avg/min pair on mobile — a bare "320k" was
+  // ambiguous with a min-only measurement (issue #813 follow-up).
+  assertContains(strip, '>320k avg/320k min<', 'mobile keeps the CBR metric pair explicit');
+  assertExcludes(strip, '>320k</span>', 'mobile no longer collapses the CBR metric to one number');
+  assertContains(strip, '>V0 245k<', 'an equal V0 pair still collapses (its prefix labels it)');
 }
 
 console.log('renderEvidenceStrip() shows the on-disk format on the HAVE side');
@@ -1332,7 +1334,7 @@ console.log('evidence strip CSS keeps desktop alignment and gives mobile readabl
     'desktop reserves aligned tag/source/metric/spectral/V0 columns');
   assertContains(css, '@media (max-width: 720px)', 'shared grid has a narrow-screen layout');
   assertContains(css, '.r-evidence { grid-template-columns: 2.9em 3.2em minmax(8.5em, max-content) minmax(3em, 1fr) max-content; column-gap: 0.45em; font-size: 12px;',
-    'mobile fixes tag+source and floors the bitrate column at a labelled-pair width, so a bare CBR value keeps the same column edges as the pair above it');
+    'mobile fixes tag+source and floors the bitrate column at a labelled-pair width, so every metric cell (CBR pairs included) keeps aligned column edges');
   assertContains(css, 'font-family: system-ui,',
     'mobile uses the narrow system font so full lines fit without squeezing');
   assertContains(css, '.r-ev-cell { overflow: hidden; text-overflow: ellipsis; }',
