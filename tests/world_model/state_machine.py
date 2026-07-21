@@ -1,6 +1,7 @@
 """Heavy real-PostgreSQL/real-Beets lifecycle world model (#743).
 
-The normal suite invokes this module explicitly after unittest discovery:
+The normal suite's parallel runner adds this module as an explicit front-loaded
+target outside ordinary ``test*.py`` discovery:
 
     nix-shell --run "bash scripts/run_tests.sh"
 

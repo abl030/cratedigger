@@ -439,21 +439,6 @@ def exercise_real_beets_world(
 
 
 class TestGeneratedRealBeetsConfigMatrix(unittest.TestCase):
-    def test_every_declared_common_config_cell(self) -> None:
-        for profile in PROFILES:
-            for track_count in (1, 2, 12):
-                for source in ("mb", "discogs"):
-                    with self.subTest(
-                        profile=profile,
-                        track_count=track_count,
-                        source=source,
-                    ):
-                        assert_real_beets_contract(
-                            exercise_real_beets_world(
-                                profile, track_count, source,
-                            ),
-                        )
-
     @settings(
         max_examples=(
             96
@@ -522,6 +507,32 @@ class TestGeneratedRealBeetsConfigMatrix(unittest.TestCase):
                 child_outcome=valid.child_outcome,
                 child_stdout=msgspec.json.encode(valid.child_outcome),
             ))
+
+
+def _common_config_cell_test(
+    profile: ConfigProfile,
+    track_count: int,
+    source: str,
+):
+    def test_common_config_cell(self: unittest.TestCase) -> None:
+        assert_real_beets_contract(
+            exercise_real_beets_world(profile, track_count, source),
+        )
+
+    return test_common_config_cell
+
+
+for _profile_index, _profile in enumerate(PROFILES):
+    for _cell_track_count in (1, 2, 12):
+        for _source in ("mb", "discogs"):
+            setattr(
+                TestGeneratedRealBeetsConfigMatrix,
+                (
+                    f"test_common_config_p{_profile_index:02d}_"
+                    f"t{_cell_track_count:02d}_{_source}"
+                ),
+                _common_config_cell_test(_profile, _cell_track_count, _source),
+            )
 
 
 class TestDeleteChildFdProtocol(unittest.TestCase):
