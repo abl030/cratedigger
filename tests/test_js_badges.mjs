@@ -66,6 +66,8 @@ console.log('renderStatusBadges() marks a verified lossless install');
     pipeline_provisional: false,
   });
   assertContains(html, 'badge-verified', 'verified install renders chip');
+  assertContains(html, 'badge-rank-lossless',
+    'verified identity reuses the brightest lossless bucket colour');
   assertContains(html, '>verified<', 'chip label reads verified');
   assertExcludes(html, 'badge-provisional', 'verified never doubles as provisional');
 }

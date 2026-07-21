@@ -31,6 +31,7 @@
  */
 
 import { state, API } from './state.js';
+import { qualityRankBadgeClass } from './quality_palette.js';
 import {
   esc,
   sourceLabel,
@@ -284,7 +285,7 @@ export function renderLongTailRow(row) {
   // mislabel the actual file. The band name + colour is the honest
   // signal; the console (U4) surfaces the exact on-disk format.
   const band = String(row.band || '').toLowerCase();
-  const bandCls = band === MISSING_BAND ? 'badge-wanted' : `badge-rank-${esc(band)}`;
+  const bandCls = band === MISSING_BAND ? 'badge-wanted' : qualityRankBadgeClass(band);
   const bandBadge = `<span class="badge ${bandCls}">${esc(bandLabel(band))}</span>`;
   const flight = row.in_flight_rescue
     ? '<span class="badge badge-new">rescue running</span>'

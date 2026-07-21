@@ -135,5 +135,28 @@ console.log('request 6039 current Quality uses average positive track bitrate');
   assertExcludes(html, 'MP3 V2', 'min 194 never paints current quality');
 }
 
+console.log('current Quality uses the shared ordered spectral palette');
+for (const [grade, tone] of [
+  ['likely_transcode', 'poor'],
+  ['suspect', 'acceptable'],
+  ['marginal', 'good'],
+  ['genuine', 'lossless'],
+]) {
+  const html = __test__.renderCurrentQualityRow(
+    {
+      current_spectral_bitrate: 128,
+      last_download_spectral_bitrate: null,
+      current_spectral_grade: grade,
+      last_download_spectral_grade: null,
+      verified_lossless: false,
+    },
+    [{ format: 'MP3', bitrate: 192000 }],
+  );
+  assertContains(html, `quality-tone-${tone}`, `${grade} uses shared ${tone} tone`);
+  assertContains(html, grade.replaceAll('_', ' '), `${grade} is humanized`);
+  assertExcludes(html, grade.includes('_') ? grade : '__never__',
+    `${grade} never leaks a raw token`);
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

@@ -387,13 +387,21 @@ console.log('withWas() helper appends the existing comparison inline');
 
 console.log('formatSpectral() helper colors grades and prefixes the floor');
 {
-  if (!formatSpectral('genuine').includes('#6d6')) {
+  if (!formatSpectral('genuine').includes('quality-tone-lossless')) {
     failed++;
-    console.error('  FAIL: genuine should be green (#6d6)');
+    console.error('  FAIL: genuine should use the brightest shared green');
   } else { passed++; }
-  if (!formatSpectral('suspect').includes('#d66')) {
+  if (!formatSpectral('marginal').includes('quality-tone-good')) {
     failed++;
-    console.error('  FAIL: suspect should be red (#d66)');
+    console.error('  FAIL: marginal should use the shared yellow tone');
+  } else { passed++; }
+  if (!formatSpectral('suspect').includes('quality-tone-acceptable')) {
+    failed++;
+    console.error('  FAIL: suspect should use the shared orange tone');
+  } else { passed++; }
+  if (!formatSpectral('likely_transcode').includes('quality-tone-poor')) {
+    failed++;
+    console.error('  FAIL: likely transcode should use the shared red tone');
   } else { passed++; }
   if (!formatSpectral('genuine', 96).includes('~96kbps')) {
     failed++;

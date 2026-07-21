@@ -141,6 +141,11 @@ import {
 } from './util.js';
 import { openReplacePicker, pressingMeta } from './replace_picker.js';
 import { bandLabel, renderLongTail, loadLongTail } from './long_tail.js';
+import {
+  qualityRankBadgeClass,
+  spectralGradeClass,
+  spectralGradeLabel,
+} from './quality_palette.js';
 
 // --- Action console (U4) --------------------------------------------
 //
@@ -662,7 +667,7 @@ function renderSiblingRow(rel) {
   // panel and the picker render the same "country · year · format · Nt".
   const meta = pressingMeta(rel);
   const inLib = rel.in_library
-    ? `<span class="badge badge-rank-${esc(String(rel.library_rank || 'library').toLowerCase())}">in library</span>`
+    ? `<span class="badge ${rel.library_rank ? qualityRankBadgeClass(rel.library_rank) : 'badge-library'}">in library</span>`
     : '';
   const pStatus = rel.pipeline_status
     ? `<span class="badge badge-${esc(String(rel.pipeline_status))}">${esc(String(rel.pipeline_status))}</span>`
@@ -830,8 +835,8 @@ function renderYoutubeBody(result, id) {
 
 /**
  * Inline "spectral: <grade> ~<kbps>kbps" fragment for the on-disk quality
- * line, coloured by grade (green genuine / red suspect-or-transcode /
- * neutral otherwise — matching `pipeline.js`). Returns '' when the grade is
+ * line, coloured through the shared red→orange→yellow→bright-green
+ * spectral palette used by every other view. Returns '' when the grade is
  * unknown (NULL `current_spectral_grade` — pre-2026-05-17 imports or
  * lossy-source transcodes): "if known". Pure.
  *
@@ -844,10 +849,7 @@ function renderSpectralFragment(row) {
   if (!grade) return '';
   const br = (row.current_spectral_bitrate != null)
     ? ` ~${Number(row.current_spectral_bitrate)}kbps` : '';
-  const color = (grade === 'genuine') ? '#6d6'
-    : (grade === 'suspect' || grade === 'likely_transcode') ? '#d88'
-    : '#caa';
-  return ` · <span style="color:${color};">spectral: ${esc(grade)}${esc(br)}</span>`;
+  return ` · <span class="${spectralGradeClass(grade)}">spectral: ${esc(spectralGradeLabel(grade))}${esc(br)}</span>`;
 }
 
 /**
@@ -1957,4 +1959,5 @@ export const __test__ = {
   intentToggleTarget,
   buildAcceptSiblingOptions,
   renderActionsBar,
+  renderSpectralFragment,
 };
