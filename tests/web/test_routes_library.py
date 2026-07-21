@@ -112,6 +112,7 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
                     request.album_id, "album_not_found", "absent", False)
             tracks = detail.get("tracks") or []
             album_path = str(detail.get("path") or "/music/Test Artist/Test Album")
+            self.beets_db.set_album_info(request.expected_release_id, None)
             return BeetsDeleteCompleted(
                 album_id=request.album_id,
                 album_name=str(detail.get("album") or ""),
@@ -189,6 +190,11 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         detail = self._album()
         detail["tracks"] = [self._track()]
         self.beets_db.set_album_detail(7, detail)
+        self.beets_db.set_album_ids_for_release(self.RELEASE_ID, [7])
+        self.beets_db.set_item_paths(
+            self.RELEASE_ID,
+            [(11, "/music/Test Artist/Test Album/01 Track.mp3")],
+        )
         if isinstance(delete_side_effect, Exception):
             self._delete_failure = BeetsDeleteFailed(
                 album_id=7,
@@ -459,6 +465,11 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         detail["source"] = "discogs"
         detail["tracks"] = [self._track()]
         self.beets_db.set_album_detail(7, detail)
+        self.beets_db.set_album_ids_for_release("12856590", [7])
+        self.beets_db.set_item_paths(
+            "12856590",
+            [(11, "/music/Test Artist/Test Album/01 Track.mp3")],
+        )
 
         status, data = self._post("/api/beets/delete", {
             "id": 7,
@@ -525,6 +536,22 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         self.assertFalse(data["acknowledgement_lost"])
         self.assertTrue(data["album_still_present"])
         self.assertIsNotNone(self.db.get_request(42))
+
+    def test_beets_delete_ambiguous_current_identity_is_zero_mutation(self):
+        self._srv.beets_db_path = "/tmp/beets.db"
+        self._configure_beets_delete_mock(None)
+        self.beets_db.set_album_ids_for_release(self.RELEASE_ID, [7, 8])
+
+        status, data = self._post("/api/beets/delete", {
+            "id": 7,
+            "confirm": "DELETE",
+        })
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "current_beets_ambiguous")
+        self.assertEqual(data["album_ids"], [7, 8])
+        self.assertEqual(self.delete_requests, [])
+        self.assertIsNotNone(self.beets_db.get_album_detail(7))
 
 if __name__ == "__main__":
     unittest.main()

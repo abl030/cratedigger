@@ -58,6 +58,32 @@ class TestReleaseIdentity(unittest.TestCase):
         self.assertEqual(frontend_release_id("", "0012856590"), "12856590")
         self.assertIsNone(frontend_release_id("", "0"))
 
+    def test_strict_fields_require_one_valid_exact_identity(self):
+        from lib.release_identity import ReleaseIdentity
+
+        self.assertEqual(
+            ReleaseIdentity.from_strict_fields("0012856590", "12856590"),
+            ReleaseIdentity(source="discogs", release_id="12856590"),
+        )
+        self.assertEqual(
+            ReleaseIdentity.from_strict_fields(
+                "89AD4AC3-39F7-470E-963A-56509C546377", "0",
+            ),
+            ReleaseIdentity(
+                source="musicbrainz",
+                release_id="89ad4ac3-39f7-470e-963a-56509c546377",
+            ),
+        )
+        for primary, secondary in (
+            ("89ad4ac3-39f7-470e-963a-56509c546377", "12856590"),
+            ("malformed", "12856590"),
+            ("", ""),
+        ):
+            with self.subTest(primary=primary, secondary=secondary):
+                self.assertIsNone(
+                    ReleaseIdentity.from_strict_fields(primary, secondary),
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

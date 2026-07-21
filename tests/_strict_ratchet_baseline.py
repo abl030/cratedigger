@@ -19,7 +19,6 @@ STRICT_RATCHET_BASELINE: dict[str, int] = {
     "lib/browse.py": 3,
     "lib/config.py": 35,
     "lib/context.py": 12,
-    "lib/destructive_release_service.py": 3,
     "lib/disk_coverage_service.py": 1,
     "lib/dispatch/outcome_actions.py": 1,
     "lib/dispatch/post_import.py": 3,

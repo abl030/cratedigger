@@ -12,8 +12,9 @@ test catching the drift, since they were never the same symbol. Both
 surfaces now import from here (#501 item 2).
 
 ``REPLACE_REASON_*`` are typed sub-codes for ``ReplaceResult.reason``,
-distinguishing the different rejections ``RESULT_TARGET_INVALID``
-collapses. ``error_message`` stays free-text for operator-facing detail;
+distinguishing the different rejections collapsed by semantic outcomes such
+as ``RESULT_TARGET_INVALID`` and ``RESULT_WRONG_STATE``. ``error_message``
+stays free-text for operator-facing detail;
 ``reason`` is the stable code CLI/API/tests assert on. Pathway-neutral by
 design (no MB/Discogs adapter asymmetry) — the same reason applies
 whether the failing lookup was against the MB mirror or the Discogs
@@ -33,6 +34,12 @@ mirror:
                                that isn't the known transient set — this
                                ALSO logs a warning, since it may be a
                                real bug rather than expected bad input
+    current_beets_ambiguous    the current exact identity resolves to no
+                               single safe album primary key
+    current_beets_unavailable  current Beets authority could not be read
+                               before the supersede mutation
+    source_identity_invalid    source identity fields were missing,
+                               malformed, or named conflicting pressings
 """
 
 from __future__ import annotations
@@ -49,12 +56,15 @@ RESULT_TARGET_COLLISION_REQUEST = "target_collision_request"
 RESULT_MIRROR_UNCONFIGURED = "mirror_unconfigured"
 RESULT_TRANSIENT = "transient"
 
-# ReplaceResult.reason constants — sub-codes for RESULT_TARGET_INVALID.
+# ReplaceResult.reason constants — stable semantic sub-codes.
 REPLACE_REASON_CROSS_PATHWAY_TARGET = "cross_pathway_target"
 REPLACE_REASON_SOURCE_NO_RELEASE_GROUP = "source_no_release_group"
 REPLACE_REASON_UNRESOLVABLE_TARGET = "unresolvable_target"
 REPLACE_REASON_TARGET_NO_RELEASE_GROUP = "target_no_release_group"
 REPLACE_REASON_UNEXPECTED_LOOKUP_ERROR = "unexpected_lookup_error"
+REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS = "current_beets_ambiguous"
+REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE = "current_beets_unavailable"
+REPLACE_REASON_SOURCE_IDENTITY_INVALID = "source_identity_invalid"
 
 # POST /api/pipeline/<id>/resolve-rg status vocabulary
 # (web/routes/release_identity_routes.py::post_pipeline_resolve_rg). Two of these

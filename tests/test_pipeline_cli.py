@@ -4633,36 +4633,81 @@ class TestDestructiveCliAdapters(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())["error"], "release_mismatch")
         self.assertEqual(db.denylist, [])
 
-    def test_ban_source_incomplete_reports_resulting_searchability(self) -> None:
+    def test_ban_source_ambiguous_current_identity_returns_state_exit_4(
+        self,
+    ) -> None:
+        _insert_album(
+            self.beets_path,
+            8,
+            RELEASE_A,
+            [(320000, os.path.join(self.tmpdir.name, "Duplicate", "01.flac"))],
+            album="Album A duplicate",
+            albumartist="Artist A",
+        )
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41,
+            status="imported",
+            mb_release_id=RELEASE_A,
+        ))
         args = SimpleNamespace(
             request_id=41,
             release_id=RELEASE_A,
             beets_db=self.beets_path,
             beets_directory=self.tmpdir.name,
         )
-        with patch("lib.beets_album_op.sp.run") as mock_beet:
-            mock_beet.return_value = SimpleNamespace(
-                returncode=1,
-                stderr="isolated test: album retained",
-            )
-            for request_status in ("wanted", "unsearchable"):
-                with self.subTest(request_status=request_status):
-                    db = FakePipelineDB()
-                    db.seed_request(make_request_row(
-                        id=41,
-                        status=request_status,
-                        mb_release_id=RELEASE_A,
-                    ))
-                    output = io.StringIO()
-                    with self._env(), redirect_stdout(output):
-                        rc = pipeline_cli.cmd_ban_source(db, args)
+        output = io.StringIO()
 
-                    self.assertEqual(rc, 4)
-                    payload = json.loads(output.getvalue())
-                    self.assertEqual(payload["error"], "cleanup_incomplete")
-                    self.assertEqual(payload["status"], "partial")
-                    self.assertEqual(payload["request_status"], request_status)
-            self.assertEqual(mock_beet.call_count, 2)
+        with self._env(), redirect_stdout(output):
+            rc = pipeline_cli.cmd_ban_source(db, args)
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, 4)
+        self.assertEqual(payload["error"], "current_beets_ambiguous")
+        self.assertEqual(payload["album_ids"], [7, 8])
+        self.assertEqual(db.denylist, [])
+
+    def test_ban_source_incomplete_reports_resulting_searchability(self) -> None:
+        from lib.beets_delete import BeetsDeleteFailed
+
+        args = SimpleNamespace(
+            request_id=41,
+            release_id=RELEASE_A,
+            beets_db=self.beets_path,
+            beets_directory=self.tmpdir.name,
+        )
+        delete_requests = []
+
+        def failed_delete(request):
+            delete_requests.append(request)
+            return BeetsDeleteFailed(
+                album_id=request.album_id,
+                reason="filesystem_error",
+                detail="isolated test: album retained",
+                album_still_present=True,
+            )
+
+        for request_status in ("wanted", "unsearchable"):
+            with self.subTest(request_status=request_status):
+                db = FakePipelineDB()
+                db.seed_request(make_request_row(
+                    id=41,
+                    status=request_status,
+                    mb_release_id=RELEASE_A,
+                ))
+                output = io.StringIO()
+                with self._env(), redirect_stdout(output):
+                    rc = pipeline_cli.cmd_ban_source(
+                        db, args, beets_delete_fn=failed_delete,
+                    )
+
+                self.assertEqual(rc, 4)
+                payload = json.loads(output.getvalue())
+                self.assertEqual(payload["error"], "cleanup_incomplete")
+                self.assertEqual(payload["status"], "partial")
+                self.assertEqual(payload["request_status"], request_status)
+        self.assertEqual(len(delete_requests), 2)
+        self.assertEqual({request.album_id for request in delete_requests}, {7})
 
     def test_library_delete_lock_contention_returns_state_exit_4(self) -> None:
         db = FakePipelineDB()
@@ -4688,6 +4733,34 @@ class TestDestructiveCliAdapters(unittest.TestCase):
             "destructive_operation_busy",
         )
         self.assertIsNotNone(db.get_request(41))
+
+    def test_library_delete_ambiguous_identity_returns_state_exit_4(self) -> None:
+        _insert_album(
+            self.beets_path,
+            8,
+            RELEASE_A,
+            [(320000, os.path.join(self.tmpdir.name, "Duplicate", "01.flac"))],
+            album="Album A duplicate",
+            albumartist="Artist A",
+        )
+        db = FakePipelineDB()
+        args = SimpleNamespace(
+            album_id=7,
+            purge_pipeline=False,
+            pipeline_id=None,
+            release_id=RELEASE_A,
+            beets_db=self.beets_path,
+            beets_directory=self.tmpdir.name,
+        )
+        output = io.StringIO()
+
+        with self._env(), redirect_stdout(output):
+            rc = pipeline_cli.cmd_library_delete(db, args)
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, 4)
+        self.assertEqual(payload["error"], "current_beets_ambiguous")
+        self.assertEqual(payload["album_ids"], [7, 8])
 
     def test_library_delete_success_exposes_artifacts_and_notifier_warnings(self) -> None:
         from lib.beets_delete import BeetsDeleteCompleted

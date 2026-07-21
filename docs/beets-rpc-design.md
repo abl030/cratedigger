@@ -1,6 +1,12 @@
 # Beets RPC — design sketch
 
-**Status:** draft, not implemented. This document captures the
+**Status:** superseded historical design. Issue #762 retired the selector-based
+`beet remove` subprocess path and moved destructive callers to the pinned
+exact-album child. The inventory and porting steps below describe the older
+architecture and are retained as design history, not current implementation
+guidance.
+
+This document captures the
 proposed architecture for replacing cratedigger's subprocess-based
 beets invocation with a long-lived JSON-RPC protocol. Nothing here
 has been built yet; the intent is to review the shape before we start
@@ -40,11 +46,11 @@ Production callsites (`grep "sp\\.run\\|sp\\.Popen" -- lib/ harness/`):
 - `lib/beets.py::beets_validate` — invokes `run_beets_harness.sh`
   for the pre-import validation flow. Already uses a JSON protocol
   over stdin/stdout, but spawns fresh each time.
-- `lib/beets_album_op.py::_run_beet_op` — the centralised `beet
+- the former `beets_album_op._run_beet_op` — the centralised `beet
   remove` / `beet move` wrapper (issue #133). Every post-import
   stale-row cleanup, ban-source, and sibling canonicalization goes
   through here.
-- `lib/release_cleanup.py::remove_album_by_selectors` — iterates
+- the former `release_cleanup.remove_album_by_selectors` — iterates
   selectors (`mb_albumid:X`, `discogs_albumid:Y`) delegating to the
   op wrapper.
 - `harness/import_one.py` — spawns the harness and then spawns
@@ -188,9 +194,9 @@ Once all callsites are ported:
   inheritance — RPC process has its own env, set once.
 - **`lib/util.py::beets_subprocess_env`** → delete. Only the RPC
   wrapper sets HOME now.
-- **`lib/util.py::beet_bin`** → delete. Only the RPC wrapper needs
+- the former **`util.beet_bin`** → delete. Only the RPC wrapper needs
   to find `beet`, and it's in its own PATH.
-- **`lib/release_cleanup.py`**'s multi-selector iteration → becomes
+- the former **`release_cleanup`** multi-selector iteration → becomes
   a single RPC call with a list of selectors. Per-selector failure
   reporting stays (the RPC returns a list of `BeetsOpFailure`).
 - **`harness/run_beets_harness.sh`** → delete. One shell wrapper

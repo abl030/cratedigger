@@ -13,16 +13,19 @@ import unittest
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from hypothesis import example, given, strategies as st
 import msgspec
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.destructive_release_service import (
+    BanSourceBeetsAmbiguous,
     BanSourceCleanupIncomplete,
     BanSourceSuccess,
     BanSourceRequest,
     DeleteIncomplete,
+    DeleteBeetsAmbiguous,
     DeleteRequest,
     DeleteSuccess,
     ban_source,
@@ -41,15 +44,40 @@ from lib.beets_delete import (
     _delete_manifest,
 )
 from lib.import_queue import IMPORT_JOB_AUTOMATION
+from lib.config import CratediggerConfig
+from lib.mbid_replace_service import (
+    MbidReplaceService,
+    REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
+    REPLACE_REASON_SOURCE_IDENTITY_INVALID,
+    RESULT_REPLACED,
+    RESULT_WRONG_STATE,
+)
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
     ADVISORY_LOCK_NAMESPACE_RELEASE,
     AlbumRequestRow,
 )
 from lib.release_identity import ReleaseIdentity
-from lib.release_cleanup import ReleaseCleanupResult, SelectorFailure
 from tests.fakes import DenylistEntry, FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
+
+
+def assert_fresh_destructive_authority(
+    *,
+    authority: str,
+    beets_delete_album_ids: tuple[int, ...],
+    expected_album_id: int | None,
+    destructive_result: bool,
+) -> None:
+    """Only one fresh unique snapshot can authorize a Beets mutation."""
+    if authority == "unique":
+        if beets_delete_album_ids != (expected_album_id,):
+            raise AssertionError("unique authority did not target its exact album id")
+        return
+    if beets_delete_album_ids:
+        raise AssertionError(f"{authority} authority reached a Beets mutation")
+    if authority == "ambiguous" and destructive_result:
+        raise AssertionError("ambiguous authority reported destructive success")
 
 
 @dataclass(frozen=True)
@@ -209,6 +237,24 @@ def assert_presence_probe_failure_fails_closed(
         raise AssertionError("presence-probe failure notified media servers")
 
 
+def assert_replace_identity_conflict_fails_closed(
+    *,
+    outcome: str,
+    reason: str | None,
+    state_preserved: bool,
+    authority_boundary_reached: bool,
+) -> None:
+    """Conflicting source identities are a typed pre-mutation rejection."""
+    if outcome != RESULT_WRONG_STATE:
+        raise AssertionError("Replace identity conflict was not rejected")
+    if reason != REPLACE_REASON_SOURCE_IDENTITY_INVALID:
+        raise AssertionError("Replace identity conflict lost its typed reason")
+    if not state_preserved:
+        raise AssertionError("Replace identity conflict mutated pipeline state")
+    if authority_boundary_reached:
+        raise AssertionError("Replace identity conflict reached mutation authority")
+
+
 def _different_release(release_id: str) -> str:
     identity = ReleaseIdentity.from_id(release_id)
     assert identity is not None
@@ -312,25 +358,252 @@ def _configure_lock_world(
 
 class TestGeneratedDestructiveAuthority(unittest.TestCase):
     @example(
-        initial_status="imported", absent_after=False,
-        beets_removed=False, failure_count=1,
+        action="ban", source="musicbrainz", authority="ambiguous",
+        album_id=7,
     )
     @example(
-        initial_status="unsearchable", absent_after=True,
-        beets_removed=True, failure_count=1,
+        action="delete", source="discogs", authority="unique", album_id=41,
+    )
+    @given(
+        action=st.sampled_from(("ban", "delete", "replace")),
+        source=st.sampled_from(("musicbrainz", "discogs")),
+        authority=st.sampled_from(("unique", "missing", "ambiguous")),
+        album_id=st.integers(min_value=1, max_value=2_000_000_000),
+    )
+    def test_each_destructive_caller_requires_fresh_unique_album_authority(
+        self,
+        action: str,
+        source: str,
+        authority: str,
+        album_id: int,
+    ) -> None:
+        release_id = (
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+            if source == "musicbrainz" else "12856590"
+        )
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41,
+            status="imported",
+            mb_release_id=release_id,
+            discogs_release_id=(release_id if source == "discogs" else None),
+        ))
+        beets = FakeBeetsDB(library_root="/library")
+        beets.set_album_detail(album_id, {
+            "id": album_id,
+            "album": "Album",
+            "artist": "Artist",
+            "mb_albumid": release_id,
+            "discogs_albumid": (
+                release_id if source == "discogs" else None
+            ),
+            "tracks": [],
+        })
+        if authority == "unique":
+            beets.set_album_ids_for_release(release_id, [album_id])
+            beets.set_item_paths(
+                release_id,
+                [(album_id * 10, f"/library/current-{album_id}/01.flac")],
+            )
+        elif authority == "ambiguous":
+            beets.set_album_ids_for_release(
+                release_id,
+                [album_id, album_id + 2_000_000_001],
+            )
+
+        delete_album_ids: list[int] = []
+
+        def exact_delete(request: BeetsDeleteRequest) -> BeetsDeleteCompleted:
+            delete_album_ids.append(request.album_id)
+            beets._album_detail.pop(request.album_id, None)
+            return BeetsDeleteCompleted(
+                album_id=request.album_id,
+                album_name="Album",
+                artist_name="Artist",
+                former_album_path=f"/library/current-{request.album_id}",
+                deleted_tracks=1,
+                deleted_artifacts=1,
+                preserved_paths=(),
+            )
+
+        if action == "ban":
+            with patch(
+                "lib.destructive_release_service.hash_audio_content",
+                return_value="generated-hash",
+            ):
+                result = ban_source(
+                    pipeline_db=db,
+                    beets_db=beets,
+                    request=BanSourceRequest(request_id=41),
+                    beets_delete_fn=exact_delete,
+                )
+            destructive_result = isinstance(result, BanSourceSuccess)
+            if authority == "ambiguous":
+                self.assertIsInstance(result, BanSourceBeetsAmbiguous)
+        elif action == "delete":
+            result = delete_release_from_library(
+                pipeline_db=db,
+                beets_db=beets,
+                request=DeleteRequest(album_id=album_id),
+                beets_delete_fn=exact_delete,
+                notify_fn=lambda _path: (),
+            )
+            destructive_result = isinstance(result, DeleteSuccess)
+            if authority == "ambiguous":
+                self.assertIsInstance(result, DeleteBeetsAmbiguous)
+        else:
+            target_release_id = (
+                "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+                if source == "musicbrainz" else "12856591"
+            )
+            target_group_id = (
+                "11111111-1111-1111-1111-111111111111"
+                if source == "musicbrainz" else "7654321"
+            )
+            db.request(41)["mb_release_group_id"] = target_group_id
+            scans: list[str | None] = []
+
+            target = {
+                "id": target_release_id,
+                "title": "Replacement",
+                "artist_name": "Artist",
+                "artist_id": "artist-1",
+                "release_group_id": target_group_id,
+                "year": 2026,
+                "country": "AU",
+                "tracks": [
+                    {"disc_number": 1, "track_number": 1, "title": "One"},
+                ],
+            }
+            service = MbidReplaceService(
+                db=db,
+                config=CratediggerConfig(),
+                beets_db_factory=lambda: beets,
+                mb_lookup=lambda _rid, *, fresh=False: target,
+                discogs_lookup=lambda _rid, *, fresh=False: target,
+                search_plan_service=MagicMock(),
+                beets_delete_fn=exact_delete,
+            )
+            before = db.request(41).copy()
+            with (
+                patch(
+                    "lib.mbid_replace_service.trigger_plex_scan",
+                    side_effect=lambda _cfg, imported_path=None: scans.append(
+                        imported_path,
+                    ),
+                ),
+                patch(
+                    "lib.mbid_replace_service.trigger_jellyfin_scan",
+                    side_effect=lambda _cfg, imported_path=None: scans.append(
+                        imported_path,
+                    ),
+                ),
+            ):
+                result = service.replace_request_mbid(
+                    41,
+                    target_mb_release_id=target_release_id,
+                )
+            destructive_result = result.outcome == RESULT_REPLACED
+            if authority == "ambiguous":
+                self.assertEqual(
+                    result.reason,
+                    REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
+                )
+                self.assertEqual(db.request(41), before)
+                self.assertEqual(scans, [])
+            elif authority == "unique":
+                self.assertEqual(
+                    scans,
+                    [
+                        f"/library/current-{album_id}",
+                        f"/library/current-{album_id}",
+                    ],
+                )
+            else:
+                self.assertEqual(scans, [None, None])
+
+        assert_fresh_destructive_authority(
+            authority=authority,
+            beets_delete_album_ids=tuple(delete_album_ids),
+            expected_album_id=(album_id if authority == "unique" else None),
+            destructive_result=destructive_result,
+        )
+
+    @example(
+        mb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        discogs_id="12856590",
+        status="imported",
+    )
+    @given(
+        mb_id=MB_RELEASE_IDS,
+        discogs_id=DISCOGS_RELEASE_IDS,
+        status=st.sampled_from(("wanted", "imported", "unsearchable")),
+    )
+    def test_replace_conflicting_source_identities_are_zero_mutation(
+        self,
+        mb_id: str,
+        discogs_id: str,
+        status: str,
+    ) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41,
+            status=status,
+            mb_release_id=mb_id,
+            discogs_release_id=discogs_id,
+            mb_release_group_id="11111111-1111-1111-1111-111111111111",
+        ))
+        before = copy.deepcopy(db.get_request(41))
+        mb_lookup = MagicMock()
+        discogs_lookup = MagicMock()
+        beets_factory = MagicMock()
+        service = MbidReplaceService(
+            db=db,
+            config=CratediggerConfig(),
+            beets_db_factory=beets_factory,
+            mb_lookup=mb_lookup,
+            discogs_lookup=discogs_lookup,
+            search_plan_service=MagicMock(),
+        )
+        mb_lookup.reset_mock()
+        discogs_lookup.reset_mock()
+        beets_factory.reset_mock()
+
+        result = service.replace_request_mbid(
+            41,
+            target_mb_release_id=_different_release(mb_id),
+        )
+
+        after = db.get_request(41)
+        assert_replace_identity_conflict_fails_closed(
+            outcome=result.outcome,
+            reason=result.reason,
+            state_preserved=before == after,
+            authority_boundary_reached=bool(
+                db.advisory_lock_calls
+                or mb_lookup.mock_calls
+                or discogs_lookup.mock_calls
+                or beets_factory.mock_calls
+            ),
+        )
+
+    @example(
+        initial_status="imported", authority="unique", delete_succeeds=False,
+    )
+    @example(
+        initial_status="unsearchable", authority="missing",
+        delete_succeeds=True,
     )
     @given(
         initial_status=st.sampled_from(("wanted", "imported", "unsearchable")),
-        absent_after=st.booleans(),
-        beets_removed=st.booleans(),
-        failure_count=st.integers(min_value=0, max_value=2),
+        authority=st.sampled_from(("unique", "missing")),
+        delete_succeeds=st.booleans(),
     )
     def test_ban_completion_is_exactly_authoritative_absence(
         self,
         initial_status: str,
-        absent_after: bool,
-        beets_removed: bool,
-        failure_count: int,
+        authority: str,
+        delete_succeeds: bool,
     ) -> None:
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -339,28 +612,41 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
             mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         ))
         beets = FakeBeetsDB()
-        failures = tuple(
-            SelectorFailure(
-                reason="nonzero_rc",
-                detail=f"generated selector failure {index}",
-                selector=f"id:{index + 1}",
+        if authority == "unique":
+            beets.set_album_ids_for_release(
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                [7],
             )
-            for index in range(failure_count)
-        )
-        cleanup = ReleaseCleanupResult(
-            beets_removed=beets_removed and absent_after,
-            absent_after=absent_after,
-            selector_failures=failures,
-        )
+
+        def exact_delete(
+            request: BeetsDeleteRequest,
+        ) -> BeetsDeleteCompleted | BeetsDeleteFailed:
+            if delete_succeeds:
+                return BeetsDeleteCompleted(
+                    album_id=request.album_id,
+                    album_name="Album",
+                    artist_name="Artist",
+                    former_album_path="/tmp/fake-beets-library/album-7",
+                    deleted_tracks=1,
+                    deleted_artifacts=1,
+                    preserved_paths=(),
+                )
+            return BeetsDeleteFailed(
+                album_id=request.album_id,
+                reason="filesystem_error",
+                detail="generated exact-delete failure",
+                album_still_present=True,
+            )
 
         result = ban_source(
             pipeline_db=db,
             beets_db=beets,
             request=BanSourceRequest(41),
-            cleanup_release_fn=lambda **_kwargs: cleanup,
+            beets_delete_fn=exact_delete,
         )
 
         completed = isinstance(result, BanSourceSuccess)
+        absent_after = authority == "missing" or delete_succeeds
         assert_ban_completion_truth(
             completed=completed,
             absent_after=absent_after,
@@ -374,7 +660,10 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
             "unsearchable" if initial_status == "unsearchable" else "wanted"
         ))
         self.assertEqual(db.download_logs[-1].outcome, "curator_ban")
-        self.assertEqual(tuple(result.cleanup_errors), failures)
+        self.assertEqual(
+            len(result.cleanup_errors),
+            0 if absent_after else 1,
+        )
 
     @given(
         prefix=st.binary(min_size=0, max_size=24),
@@ -718,6 +1007,15 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                 "discogs_albumid": discogs_albumid,
                 "tracks": tracks,
             })
+            if authoritative_release is not None:
+                beets.set_album_ids_for_release(authoritative_release, [7])
+                beets.set_item_paths(
+                    authoritative_release,
+                    [
+                        (int(str(track["id"])), str(track["path"]))
+                        for track in tracks
+                    ],
+                )
 
             def beets_delete(
                 request: BeetsDeleteRequest,
@@ -794,6 +1092,7 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
             job_ok = current_pipeline_id is None or not job_race
             should_succeed = (
                 authoritative_release is not None
+                and bool(file_payloads)
                 and confirmation_ok
                 and locks_ok
                 and job_ok
@@ -860,6 +1159,14 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
             detail["artpath"] = str(album_dir / "cover.jpg")
         beets = FakeBeetsDB()
         beets.set_album_detail(7, detail)
+        beets.set_album_ids_for_release(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            [7],
+        )
+        beets.set_item_paths(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            [(1, str(album_dir / "01.flac"))],
+        )
         notifications: list[str] = []
 
         def failed_child(request: BeetsDeleteRequest) -> BeetsDeleteFailed:
@@ -889,7 +1196,9 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
         finally:
             logging.disable(previous_disable)
 
-        expected_path = str(album_dir) if path_source != "none" else ""
+        # The fresh joined resolver sees the current item path even when the
+        # earlier album-detail projection had no recovery path at all.
+        expected_path = str(album_dir)
         context_retained = (
             isinstance(result, DeleteIncomplete)
             and result.album_name == "Album"
@@ -1040,6 +1349,14 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                 "path": str(root),
                 "tracks": [{"id": 1, "path": str(track)}],
             })
+            beets.set_album_ids_for_release(
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                [7],
+            )
+            beets.set_item_paths(
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                [(1, str(track))],
+            )
             list_calls = 0
             notifications: list[str] = []
 
@@ -1124,6 +1441,14 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                 "path": str(root),
                 "tracks": [{"id": 1, "path": str(track)}],
             })
+            beets.set_album_ids_for_release(
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                [7],
+            )
+            beets.set_item_paths(
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                [(1, str(track))],
+            )
             notifications: list[str] = []
             probe_calls = 0
             fault_call = {
@@ -1230,6 +1555,59 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
 
 
 class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
+    def test_replace_conflict_checker_kills_each_fail_open_mutant(self) -> None:
+        mutants: tuple[tuple[str, str | None, bool, bool], ...] = (
+            (
+                RESULT_REPLACED, REPLACE_REASON_SOURCE_IDENTITY_INVALID,
+                True, False,
+            ),
+            (RESULT_WRONG_STATE, None, True, False),
+            (
+                RESULT_WRONG_STATE, REPLACE_REASON_SOURCE_IDENTITY_INVALID,
+                False, False,
+            ),
+            (
+                RESULT_WRONG_STATE, REPLACE_REASON_SOURCE_IDENTITY_INVALID,
+                True, True,
+            ),
+        )
+        for outcome, reason, state_preserved, boundary_reached in mutants:
+            with self.subTest(
+                outcome=outcome,
+                reason=reason,
+                state_preserved=state_preserved,
+                boundary_reached=boundary_reached,
+            ), self.assertRaises(AssertionError):
+                assert_replace_identity_conflict_fails_closed(
+                    outcome=outcome,
+                    reason=reason,
+                    state_preserved=state_preserved,
+                    authority_boundary_reached=boundary_reached,
+                )
+
+    def test_fresh_authority_checker_kills_cardinality_and_target_mutants(
+        self,
+    ) -> None:
+        mutants: tuple[
+            tuple[str, tuple[int, ...], int | None, bool], ...
+        ] = (
+            ("ambiguous", (7,), None, False),
+            ("missing", (7,), None, False),
+            ("unique", (8,), 7, True),
+            ("ambiguous", (), None, True),
+        )
+        for authority, album_ids, expected_album_id, destructive in mutants:
+            with self.subTest(
+                authority=authority,
+                album_ids=album_ids,
+            ), self.assertRaises(AssertionError):
+                assert_fresh_destructive_authority(
+                    authority=authority,
+                    beets_delete_album_ids=album_ids,
+                    expected_album_id=expected_album_id,
+                    destructive_result=destructive,
+                )
+
     def test_ban_searchability_checker_kills_resume_mutant(self) -> None:
         with self.assertRaisesRegex(AssertionError, "changed searchability"):
             assert_ban_searchability_preserved(
