@@ -147,9 +147,13 @@ class TestSpectralImportDecision(unittest.TestCase):
         ("genuine ignores bitrates", "genuine", 128, 256, "import"),
         ("marginal imports", "marginal", 192, 256, "import"),
         ("marginal no bitrates", "marginal", None, None, "import"),
-        ("suspect equal rejects", "suspect", 128, 128, "reject"),
+        # Equal spectral floor is a TIE on the only metric this stage
+        # measures, not a downgrade — it defers to Stage 2's codec-aware
+        # tiebreak so a strictly-better copy (higher container bitrate / grade
+        # / V0) is not discarded as "not better" (Mark DeNardo request 1308).
+        ("suspect equal defers to stage2", "suspect", 128, 128, "import"),
         ("suspect worse rejects", "suspect", 96, 128, "reject"),
-        ("likely transcode equal rejects", "likely_transcode", 160, 160, "reject"),
+        ("likely transcode equal defers to stage2", "likely_transcode", 160, 160, "import"),
         ("suspect better upgrades", "suspect", 192, 128, "import_upgrade"),
         ("likely transcode better upgrades", "likely_transcode", 192, 96, "import_upgrade"),
         ("suspect no existing zero", "suspect", 128, 0, "import_no_exist"),
@@ -1960,8 +1964,10 @@ class TestFullPipelineContract(unittest.TestCase):
 
         Once a better comparable lossless-source V0 probe exists from the
         earlier SPENCERTPSN import, a lower 171kbps source probe is a confident
-        suspect-lossless downgrade even though the generic spectral stage would
-        also reject at 96kbps.
+        suspect-lossless downgrade. The generic spectral stage now ties at
+        96kbps (equal floor) and defers to Stage 2 — the real, load-bearing
+        reject is the provisional-lossless lane's ``suspect_lossless_downgrade``
+        (V0 171 < 228), which is unchanged.
         """
         r = full_pipeline_decision(
             is_flac=True,
@@ -1983,7 +1989,9 @@ class TestFullPipelineContract(unittest.TestCase):
         )
 
         self.assertEqual(r["stage0_spectral_gate"], "skipped_flac")
-        self.assertEqual(r["stage1_spectral"], "reject")
+        # Equal spectral floor (96 == 96) now ties and defers to Stage 2; the
+        # provisional-lossless lane owns the real reject below.
+        self.assertEqual(r["stage1_spectral"], "import")
         self.assertEqual(
             r["stage2_import"], DECISION_SUSPECT_LOSSLESS_DOWNGRADE)
         self.assertFalse(r["imported"])

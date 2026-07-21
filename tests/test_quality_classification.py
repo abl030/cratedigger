@@ -39,6 +39,16 @@ class TestLiveBugReproductions(unittest.TestCase):
 
         Root cause: cratedigger.py line 1426 checked `== "suspect"` not
         `in ("suspect", "likely_transcode")`.
+
+        Post tie-defer fix (Mark DeNardo, request 1308): an equal spectral
+        floor (new 160 == existing 160) is a TIE, so Stage 1 no longer
+        rejects — it defers to Stage 2, which rejects this equal-rank
+        candidate as a ``downgrade``. The bug this guards is *acceptance* of a
+        320 transcode from a 160k source; that is still prevented — the
+        candidate is never imported and the search continues. (Denylist is a
+        production-side ``dispatch_action("downgrade")`` concern, not reflected
+        in the simulator dict for the native-lossy downgrade branch; out of
+        scope for this quality assertion.)
         """
         r = full_pipeline_decision(
             is_flac=False,
@@ -49,11 +59,11 @@ class TestLiveBugReproductions(unittest.TestCase):
             existing_min_bitrate=320,
             existing_spectral_bitrate=160,
         )
-        # Should reject — spectral says transcode and not better than existing
-        self.assertEqual(r["stage1_spectral"], "reject",
-                         f"Should reject: new spectral 160 <= existing 160")
+        # Equal spectral floor ties → defers to Stage 2 → equal-rank downgrade.
+        # Load-bearing guard: the transcode is NOT accepted.
+        self.assertEqual(r["stage1_spectral"], "import")
+        self.assertEqual(r["stage2_import"], "downgrade")
         self.assertFalse(r["imported"])
-        self.assertTrue(r["denylisted"])
         self.assertTrue(r["keep_searching"])
 
     def test_tyler_lamberts_grave_no_spectral_bitrate(self):
@@ -77,6 +87,55 @@ class TestLiveBugReproductions(unittest.TestCase):
         # not mark as final "imported".
         self.assertTrue(r["keep_searching"],
                         "likely_transcode should trigger keep_searching")
+
+    def test_mark_denardo_lion_tiger_bear_equal_spectral_higher_bitrate_imports(self):
+        """BUG: a strictly-better transcode discarded as "not better".
+
+        Mark DeNardo - Lion, Tiger, Bear (request 1308, download_log 37700,
+        ruxxell2, 2026-07-21). Candidate: MP3 192 CBR, spectral grade
+        ``suspect``, spectral estimate 128. On-disk: MP3 128 CBR, spectral
+        grade ``likely_transcode``, spectral estimate 128. On every signal the
+        candidate was better or equal — container 192 > 128, grade suspect
+        (66% suspect tracks) vs likely_transcode (100%), V0 research 209 > 187
+        — yet it was rejected as "Spectral quality not better than on-disk
+        copy; searching continues".
+
+        Root cause: Stage 1 ``spectral_import_decision`` compared ONLY the
+        spectral estimate (128 <= 128 → reject) and short-circuited before
+        Stage 2 ``compare_quality`` ever ran. An equal spectral floor is a
+        TIE, not a downgrade; it now defers to Stage 2, whose codec-aware
+        metric tiebreak picks the higher-container copy (192 vs 128, delta 64
+        ≫ tolerance 5) as ``better`` → import. Archivist-correct outcome: the
+        less-degraded transcode lands on disk and the search for a lossless
+        copy continues.
+
+        (V0 209/187 are native-lossy research probes — subject=installed,
+        non-comparable — so they carry no policy weight here; the decision
+        turns on the spectral tie + container tiebreak alone. The V0 numbers
+        are recorded in the docstring as forensic context, not decision input.)
+        """
+        r = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=192,
+            is_cbr=True,
+            avg_bitrate=192,
+            new_format="MP3",
+            spectral_grade="suspect",
+            spectral_bitrate=128,
+            existing_min_bitrate=128,
+            existing_avg_bitrate=128,
+            existing_format="MP3",
+            existing_is_cbr=True,
+            existing_spectral_grade="likely_transcode",
+            existing_spectral_bitrate=128,
+        )
+        # Stage 1 tie defers; Stage 2 codec-aware tiebreak imports the better copy.
+        self.assertEqual(r["stage1_spectral"], "import")
+        self.assertEqual(r["stage2_import"], "import")
+        self.assertEqual(r["comparison_basis"]["verdict"], "better")
+        self.assertEqual(r["comparison_basis"]["branch"], "metric_tiebreak")
+        self.assertTrue(r["imported"])
+        self.assertTrue(r["keep_searching"])
 
     def test_taboo_vi_fake_flac_192_accepted(self):
         """Fake FLAC (192k source) converted to V0 at 224kbps is provisional.
@@ -492,6 +551,42 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
 
         self.assertEqual(r["stage2_import"], "downgrade")
         self.assertFalse(r["imported"])
+
+    def test_mark_denardo_equal_spectral_higher_bitrate_imports_via_evidence(self):
+        """Mark DeNardo request 1308 through the production evidence decider.
+
+        Parity twin of
+        ``TestLiveBugReproductions.test_mark_denardo_lion_tiger_bear_equal_spectral_higher_bitrate_imports``:
+        equal spectral floor (128 == 128) defers past Stage 1, and Stage 2's
+        codec-aware tiebreak imports the higher-container copy (MP3 192 over
+        MP3 128). The simulator and the evidence pipeline must agree.
+        """
+        from lib.quality import full_pipeline_decision_from_evidence
+
+        candidate = self._build_candidate(
+            is_flac=False,
+            min_bitrate=192,
+            avg_bitrate=192,
+            is_cbr=True,
+            spectral_grade="suspect",
+            spectral_bitrate=128,
+        )
+        current = self._build_current(
+            min_bitrate=128,
+            avg_bitrate=128,
+            format="MP3",
+            is_cbr=True,
+            spectral_grade="likely_transcode",
+            spectral_bitrate=128,
+        )
+
+        r = full_pipeline_decision_from_evidence(candidate, current)
+
+        self.assertEqual(r["stage1_spectral"], "import")
+        self.assertEqual(r["stage2_import"], "import")
+        self.assertEqual(r["comparison_basis"]["verdict"], "better")
+        self.assertTrue(r["imported"])
+        self.assertTrue(r["keep_searching"])
 
     def test_lil_wayne_da_drought_3_transcoded_flac_rejects_duplicate_via_evidence(self):
         """Parity sibling of

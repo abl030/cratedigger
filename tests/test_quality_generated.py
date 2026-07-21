@@ -62,6 +62,7 @@ from lib.quality import (
     evidence_decision_name,
     full_pipeline_decision_from_evidence,
     quality_gate_decision,
+    spectral_import_decision,
 )
 from lib.dispatch.quality_gate import QualityGatePlan, _check_quality_gate_core
 from lib.dispatch.types import QualityGateState
@@ -284,6 +285,40 @@ def assert_unmapped_first_copy_stays_searchable(result: SimResult) -> None:
         raise AssertionError(
             f"unmapped first copy narrowed to lossless: {result!r}"
         )
+
+
+def assert_only_strictly_lower_spectral_rejects(
+    decision: str,
+    *,
+    grade: str,
+    new_spectral: int,
+    existing_spectral: int,
+) -> None:
+    """Stage-1 spectral pre-gate policy: a transcode-grade candidate rejects
+    at Stage 1 ONLY when its spectral estimate is STRICTLY below the existing
+    one.
+
+    An EQUAL spectral floor is a tie on the single metric this coarse stage
+    measures, not affirmative worse-content evidence — it must defer to Stage
+    2's codec-aware comparison rather than reject (Mark DeNardo request 1308:
+    a tie-reject discarded a strictly-higher-bitrate copy). A strictly-lower
+    estimate is affirmative worse content and must reject. Both estimates are
+    assumed positive (the caller only invokes this on nonzero pairs).
+    """
+    if new_spectral < existing_spectral:
+        if decision != "reject":
+            raise AssertionError(
+                f"strictly-lower spectral {new_spectral} < {existing_spectral} "
+                f"(grade={grade}) must reject at Stage 1, got {decision!r}"
+            )
+    else:
+        # Equal or strictly-higher: never a Stage-1 reject.
+        if decision == "reject":
+            raise AssertionError(
+                f"spectral {new_spectral} vs {existing_spectral} "
+                f"(grade={grade}) is a tie or upgrade but was rejected at "
+                f"Stage 1 instead of deferring to Stage 2: {decision!r}"
+            )
 
 
 _MEASURED_STAGE2_DECISIONS = frozenset({
@@ -764,6 +799,33 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
             v0_probe_kind=probe_kind,
             v0_avg=v0_avg,
             v0_min=v0_min,
+        )
+
+    @given(
+        grade=st.sampled_from(("suspect", "likely_transcode")),
+        existing_spectral=_bitrates(min_value=2, max_value=3000),
+        delta=st.integers(min_value=-600, max_value=600),
+    )
+    @example(grade="suspect", existing_spectral=128, delta=0)  # Mark DeNardo tie
+    @example(grade="likely_transcode", existing_spectral=160, delta=0)
+    @example(grade="suspect", existing_spectral=128, delta=-32)  # strictly worse
+    def test_only_strictly_lower_spectral_rejects_at_stage1(
+        self, grade, existing_spectral, delta,
+    ):
+        """PAIR (generated half) with the Mark DeNardo pin in
+        ``tests/test_quality_decisions.py::TestSpectralImportDecision`` and
+        ``tests/test_quality_classification.py``: an equal spectral floor
+        defers to Stage 2, only a strictly-lower estimate rejects at Stage 1.
+        ``delta=0`` gives the tie real fuzz coverage, not just the pins."""
+        new_spectral = max(1, existing_spectral + delta)
+        decision = spectral_import_decision(
+            grade, new_spectral, existing_spectral,
+        )
+        assert_only_strictly_lower_spectral_rejects(
+            decision,
+            grade=grade,
+            new_spectral=new_spectral,
+            existing_spectral=existing_spectral,
         )
 
     @given(
@@ -1637,6 +1699,24 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 v0_probe_kind="lossless_source_v0",
                 v0_avg=300,
                 v0_min=250,
+            )
+
+    def test_strictly_lower_spectral_checker_trips_on_violations(self):
+        # Planted tie-reject (the Mark DeNardo bug): equal floor rejected.
+        with self.assertRaises(AssertionError):
+            assert_only_strictly_lower_spectral_rejects(
+                "reject",
+                grade="suspect",
+                new_spectral=128,
+                existing_spectral=128,
+            )
+        # Planted strictly-lower non-reject: worse content that failed to reject.
+        with self.assertRaises(AssertionError):
+            assert_only_strictly_lower_spectral_rejects(
+                "import",
+                grade="likely_transcode",
+                new_spectral=96,
+                existing_spectral=128,
             )
 
     def test_unmapped_codec_checker_trips_on_terminal_narrowing(self):
