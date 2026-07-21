@@ -710,13 +710,18 @@ class LifecycleWorld:
         attempt = replace(release, codec=codec or release.codec)
         before_album = self._album_for_release(release.release_id)
         self._dispatch_counter += 1
+        origin = (
+            self.beets.root
+            / "slskd"
+            / f"force-{request_id}-{self._dispatch_counter:04d}"
+        )
         source = (
             self.beets.root
             / "failed_imports"
             / f"force-{request_id}-{self._dispatch_counter:04d}"
         )
-        self.beets.stage_release(attempt, source_dir=source)
-        candidate_files = snapshot_audio_files(str(source))
+        self.beets.stage_release(attempt, source_dir=origin)
+        candidate_files = snapshot_audio_files(str(origin))
         min_bitrate = 900 if attempt.codec.casefold() == "flac" else 245
         measurement = AudioQualityMeasurement(
             min_bitrate_kbps=min_bitrate,
@@ -740,7 +745,7 @@ class LifecycleWorld:
         )
         candidate = make_album_quality_evidence(
             mb_release_id=attempt.release_id,
-            source_path=str(source),
+            source_path=str(origin),
             files=candidate_files,
             measurement=measurement,
             verified_lossless_proof=proof,
@@ -755,6 +760,8 @@ class LifecycleWorld:
         )
         if persisted is None or persisted.id is None:
             raise AssertionError("force candidate evidence did not persist")
+        source.parent.mkdir(parents=True, exist_ok=True)
+        origin.rename(source)
         download_log_id = self.db.log_download(
             request_id,
             soulseek_username=f"force-peer-{self._dispatch_counter}",
