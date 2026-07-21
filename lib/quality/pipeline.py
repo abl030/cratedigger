@@ -266,12 +266,35 @@ def full_pipeline_decision(
     # measure an avg, nothing is fabricated: metric selection falls back to
     # min and the persisted basis says "min" (dl 36660 display-lie class).
     effective_existing_format = existing_format if existing_format is not None else "MP3"
+    # Symmetric-representation gate (issue #813 Finding 1). The existing-side
+    # spectral-floor ``override_min_bitrate`` represents the installed album by
+    # its real content so a fake-high existing (CBR 320 whose spectral says 96)
+    # cannot block a genuine upgrade. But that override is ONE-SIDED: it floors
+    # only the existing measurement. When the CANDIDATE ALSO carries a spectral
+    # estimate, ``_shared_spectral_bitrates`` already floors BOTH sides
+    # symmetrically for rank — and additionally applying the existing-only
+    # override then poisons the raw ``metric_tiebreak``: the candidate keeps its
+    # inflated container bitrate while the existing is floored to its spectral
+    # estimate, minting a phantom "better" for an identical transcode. That is
+    # the Deerhunter "Rhapsody Original" bug (download_log 37725): a
+    # 256/spectral-192 candidate scored "better" over an identical
+    # 256/spectral-192 installed copy purely because the existing was floored to
+    # 192 and the candidate was not. Skip the one-sided override when the shared
+    # clamp will govern; keep it for the single-sided case (candidate carries no
+    # spectral estimate) it exists to serve. Rank demotion is unchanged either
+    # way — only the same-rank tiebreak now compares true container bitrates.
+    shared_spectral_clamp_will_fire = (
+        spectral_bitrate is not None and existing_spectral_bitrate is not None
+    )
+    effective_existing_override = (
+        None if shared_spectral_clamp_will_fire else override_min_bitrate
+    )
     existing_m = build_existing_quality_measurement(
         min_bitrate_kbps=existing_min_bitrate,
         avg_bitrate_kbps=existing_avg_bitrate,
         format=effective_existing_format,
         is_cbr=existing_is_cbr,
-        override_min_bitrate=override_min_bitrate,
+        override_min_bitrate=effective_existing_override,
         spectral_grade=existing_spectral_grade,
         spectral_bitrate_kbps=existing_spectral_bitrate,
     )

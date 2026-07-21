@@ -327,14 +327,22 @@ function buildEvidenceCardModel(h) {
 
 /**
  * Mobile wording: each number carries its own label in place ("725k
- * avg/455k min") instead of a detached trailing legend. Equal pairs (CBR
- * albums) collapse to one number, the V0 cell stays the bare pair (the V0
- * prefix is its label), and a converted source reads "FLAC→Opus". Full
- * wording stays a tap away in the detail panel.
+ * avg/455k min") instead of a detached trailing legend. A CBR metric cell
+ * keeps its pair too ("320k avg/320k min") so it stays explicit rather than
+ * collapsing to an ambiguous bare number; only the V0 cell collapses an equal
+ * pair (its "V0" prefix is its label). A converted source reads "FLAC→Opus".
+ * Full wording stays a tap away in the detail panel.
  */
 function compactEvidenceValue(kind, value) {
+  // The bitrate metric cell keeps its avg/min pair even when they're equal
+  // (CBR), instead of collapsing to a bare "320k". A bare number was
+  // ambiguous — indistinguishable from a row where only a min was measured —
+  // and hid the fact that a constant-bitrate file's avg IS its min. The V0
+  // cell still collapses an equal pair: its "V0" prefix already labels it and
+  // its compact "V0 a/b" grammar is distinct.
+  const collapseEqual = kind === 'v0';
   const labelled = (label) => (_, a, b) =>
-    (a === b ? `${a}k` : `${a}k ${label}/${b}k min`);
+    (collapseEqual && a === b ? `${a}k` : `${a}k ${label}/${b}k min`);
   let compact = value
     .replace(/(\d+)k avg \(min (\d+)k\)/g, labelled('avg'))
     .replace(/(\d+)k median \(min (\d+)k\)/g, labelled('med'));

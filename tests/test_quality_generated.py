@@ -60,6 +60,7 @@ from lib.quality import (
     compute_effective_override_bitrate,
     determine_verified_lossless,
     evidence_decision_name,
+    full_pipeline_decision,
     full_pipeline_decision_from_evidence,
     quality_gate_decision,
     spectral_import_decision,
@@ -319,6 +320,38 @@ def assert_only_strictly_lower_spectral_rejects(
                 f"(grade={grade}) is a tie or upgrade but was rejected at "
                 f"Stage 1 instead of deferring to Stage 2: {decision!r}"
             )
+
+
+def assert_existing_override_noop_under_shared_clamp(
+    with_override: dict,
+    without_override: dict,
+) -> None:
+    """When BOTH sides carry a spectral estimate, the existing-side spectral-
+    floor ``override_min_bitrate`` must not change the Stage-2 outcome.
+
+    ``_shared_spectral_bitrates`` already floors both sides symmetrically for
+    rank, so the one-sided override would only poison the raw
+    ``metric_tiebreak`` — comparing the candidate's inflated container bitrate
+    against the existing's spectral floor and minting a phantom "better". This
+    is the Deerhunter bug (download_log 37725, issue #813 Finding 1): an
+    identical transcode read as an upgrade purely because the existing was
+    floored and the candidate was not. Under the symmetric-representation gate
+    the override is a strict no-op whenever the shared clamp governs.
+    """
+    a = with_override.get("comparison_basis") or {}
+    b = without_override.get("comparison_basis") or {}
+    if with_override["stage2_import"] != without_override["stage2_import"]:
+        raise AssertionError(
+            "existing-side spectral override changed the Stage-2 decision "
+            f"under a shared spectral clamp: {with_override['stage2_import']!r} "
+            f"(override) vs {without_override['stage2_import']!r} (none)"
+        )
+    if a.get("verdict") != b.get("verdict"):
+        raise AssertionError(
+            "existing-side spectral override changed the comparison verdict "
+            f"under a shared spectral clamp: {a.get('verdict')!r} (override) "
+            f"vs {b.get('verdict')!r} (none)"
+        )
 
 
 _MEASURED_STAGE2_DECISIONS = frozenset({
@@ -826,6 +859,61 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
             grade=grade,
             new_spectral=new_spectral,
             existing_spectral=existing_spectral,
+        )
+
+    @given(
+        candidate_container=_bitrates(min_value=64, max_value=320),
+        existing_container=_bitrates(min_value=64, max_value=320),
+        candidate_spectral=_bitrates(min_value=32, max_value=320),
+        existing_spectral=_bitrates(min_value=32, max_value=320),
+        grade=st.sampled_from(("suspect", "likely_transcode")),
+        existing_grade=st.sampled_from(("suspect", "likely_transcode")),
+    )
+    @example(  # Deerhunter dl 37725: identical 256/spectral-192 transcode.
+        candidate_container=256, existing_container=256,
+        candidate_spectral=192, existing_spectral=192,
+        grade="likely_transcode", existing_grade="likely_transcode",
+    )
+    def test_existing_spectral_override_is_noop_when_candidate_has_spectral(
+        self, candidate_container, existing_container,
+        candidate_spectral, existing_spectral, grade, existing_grade,
+    ):
+        """PAIR (generated half) with the Deerhunter pin in
+        ``tests/test_quality_classification.py`` (issue #813 Finding 1).
+
+        When both sides carry a spectral estimate, the existing-side
+        spectral-floor override must not change the decision — the shared
+        clamp already floors both symmetrically. The Deerhunter ``@example``
+        makes the override decisive (with it -> phantom "better"; gated off ->
+        "equivalent"), so a mutant reverting the gate dies here.
+        """
+        # A spectral floor above the container is not something measurement
+        # produces; clamp it so the world stays physical.
+        candidate_spectral = min(candidate_spectral, candidate_container)
+        existing_spectral = min(existing_spectral, existing_container)
+        # The floor override_bitrate_from_current_evidence would derive.
+        override = min(existing_container, existing_spectral)
+
+        def decide(override_min):
+            return full_pipeline_decision(
+                is_flac=False,
+                min_bitrate=candidate_container,
+                is_cbr=True,
+                avg_bitrate=candidate_container,
+                new_format="MP3",
+                spectral_grade=grade,
+                spectral_bitrate=candidate_spectral,
+                existing_min_bitrate=existing_container,
+                existing_avg_bitrate=existing_container,
+                existing_format="MP3",
+                existing_is_cbr=True,
+                existing_spectral_grade=existing_grade,
+                existing_spectral_bitrate=existing_spectral,
+                override_min_bitrate=override_min,
+            )
+
+        assert_existing_override_noop_under_shared_clamp(
+            decide(override), decide(None),
         )
 
     @given(
@@ -1718,6 +1806,32 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 new_spectral=96,
                 existing_spectral=128,
             )
+
+    def test_existing_override_noop_checker_trips_on_divergence(self):
+        # Planted phantom upgrade (the Deerhunter bug): applying the existing-
+        # side spectral override flips the verdict from equivalent to better.
+        with self.assertRaises(AssertionError):
+            assert_existing_override_noop_under_shared_clamp(
+                {"stage2_import": "import",
+                 "comparison_basis": {"verdict": "better"}},
+                {"stage2_import": "downgrade",
+                 "comparison_basis": {"verdict": "equivalent"}},
+            )
+        # A stage2-only divergence must also trip (verdict alone is not enough).
+        with self.assertRaises(AssertionError):
+            assert_existing_override_noop_under_shared_clamp(
+                {"stage2_import": "import",
+                 "comparison_basis": {"verdict": "better"}},
+                {"stage2_import": "downgrade",
+                 "comparison_basis": {"verdict": "better"}},
+            )
+        # An invariant (identical) pair must NOT trip.
+        assert_existing_override_noop_under_shared_clamp(
+            {"stage2_import": "downgrade",
+             "comparison_basis": {"verdict": "equivalent"}},
+            {"stage2_import": "downgrade",
+             "comparison_basis": {"verdict": "equivalent"}},
+        )
 
     def test_unmapped_codec_checker_trips_on_terminal_narrowing(self):
         bad = SimResult(
