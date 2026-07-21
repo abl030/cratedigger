@@ -131,6 +131,53 @@ class TestCleanupGhostImported(unittest.TestCase):
         self.assertEqual(ghosts, [])
         self.assertEqual([row["id"] for row in manual_review], [7])
 
+    def test_conflicting_release_fields_require_manual_review(self):
+        rows = [{
+            "id": 9,
+            "mb_release_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "discogs_release_id": "12856590",
+            "artist_name": "Conflicting",
+            "album_title": "Never Auto Delete",
+        }]
+
+        with BeetsDB(self.db_path) as beets:
+            ghosts, manual_review = classify_imported_rows(rows, beets)
+
+        self.assertEqual(ghosts, [])
+        self.assertEqual([row["id"] for row in manual_review], [9])
+
+    def test_classify_imported_rows_fails_closed_on_ambiguous_exact_identity(self):
+        release_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        conn = sqlite3.connect(self.db_path)
+        for album_id in (1, 2):
+            conn.execute(
+                "INSERT INTO albums (id, mb_albumid) VALUES (?, ?)",
+                (album_id, release_id),
+            )
+            conn.execute(
+                "INSERT INTO items (id, album_id, path) VALUES (?, ?, ?)",
+                (
+                    album_id * 10,
+                    album_id,
+                    os.path.join(self.tmpdir, str(album_id), "01.flac"),
+                ),
+            )
+        conn.commit()
+        conn.close()
+        rows = [{
+            "id": 8,
+            "mb_release_id": release_id,
+            "discogs_release_id": None,
+            "artist_name": "Ambiguous",
+            "album_title": "Manual Review",
+        }]
+
+        with BeetsDB(self.db_path) as beets:
+            ghosts, manual_review = classify_imported_rows(rows, beets)
+
+        self.assertEqual(ghosts, [])
+        self.assertEqual([row["id"] for row in manual_review], [8])
+
 
 class TestDefaultDsnFailsLoud(unittest.TestCase):
     """#479 item 2: no hardcoded fallback — fail loud instead."""

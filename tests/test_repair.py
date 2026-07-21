@@ -17,8 +17,7 @@ class TestFindInconsistencies(unittest.TestCase):
     """Detect inconsistent pipeline DB rows."""
 
     def test_downloading_no_state(self):
-        rows = [{"id": 1, "status": "downloading", "active_download_state": None,
-                 "imported_path": None}]
+        rows = [{"id": 1, "status": "downloading", "active_download_state": None}]
         issues = find_inconsistencies(rows)
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0].issue_type, "corrupt_downloading")
@@ -26,58 +25,22 @@ class TestFindInconsistencies(unittest.TestCase):
 
     def test_downloading_with_state_is_fine(self):
         rows = [{"id": 1, "status": "downloading",
-                 "active_download_state": {"filetype": "flac"},
-                 "imported_path": None}]
-        issues = find_inconsistencies(rows)
-        self.assertEqual(len(issues), 0)
-
-    def test_wanted_with_imported_path_is_fine(self):
-        """Issue #93: transcode_upgrade / quality-gate upgrade flows
-        mark_done (persisting imported_path to the real beets destination),
-        then re-queue the row to ``wanted`` to search for something better.
-        The files genuinely live at imported_path during that search, so
-        flagging the row as stale would wipe correct data on the next
-        ``repair.py fix``.
-        """
-        rows = [{"id": 2, "status": "wanted",
-                 "active_download_state": None,
-                 "imported_path": "/Beets/Artist/Album"}]
-        issues = find_inconsistencies(rows)
-        self.assertEqual(len(issues), 0,
-                         "wanted + imported_path is a valid upgrade-search state")
-
-    def test_unsearchable_with_imported_path_is_fine(self):
-        """Same rationale as wanted: unsearchable after a force-import
-        could legitimately carry imported_path until the row is cleared."""
-        rows = [{"id": 4, "status": "unsearchable",
-                 "active_download_state": None,
-                 "imported_path": "/Beets/Artist/Album"}]
-        issues = find_inconsistencies(rows)
-        self.assertEqual(len(issues), 0)
-
-    def test_imported_with_path_is_fine(self):
-        rows = [{"id": 3, "status": "imported",
-                 "active_download_state": None,
-                 "imported_path": "/some/path"}]
+                 "active_download_state": {"filetype": "flac"}}]
         issues = find_inconsistencies(rows)
         self.assertEqual(len(issues), 0)
 
     def test_multiple_issues(self):
         rows = [
-            {"id": 1, "status": "downloading", "active_download_state": None,
-             "imported_path": None},
-            {"id": 2, "status": "downloading", "active_download_state": None,
-             "imported_path": None},
+            {"id": 1, "status": "downloading", "active_download_state": None},
+            {"id": 2, "status": "downloading", "active_download_state": None},
         ]
         issues = find_inconsistencies(rows)
         self.assertEqual(len(issues), 2)
 
     def test_clean_rows(self):
         rows = [
-            {"id": 1, "status": "wanted", "active_download_state": None,
-             "imported_path": None},
-            {"id": 2, "status": "imported", "active_download_state": None,
-             "imported_path": "/valid"},
+            {"id": 1, "status": "wanted", "active_download_state": None},
+            {"id": 2, "status": "imported", "active_download_state": None},
         ]
         issues = find_inconsistencies(rows)
         self.assertEqual(len(issues), 0)

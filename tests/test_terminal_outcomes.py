@@ -128,7 +128,7 @@ def _snapshot(db: PipelineDB, request_id: int, job_id: int) -> dict[str, object]
         SELECT status, active_download_state, download_attempts,
                validation_attempts,
                search_filetype_override, beets_distance, beets_scenario,
-               min_bitrate, prev_min_bitrate, imported_path,
+               min_bitrate, prev_min_bitrate,
                verified_lossless, rescued_at, prior_unfindable_category,
                unfindable_category
         FROM album_requests WHERE id = %s
@@ -253,7 +253,6 @@ def _searching_import_outcome(
         request_id=request_id,
         import_job_id=job_id,
         initial_transition=transitions.RequestTransition.to_imported(
-            imported_path="/music/Atomic/Outcome",
             verified_lossless=False,
         ),
         audit=TerminalDownloadAudit(outcome="success"),
@@ -322,7 +321,6 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
                 initial_transition=transitions.RequestTransition.to_imported(
                     beets_distance=0.04,
                     beets_scenario="strong_match",
-                    imported_path="/music/Atomic/Outcome",
                     verified_lossless=True,
                 ),
                 audit=TerminalDownloadAudit(
@@ -772,7 +770,6 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             import_job_id=job_id,
             initial_transition=transitions.RequestTransition.to_imported(
                 from_status="unsearchable",
-                imported_path="/music/Atomic/Outcome",
             ),
             audit=TerminalDownloadAudit(outcome="success"),
             job=ImportJobTerminal(
@@ -934,7 +931,6 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             initial_transition=transitions.RequestTransition.to_imported(
                 beets_distance=0.04,
                 beets_scenario="strong_match",
-                imported_path="/music/Atomic/Outcome",
                 verified_lossless=True,
             ),
             audit=TerminalDownloadAudit(
@@ -977,7 +973,6 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             request_id=request_id,
             import_job_id=job_id,
             initial_transition=transitions.RequestTransition.to_imported(
-                imported_path="/music/Atomic/Outcome",
             ),
             audit=TerminalDownloadAudit(
                 outcome="force_import",

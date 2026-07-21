@@ -9,11 +9,17 @@ columns as mutation authority.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Callable, Literal
 
 import msgspec
 
+from lib.beets_db import (
+    CurrentBeetsAmbiguous,
+    CurrentBeetsMissing,
+    CurrentBeetsUnique,
+    album_info_from_current,
+    release_identity_for_lookup,
+)
 from lib.quality import (
     LOSSLESS_CODECS,
     EVIDENCE_SUBJECT_SOURCE,
@@ -28,6 +34,8 @@ from lib.quality_evidence import (
     current_evidence_rebuild_reasons,
     load_candidate_evidence_for_source,
     load_or_backfill_current_evidence,
+    snapshot_audio_files,
+    snapshot_fingerprint,
 )
 
 logger = logging.getLogger("cratedigger")
@@ -148,11 +156,13 @@ def ensure_candidate_evidence_for_action(
     """Load valid candidate evidence for a mutating action or fail closed.
 
     Candidate evidence is addressed by release identity plus the audio
-    snapshot, not by its observed filesystem location.  Rejected downloads
-    are moved into ``failed_imports`` after preview, so refresh ``source_path``
-    when the same snapshot is consumed from its new action path.  This is the
-    shared action boundary for automation, force, and rescue imports; callers
-    must not grow a job-type-specific relocation exception.
+    snapshot, not by its observed filesystem location. Rejected downloads
+    may move into ``failed_imports`` after preview, but ``evidence.source_path``
+    remains the immutable capture-time path. The ``source_path`` argument is
+    the fingerprint-validated transient action path; the claimed import-job
+    payload carries it to the launch fence separately. This is the shared
+    action boundary for automation, force, and rescue imports; callers must
+    not grow a job-type-specific relocation exception.
     """
 
     loaded = load_candidate_evidence_for_source(
@@ -162,15 +172,8 @@ def ensure_candidate_evidence_for_action(
         import_job_id=import_job_id,
     )
     if loaded.evidence is not None:
-        evidence = loaded.evidence
-        if evidence.source_path != source_path:
-            evidence = msgspec.structs.replace(
-                evidence,
-                source_path=source_path,
-            )
-            db.upsert_album_quality_evidence(evidence)
         return CandidateEvidenceActionResult(
-            evidence=evidence,
+            evidence=loaded.evidence,
             provenance=ActionEvidenceProvenance(
                 candidate_status=CANDIDATE_STATUS_REUSED,
                 snapshot_guard=SNAPSHOT_GUARD_MATCHED,
@@ -194,13 +197,40 @@ def ensure_current_evidence_for_action(
     *,
     request_id: int,
     mb_release_id: str,
+    current_release: CurrentBeetsUnique,
     quality_ranks: Any = None,
-    current_album_path: str | None = None,
     album_info: Any = None,
     backfill_builder: CurrentEvidenceBackfillBuilder | None = None,
     beets_library_root: str = "",
 ) -> CurrentEvidenceActionResult:
     """Load or backfill current Beets evidence with action provenance."""
+
+    current_album_path = current_release.album_path
+    try:
+        current_files = snapshot_audio_files(current_album_path)
+    except OSError as exc:
+        return CurrentEvidenceActionResult(
+            evidence=None,
+            provenance=ActionEvidenceProvenance(
+                current_status=CURRENT_STATUS_FAILED,
+                snapshot_guard=SNAPSHOT_GUARD_FAILED,
+                fallback_reason=f"{type(exc).__name__}: {exc}",
+                installed_path=current_album_path,
+                fail_closed=True,
+            ),
+        )
+    if not current_files:
+        return CurrentEvidenceActionResult(
+            evidence=None,
+            provenance=ActionEvidenceProvenance(
+                current_status=CURRENT_STATUS_FAILED,
+                snapshot_guard=SNAPSHOT_GUARD_MISSING,
+                fallback_reason="current Beets album has no audio files",
+                installed_path=current_album_path,
+                fail_closed=True,
+            ),
+        )
+    current_fingerprint = snapshot_fingerprint(current_files)
 
     existing_id = db.get_request_current_evidence_id(request_id)
     existing = (
@@ -219,40 +249,20 @@ def ensure_current_evidence_for_action(
             require_lossless_source_v0=existing_requires_lossless_source_v0,
         )
         snapshot_matches = (
-            current_album_path is None
-            or audio_snapshot_matches(current_album_path, existing.files)
+            existing.mb_release_id == mb_release_id
+            and existing.snapshot_fingerprint == current_fingerprint
+            and audio_snapshot_matches(current_album_path, existing.files)
         )
         if not errors and snapshot_matches:
-            # Candidate and installed snapshots can have the same content
-            # address.  A later candidate upsert then reuses the installed
-            # row and writes its disposable staging path into ``source_path``.
-            # The linked current row must prefer the durable Beets path: all
-            # enrichment helpers use this field as their read boundary after
-            # the candidate directory has been cleaned up.
-            if (
-                current_album_path is not None
-                and os.path.realpath(existing.source_path)
-                != os.path.realpath(current_album_path)
-            ):
-                existing = msgspec.structs.replace(
-                    existing,
-                    source_path=current_album_path,
-                )
-                db.upsert_album_quality_evidence(existing)
             return CurrentEvidenceActionResult(
                 evidence=existing,
                 provenance=ActionEvidenceProvenance(
                     current_status=CURRENT_STATUS_LOADED,
-                    snapshot_guard=(
-                        SNAPSHOT_GUARD_MATCHED
-                        if current_album_path is not None
-                        else SNAPSHOT_GUARD_NOT_CHECKED
-                    ),
-                    ),
-                )
-        existing_snapshot_stale = (
-            current_album_path is not None and not snapshot_matches
-        )
+                    snapshot_guard=SNAPSHOT_GUARD_MATCHED,
+                    installed_path=current_album_path,
+                ),
+            )
+        existing_snapshot_stale = not snapshot_matches
         fallback_reason = (
             "; ".join(errors)
             if errors
@@ -267,14 +277,12 @@ def ensure_current_evidence_for_action(
                 provenance=ActionEvidenceProvenance(
                     current_status=CURRENT_STATUS_FAILED,
                     snapshot_guard=(
-                        SNAPSHOT_GUARD_MATCHED
-                        if current_album_path is not None
-                        else SNAPSHOT_GUARD_NOT_CHECKED
+                        SNAPSHOT_GUARD_STALE
+                        if existing_snapshot_stale
+                        else SNAPSHOT_GUARD_MATCHED
                     ),
                     fallback_reason=fallback_reason,
-                    installed_path=(
-                        current_album_path or existing.source_path
-                    ),
+                    installed_path=current_album_path,
                     fail_closed=True,
                 ),
             )
@@ -306,6 +314,7 @@ def ensure_current_evidence_for_action(
                 preloaded_evidence=None if existing_snapshot_stale else existing,
                 preloaded=True,
                 beets_library_root=beets_library_root,
+                current_release=current_release,
             )
     except Exception as exc:
         return CurrentEvidenceActionResult(
@@ -314,14 +323,11 @@ def ensure_current_evidence_for_action(
                 current_status=CURRENT_STATUS_FAILED,
                 snapshot_guard=(
                     SNAPSHOT_GUARD_STALE
-                    if existing is not None and current_album_path is not None
+                    if existing_snapshot_stale
                     else SNAPSHOT_GUARD_NOT_CHECKED
                 ),
                 fallback_reason=f"{type(exc).__name__}: {exc}",
-                installed_path=(
-                    current_album_path
-                    or (existing.source_path if existing is not None else None)
-                ),
+                installed_path=current_album_path,
                 fail_closed=True,
             ),
         )
@@ -346,6 +352,7 @@ def ensure_current_evidence_for_action(
             or linked.mb_release_id != backfilled.evidence.mb_release_id
             or linked.snapshot_fingerprint
                 != backfilled.evidence.snapshot_fingerprint
+            or linked.snapshot_fingerprint != current_fingerprint
         ):
             backfilled = EvidenceBuildResult(
                 None,
@@ -373,6 +380,7 @@ def ensure_current_evidence_for_action(
                         current_status=CURRENT_STATUS_BACKFILLED,
                         snapshot_guard=SNAPSHOT_GUARD_MATCHED,
                         fallback_reason=fallback_reason,
+                        installed_path=current_album_path,
                     ),
                 )
 
@@ -382,14 +390,11 @@ def ensure_current_evidence_for_action(
             current_status=_current_action_status(backfilled.status),
             snapshot_guard=(
                 SNAPSHOT_GUARD_STALE
-                if existing is not None and current_album_path is not None
+                if existing_snapshot_stale
                 else SNAPSHOT_GUARD_NOT_CHECKED
             ),
             fallback_reason=backfilled.reason or fallback_reason,
-            installed_path=(
-                current_album_path
-                or (existing.source_path if existing is not None else None)
-            ),
+            installed_path=current_album_path,
             fail_closed=True,
         ),
     )
@@ -472,15 +477,53 @@ def load_current_evidence_for_action(
                 library_root=beets_library_root,
             )
         with beets_handle as beets:
-            album_info = beets.get_album_info(mb_release_id, cfg)
+            identity = release_identity_for_lookup(mb_release_id)
+            if identity is None:
+                return CurrentEvidenceActionResult(
+                    evidence=None,
+                    provenance=ActionEvidenceProvenance(
+                        current_status=CURRENT_STATUS_FAILED,
+                        fallback_reason=(
+                            f"invalid exact release identity {mb_release_id!r}"
+                        ),
+                        fail_closed=True,
+                    ),
+                )
+            current_release = beets.resolve_current_release(identity)
+            if isinstance(current_release, CurrentBeetsMissing):
+                return None
+            if isinstance(current_release, CurrentBeetsAmbiguous):
+                return CurrentEvidenceActionResult(
+                    evidence=None,
+                    provenance=ActionEvidenceProvenance(
+                        current_status=CURRENT_STATUS_FAILED,
+                        fallback_reason=(
+                            "ambiguous current Beets authority: "
+                            f"{current_release.reason}; "
+                            f"album_ids={current_release.album_ids}"
+                        ),
+                        fail_closed=True,
+                    ),
+                )
+            album_info = album_info_from_current(current_release, cfg)
         if album_info is None:
-            return None
+            return CurrentEvidenceActionResult(
+                evidence=None,
+                provenance=ActionEvidenceProvenance(
+                    current_status=CURRENT_STATUS_FAILED,
+                    fallback_reason=(
+                        "unique current Beets album has no usable bitrate metadata"
+                    ),
+                    installed_path=current_release.album_path,
+                    fail_closed=True,
+                ),
+            )
         return ensure_current_evidence_for_action(
             db,
             request_id=request_id,
             mb_release_id=mb_release_id,
+            current_release=current_release,
             quality_ranks=cfg,
-            current_album_path=album_info.album_path,
             album_info=album_info,
             beets_library_root=beets_library_root,
         )
@@ -498,6 +541,7 @@ def load_current_evidence_for_action(
                 fail_closed=True,
             ),
         )
+
 
 def _candidate_action_status(status: str) -> str:
     if status in {"missing", "unowned", "empty_fileset"}:

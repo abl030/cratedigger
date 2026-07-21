@@ -300,11 +300,8 @@ def find_inconsistencies(db_rows: list[dict[str, Any]]) -> list[OrphanInfo]:
     Checks:
     - downloading row with no active_download_state (corrupt crash recovery)
 
-    ``imported_path`` is NOT checked against status: it means "files are on
-    disk at this path" and survives a status=wanted re-queue (transcode
-    upgrade, quality-gate upgrade search). Clearing it on status=wanted
-    would wipe the correct beets destination for any album the pipeline is
-    actively searching for a better version of. See issue #93.
+    Current library membership and location are Beets-owned and are not
+    inferred from request status or cached request fields.
     """
     issues: list[OrphanInfo] = []
     for row in db_rows:

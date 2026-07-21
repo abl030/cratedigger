@@ -8,7 +8,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from lib.beets_db import AlbumInfo
+from lib.beets_db import (
+    AlbumInfo,
+    CurrentBeetsItem,
+    CurrentBeetsUnique,
+    release_identity_for_lookup,
+)
 from lib.import_evidence import (
     ActionEvidenceProvenance,
     CurrentEvidenceActionResult,
@@ -26,7 +31,7 @@ from lib.quality_evidence import (
     EvidenceBuildResult,
     snapshot_audio_files,
 )
-from tests.fakes import FakePipelineDB
+from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
 
 
@@ -50,6 +55,22 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             mb_release_id="release-1",
             source_path=self.root,
             files=snapshot_audio_files(self.root),
+        )
+
+    def _current_release(self) -> CurrentBeetsUnique:
+        identity = release_identity_for_lookup("release-1")
+        assert identity is not None
+        return CurrentBeetsUnique(
+            identity=identity,
+            album_id=1,
+            album_path=self.root,
+            items=(CurrentBeetsItem(
+                id=1,
+                path=os.path.join(self.root, "01 - Track.mp3"),
+                format="MP3",
+                bitrate=250_000,
+            ),),
+            selectors=("mb_albumid:release-1",),
         )
 
     def _persist_candidate(self) -> int:
@@ -122,8 +143,8 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         self.assertEqual(result.provenance.snapshot_guard, "matched")
         self.assertFalse(result.provenance.fail_closed)
 
-    def test_matching_candidate_is_rebound_to_current_action_path(self):
-        """Same bytes at a moved path refresh authority before Beets launch."""
+    def test_matching_candidate_keeps_capture_path_at_moved_action_path(self):
+        """Same bytes may move without rewriting capture-time evidence."""
 
         evidence = make_album_quality_evidence(
             mb_release_id="release-1",
@@ -149,10 +170,16 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
 
         self.assertTrue(result.available)
         assert result.evidence is not None
-        self.assertEqual(result.evidence.source_path, self.root)
-        rebound = self.db.load_album_quality_evidence_by_id(persisted.id)
-        assert rebound is not None
-        self.assertEqual(rebound.source_path, self.root)
+        self.assertEqual(
+            result.evidence.source_path,
+            "/pre-quarantine/Artist - Album",
+        )
+        unchanged = self.db.load_album_quality_evidence_by_id(persisted.id)
+        assert unchanged is not None
+        self.assertEqual(
+            unchanged.source_path,
+            "/pre-quarantine/Artist - Album",
+        )
 
     def test_stale_candidate_snapshot_fails_closed(self):
         self._persist_candidate()
@@ -194,7 +221,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             self.db,
             request_id=42,
             mb_release_id="release-1",
-            current_album_path=self.root,
+            current_release=self._current_release(),
             backfill_builder=backfill,
         )
 
@@ -202,7 +229,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         self.assertEqual(result.provenance.current_status, "loaded")
         self.assertEqual(result.provenance.snapshot_guard, "matched")
 
-    def test_matching_candidate_path_is_rebound_to_installed_path(self):
+    def test_matching_candidate_capture_path_remains_historical(self):
         evidence = make_album_quality_evidence(
             mb_release_id="release-1",
             source_path="/tmp/disposable-candidate",
@@ -223,17 +250,18 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             self.db,
             request_id=42,
             mb_release_id="release-1",
-            current_album_path=self.root,
+            current_release=self._current_release(),
             backfill_builder=backfill,
         )
 
         self.assertTrue(result.available)
         self.assertEqual(result.provenance.current_status, "loaded")
         assert result.evidence is not None
-        self.assertEqual(result.evidence.source_path, self.root)
+        self.assertEqual(result.evidence.source_path, "/tmp/disposable-candidate")
+        self.assertEqual(result.provenance.installed_path, self.root)
         linked = self.db.load_album_quality_evidence_by_id(persisted.id)
         assert linked is not None
-        self.assertEqual(linked.source_path, self.root)
+        self.assertEqual(linked.source_path, "/tmp/disposable-candidate")
 
     def test_matching_v1_current_evidence_rebuilds_as_v3(self):
         evidence = make_album_quality_evidence(
@@ -253,7 +281,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             self.db,
             request_id=42,
             mb_release_id="release-1",
-            current_album_path=self.root,
+            current_release=self._current_release(),
             album_info=AlbumInfo(
                 album_id=1,
                 track_count=1,
@@ -320,7 +348,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             self.db,
             request_id=42,
             mb_release_id="release-1",
-            current_album_path=self.root,
+            current_release=self._current_release(),
             album_info=AlbumInfo(
                 album_id=1,
                 track_count=1,
@@ -353,6 +381,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             self.db,
             request_id=42,
             mb_release_id="release-1",
+            current_release=self._current_release(),
             album_info=AlbumInfo(
                 album_id=1,
                 track_count=1,
@@ -382,7 +411,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             self.db,
             request_id=42,
             mb_release_id="release-1",
-            current_album_path=self.root,
+            current_release=self._current_release(),
             album_info=AlbumInfo(
                 album_id=1,
                 track_count=1,
@@ -424,7 +453,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             self.db,
             request_id=42,
             mb_release_id="release-1",
-            current_album_path=self.root,
+            current_release=self._current_release(),
             album_info=AlbumInfo(
                 album_id=1,
                 track_count=1,
@@ -461,14 +490,14 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             self.db,
             request_id=42,
             mb_release_id="release-1",
-            current_album_path=self.root,
+            current_release=self._current_release(),
             album_info=album_info,
         )
         second = ensure_current_evidence_for_action(
             self.db,
             request_id=42,
             mb_release_id="release-1",
-            current_album_path=self.root,
+            current_release=self._current_release(),
             album_info=album_info,
         )
 
@@ -495,7 +524,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             self.db,
             request_id=42,
             mb_release_id="release-1",
-            current_album_path=self.root,
+            current_release=self._current_release(),
             album_info=AlbumInfo(
                 album_id=1,
                 track_count=1,
@@ -523,7 +552,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             self.db,
             request_id=42,
             mb_release_id="release-1",
-            current_album_path=self.root,
+            current_release=self._current_release(),
             album_info=AlbumInfo(
                 album_id=1,
                 track_count=1,
@@ -577,7 +606,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             self.db,
             request_id=42,
             mb_release_id="release-1",
-            current_album_path=self.root,
+            current_release=self._current_release(),
             album_info=AlbumInfo(
                 album_id=1,
                 track_count=1,
@@ -609,7 +638,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             self.db,
             request_id=42,
             mb_release_id="release-1",
-            current_album_path=self.root,
+            current_release=self._current_release(),
             album_info=AlbumInfo(
                 album_id=1,
                 track_count=1,
@@ -641,7 +670,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
                 self.db,
                 request_id=42,
                 mb_release_id="release-1",
-                current_album_path=self.root,
+                current_release=self._current_release(),
             )
 
         self.assertFalse(result.available)
@@ -657,7 +686,7 @@ class TestLoadCurrentEvidenceForAction(unittest.TestCase):
         self.db.seed_request(make_request_row(id=42, mb_release_id="release-1"))
         self.album_info = AlbumInfo(
             album_id=1,
-            track_count=1,
+            track_count=3,
             min_bitrate_kbps=240,
             avg_bitrate_kbps=250,
             median_bitrate_kbps=245,
@@ -679,16 +708,21 @@ class TestLoadCurrentEvidenceForAction(unittest.TestCase):
             ),
         )
 
+    def _beets(self, *, present: bool = True) -> FakeBeetsDB:
+        beets = FakeBeetsDB(library_root=self.root)
+        beets.set_album_info(
+            "release-1",
+            self.album_info if present else None,
+        )
+        return beets
+
     def test_happy_path_returns_ensure_result_unchanged(self):
         expected = self._available_result()
-        with patch("lib.beets_db.BeetsDB") as beets_cls, patch(
+        beets = self._beets()
+        with patch("lib.beets_db.BeetsDB", return_value=beets), patch(
             "lib.import_evidence.ensure_current_evidence_for_action",
             return_value=expected,
         ) as ensure:
-            beets_cls.return_value.__enter__.return_value.get_album_info.return_value = (
-                self.album_info
-            )
-
             result = load_current_evidence_for_action(
                 self.db,
                 request_id=42,
@@ -702,16 +736,18 @@ class TestLoadCurrentEvidenceForAction(unittest.TestCase):
         kwargs = ensure.call_args.kwargs
         self.assertEqual(kwargs["request_id"], 42)
         self.assertEqual(kwargs["mb_release_id"], "release-1")
-        self.assertIs(kwargs["album_info"], self.album_info)
-        self.assertEqual(kwargs["current_album_path"], self.root)
+        self.assertEqual(kwargs["album_info"].album_path, self.root)
+        self.assertEqual(kwargs["current_release"].album_path, self.root)
         self.assertEqual(kwargs["beets_library_root"], "/tmp/beets")
+        self.assertEqual(len(beets.resolve_current_release_calls), 1)
 
     def test_beets_absent_returns_none(self):
-        with patch("lib.beets_db.BeetsDB") as beets_cls, patch(
+        with patch(
+            "lib.beets_db.BeetsDB",
+            return_value=self._beets(present=False),
+        ), patch(
             "lib.import_evidence.ensure_current_evidence_for_action"
         ) as ensure:
-            beets_cls.return_value.__enter__.return_value.get_album_info.return_value = None
-
             result = load_current_evidence_for_action(
                 self.db,
                 request_id=42,
@@ -722,9 +758,10 @@ class TestLoadCurrentEvidenceForAction(unittest.TestCase):
         ensure.assert_not_called()
 
     def test_explicit_beets_library_path_is_forwarded(self):
-        with patch("lib.beets_db.BeetsDB") as beets_cls:
-            beets_cls.return_value.__enter__.return_value.get_album_info.return_value = None
-
+        with patch(
+            "lib.beets_db.BeetsDB",
+            return_value=self._beets(present=False),
+        ) as beets_cls:
             load_current_evidence_for_action(
                 self.db,
                 request_id=42,
@@ -739,14 +776,10 @@ class TestLoadCurrentEvidenceForAction(unittest.TestCase):
         )
 
     def test_ensure_raises_returns_fail_closed_result(self):
-        with patch("lib.beets_db.BeetsDB") as beets_cls, patch(
+        with patch("lib.beets_db.BeetsDB", return_value=self._beets()), patch(
             "lib.import_evidence.ensure_current_evidence_for_action",
             side_effect=RuntimeError("backfill failed"),
         ):
-            beets_cls.return_value.__enter__.return_value.get_album_info.return_value = (
-                self.album_info
-            )
-
             result = load_current_evidence_for_action(
                 self.db,
                 request_id=42,
@@ -770,14 +803,10 @@ class TestLoadCurrentEvidenceForAction(unittest.TestCase):
                 fail_closed=True,
             ),
         )
-        with patch("lib.beets_db.BeetsDB") as beets_cls, patch(
+        with patch("lib.beets_db.BeetsDB", return_value=self._beets()), patch(
             "lib.import_evidence.ensure_current_evidence_for_action",
             return_value=fail_closed,
         ):
-            beets_cls.return_value.__enter__.return_value.get_album_info.return_value = (
-                self.album_info
-            )
-
             result = load_current_evidence_for_action(
                 self.db,
                 request_id=42,
@@ -787,23 +816,20 @@ class TestLoadCurrentEvidenceForAction(unittest.TestCase):
         self.assertIs(result, fail_closed)
 
     def test_default_quality_ranks_resolves_to_defaults(self):
-        with patch("lib.beets_db.BeetsDB") as beets_cls, patch(
+        with patch("lib.beets_db.BeetsDB", return_value=self._beets()), patch(
             "lib.import_evidence.ensure_current_evidence_for_action",
             return_value=self._available_result(),
         ) as ensure:
-            get_album_info = beets_cls.return_value.__enter__.return_value.get_album_info
-            get_album_info.return_value = self.album_info
-
             load_current_evidence_for_action(
                 self.db,
                 request_id=42,
                 mb_release_id="release-1",
             )
 
-        get_album_info.assert_called_once()
-        passed_cfg = get_album_info.call_args.args[1]
-        self.assertEqual(passed_cfg, QualityRankConfig.defaults())
-        self.assertEqual(ensure.call_args.kwargs["quality_ranks"], QualityRankConfig.defaults())
+        self.assertEqual(
+            ensure.call_args.kwargs["quality_ranks"],
+            QualityRankConfig.defaults(),
+        )
 
 
 if __name__ == "__main__":

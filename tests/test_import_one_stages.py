@@ -104,7 +104,6 @@ class TestPipelineDbUpdate(unittest.TestCase):
 
         import_one.update_pipeline_db(
             42,
-            imported_path="/Beets/Artist/Album",
             distance=0.12,
             scenario="preflight_existing",
         )
@@ -117,7 +116,6 @@ class TestPipelineDbUpdate(unittest.TestCase):
         self.assertEqual(
             outcome.fields,
             {
-                "imported_path": "/Beets/Artist/Album",
                 "beets_distance": 0.12,
                 "beets_scenario": "preflight_existing",
             },

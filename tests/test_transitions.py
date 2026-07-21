@@ -365,13 +365,18 @@ class TestRequestTransition(unittest.TestCase):
             },
         )
 
-    def test_wanted_transition_rejects_imported_only_fields(self):
+    def test_transition_rejects_removed_imported_path_parameter(self):
         with self.assertRaises(TypeError):
             RequestTransition.to_wanted(imported_path="/Beets/Artist/Album")  # type: ignore[call-arg]
 
-    def test_wanted_fields_reject_imported_only_fields(self):
+    def test_wanted_fields_reject_removed_imported_path(self):
         with self.assertRaisesRegex(ValueError, "imported_path"):
             RequestTransition.to_wanted_fields(
+                fields={"imported_path": "/Beets/Artist/Album"})
+
+    def test_imported_fields_reject_removed_imported_path(self):
+        with self.assertRaisesRegex(ValueError, "imported_path"):
+            RequestTransition.to_imported_fields(
                 fields={"imported_path": "/Beets/Artist/Album"})
 
     def test_imported_fields_reject_downloading_only_fields(self):

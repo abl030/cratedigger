@@ -90,6 +90,31 @@ for (let count = 0; count <= 30; count++) {
   }
 }
 
+console.log('current library display uses typed authority states only');
+{
+  const unique = __test__.renderCurrentLibraryRow({
+    state: 'unique', path: '/library/Moved/current',
+  });
+  assertContains(unique, 'Imported to', 'unique state labels the fresh path');
+  assertContains(unique, '/library/Moved/current', 'unique state renders the resolver path');
+
+  const missing = __test__.renderCurrentLibraryRow({state: 'missing'});
+  assertContains(missing, 'Not installed in Beets', 'missing state stays explicit');
+
+  const ambiguous = __test__.renderCurrentLibraryRow({
+    state: 'ambiguous', reason: 'multiple_matches', album_ids: [7, 8],
+  });
+  assertContains(ambiguous, 'Manual review', 'ambiguous state fails closed visibly');
+  assertContains(ambiguous, 'multiple_matches', 'ambiguity reason is visible');
+  assertContains(ambiguous, 'album IDs 7, 8', 'ambiguous album ids are visible');
+
+  const unavailable = __test__.renderCurrentLibraryRow({
+    state: 'unavailable', reason: 'conflicting_request_identity',
+  });
+  assertContains(unavailable, 'Unavailable', 'unavailable state stays explicit');
+  assertContains(unavailable, 'conflicting_request_identity', 'unavailable reason is visible');
+}
+
 console.log('request 6039 current Quality uses average positive track bitrate');
 {
   const html = __test__.renderCurrentQualityRow(

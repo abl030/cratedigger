@@ -172,7 +172,6 @@ class _ServiceCase(unittest.TestCase):
         status: str = "wanted",
         mb_release_group_id: str | None = RG_ID,
         mb_release_id: str = OLD_MBID,
-        imported_path: str | None = None,
         source: str = "request",
     ) -> int:
         row = make_request_row(
@@ -185,7 +184,6 @@ class _ServiceCase(unittest.TestCase):
             year=2024,
             country="US",
             status=status,
-            imported_path=imported_path,
             source=source,
             verified_lossless=True,
             current_spectral_grade="A",
@@ -202,7 +200,6 @@ class _ServiceCase(unittest.TestCase):
         status: str = "wanted",
         master: str | None = DISCOGS_MASTER,
         release_id: str = OLD_DISCOGS_ID,
-        imported_path: str | None = None,
         source: str = "request",
     ) -> int:
         """Seed a Discogs-pathway source row.
@@ -223,7 +220,6 @@ class _ServiceCase(unittest.TestCase):
             year=2024,
             country="US",
             status=status,
-            imported_path=imported_path,
             source=source,
         )
         db.seed_request(row)
@@ -799,7 +795,7 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         )
         self.assertEqual(result.current_status, "imported")
 
-    def test_state_capture_under_lock_uses_fresh_beets_path_not_imported_path(
+    def test_state_capture_under_lock_uses_fresh_beets_path(
         self,
     ):
         """Race-window guard (P0 fix): the importer finishes between
@@ -812,12 +808,11 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         db = FakePipelineDB()
         self._seed_old(db, status="downloading")
 
-        # The importer mutation: when the lock is acquired, flip the
-        # row to ``imported`` with an ``imported_path``.
+        # The importer mutation: when the lock is acquired, flip the row to
+        # ``imported``.
         def lock_callable(namespace, key):
             row = db._requests[42]
             row["status"] = "imported"
-            row["imported_path"] = "/mnt/virtio/Music/Beets/Pet Grief/Old Pressing"
             return True
 
         db.set_advisory_lock_result(lock_callable)
@@ -862,7 +857,7 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
             )
         self.assertEqual(result.outcome, RESULT_REPLACED)
         self.assertEqual([request.album_id for request in delete_calls], [77])
-        # The fresh Beets path wins over the freshly written stale request path.
+        # The fresh Beets path drives both media notifications.
         mock_plex.assert_called_once()
         _, plex_kwargs = mock_plex.call_args
         self.assertEqual(
@@ -1221,11 +1216,7 @@ class TestReplaceHappyPath(_ServiceCase):
 
     def _replace(self, *, old_status="wanted", **service_kwargs):
         db = FakePipelineDB()
-        self._seed_old(db, status=old_status,
-                       imported_path=(
-                           "/mnt/virtio/Music/Beets/Pet Grief/Old Pressing"
-                           if old_status == "imported" else None
-                       ))
+        self._seed_old(db, status=old_status)
         plan_svc = MagicMock()
         svc = self._make_service(
             db, search_plan_service=plan_svc, **service_kwargs,
@@ -1432,10 +1423,7 @@ class TestReplaceWarnings(_ServiceCase):
             "lib.mbid_replace_service.trigger_jellyfin_scan"
         ):
             db = FakePipelineDB()
-            self._seed_old(
-                db, status="imported",
-                imported_path="/mnt/virtio/Music/Beets/X",
-            )
+            self._seed_old(db, status="imported")
             beets = self._installed_beets()
             svc = self._make_service(
                 db,
@@ -1505,10 +1493,7 @@ class TestReplaceWarnings(_ServiceCase):
             "lib.mbid_replace_service.trigger_jellyfin_scan"
         ):
             db = FakePipelineDB()
-            self._seed_old(
-                db, status="imported",
-                imported_path="/mnt/virtio/Music/Beets/X",
-            )
+            self._seed_old(db, status="imported")
             beets = self._installed_beets()
             svc = self._make_service(
                 db,
@@ -1690,8 +1675,7 @@ class TestReplaceCallOrder(_ServiceCase):
         manager = MagicMock()
         # Wrap db.supersede_request_mbid so it lands in the manager.
         db = FakePipelineDB()
-        self._seed_old(db, status="imported",
-                       imported_path="/mnt/virtio/Music/Beets/X")
+        self._seed_old(db, status="imported")
         real_supersede = db.supersede_request_mbid
 
         def supersede_recording(*args, **kwargs):
@@ -1795,13 +1779,11 @@ class TestReplaceCurrentAuthorityRealBeets(_ServiceCase):
                         self._seed_old(
                             db,
                             status="imported",
-                            imported_path="/poisoned/request/cache",
                         )
                     else:
                         self._seed_discogs(
                             db,
                             status="imported",
-                            imported_path="/poisoned/request/cache",
                         )
                     target = (
                         _fake_target_payload(
@@ -1875,11 +1857,7 @@ class TestReplaceCurrentAuthorityRealBeets(_ServiceCase):
                 path: Path(path).read_bytes() for path in sibling.item_paths
             }
             db = FakePipelineDB()
-            self._seed_old(
-                db,
-                status="imported",
-                imported_path="/poisoned/request/cache",
-            )
+            self._seed_old(db, status="imported")
             delete_op = MagicMock(side_effect=AssertionError(
                 "missing authority reached Beets mutation",
             ))

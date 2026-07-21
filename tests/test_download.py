@@ -3668,23 +3668,23 @@ class TestPollActiveDownloads(unittest.TestCase):
             album_path=source,
             format="AAC",
         ))
-        original_get_album_info = fake_beets.get_album_info
+        original_resolve_current_release = fake_beets.resolve_current_release
         beets_statuses: list[str] = []
 
-        def get_album_info(*args: Any, **kwargs: Any):
+        def resolve_current_release(*args: Any, **kwargs: Any):
             beets_statuses.append(str(fake_db.request(1)["status"]))
-            return original_get_album_info(*args, **kwargs)
+            return original_resolve_current_release(*args, **kwargs)
 
         with patch(
             "lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets,
         ), patch.object(
             fake_beets,
-            "get_album_info",
-            side_effect=get_album_info,
+            "resolve_current_release",
+            side_effect=resolve_current_release,
         ):
             poll_active_downloads(ctx)
 
-        self.assertEqual(beets_statuses, ["wanted"])
+        self.assertEqual(beets_statuses, ["downloading", "wanted"])
         self.assertEqual(fake_db.request(1)["status"], "wanted")
         current = fake_db.load_album_quality_evidence_by_id(stored.id)
         assert current is not None
@@ -6725,9 +6725,11 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
     def test_timeout_album_default_enrichment_marks_v0_attempted(self):
         """Default wiring, no injection: a real (failing) probe still lands
         the once-only attempted marker on the exact current snapshot."""
+        from lib.beets_db import AlbumInfo
         from lib.download import _timeout_album
         from lib.quality import AudioQualityMeasurement
         from lib.quality_evidence import snapshot_audio_files
+        from tests.fakes import FakeBeetsDB
 
         source = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, source, ignore_errors=True)
@@ -6758,8 +6760,21 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
         assert stored is not None and stored.id is not None
         db.set_request_current_evidence(42, stored.id)
         ctx = make_ctx_with_fake_db(db)
+        fake_beets = FakeBeetsDB()
+        fake_beets.set_album_info("mb-uuid", AlbumInfo(
+            album_id=1,
+            track_count=1,
+            min_bitrate_kbps=320,
+            avg_bitrate_kbps=320,
+            median_bitrate_kbps=320,
+            is_cbr=True,
+            album_path=source,
+            format="MP3",
+        ))
 
-        with patch("lib.download.cancel_and_delete"):
+        with patch("lib.download.cancel_and_delete"), patch(
+            "lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets,
+        ):
             _timeout_album(self._entry(), 42, "stalled", ctx)
 
         persisted = db.load_album_quality_evidence_by_id(stored.id)
@@ -6816,8 +6831,8 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
         self.assertEqual(log_row["_current_evidence_format"], "MP3")
         self.assertEqual(log_row["_current_evidence_avg_bitrate"], 190)
 
-    def test_timeout_v1_refresh_runs_after_wanted_and_preserves_history(self):
-        """Timeout bookkeeping stays fast while its v4 repair stays historical."""
+    def test_timeout_v1_reauthorizes_after_wanted_and_preserves_history(self):
+        """Timeout bookkeeping reauthorizes v4 repair after ``wanted``."""
         from lib.beets_db import AlbumInfo
         from lib.config import CratediggerConfig
         from lib.download import _timeout_album
@@ -6876,12 +6891,12 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
             album_path=source,
             format="AAC",
         ))
-        original_get_album_info = fake_beets.get_album_info
+        original_resolve_current_release = fake_beets.resolve_current_release
         beets_statuses: list[str] = []
 
-        def get_album_info(*args: Any, **kwargs: Any):
+        def resolve_current_release(*args: Any, **kwargs: Any):
             beets_statuses.append(str(db.request(42)["status"]))
-            return original_get_album_info(*args, **kwargs)
+            return original_resolve_current_release(*args, **kwargs)
 
         ctx = make_ctx_with_fake_db(
             db,
@@ -6891,12 +6906,12 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
             "lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets,
         ), patch.object(
             fake_beets,
-            "get_album_info",
-            side_effect=get_album_info,
+            "resolve_current_release",
+            side_effect=resolve_current_release,
         ):
             _timeout_album(self._entry(), 42, "stalled", ctx)
 
-        self.assertEqual(beets_statuses, ["wanted"])
+        self.assertEqual(beets_statuses, ["downloading", "wanted"])
         self.assertEqual(db.request(42)["status"], "wanted")
         current = db.load_album_quality_evidence_by_id(stored.id)
         assert current is not None

@@ -288,7 +288,6 @@ def _load_evidence_import_gate(
                 "attempt did not produce a usable installed HAVE spectral grade"
             )
     if fresh_have_failure is not None:
-        current = current_result.evidence
         return EvidenceImportGate(
             current=None,
             candidate=candidate_result.evidence,
@@ -296,10 +295,7 @@ def _load_evidence_import_gate(
             candidate_reason=candidate_result.provenance.fallback_reason,
             current_status=CURRENT_STATUS_FAILED,
             current_reason=fresh_have_failure,
-            current_path=(
-                current_result.provenance.installed_path
-                or (current.source_path if current is not None else None)
-            ),
+            current_path=current_result.provenance.installed_path,
             current_snapshot_guard=current_result.provenance.snapshot_guard,
             snapshot_guard=candidate_result.provenance.snapshot_guard,
         )
@@ -351,7 +347,14 @@ def _refresh_current_evidence_after_import(
     module-configured read-only library path.
     """
 
-    from lib.beets_db import BeetsDB
+    from lib.beets_db import (
+        BeetsDB,
+        CurrentBeetsAmbiguous,
+        CurrentBeetsMissing,
+        album_info_from_current,
+        exact_release_identity_matches,
+        release_identity_for_lookup,
+    )
     from lib.quality import QualityRankConfig
 
     cfg = quality_ranks if quality_ranks is not None else QualityRankConfig.defaults()
@@ -368,10 +371,41 @@ def _refresh_current_evidence_after_import(
             beets_library_db_path,
             library_root=beets_library_root,
         )
+    identity = release_identity_for_lookup(mb_release_id)
+    if identity is None:
+        return EvidenceBuildResult(
+            None,
+            "failed",
+            f"invalid exact release identity {mb_release_id!r}",
+        )
+    if source_candidate is not None and not exact_release_identity_matches(
+        mb_release_id,
+        source_candidate.mb_release_id,
+    ):
+        return EvidenceBuildResult(
+            None,
+            "identity_mismatch",
+            "candidate evidence exact release identity does not match import",
+        )
     with beets_handle as beets:
-        album_info = beets.get_album_info(mb_release_id, cfg)
-    if album_info is None:
+        current = beets.resolve_current_release(identity)
+    if isinstance(current, CurrentBeetsMissing):
         return EvidenceBuildResult(None, "empty_current", "album not in beets")
+    if isinstance(current, CurrentBeetsAmbiguous):
+        return EvidenceBuildResult(
+            None,
+            "ambiguous_current",
+            "ambiguous current Beets authority: "
+            f"{current.reason}; album_ids={current.album_ids}",
+        )
+    album_info = album_info_from_current(current, cfg)
+    if album_info is None:
+        return EvidenceBuildResult(
+            None,
+            "failed",
+            "unique current Beets album has no usable bitrate metadata",
+            current_album_path=current.album_path,
+        )
 
     if source_candidate is not None:
         result = propagate_candidate_evidence_to_current(
