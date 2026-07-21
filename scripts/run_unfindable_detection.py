@@ -31,7 +31,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from lib.config import read_runtime_config  # noqa: E402
+from lib.config import CratediggerConfig, read_runtime_config  # noqa: E402
 from lib.migrator import SchemaBehindError, assert_schema_current  # noqa: E402
 from lib.slskd_client import SlskdClient  # noqa: E402
 from lib.pipeline_db import DEFAULT_DSN, PipelineDB  # noqa: E402
@@ -44,12 +44,13 @@ from lib.unfindable_detection_service import (  # noqa: E402
     RESULT_PROBE_FAILED,
     RESULT_REQUEST_NOT_FOUND,
     UnfindableDetectionService,
+    UnfindableServiceResult,
 )
 
 logger = logging.getLogger("cratedigger-unfindable")
 
 
-def _build_slskd_client(cfg) -> SlskdClient:
+def _build_slskd_client(cfg: CratediggerConfig) -> SlskdClient:
     """Construct the slskd client from the runtime config.
 
     Mirrors ``cratedigger._create_slskd_client`` minus the connection-
@@ -64,7 +65,7 @@ def _build_slskd_client(cfg) -> SlskdClient:
     )
 
 
-def _summarise(results) -> dict[str, int]:
+def _summarise(results: list[UnfindableServiceResult]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for r in results:
         counts[r.outcome] = counts.get(r.outcome, 0) + 1

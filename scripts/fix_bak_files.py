@@ -15,11 +15,15 @@ Usage:
         python3 scripts/fix_bak_files.py --dry-run
 """
 
+from __future__ import annotations
+
 import json
 import os
 import sqlite3
 import subprocess
 import sys
+
+import msgspec
 
 BEETS_DB = os.environ.get("BEETS_DB", "/mnt/virtio/Music/beets-library.db")
 VALID_AUDIO_EXT = {".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac", ".wma", ".wav"}
@@ -65,11 +69,20 @@ def detect_format(path: str) -> str | None:
             capture_output=True, text=True, timeout=15)
         if result.returncode != 0:
             return None
-        payload = json.loads(result.stdout or "{}")
-        streams = payload.get("streams")
-        if isinstance(streams, list):
-            for stream in streams:
-                if not isinstance(stream, dict):
+        # ffprobe stdout is a trusted local subprocess JSON object; the
+        # ``msgspec.convert`` steps recover parameterized dict/list shapes
+        # (established wire-boundary adapter, CLAUDE.md "Wire-boundary
+        # types") from ``json.loads``'s ``Any`` while preserving the exact
+        # non-dict-stream skip behaviour the ``isinstance`` guards had.
+        payload_obj = json.loads(result.stdout or "{}")
+        payload = msgspec.convert(payload_obj, type=dict[str, object])
+        streams_obj = payload.get("streams")
+        if isinstance(streams_obj, list):
+            streams = msgspec.convert(streams_obj, type=list[object])
+            for stream_obj in streams:
+                try:
+                    stream = msgspec.convert(stream_obj, type=dict[str, object])
+                except msgspec.ValidationError:
                     continue
                 if stream.get("codec_type") != "audio":
                     continue
@@ -78,7 +91,8 @@ def detect_format(path: str) -> str | None:
                     return CODEC_EXT_MAP[codec]
         fmt_obj = payload.get("format")
         if isinstance(fmt_obj, dict):
-            names = str(fmt_obj.get("format_name") or "").lower().split(",")
+            fmt = msgspec.convert(fmt_obj, type=dict[str, object])
+            names = str(fmt.get("format_name") or "").lower().split(",")
             for name in names:
                 if name in FORMAT_EXT_MAP:
                     return FORMAT_EXT_MAP[name]
@@ -103,7 +117,7 @@ def main() -> None:
     conn = sqlite3.connect(BEETS_DB)
     rows = conn.execute("SELECT id, path FROM items").fetchall()
 
-    bad = []
+    bad: list[tuple[int, str]] = []
     for item_id, raw_path in rows:
         path = raw_path.decode("utf-8", errors="replace") if isinstance(raw_path, bytes) else raw_path
         if path_filter and path_filter not in path:

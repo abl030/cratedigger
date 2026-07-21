@@ -5,12 +5,28 @@ current quality state. ``repair-spectral`` — find and fix albums stuck
 by stale ``current_spectral_bitrate`` (issue #18).
 """
 
+from __future__ import annotations
+
 import argparse
 
-from typing import TypedDict
+from typing import TypedDict, TYPE_CHECKING
 
 from lib import transitions
 from scripts.pipeline_cli._format import _fmt_br
+
+if TYPE_CHECKING:
+    # Both ``cmd_quality`` and ``cmd_repair_spectral`` call
+    # ``lib.dispatch.load_quality_gate_state(db=...)``, which is typed
+    # against the concrete ``PipelineDB`` class (not a Protocol) --
+    # unlike the narrow-Protocol pattern used elsewhere in this package
+    # (issue #784, #409), a Protocol here would NOT satisfy that
+    # downstream nominal-class parameter. ``FakePipelineDB`` does not
+    # subclass ``PipelineDB``, so every test call site already wraps its
+    # fake with ``cast(Any, db)`` (see ``tests/test_pipeline_cli.py``'s
+    # ``TestCmdQuality``/``TestCmdRepairSpectral``), which is exactly
+    # what makes this concrete annotation safe to add here.
+    from lib.pipeline_db import PipelineDB
+    from lib.quality import QualityRankConfig
 
 
 class _ScenarioParams(TypedDict, total=False):
@@ -40,7 +56,7 @@ class _ScenarioParams(TypedDict, total=False):
 finalize_request = transitions.finalize_request
 
 
-def _load_runtime_rank_config():
+def _load_runtime_rank_config() -> "QualityRankConfig":
     """Load the runtime QualityRankConfig from the active config.ini."""
     from lib.config import read_runtime_rank_config
 
@@ -79,7 +95,7 @@ def _quality_preview_target_label(
     return "V0"
 
 
-def cmd_quality(db, args):
+def cmd_quality(db: "PipelineDB", args: argparse.Namespace) -> None:
     """Show quality state and simulate decisions for common download scenarios."""
     from lib.dispatch import load_quality_gate_state
     from lib.quality import (full_pipeline_decision, quality_gate_decision,
@@ -412,7 +428,9 @@ def cmd_quality(db, args):
                       "(attempt-local HAVE audit not modeled; keep all tiers)")
 
 
-def cmd_repair_spectral(db, args):
+def cmd_repair_spectral(
+    db: "PipelineDB", args: argparse.Namespace,
+) -> int | None:
     """Find and repair albums stuck by stale current_spectral_bitrate.
 
     Identifies wanted albums where current_spectral_grade is genuine but
@@ -530,7 +548,9 @@ def cmd_repair_spectral(db, args):
           else f"\n[DRY RUN] Would repair {len(candidates)} album(s).")
 
 
-def add_quality_subparsers(sub: argparse._SubParsersAction) -> None:
+def add_quality_subparsers(
+    sub: "argparse._SubParsersAction[argparse.ArgumentParser]",
+) -> None:
     """Add ``quality`` / ``repair-spectral`` (#521 carve out of
     ``routes_meta._build_parser``, verbatim argument definitions)."""
     # quality

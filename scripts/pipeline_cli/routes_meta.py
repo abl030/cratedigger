@@ -13,6 +13,7 @@ the assembled parser to self-document the CLI surface, mirroring
 
 import argparse
 import json
+from typing import cast, TYPE_CHECKING
 
 from lib.pipeline_db import DEFAULT_DSN
 from scripts.pipeline_cli.audit import add_audit_subparser
@@ -142,6 +143,23 @@ def _describe_argparse_action(
     return label
 
 
+# ``isinstance(a, argparse._SubParsersAction)`` can only narrow to the
+# unparameterized form (Python's ``isinstance`` can't check a generic type
+# argument) — ``cast`` restores the declared ``ArgumentParser`` element type
+# at each narrowing site below. Purely an argparse-internals typing gap, not
+# an external-JSON concern (issue #784's asserts caution doesn't apply).
+#
+# ``argparse._SubParsersAction`` is a stub-only generic: typeshed declares
+# it ``Generic[...]`` for static checking, but the real runtime class does
+# NOT support ``[...]`` subscripting (``TypeError: type '_SubParsersAction'
+# is not subscriptable``). The alias below must therefore never be
+# evaluated outside ``TYPE_CHECKING``; every runtime use quotes it as a
+# forward-reference string (``cast("_SubParsers", ...)``), which
+# ``typing.cast`` never inspects at runtime.
+if TYPE_CHECKING:
+    _SubParsers = argparse._SubParsersAction[argparse.ArgumentParser]
+
+
 def _collect_cli_routes(
     parser: argparse.ArgumentParser,
 ) -> list[dict[str, object]]:
@@ -155,8 +173,8 @@ def _collect_cli_routes(
     rows: list[dict[str, object]] = []
 
     def _walk(p: argparse.ArgumentParser, prefix: str) -> None:
-        sub_actions = [
-            a for a in p._actions  # noqa: SLF001
+        sub_actions: list[_SubParsers] = [
+            cast("_SubParsers", a) for a in p._actions  # noqa: SLF001
             if isinstance(a, argparse._SubParsersAction)  # noqa: SLF001
         ]
         if not sub_actions:
@@ -164,12 +182,21 @@ def _collect_cli_routes(
         for sub_action in sub_actions:
             for name, sub_parser in sub_action.choices.items():
                 label = f"{prefix} {name}".strip()
-                # Recurse first to detect leaves.
-                nested = [
-                    a for a in sub_parser._actions  # noqa: SLF001
-                    if isinstance(a, argparse._SubParsersAction)  # noqa: SLF001
-                    and a.choices
-                ]
+                # Recurse first to detect leaves. Two-step filter (not a
+                # comprehension testing ``a.choices`` inline) because
+                # ``isinstance`` can only narrow to the unparameterized
+                # form -- the ``cast`` must land before ``.choices`` is
+                # read, or that member access is still Unknown-typed.
+                nested: list[_SubParsers] = []
+                for raw_nested_action in sub_parser._actions:  # noqa: SLF001
+                    if not isinstance(
+                        raw_nested_action, argparse._SubParsersAction,  # noqa: SLF001
+                    ):
+                        continue
+                    typed_nested_action = cast(
+                        "_SubParsers", raw_nested_action)
+                    if typed_nested_action.choices:
+                        nested.append(typed_nested_action)
                 if nested:
                     _walk(sub_parser, label)
                     continue
@@ -200,12 +227,13 @@ def _collect_cli_routes(
     return rows
 
 
-def cmd_routes(db, args) -> int:
+def cmd_routes(db: object, args: argparse.Namespace) -> int:
     """Emit every CLI subcommand with its args and description.
 
     Reads the parser from ``_build_parser`` so the listing cannot drift
     from the actual surface — adding a subparser anywhere updates this
-    output automatically.
+    output automatically. ``db`` is unused — ``routes`` is the one
+    subcommand ``main()`` runs without opening a DB connection.
     """
     parser, _, _ = _build_parser()
     rows = _collect_cli_routes(parser)
@@ -214,7 +242,12 @@ def cmd_routes(db, args) -> int:
         return 0
     for row in rows:
         raw_args = row["args"]
-        args_list = raw_args if isinstance(raw_args, list) else []
+        # ``_collect_cli_routes`` always stores a ``list[str]`` under
+        # "args" -- ``cast`` restores that after the ``isinstance`` narrow
+        # loses the element type (own internal data, not external JSON).
+        args_list = (
+            cast(list[str], raw_args) if isinstance(raw_args, list) else []
+        )
         args_str = " ".join(str(a) for a in args_list) if args_list else ""
         if args_str:
             print(f"{row['subcommand']}  [{args_str}]")

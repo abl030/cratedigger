@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import argparse
 import json
+from typing import TYPE_CHECKING
 
 import msgspec
 
 from lib.beets_db import BeetsDB, open_beets_db
 from lib.world_audit_service import WorldAuditReport, audit_world
+
+if TYPE_CHECKING:
+    from lib.world_audit_service import WorldAuditPipelineDB
 
 
 class _AuditWorldArgs(msgspec.Struct, frozen=True):
@@ -41,7 +45,7 @@ def _render_text(report: WorldAuditReport) -> None:
         print(f"{violation.code}: {violation.detail}")
 
 
-def cmd_audit_world(db, args: object) -> int:
+def cmd_audit_world(db: "WorldAuditPipelineDB", args: object) -> int:
     """Run the shared world invariant bank without mutating either store."""
     typed_args = msgspec.convert(vars(args), type=_AuditWorldArgs)
     try:

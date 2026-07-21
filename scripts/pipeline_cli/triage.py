@@ -15,9 +15,12 @@ thin wrapper around ``lib.triage_service``; the matching HTTP routes
 status-code mapping.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys
+from typing import TYPE_CHECKING, Any, Optional, Protocol
 
 import msgspec
 
@@ -28,6 +31,53 @@ import msgspec
 # service layer; both wrappers auto-pick them up.
 from lib.triage_service import VALID_FILTER_FORMS as _TRIAGE_VALID_FILTER_FORMS_BASE
 from scripts.pipeline_cli._format import _format_dt, _json_default, _truncate
+
+if TYPE_CHECKING:
+    from lib.pipeline_db.rows import AlbumRequestRow, WrongMatchCandidateRow
+    from lib.triage_service import ParsedTriageFilter
+
+
+class _TriagePipelineDB(Protocol):
+    """Narrow ``db`` shape the triage request/cohort commands touch
+    (issue #784, #409 pattern) — mirrors ``lib.triage_service._PipelineDB``
+    structurally so ``PipelineDB`` / ``FakePipelineDB`` conform without
+    importing that private symbol across the module boundary."""
+
+    def get_request(self, request_id: int) -> "AlbumRequestRow | None": ...
+
+    def list_triage_page(
+        self,
+        *,
+        filter_spec: "ParsedTriageFilter",
+        page_size: int,
+        after_request_id: Optional[int],
+    ) -> list[dict[str, Any]]: ...
+
+    def get_field_resolutions_for_requests(
+        self, request_ids: list[int],
+    ) -> dict[int, list[dict[str, Any]]]: ...
+
+    def get_search_summaries_for_requests(
+        self, request_ids: list[int],
+    ) -> dict[int, dict[str, Any]]: ...
+
+    def get_recent_search_log_for_requests(
+        self,
+        request_ids: list[int],
+        *,
+        per_request_limit: int,
+    ) -> dict[int, list[dict[str, Any]]]: ...
+
+
+class _QuarantineWrongMatchesDB(Protocol):
+    """Narrow ``db`` shape ``cmd_triage_quarantine`` touches (issue #784,
+    #409 pattern) — mirrors
+    ``lib.quarantine_triage_service._WrongMatchesDB`` structurally so the
+    concrete DB conforms without importing the private symbol across the
+    module boundary."""
+
+    def get_wrong_matches(self) -> "list[WrongMatchCandidateRow]": ...
+
 
 _TRIAGE_VALID_FILTER_FORMS = (
     "all",
@@ -46,7 +96,7 @@ _TRIAGE_VALID_FILTER_FORMS = (
 )
 
 
-def cmd_triage_show(db, args):
+def cmd_triage_show(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
     """``pipeline-cli triage show <id>`` — per-request triage composition.
 
     Wraps ``compose_triage_for_request`` and renders the full payload
@@ -176,7 +226,7 @@ def cmd_triage_show(db, args):
     return 0
 
 
-def cmd_triage_list(db, args):
+def cmd_triage_list(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
     """``pipeline-cli triage list --filter=<spec>`` — cohort listing.
 
     Wraps ``list_triage``. Default page size is 50. Use ``--after=<id>``
@@ -327,7 +377,9 @@ def cmd_triage_list(db, args):
     return 0
 
 
-def cmd_triage_quarantine(db, args):
+def cmd_triage_quarantine(
+    db: _QuarantineWrongMatchesDB, args: argparse.Namespace,
+) -> int:
     """List unreferenced immediate folders under ``failed_imports``.
 
     Exit codes:
@@ -364,7 +416,9 @@ def cmd_triage_quarantine(db, args):
     return 0
 
 
-def _quarantine_scan_unavailable(args, error: str) -> int:
+def _quarantine_scan_unavailable(
+    args: argparse.Namespace, error: str,
+) -> int:
     """Render the quarantine command's stable unavailable mapping."""
     if bool(getattr(args, "json", False)):
         print(json.dumps({"error": error}, indent=2, sort_keys=True))
@@ -374,7 +428,7 @@ def _quarantine_scan_unavailable(args, error: str) -> int:
 
 
 def add_triage_subparser(
-    sub: argparse._SubParsersAction,
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> argparse.ArgumentParser:
     """Add ``triage`` + its nested subcommands (#521 carve out of
     ``routes_meta._build_parser``, verbatim argument definitions).

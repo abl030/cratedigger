@@ -5,16 +5,34 @@ on-disk quality and stamped with ``in_flight_rescue``. Counterpart of
 ``GET /api/pipeline/long-tail`` (U1).
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys
+from typing import Any, Optional, Protocol, TYPE_CHECKING
 
 import msgspec
 
 from scripts.pipeline_cli._format import _json_default, _truncate
 
+if TYPE_CHECKING:
+    from lib.long_tail_service import BandFn
 
-def _cli_band_fn(release_ids):
+
+class _LongTailDB(Protocol):
+    """Narrow ``db`` shape ``cmd_long_tail`` touches (#409 pattern) —
+    mirrors ``lib.long_tail_service._PipelineDB`` structurally so
+    ``FakePipelineDB`` conforms without importing that private symbol."""
+
+    def get_long_tail_cohort(self) -> list[dict[str, Any]]: ...
+
+    def get_long_tail_request(
+        self, request_id: int,
+    ) -> Optional[dict[str, Any]]: ...
+
+
+def _cli_band_fn(release_ids: list[str]) -> dict[str, str]:
     """Build the long-tail band map for the CLI.
 
     Reuses the SAME banding decision the web overlay uses
@@ -51,7 +69,12 @@ def _cli_band_fn(release_ids):
     }
 
 
-def cmd_long_tail(db, args, *, band_fn=None):
+def cmd_long_tail(
+    db: "_LongTailDB",
+    args: argparse.Namespace,
+    *,
+    band_fn: "Optional[BandFn]" = None,
+) -> int:
     """``pipeline-cli long-tail [--band=<band>] [--json]``.
 
     The long-tail worklist read — every ``wanted`` request pre-banded by
@@ -152,7 +175,9 @@ def cmd_long_tail(db, args, *, band_fn=None):
     return 0
 
 
-def add_long_tail_subparser(sub: argparse._SubParsersAction) -> None:
+def add_long_tail_subparser(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
     """Add ``long-tail`` (#521 carve out of ``routes_meta._build_parser``,
     verbatim argument definitions)."""
     p_long_tail = sub.add_parser(

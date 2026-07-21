@@ -20,6 +20,8 @@ Usage:
     PLEX_TOKEN=$(...)            python3 merge_dupes.py dupes.after.json --commit
     PLEX_TOKEN=$(...)            python3 merge_dupes.py dupes.after.json --commit --limit 5
 """
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -27,20 +29,46 @@ import ssl
 import sys
 import urllib.request
 
+import msgspec
+
 BASE = "https://plex.ablz.au"
 CTX = ssl.create_default_context()
 CTX.check_hostname = False
 CTX.verify_mode = ssl.CERT_NONE
 
 
-def pick_primary(members):
+class _MemberRow(msgspec.Struct):
+    """One album row within a dup group, as emitted by plex_dupes_audit.py."""
+
+    ratingKey: str
+    track_count: int
+
+
+class _GroupRow(msgspec.Struct):
+    """One duplicate (artist, title, year) group, as emitted by plex_dupes_audit.py."""
+
+    parent_title: str
+    title: str
+    year: str
+    classification: str
+    members: list[_MemberRow]
+
+
+class _DupesFile(msgspec.Struct):
+    """The subset of plex_dupes_audit.py's JSON output this script consumes."""
+
+    groups: list[_GroupRow]
+    summary: dict[str, int]
+
+
+def pick_primary(members: list[_MemberRow]) -> _MemberRow:
     return sorted(
         members,
-        key=lambda m: (-m["track_count"], int(m["ratingKey"])),
+        key=lambda m: (-m.track_count, int(m.ratingKey)),
     )[0]
 
 
-def merge(primary_rk, ghost_rks, token):
+def merge(primary_rk: str, ghost_rks: list[str], token: str) -> tuple[int, bytes]:
     ids = ",".join(ghost_rks)
     url = f"{BASE}/library/metadata/{primary_rk}/merge?ids={ids}&X-Plex-Token={token}"
     req = urllib.request.Request(url, method="PUT")
@@ -48,7 +76,7 @@ def merge(primary_rk, ghost_rks, token):
         return r.status, r.read()
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("json_path", help="dupes.after.json from build_dupes_json.py")
     ap.add_argument("--commit", action="store_true",
@@ -66,21 +94,23 @@ def main():
     if not token:
         sys.exit("PLEX_TOKEN env var required")
 
-    data = json.load(open(args.json_path))
-    print(f"Loaded {len(data['groups'])} dup groups from {args.json_path}", file=sys.stderr)
-    print(f"  same_folder: {data['summary'].get('same_folder', 0)}", file=sys.stderr)
-    print(f"  diff_folder: {data['summary'].get('diff_folder', 0)}", file=sys.stderr)
+    with open(args.json_path) as f:
+        raw = json.load(f)
+    data = msgspec.convert(raw, type=_DupesFile)
+    print(f"Loaded {len(data.groups)} dup groups from {args.json_path}", file=sys.stderr)
+    print(f"  same_folder: {data.summary.get('same_folder', 0)}", file=sys.stderr)
+    print(f"  diff_folder: {data.summary.get('diff_folder', 0)}", file=sys.stderr)
 
-    targets = []
-    for g in data["groups"]:
-        if g["classification"] == "diff_folder" and not args.include_diff_folder:
+    targets: list[tuple[_GroupRow, _MemberRow, list[_MemberRow]]] = []
+    for g in data.groups:
+        if g.classification == "diff_folder" and not args.include_diff_folder:
             continue
-        if g["classification"] not in ("same_folder", "diff_folder"):
+        if g.classification not in ("same_folder", "diff_folder"):
             continue
-        if len(g["members"]) < 2:
+        if len(g.members) < 2:
             continue
-        primary = pick_primary(g["members"])
-        ghosts = [m for m in g["members"] if m["ratingKey"] != primary["ratingKey"]]
+        primary = pick_primary(g.members)
+        ghosts = [m for m in g.members if m.ratingKey != primary.ratingKey]
         if not ghosts:
             continue
         targets.append((g, primary, ghosts))
@@ -95,16 +125,16 @@ def main():
     ok = 0
     fail = 0
     for i, (g, primary, ghosts) in enumerate(targets, 1):
-        ghost_rks = [m["ratingKey"] for m in ghosts]
-        ghost_counts = [m["track_count"] for m in ghosts]
-        label = f"{g['parent_title']} / {g['title']} ({g['year']})"
+        ghost_rks = [m.ratingKey for m in ghosts]
+        ghost_counts = [m.track_count for m in ghosts]
+        label = f"{g.parent_title} / {g.title} ({g.year})"
         print(f"[{i:>4}/{len(targets)}] {label}")
-        print(f"        keep rk={primary['ratingKey']:>6} tracks={primary['track_count']:>3}  "
+        print(f"        keep rk={primary.ratingKey:>6} tracks={primary.track_count:>3}  "
               f"merge ghosts={list(zip(ghost_rks, ghost_counts))}")
         if not args.commit:
             continue
         try:
-            status, _body = merge(primary["ratingKey"], ghost_rks, token)
+            status, _body = merge(primary.ratingKey, ghost_rks, token)
             if 200 <= status < 300:
                 ok += 1
                 print(f"        ✓ HTTP {status}")

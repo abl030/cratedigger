@@ -15,7 +15,7 @@ import argparse
 import os
 import sys
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Callable, Protocol
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -26,7 +26,8 @@ from lib import transitions
 # ``lib.dispatch.outcome_actions.finalize_request`` for the rationale.
 finalize_request = transitions.finalize_request
 
-from lib.download_recovery import (find_blocked_processing_path_issues,
+from lib.download_recovery import (BlockedRecoveryIssue,
+                                   find_blocked_processing_path_issues,
                                    find_blocked_recovery_issues)
 from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE, PipelineDB,
                              release_id_to_lock_key)
@@ -35,6 +36,37 @@ from lib.repair import (OrphanInfo, SlskdOrphanTransfer, find_inconsistencies,
                         find_orphaned_downloads, find_slskd_orphans,
                         suggest_repair)
 from lib.slskd_client import DownloadUser
+
+
+class _CursorRows(Protocol):
+    """Narrow shape of the cursor ``PipelineDB._execute`` returns — just
+    enough for this module's raw-SQL probes (issue #784, #409 pattern;
+    mirrors ``scripts/pipeline_cli/album_requests.py``). ``fetchone`` keeps
+    the tuple-row branch typeable too — real ``_execute`` calls always use
+    ``RealDictCursor`` so that branch is defensive/unreachable today, but
+    this stays annotation-only and must not assert that away.
+    """
+
+    def fetchall(self) -> list[dict[str, object]]: ...
+    def fetchone(self) -> dict[str, object] | tuple[object, ...] | None: ...
+
+
+class _RepairDB(transitions.TransitionsDB, Protocol):
+    """Narrow surface this module's scan/fix helpers touch through the
+    shared ``db`` handle (issue #784, #409 pattern) -- ``TransitionsDB``
+    (the status-transition engine's own narrow protocol, reused here since
+    ``cmd_fix`` calls ``finalize_request``/``require_transition_applied``)
+    plus the two extra raw-SQL / ledger methods this module calls
+    directly. ``PipelineDB``'s real ``_execute`` is untyped in its own
+    module (out of this migration's scope) — this Protocol carries the
+    fully-typed contract instead of inheriting that gap.
+    """
+
+    def _execute(
+        self, sql: str, params: tuple[object, ...] = (),
+    ) -> _CursorRows: ...
+
+    def get_owned_transfer_keys(self) -> set[tuple[str, str]]: ...
 
 # No hardcoded fallback (#479): the nspawn DB has moved before (last time to
 # 10.20.0.11) and a baked-in IP silently dials a dead host forever after the
@@ -105,7 +137,7 @@ def _dedupe_issues(issues: list[OrphanInfo]) -> list[OrphanInfo]:
 
 
 def _auto_import_in_progress(
-    db: PipelineDB,
+    db: _RepairDB,
     request_id: int,
     mb_release_id: str | None,
 ) -> bool | None:
@@ -157,12 +189,14 @@ def _blocked_processing_issue_type(detail: str) -> str:
 
 
 def _collect_issues(
-    db: PipelineDB,
+    db: _RepairDB,
     slskd_host: str | None,
     slskd_key: str | None,
     *,
-    find_orphaned_fn: "Callable[..., list[OrphanInfo]]" = find_orphaned_downloads,
-    find_blocked_recovery_fn: "Callable[..., list[Any]]" = find_blocked_recovery_issues,
+    find_orphaned_fn: Callable[..., list[OrphanInfo]] = find_orphaned_downloads,
+    find_blocked_recovery_fn: Callable[
+        ..., list[BlockedRecoveryIssue]
+    ] = find_blocked_recovery_issues,
 ) -> CollectedIssues:
     """Collect all issues: DB inconsistencies + optional orphaned downloads.
 
@@ -312,8 +346,8 @@ def _print_slskd_orphan_report(
         )
 
 
-def cmd_scan(db: PipelineDB, slskd_host: str | None = None,
-             slskd_key: str | None = None) -> list:
+def cmd_scan(db: _RepairDB, slskd_host: str | None = None,
+             slskd_key: str | None = None) -> list[OrphanInfo]:
     """Scan for inconsistencies and print them."""
     collected = _collect_issues(db, slskd_host, slskd_key)
     issues = collected.issues
@@ -332,7 +366,7 @@ def cmd_scan(db: PipelineDB, slskd_host: str | None = None,
     return issues
 
 
-def cmd_fix(db: PipelineDB, slskd_host: str | None = None,
+def cmd_fix(db: _RepairDB, slskd_host: str | None = None,
             slskd_key: str | None = None) -> None:
     """Apply suggested repairs.
 
@@ -367,7 +401,7 @@ def cmd_fix(db: PipelineDB, slskd_host: str | None = None,
             print(f"  [{issue.request_id}] Skipped: {repair.action} (manual review required)")
 
 
-def _get_all_rows(db: PipelineDB) -> list:
+def _get_all_rows(db: _RepairDB) -> list[dict[str, object]]:
     """Fetch all album_requests rows for inspection."""
     cur = db._execute(
         "SELECT id, status, artist_name, album_title, year, mb_release_id, "

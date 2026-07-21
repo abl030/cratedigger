@@ -3,13 +3,21 @@
 Real beets-distance between a download_log's failed_path and an MBID.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
+from typing import Callable, Optional, TYPE_CHECKING
 
 from scripts.pipeline_cli._format import _json_default
 
+if TYPE_CHECKING:
+    from lib.beets_distance import BeetsDistancePipelineDB
 
-def cmd_beets_distance(db, args):
+
+def cmd_beets_distance(
+    db: "BeetsDistancePipelineDB", args: argparse.Namespace,
+) -> int:
     """Real beets-distance between a download_log's failed_path and an MBID.
 
     Counterpart of ``GET /api/beets-distance/<download_log_id>/<mbid>``.
@@ -38,6 +46,7 @@ def cmd_beets_distance(db, args):
     from web import discogs as discogs_api
     from web import mb as mb_api
 
+    get_release_fn: Callable[[str], Optional[dict[str, object]]]
     if detect_release_source(args.mbid) == "discogs":
         get_release_fn = lambda m: discogs_api.get_release(int(m), fresh=False)
     else:
@@ -107,7 +116,9 @@ def cmd_beets_distance(db, args):
     return 1
 
 
-def add_beets_distance_subparser(sub: argparse._SubParsersAction) -> None:
+def add_beets_distance_subparser(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
     """Add ``beets-distance`` (#521 carve out of
     ``routes_meta._build_parser``, verbatim argument definitions)."""
     p_bd = sub.add_parser(

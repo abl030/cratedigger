@@ -6,10 +6,49 @@ over persisted search plans. All wrap ``lib.search_plan_service`` (CLI ⇄
 API surface symmetry, CLAUDE.md).
 """
 
+from __future__ import annotations
+
 import argparse
 import json
+from typing import Any, Protocol, TYPE_CHECKING
+
+import msgspec
 
 from scripts.pipeline_cli._format import _json_default
+
+if TYPE_CHECKING:
+    from lib.pipeline_db import SearchPlanInspection, SearchPlanStats
+    from lib.pipeline_db.rows import AlbumRequestRow
+    from lib.search_plan_service import SearchPlanDB
+
+
+class _SearchPlanShowDB(Protocol):
+    """``db`` shape ``cmd_search_plan_show`` needs — mirrors
+    ``lib.search_plan_inspection._DBLike`` structurally (issue #784,
+    #409 pattern) so ``FakePipelineDB`` conforms without importing that
+    private symbol across the module boundary."""
+
+    def get_request(self, request_id: int) -> "AlbumRequestRow | None": ...
+
+    def get_search_plan_inspection(
+        self, request_id: int,
+    ) -> "SearchPlanInspection": ...
+
+    def get_legacy_search_log_summary(
+        self, request_id: int, *, limit: int,
+    ) -> tuple[int, list[dict[str, Any]]]: ...
+
+    def get_search_plan_stats_history(
+        self, request_id: int,
+    ) -> list[dict[str, Any]]: ...
+
+    def get_search_plan_stats(
+        self,
+        request_id: int,
+        *,
+        current_only: bool = ...,
+        prefetched_history: list[dict[str, Any]] | None = ...,
+    ) -> "SearchPlanStats": ...
 
 
 def _search_plan_exit_code(outcome: str) -> int:
@@ -54,7 +93,9 @@ def _search_plan_exit_code(outcome: str) -> int:
     return mapping.get(outcome, 1)
 
 
-def cmd_search_plan_show(db, args):
+def cmd_search_plan_show(
+    db: "_SearchPlanShowDB", args: argparse.Namespace,
+) -> int:
     """U6: read-only `pipeline-cli search-plan show <id>`.
 
     Default: human-readable text including the U8 stats section. Pass
@@ -90,7 +131,9 @@ def cmd_search_plan_show(db, args):
     return 0
 
 
-def cmd_search_plan_regenerate(db, args):
+def cmd_search_plan_regenerate(
+    db: "SearchPlanDB", args: argparse.Namespace,
+) -> int:
     """U8: ``pipeline-cli search-plan regenerate <request_id>``.
 
     Wraps ``SearchPlanService.generate_for_request(regenerate=True)``
@@ -186,7 +229,9 @@ def cmd_search_plan_regenerate(db, args):
     return 1
 
 
-def cmd_search_plan_dry_run(db, args):
+def cmd_search_plan_dry_run(
+    db: "SearchPlanDB", args: argparse.Namespace,
+) -> int:
     """U6: ``pipeline-cli search-plan dry-run <request_id>``.
 
     Read-only simulator: runs the current generator against the
@@ -277,26 +322,29 @@ def cmd_search_plan_dry_run(db, args):
                 if it.get("repeat_group"):
                     head += f"  repeat={it['repeat_group']}"
                 print(head)
-                prov = it.get("provenance") or {}
+                prov: dict[str, Any] = it.get("provenance") or {}
                 for key, value in prov.items():
                     print(f"          provenance.{key}: {value}")
-            prov_plan = plan.get("provenance") or {}
+            prov_plan: dict[str, Any] = plan.get("provenance") or {}
             if prov_plan:
                 print(f"  Plan provenance:")
-                for key, value in prov_plan.items():
-                    if isinstance(value, list):
-                        print(f"    {key}: {len(value)} item(s)")
-                        for entry in value[:5]:
+                for pkey, pvalue in prov_plan.items():
+                    if isinstance(pvalue, list):
+                        value_list = msgspec.convert(pvalue, type=list[object])
+                        print(f"    {pkey}: {len(value_list)} item(s)")
+                        for entry in value_list[:5]:
                             print(f"      - {entry}")
-                        if len(value) > 5:
-                            print(f"      ... +{len(value) - 5} more")
+                        if len(value_list) > 5:
+                            print(f"      ... +{len(value_list) - 5} more")
                     else:
-                        print(f"    {key}: {value}")
+                        print(f"    {pkey}: {pvalue}")
 
     return _search_plan_exit_code(result.outcome)
 
 
-def cmd_search_plan_saturation(db, args):
+def cmd_search_plan_saturation(
+    db: "SearchPlanDB", args: argparse.Namespace,
+) -> int:
     """U7: ``pipeline-cli search-plan saturation <request_id>``.
 
     Read-only telemetry aggregator: reports the saturation rate (rows
@@ -358,7 +406,9 @@ def cmd_search_plan_saturation(db, args):
     return _search_plan_exit_code(result.outcome)
 
 
-def cmd_search_plan_advance(db, args):
+def cmd_search_plan_advance(
+    db: "SearchPlanDB", args: argparse.Namespace,
+) -> int:
     """Forward-only operator advance of the search-plan cursor.
 
     Counterpart of ``POST /api/pipeline/<id>/search-plan/advance``. Both
@@ -418,7 +468,9 @@ def cmd_search_plan_advance(db, args):
     return _search_plan_exit_code(result.outcome)
 
 
-def cmd_search_plan_history(db, args):
+def cmd_search_plan_history(
+    db: "SearchPlanDB", args: argparse.Namespace,
+) -> int:
     """Cursor-paginated read of one request's ``search_log`` rows.
 
     Counterpart of ``GET /api/pipeline/<id>/search-plan/history``. Both
@@ -503,7 +555,7 @@ def cmd_search_plan_history(db, args):
 
 
 def add_search_plan_subparser(
-    sub: argparse._SubParsersAction,
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> argparse.ArgumentParser:
     """Add ``search-plan`` + its nested subcommands (#521 carve out of
     ``routes_meta._build_parser``, verbatim argument definitions).

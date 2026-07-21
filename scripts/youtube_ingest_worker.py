@@ -439,7 +439,11 @@ def _cleanup_orphan_paths(
     if row is None:
         return None
     request_id = row.get("request_id")
-    metadata = row.get("youtube_metadata") or {}
+    # ``pdb`` is the worker's untyped DB handle, so ``row.get(...)`` is
+    # ``Any``; declaring ``metadata``'s type recovers a parameterized shape
+    # for the ``.get`` + ``isinstance`` narrow below (the empty-dict fallback
+    # would otherwise infer ``dict[Unknown, Unknown]`` under strict mode).
+    metadata: dict[str, object] = row.get("youtube_metadata") or {}
     browse_id = metadata.get("browse_id")
     if temp_dir is not None and isinstance(request_id, int) and isinstance(browse_id, str):
         prefix = f"ytdlp-req{request_id}-{browse_id}-"

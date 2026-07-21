@@ -5,12 +5,25 @@
 folders for one request).
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lib.wrong_match_cleanup_service import WrongMatchCleanupDB
+    from lib.wrong_match_delete_service import (
+        WrongMatchDeleteDB,
+        WrongMatchDeleteResult,
+        WrongMatchDeleteSummary,
+    )
 
 
-def cmd_wrong_match_triage(db, args):
+def cmd_wrong_match_triage(
+    db: "WrongMatchCleanupDB", args: argparse.Namespace,
+) -> int:
     """Run evidence-only cleanup for the full Wrong Matches queue."""
     from lib.wrong_match_cleanup_service import (
         OUTCOME_KEYS,
@@ -55,7 +68,9 @@ def cmd_wrong_match_triage(db, args):
     return 0
 
 
-def _print_wrong_match_delete_result(result, *, json_output: bool) -> None:
+def _print_wrong_match_delete_result(
+    result: "WrongMatchDeleteResult", *, json_output: bool,
+) -> None:
     if json_output:
         print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
         return
@@ -69,7 +84,9 @@ def _print_wrong_match_delete_result(result, *, json_output: bool) -> None:
     print(f"  cleared_rows: {result.cleared_rows}")
 
 
-def cmd_wrong_match_delete(db, args):
+def cmd_wrong_match_delete(
+    db: "WrongMatchDeleteDB", args: argparse.Namespace,
+) -> int:
     """Delete one visible Wrong Matches source folder."""
     from lib.wrong_match_delete_service import (
         OUTCOME_DELETE_FAILED,
@@ -110,7 +127,9 @@ def cmd_wrong_match_delete(db, args):
     return 1
 
 
-def cmd_wrong_match_delete_group(db, args):
+def cmd_wrong_match_delete_group(
+    db: "WrongMatchDeleteDB", args: argparse.Namespace,
+) -> int:
     """Delete every visible Wrong Matches source folder for one request."""
     from lib.wrong_match_delete_service import delete_wrong_match_group
 
@@ -141,7 +160,9 @@ def cmd_wrong_match_delete_group(db, args):
     return _wrong_match_delete_group_exit_code(summary)
 
 
-def _wrong_match_delete_group_exit_code(summary) -> int:
+def _wrong_match_delete_group_exit_code(
+    summary: "WrongMatchDeleteSummary",
+) -> int:
     from lib.wrong_match_delete_service import (
         OUTCOME_DELETE_FAILED,
         OUTCOME_SKIPPED_ACTIVE_JOB,
@@ -167,7 +188,9 @@ def _wrong_match_delete_group_exit_code(summary) -> int:
     return 1
 
 
-def add_wrong_match_subparsers(sub: argparse._SubParsersAction) -> None:
+def add_wrong_match_subparsers(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
     """Add ``wrong-match-triage`` / ``wrong-match-delete`` /
     ``wrong-match-delete-group`` (#521 carve out of
     ``routes_meta._build_parser``, verbatim argument definitions)."""

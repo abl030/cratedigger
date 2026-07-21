@@ -13,11 +13,26 @@ import json
 import sys
 import urllib.error
 import urllib.request
+from contextlib import AbstractContextManager
+from typing import Protocol, TYPE_CHECKING
 import msgspec
 
 from lib import transitions
-from lib.disk_coverage_service import disk_coverage
+from lib.disk_coverage_service import DiskCoveragePipelineDB, disk_coverage
+from lib.pipeline_db.rows import album_request_row
 from lib.release_identity import detect_release_source, normalize_release_id
+
+if TYPE_CHECKING:
+    from lib.field_resolver_service import ResolveAllResult
+    from lib.pipeline_db import (
+        ActiveSearchPlan,
+        SaturationSummary,
+        SearchLogHistoryPage,
+        SearchPlanInspection,
+        SearchPlanItemInput,
+    )
+    from lib.pipeline_db.rows import AlbumRequestRow
+    from lib.search_plan_service import SearchPlanService
 
 
 class _DiskCoverageArgs(msgspec.Struct, frozen=True):
@@ -25,6 +40,250 @@ class _DiskCoverageArgs(msgspec.Struct, frozen=True):
     beets_directory: str | None = None
     counts_only: bool = False
     include_inverse: bool = False
+
+
+class _CursorRows(Protocol):
+    """Narrow shape of the cursor ``PipelineDB._execute`` returns — just
+    enough for the raw-SQL ``cmd_list`` fallback (issue #784, #409
+    pattern)."""
+
+    def fetchall(self) -> list[dict[str, object]]: ...
+
+
+class _AlbumRequestsDB(
+    transitions.TransitionsDB,
+    DiskCoveragePipelineDB,
+    Protocol,
+):
+    """Pipeline DB surface this module's ``cmd_*`` handlers touch, directly
+    or via the collaborator services the ``add`` path constructs
+    (``SearchPlanService`` / ``lib.field_resolver_service`` /
+    ``lib.disk_coverage_service.disk_coverage``) (issue #784, the #409
+    narrow-protocol pattern). Inherits the two PUBLIC per-consumer
+    protocols whose owning modules this file ALREADY imports eagerly
+    (``transitions.TransitionsDB``, ``lib.disk_coverage_service.
+    DiskCoveragePipelineDB``). ``lib.search_plan_service.SearchPlanDB``
+    is NOT inherited even though it's also public — using it as a base
+    class would force an eager top-level import of
+    ``lib.search_plan_service``, which this module deliberately keeps
+    lazy (imported inside the functions that need it, matching every
+    other ``pipeline_cli`` command-family module), so its methods are
+    mirrored below by signature instead. The field-resolver service's
+    OWN narrow protocols (``_PdbRecorder`` / ``_ApplyResolveAllRecipient``
+    in ``lib/field_resolver_service.py``) are private for the same
+    reason AND leading-underscore, so their two methods are mirrored
+    too, plus the handful of methods unique to this module's own
+    ``cmd_*`` bodies (list/search/add/status/raw-SQL).
+
+    ``add_request``'s MB/Discogs-JSON-sourced fields (``artist_name``,
+    ``album_title``, ``mb_release_group_id``, ``mb_artist_id``,
+    ``country``, ``year``) are narrowed to their real declared types
+    via ``_str_or``/``_opt_str``/the inline ``isinstance``-guarded year
+    parse below — graceful, non-crashing narrowing helpers, NOT a new
+    ``assert isinstance(...)`` on external JSON (a prior sweep added
+    exactly that here and a reviewer flagged it as borderline; issue
+    #784 forbids repeating it). Each helper falls through to a safe
+    default instead of raising on a malformed/differently-typed
+    upstream value, so a live MB/Discogs payload (always the expected
+    shape) round-trips unchanged and a hypothetical malformed one
+    degrades instead of crashing the CLI.
+    """
+
+    def get_request_by_release_id(
+        self, release_id: object | None,
+    ) -> "AlbumRequestRow | None": ...
+
+    # --- lib.search_plan_service.SearchPlanDB, mirrored (see class
+    # docstring for why this isn't a base class) ---
+
+    def advisory_lock(
+        self, namespace: int, key: int,
+    ) -> "AbstractContextManager[bool]": ...
+
+    def get_active_search_plan(
+        self, request_id: int,
+    ) -> "ActiveSearchPlan | None": ...
+
+    def create_successful_search_plan(
+        self,
+        *,
+        request_id: int,
+        generator_id: str,
+        items: "list[SearchPlanItemInput]",
+        metadata_snapshot: dict[str, object] | None = None,
+        provenance: dict[str, object] | None = None,
+        set_active: bool = True,
+    ) -> int: ...
+
+    def create_failed_search_plan(
+        self,
+        *,
+        request_id: int,
+        generator_id: str,
+        failure_class: str,
+        error_message: str | None = None,
+        transient: bool,
+        metadata_snapshot: dict[str, object] | None = None,
+        provenance: dict[str, object] | None = None,
+    ) -> int: ...
+
+    def supersede_search_plan_with_replacement(
+        self,
+        *,
+        request_id: int,
+        generator_id: str,
+        items: "list[SearchPlanItemInput]",
+        metadata_snapshot: dict[str, object] | None = None,
+        provenance: dict[str, object] | None = None,
+    ) -> int: ...
+
+    def advance_search_plan_cursor(
+        self,
+        request_id: int,
+        *,
+        target_ordinal: int,
+        plan_item_count: int,
+    ) -> tuple[int, int, int]: ...
+
+    def get_saturation_summary(
+        self, request_id: int, *, window_days: int = 14,
+    ) -> "SaturationSummary": ...
+
+    def get_search_history_page(
+        self,
+        request_id: int,
+        *,
+        limit: int,
+        before_id: int | None = None,
+    ) -> "SearchLogHistoryPage": ...
+
+    def get_search_plan_inspection(
+        self, request_id: int,
+    ) -> "SearchPlanInspection": ...
+
+    def search_requests(
+        self, query: str, *, limit: int = 200, status: str | None = None,
+    ) -> "list[AlbumRequestRow]": ...
+
+    def get_by_status(
+        self, status: str, *, limit: int | None = None,
+        newest_first: bool = False,
+    ) -> "list[AlbumRequestRow]": ...
+
+    def count_by_status(self) -> dict[str | None, int]: ...
+
+    def add_request(
+        self,
+        *,
+        artist_name: str,
+        album_title: str,
+        source: str,
+        mb_release_id: str | None = None,
+        mb_release_group_id: str | None = None,
+        mb_artist_id: str | None = None,
+        discogs_release_id: str | None = None,
+        year: int | None = None,
+        country: str | None = None,
+        format: str | None = None,
+        source_path: str | None = None,
+        reasoning: str | None = None,
+        status: str = "wanted",
+        release_group_year: int | None = None,
+        is_va_compilation: bool = False,
+    ) -> int: ...
+
+    def update_track_artists(
+        self,
+        request_id: int,
+        track_artists: list[str | None],
+        *,
+        expected_status: str | None = None,
+    ) -> bool: ...
+
+    def set_tracks(
+        self, request_id: int, tracks: list[dict[str, object]],
+    ) -> None: ...
+
+    def get_tracks(self, request_id: int) -> list[dict[str, object]]: ...
+
+    def update_request_fields(
+        self,
+        request_id: int,
+        *,
+        expected_status: str | None = None,
+        **extra: object,
+    ) -> bool: ...
+
+    def record_field_resolution(
+        self,
+        request_id: int,
+        field_name: str,
+        status: str,
+        reason_code: str | None,
+    ) -> bool: ...
+
+    def _execute(
+        self, sql: str, params: tuple[object, ...] = (),
+    ) -> _CursorRows: ...
+
+
+def _json_dict(value: object) -> dict[str, object]:
+    """Narrow an untyped nested MB/Discogs JSON value to a plain dict.
+
+    ``msgspec.convert`` is the established wire-boundary adapter
+    (CLAUDE.md "Wire-boundary types") — used here (rather than an
+    ``isinstance`` assert) because narrowing a bare ``object`` to a
+    generic container via ``isinstance`` loses the type argument
+    (``dict[Unknown, Unknown]``), which still trips strict mode at
+    every call site; ``msgspec.convert``'s own signature restores the
+    declared type argument cleanly. No internal ``or {}`` fallback —
+    callers that need one (matching the pre-existing ``X or {}`` guards
+    in this file) supply it at the call site, so behaviour on an
+    explicit JSON ``null`` is unchanged from before this migration.
+    """
+    return msgspec.convert(value, type=dict[str, object])
+
+
+def _json_list_of_dicts(value: object) -> list[dict[str, object]]:
+    """``_json_dict``'s twin for a JSON array of objects."""
+    return msgspec.convert(value, type=list[dict[str, object]])
+
+
+def _num_or_none(value: object) -> "int | float | None":
+    """Narrow an external-JSON (MB) numeric field without asserting.
+
+    Issue #784: a prior sweep asserted ``isinstance(x, (int, float))``
+    on MB track-length fields and a reviewer flagged new external-JSON
+    asserts as borderline. This degrades to ``None`` instead of
+    crashing on a malformed/non-numeric payload — a real MB response
+    always carries an int here, so this is a no-op for every live
+    invocation.
+    """
+    return value if isinstance(value, (int, float)) else None
+
+
+def _opt_str(value: object) -> str | None:
+    """Narrow an optional external-JSON (MB/Discogs) string field.
+
+    Same non-crashing-degrade rationale as ``_num_or_none``: an
+    ``isinstance`` narrowing condition, never an ``assert`` (issue
+    #784). MB/Discogs string fields (release-group id, artist id,
+    country) are always ``str`` when present in a live payload, so
+    this is a no-op for every real invocation.
+    """
+    return value if isinstance(value, str) else None
+
+
+def _str_or(value: object, default: str) -> str:
+    """``_opt_str``'s twin for a REQUIRED string field with a fallback.
+
+    Used for ``artist_name``/``album_title`` — both feed
+    ``SearchPlanService.generate_for_new_request`` (a real ``str``-typed
+    lib boundary), so a concrete ``str`` is unavoidable. Falls back to
+    ``default`` instead of asserting on a malformed non-string payload.
+    """
+    return value if isinstance(value, str) else default
+
 
 # Module-level DI seam for the operator transition service — see
 # ``lib.dispatch.outcome_actions.finalize_request`` for the rationale.
@@ -50,7 +309,7 @@ def _transition_applied_or_report(
 
 
 def _request_fields_applied_or_report(
-    db,
+    db: _AlbumRequestsDB,
     request_id: int,
     *,
     expected_status: str,
@@ -87,7 +346,7 @@ def _mb_api() -> str:
     return mb_ws2_base(read_runtime_config().musicbrainz_api_base)
 
 
-def fetch_mb_release(mb_release_id):
+def fetch_mb_release(mb_release_id: str) -> dict[str, object] | None:
     """Fetch release metadata + tracks from MusicBrainz API.
 
     Returns raw MB JSON. The ``media+release-groups+labels`` inc params
@@ -112,27 +371,33 @@ def fetch_mb_release(mb_release_id):
         return None
 
 
-def tracks_from_mb_release(release_data):
+def tracks_from_mb_release(
+    release_data: dict[str, object],
+) -> list[dict[str, object]]:
     """Extract track list from MB API release response.
 
     Includes pregap tracks (to match beets' default behaviour) but excludes
     data tracks (beets' ignore_data_tracks defaults to yes).
     """
-    tracks = []
-    for medium in release_data.get("media", []):
+    tracks: list[dict[str, object]] = []
+    for medium in _json_list_of_dicts(release_data.get("media", [])):
         disc = medium.get("position", 1)
         # Include pregap track if present (beets always counts these)
         if "pregap" in medium:
-            pg = medium["pregap"]
-            length_ms = pg.get("length") or (pg.get("recording") or {}).get("length")
+            pg = _json_dict(medium["pregap"])
+            recording = _json_dict(pg.get("recording") or {})
+            length_ms = _num_or_none(pg.get("length")) or _num_or_none(
+                recording.get("length"))
             tracks.append({
                 "disc_number": disc,
                 "track_number": 0,
                 "title": pg.get("title", ""),
                 "length_seconds": round(length_ms / 1000, 1) if length_ms else None,
             })
-        for track in medium.get("tracks", []):
-            length_ms = track.get("length") or (track.get("recording") or {}).get("length")
+        for track in _json_list_of_dicts(medium.get("tracks", [])):
+            recording = _json_dict(track.get("recording") or {})
+            length_ms = _num_or_none(track.get("length")) or _num_or_none(
+                recording.get("length"))
             tracks.append({
                 "disc_number": disc,
                 "track_number": track.get("position", track.get("number", 0)),
@@ -142,7 +407,8 @@ def tracks_from_mb_release(release_data):
     return tracks
 
 
-def cmd_list(db, args):
+def cmd_list(db: _AlbumRequestsDB, args: argparse.Namespace) -> None:
+    albums: list[AlbumRequestRow]
     if args.search:
         # Status narrowing happens in SQL — a Python post-filter after
         # the LIMIT would silently drop matches on common tokens.
@@ -150,8 +416,15 @@ def cmd_list(db, args):
     elif args.filter_status:
         albums = db.get_by_status(args.filter_status)
     else:
-        rows = db._execute("SELECT * FROM album_requests ORDER BY created_at ASC").fetchall()
-        albums = [dict(r) for r in rows]
+        # Same unfiltered ``SELECT * FROM album_requests`` shape as
+        # ``get_by_status``/``search_requests`` -- projected through the
+        # same ``album_request_row`` adapter those methods use, rather
+        # than a bare ``dict(r)``, so all three branches share one typed
+        # element shape.
+        rows = db._execute(
+            "SELECT * FROM album_requests ORDER BY created_at ASC"
+        ).fetchall()
+        albums = [album_request_row(r) for r in rows]
 
     if not albums:
         print("No albums found.")
@@ -164,7 +437,7 @@ def cmd_list(db, args):
     print(f"\n  Total: {len(albums)}")
 
 
-def cmd_disk_coverage(db, args: object):
+def cmd_disk_coverage(db: _AlbumRequestsDB, args: object) -> None:
     from lib.beets_db import open_beets_db
 
     typed_args = msgspec.convert(vars(args), type=_DiskCoverageArgs)
@@ -181,7 +454,7 @@ def cmd_disk_coverage(db, args: object):
     print(json.dumps(msgspec.to_builtins(result), indent=2, sort_keys=True))
 
 
-def cmd_add(db, args):
+def cmd_add(db: _AlbumRequestsDB, args: argparse.Namespace) -> int | None:
     release_id = normalize_release_id(args.mbid)
     source = args.source
     id_source = detect_release_source(release_id)
@@ -191,7 +464,7 @@ def cmd_add(db, args):
     return _cmd_add_mb(db, release_id, source)
 
 
-def _build_search_plan_service(db):
+def _build_search_plan_service(db: _AlbumRequestsDB) -> "SearchPlanService":
     """Construct a `SearchPlanService` against the runtime config.
 
     CLI / web / startup all share the same source so generator-id and
@@ -202,10 +475,19 @@ def _build_search_plan_service(db):
     return SearchPlanService(db, read_runtime_config())
 
 
-def _generate_plan_after_add(db, req_id, *, artist_name, album_title, year,
-                              tracks, source, release_group_year=None,
-                              is_va_compilation=False,
-                              catalog_number=None):
+def _generate_plan_after_add(
+    db: _AlbumRequestsDB,
+    req_id: int,
+    *,
+    artist_name: str,
+    album_title: str,
+    year: int | None,
+    tracks: list[dict[str, object]],
+    source: str,
+    release_group_year: int | None = None,
+    is_va_compilation: bool = False,
+    catalog_number: str | None = None,
+) -> None:
     """Run plan generation for a freshly-added request.
 
     Failures are non-fatal: a deterministic / transient failure is
@@ -248,16 +530,16 @@ def _generate_plan_after_add(db, req_id, *, artist_name, album_title, year,
 
 
 def _resolve_and_update_after_add(
-    db,
+    db: _AlbumRequestsDB,
     req_id: int,
     *,
     mb_release_id: str | None,
     discogs_release_id: str | None,
     mb_release_group_id: str | None,
     mb_artist_id: str | None,
-    mb_release_payload: dict | None = None,
-    discogs_release_payload: dict | None = None,
-):
+    mb_release_payload: dict[str, object] | None = None,
+    discogs_release_payload: dict[str, object] | None = None,
+) -> "ResolveAllResult | None":
     """U4 helper for the CLI add path — mirrors the web helper.
 
     Both surfaces wrap ``field_resolver_service.resolve_all`` after the
@@ -272,7 +554,7 @@ def _resolve_and_update_after_add(
         resolve_all,
     )
 
-    skeleton = {
+    skeleton: dict[str, object] = {
         "id": req_id,
         "mb_release_id": mb_release_id,
         "discogs_release_id": discogs_release_id,
@@ -324,36 +606,48 @@ def _resolve_and_update_after_add(
     return result
 
 
-def _cmd_add_mb(db, mbid, source):
+def _cmd_add_mb(db: _AlbumRequestsDB, mbid: str, source: str) -> int | None:
     """Add a MusicBrainz release to the pipeline."""
     existing = db.get_request_by_release_id(mbid)
     if existing:
         print(f"  Already in DB: id={existing['id']} status={existing['status']}")
-        return
+        return None
 
     print(f"  Fetching MB release {mbid}...")
     release = fetch_mb_release(mbid)
     if not release:
         print("  Failed to fetch release from MB API.")
-        return
+        return None
 
-    artist_credit = release.get("artist-credit", [{}])
-    artist_name = artist_credit[0].get("name", "Unknown") if artist_credit else "Unknown"
-    artist_id = (artist_credit[0].get("artist", {}).get("id")
-                 if artist_credit else None)
-    rg_id = (release.get("release-group") or {}).get("id")
-    year = None
-    if release.get("date"):
-        year = int(release["date"][:4]) if len(release["date"]) >= 4 else None
+    # An absent/empty ``artist-credit`` list is handled identically below
+    # (every access is guarded by ``if artist_credit:``), so a bare empty
+    # default preserves the original ``[{}]`` fallback's observable
+    # behaviour without an unparameterized-dict-literal default arg.
+    artist_credit = _json_list_of_dicts(release.get("artist-credit", []))
+    first_credit = artist_credit[0] if artist_credit else {}
+    raw_artist_name = first_credit.get("name", "Unknown") if artist_credit else "Unknown"
+    artist_name = _str_or(raw_artist_name, "Unknown")
+    artist_id: str | None = None
+    if artist_credit:
+        credited_artist = _json_dict(first_credit.get("artist", {}))
+        artist_id = _opt_str(credited_artist.get("id"))
+    release_group = _json_dict(release.get("release-group") or {})
+    rg_id = _opt_str(release_group.get("id"))
+    year: int | None = None
+    release_date = release.get("date")
+    if isinstance(release_date, str) and len(release_date) >= 4:
+        year = int(release_date[:4])
+    title = _str_or(release.get("title", "Unknown"), "Unknown")
+    country = _opt_str(release.get("country"))
 
     req_id = db.add_request(
         mb_release_id=mbid,
         mb_release_group_id=rg_id,
         mb_artist_id=artist_id,
         artist_name=artist_name,
-        album_title=release.get("title", "Unknown"),
+        album_title=title,
         year=year,
-        country=release.get("country"),
+        country=country,
         source=source,
     )
 
@@ -361,7 +655,7 @@ def _cmd_add_mb(db, mbid, source):
     if tracks:
         db.set_tracks(req_id, tracks)
 
-    print(f"  Added: id={req_id} {artist_name} - {release.get('title')} ({len(tracks)} tracks)")
+    print(f"  Added: id={req_id} {artist_name} - {title} ({len(tracks)} tracks)")
     # U4: inline field resolution + VA detection. Single resolver-service
     # invocation shared with the web add path (CLI ⇄ API symmetry).
     resolved = _resolve_and_update_after_add(
@@ -382,7 +676,7 @@ def _cmd_add_mb(db, mbid, source):
     _generate_plan_after_add(
         db, req_id,
         artist_name=artist_name,
-        album_title=release.get("title", "Unknown"),
+        album_title=title,
         year=year,
         tracks=post_resolve_tracks,
         source=source,
@@ -390,14 +684,17 @@ def _cmd_add_mb(db, mbid, source):
         is_va_compilation=resolved.is_va_compilation,
         catalog_number=resolved.catalog_number,
     )
+    return None
 
 
-def _cmd_add_discogs(db, discogs_id, source):
+def _cmd_add_discogs(
+    db: _AlbumRequestsDB, discogs_id: str, source: str,
+) -> int | None:
     """Add a Discogs release to the pipeline."""
     existing = db.get_request_by_release_id(discogs_id)
     if existing:
         print(f"  Already in DB: id={existing['id']} status={existing['status']}")
-        return
+        return None
 
     print(f"  Fetching Discogs release {discogs_id}...")
     try:
@@ -405,25 +702,37 @@ def _cmd_add_discogs(db, discogs_id, source):
         release = discogs_api.get_release(int(discogs_id))
     except Exception as e:
         print(f"  Failed to fetch release from Discogs API: {e}")
-        return
+        return None
+
+    # ``str(x or "")`` is the pre-existing coercion for this field (never
+    # raises, unlike an ``isinstance`` assert) -- kept verbatim.
+    artist_id = str(release.get("artist_id") or "")
+    artist_name = _str_or(release["artist_name"], "Unknown")
+    title = _str_or(release["title"], "Unknown")
+    year_raw = release.get("year")
+    year = year_raw if isinstance(year_raw, int) else None
+    country = _opt_str(release.get("country"))
 
     req_id = db.add_request(
         mb_release_id=discogs_id,
         discogs_release_id=discogs_id,
-        mb_artist_id=str(release.get("artist_id") or ""),
-        artist_name=release["artist_name"],
-        album_title=release["title"],
-        year=release.get("year"),
-        country=release.get("country"),
+        mb_artist_id=artist_id,
+        artist_name=artist_name,
+        album_title=title,
+        year=year,
+        country=country,
         source=source,
     )
 
     tracks_raw = release.get("tracks", [])
-    tracks = tracks_raw if isinstance(tracks_raw, list) else []
+    tracks: list[dict[str, object]] = (
+        msgspec.convert(tracks_raw, type=list[dict[str, object]])
+        if isinstance(tracks_raw, list) else []
+    )
     if tracks:
         db.set_tracks(req_id, tracks)
 
-    print(f"  Added: id={req_id} {release['artist_name']} - {release['title']} ({len(tracks)} tracks)")
+    print(f"  Added: id={req_id} {artist_name} - {title} ({len(tracks)} tracks)")
     # U4: inline field resolution + VA detection. Discogs add path has
     # no MB release/release-group payload available so the resolver only
     # sees the discogs release (Rule 1 of VA detection still fires on
@@ -433,7 +742,7 @@ def _cmd_add_discogs(db, discogs_id, source):
         mb_release_id=None,
         discogs_release_id=discogs_id,
         mb_release_group_id=None,
-        mb_artist_id=str(release.get("artist_id") or "") or None,
+        mb_artist_id=artist_id or None,
         discogs_release_payload=release,
     )
     if resolved is None:
@@ -444,18 +753,19 @@ def _cmd_add_discogs(db, discogs_id, source):
     post_resolve_tracks = db.get_tracks(req_id)
     _generate_plan_after_add(
         db, req_id,
-        artist_name=release["artist_name"],
-        album_title=release["title"],
-        year=release.get("year"),
+        artist_name=artist_name,
+        album_title=title,
+        year=year,
         tracks=post_resolve_tracks,
         source=source,
         release_group_year=resolved.release_group_year,
         is_va_compilation=resolved.is_va_compilation,
         catalog_number=resolved.catalog_number,
     )
+    return None
 
 
-def cmd_status(db, args):
+def cmd_status(db: _AlbumRequestsDB, args: argparse.Namespace) -> None:
     counts = db.count_by_status()
     if not counts:
         print("  Database is empty.")
@@ -468,7 +778,7 @@ def cmd_status(db, args):
             print(f"    {status:15s} {c:4d}")
 
 
-def cmd_set(db, args):
+def cmd_set(db: _AlbumRequestsDB, args: argparse.Namespace) -> int:
     req = db.get_request(args.id)
     if not req:
         print(f"  Request {args.id} not found.")
@@ -488,7 +798,7 @@ def cmd_set(db, args):
     return 0
 
 
-def cmd_set_intent(db, args):
+def cmd_set_intent(db: _AlbumRequestsDB, args: argparse.Namespace) -> int:
     """Toggle lossless-on-disk intent for a request.
 
     'lossless' — keep lossless on disk (overrides global verified_lossless_target)
@@ -544,7 +854,7 @@ def cmd_set_intent(db, args):
             return 4
         print(f"  [{args.id}] {label}: lossless on disk, re-queued for search")
     else:
-        update_fields = {"target_format": target_format}
+        update_fields: dict[str, object] = {"target_format": target_format}
         if should_clear_lossless_search_override(
             new_target_format=target_format,
             old_target_format=old_target,
