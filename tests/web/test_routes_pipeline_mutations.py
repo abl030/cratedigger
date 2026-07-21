@@ -9,7 +9,7 @@ import json
 import os
 import sys
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -22,7 +22,24 @@ from tests.web._harness import (
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
 from lib import transitions
+from lib.beets_delete import (
+    BeetsDeleteCompleted,
+    BeetsDeleteFailed,
+    BeetsDeleteRequest,
+)
 from lib.transitions import TransitionConflict, TransitionConflictKind
+
+
+def _completed_beets_delete(request: BeetsDeleteRequest) -> BeetsDeleteCompleted:
+    return BeetsDeleteCompleted(
+        album_id=request.album_id,
+        album_name="Test Album",
+        artist_name="Test Artist",
+        former_album_path="/mnt/Music/Beets/Test Artist/Test Album",
+        deleted_tracks=1,
+        deleted_artifacts=1,
+        preserved_paths=(),
+    )
 
 
 class _RacingDeleteDB(FakePipelineDB):
@@ -1092,45 +1109,23 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         import web.server as srv
         self._srv = srv
         self._orig_beets = srv._beets
+        self._orig_delete_fn = srv.beets_delete_fn
+        self.delete_requests: list[BeetsDeleteRequest] = []
         # Beets fake: update() only hits this via album_exists / get_min_bitrate.
         # A live beets DB is the usual preceding state for a requeue.
         self.beets_db = FakeBeetsDB()
         self.beets_db.set_min_bitrate(self.RELEASE_ID, 320)
-        # Ban-source now also calls ``get_item_paths`` for the bad-rip
-        # hash-capture step (plan 2026-04-29-005, U4). The fake defaults
-        # to "no tracks" so legacy ban-source tests don't trip over the
-        # new gate; tests that exercise hash capture seed item paths.
-        # Ban-source routes through ``BeetsDB.locate`` (issue #121).
-        # Default the queue to 'album present before and removed after'
-        # so the legacy `album_exists.side_effect = [True, False]`
-        # tests read as "exact → absent" in the new vocabulary.
-        # Individual tests override this via ``_set_locate_sequence``.
-        self._set_locate_sequence([
-            ("exact", 1, ()),  # selectors auto-filled by the fake
-            ("absent", None, ()),
-        ])
         srv._beets = self.beets_db
 
-    def _set_locate_sequence(
-            self, results: list[tuple[str, object, tuple]]) -> None:
-        """Queue ``(kind, album_id, selectors)`` locate outcomes on the
-        fake. Extra calls reuse the final entry; blank selectors on an
-        'exact' entry are auto-filled from the queried id's shape by
-        the fake (the locate contract derives them from the ID)."""
-        from lib.beets_db import ReleaseLocation
-        entries: list[ReleaseLocation] = []
-        for kind, album_id, selectors in results:
-            assert kind in ("exact", "absent"), kind
-            # No coercion — queue_locate_results rejects
-            # production-impossible (kind, album_id, selectors) combos.
-            entries.append(ReleaseLocation(
-                kind="exact" if kind == "exact" else "absent",
-                album_id=album_id,  # type: ignore[arg-type]
-                selectors=tuple(selectors)))
-        self.beets_db.queue_locate_results(entries)
+        def completed_delete(request: BeetsDeleteRequest):
+            self.delete_requests.append(request)
+            return _completed_beets_delete(request)
+
+        srv.beets_delete_fn = completed_delete
 
     def tearDown(self) -> None:
         self._srv._beets = self._orig_beets
+        self._srv.beets_delete_fn = self._orig_delete_fn
 
     def _override_passed(self, mock_transition) -> object:
         """Extract the search override from the last routed transition."""
@@ -1266,22 +1261,18 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(self._override_passed(mock_transition), "lossless")
 
-    @patch("lib.beets_album_op.sp.run")
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_ban_source_clears_on_disk_quality_fields(
-            self, _mock_transition, mock_subprocess):
-        """After ``beet remove -d``, pipeline DB must forget on-disk quality.
+            self, _mock_transition):
+        """After an exact pinned delete, pipeline DB forgets on-disk quality.
 
         ``current_spectral_*`` and ``verified_lossless`` describe files that
         live in beets. Once the ban flow wipes those files, leaving the
         fields populated misleads every downstream consumer (wrong-matches
         UI shows ghost quality, library views, quality gate uses stale
-        baselines). The write-side invariant: remove-from-beets implies
-        clear-on-disk-quality. Issue #121 couples both sides via
-        ``lib.release_cleanup.remove_and_reset_release``.
+        baselines). The write-side invariant: an exact Beets delete clears
+        every pipeline field that described the removed files.
         """
-        mock_subprocess.return_value = MagicMock(
-            returncode=0, stdout="", stderr="")
         self.db.seed_request(make_request_row(
             id=1704, status="imported", mb_release_id=self.RELEASE_ID,
             min_bitrate=320,
@@ -1289,12 +1280,6 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
             current_spectral_bitrate=160,
             verified_lossless=False,
         ))
-        # First locate: was present. Second (after remove): gone.
-        self._set_locate_sequence([
-            ("exact", 1, ()),
-            ("absent", None, ()),
-        ])
-
         status, _data = self._post("/api/pipeline/ban-source", {
             "request_id": 1704, "confirm": "BAN", "username": "baduser",
             "mb_release_id": self.RELEASE_ID,
@@ -1310,34 +1295,23 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         self.assertFalse(row["verified_lossless"])
         self.assertIsNone(row["imported_path"])
 
-    @patch("lib.beets_album_op.sp.run")
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_ban_source_skips_clear_when_beet_remove_failed(
-            self, _mock_transition, mock_subprocess):
-        """Conservative: if beets still holds the album after the remove
-        attempts (e.g. permissions error, wrong column and no legacy
-        fallback matched), the on-disk quality state is still accurate,
-        so don't clear it. Modelled by ``locate`` returning 'exact'
-        both before and after the subprocess calls. The non-zero rc
-        also surfaces in ``cleanup_errors`` so the UI can tell the
-        user the ban committed but the on-disk remove was incomplete
-        (issue #123 PR B).
+            self, _mock_transition):
+        """A typed pinned-delete failure retains current quality state.
         """
-        mock_subprocess.return_value = MagicMock(
-            returncode=1, stdout="", stderr="beet failed")
+        self._srv.beets_delete_fn = lambda request: BeetsDeleteFailed(
+            album_id=request.album_id,
+            reason="filesystem_error",
+            detail="isolated test: album retained",
+            album_still_present=True,
+        )
         self.db.seed_request(make_request_row(
             id=1704, status="imported", mb_release_id=self.RELEASE_ID,
             min_bitrate=320,
             current_spectral_grade="genuine",
             verified_lossless=True,
         ))
-        # Album is still there after the remove attempt. Seed the
-        # selector tuple so the remove loop has something to iterate.
-        self._set_locate_sequence([
-            ("exact", 1, (f"mb_albumid:{self.RELEASE_ID}",)),
-            ("exact", 1, (f"mb_albumid:{self.RELEASE_ID}",)),
-        ])
-
         status, data = self._post("/api/pipeline/ban-source", {
             "request_id": 1704, "confirm": "BAN", "username": "baduser",
             "mb_release_id": self.RELEASE_ID,
@@ -1349,41 +1323,30 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         row = self.db.request(1704)
         self.assertEqual(row["current_spectral_grade"], "genuine")
         self.assertTrue(row["verified_lossless"])
-        # #123 PR B + plan 2026-04-29-005 U4: the non-zero rc now
-        # surfaces under ``partial_failures.cleanup_errors`` (the
-        # unified shape). Distinguishes "banned cleanly" from
-        # "banned but album still on disk".
+        # The typed pinned failure surfaces in the unified partial shape.
         self.assertEqual(data["error"], "cleanup_incomplete")
         self.assertEqual(data["status"], "partial")
         cleanup_errors = data["partial_failures"]["cleanup_errors"]
         self.assertEqual(len(cleanup_errors), 1)
-        self.assertEqual(cleanup_errors[0]["reason"], "nonzero_rc")
+        self.assertEqual(cleanup_errors[0]["reason"], "filesystem_error")
+        self.assertTrue(cleanup_errors[0]["selector"].startswith("id:"))
         self.assertFalse(data["beets_removed"])
 
-    @patch("lib.beets_album_op.sp.run")
     @patch("web.routes.pipeline_mutations.finalize_request")
-    def test_ban_source_uses_discogs_selector_for_numeric_id(
-            self, _mock_transition, mock_subprocess):
-        """Discogs-backed requests carry a numeric ID. ``beet remove -d``
-        must try ``discogs_albumid:<id>`` (the new layout) AND
-        ``mb_albumid:<id>`` (the legacy layout documented in
-        artist_compare.py / webui-primer.md), otherwise one of the two
-        layouts goes unremoved and the banned copy stays on disk.
-        After issue #121 the selectors come from ``BeetsDB.locate`` so
-        every caller that asks 'is this release on disk?' agrees on
-        the same selector set.
+    def test_ban_source_uses_exact_discogs_album_pk(
+            self, _mock_transition):
+        """Modern and legacy Discogs columns converge on one exact album PK.
         """
-        mock_subprocess.return_value = MagicMock(
-            returncode=0, stdout="", stderr="")
         self.db.seed_request(make_request_row(
             id=1704, status="imported", mb_release_id="12856590",
+            discogs_release_id="12856590",
             min_bitrate=320,
         ))
-        # Was there (with BOTH Discogs selectors); after both removes, gone.
-        self._set_locate_sequence([
-            ("exact", 1, ("discogs_albumid:12856590", "mb_albumid:12856590")),
-            ("absent", None, ()),
-        ])
+        self.beets_db.set_album_ids_for_release("12856590", [77])
+        self.beets_db.set_item_paths(
+            "12856590", [(7701, "/mnt/Music/Beets/Discogs/01.flac")],
+        )
+        self.delete_requests.clear()
 
         status, _data = self._post("/api/pipeline/ban-source", {
             "request_id": 1704, "confirm": "BAN", "username": "baduser",
@@ -1391,29 +1354,20 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         })
 
         self.assertEqual(status, 200)
-        argvs = [call.args[0] for call in mock_subprocess.call_args_list]
-        flattened = [token for argv in argvs for token in argv]
-        self.assertIn("discogs_albumid:12856590", flattened,
-                      "Must attempt the new-layout selector.")
-        self.assertIn("mb_albumid:12856590", flattened,
-                      "Must also attempt the legacy mb_albumid selector "
-                      "so older beets libraries don't regress.")
+        self.assertEqual(len(self.delete_requests), 1)
+        self.assertEqual(self.delete_requests[0].album_id, 77)
+        self.assertEqual(self.delete_requests[0].expected_release_id, "12856590")
 
-    @patch("lib.beets_album_op.sp.run")
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_ban_source_clears_stale_state_when_album_already_gone(
-            self, _mock_transition, mock_subprocess):
-        """Ghost state can pre-date the handler: a user runs
-        ``beet rm mb_albumid:X`` manually, then days later bans the
-        source. ``locate`` returns 'absent' before ban-source even
-        starts, so no ``beet remove`` runs — but the pipeline DB still
-        carries the old ``current_spectral_*`` / ``imported_path``.
+            self, _mock_transition):
+        """Ghost state can pre-date the handler: the album is already absent
+        when the fresh typed lookup runs, but the pipeline DB still carries
+        the old ``current_spectral_*`` / ``imported_path``.
         The handler must still clear those fields so ``dispatch_import_core``
         doesn't keep deriving ``--override-min-bitrate`` from phantom
         baselines on the next import attempt.
         """
-        mock_subprocess.return_value = MagicMock(
-            returncode=0, stdout="", stderr="")
         self.db.seed_request(make_request_row(
             id=1704, status="imported", mb_release_id=self.RELEASE_ID,
             min_bitrate=320,
@@ -1421,11 +1375,8 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
             current_spectral_bitrate=160,
             imported_path="/mnt/virtio/Music/Beets/Stale/Path",
         ))
-        # Album was already gone when ban-source ran (earlier beet rm).
-        self._set_locate_sequence([
-            ("absent", None, ()),
-            ("absent", None, ()),
-        ])
+        self.beets_db.set_album_info(self.RELEASE_ID, None)
+        self.delete_requests.clear()
 
         status, _data = self._post("/api/pipeline/ban-source", {
             "request_id": 1704, "confirm": "BAN", "username": "baduser",
@@ -1440,8 +1391,31 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         self.assertIsNone(row["current_spectral_grade"])
         self.assertIsNone(row["current_spectral_bitrate"])
         self.assertIsNone(row["imported_path"])
-        # No remove ran — the handler had nothing to remove.
-        mock_subprocess.assert_not_called()
+        # No pinned delete ran — the joined current snapshot was missing.
+        self.assertEqual(self.delete_requests, [])
+
+    def test_ban_source_ambiguous_current_identity_is_zero_mutation(self):
+        self.db.seed_request(make_request_row(
+            id=1704,
+            status="imported",
+            mb_release_id=self.RELEASE_ID,
+        ))
+        self.beets_db.set_album_ids_for_release(self.RELEASE_ID, [7, 8])
+        before = self.db.request(1704).copy()
+
+        status, data = self._post("/api/pipeline/ban-source", {
+            "request_id": 1704,
+            "confirm": "BAN",
+            "mb_release_id": self.RELEASE_ID,
+        })
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "current_beets_ambiguous")
+        self.assertEqual(data["album_ids"], [7, 8])
+        self.assertEqual(self.db.request(1704), before)
+        self.assertEqual(self.delete_requests, [])
+        self.assertEqual(self.db.denylist, [])
+        self.assertEqual(self.db.bad_audio_hashes, [])
 
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_ban_source_rejects_request_without_server_release_identity(
@@ -1484,25 +1458,17 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         import web.server as srv
         self._srv = srv
         self._orig_beets = srv._beets
+        self._orig_delete_fn = srv.beets_delete_fn
         self.beets_db = FakeBeetsDB()
-        # Defaults: no tracks (tests seed item paths), and locate is
-        # state-derived — nothing seeded means "absent", so
-        # ``remove_and_reset_release`` is a no-op unless a test seeds
-        # album ids or queues locate results.
         srv._beets = self.beets_db
-        self._beet_run_patcher = patch("lib.beets_album_op.sp.run")
-        self.mock_beet_run = self._beet_run_patcher.start()
-        self.addCleanup(self._beet_run_patcher.stop)
+        self.delete_requests: list[BeetsDeleteRequest] = []
 
-        def remove_current_album(*_args, **_kwargs):
-            # Model the successful subprocess through the same current-item
-            # store every public fake read uses. The postcondition lookup
-            # therefore observes a genuinely absent album rather than an
-            # impossible paths-present/locate-absent split world.
-            self.beets_db.set_album_info(self.RELEASE_ID, None)
-            return MagicMock(returncode=0, stdout="", stderr="")
+        def remove_current_album(request: BeetsDeleteRequest):
+            self.delete_requests.append(request)
+            self.beets_db.set_album_info(request.expected_release_id, None)
+            return _completed_beets_delete(request)
 
-        self.mock_beet_run.side_effect = remove_current_album
+        srv.beets_delete_fn = remove_current_album
 
         self.db.seed_request(make_request_row(
             id=1704, status="imported", mb_release_id=self.RELEASE_ID,
@@ -1511,6 +1477,7 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
 
     def tearDown(self) -> None:
         self._srv._beets = self._orig_beets
+        self._srv.beets_delete_fn = self._orig_delete_fn
 
     # AE1, AE2 — body-without-username, server resolves uploader, hashes recorded.
     @patch("lib.destructive_release_service.hash_audio_content")

@@ -81,6 +81,34 @@ class ReleaseIdentity:
 
         return primary
 
+    @classmethod
+    def from_strict_fields(
+        cls,
+        release_id: object | None,
+        discogs_release_id: object | None = None,
+    ) -> ReleaseIdentity | None:
+        """Return exactly one valid identity, failing closed on conflicts.
+
+        Unlike :meth:`from_fields`, this is an authority boundary: every
+        nonempty field must parse as a release identity and all populated
+        fields must name the same exact pressing. The duplicated numeric
+        Discogs layout remains valid because both fields normalize to the
+        same identity.
+        """
+        identities: list[ReleaseIdentity] = []
+        for value in (release_id, discogs_release_id):
+            normalized = normalize_release_id(value)
+            if not normalized:
+                continue
+            identity = cls.from_id(normalized)
+            if identity is None:
+                return None
+            if identity not in identities:
+                identities.append(identity)
+        if len(identities) != 1:
+            return None
+        return identities[0]
+
 
 def frontend_release_id(
     release_id: object | None,

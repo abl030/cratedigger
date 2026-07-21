@@ -89,10 +89,9 @@ class SpectralDetail(msgspec.Struct):
     existing: Optional[SpectralAnalysisDetail] = None
 
 
-# Issue #133: ``DisambiguationFailure`` / ``SelectorFailure`` were two
-# duplicated types with identical shape, scattered across lib.quality
-# and lib.release_cleanup. They are now a single
-# ``lib.beets_album_op.BeetsOpFailure``; these aliases preserve existing
+# Issue #133 unified the historical ``DisambiguationFailure`` and destructive
+# selector failure payloads. The selector-based path was retired in #762, but
+# ``lib.beets_album_op.BeetsOpFailure`` remains so these aliases preserve old
 # imports (``from lib.quality import DisambiguationFailure`` in the
 # harness, tests/helpers.py, etc). The unified type added a ``selector``
 # field (default ``""``) so old JSON rows with only ``{reason, detail}``

@@ -381,7 +381,6 @@
     directory = ${cfg.beets.config.directory}
     library = ${cfg.beets.config.library}
     config_dir = ${beetsConfigDir}
-    beet_binary = ${pythonEnv}/bin/beet
     python = ${pythonEnv}/bin/python
 
     [Beets Validation]
@@ -1503,8 +1502,8 @@ in {
       restartIfChanged = false;
       # Deliberately exclude pythonEnv from PATH: the python interpreter is
       # invoked via absolute path inside the wrappers, and every beets
-      # consumer resolves the pinned interpreter/binary from the rendered
-      # [Beets] config keys (config_dir / beet_binary / python) rather than
+      # consumer resolves the pinned interpreter from the rendered
+      # [Beets] config keys (config_dir / python) rather than
       # PATH lookup — keeping PATH lean avoids ever re-introducing an
       # ambient-beet dependency (tier-2 plan R6).
       path = [pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.curl pkgs.jq pkgs.ffmpeg pkgs.mp3val pkgs.flac pkgs.sox];

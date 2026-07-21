@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import subprocess as sp
 
 import msgspec
 import yaml
@@ -92,48 +91,3 @@ def validate_beets_config(config_dir: str) -> frozenset[str]:
                 included["plugins"], source=include_path,
             )
     return configured_plugins
-
-
-def validate_beets_plugins_loaded(
-    beet: str,
-    env: dict[str, str],
-    configured_plugins: frozenset[str],
-    *,
-    timeout: int,
-) -> None:
-    """Require pinned Beets to load every configured plugin before mutation."""
-    if not configured_plugins:
-        return
-    try:
-        proc = sp.run(
-            [beet, "version"],
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=timeout,
-            env=env,
-            stdin=sp.DEVNULL,
-        )
-    except (sp.TimeoutExpired, OSError) as exc:
-        raise BeetsConfigError(
-            f"Beets plugin preflight failed: {type(exc).__name__}: {exc}"
-        ) from exc
-    if proc.returncode != 0:
-        detail = (proc.stderr or "").strip().splitlines()
-        last = detail[-1] if detail else f"rc={proc.returncode}"
-        raise BeetsConfigError(f"Beets plugin preflight failed: {last}")
-    plugin_lines = [
-        line for line in (proc.stdout or "").splitlines()
-        if line.startswith("plugins:")
-    ]
-    loaded = frozenset(
-        name.strip()
-        for line in plugin_lines
-        for name in line.split(":", 1)[1].split(",")
-        if name.strip()
-    )
-    missing = sorted(configured_plugins - loaded)
-    if missing:
-        raise BeetsConfigError(
-            "configured Beets plugins failed to load: " + ", ".join(missing)
-        )

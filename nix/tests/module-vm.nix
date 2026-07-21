@@ -489,7 +489,6 @@ pkgs.testers.nixosTest {
     # beets subprocess resolves the pinned interpreter + rendered config.
     machine.succeed("grep -q 'config_dir = /var/lib/cratedigger/beets' /var/lib/cratedigger/config.ini")
     machine.succeed("grep -q '^library = /var/lib/cratedigger-music/beets-library.db$' /var/lib/cratedigger/config.ini")
-    machine.succeed("grep -q 'beet_binary = /nix/store/' /var/lib/cratedigger/config.ini")
     machine.succeed("grep -q 'python = /nix/store/' /var/lib/cratedigger/config.ini")
     # U6 (tier-2): one MB value, rendered for the python consumers too.
     machine.succeed("grep -q 'api_base = https://musicbrainz.org' /var/lib/cratedigger/config.ini")

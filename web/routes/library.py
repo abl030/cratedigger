@@ -48,6 +48,8 @@ class BeetsDeleteRequest(BaseModel):
 def post_beets_delete(h: RouteHandler, body: dict[str, object]) -> None:
     from lib.destructive_release_service import (
         DeleteAlbumNotFound,
+        DeleteAlbumAuthorityMismatch,
+        DeleteBeetsAmbiguous,
         DeleteIncomplete,
         DeleteImporterBusy,
         DeleteLockContended,
@@ -113,6 +115,24 @@ def post_beets_delete(h: RouteHandler, body: dict[str, object]) -> None:
             "authoritative_release_id": result.authoritative_release_id,
             "authoritative_pipeline_id": result.authoritative_pipeline_id,
         }, status=422)
+        return
+
+    if isinstance(result, DeleteBeetsAmbiguous):
+        h._json({
+            "error": "current_beets_ambiguous",
+            "release_id": result.release_id,
+            "album_ids": list(result.album_ids),
+            "reason": result.reason,
+        }, status=409)
+        return
+
+    if isinstance(result, DeleteAlbumAuthorityMismatch):
+        h._json({
+            "error": "album_authority_mismatch",
+            "requested_album_id": result.album_id,
+            "authoritative_album_id": result.authoritative_album_id,
+            "release_id": result.release_id,
+        }, status=409)
         return
 
     if isinstance(result, DeleteLockContended):

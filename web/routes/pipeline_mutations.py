@@ -887,6 +887,7 @@ class PipelineBanSourceRequest(BaseModel):
 def post_pipeline_ban_source(h: RouteHandler, body: dict[str, object]) -> None:
     from lib.destructive_release_service import (
         BanSourceCleanupIncomplete,
+        BanSourceBeetsAmbiguous,
         BanSourceImporterBusy,
         BanSourceLockContended,
         BanSourceReleaseMismatch,
@@ -913,6 +914,7 @@ def post_pipeline_ban_source(h: RouteHandler, body: dict[str, object]) -> None:
             expected_release_id=req_body.mb_release_id,
         ),
         finalize_request_fn=finalize_request,
+        beets_delete_fn=s.beets_delete_fn,
     )
     if isinstance(result, BanSourceRequestNotFound):
         h._error("Request not found", 404)
@@ -934,6 +936,14 @@ def post_pipeline_ban_source(h: RouteHandler, body: dict[str, object]) -> None:
         return
     if isinstance(result, BanSourceTransitionConflict):
         _transition_applied_or_respond(h, result.conflict)
+        return
+    if isinstance(result, BanSourceBeetsAmbiguous):
+        h._json({
+            "error": "current_beets_ambiguous",
+            "release_id": result.release_id,
+            "album_ids": list(result.album_ids),
+            "reason": result.reason,
+        }, status=409)
         return
     assert isinstance(result, (BanSourceSuccess, BanSourceCleanupIncomplete))
 

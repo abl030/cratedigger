@@ -60,9 +60,27 @@ _TRANSIENT_LOOKUP_EXCEPTIONS: tuple[type[BaseException], ...] = (
 )
 
 from lib.config import CratediggerConfig
-from lib.release_identity import detect_release_source, normalize_release_id
+from lib.beets_db import (
+    CurrentBeetsAmbiguous,
+    CurrentBeetsResolution,
+    CurrentBeetsUnique,
+)
+from lib.beets_delete import (
+    BeetsDeleteFailed,
+    BeetsDeleteOutcome,
+    BeetsDeleteRequest,
+    run_beets_delete,
+)
+from lib.release_identity import (
+    ReleaseIdentity,
+    detect_release_source,
+    normalize_release_id,
+)
 from lib.replace_status import (
+    REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
+    REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE,
     REPLACE_REASON_CROSS_PATHWAY_TARGET,
+    REPLACE_REASON_SOURCE_IDENTITY_INVALID,
     REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
     REPLACE_REASON_TARGET_NO_RELEASE_GROUP,
     REPLACE_REASON_UNEXPECTED_LOOKUP_ERROR,
@@ -83,11 +101,6 @@ from lib.pipeline_db import (
     SupersedeRaceError,
 )
 from lib.processing_paths import stage_to_ai_path
-from lib.release_cleanup import (
-    ReleaseCleanupDB,
-    ReleaseCleanupResult,
-    remove_and_reset_release,
-)
 from lib.search_plan_service import SearchPlanDB, SearchPlanService
 from lib.util import (
     trigger_jellyfin_scan,
@@ -103,13 +116,13 @@ logger = logging.getLogger(__name__)
 
 @runtime_checkable
 class MbidReplaceDB(
-    WrongMatchDeleteDB, ReleaseCleanupDB, SearchPlanDB, Protocol,
+    WrongMatchDeleteDB, SearchPlanDB, Protocol,
 ):
     """The PipelineDB surface the Replace action uses (#409).
 
     Extends the protocols of everything the handle is forwarded into:
-    ``delete_wrong_match_group``, ``remove_and_reset_release``, and the
-    constructor-built ``SearchPlanService``. Parity tests live in
+    ``delete_wrong_match_group`` and the constructor-built
+    ``SearchPlanService``. Parity tests live in
     ``tests/test_mbid_replace_service.py``.
     """
 
@@ -156,13 +169,12 @@ class ReplaceResult(msgspec.Struct, frozen=True):
     - ``descendant_request_id``: set on ``RESULT_WRONG_STATE`` when the
       source row is itself already ``status='replaced'`` — so the UI
       can deep-link to "the new request is at /pipeline/{id}".
-    - ``reason``: set on ``RESULT_TARGET_INVALID`` — one of the
-      ``REPLACE_REASON_*`` constants, distinguishing the several distinct
-      rejections that outcome collapses (#501 item 2). ``error_message``
-      stays free-text for operator-facing detail; ``reason`` is the
-      stable code CLI/API/tests assert on. ``msgspec.Struct`` per the
-      wire-boundary rule (CLI ``--json`` output and the HTTP response
-      body both surface every field).
+    - ``reason``: a ``REPLACE_REASON_*`` constant on typed rejection
+      outcomes, distinguishing failures that an outcome alone collapses.
+      ``error_message`` stays free-text for operator-facing detail;
+      ``reason`` is the stable code CLI/API/tests assert on.
+      ``msgspec.Struct`` per the wire-boundary rule (CLI ``--json`` output
+      and the HTTP response body both surface every field).
     - ``warnings``: filesystem-cleanup failures that did NOT roll back
       the DB change (R26 non-fatal semantics).
     """
@@ -188,12 +200,26 @@ dict``. The default is ``web.discogs.get_release``; tests inject a fake
 that raises the real ``HTTPError``/``URLError``/``DiscogsMirrorNotConfigured``
 on failure paths (test-fidelity Rule B)."""
 
-BeetsDBFactory = Callable[[], Any]
+class ReplaceBeetsDB(Protocol):
+    @property
+    def library_db_path(self) -> str: ...
+
+    @property
+    def library_root(self) -> str: ...
+
+    def resolve_current_release(
+        self, identity: ReleaseIdentity,
+    ) -> CurrentBeetsResolution: ...
+
+    def close(self) -> None: ...
+
+
+BeetsDBFactory = Callable[[], ReplaceBeetsDB]
 """Zero-arg callable returning a ``BeetsDB`` instance. Default uses
 ``lib.beets_db.BeetsDB`` against the configured library path."""
 
-ReleaseCleanupFn = Callable[..., ReleaseCleanupResult]
-"""Injectable exact-release cleanup at the service's filesystem boundary."""
+BeetsDeleteFn = Callable[[BeetsDeleteRequest], BeetsDeleteOutcome]
+"""Injectable pinned exact-album deletion boundary."""
 
 
 def _default_mb_lookup(mbid: str, *, fresh: bool = False) -> dict[str, Any]:
@@ -212,7 +238,7 @@ def _default_discogs_lookup(
     return get_release(release_id, fresh=fresh)
 
 
-def _default_beets_db_factory() -> Any:
+def _default_beets_db_factory() -> ReplaceBeetsDB:
     """Default beets DB factory — production callers pass an explicit
     factory but tests and CLI scripts use this fallback."""
     from lib.beets_db import open_beets_db
@@ -235,7 +261,7 @@ class MbidReplaceService:
         mb_lookup: MBLookup | None = None,
         discogs_lookup: DiscogsLookup | None = None,
         search_plan_service: SearchPlanService | None = None,
-        remove_release_fn: ReleaseCleanupFn | None = None,
+        beets_delete_fn: BeetsDeleteFn | None = None,
     ) -> None:
         self.db = db
         self.config = config
@@ -249,7 +275,9 @@ class MbidReplaceService:
         self.search_plan_service = (
             search_plan_service or SearchPlanService(db, config)
         )
-        self.remove_release_fn = remove_release_fn or remove_and_reset_release
+        self.beets_delete_fn = (
+            beets_delete_fn if beets_delete_fn is not None else run_beets_delete
+        )
 
     def replace_request_mbid(
         self,
@@ -268,11 +296,8 @@ class MbidReplaceService:
         1. Acquire the per-request IMPORT advisory lock; refuse on
            contention (no pre-emption — the importer worker holds it).
         2. Re-read the source row under the lock and capture
-           pre-supersede state (artist/title for staging path,
-           imported_path for Plex partial scan, old release id, status).
-           The fresh re-read closes the race window where the importer
-           worker finished between Phase 0 and Phase 1 — stale
-           ``old_imported_path`` would mis-route the Plex rescan.
+           pre-supersede state (artist/title for staging path, exact release
+           identity, status), then resolve the current Beets album snapshot.
         3. DB transaction: ``supersede_request_mbid`` atomically flips
            the old row's status, clears ``imported_path``, inserts the
            new row, inserts tracks.
@@ -320,7 +345,21 @@ class MbidReplaceService:
                 ),
             )
 
-        source_mbid = source.get("mb_release_id")
+        source_identity = ReleaseIdentity.from_strict_fields(
+            source.get("mb_release_id"),
+            source.get("discogs_release_id"),
+        )
+        if source_identity is None:
+            return ReplaceResult(
+                outcome=RESULT_WRONG_STATE,
+                request_id=request_id,
+                reason=REPLACE_REASON_SOURCE_IDENTITY_INVALID,
+                error_message=(
+                    f"request {request_id} has missing, malformed, or "
+                    "conflicting exact release identity fields"
+                ),
+            )
+        source_mbid = source_identity.release_id
 
         # Pathway-aware target gate (replaces the old step-0a UUID gate).
         # The target must be a valid release id in the SAME identity space
@@ -330,7 +369,7 @@ class MbidReplaceService:
         # (R4 / AE2). ``detect_release_source`` is the single authority for
         # the pathway (KTD-2); the branch below dispatches on the source's
         # own shape, so MB×MB flows through the original path untouched.
-        source_source = detect_release_source(source_mbid)
+        source_source = source_identity.source
         target_source = detect_release_source(target_mb_release_id)
         if (
             target_source not in ("musicbrainz", "discogs")
@@ -364,19 +403,6 @@ class MbidReplaceService:
 
         source_rg = source.get("mb_release_group_id")
         if not source_rg:
-            # A source row without an MBID (Discogs-only) cannot be
-            # RG-resolved — same TARGET_INVALID outcome the lookup
-            # exception path produced before the typed narrowing.
-            if not isinstance(source_mbid, str) or not source_mbid:
-                return ReplaceResult(
-                    outcome=RESULT_TARGET_INVALID,
-                    request_id=request_id,
-                    error_message=(
-                        f"source MBID {source_mbid!r} could not be "
-                        "resolved: source request has no MB release id"
-                    ),
-                    reason=REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
-                )
             # Lazy-backfill: resolve the source MBID's RG fresh.
             src_data, err = self._mb_lookup_or_error(
                 source_mbid,
@@ -494,7 +520,6 @@ class MbidReplaceService:
 
         return self._finalize_replace(
             request_id,
-            source_mbid=source_mbid,
             canonical_mbid=canonical_mbid,
             target_rg=target_rg,
             target_data=target_data,
@@ -691,7 +716,6 @@ class MbidReplaceService:
 
         return self._finalize_replace(
             request_id,
-            source_mbid=source_mbid,
             canonical_mbid=canonical_id,
             target_rg=target_master,
             target_data=target_data,
@@ -758,7 +782,6 @@ class MbidReplaceService:
         self,
         request_id: int,
         *,
-        source_mbid: str | None,
         canonical_mbid: str,
         target_rg: str,
         target_data: dict[str, Any],
@@ -827,9 +850,56 @@ class MbidReplaceService:
                 )
             old_artist = source_locked.get("artist_name") or ""
             old_title = source_locked.get("album_title") or ""
-            old_imported_path = source_locked.get("imported_path")
-            old_release_id = source_locked.get("mb_release_id") or source_mbid
             old_status = source_locked.get("status")
+
+            old_identity = ReleaseIdentity.from_strict_fields(
+                source_locked.get("mb_release_id"),
+                source_locked.get("discogs_release_id"),
+            )
+            if old_identity is None:
+                return ReplaceResult(
+                    outcome=RESULT_WRONG_STATE,
+                    request_id=request_id,
+                    reason=REPLACE_REASON_SOURCE_IDENTITY_INVALID,
+                    error_message=(
+                        f"request {request_id} has missing, malformed, or "
+                        "conflicting exact release identity fields"
+                    ),
+                )
+            try:
+                beets_db = self.beets_db_factory()
+                try:
+                    current_beets = beets_db.resolve_current_release(old_identity)
+                    current_library_db_path = beets_db.library_db_path
+                    current_library_root = beets_db.library_root
+                finally:
+                    beets_db.close()
+            except Exception as exc:  # noqa: BLE001 -- typed zero-mutation result
+                return ReplaceResult(
+                    outcome=RESULT_WRONG_STATE,
+                    request_id=request_id,
+                    reason=REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE,
+                    error_message=(
+                        "current Beets resolution failed before Replace: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                )
+            if isinstance(current_beets, CurrentBeetsAmbiguous):
+                return ReplaceResult(
+                    outcome=RESULT_WRONG_STATE,
+                    request_id=request_id,
+                    reason=REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
+                    error_message=(
+                        f"current Beets authority for {old_identity.release_id} "
+                        f"is ambiguous ({current_beets.reason}; album ids "
+                        f"{list(current_beets.album_ids)})"
+                    ),
+                )
+            current_album_path = (
+                current_beets.album_path
+                if isinstance(current_beets, CurrentBeetsUnique)
+                else None
+            )
 
             # Phase 3 — DB transaction.
             try:
@@ -875,29 +945,26 @@ class MbidReplaceService:
                     ),
                 )
 
-            # Phase 4 — filesystem cleanup (non-fatal). Keyed on the old
-            # release id ONLY — never on request status. "wanted" does not
+            # Phase 4 — filesystem cleanup (non-fatal). Keyed on the fresh
+            # exact Beets album PK — never on request status. "wanted" does not
             # mean "nothing on disk": library-backfill rows (2026-06-04)
             # track pre-existing installs while still wanted, and Replace
             # REPLACES — the old pressing's install is displaced whenever
             # it resolves in beets (the Passenger regression, 2026-07-18).
-            # ``remove_and_reset_release`` is a safe no-op when the old
-            # release is not in beets.
-            if old_release_id:
+            # Missing current Beets authority is a safe no-op.
+            if isinstance(current_beets, CurrentBeetsUnique):
                 try:
-                    beets_db = self.beets_db_factory()
-                    result = self.remove_release_fn(
-                        beets_db=beets_db,
-                        pipeline_db=self.db,
-                        release_id=old_release_id,
-                        request_id=request_id,
-                        clear_pipeline_state=False,
-                    )
-                    for failure in result.selector_failures:
+                    delete_outcome = self.beets_delete_fn(BeetsDeleteRequest(
+                        album_id=current_beets.album_id,
+                        expected_release_id=old_identity.release_id,
+                        library_db_path=current_library_db_path,
+                        library_root=current_library_root,
+                    ))
+                    if isinstance(delete_outcome, BeetsDeleteFailed):
                         warnings.append(
-                            f"beets selector failed "
-                            f"{getattr(failure, 'selector', '?')}: "
-                            f"{getattr(failure, 'reason', '?')}"
+                            f"beets exact delete id:{current_beets.album_id} "
+                            f"failed {delete_outcome.reason}: "
+                            f"{delete_outcome.detail}"
                         )
                 except Exception as exc:  # noqa: BLE001
                     warnings.append(
@@ -970,7 +1037,7 @@ class MbidReplaceService:
 
         try:
             trigger_plex_scan(
-                self.config, imported_path=old_imported_path
+                self.config, imported_path=current_album_path
             )
         except Exception as exc:  # noqa: BLE001
             warnings.append(
@@ -978,7 +1045,7 @@ class MbidReplaceService:
             )
         try:
             trigger_jellyfin_scan(
-                self.config, imported_path=old_imported_path
+                self.config, imported_path=current_album_path
             )
         except Exception as exc:  # noqa: BLE001
             warnings.append(

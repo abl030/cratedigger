@@ -51,43 +51,6 @@ def parse_mb_first_release_year(data: dict[str, Any]) -> int | None:
         return None
 
 
-# === Subprocess env for beets ===
-
-
-def beet_bin() -> str:
-    """Locate the ``beet`` executable.
-
-    Single source of truth for "where does ``beet`` live" across every
-    subprocess callsite (release_cleanup remove, force-import, diagnostics,
-    etc). Precedence:
-
-      1. ``[Beets] beet_binary`` from the runtime config.ini — rendered by
-         the NixOS module with the pinned env's ``beet`` (nix/beets.nix),
-         so production always runs the beets the test suite verified.
-      2. ``beet`` on PATH (dev shells; the pinned dev shell provides the
-         same derivation).
-
-    There is deliberately NO per-user-profile fallback (tier-2 plan R6):
-    a missing beet is an actionable configuration error, never a silent
-    revert to whatever Home Manager profile happens to exist on the host.
-
-    Resolved at CALL time (not import time) so tests that patch config or
-    ``shutil.which`` see the patched values.
-    """
-    from lib.config import read_runtime_config
-    configured = read_runtime_config().beet_binary
-    if configured:
-        return configured
-    found = shutil.which("beet")
-    if found:
-        return found
-    raise RuntimeError(
-        "beet binary not found: set [Beets] beet_binary in config.ini "
-        "(services.cratedigger renders it from the pinned beets env) or "
-        "put `beet` on PATH. There is no Home Manager fallback."
-    )
-
-
 def beets_subprocess_env() -> dict[str, str]:
     """Env for subprocesses that invoke beets (directly or via the harness
     and import_one.py). Single source of truth for how a beets subprocess
@@ -107,8 +70,7 @@ def beets_subprocess_env() -> dict[str, str]:
     Every subprocess that runs beets must use this env:
       - lib/beets.py::beets_validate (harness for validation)
       - lib/dispatch/ (launches import_one.py)
-      - harness/import_one.py (launches the harness + `beet move`)
-      - web/routes/pipeline.py (ban-source `beet remove`)
+      - harness/import_one.py (launches the harness)
 
     os.environ and the runtime config are read at CALL time, not import
     time, so tests that patch either see the patched values.

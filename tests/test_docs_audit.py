@@ -291,8 +291,6 @@ class TestReferenceScannerKnownBadCases(unittest.TestCase):
 STALE_CALL_REFERENCE_ALLOWLIST: dict[str, str] = {
     "lib/download.py::harvest_terminal_transfer_evidence::remove_completed_downloads":
         "Past-tense #589 docstring explains the unsafe bulk cleanup replaced by owned purging.",
-    "lib/release_cleanup.py::remove_album_by_selectors::remove_duplicates":
-        "Past-tense beets API mention documents the historical cross-MBID deletion hazard.",
     "lib/slskd_transfers.py::purge_completed_transfers::remove_completed_downloads":
         "Past-tense #589 docstring explains the unsafe bulk cleanup replaced by per-id purging.",
 }
