@@ -37,6 +37,11 @@ from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 
 from lib.config import CratediggerConfig
+from lib.json_narrow import (
+    is_container_like as _is_container_like,
+    is_dict_like as _is_dict_like,
+    is_list_like as _is_list_like,
+)
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_PLAN,
     PLAN_STATUS_ACTIVE,
@@ -288,30 +293,6 @@ def sanitize_provenance(provenance: dict[str, Any] | None) -> dict[str, Any] | N
 _SANITIZE_MAX_DEPTH = 10
 _CYCLE_MARKER = "[CYCLE]"
 _TRUNCATED_MARKER = "[TRUNCATED]"
-
-
-def _is_container_like(value: object) -> bool:
-    """``isinstance(value, (dict, list, tuple))`` behind a plain boundary.
-
-    Same rationale as ``lib.youtube_album_service._is_dict_like``: an
-    inline ``isinstance`` check narrows the caller's ``Any``-typed
-    ``value`` to a partially-unknown parameterized type (``dict[Unknown,
-    Unknown] | list[Unknown] | tuple[Unknown, ...]``), tainting every
-    downstream ``id()``/``.items()``/iteration call in strict mode. A
-    plain (non-``TypeGuard``) function performs the identical runtime
-    check without narrowing the caller's variable.
-    """
-    return isinstance(value, (dict, list, tuple))
-
-
-def _is_dict_like(value: object) -> bool:
-    """``isinstance(value, dict)`` behind a plain boundary — see above."""
-    return isinstance(value, dict)
-
-
-def _is_list_like(value: object) -> bool:
-    """``isinstance(value, list)`` behind a plain boundary — see above."""
-    return isinstance(value, list)
 
 
 def _sanitize_obj(value: Any, *, _depth: int, _seen: set[int]) -> Any:

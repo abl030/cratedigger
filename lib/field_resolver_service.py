@@ -37,6 +37,8 @@ from typing import Any, Callable, Literal, Protocol
 
 import msgspec
 
+from lib.json_narrow import json_dict as _json_dict, json_list as _json_list
+
 
 logger = logging.getLogger(__name__)
 
@@ -147,43 +149,6 @@ release_group_id resolver and the track-artist resolver."""
 DiscogsReleaseFn = Callable[..., dict[str, Any]]
 """``discogs_get_release(release_id, *, fresh: bool=False) -> dict``.
 Used by the release_group_id resolver and the track-artist resolver."""
-
-
-def _json_list(value: Any) -> list[object]:
-    """Narrow an untyped value (MB/Discogs JSON, or an internal ``Any``-
-    stored container of our own typed objects) to a plain list.
-
-    ``isinstance(value, list)`` alone leaves pyright with a partially-
-    unknown ``list[Unknown]`` even when ``value`` was already ``Any`` —
-    strict mode never lets an ``isinstance`` narrowing inherit ``Any``
-    into a generic's type argument, and an isinstance-narrowed argument
-    stays unknown-tainted even at an already-declared ``object``
-    parameter. Accepting ``Any`` here (matching ``msgspec.convert``'s
-    own ``obj: Any`` parameter) absorbs that taint at this one seam;
-    routing through ``msgspec.convert`` gives every caller a fully known
-    ``list[object]`` back, with no change to the elements themselves —
-    each stays the exact same object (verified: ``msgspec.convert`` does
-    not copy or coerce elements at ``object`` value type, including
-    already-constructed ``msgspec.Struct`` instances). A non-list value
-    returns ``[]``, matching the ``isinstance(..., list)`` guard every
-    call site already uses.
-    """
-    if not isinstance(value, list):
-        return []
-    return msgspec.convert(value, type=list[object])
-
-
-def _json_dict(value: Any) -> dict[str, object]:
-    """Narrow an untyped MB/Discogs JSON value to a plain string-keyed dict.
-
-    Dict counterpart of ``_json_list`` — see its docstring for why the
-    ``Any`` parameter and the ``msgspec.convert`` indirection are needed.
-    A non-dict value returns ``{}``, matching the ``isinstance(...,
-    dict)`` guard every call site already uses.
-    """
-    if not isinstance(value, dict):
-        return {}
-    return msgspec.convert(value, type=dict[str, object])
 
 
 def _looks_numeric(value: Any) -> bool:

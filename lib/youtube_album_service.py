@@ -49,6 +49,11 @@ from lib.beets_distance import (
     SyntheticItem,
     compute_beets_distance as _default_distance_fn,
 )
+from lib.json_narrow import (
+    is_dict_like as _is_dict_like,
+    json_dict as _json_dict,
+    json_list as _json_list,
+)
 from lib.pipeline_db import PersistedDistance, PersistedTrack, PersistedYoutubeRow
 from lib.release_identity import detect_release_source, normalize_release_id
 
@@ -103,61 +108,6 @@ def _is_leaf_miss(exc: BaseException) -> bool:
     return False
 
 log = logging.getLogger(__name__)
-
-
-def _json_list(value: object) -> list[object]:
-    """Narrow an untyped ytmusicapi/MB/Discogs JSON value to a plain list.
-
-    ``isinstance(value, list)`` alone leaves pyright with a partially-
-    unknown ``list[Unknown]`` even when ``value`` was already fully
-    known — strict mode never lets an ``isinstance`` narrowing inherit
-    a generic's type argument. Routing through ``msgspec.convert`` gives
-    every caller a fully known ``list[object]`` back, with no change to
-    the elements themselves (each stays the exact same object —
-    verified: ``msgspec.convert`` does not copy or coerce elements at
-    ``object`` value type). A non-list value returns ``[]`` — graceful
-    narrowing, never an assertion, per this module's external-JSON
-    contract (a malformed field degrades to absent, it never crashes
-    the resolver).
-
-    Callers must pass a freshly-evaluated expression (e.g. a ``dict``
-    subscript/``.get()``), not an already ``isinstance``-narrowed local
-    — the narrowing taint survives even at this declared ``object``
-    parameter, same as it survives at the call site itself.
-    """
-    if not isinstance(value, list):
-        return []
-    return msgspec.convert(value, type=list[object])
-
-
-def _json_dict(value: object) -> dict[str, object]:
-    """Narrow an untyped ytmusicapi/MB/Discogs JSON value to a plain
-    string-keyed dict.
-
-    Dict counterpart of ``_json_list`` — see its docstring for why the
-    ``msgspec.convert`` indirection is needed, why callers must pass a
-    fresh expression rather than an already-narrowed local, and why a
-    non-dict value gracefully returns ``{}`` rather than asserting.
-    """
-    if not isinstance(value, dict):
-        return {}
-    return msgspec.convert(value, type=dict[str, object])
-
-
-def _is_dict_like(value: object) -> bool:
-    """``isinstance(value, dict)`` behind a plain function boundary.
-
-    A loop that needs to gate on "is this entry a dict" *before* calling
-    ``_json_dict`` (rather than letting ``_json_dict`` itself degrade a
-    non-dict to ``{}``) can't use a bare ``isinstance`` check as the
-    gate: pyright narrows the loop variable to a partially-unknown
-    ``dict[Unknown, Unknown]``, which then taints the ``_json_dict``
-    call even at its declared ``object`` parameter. A plain (non-
-    ``TypeGuard``) function does the identical runtime check without
-    pyright narrowing the caller's variable, so the loop variable stays
-    cleanly ``object``-typed all the way into ``_json_dict``.
-    """
-    return isinstance(value, dict)
 
 
 # Redis cache TTL for cached YouTube Music HTTP responses. Effectively

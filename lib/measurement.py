@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import msgspec
 
 from lib.audio_hash import AudioHashError, hash_audio_content
+from lib.json_narrow import json_dict as _json_dict, json_list as _json_list
 
 # Extensions audio_hash.py currently knows how to hash. AUDIO_EXTS is broader
 # (includes wav, alac); the bad-hash gate filters to this subset so legitimate
@@ -375,30 +376,6 @@ AudioCodecProbe = Callable[[str], str | None]
 
 class AudioCodecProbeError(RuntimeError):
     """Raised when an ambiguous container's codec cannot be measured."""
-
-
-def _json_dict(value: object) -> dict[str, object]:
-    """Narrow an untyped ffprobe JSON value to a plain string-keyed dict.
-
-    A bare ``isinstance(value, dict)`` leaves pyright with a partially
-    unknown ``dict[Unknown, Unknown]`` even when ``value`` was already
-    fully known — strict mode never lets an ``isinstance`` narrowing
-    inherit a generic's type argument (same quirk documented on
-    ``lib.youtube_album_service._json_dict``). Routing through
-    ``msgspec.convert`` gives every caller a fully known
-    ``dict[str, object]`` back. A non-dict value gracefully returns
-    ``{}`` — this is subprocess JSON, never an assertion.
-    """
-    if not isinstance(value, dict):
-        return {}
-    return msgspec.convert(value, type=dict[str, object])
-
-
-def _json_list(value: object) -> list[object]:
-    """List counterpart of ``_json_dict`` — see its docstring."""
-    if not isinstance(value, list):
-        return []
-    return msgspec.convert(value, type=list[object])
 
 
 def ffprobe_audio_codec_name(fpath: str) -> str | None:
