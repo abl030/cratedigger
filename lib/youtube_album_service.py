@@ -105,6 +105,61 @@ def _is_leaf_miss(exc: BaseException) -> bool:
 log = logging.getLogger(__name__)
 
 
+def _json_list(value: object) -> list[object]:
+    """Narrow an untyped ytmusicapi/MB/Discogs JSON value to a plain list.
+
+    ``isinstance(value, list)`` alone leaves pyright with a partially-
+    unknown ``list[Unknown]`` even when ``value`` was already fully
+    known — strict mode never lets an ``isinstance`` narrowing inherit
+    a generic's type argument. Routing through ``msgspec.convert`` gives
+    every caller a fully known ``list[object]`` back, with no change to
+    the elements themselves (each stays the exact same object —
+    verified: ``msgspec.convert`` does not copy or coerce elements at
+    ``object`` value type). A non-list value returns ``[]`` — graceful
+    narrowing, never an assertion, per this module's external-JSON
+    contract (a malformed field degrades to absent, it never crashes
+    the resolver).
+
+    Callers must pass a freshly-evaluated expression (e.g. a ``dict``
+    subscript/``.get()``), not an already ``isinstance``-narrowed local
+    — the narrowing taint survives even at this declared ``object``
+    parameter, same as it survives at the call site itself.
+    """
+    if not isinstance(value, list):
+        return []
+    return msgspec.convert(value, type=list[object])
+
+
+def _json_dict(value: object) -> dict[str, object]:
+    """Narrow an untyped ytmusicapi/MB/Discogs JSON value to a plain
+    string-keyed dict.
+
+    Dict counterpart of ``_json_list`` — see its docstring for why the
+    ``msgspec.convert`` indirection is needed, why callers must pass a
+    fresh expression rather than an already-narrowed local, and why a
+    non-dict value gracefully returns ``{}`` rather than asserting.
+    """
+    if not isinstance(value, dict):
+        return {}
+    return msgspec.convert(value, type=dict[str, object])
+
+
+def _is_dict_like(value: object) -> bool:
+    """``isinstance(value, dict)`` behind a plain function boundary.
+
+    A loop that needs to gate on "is this entry a dict" *before* calling
+    ``_json_dict`` (rather than letting ``_json_dict`` itself degrade a
+    non-dict to ``{}``) can't use a bare ``isinstance`` check as the
+    gate: pyright narrows the loop variable to a partially-unknown
+    ``dict[Unknown, Unknown]``, which then taints the ``_json_dict``
+    call even at its declared ``object`` parameter. A plain (non-
+    ``TypeGuard``) function does the identical runtime check without
+    pyright narrowing the caller's variable, so the loop variable stays
+    cleanly ``object``-typed all the way into ``_json_dict``.
+    """
+    return isinstance(value, dict)
+
+
 # Redis cache TTL for cached YouTube Music HTTP responses. Effectively
 # forever: Redis ``SETEX`` accepts up to ``2**63 - 1``, but ``2**31 - 1``
 # (~68 years) is the conservative limit honoured by all Redis clients
@@ -319,7 +374,7 @@ class YoutubeAlbumResolverResult(msgspec.Struct, kw_only=True):
     source: Optional[str] = None  # "mb" | "discogs" | None
     from_cache: bool = False
     youtube_releases: list[ResolvedYoutubeRelease] = msgspec.field(
-        default_factory=list)
+        default_factory=list[ResolvedYoutubeRelease])
     error_message: Optional[str] = None
     duration_ms: Optional[int] = None
 
@@ -350,6 +405,14 @@ DiscogsLookup = Callable[[str], Optional[dict[str, object]]]
 
 DiscogsMasterReleases = Callable[[str], Optional[dict[str, object]]]
 """``discogs_get_master_releases(master_id) -> {title, type, releases[]}``."""
+
+_ReleaseOrGroupLookup = Callable[[str], Optional[dict[str, object]]]
+"""Structurally identical to ``MBLookup``/``MBRGReleases``/
+``DiscogsLookup``/``DiscogsMasterReleases`` above — used as the
+parameter type for the two source-agnostic helpers
+(``_safe_leaf_lookup``/``_safe_group_lookup``) that accept either an MB
+or a Discogs callable interchangeably, so the name doesn't imply one
+source over the other."""
 
 DistanceFn = Callable[..., BeetsDistanceResult]
 """``compute_beets_distance(...)`` shape — service injects this so tests
@@ -569,7 +632,7 @@ def resolve_youtube_album(
     # Step 5-8: search YT, expand siblings, fetch per-YT-album track lists.
     yt_failure: Optional[tuple[str, str]] = None
     seed_browse_id: Optional[str] = None
-    yt_album_responses: dict[str, dict] = {}
+    yt_album_responses: dict[str, dict[str, Any]] = {}
     deadline_message: Optional[str] = None
     # Round 2 P2-4: accumulate the jitter so operators can see how
     # much of the wall-clock time is the anti-throttle pause vs real
@@ -599,7 +662,7 @@ def resolve_youtube_album(
         seed_album = _cached_get_album(
             yt_client, cache, seed_browse_id, refresh=refresh)
         yt_album_responses[seed_browse_id] = seed_album
-        for other in seed_album.get("other_versions") or []:
+        for other_raw in _json_list(seed_album.get("other_versions")):
             if _deadline_breached():
                 deadline_message = (
                     f"deadline exceeded after "
@@ -609,8 +672,13 @@ def resolve_youtube_album(
                 log.warning(
                     "youtube_album_service: %s", deadline_message)
                 break
+            other = _json_dict(other_raw)
             other_browse_id = other.get("browseId")
-            if not other_browse_id or other_browse_id in yt_album_responses:
+            if (
+                not isinstance(other_browse_id, str)
+                or not other_browse_id
+                or other_browse_id in yt_album_responses
+            ):
                 continue
             # Jitter between consecutive ``get_album`` calls. Default
             # 0.5-1.5s (round 2 P2-4 — tightened from 1-3s) so the
@@ -735,14 +803,12 @@ def resolve_youtube_album(
         # carry duplicate or zero-indexed trackNumber values. The synth
         # list was built from the same input order immediately above.
         persistable_tracks: list[PersistedTrack] = []
-        raw_tracks = album_resp.get("tracks") or []
+        raw_tracks = _json_list(album_resp.get("tracks"))
         for idx, si in enumerate(synth_items):
-            raw_track = raw_tracks[idx] if idx < len(raw_tracks) else {}
-            video_id = (
-                raw_track.get("videoId")
-                if isinstance(raw_track, dict)
-                else None
+            raw_track = (
+                _json_dict(raw_tracks[idx]) if idx < len(raw_tracks) else {}
             )
+            video_id = raw_track.get("videoId")
             persistable_tracks.append(PersistedTrack(
                 title=si.title,
                 artists=[{"name": si.artist}],
@@ -857,15 +923,17 @@ class _GroupResolution(msgspec.Struct, kw_only=True):
     """
 
     rg_id: Optional[str] = None
-    sibling_summaries: list[Any] = msgspec.field(default_factory=list)
+    sibling_summaries: list[object] = msgspec.field(
+        default_factory=list[object]
+    )
     failure_outcome: Optional[str] = None
     is_orphan: bool = False
 
 
 def _safe_leaf_lookup(
-    lookup: Callable[[str], Optional[dict]],
+    lookup: _ReleaseOrGroupLookup,
     identifier: str,
-) -> Optional[dict]:
+) -> Optional[dict[str, object]]:
     """Call a leaf lookup, treating ONLY 404 (and Discogs ValueError) as a miss.
 
     Real adapters (``web.mb.get_release`` / ``web.discogs.get_release``)
@@ -896,9 +964,9 @@ def _safe_leaf_lookup(
 
 
 def _safe_group_lookup(
-    lookup: Callable[[str], Optional[dict]],
+    lookup: _ReleaseOrGroupLookup,
     identifier: str,
-) -> Optional[dict]:
+) -> Optional[dict[str, object]]:
     """Call a release-group / master lookup with the same 404-only tolerance."""
     try:
         return lookup(identifier)
@@ -932,7 +1000,7 @@ def _resolve_mb_group(
     leaf = _safe_leaf_lookup(mb_get_release, identifier)
     if leaf:
         rg_id = leaf.get("release_group_id")
-        if not rg_id:
+        if not isinstance(rg_id, str) or not rg_id:
             # Orphan release: legacy MB row without a release group. Treat
             # the leaf as its own one-element matrix — sibling enumeration
             # isn't possible, but YT search + N×1 scoring still is. See
@@ -947,7 +1015,7 @@ def _resolve_mb_group(
             return _GroupResolution(failure_outcome="not_found")
         return _GroupResolution(
             rg_id=rg_id,
-            sibling_summaries=list(group.get("releases") or []),
+            sibling_summaries=_json_list(group.get("releases")),
         )
 
     # Leaf miss → treat identifier as RG MBID.
@@ -956,7 +1024,7 @@ def _resolve_mb_group(
         return _GroupResolution(failure_outcome="not_found")
     return _GroupResolution(
         rg_id=identifier,
-        sibling_summaries=list(group.get("releases") or []),
+        sibling_summaries=_json_list(group.get("releases")),
     )
 
 
@@ -976,7 +1044,7 @@ def _resolve_discogs_group(
     leaf = _safe_leaf_lookup(discogs_get_release, identifier)
     if leaf:
         master_id = leaf.get("release_group_id")
-        if not master_id:
+        if not isinstance(master_id, str) or not master_id:
             # Orphan Discogs release: no master record. Score against the
             # leaf alone — sibling enumeration via the master is not
             # possible, but YT search + N×1 distance is.
@@ -990,7 +1058,7 @@ def _resolve_discogs_group(
             return _GroupResolution(failure_outcome="not_found")
         return _GroupResolution(
             rg_id=master_id,
-            sibling_summaries=list(group.get("releases") or []),
+            sibling_summaries=_json_list(group.get("releases")),
         )
 
     group = _safe_group_lookup(discogs_get_master_releases, identifier)
@@ -998,7 +1066,7 @@ def _resolve_discogs_group(
         return _GroupResolution(failure_outcome="not_found")
     return _GroupResolution(
         rg_id=identifier,
-        sibling_summaries=list(group.get("releases") or []),
+        sibling_summaries=_json_list(group.get("releases")),
     )
 
 
@@ -1007,24 +1075,24 @@ def _resolve_discogs_group(
 # ---------------------------------------------------------------------------
 
 
-def _extract_sibling_ids(summaries: list[Any]) -> list[str]:
+def _extract_sibling_ids(summaries: list[object]) -> list[str]:
     """Return every sibling MBID/release-ID from the group's release summaries."""
     out: list[str] = []
-    for s in summaries:
-        if not isinstance(s, dict):
-            continue
-        sid = s.get("id")
+    for s_raw in summaries:
+        # ``_json_dict`` already returns ``{}`` for a non-dict entry, so
+        # a preceding ``isinstance`` gate would be redundant.
+        sid = _json_dict(s_raw).get("id")
         if sid:
             out.append(str(sid))
     return out
 
 
 def _fetch_mb_siblings(
-    summaries: list[Any],
+    summaries: list[object],
     source_label: str,
     mb_get_release: MBLookup,
     discogs_get_release: DiscogsLookup,
-) -> list[dict]:
+) -> list[dict[str, object]]:
     """Resolve each sibling-summary into a full release record.
 
     Misses (mirror 404 / network error) are skipped silently — the
@@ -1033,12 +1101,12 @@ def _fetch_mb_siblings(
     the same MBID. (Per R17, partial mirror coverage shouldn't fail the
     whole resolve.)
     """
-    out: list[dict] = []
+    out: list[dict[str, object]] = []
     fetcher = mb_get_release if source_label == "mb" else discogs_get_release
-    for summary in summaries:
-        if not isinstance(summary, dict):
-            continue
-        sid = summary.get("id")
+    for summary_raw in summaries:
+        # ``_json_dict`` already returns ``{}`` for a non-dict entry, so
+        # a preceding ``isinstance`` gate would be redundant.
+        sid = _json_dict(summary_raw).get("id")
         if not sid:
             continue
         try:
@@ -1054,15 +1122,15 @@ def _fetch_mb_siblings(
     return out
 
 
-def _pick_mb_seed(siblings: list[dict]) -> dict:
+def _pick_mb_seed(siblings: list[dict[str, object]]) -> dict[str, object]:
     """Lowest-year sibling, first-by-id tiebreak."""
-    def _sort_key(s: dict) -> tuple[int, str]:
+    def _sort_key(s: dict[str, object]) -> tuple[int, str]:
         year = s.get("year")
         return (year if isinstance(year, int) else 9999, str(s.get("id") or ""))
     return sorted(siblings, key=_sort_key)[0]
 
 
-def _build_search_query(seed_release: dict) -> str:
+def _build_search_query(seed_release: dict[str, object]) -> str:
     """Form the YT search query from the seed release.
 
     ``f"{artist_name} {album_title}"`` — the simplest deterministic
@@ -1074,8 +1142,8 @@ def _build_search_query(seed_release: dict) -> str:
 
 
 def _pick_yt_seed(
-    search_results: list[dict],
-    mb_seed: dict,
+    search_results: list[dict[str, Any]],
+    mb_seed: dict[str, object],
 ) -> Optional[str]:
     """Pick the YT search result whose ``(year, trackCount)`` is closest
     to the MB seed. Fall back to the top-ranked result on ties.
@@ -1085,8 +1153,9 @@ def _pick_yt_seed(
     """
     if not search_results:
         return None
-    mb_year = mb_seed.get("year") if isinstance(mb_seed.get("year"), int) else None
-    mb_track_count = len(mb_seed.get("tracks") or [])
+    mb_year_raw = mb_seed.get("year")
+    mb_year = mb_year_raw if isinstance(mb_year_raw, int) else None
+    mb_track_count = len(_json_list(mb_seed.get("tracks")))
 
     best_idx: Optional[int] = None
     best_score: Optional[tuple[int, int]] = None
@@ -1195,7 +1264,7 @@ def _normalize_track_number(idx: int, raw_tn: Any, *, zero_indexed: bool) -> int
     return idx + 1
 
 
-def _synthesize_items(album_resp: dict) -> list[SyntheticItem]:
+def _synthesize_items(album_resp: dict[str, Any]) -> list[SyntheticItem]:
     """Build a ``SyntheticItem`` list from a ``ytmusicapi.get_album`` response.
 
     Beets's ``distance()`` reads ``title``, ``artist``, ``album``,
@@ -1205,36 +1274,43 @@ def _synthesize_items(album_resp: dict) -> list[SyntheticItem]:
     comparisons rather than penalising them.
     """
     album_title = str(album_resp.get("title") or "")
-    album_artists = album_resp.get("artists") or []
+    album_artists = _json_list(album_resp.get("artists"))
+    # ``_json_dict`` already returns ``{}`` for a non-dict entry (and
+    # ``.get`` then degrades to the ``or ""`` fallback below), so a
+    # preceding ``isinstance`` check on ``album_artists[0]`` would be
+    # redundant.
     albumartist = (
-        str(album_artists[0].get("name") or "")
-        if album_artists and isinstance(album_artists[0], dict)
+        str(_json_dict(album_artists[0]).get("name") or "")
+        if album_artists
         else ""
     )
-    tracks = album_resp.get("tracks") or []
+    tracks = _json_list(album_resp.get("tracks"))
     total = len(tracks)
 
-    # Detect 0-indexed payload on the first usable track only. Without
-    # this flag we'd misclassify a 1-indexed payload that legitimately
-    # repeats ``trackNumber: 1`` (e.g. duplicate or malformed entries)
-    # as 0-indexed.
+    # Detect 0-indexed payload on the first usable (dict) track only —
+    # non-dict entries are skipped, not treated as the "first" track.
+    # Without this flag we'd misclassify a 1-indexed payload that
+    # legitimately repeats ``trackNumber: 1`` (e.g. duplicate or
+    # malformed entries) as 0-indexed.
     zero_indexed = False
-    for t in tracks:
-        if isinstance(t, dict):
-            raw_first = t.get("trackNumber")
-            if isinstance(raw_first, int) and raw_first == 0:
-                zero_indexed = True
-            break
+    for t_raw in tracks:
+        if not _is_dict_like(t_raw):
+            continue
+        raw_first = _json_dict(t_raw).get("trackNumber")
+        if isinstance(raw_first, int) and raw_first == 0:
+            zero_indexed = True
+        break
 
     out: list[SyntheticItem] = []
-    for idx, t in enumerate(tracks):
-        if not isinstance(t, dict):
+    for idx, t_raw in enumerate(tracks):
+        if not _is_dict_like(t_raw):
             continue
+        t = _json_dict(t_raw)
         title = str(t.get("title") or "")
-        t_artists = t.get("artists") or []
+        t_artists = _json_list(t.get("artists"))
         artist = (
-            str(t_artists[0].get("name") or "")
-            if t_artists and isinstance(t_artists[0], dict)
+            str(_json_dict(t_artists[0]).get("name") or "")
+            if t_artists
             else albumartist
         )
         raw_tn = t.get("trackNumber")
@@ -1261,7 +1337,7 @@ def _score_against_siblings(
     mb_release_group_id: Optional[str],
     distance_fn: DistanceFn,
     pdb: YoutubeResolverDB,
-    mb_fetcher: Callable[[str], Optional[dict]],
+    mb_fetcher: _ReleaseOrGroupLookup,
     deadline_breached: Optional[Callable[[], bool]] = None,
 ) -> list[ResolvedDistance]:
     """Run ``distance_fn`` for every sibling MBID and collect typed results.
@@ -1371,7 +1447,7 @@ def _classify_server_error(exc: Exception) -> str:
 
 
 def _rows_to_youtube_releases(
-    rows: list[dict],
+    rows: list[dict[str, Any]],
 ) -> list[ResolvedYoutubeRelease]:
     """Deserialize cached DB rows back into typed structs.
 

@@ -11,6 +11,8 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+import msgspec
+
 
 ROOT = Path(__file__).resolve().parent.parent
 CLAUDE_AGENTS = ROOT / ".claude" / "agents"
@@ -24,6 +26,12 @@ class AdapterError(RuntimeError):
     """Raised when a shared source cannot be represented safely for Codex."""
 
 
+# Shared alias for the ``mcpServers`` shape parsed from agent frontmatter
+# and ``.mcp.json`` alike — one declaration site instead of repeating
+# ``dict[str, dict[str, Any]]`` at every producer/consumer.
+type MCPServers = dict[str, dict[str, Any]]
+
+
 def toml_value(value: Any) -> str:
     if isinstance(value, str):
         return json.dumps(value, ensure_ascii=False)
@@ -32,11 +40,19 @@ def toml_value(value: Any) -> str:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return str(value)
     if isinstance(value, list):
-        return "[" + ", ".join(toml_value(item) for item in value) + "]"
+        # ``isinstance`` alone leaves ``item`` partially unknown even
+        # though ``value`` was already ``Any`` — route the isinstance-
+        # narrowed list through ``msgspec.convert`` for a fully known
+        # ``list[object]`` (elements keep their original identity).
+        items: list[object] = msgspec.convert(value, type=list[object])
+        return "[" + ", ".join(toml_value(item) for item in items) + "]"
     if isinstance(value, dict):
+        mapping: dict[str, object] = msgspec.convert(
+            value, type=dict[str, object]
+        )
         entries = (
             f"{toml_value(str(key))} = {toml_value(item)}"
-            for key, item in value.items()
+            for key, item in mapping.items()
         )
         return "{ " + ", ".join(entries) + " }"
     raise AdapterError(f"unsupported TOML value: {value!r}")
@@ -56,7 +72,7 @@ def parse_scalar(raw: str) -> Any:
     return raw
 
 
-def parse_agent(path: Path) -> tuple[str, str, str, dict[str, dict[str, Any]]]:
+def parse_agent(path: Path) -> tuple[str, str, str, MCPServers]:
     text = path.read_text(encoding="utf-8")
     match = re.match(r"\A---\n(.*?)\n---\n(.*)\Z", text, re.DOTALL)
     if not match:
@@ -64,7 +80,7 @@ def parse_agent(path: Path) -> tuple[str, str, str, dict[str, dict[str, Any]]]:
 
     header, body = match.groups()
     fields: dict[str, Any] = {}
-    servers: dict[str, dict[str, Any]] = {}
+    servers: MCPServers = {}
     lines = header.splitlines()
     index = 0
     while index < len(lines):
@@ -138,8 +154,8 @@ def normalize_mcp(server: dict[str, Any], source: str) -> dict[str, Any]:
     return result
 
 
-def render_mcp_tables(servers: dict[str, dict[str, Any]]) -> str:
-    chunks = []
+def render_mcp_tables(servers: MCPServers) -> str:
+    chunks: list[str] = []
     preferred_order = [
         "command", "args", "url", "bearer_token_env_var", "cwd", "env_vars",
         "env", "http_headers", "env_http_headers", "enabled", "required",
@@ -173,9 +189,15 @@ def expected_outputs() -> dict[Path, str]:
         outputs[CODEX_AGENTS / f"{name}.toml"] = "\n".join(content) + "\n"
 
     data = json.loads(MCP_SOURCE.read_text(encoding="utf-8"))
-    servers = data.get("mcpServers")
-    if not isinstance(servers, dict):
+    raw_servers = data.get("mcpServers")
+    if not isinstance(raw_servers, dict):
         raise AdapterError(".mcp.json: mcpServers must be an object")
+    # ``isinstance`` alone leaves pyright with a partially-unknown
+    # ``dict[Unknown, Unknown]`` even though ``raw_servers`` was already
+    # confirmed a dict — route through ``msgspec.convert`` (this
+    # project's one typed-boundary decoder) to get the fully known
+    # ``MCPServers`` shape ``render_mcp_tables`` declares.
+    servers: MCPServers = msgspec.convert(raw_servers, type=MCPServers)
     config = GENERATED_HEADER
     if servers:
         config += "\n" + render_mcp_tables(servers) + "\n"
@@ -188,12 +210,12 @@ def validate_skill(path: Path) -> list[str]:
     match = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
     if not match:
         return [f"{path.relative_to(ROOT)} must start with YAML frontmatter"]
-    fields = {}
+    fields: dict[str, str] = {}
     for line in match.group(1).splitlines():
         key, separator, value = line.partition(":")
         if separator:
             fields[key] = value.strip()
-    errors = []
+    errors: list[str] = []
     if fields.get("name") != path.parent.name:
         errors.append(f"{path.relative_to(ROOT)} name must match its directory")
     if not fields.get("description"):
@@ -249,7 +271,10 @@ def write_outputs(outputs: dict[Path, str]) -> None:
 def check_outputs(outputs: dict[Path, str]) -> list[str]:
     errors = validate_shared_surfaces()
     expected_paths = set(outputs)
-    actual_agents = set(CODEX_AGENTS.glob("*.toml")) if CODEX_AGENTS.exists() else set()
+    actual_agents = (
+        set(CODEX_AGENTS.glob("*.toml"))
+        if CODEX_AGENTS.exists() else set[Path]()
+    )
     for stale in sorted(actual_agents - expected_paths):
         errors.append(f"stale generated agent: {stale.relative_to(ROOT)}")
     for path, content in outputs.items():

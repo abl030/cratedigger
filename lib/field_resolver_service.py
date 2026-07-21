@@ -149,6 +149,43 @@ DiscogsReleaseFn = Callable[..., dict[str, Any]]
 Used by the release_group_id resolver and the track-artist resolver."""
 
 
+def _json_list(value: Any) -> list[object]:
+    """Narrow an untyped value (MB/Discogs JSON, or an internal ``Any``-
+    stored container of our own typed objects) to a plain list.
+
+    ``isinstance(value, list)`` alone leaves pyright with a partially-
+    unknown ``list[Unknown]`` even when ``value`` was already ``Any`` —
+    strict mode never lets an ``isinstance`` narrowing inherit ``Any``
+    into a generic's type argument, and an isinstance-narrowed argument
+    stays unknown-tainted even at an already-declared ``object``
+    parameter. Accepting ``Any`` here (matching ``msgspec.convert``'s
+    own ``obj: Any`` parameter) absorbs that taint at this one seam;
+    routing through ``msgspec.convert`` gives every caller a fully known
+    ``list[object]`` back, with no change to the elements themselves —
+    each stays the exact same object (verified: ``msgspec.convert`` does
+    not copy or coerce elements at ``object`` value type, including
+    already-constructed ``msgspec.Struct`` instances). A non-list value
+    returns ``[]``, matching the ``isinstance(..., list)`` guard every
+    call site already uses.
+    """
+    if not isinstance(value, list):
+        return []
+    return msgspec.convert(value, type=list[object])
+
+
+def _json_dict(value: Any) -> dict[str, object]:
+    """Narrow an untyped MB/Discogs JSON value to a plain string-keyed dict.
+
+    Dict counterpart of ``_json_list`` — see its docstring for why the
+    ``Any`` parameter and the ``msgspec.convert`` indirection are needed.
+    A non-dict value returns ``{}``, matching the ``isinstance(...,
+    dict)`` guard every call site already uses.
+    """
+    if not isinstance(value, dict):
+        return {}
+    return msgspec.convert(value, type=dict[str, object])
+
+
 def _looks_numeric(value: Any) -> bool:
     """Heuristic: does this id look like a Discogs numeric id (vs a UUID)?
 
@@ -684,16 +721,16 @@ def _resolve_mb_track_artists(
     # Shape 1: direct MB JSON with media[].tracks[]
     media_list = data.get("media")
     if isinstance(media_list, list) and media_list:
-        for medium in media_list:
-            if not isinstance(medium, dict):
+        for medium_raw in _json_list(media_list):
+            if not isinstance(medium_raw, dict):
                 continue
-            for track in medium.get("tracks") or []:
-                if not isinstance(track, dict):
+            medium = _json_dict(medium_raw)
+            for track_raw in _json_list(medium.get("tracks")):
+                if not isinstance(track_raw, dict):
                     continue
-                ac = track.get("artist-credit") or (
-                    (track.get("recording") or {}).get("artist-credit")
-                    if isinstance(track.get("recording"), dict) else None
-                )
+                track = _json_dict(track_raw)
+                recording = _json_dict(track.get("recording"))
+                ac = track.get("artist-credit") or recording.get("artist-credit")
                 if not isinstance(ac, list) or not ac:
                     per_track.append(ResolverResult(
                         field_name=FIELD_TRACK_ARTIST,
@@ -701,7 +738,7 @@ def _resolve_mb_track_artists(
                         reason_code="mb_track_no_artist_credit",
                     ))
                     continue
-                name = _format_mb_artist_credit(ac)
+                name = _format_mb_artist_credit(_json_list(ac))
                 if not name:
                     per_track.append(ResolverResult(
                         field_name=FIELD_TRACK_ARTIST,
@@ -722,7 +759,7 @@ def _resolve_mb_track_artists(
             # this is "the album artist" rather than the per-track
             # featured artist, so we record it as
             # unresolved_field_missing_upstream and leave value=None.
-            for _ in tracks_summary:
+            for _ in _json_list(tracks_summary):
                 per_track.append(ResolverResult(
                     field_name=FIELD_TRACK_ARTIST,
                     status="unresolved_field_missing_upstream",
@@ -767,7 +804,7 @@ def _build_track_artist_summary(
     )
 
 
-def _format_mb_artist_credit(ac: list[Any]) -> str:
+def _format_mb_artist_credit(ac: list[object]) -> str:
     """Render an MB ``artist-credit`` array into a display string.
 
     Pattern: ``[{name, joinphrase}, {name, joinphrase}, ...]`` ->
@@ -776,12 +813,13 @@ def _format_mb_artist_credit(ac: list[Any]) -> str:
     canonical credit-name) and fall back to ``artist.name``.
     """
     parts: list[str] = []
-    for entry in ac:
-        if not isinstance(entry, dict):
+    for entry_raw in ac:
+        if not isinstance(entry_raw, dict):
             continue
+        entry = _json_dict(entry_raw)
         name = entry.get("name")
-        if not name and isinstance(entry.get("artist"), dict):
-            name = entry["artist"].get("name")
+        if not name:
+            name = _json_dict(entry.get("artist")).get("name")
         if not name:
             continue
         parts.append(str(name))
@@ -820,17 +858,18 @@ def _resolve_discogs_track_artists(
         _record(pdb, request_id, FIELD_TRACK_ARTIST, result)
         return [result]
 
-    for track in tracks:
-        if not isinstance(track, dict):
+    for track_raw in _json_list(tracks):
+        if not isinstance(track_raw, dict):
             per_track.append(ResolverResult(
                 field_name=FIELD_TRACK_ARTIST,
                 status="unresolved_malformed",
                 reason_code="discogs_track_not_dict",
             ))
             continue
+        track = _json_dict(track_raw)
         artists = track.get("artists")
         if isinstance(artists, list) and artists:
-            name = _format_discogs_artist_list(artists)
+            name = _format_discogs_artist_list(_json_list(artists))
             if name:
                 per_track.append(ResolverResult(
                     field_name=FIELD_TRACK_ARTIST,
@@ -849,12 +888,13 @@ def _resolve_discogs_track_artists(
     return per_track
 
 
-def _format_discogs_artist_list(artists: list[Any]) -> str:
+def _format_discogs_artist_list(artists: list[object]) -> str:
     """Render a Discogs artist list into a display string."""
     parts: list[str] = []
-    for entry in artists:
-        if not isinstance(entry, dict):
+    for entry_raw in artists:
+        if not isinstance(entry_raw, dict):
             continue
+        entry = _json_dict(entry_raw)
         name = entry.get("name")
         if not name:
             continue
@@ -982,12 +1022,11 @@ def resolve_catalog_number(
 
 def _first_mb_catalog_number(data: dict[str, Any]) -> str | None:
     """Pick the first non-empty ``catalog-number`` from an MB release."""
-    labels = data.get("label-info") or data.get("labels") or []
-    if not isinstance(labels, list):
-        return None
-    for entry in labels:
-        if not isinstance(entry, dict):
+    labels = _json_list(data.get("label-info") or data.get("labels"))
+    for entry_raw in labels:
+        if not isinstance(entry_raw, dict):
             continue
+        entry = _json_dict(entry_raw)
         # MB JSON uses kebab-case key for label-info; our
         # ``web.mb.get_release`` shape doesn't currently carry catno
         # at all, but the direct MB JSON does.
@@ -999,12 +1038,11 @@ def _first_mb_catalog_number(data: dict[str, Any]) -> str | None:
 
 def _first_discogs_catno(data: dict[str, Any]) -> str | None:
     """Pick the first non-empty ``catno`` from a Discogs release."""
-    labels = data.get("labels") or []
-    if not isinstance(labels, list):
-        return None
-    for entry in labels:
-        if not isinstance(entry, dict):
+    labels = _json_list(data.get("labels"))
+    for entry_raw in labels:
+        if not isinstance(entry_raw, dict):
             continue
+        entry = _json_dict(entry_raw)
         catno = entry.get("catno")
         if catno:
             return str(catno)
@@ -1037,7 +1075,7 @@ def _is_compilation_by_release_group_type(
     if isinstance(primary_type, str) and primary_type.lower() == "compilation":
         return True
     if isinstance(secondary_types, list):
-        for t in secondary_types:
+        for t in _json_list(secondary_types):
             if isinstance(t, str) and t.lower() == "compilation":
                 return True
     return False
@@ -1061,19 +1099,33 @@ def _has_divergent_track_credits_only(
     """
     if not isinstance(album_artist_credit, list) or not album_artist_credit:
         return False
-    album_credit_str = _format_mb_artist_credit(album_artist_credit)
+    album_credit_str = _format_mb_artist_credit(_json_list(album_artist_credit))
     if not album_credit_str:
         return False
     if not isinstance(tracks, list):
         return False
-    for track in tracks:
-        if not isinstance(track, dict):
+    for track_raw in _json_list(tracks):
+        if not isinstance(track_raw, dict):
             continue
+        track = _json_dict(track_raw)
         ac = track.get("artist-credit")
         if not isinstance(ac, list) or not ac:
             continue
-        track_credit_str = _format_mb_artist_credit(ac)
+        track_credit_str = _format_mb_artist_credit(_json_list(ac))
         if track_credit_str and track_credit_str != album_credit_str:
+            return True
+    return False
+
+
+def _has_slash_joinphrase(credit_list: list[object]) -> bool:
+    """True if any MB artist-credit entry's ``joinphrase`` contains "/"
+    -- the canonical MB marker for split-artist credits (e.g. "Artist A
+    / Artist B")."""
+    for entry_raw in credit_list:
+        if not isinstance(entry_raw, dict):
+            continue
+        joinphrase = _json_dict(entry_raw).get("joinphrase")
+        if isinstance(joinphrase, str) and "/" in joinphrase:
             return True
     return False
 
@@ -1087,19 +1139,11 @@ def _has_divergent_track_credits(
     # Render the album-level credit for comparison.
     if not isinstance(album_artist_credit, list) or not album_artist_credit:
         return False
-    album_credit_str = _format_mb_artist_credit(album_artist_credit)
+    album_credit_str = _format_mb_artist_credit(_json_list(album_artist_credit))
     if not album_credit_str:
         return False
 
-    # Look for joinphrase containing "/" -- the canonical MB marker
-    # for split-artist credits (e.g. "Artist A / Artist B").
-    has_slash_joinphrase = any(
-        isinstance(e, dict)
-        and isinstance(e.get("joinphrase"), str)
-        and "/" in e["joinphrase"]
-        for e in album_artist_credit
-    )
-    if not has_slash_joinphrase:
+    if not _has_slash_joinphrase(_json_list(album_artist_credit)):
         return False
 
     # And at least one track credit must differ from the album credit.
@@ -1114,16 +1158,13 @@ def _flatten_release_tracks(mb_release_payload: dict[str, Any]) -> list[Any]:
     credits in flat form. Defensive against malformed payloads: returns
     ``[]`` for missing/non-list ``media`` or non-list ``tracks``.
     """
-    media = mb_release_payload.get("media") or []
-    if not isinstance(media, list):
-        return []
+    media = _json_list(mb_release_payload.get("media"))
     flat: list[Any] = []
-    for m in media:
-        if not isinstance(m, dict):
+    for m_raw in media:
+        if not isinstance(m_raw, dict):
             continue
-        tr = m.get("tracks") or []
-        if isinstance(tr, list):
-            flat.extend(tr)
+        m = _json_dict(m_raw)
+        flat.extend(_json_list(m.get("tracks")))
     return flat
 
 
@@ -1189,11 +1230,11 @@ def detect_va_compilation(
             if top_level not in (None, ""):
                 artist_id = top_level
             else:
-                artists = discogs_release_payload.get("artists") or []
-                if isinstance(artists, list) and artists:
-                    first = artists[0] if isinstance(artists[0], dict) else None
-                    if first is not None:
-                        artist_id = first.get("id")
+                artists = _json_list(discogs_release_payload.get("artists"))
+                if artists:
+                    first_raw = artists[0]
+                    if isinstance(first_raw, dict):
+                        artist_id = _json_dict(first_raw).get("id")
     if _is_canonical_va_credit(artist_id, source_is_discogs=is_discogs):
         return True
 
@@ -1213,8 +1254,9 @@ def detect_va_compilation(
             mb_release_group_payload.get("secondary-types"),
         )
     if not is_compilation_rg and isinstance(mb_release_payload, dict):
-        rg = mb_release_payload.get("release-group")
-        if isinstance(rg, dict):
+        rg_raw = mb_release_payload.get("release-group")
+        if isinstance(rg_raw, dict):
+            rg = _json_dict(rg_raw)
             is_compilation_rg = _is_compilation_by_release_group_type(
                 rg.get("primary-type"),
                 rg.get("secondary-types"),
@@ -1275,7 +1317,9 @@ class ResolveAllResult(msgspec.Struct, kw_only=True):
     release_group_year: int | None = None
     release_group_id: str | None = None
     catalog_number: str | None = None
-    track_artists: list[str | None] = msgspec.field(default_factory=list)
+    track_artists: list[str | None] = msgspec.field(
+        default_factory=list[str | None]
+    )
     is_va_compilation: bool = False
     # Total wall-clock seconds the orchestrator spent. Useful for the
     # operator triage surface and the latency-budget regression test.
@@ -1283,7 +1327,7 @@ class ResolveAllResult(msgspec.Struct, kw_only=True):
     # Names (the FIELD_* constants) of resolvers that hit the budget
     # ceiling and were marked as unresolved_timeout. Empty in the happy
     # path. The test guard reads this directly.
-    timed_out_fields: list[str] = msgspec.field(default_factory=list)
+    timed_out_fields: list[str] = msgspec.field(default_factory=list[str])
 
 
 class _DeferredRecorder:
@@ -1560,7 +1604,7 @@ def resolve_all(
     track_artist_results = outputs.get("track_artists")
     track_artists: list[str | None] = []
     if isinstance(track_artist_results, list):
-        for entry in track_artist_results:
+        for entry in _json_list(track_artist_results):
             if isinstance(entry, ResolverResult) and entry.status == "resolved":
                 v = entry.value
                 track_artists.append(str(v) if v is not None else None)

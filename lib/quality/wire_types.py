@@ -177,8 +177,10 @@ class ValidationResult(msgspec.Struct):
     target_mbid: Optional[str] = None
     candidate_count: int = 0
     candidates: list[CandidateSummary] = []
-    # Local file info (from harness choose_match items)
-    items: list[dict] = []
+    # Local file info (from harness choose_match items) — JSON-plain
+    # projection (``msgspec.to_builtins``) of ``HarnessItem``, not the
+    # Struct itself.
+    items: list[dict[str, object]] = []
     local_track_count: Optional[int] = None
     recommendation: Optional[str] = None        # beets confidence: "strong", "medium", "none"
     path: Optional[str] = None                  # album path being validated
@@ -202,7 +204,7 @@ class ValidationResult(msgspec.Struct):
         return msgspec.json.encode(self).decode()
 
     @classmethod
-    def from_dict(cls, d: dict) -> "ValidationResult":
+    def from_dict(cls, d: dict[str, object]) -> "ValidationResult":
         """Construct from a dict — strict-typed decode at the boundary.
 
         Every nested ``CandidateSummary`` / ``TrackMapping`` / ``HarnessItem``

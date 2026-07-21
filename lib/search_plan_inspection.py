@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
+import msgspec
+
 from lib.pipeline_db import (
     ActiveSearchPlan,
     SearchPlanInspection,
@@ -288,6 +290,49 @@ def build_inspection_payload(
 
 
 # ── Human renderer ───────────────────────────────────────────────
+#
+# The renderer walks the ``dict[str, Any]`` inspection payload built above
+# (deliberately loose — it's the JSON-serialisable API/CLI contract).
+# ``_as_list`` / ``_as_dict`` narrow one nested value at a time; see their
+# docstrings for why a plain ``isinstance`` check alone isn't enough under
+# strict mode.
+
+
+def _as_list(value: object) -> list[object]:
+    """Narrow an untyped payload value to a plain list.
+
+    ``isinstance(value, list)`` alone leaves pyright with a partially-
+    unknown ``list[Unknown]`` even when ``value`` was already fully
+    known — strict mode never lets an ``isinstance`` narrowing inherit
+    a generic's type argument. Routing through ``msgspec.convert`` gives
+    every caller a fully known ``list[object]`` back, with no change to
+    the elements themselves (each stays the exact same object —
+    verified: ``msgspec.convert`` does not copy or coerce elements at
+    ``object`` value type). A non-list value returns ``[]``, matching
+    the ``... or []`` fallback every call site already uses.
+
+    Callers must pass a freshly-evaluated expression (e.g. a ``dict``
+    subscript/``.get()``), not an already ``isinstance``-narrowed local
+    — the narrowing taint survives even at this declared ``object``
+    parameter, same as it survives at the call site itself.
+    """
+    if not isinstance(value, list):
+        return []
+    return msgspec.convert(value, type=list[object])
+
+
+def _as_dict(value: object) -> dict[str, object]:
+    """Narrow an untyped payload value to a plain string-keyed dict.
+
+    Dict counterpart of ``_as_list`` — see its docstring for why the
+    ``msgspec.convert`` indirection is needed and why callers must pass
+    a fresh expression rather than an already-narrowed local. A non-dict
+    value returns ``{}``, matching the ``... or {}`` fallback every call
+    site already uses.
+    """
+    if not isinstance(value, dict):
+        return {}
+    return msgspec.convert(value, type=dict[str, object])
 
 
 def _fmt_iso(value: object) -> str:
@@ -322,15 +367,16 @@ def _plan_provenance_line(prov: dict[str, Any] | None) -> list[str]:
     if not prov:
         return ["      provenance:     (none)"]
     out = ["      provenance:"]
-    for key, value in prov.items():
-        if isinstance(value, list):
+    for key, raw_value in prov.items():
+        if isinstance(raw_value, list):
+            value = _as_list(prov[key])
             out.append(f"        {key}: {len(value)} item(s)")
             for entry in value[:5]:
                 out.append(f"          - {entry}")
             if len(value) > 5:
                 out.append(f"          ... +{len(value) - 5} more")
         else:
-            out.append(f"        {key}: {value}")
+            out.append(f"        {key}: {raw_value}")
     return out
 
 
@@ -452,6 +498,25 @@ def _fmt_num(value: object) -> str:
     return str(value)
 
 
+def _stats_group_sort_key(raw: object) -> tuple[int, int]:
+    """Rank a rendered stats-group dict by attempts desc, ordinal asc.
+
+    Ties broken by ordinal so ``_render_stats_section``'s slot ranking is
+    deterministic. ``attempts``/``ordinal`` are always ``int`` on a
+    genuine ``SearchPlanStatsGroup`` projection (see
+    ``_stats_group_to_dict``); the ``isinstance`` fallback to ``0`` is
+    rendering-layer defense, matching this module's existing ``... or
+    {}``/``... or []`` tolerance for a value that drifted shape.
+    """
+    g = _as_dict(raw)
+    attempts = g.get("attempts", 0)
+    ordinal = _as_dict(g.get("identity")).get("ordinal") or 0
+    return (
+        -attempts if isinstance(attempts, int) else 0,
+        ordinal if isinstance(ordinal, int) else 0,
+    )
+
+
 def _render_stats_section(
     title: str, bucket: dict[str, Any],
 ) -> list[str]:
@@ -461,20 +526,17 @@ def _render_stats_section(
     lines.append(
         f"    cache_attribution_level: {cache_label}"
         f" (per_search_available={_fmt_bool(cache_per_search)})")
-    slots = bucket.get("slots") or []
+    slots = _as_list(bucket.get("slots"))
     # Rank slots by attempts (desc) — ties broken by ordinal so the
     # output is deterministic.
-    ranked_slots = sorted(
-        slots,
-        key=lambda g: (-int(g.get("attempts", 0)),
-                       g.get("identity", {}).get("ordinal") or 0),
-    )
+    ranked_slots = sorted(slots, key=_stats_group_sort_key)
     if not ranked_slots:
         lines.append("    slots: (none)")
     else:
         lines.append(f"    slots ({len(ranked_slots)}, ranked by attempts):")
-        for g in ranked_slots:
-            ident = g.get("identity") or {}
+        for g_raw in ranked_slots:
+            g = _as_dict(g_raw)
+            ident = _as_dict(g.get("identity"))
             lines.append(
                 f"      ordinal={ident.get('ordinal')}"
                 f"  strategy={ident.get('strategy') or '-'}"
@@ -483,7 +545,7 @@ def _render_stats_section(
                 f"  stale={g.get('stale_completion_attempts')}"
                 f"  non_consuming={g.get('non_consuming_attempts')}"
             )
-            outcome_counts = g.get("outcome_counts") or {}
+            outcome_counts = _as_dict(g.get("outcome_counts"))
             if outcome_counts:
                 outcomes = " ".join(
                     f"{k}={v}" for k, v in
@@ -500,19 +562,21 @@ def _render_stats_section(
                 f"  peers_browsed_mean={_fmt_num(g.get('peers_browsed_mean'))}"
                 f"  fanout_waves_mean={_fmt_num(g.get('fanout_waves_mean'))}"
             )
-    qg = bucket.get("query_groups") or []
+    qg = _as_list(bucket.get("query_groups"))
     if qg:
         lines.append(f"    query_groups ({len(qg)}):")
-        for g in qg:
-            ident = g.get("identity") or {}
+        for g_raw in qg:
+            g = _as_dict(g_raw)
+            ident = _as_dict(g.get("identity"))
             lines.append(
                 f"      key={ident.get('canonical_query_key') or '-'}"
                 f"  repeat={ident.get('repeat_group') or '-'}"
                 f"  attempts={g.get('attempts')}"
                 f"  consumed={g.get('consumed_attempts')}"
             )
-    legacy_bucket = bucket.get("legacy_bucket")
-    if legacy_bucket is not None:
+    legacy_bucket_raw = bucket.get("legacy_bucket")
+    if legacy_bucket_raw is not None:
+        legacy_bucket = _as_dict(legacy_bucket_raw)
         lines.append(
             f"    legacy_bucket: attempts={legacy_bucket.get('attempts')}"
             f"  consumed={legacy_bucket.get('consumed_attempts')}"
