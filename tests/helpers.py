@@ -114,6 +114,7 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         # Migration 023 — supersede lineage.
         "replaces_request_id": None,
         "created_at": datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        "priority_started_at": None,
         "updated_at": datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
     }
     row.update(overrides)

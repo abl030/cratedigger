@@ -39,12 +39,19 @@ EligibilityState = Literal[
 class SchedulerWorld:
     request_id: int
     age_seconds: int
+    priority_age_seconds: int | None
     state: EligibilityState
     attempts: int
 
     @property
     def is_new(self) -> bool:
-        return self.age_seconds < 24 * 60 * 60
+        return (
+            self.age_seconds < 24 * 60 * 60
+            or (
+                self.priority_age_seconds is not None
+                and self.priority_age_seconds < 24 * 60 * 60
+            )
+        )
 
     @property
     def is_eligible(self) -> bool:
@@ -65,6 +72,10 @@ def scheduler_worlds(draw: st.DrawFn) -> tuple[SchedulerWorld, ...]:
         rows.append(SchedulerWorld(
             request_id=index + 1,
             age_seconds=age_seconds,
+            priority_age_seconds=draw(st.one_of(
+                st.none(),
+                st.integers(min_value=0, max_value=7 * 24 * 60 * 60),
+            )),
             state=draw(st.sampled_from((
                 "eligible",
                 "backoff",
@@ -147,6 +158,11 @@ def _run_world(
             album_title=title,
             status=status,
             created_at=NOW - timedelta(seconds=world.age_seconds),
+            priority_started_at=(
+                NOW - timedelta(seconds=world.priority_age_seconds)
+                if world.priority_age_seconds is not None
+                else None
+            ),
             next_retry_after=next_retry_after,
             search_attempts=world.attempts,
             download_attempts=world.attempts,
@@ -201,12 +217,39 @@ class TestSchedulerInvariantCheckerKnownBad(unittest.TestCase):
             SchedulerWorld(
                 request_id=index,
                 age_seconds=60 if index <= 10 else 48 * 60 * 60,
+                priority_age_seconds=None,
                 state="eligible",
                 attempts=1,
             )
             for index in range(1, 31)
         )
         bad_selection = tuple(range(1, 6)) + tuple(range(11, 22))
+
+        with self.assertRaises(AssertionError):
+            assert_scheduler_selection_invariants(
+                worlds, bad_selection, page_size=16)
+
+    def test_checker_rejects_recent_bad_rip_as_established(self) -> None:
+        worlds = (
+            SchedulerWorld(
+                request_id=1,
+                age_seconds=10 * 24 * 60 * 60,
+                priority_age_seconds=60,
+                state="eligible",
+                attempts=3,
+            ),
+            *(
+                SchedulerWorld(
+                    request_id=index,
+                    age_seconds=10 * 24 * 60 * 60,
+                    priority_age_seconds=None,
+                    state="eligible",
+                    attempts=3,
+                )
+                for index in range(2, 22)
+            ),
+        )
+        bad_selection = tuple(range(2, 18))
 
         with self.assertRaises(AssertionError):
             assert_scheduler_selection_invariants(
