@@ -16,6 +16,8 @@
 #
 # FUZZ_PROFILE overrides the Hypothesis profile (default: fuzz) — used by the
 # script's own smoke test; real bursts never pass it.
+# CRATEDIGGER_FUZZ_OUTPUT_DIR retains a failed run's complete per-module logs
+# below a unique run.* directory. Successful run logs are always removed.
 set -u
 
 cd "$(dirname "$0")/.."
@@ -31,8 +33,21 @@ fi
 
 jobs=$(nproc)
 profile="${FUZZ_PROFILE:-fuzz}"
-outdir=$(mktemp -d)
-trap 'rm -rf "$outdir"' EXIT
+persistent_output=false
+if [ -n "${CRATEDIGGER_FUZZ_OUTPUT_DIR:-}" ]; then
+    mkdir -p "$CRATEDIGGER_FUZZ_OUTPUT_DIR"
+    outdir=$(mktemp -d "$CRATEDIGGER_FUZZ_OUTPUT_DIR/run.XXXXXX")
+    persistent_output=true
+else
+    outdir=$(mktemp -d)
+fi
+
+cleanup_output() {
+    if [ -d "$outdir" ]; then
+        rm -rf -- "$outdir"
+    fi
+}
+trap cleanup_output EXIT
 export _FUZZ_OUTDIR="$outdir"
 export _FUZZ_PROFILE="$profile"
 
@@ -53,6 +68,10 @@ status=$?
 
 if [ "$status" -ne 0 ]; then
     echo "fuzz burst: FAILURES (see above)"
+    if [ "$persistent_output" = true ]; then
+        trap - EXIT
+        echo "fuzz burst: complete module logs retained at $outdir"
+    fi
     exit 1
 fi
 echo "fuzz burst: ALL GREEN (${#modules[@]} modules)"
