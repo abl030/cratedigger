@@ -966,6 +966,7 @@ def load_current_evidence_for_preview(
     quality_ranks: QualityRankConfig,
     beets_library_root: str,
     preloaded_evidence: AlbumQualityEvidence | None,
+    enrich_current_fn: Callable[..., EvidenceBuildResult] | None = None,
 ) -> EvidenceBuildResult:
     """Load/backfill HAVE and perform preview-owned neutral enrichment."""
 
@@ -991,7 +992,8 @@ def load_current_evidence_for_preview(
 
     if current.id is None:
         return authorized
-    enriched = enrich_current_v0_research_for_preview(
+    enrich = enrich_current_fn or enrich_current_v0_research_for_preview
+    enriched = enrich(
         db,
         request_id=request_id,
         expected_evidence_id=current.id,
@@ -1438,6 +1440,7 @@ def measure_and_persist_candidate_evidence(
     run_import_fn: Callable[..., ImportOneRun] | None = None,
     spectral_detail_analyzer: SpectralDetailAnalyzer | None = None,
     existing_spectral_resolver: ExistingSpectralResolver | None = None,
+    current_evidence_loader: Callable[..., EvidenceBuildResult] | None = None,
 ) -> ImportPreviewResult:
     """Measure a source folder and persist candidate evidence; never decide.
 
@@ -1553,7 +1556,8 @@ def measure_and_persist_candidate_evidence(
         existing_spectral_evidence,
         _current_evidence_authoritative,
     ) = load_persisted_existing_spectral(db, request_id)
-    current_result = load_current_evidence_for_preview(
+    load_current = current_evidence_loader or load_current_evidence_for_preview
+    current_result = load_current(
         db,
         request_id=request_id,
         mb_release_id=mbid,

@@ -1343,9 +1343,6 @@ class TestImportPreviewPath(unittest.TestCase):
             with patch(
                 "lib.beets_db.BeetsDB",
                 return_value=self._beets_current(source),
-            ), patch(
-                "lib.import_preview.enrich_current_v0_research_for_preview",
-                side_effect=mutating_enrichment,
             ):
                 result = load_current_evidence_for_preview(
                     db,
@@ -1354,6 +1351,7 @@ class TestImportPreviewPath(unittest.TestCase):
                     quality_ranks=QualityRankConfig.defaults(),
                     beets_library_root=source,
                     preloaded_evidence=current,
+                    enrich_current_fn=mutating_enrichment,
                 )
 
             self.assertEqual(result.status, "stale")
@@ -1522,14 +1520,14 @@ class TestImportPreviewPath(unittest.TestCase):
         db = self._db()
         source = self._source_dir()
         try:
-            with patch(
-                "lib.import_preview.load_current_evidence_for_preview",
-                return_value=EvidenceBuildResult(
+            def stale_current(*_args: Any, **_kwargs: Any) -> EvidenceBuildResult:
+                return EvidenceBuildResult(
                     None,
                     "stale",
                     "current files changed during V0 probe",
-                ),
-            ), patch(
+                )
+
+            with patch(
                 "lib.import_preview.inspect_local_files",
             ) as inspect, patch(
                 "lib.import_preview.run_import_one",
@@ -1538,6 +1536,7 @@ class TestImportPreviewPath(unittest.TestCase):
                     db,
                     request_id=42,
                     path=source,
+                    current_evidence_loader=stale_current,
                 )
 
             self.assertEqual(result.verdict, "measurement_failed")

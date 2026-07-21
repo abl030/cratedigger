@@ -535,6 +535,7 @@ def process_claimed_preview_job(
     preview_fn: PreviewFn | None = None,
     prepare_failure_have_fn: FailureHavePrepareFn | None = None,
     enrich_failure_have_fn: FailureHaveEnrichFn | None = None,
+    current_evidence_loader: Callable[..., EvidenceBuildResult] | None = None,
 ) -> ImportJob | None:
     def handle_measurement_failed(result: ImportPreviewResult) -> ImportJob | None:
         return _handle_measurement_failed(
@@ -597,7 +598,11 @@ def process_claimed_preview_job(
                     )
                 )
                 preview_cfg = read_runtime_config()
-                current_result = load_current_evidence_for_preview(
+                load_current = (
+                    current_evidence_loader
+                    or load_current_evidence_for_preview
+                )
+                current_result = load_current(
                     db,
                     request_id=job.request_id,
                     mb_release_id=mb_release_id,

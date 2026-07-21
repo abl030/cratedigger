@@ -2312,21 +2312,21 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             assert claimed is not None
             self._seed_evidence_for_download_log(db, download_log_id, source)
 
-            with patch(
-                "scripts.import_preview_worker.load_current_evidence_for_preview",
-                return_value=EvidenceBuildResult(
+            def stale_current(*_args: Any, **_kwargs: Any):
+                return EvidenceBuildResult(
                     None,
                     "stale",
                     "current files changed during V0 probe",
-                ),
-            ):
-                updated = import_preview_worker.process_claimed_preview_job(
-                    db,
-                    claimed,
-                    prepare_failure_have_fn=(
-                        lambda *_args, **_kwargs: "no_current_evidence"
-                    ),
                 )
+
+            updated = import_preview_worker.process_claimed_preview_job(
+                db,
+                claimed,
+                prepare_failure_have_fn=(
+                    lambda *_args, **_kwargs: "no_current_evidence"
+                ),
+                current_evidence_loader=stale_current,
+            )
 
         assert updated is not None
         self.assertEqual(updated.status, "failed")
@@ -2361,17 +2361,17 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             assert claimed is not None
             self._seed_evidence_for_download_log(db, download_log_id, source)
 
-            with patch(
-                "scripts.import_preview_worker.load_current_evidence_for_preview",
-                side_effect=RuntimeError("Beets authority unavailable"),
-            ):
-                updated = import_preview_worker.process_claimed_preview_job(
-                    db,
-                    claimed,
-                    prepare_failure_have_fn=(
-                        lambda *_args, **_kwargs: "no_current_evidence"
-                    ),
-                )
+            def raising_current(*_args: Any, **_kwargs: Any):
+                raise RuntimeError("Beets authority unavailable")
+
+            updated = import_preview_worker.process_claimed_preview_job(
+                db,
+                claimed,
+                prepare_failure_have_fn=(
+                    lambda *_args, **_kwargs: "no_current_evidence"
+                ),
+                current_evidence_loader=raising_current,
+            )
 
         assert updated is not None
         self.assertEqual(updated.status, "failed")
