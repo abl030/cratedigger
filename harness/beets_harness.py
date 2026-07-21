@@ -34,7 +34,30 @@ from beets.util import PathBytes
 if TYPE_CHECKING:
     from beets.autotag.hooks import JSONDict
     from beets.importer.tasks import ImportTask
+    from beets.dbcore.db import Results
     from confuse import ConfigView
+
+    def _lib_albums(
+        lib: library.Library, query: object = None, sort: object = None,
+    ) -> Results[library.Album]: ...
+else:
+    def _lib_albums(lib, query=None, sort=None):
+        """``library.Library.albums`` behind a fully-typed wrapper.
+
+        Upstream ``Library.albums(self, query=None, sort=None)`` has no
+        parameter annotations (a third-party stub gap, not our code), so
+        pyright infers the member's own type as partially unknown at
+        every call site — including a declared-type local variable
+        assigned from a ``Library`` instance, since the "unknown" taint
+        is carried by the *source* expression, not suppressed by the
+        target's annotation. A ``TYPE_CHECKING``-only redeclaration of
+        this one call as a plain function (mirroring the
+        ``cratedigger.py::_grab_most_wanted_impl`` pattern) is the idiom
+        that actually breaks the taint: pyright only ever sees the fully
+        typed stub signature above; at runtime this branch calls the
+        real bound method unchanged.
+        """
+        return lib.albums(query, sort)
 
 
 def _mutations_log_path() -> str:
@@ -395,7 +418,7 @@ def _find_duplicates_with_mapped_release_ids(
     # file paths is not a duplicate replacement.
     task_paths = {i.path for i in task.items if i}
     duplicates: list[library.Album] = []
-    for album in lib.albums(dup_query):
+    for album in _lib_albums(lib, dup_query):
         album_paths = {i.path for i in album.items()}
         if not (album_paths <= task_paths):
             duplicates.append(album)

@@ -308,7 +308,9 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
     measurement: AudioQualityMeasurement
     measured_at: datetime
     id: int | None = None
-    files: list[AlbumQualityEvidenceFile] = msgspec.field(default_factory=list)
+    files: list[AlbumQualityEvidenceFile] = msgspec.field(
+        default_factory=list[AlbumQualityEvidenceFile]
+    )
     codec: str | None = None
     container: str | None = None
     storage_format: str | None = None

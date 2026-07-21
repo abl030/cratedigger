@@ -90,7 +90,11 @@ class MeasurementFailure(msgspec.Struct, frozen=True):
 # ---------------------------------------------------------------------------
 
 
-def spectral_import_decision(spectral_grade, spectral_bitrate, existing_spectral_bitrate):
+def spectral_import_decision(
+    spectral_grade: str | None,
+    spectral_bitrate: int | None,
+    existing_spectral_bitrate: int | None,
+) -> Literal["import", "import_upgrade", "import_no_exist", "reject"]:
     """Decide whether to import a download based on spectral analysis.
 
     Pure comparison of spectral evidence against spectral evidence. Container

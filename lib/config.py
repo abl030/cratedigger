@@ -232,19 +232,21 @@ class CratediggerConfig:
 
         Reproduces the exact same parsing logic as main() in cratedigger.py.
         """
-        def get(section, key, fallback=""):
+        def get(section: str, key: str, fallback: str = "") -> str:
             return config.get(section, key, fallback=fallback)
 
-        def getbool(section, key, fallback=False):
+        def getbool(section: str, key: str, fallback: bool = False) -> bool:
             return config.getboolean(section, key, fallback=fallback)
 
-        def getint(section, key, fallback=0):
+        def getint(section: str, key: str, fallback: int = 0) -> int:
             return config.getint(section, key, fallback=fallback)
 
-        def getfloat(section, key, fallback=0.0):
+        def getfloat(section: str, key: str, fallback: float = 0.0) -> float:
             return config.getfloat(section, key, fallback=fallback)
 
-        def split_csv(section, key, fallback=""):
+        def split_csv(
+            section: str, key: str, fallback: str = "",
+        ) -> tuple[str, ...]:
             raw = get(section, key, fallback)
             return tuple(s.strip() for s in raw.split(",") if s.strip())
 
