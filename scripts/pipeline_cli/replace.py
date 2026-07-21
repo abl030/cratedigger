@@ -4,13 +4,19 @@ Supersede a request with a new row at a different release id in the
 same release group / master. Counterpart of the Replace web action.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
+from typing import TYPE_CHECKING
 
 from scripts.pipeline_cli._format import _json_default
 
+if TYPE_CHECKING:
+    from lib.mbid_replace_service import MbidReplaceDB
 
-def cmd_replace(db, args):
+
+def cmd_replace(db: "MbidReplaceDB", args: argparse.Namespace) -> int:
     """Supersede a request with a new row at a different release id (an
     MB release UUID or a Discogs numeric release id — must share the
     source's pathway and release group/master).
@@ -104,7 +110,9 @@ def cmd_replace(db, args):
     return 1
 
 
-def add_replace_subparser(sub: argparse._SubParsersAction) -> None:
+def add_replace_subparser(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
     """Add ``replace`` (#521 carve out of ``routes_meta._build_parser``,
     verbatim argument definitions)."""
     p_replace = sub.add_parser(

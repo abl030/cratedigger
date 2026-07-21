@@ -17,10 +17,10 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import ParseResult, parse_qs, urlparse
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -31,7 +31,7 @@ PROD_BASE_URL = "https://music.ablz.au"
 sys.path.insert(0, str(REPO_ROOT))
 
 
-FALLBACK_FIXTURES: dict[str, dict[str, Any]] = {
+FALLBACK_FIXTURES: dict[str, dict[str, object]] = {
     "/api/pipeline/all": {
         "counts": {
             "wanted": 0, "downloading": 0, "imported": 0,
@@ -89,7 +89,12 @@ class DevConfig:
 class DevHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, server_address, RequestHandlerClass, config: DevConfig):
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        RequestHandlerClass: type[BaseHTTPRequestHandler],
+        config: DevConfig,
+    ) -> None:
         super().__init__(server_address, RequestHandlerClass)
         self.config = config
 
@@ -117,7 +122,7 @@ class DevHTTPServer(ThreadingHTTPServer):
 class DevHandler(BaseHTTPRequestHandler):
     server: DevHTTPServer  # pyright: ignore[reportIncompatibleVariableOverride]
 
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - match base signature
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - match base signature
         print(f"{self.address_string()} - {format % args}", flush=True)
 
     def do_GET(self) -> None:
@@ -188,7 +193,7 @@ class DevHandler(BaseHTTPRequestHandler):
             cache_control="no-cache",
         )
 
-    def _serve_api_get(self, parsed) -> None:
+    def _serve_api_get(self, parsed: ParseResult) -> None:
         mode = self.server.config.data
         if mode == "fixture":
             self._serve_fixture_api(parsed.path)
@@ -241,11 +246,20 @@ class DevHandler(BaseHTTPRequestHandler):
                 body = resp.read()
                 self._proxy_response(body, resp.headers, status=resp.status)
         except urllib.error.HTTPError as exc:
-            self._proxy_response(exc.read(), exc.headers, status=exc.code)
+            # ``HTTPError.headers`` is declared as a bare (unparameterized)
+            # ``Message`` in typeshed's ``urllib/error.pyi`` -- this explicit
+            # local annotation is the "declared type wins" seam (no
+            # msgspec/JSON boundary involved, just a stdlib stub gap out of
+            # this migration's scope) that recovers the concrete
+            # ``Message[str, str]`` shape ``_proxy_response`` expects.
+            exc_headers: Message[str, str] = exc.headers
+            self._proxy_response(exc.read(), exc_headers, status=exc.code)
         except Exception as exc:
             self._json({"error": str(exc), "upstream": url}, status=502)
 
-    def _proxy_response(self, body: bytes, headers, *, status: int) -> None:
+    def _proxy_response(
+        self, body: bytes, headers: Message[str, str], *, status: int,
+    ) -> None:
         content_type = headers.get("Content-Type", "application/json")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -259,7 +273,7 @@ class DevHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _serve_live_db_get(self, parsed) -> None:
+    def _serve_live_db_get(self, parsed: ParseResult) -> None:
         import web.server as web_server
         from web import discogs as _discogs
 
@@ -338,7 +352,7 @@ class DevHandler(BaseHTTPRequestHandler):
 </script>
 """
 
-    def _json(self, data: Any, status: int = 200) -> None:
+    def _json(self, data: object, status: int = 200) -> None:
         body = json.dumps(data).encode("utf-8")
         self._send_bytes(body, "application/json; charset=utf-8", status=status)
 

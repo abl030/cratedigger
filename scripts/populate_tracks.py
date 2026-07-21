@@ -7,6 +7,8 @@ fetches the release from the local MB mirror, extracts tracks, and stores them.
 Rate limit: 1 request per 100ms (local mirror allows ratelimit 100).
 """
 
+from __future__ import annotations
+
 import sys
 import os
 import time
@@ -21,7 +23,7 @@ DB_PATH = "/mnt/virtio/Music/pipeline.db"
 RATE_LIMIT_SECONDS = 0.1  # 100ms between requests
 
 
-def main():
+def main() -> None:
     db = PipelineDB(DB_PATH)
 
     # Get all requests
@@ -30,7 +32,7 @@ def main():
     ).fetchall()
 
     # Filter to those with mb_release_id and no tracks
-    needs_tracks = []
+    needs_tracks: list[dict[str, object]] = []
     for r in rows:
         r = dict(r)
         if not r["mb_release_id"]:
@@ -50,8 +52,12 @@ def main():
     failed = 0
 
     for i, req in enumerate(needs_tracks, 1):
-        rid = req["id"]
-        mbid = req["mb_release_id"]
+        raw_rid = req["id"]
+        assert isinstance(raw_rid, int)
+        rid = raw_rid
+        raw_mbid = req["mb_release_id"]
+        assert isinstance(raw_mbid, str)
+        mbid = raw_mbid
         label = f"{req['artist_name']} - {req['album_title']}"
 
         print(f"[{i}/{total}] id={rid} {label} ...", end=" ", flush=True)

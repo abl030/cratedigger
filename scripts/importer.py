@@ -179,7 +179,11 @@ def _cleanup_failed_force_import(
         # full_pipeline_decision_from_evidence; this step only removes the
         # reviewed source from Wrong Matches.
         payload = job.payload or {}
-        source_dirs = payload.get("source_dirs")
+        # ``job.payload`` is ``dict[str, Any]`` (lib/import_queue.py, out of
+        # this migration's scope); declaring ``source_dirs``'s own type here
+        # recovers a parameterized value for the ``isinstance`` narrow below
+        # without widening ``ImportJob``.
+        source_dirs: list[str] | None = payload.get("source_dirs")
         result = delete_wrong_match(
             db,
             download_log_id,
@@ -268,7 +272,11 @@ def execute_import_job(
                 message="Import job payload is missing failed_path",
             )
         source_username = payload.get("source_username")
-        source_dirs = payload.get("source_dirs")
+        # See the analogous annotation in ``_cleanup_failed_force_import``:
+        # ``payload`` is ``dict[str, Any]`` (out of scope), so this local
+        # declaration recovers a parameterized type for the ``isinstance``
+        # narrow in the comprehension below.
+        source_dirs: list[object] | None = payload.get("source_dirs")
         download_log_id = payload.get("download_log_id")
         return dispatch_import_from_db(
             db,

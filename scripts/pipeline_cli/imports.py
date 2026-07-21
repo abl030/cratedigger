@@ -6,16 +6,20 @@ list recent queue jobs, and preview
 whether an import would pass without actually running one.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
 import sys
+from typing import Optional, Protocol, TYPE_CHECKING
 
 import msgspec
 
 from lib.import_preview import ImportPreviewValues
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
+    ImportJob,
     force_import_dedupe_key,
     force_import_payload,
 )
@@ -24,10 +28,45 @@ from lib.util import (
 )
 from scripts.pipeline_cli.quality import _load_runtime_rank_config
 
+if TYPE_CHECKING:
+    from lib.import_job_recovery_service import ImportRecoveryDB
+    from lib.import_preview import ImportPreviewDB, ImportPreviewResult
+    from lib.pipeline_db.rows import AlbumRequestRow, DownloadLogWithEvidenceRow
+
 SPECTRAL_GRADE_CHOICES = ("genuine", "marginal", "suspect", "likely_transcode")
 
 # Known slskd download dirs to resolve old relative failed_paths against
 SLSKD_DOWNLOAD_DIRS = ["/mnt/virtio/music/slskd"]
+
+
+class _ForceImportDB(Protocol):
+    """``db`` shape ``cmd_force_import`` touches (issue #784, #409
+    pattern) -- ``ImportPreviewDB``'s two reads plus the import-queue
+    write, which ``ImportPreviewDB`` doesn't carry."""
+
+    def get_download_log_entry(
+        self, log_id: int,
+    ) -> "Optional[DownloadLogWithEvidenceRow]": ...
+
+    def get_request(self, request_id: int) -> "Optional[AlbumRequestRow]": ...
+
+    def enqueue_import_job(
+        self,
+        job_type: str,
+        *,
+        request_id: Optional[int] = None,
+        dedupe_key: Optional[str] = None,
+        payload: Optional[dict[str, object]] = None,
+        message: Optional[str] = None,
+    ) -> ImportJob: ...
+
+
+class _ImportJobsDB(Protocol):
+    """``db`` shape ``cmd_import_jobs`` touches (issue #784, #409 pattern)."""
+
+    def list_import_jobs(
+        self, *, status: Optional[str] = None, limit: int = 50,
+    ) -> list[ImportJob]: ...
 
 
 def _resolve_failed_path(failed_path: str) -> "str | None":
@@ -43,7 +82,9 @@ def _resolve_failed_path(failed_path: str) -> "str | None":
     )
 
 
-def cmd_force_import(db, args):
+def cmd_force_import(
+    db: "_ForceImportDB", args: argparse.Namespace,
+) -> None:
     """Force-import a rejected download by download_log ID."""
     log_id = args.download_log_id
 
@@ -107,7 +148,7 @@ def cmd_force_import(db, args):
     print(f"  [OK] Queued{deduped} import job #{job.id} ({job.status}).")
 
 
-def cmd_import_jobs(db, args):
+def cmd_import_jobs(db: "_ImportJobsDB", args: argparse.Namespace) -> None:
     """List recent import queue jobs."""
     jobs = db.list_import_jobs(status=args.status, limit=args.limit)
     if not jobs:
@@ -130,7 +171,9 @@ def cmd_import_jobs(db, args):
             )
 
 
-def cmd_import_job_recovery(db, args) -> int:
+def cmd_import_job_recovery(
+    db: "ImportRecoveryDB", args: argparse.Namespace,
+) -> int:
     """Resolve one ambiguous Beets operation by explicit operator choice."""
     from lib.import_job_recovery_service import resolve_import_job_recovery
 
@@ -154,13 +197,13 @@ def cmd_import_job_recovery(db, args) -> int:
     return 0
 
 
-def _preview_values_from_args(args) -> ImportPreviewValues:
+def _preview_values_from_args(args: argparse.Namespace) -> ImportPreviewValues:
     raw: dict[str, object] = {}
     if args.values_json:
-        parsed = json.loads(args.values_json)
+        parsed: object = json.loads(args.values_json)
         if not isinstance(parsed, dict):
             raise ValueError("--values-json must be a JSON object")
-        raw.update(parsed)
+        raw.update(msgspec.convert(parsed, type=dict[str, object]))
 
     for attr in (
         "is_flac",
@@ -198,7 +241,9 @@ def _preview_values_from_args(args) -> ImportPreviewValues:
     return msgspec.convert(raw, type=ImportPreviewValues)
 
 
-def _print_preview_result(result, *, json_output: bool) -> None:
+def _print_preview_result(
+    result: "ImportPreviewResult", *, json_output: bool,
+) -> None:
     if json_output:
         print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
         return
@@ -217,7 +262,9 @@ def _print_preview_result(result, *, json_output: bool) -> None:
             print(f"    - {stage}")
 
 
-def cmd_import_preview(db, args):
+def cmd_import_preview(
+    db: "ImportPreviewDB", args: argparse.Namespace,
+) -> int:
     """Preview a real folder/download-log row or a typed values scenario."""
     from lib.import_preview import (
         preview_import_from_download_log,
@@ -263,7 +310,9 @@ def cmd_import_preview(db, args):
     return 0
 
 
-def add_imports_subparsers(sub: argparse._SubParsersAction) -> None:
+def add_imports_subparsers(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
     """Add ``force-import`` / ``import-jobs`` / ``import-job-recovery`` /
     ``import-preview`` (#521 carve out of ``routes_meta._build_parser``,
     verbatim argument definitions)."""

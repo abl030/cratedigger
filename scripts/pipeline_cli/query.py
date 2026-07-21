@@ -3,18 +3,21 @@
 Debugging read-only SQL escape hatch — ``pipeline-cli query <sql>``.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys
 from datetime import date, datetime, time
 from decimal import Decimal
+from typing import Mapping, Optional, Protocol, Sequence
 
 import psycopg2
 
 from scripts.pipeline_cli._format import _json_default
 
 
-def _stringify_query_value(value):
+def _stringify_query_value(value: object) -> str:
     """Format a SQL value for table output."""
     if value is None:
         return "NULL"
@@ -27,13 +30,15 @@ def _stringify_query_value(value):
     return str(value)
 
 
-def _render_query_table(rows, columns):
+def _render_query_table(
+    rows: list[Mapping[str, object]], columns: list[str],
+) -> list[str]:
     """Render SQL query results as a simple aligned table."""
     widths = {col: len(col) for col in columns}
-    string_rows = []
+    string_rows: list[list[str]] = []
 
     for row in rows:
-        rendered = []
+        rendered: list[str] = []
         for col in columns:
             text = _stringify_query_value(row.get(col))
             widths[col] = max(widths[col], len(text))
@@ -52,7 +57,7 @@ def _render_query_table(rows, columns):
     return lines
 
 
-def _get_query_sql(args):
+def _get_query_sql(args: argparse.Namespace) -> str:
     """Resolve SQL text from argv or stdin."""
     sql = sys.stdin.read() if args.sql == "-" else args.sql
     sql = sql.strip()
@@ -61,7 +66,22 @@ def _get_query_sql(args):
     return sql
 
 
-def cmd_query(db, args):
+class _QueryCursor(Protocol):
+    """DB-API cursor slice ``cmd_query`` reads (issue #784, #409 pattern)."""
+
+    description: Optional[Sequence[Sequence[object]]]
+
+    def fetchall(self) -> list[Mapping[str, object]]: ...
+
+
+class _QueryDB(Protocol):
+    """``db`` shape ``cmd_query`` needs — the raw-SQL debugging escape
+    hatch touches nothing but ``_execute`` (issue #784, #409 pattern)."""
+
+    def _execute(self, sql: str) -> _QueryCursor: ...
+
+
+def cmd_query(db: _QueryDB, args: argparse.Namespace) -> Optional[int]:
     """Run a debugging SQL query in a read-only session."""
     try:
         sql = _get_query_sql(args)
@@ -72,8 +92,12 @@ def cmd_query(db, args):
     db._execute("SET SESSION default_transaction_read_only = on")
     try:
         cur = db._execute(sql)
-        columns = [desc[0] for desc in cur.description] if cur.description else []
-        rows = [dict(row) for row in cur.fetchall()] if cur.description else []
+        columns: list[str] = (
+            [str(desc[0]) for desc in cur.description] if cur.description else []
+        )
+        rows: list[Mapping[str, object]] = (
+            [dict(row) for row in cur.fetchall()] if cur.description else []
+        )
     except psycopg2.Error as exc:
         message = exc.pgerror or str(exc)
         print(f"  [ERROR] {message.strip()}", file=sys.stderr)
@@ -94,7 +118,9 @@ def cmd_query(db, args):
     return None
 
 
-def add_query_subparser(sub: argparse._SubParsersAction) -> None:
+def add_query_subparser(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
     """Add ``query`` (#521 carve out of ``routes_meta._build_parser``,
     verbatim argument definitions)."""
     p_query = sub.add_parser("query", help="Run a read-only SQL query for debugging")

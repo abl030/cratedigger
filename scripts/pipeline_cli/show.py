@@ -6,8 +6,11 @@ forensics summary), download history (+ import-result rendering), and
 denylisted users.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
+from typing import Any, Mapping, Protocol, TYPE_CHECKING
 
 import msgspec
 
@@ -16,36 +19,64 @@ from lib.quality import ImportResult
 
 from scripts.pipeline_cli._format import _fmt_br, _fmt_measurement
 
+if TYPE_CHECKING:
+    from lib.pipeline_db.rows import (
+        AlbumRequestRow,
+        DownloadLogWithEvidenceRow,
+    )
 
-def _render_import_result(ir_raw):
+
+def _as_dict(value: object) -> dict[str, Any]:
+    """Narrow an ``Any``-typed JSONB sub-value to ``dict[str, Any]``.
+
+    ``ImportResult``'s nested fields (``source_measurement``,
+    ``target_quality_contract``, ``conversion``, ``quality``,
+    ``spectral``, ``postflight``) are themselves loosely-typed dicts on
+    the ``ImportResult`` msgspec Struct (out of this migration's scope);
+    ``msgspec.convert`` recovers a properly parameterized dict here
+    (established wire-boundary adapter, CLAUDE.md "Wire-boundary
+    types") instead of the ``x or {}`` idiom, which leaves an
+    ``Any | dict[Unknown, Unknown]`` union under strict mode.
+    """
+    return msgspec.convert(value or {}, type=dict[str, Any])
+
+
+def _render_import_result(ir_raw: object) -> list[str]:
     """Render an ImportResult JSONB blob as human-readable lines."""
     if not ir_raw:
         return []
     try:
-        typed = (
-            ImportResult.from_dict(ir_raw)
-            if isinstance(ir_raw, dict)
-            else ImportResult.from_json(ir_raw)
-        )
+        if isinstance(ir_raw, dict):
+            typed = ImportResult.from_dict(
+                msgspec.convert(ir_raw, type=dict[str, object]))
+        elif isinstance(ir_raw, (str, bytes)):
+            typed = ImportResult.from_json(
+                ir_raw if isinstance(ir_raw, str) else ir_raw.decode("utf-8"),
+            )
+        else:
+            # Matches the original ``from_json`` fallback's observable
+            # outcome for any other truthy, non-dict/str/bytes shape:
+            # ``json.loads`` would raise ``TypeError``, caught below.
+            return []
         ir = msgspec.to_builtins(typed)
     except (json.JSONDecodeError, TypeError, ValueError, msgspec.ValidationError):
         return []
 
-    lines = []
+    lines: list[str] = []
     decision = ir.get("decision", "?")
     lines.append(f"      decision:  {decision}")
 
     source_m = ir.get("source_measurement")
     if source_m:
         lines.append(f"      source:    {_fmt_measurement(source_m)}")
-        target = ir.get("target_quality_contract") or {}
+        target = _as_dict(ir.get("target_quality_contract"))
         if target.get("format"):
             lines.append(f"      target:    {target['format']} (contract)")
         existing_m = ir.get("current_measurement")
         if existing_m:
             lines.append(f"      current:   {_fmt_measurement(existing_m)}")
 
-        conv = ir.get("conversion") or {}
+        conv = _as_dict(ir.get("conversion"))
         if conv.get("was_converted"):
             src = conv.get("original_filetype", "?")
             tgt = conv.get("target_filetype", "?")
@@ -56,8 +87,8 @@ def _render_import_result(ir_raw):
             lines.append(f"      converted: {src} -> {tgt} ({n} files){extra}")
     else:
         # A v1 row with no projected measurement at all.
-        quality = ir.get("quality") or {}
-        spectral = ir.get("spectral") or {}
+        quality = _as_dict(ir.get("quality"))
+        spectral = _as_dict(ir.get("spectral"))
         if quality.get("new_min_bitrate") is not None:
             lines.append(f"      new:       {_fmt_br(quality['new_min_bitrate'])}")
         if quality.get("prev_min_bitrate") is not None:
@@ -72,11 +103,12 @@ def _render_import_result(ir_raw):
     # don't have to grep JSONB to see them. `disambiguated=True` means
     # the move ran cleanly; a `disambiguation_failure` object means it
     # did not exit cleanly and the album is in beets at a stale path.
-    pf = ir.get("postflight") or {}
+    pf = _as_dict(ir.get("postflight"))
     dfail = pf.get("disambiguation_failure")
     if dfail:
-        reason = dfail.get("reason", "unknown")
-        detail = dfail.get("detail", "")
+        dfail_dict = _as_dict(dfail)
+        reason = dfail_dict.get("reason", "unknown")
+        detail = dfail_dict.get("detail", "")
         lines.append(f"      disambig:  FAILED ({reason}): {detail}")
     elif pf.get("disambiguated") is True:
         lines.append(f"      disambig:  ok")
@@ -84,7 +116,7 @@ def _render_import_result(ir_raw):
     return lines
 
 
-def _render_have_analysis_failure(row: dict[str, object]) -> list[str]:
+def _render_have_analysis_failure(row: "Mapping[str, object]") -> list[str]:
     """Render the typed installed-HAVE environment-failure payload."""
 
     if row.get("outcome") != "have_analysis_error":
@@ -115,7 +147,8 @@ def _render_have_analysis_failure(row: dict[str, object]) -> list[str]:
 
 
 def _render_search_forensics_summary(
-    request_row: dict, latest_search: dict,
+    request_row: "Mapping[str, object]",
+    latest_search: "Mapping[str, object]",
 ) -> list[str]:
     """Build the U7 forensic summary block printed above search history.
 
@@ -176,13 +209,12 @@ def _render_search_forensics_summary(
     return lines
 
 
-def _render_download_history_header(row):
+def _render_download_history_header(row: "Mapping[str, object]") -> str:
     source = row.get("source") or "slskd"
     outcome = row.get("outcome")
     created_at = row.get("created_at")
     if source == "youtube":
-        meta = row.get("youtube_metadata")
-        meta = meta if isinstance(meta, dict) else {}
+        meta = _as_dict(row.get("youtube_metadata"))
         parts = ["via youtube"]
         browse_id = meta.get("browse_id")
         if browse_id:
@@ -203,13 +235,14 @@ def _render_download_history_header(row):
     )
 
 
-def _render_youtube_metadata(row):
+def _render_youtube_metadata(row: "Mapping[str, object]") -> list[str]:
     if (row.get("source") or "slskd") != "youtube":
         return []
-    meta = row.get("youtube_metadata")
-    if not isinstance(meta, dict):
+    raw_meta = row.get("youtube_metadata")
+    if not isinstance(raw_meta, dict):
         return []
-    lines = []
+    meta = msgspec.convert(raw_meta, type=dict[str, Any])
+    lines: list[str] = []
     yt_url = meta.get("yt_url")
     if yt_url:
         lines.append(f"      yt_url:    {yt_url}")
@@ -222,7 +255,23 @@ def _render_youtube_metadata(row):
     return lines
 
 
-def cmd_show(db, args):
+class _ShowDB(Protocol):
+    """``db`` shape ``cmd_show`` touches (issue #784, #409 pattern)."""
+
+    def get_request(self, request_id: int) -> "AlbumRequestRow | None": ...
+
+    def get_tracks(self, request_id: int) -> list[dict[str, Any]]: ...
+
+    def get_search_history(self, request_id: int) -> list[dict[str, object]]: ...
+
+    def get_download_history(
+        self, request_id: int,
+    ) -> "list[DownloadLogWithEvidenceRow]": ...
+
+    def get_denylisted_users(self, request_id: int) -> list[dict[str, Any]]: ...
+
+
+def cmd_show(db: "_ShowDB", args: argparse.Namespace) -> None:
     req = db.get_request(args.id)
     if not req:
         print(f"  Request {args.id} not found.")
@@ -244,8 +293,9 @@ def cmd_show(db, args):
     print(f"  VA Comp:      {'yes' if req.get('is_va_compilation') else 'no'}")
     print(f"  Catalog #:    {req.get('catalog_number') or '-'}")
     print(f"  Source Path:  {req['source_path']}")
-    if req.get("reasoning"):
-        print(f"  Reasoning:    {req['reasoning'][:120]}...")
+    reasoning = req.get("reasoning")
+    if reasoning:
+        print(f"  Reasoning:    {reasoning[:120]}...")
     print(f"  Distance:     {req['beets_distance']}")
     print(f"  Imported:     {req['imported_path']}")
     print(f"  Attempts:     search={req['search_attempts']} dl={req['download_attempts']} val={req['validation_attempts']}")
@@ -254,10 +304,14 @@ def cmd_show(db, args):
 
     # --- Active download state ---
     ads = req.get("active_download_state")
-    if ads and isinstance(ads, dict):
+    if ads:
         enq = ads.get("enqueued_at", "?")
         ftype = ads.get("filetype", "?")
-        fcount = len(ads.get("files", []))
+        ads_files = ads.get("files")
+        fcount = (
+            len(msgspec.convert(ads_files, type=list[object]))
+            if isinstance(ads_files, list) else 0
+        )
         print(f"\n  Active Download:")
         print(f"    filetype:     {ftype}")
         print(f"    enqueued_at:  {enq}")
@@ -341,7 +395,9 @@ def cmd_show(db, args):
             print(f"    {d['username']}: {d['reason']}")
 
 
-def add_show_subparser(sub: argparse._SubParsersAction) -> None:
+def add_show_subparser(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
     """Add ``show`` (#521 carve out of ``routes_meta._build_parser``,
     verbatim argument definitions)."""
     p_show = sub.add_parser("show", help="Show full details of a request")

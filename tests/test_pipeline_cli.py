@@ -531,7 +531,7 @@ class TestTracksFromMbRelease(unittest.TestCase):
         self.assertEqual(len(tracks), 3)
         self.assertEqual(tracks[0]["title"], "Houdini Crush")
         self.assertEqual(tracks[0]["disc_number"], 1)
-        self.assertAlmostEqual(tracks[0]["length_seconds"], 200.0)
+        self.assertAlmostEqual(cast(float, tracks[0]["length_seconds"]), 200.0)
 
 
 class TestCmdImportJobRecovery(unittest.TestCase):
@@ -577,7 +577,7 @@ class TestCmdImportJobRecovery(unittest.TestCase):
         with redirect_stdout(stdout):
             pipeline_cli.cmd_import_jobs(
                 db,
-                SimpleNamespace(status="recovery_required", limit=20),
+                cast(Any, SimpleNamespace(status="recovery_required", limit=20)),
             )
 
         output = stdout.getvalue()
@@ -596,7 +596,7 @@ class TestCmdImportJobRecovery(unittest.TestCase):
         stdout = io.StringIO()
 
         with redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_import_job_recovery(db, args)
+            rc = pipeline_cli.cmd_import_job_recovery(db, cast(Any, args))
 
         self.assertEqual(rc, 0)
         self.assertIn("Queued fresh import job", stdout.getvalue())
@@ -617,7 +617,7 @@ class TestCmdImportJobRecovery(unittest.TestCase):
         )
 
         with redirect_stderr(io.StringIO()):
-            rc = pipeline_cli.cmd_import_job_recovery(db, args)
+            rc = pipeline_cli.cmd_import_job_recovery(db, cast(Any, args))
 
         self.assertEqual(rc, 4)
 
@@ -680,7 +680,7 @@ class TestCmdImportPreview(unittest.TestCase):
         )
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_import_preview(db, args)
+            rc = pipeline_cli.cmd_import_preview(db, cast(Any, args))
 
         self.assertEqual(rc, 0)
         payload = json.loads(stdout.getvalue())
@@ -723,7 +723,7 @@ class TestCmdImportPreview(unittest.TestCase):
         )
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_import_preview(db, args)
+            rc = pipeline_cli.cmd_import_preview(db, cast(Any, args))
 
         self.assertEqual(rc, 0)
         payload = json.loads(stdout.getvalue())
@@ -750,7 +750,7 @@ class TestCmdImportPreview(unittest.TestCase):
         )
         stderr = io.StringIO()
         with redirect_stderr(stderr):
-            rc = pipeline_cli.cmd_import_preview(db, args)
+            rc = pipeline_cli.cmd_import_preview(db, cast(Any, args))
 
         # rc=2 + the expected stderr message is sufficient evidence that
         # validation rejected before the preview engine was invoked.
@@ -770,7 +770,7 @@ class TestCmdImportPreview(unittest.TestCase):
         )
         stderr = io.StringIO()
         with redirect_stderr(stderr):
-            rc = pipeline_cli.cmd_import_preview(db, args)
+            rc = pipeline_cli.cmd_import_preview(db, cast(Any, args))
 
         self.assertEqual(rc, 2)
         self.assertIn(
@@ -802,7 +802,7 @@ class TestCmdImportPreview(unittest.TestCase):
                 cleanup_eligible=True,
             ),
         ) as mock_preview, redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_import_preview(db, args)
+            rc = pipeline_cli.cmd_import_preview(db, cast(Any, args))
 
         self.assertEqual(rc, 0)
         mock_preview.assert_called_once_with(db, 99)
@@ -817,7 +817,7 @@ class TestCmdWrongMatchTriage(unittest.TestCase):
         with patch(
             "lib.wrong_match_cleanup_service.cleanup_all_wrong_matches"
         ) as cleanup, redirect_stderr(stderr):
-            rc = pipeline_cli.cmd_wrong_match_triage(db, args)
+            rc = pipeline_cli.cmd_wrong_match_triage(db, cast(Any, args))
 
         self.assertEqual(rc, 2)
         cleanup.assert_not_called()
@@ -834,7 +834,7 @@ class TestCmdWrongMatchTriage(unittest.TestCase):
         with patch(
             "lib.wrong_match_cleanup_service.cleanup_all_wrong_matches"
         ) as cleanup, redirect_stderr(stderr):
-            rc = pipeline_cli.cmd_wrong_match_triage(db, args)
+            rc = pipeline_cli.cmd_wrong_match_triage(db, cast(Any, args))
 
         self.assertEqual(rc, 2)
         cleanup.assert_not_called()
@@ -852,7 +852,7 @@ class TestCmdWrongMatchTriage(unittest.TestCase):
             "lib.wrong_match_cleanup_service.cleanup_all_wrong_matches",
             return_value=summary,
         ) as cleanup, redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_wrong_match_triage(db, args)
+            rc = pipeline_cli.cmd_wrong_match_triage(db, cast(Any, args))
 
         self.assertEqual(rc, 0)
         cleanup.assert_called_once_with(db, confirm_all_wrong_matches=True)
@@ -869,7 +869,7 @@ class TestCmdWrongMatchDelete(unittest.TestCase):
         with patch(
             "lib.wrong_match_delete_service.delete_wrong_match"
         ) as delete, redirect_stderr(stderr):
-            rc = pipeline_cli.cmd_wrong_match_delete(db, args)
+            rc = pipeline_cli.cmd_wrong_match_delete(db, cast(Any, args))
 
         self.assertEqual(rc, 2)
         delete.assert_not_called()
@@ -895,7 +895,7 @@ class TestCmdWrongMatchDelete(unittest.TestCase):
             "lib.wrong_match_delete_service.delete_wrong_match",
             return_value=result,
         ) as delete, redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_wrong_match_delete(db, args)
+            rc = pipeline_cli.cmd_wrong_match_delete(db, cast(Any, args))
 
         self.assertEqual(rc, 0)
         delete.assert_called_once_with(db, 42, require_visible=True)
@@ -921,7 +921,7 @@ class TestCmdWrongMatchDelete(unittest.TestCase):
             "lib.wrong_match_delete_service.delete_wrong_match",
             return_value=result,
         ), redirect_stdout(io.StringIO()):
-            rc = pipeline_cli.cmd_wrong_match_delete(db, args)
+            rc = pipeline_cli.cmd_wrong_match_delete(db, cast(Any, args))
 
         self.assertEqual(rc, 4)
 
@@ -943,7 +943,7 @@ class TestCmdWrongMatchDelete(unittest.TestCase):
             "lib.wrong_match_delete_service.delete_wrong_match",
             return_value=result,
         ), redirect_stdout(io.StringIO()):
-            rc = pipeline_cli.cmd_wrong_match_delete(db, args)
+            rc = pipeline_cli.cmd_wrong_match_delete(db, cast(Any, args))
 
         self.assertEqual(rc, 2)
 
@@ -965,7 +965,7 @@ class TestCmdWrongMatchDelete(unittest.TestCase):
             "lib.wrong_match_delete_service.delete_wrong_match",
             return_value=result,
         ), redirect_stdout(io.StringIO()):
-            rc = pipeline_cli.cmd_wrong_match_delete(db, args)
+            rc = pipeline_cli.cmd_wrong_match_delete(db, cast(Any, args))
 
         self.assertEqual(rc, 5)
 
@@ -978,7 +978,7 @@ class TestCmdWrongMatchDeleteGroup(unittest.TestCase):
         with patch(
             "lib.wrong_match_delete_service.delete_wrong_match_group"
         ) as delete, redirect_stderr(stderr):
-            rc = pipeline_cli.cmd_wrong_match_delete_group(db, args)
+            rc = pipeline_cli.cmd_wrong_match_delete_group(db, cast(Any, args))
 
         self.assertEqual(rc, 2)
         delete.assert_not_called()
@@ -1008,7 +1008,7 @@ class TestCmdWrongMatchDeleteGroup(unittest.TestCase):
             "lib.wrong_match_delete_service.delete_wrong_match_group",
             return_value=summary,
         ) as delete, redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_wrong_match_delete_group(db, args)
+            rc = pipeline_cli.cmd_wrong_match_delete_group(db, cast(Any, args))
 
         self.assertEqual(rc, 0)
         delete.assert_called_once_with(db, 42)
@@ -1049,7 +1049,7 @@ class TestCmdWrongMatchDeleteGroup(unittest.TestCase):
             "lib.wrong_match_delete_service.delete_wrong_match_group",
             return_value=summary,
         ), redirect_stdout(io.StringIO()):
-            rc = pipeline_cli.cmd_wrong_match_delete_group(db, args)
+            rc = pipeline_cli.cmd_wrong_match_delete_group(db, cast(Any, args))
 
         self.assertEqual(rc, 4)
 
@@ -2166,7 +2166,8 @@ class TestCmdShowSearchForensics(unittest.TestCase):
     def _capture(self, db, request_id):
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            pipeline_cli.cmd_show(cast(Any, db), SimpleNamespace(id=request_id))
+            pipeline_cli.cmd_show(
+                cast(Any, db), cast(Any, SimpleNamespace(id=request_id)))
         return stdout.getvalue()
 
     def test_show_renders_variant_final_state_and_top_3(self):
@@ -2360,7 +2361,7 @@ class TestCmdSearchPlanShow(unittest.TestCase):
         args = SimpleNamespace(id=rid, json=json_out)
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_search_plan_show(db, args)
+            rc = pipeline_cli.cmd_search_plan_show(db, cast(Any, args))
         return rc, stdout.getvalue()
 
     def test_search_plan_show_human_renders_active_plan(self):
@@ -2569,7 +2570,7 @@ class TestCmdSearchPlanShowStats(unittest.TestCase):
         args = SimpleNamespace(id=rid, json=False, no_stats=False)
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_search_plan_show(db, args)
+            rc = pipeline_cli.cmd_search_plan_show(db, cast(Any, args))
         self.assertEqual(rc, 0)
         out = stdout.getvalue()
         self.assertIn("Stats:", out)
@@ -2580,7 +2581,7 @@ class TestCmdSearchPlanShowStats(unittest.TestCase):
         args = SimpleNamespace(id=rid, json=False, no_stats=True)
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_search_plan_show(db, args)
+            rc = pipeline_cli.cmd_search_plan_show(db, cast(Any, args))
         self.assertEqual(rc, 0)
         out = stdout.getvalue()
         self.assertNotIn("Stats:", out)
@@ -2590,7 +2591,7 @@ class TestCmdSearchPlanShowStats(unittest.TestCase):
         args = SimpleNamespace(id=rid, json=True, no_stats=False)
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_search_plan_show(db, args)
+            rc = pipeline_cli.cmd_search_plan_show(db, cast(Any, args))
         self.assertEqual(rc, 0)
         payload = json.loads(stdout.getvalue())
         self.assertIn("stats", payload)
@@ -2618,7 +2619,7 @@ class TestCmdSearchPlanShowStats(unittest.TestCase):
         args = SimpleNamespace(id=rid, json=True, no_stats=False)
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_search_plan_show(db, args)
+            rc = pipeline_cli.cmd_search_plan_show(db, cast(Any, args))
         self.assertEqual(rc, 0)
         payload = json.loads(stdout.getvalue())
         legacy = payload["stats"]["superseded_and_legacy"]["legacy_bucket"]
@@ -2669,7 +2670,7 @@ class TestCmdSearchPlanRegenerate(unittest.TestCase):
                 cp = configparser.RawConfigParser()
                 cp.read_string("[General]\n")
                 mock_cfg.return_value = CratediggerConfig.from_ini(cp)
-                rc = pipeline_cli.cmd_search_plan_regenerate(db, args)
+                rc = pipeline_cli.cmd_search_plan_regenerate(db, cast(Any, args))
         return rc, stdout.getvalue()
 
     def test_regenerate_succeeds_creates_new_active_plan_and_resets_cursor(self):
@@ -2801,7 +2802,7 @@ class TestCmdSearchPlanDryRun(unittest.TestCase):
                 cp = configparser.RawConfigParser()
                 cp.read_string("[General]\n")
                 mock_cfg.return_value = CratediggerConfig.from_ini(cp)
-                rc = pipeline_cli.cmd_search_plan_dry_run(db, args)
+                rc = pipeline_cli.cmd_search_plan_dry_run(db, cast(Any, args))
         return rc, stdout.getvalue()
 
     def test_dry_run_happy_path_prints_plan_items_without_persisting(self):
@@ -2929,7 +2930,7 @@ class TestCmdSearchPlanSaturation(unittest.TestCase):
                 cp = configparser.RawConfigParser()
                 cp.read_string("[General]\n")
                 mock_cfg.return_value = CratediggerConfig.from_ini(cp)
-                rc = pipeline_cli.cmd_search_plan_saturation(db, args)
+                rc = pipeline_cli.cmd_search_plan_saturation(db, cast(Any, args))
         return rc, stdout.getvalue()
 
     def test_happy_path_prints_human_summary(self):
@@ -3142,7 +3143,7 @@ class TestCmdSearchPlanAdvance(unittest.TestCase):
                 cp = configparser.RawConfigParser()
                 cp.read_string("[General]\n")
                 mock_cfg.return_value = CratediggerConfig.from_ini(cp)
-                rc = pipeline_cli.cmd_search_plan_advance(db, args)
+                rc = pipeline_cli.cmd_search_plan_advance(db, cast(Any, args))
         return rc, stdout.getvalue()
 
     def test_advance_to_ordinal_succeeds_and_moves_cursor(self):
@@ -3239,7 +3240,7 @@ class TestCmdReplace(unittest.TestCase):
                 cp.read_string("[General]\n")
                 mock_cfg.return_value = CratediggerConfig.from_ini(cp)
                 MS.return_value.replace_request_mbid.return_value = result
-                rc = pipeline_cli.cmd_replace(MagicMock(), args)
+                rc = pipeline_cli.cmd_replace(MagicMock(), cast(Any, args))
         return rc, stdout.getvalue()
 
     def test_exit_0_on_replaced(self):
@@ -3361,7 +3362,7 @@ class TestCmdBeetsDistance(unittest.TestCase):
                 "lib.beets_distance.compute_beets_distance",
                 return_value=result,
             ):
-                rc = pipeline_cli.cmd_beets_distance(MagicMock(), args)
+                rc = pipeline_cli.cmd_beets_distance(MagicMock(), cast(Any, args))
         return rc, stdout.getvalue()
 
     def test_exit_0_on_ok(self):
@@ -3463,7 +3464,7 @@ class TestCmdBeetsDistance(unittest.TestCase):
                 "web.discogs.get_release",
                 return_value=discogs_release,
             ) as discogs_get:
-                rc = pipeline_cli.cmd_beets_distance(MagicMock(), args)
+                rc = pipeline_cli.cmd_beets_distance(MagicMock(), cast(Any, args))
                 self.assertIn("mb_get_release", captured)
                 resolved = captured["mb_get_release"]("2048516")
                 discogs_get.assert_called_once_with(2048516, fresh=False)
@@ -3580,7 +3581,8 @@ class TestCmdYoutubeAlbum(unittest.TestCase):
                 "scripts.pipeline_cli.youtube.resolve_youtube_album",
                 return_value=result,
             ) as mock_resolve:
-                rc = pipeline_cli.cmd_youtube_album(FakePipelineDB(), args)
+                rc = pipeline_cli.cmd_youtube_album(
+                    FakePipelineDB(), cast(Any, args))
         return rc, stdout.getvalue(), mock_resolve
 
     def test_exit_code_mapping_uses_service_module_dict(self):
@@ -3734,7 +3736,8 @@ class TestCmdYoutubeAlbum(unittest.TestCase):
             side_effect=_raising_resolver,
         ):
             with self.assertRaises(RuntimeError):
-                pipeline_cli.cmd_youtube_album(FakePipelineDB(), args)
+                pipeline_cli.cmd_youtube_album(
+                    FakePipelineDB(), cast(Any, args))
 
         self.assertEqual(
             _FakeSession.close_calls, 1,
@@ -3775,7 +3778,7 @@ class TestCmdSearchPlanHistory(unittest.TestCase):
                 cp = configparser.RawConfigParser()
                 cp.read_string("[General]\n")
                 mock_cfg.return_value = CratediggerConfig.from_ini(cp)
-                rc = pipeline_cli.cmd_search_plan_history(db, args)
+                rc = pipeline_cli.cmd_search_plan_history(db, cast(Any, args))
         return rc, stdout.getvalue()
 
     def test_history_success_default_limit_human_output(self):
@@ -3922,7 +3925,7 @@ class TestPipelineCliTriage(unittest.TestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
-            rc = pipeline_cli.cmd_triage_show(db, args)
+            rc = pipeline_cli.cmd_triage_show(db, cast(Any, args))
         return rc, stdout.getvalue(), stderr.getvalue()
 
     def _run_quarantine(self, db, root, *, json_out=False):
@@ -3937,7 +3940,7 @@ class TestPipelineCliTriage(unittest.TestCase):
             {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
             clear=False,
         ), redirect_stdout(stdout), redirect_stderr(stderr):
-            rc = pipeline_cli.cmd_triage_quarantine(db, args)
+            rc = pipeline_cli.cmd_triage_quarantine(db, cast(Any, args))
         return rc, stdout.getvalue(), stderr.getvalue()
 
     def test_quarantine_json_matches_typed_service_shape(self):
@@ -4067,7 +4070,7 @@ class TestPipelineCliTriage(unittest.TestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
-            rc = pipeline_cli.cmd_triage_list(db, args)
+            rc = pipeline_cli.cmd_triage_list(db, cast(Any, args))
         return rc, stdout.getvalue(), stderr.getvalue()
 
     def _seed_cohort(self) -> FakePipelineDB:
@@ -4268,7 +4271,7 @@ class TestPipelineCliLongTail(unittest.TestCase):
         stderr = io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
             rc = pipeline_cli.cmd_long_tail(
-                cast(Any, db), args, band_fn=band_fn)
+                cast(Any, db), cast(Any, args), band_fn=band_fn)
         return rc, stdout.getvalue(), stderr.getvalue()
 
     def test_band_missing_filter_returns_only_missing_rows(self):
@@ -4471,7 +4474,7 @@ class TestCmdYoutubeRescue(unittest.TestCase):
         stderr = io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
             rc = pipeline_cli.cmd_youtube_rescue(
-                MagicMock(), args, service_factory=_factory)
+                MagicMock(), cast(Any, args), service_factory=_factory)
         return rc, stdout.getvalue(), stderr.getvalue()
 
     # ----- outcome → exit code subTest table -----

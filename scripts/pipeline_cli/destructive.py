@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from typing import TYPE_CHECKING
 
 import msgspec
 
@@ -32,6 +33,9 @@ from lib.destructive_release_service import (
     delete_release_from_library,
 )
 
+if TYPE_CHECKING:
+    from lib.destructive_release_service import SupportsDestructivePipelineDB
+
 
 class _BanSourceArgs(msgspec.Struct, frozen=True):
     request_id: int
@@ -53,7 +57,7 @@ def _open_beets(path: str | None, library_root: str | None) -> BeetsDB:
     return open_beets_db(db_path=path, library_root=library_root)
 
 
-def cmd_ban_source(db, args: object) -> int:
+def cmd_ban_source(db: "SupportsDestructivePipelineDB", args: object) -> int:
     """Ban an exact source; preserve unsearchable or requeue as wanted."""
     typed_args = msgspec.convert(vars(args), type=_BanSourceArgs)
     try:
@@ -145,7 +149,7 @@ def cmd_ban_source(db, args: object) -> int:
 
 
 def cmd_library_delete(
-    db,
+    db: "SupportsDestructivePipelineDB",
     args: object,
     *,
     beets_delete_fn: BeetsDeleteFn | None = None,

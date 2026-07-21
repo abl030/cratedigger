@@ -273,7 +273,7 @@ def _reused_evidence_preview_payload(
     evidence: AlbumQualityEvidence,
     source_path: str,
     import_result: ImportResult,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Synthesize a preview_result payload for the reused-evidence branch.
 
     Mirrors the shape ``ImportPreviewResult.to_dict()`` produces so
@@ -283,19 +283,25 @@ def _reused_evidence_preview_payload(
     path.
     """
     del evidence  # measurement is recorded in the evidence row itself
-    payload = msgspec.to_builtins(ImportPreviewResult(
-        mode="reused",
-        verdict="would_import",
-        would_import=True,
-        decision="candidate_evidence_reused",
-        reason="candidate_evidence_reused",
-        stage_chain=["preview:candidate_evidence_reused"],
-        request_id=job.request_id,
-        download_log_id=_download_log_id_from_job(job),
-        source_path=source_path,
-        import_result=import_result,
-    ))
-    assert isinstance(payload, dict)
+    # ``msgspec.to_builtins`` returns ``Any``; ``msgspec.convert`` recovers
+    # the parameterized dict shape (established wire-boundary adapter,
+    # CLAUDE.md "Wire-boundary types") instead of an ``isinstance`` assert,
+    # which would narrow to ``dict[Unknown, Unknown]``.
+    payload = msgspec.convert(
+        msgspec.to_builtins(ImportPreviewResult(
+            mode="reused",
+            verdict="would_import",
+            would_import=True,
+            decision="candidate_evidence_reused",
+            reason="candidate_evidence_reused",
+            stage_chain=["preview:candidate_evidence_reused"],
+            request_id=job.request_id,
+            download_log_id=_download_log_id_from_job(job),
+            source_path=source_path,
+            import_result=import_result,
+        )),
+        type=dict[str, object],
+    )
     payload["candidate_status"] = CANDIDATE_STATUS_REUSED
     return payload
 
@@ -556,7 +562,11 @@ def process_claimed_preview_job(
         current_evidence = None
         if job.request_id is not None:
             try:
-                req = db.get_request(job.request_id) or {}
+                # ``db`` is the worker's untyped handle, so
+                # ``db.get_request(...)`` is ``Any``; declaring ``req``'s own
+                # type recovers a known shape for the ``.get`` calls below
+                # without touching ``db``'s parameter type.
+                req: dict[str, object] = db.get_request(job.request_id) or {}
                 mb_release_id = str(req.get("mb_release_id") or "")
                 current_evidence, persisted_existing, authoritative = (
                     load_persisted_existing_spectral(
@@ -589,7 +599,10 @@ def process_claimed_preview_job(
                     "Unable to load reused HAVE evidence for request %s",
                     job.request_id,
                 )
-        audit_resolver = existing_spectral_resolver
+        # Explicit annotation gives the fallback lambda below an expected
+        # type to infer its parameter from (otherwise its parameter type is
+        # unknown under strict mode).
+        audit_resolver: ExistingSpectralResolver | None = existing_spectral_resolver
         if audit_resolver is None:
             try:
                 audit_cfg = read_runtime_config()

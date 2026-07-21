@@ -5,8 +5,11 @@ distance matrix. ``youtube-rescue`` — submit a rescue ingest for one
 request. Both wrap the U7/U4 service layer (CLI ⇄ API surface symmetry).
 """
 
+from __future__ import annotations
+
 import argparse
 import sys
+from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol
 
 import msgspec
 
@@ -26,6 +29,97 @@ from lib.youtube_ingest_service import (
     OUTCOME_EXIT_CODE as YOUTUBE_INGEST_EXIT_CODE,
     default_youtube_ingest_service_factory,
 )
+
+if TYPE_CHECKING:
+    from lib.pipeline_db.rows import AlbumRequestRow, DownloadLogWithEvidenceRow
+    from lib.youtube_album_service import YoutubeResolverDB
+    from lib.youtube_ingest_service import SubmitResult
+
+
+class _YoutubeRescueDB(Protocol):
+    """Structural ``db`` surface forwarded into the YT-rescue ingest service
+    factory (issue #784, #409 pattern).
+
+    Mirrors ``lib.youtube_ingest_service._PipelineDB`` method-for-method so
+    ``FakePipelineDB`` / the production ``PipelineDB`` conform without
+    importing that private symbol across the module boundary.
+    ``cmd_youtube_rescue`` never calls these directly — it passes ``db``
+    straight into the injected ``service_factory`` (default
+    ``default_youtube_ingest_service_factory``), which builds a
+    ``YoutubeIngestService`` typed against the same surface.
+    """
+
+    def get_request(self, request_id: int) -> "AlbumRequestRow | None": ...
+
+    def get_youtube_album_mapping(
+        self, release_group_identifier: str, source: str,
+    ) -> Optional[list[dict[str, Any]]]: ...
+
+    def find_youtube_album_mapping_for_release(
+        self, *, source: str, release_id: str, browse_id: str,
+    ) -> Optional[dict[str, Any]]: ...
+
+    def get_tracks(self, request_id: int) -> list[dict[str, Any]]: ...
+
+    def insert_youtube_running(
+        self,
+        *,
+        request_id: int,
+        browse_id: str,
+        audio_playlist_id: Optional[str],
+        yt_url: str,
+        expected_track_count: int,
+        resolver_mapping_id: Optional[int] = None,
+        per_track_video_ids: Optional[list[str]] = None,
+    ) -> int: ...
+
+    def update_youtube_terminal(
+        self, download_log_id: int, outcome: str, metadata_dict: dict[str, Any],
+    ) -> None: ...
+
+    def get_download_log_entry(
+        self, log_id: int,
+    ) -> "Optional[DownloadLogWithEvidenceRow]": ...
+
+    def enqueue_import_job(
+        self,
+        job_type: str,
+        *,
+        request_id: Optional[int] = None,
+        dedupe_key: Optional[str] = None,
+        payload: Optional[dict[str, Any]] = None,
+        message: Optional[str] = None,
+    ) -> Any: ...
+
+    def enqueue_youtube_import_and_mark_success(
+        self,
+        *,
+        download_log_id: int,
+        request_id: int,
+        dedupe_key: str,
+        payload: dict[str, Any],
+        message: str,
+        terminal_metadata: dict[str, Any],
+    ) -> Any: ...
+
+    def find_active_youtube_import_job(
+        self, *, request_id: int, browse_id: str,
+    ) -> "Any | None": ...
+
+
+class _SubmitsYoutubeRescue(Protocol):
+    """Structural surface the rescue service factory returns — the single
+    method ``cmd_youtube_rescue`` calls (``.submit``). Both
+    ``YoutubeIngestService`` and the test stub conform (issue #784, #409
+    pattern).
+
+    Positional-only: the CLI always calls ``svc.submit(rid, browse)``
+    positionally, so the parameter *names* are not part of the contract —
+    this lets duck-typed stubs with differently-named params conform."""
+
+    def submit(
+        self, request_id: int, browse_id: str, /,
+    ) -> "SubmitResult": ...
 
 
 class _RedisYoutubeCache:
@@ -105,7 +199,7 @@ def _build_youtube_client():
     # Bind a default (connect, read) timeout so unresponsive remotes don't
     # pin the worker forever. Per-call ``timeout=`` kwargs still override.
     class _DefaultTimeoutSession(requests.Session):
-        def request(self, *args, **kwargs):
+        def request(self, *args: Any, **kwargs: Any):
             kwargs.setdefault("timeout", (5, 30))
             return super().request(*args, **kwargs)
 
@@ -129,7 +223,7 @@ def _build_youtube_client():
     return YTMusic(requests_session=session, language="en"), session
 
 
-def cmd_youtube_album(db, args):
+def cmd_youtube_album(db: "YoutubeResolverDB", args: argparse.Namespace) -> int:
     """``pipeline-cli youtube-album <identifier> [--refresh] [--json]``.
 
     Resolves any MB / Discogs release-or-group identifier into the
@@ -222,7 +316,14 @@ def cmd_youtube_album(db, args):
     return OUTCOME_EXIT_CODE.get(result.outcome, 1)
 
 
-def cmd_youtube_rescue(db, args, *, service_factory=None):
+def cmd_youtube_rescue(
+    db: "_YoutubeRescueDB",
+    args: argparse.Namespace,
+    *,
+    service_factory: Optional[
+        Callable[["_YoutubeRescueDB"], "_SubmitsYoutubeRescue"]
+    ] = None,
+) -> int:
     """``pipeline-cli youtube-rescue <request_id> <browse_id> [--json]``.
 
     Submit a YouTube-Music rescue ingest for one album request. Counterpart
@@ -270,7 +371,9 @@ def cmd_youtube_rescue(db, args, *, service_factory=None):
     return YOUTUBE_INGEST_EXIT_CODE.get(result.outcome, 1)
 
 
-def add_youtube_subparsers(sub: argparse._SubParsersAction) -> None:
+def add_youtube_subparsers(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
     """Add ``youtube-album`` / ``youtube-rescue`` (#521 carve out of
     ``routes_meta._build_parser``, verbatim argument definitions)."""
     # youtube-album (U7): MBID/Discogs ID → YT Music album matrix.

@@ -9,9 +9,10 @@ single command family.
 
 from datetime import date, datetime, time
 from decimal import Decimal
+from typing import Mapping, Optional
 
 
-def _json_default(value):
+def _json_default(value: object) -> str | float:
     """Serialize common PostgreSQL values for JSON/debug output."""
     if isinstance(value, (date, datetime, time)):
         return value.isoformat()
@@ -20,20 +21,22 @@ def _json_default(value):
     return str(value)
 
 
-def _fmt_br(kbps):
+def _fmt_br(kbps: object) -> str:
     """Format a bitrate value for display."""
     if kbps is None:
         return "-"
     return f"{kbps}kbps"
 
 
-def _fmt_measurement(m, label=""):
+def _fmt_measurement(
+    m: Optional[Mapping[str, object]], label: str = "",
+) -> str:
     """Format an AudioQualityMeasurement dict for display."""
     if not m:
         return f"{label}(none)"
     parts = [_fmt_br(m.get("min_bitrate_kbps"))]
     if m.get("spectral_grade"):
-        sg = m["spectral_grade"]
+        sg = str(m["spectral_grade"])
         if m.get("spectral_bitrate_kbps"):
             sg += f" ~{m['spectral_bitrate_kbps']}kbps"
         parts.append(f"spectral={sg}")

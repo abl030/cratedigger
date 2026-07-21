@@ -11,13 +11,15 @@ Output: JSON to stdout. Run as:
     python3 build_dupes_json.py /tmp/plex-asciify-cleanup/plex_albums.before.xml \
     > /tmp/plex-asciify-cleanup/dupes.before.json
 """
+from __future__ import annotations
+
 import json
 import os
 import ssl
 import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import TypedDict
 import urllib.request
 
@@ -28,12 +30,32 @@ CTX = ssl.create_default_context()
 CTX.check_hostname = False
 CTX.verify_mode = ssl.CERT_NONE
 
-def fetch_children(rk):
+
+class _AlbumEntry(TypedDict):
+    ratingKey: str | None
+    title: str
+    parentTitle: str
+    year: str
+    addedAt: int
+
+
+class _FailureEntry(TypedDict):
+    ratingKey: str | None
+    error: str
+
+
+class _RkInfo(TypedDict, total=False):
+    files: list[str]
+    folders: list[str]
+    track_count: int
+
+
+def fetch_children(rk: str | None) -> tuple[str | None, bytes]:
     url = f"{BASE}/library/metadata/{rk}/children?X-Plex-Token={TOKEN}"
     with urllib.request.urlopen(url, context=CTX, timeout=15) as r:
         return rk, r.read()
 
-albums = []
+albums: list[_AlbumEntry] = []
 for d in ET.parse(XML_PATH).getroot().findall('.//Directory'):
     if d.get('type') != 'album':
         continue
@@ -45,26 +67,24 @@ for d in ET.parse(XML_PATH).getroot().findall('.//Directory'):
         'addedAt': int(d.get('addedAt') or 0),
     })
 
-groups = defaultdict(list)
+groups: defaultdict[tuple[str, str, str], list[_AlbumEntry]] = defaultdict(list)
 for a in albums:
     key = (a['parentTitle'].lower(), a['title'].lower(), a['year'])
     groups[key].append(a)
 
-dup_groups = {k: v for k, v in groups.items() if len(v) > 1}
-all_rks = [a['ratingKey'] for v in dup_groups.values() for a in v]
+dup_groups: dict[tuple[str, str, str], list[_AlbumEntry]] = {
+    k: v for k, v in groups.items() if len(v) > 1
+}
+all_rks: list[str | None] = [a['ratingKey'] for v in dup_groups.values() for a in v]
 print(f"total_albums={len(albums)} dup_groups={len(dup_groups)} rks_to_fetch={len(all_rks)}", file=sys.stderr)
 
-class _RkInfo(TypedDict, total=False):
-    files: list[str]
-    folders: list[str]
-    track_count: int
-
-
-rk_data: dict[str, _RkInfo] = {}
-failures = []
+rk_data: dict[str | None, _RkInfo] = {}
+failures: list[_FailureEntry] = []
 done = 0
 with ThreadPoolExecutor(max_workers=12) as ex:
-    futs = {ex.submit(fetch_children, rk): rk for rk in all_rks}
+    futs: dict[Future[tuple[str | None, bytes]], str | None] = {
+        ex.submit(fetch_children, rk): rk for rk in all_rks
+    }
     for fut in as_completed(futs):
         rk = futs[fut]
         try:
@@ -73,7 +93,7 @@ with ThreadPoolExecutor(max_workers=12) as ex:
         except Exception as e:
             failures.append({'ratingKey': rk, 'error': str(e)})
             continue
-        files = []
+        files: list[str] = []
         for part in root.findall('.//Part'):
             f = part.get('file')
             if f:
@@ -87,7 +107,7 @@ with ThreadPoolExecutor(max_workers=12) as ex:
 # Retry failures once
 if failures:
     print(f"retrying {len(failures)} failures", file=sys.stderr)
-    retry_rks = [f['ratingKey'] for f in failures]
+    retry_rks: list[str | None] = [f['ratingKey'] for f in failures]
     failures = []
     with ThreadPoolExecutor(max_workers=4) as ex:
         futs = {ex.submit(fetch_children, rk): rk for rk in retry_rks}
@@ -106,7 +126,7 @@ group_rows: list[dict[str, object]] = []
 
 for key, members in sorted(dup_groups.items()):
     parent_title, title, year = key
-    all_folders = set()
+    all_folders: set[str] = set()
     for m in members:
         all_folders |= set(rk_data.get(m['ratingKey'], {}).get('folders', []))
     classification = 'same_folder' if len(all_folders) == 1 else ('diff_folder' if len(all_folders) > 1 else 'unknown')

@@ -16,6 +16,8 @@ Usage:
     nix-shell --run "python3 scripts/bench_parallel_search.py --levels 1,2,4,8"
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -23,6 +25,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from typing import Protocol
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -31,6 +34,30 @@ from lib.search_exec import (  # noqa: E402  — after sys.path insert
     SearchSubmitError,
     execute_search,
 )
+
+
+class _EphemeralSlskdHandle(Protocol):
+    """Narrow structural contract for ``tests/ephemeral_slskd.py::EphemeralSlskd``.
+
+    ``tests/`` is excluded from strict pyright (see
+    ``pyrightconfig.strict-production.json``), so the dynamically
+    path-inserted import below is untyped at its source; this Protocol
+    plus ``_build_ephemeral`` (the one place the untyped import happens)
+    keeps that Unknown-ness from leaking into the rest of this module.
+    """
+
+    host_url: str
+    api_key: str
+
+    def start(self) -> None: ...
+    def wait_for_soulseek(self, timeout: int = 60) -> bool: ...
+    def stop(self) -> None: ...
+
+
+def _build_ephemeral(creds_path: str) -> _EphemeralSlskdHandle:
+    """Construct the ephemeral slskd test fixture (see class docstring)."""
+    from ephemeral_slskd import EphemeralSlskd  # pyright: ignore[reportMissingImports]
+    return EphemeralSlskd(creds_path)
 
 
 # Diverse queries: mix of popular (guaranteed results) and less common artists.
@@ -145,12 +172,12 @@ def main():
                 api_key = creds.get("api_key", "")
 
     # If still no host, try ephemeral container
+    ephemeral: _EphemeralSlskdHandle | None
     if not host:
         print("No --host provided, starting ephemeral slskd container...")
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tests"))
-        from ephemeral_slskd import EphemeralSlskd  # pyright: ignore[reportMissingImports]
         creds_path = os.path.join(os.path.dirname(__file__), "..", "tests", ".slskd-creds.json")
-        ephemeral = EphemeralSlskd(creds_path)
+        ephemeral = _build_ephemeral(creds_path)
         ephemeral.start()
         host = ephemeral.host_url
         api_key = ephemeral.api_key
