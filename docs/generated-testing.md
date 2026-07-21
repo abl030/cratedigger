@@ -144,13 +144,22 @@ authoritative. Ordinary and force-import pins then prove installed-only facts
 produce the expected `have_analysis_error`, keep the request wanted, and
 converge after the production enrichment path measures the exact new snapshot.
 
-Candidate evidence reuse is also crossed through the real PostgreSQL preview
-queue for both automation and force jobs. Generated worlds vary provider
-identity, codec, spectral grade, and whether the candidate snapshot changes.
-An unchanged snapshot must reach `candidate_status=reused` with no full preview
-and no candidate analyzer call; a changed snapshot must run full preview once.
-The explicit unchanged force example uses the Rolling Stones incident identity;
-the exact 12-FLAC detail is pinned in the faster generated module.
+Every lifecycle import — ordinary automation and force alike — hands its
+enqueued job to the real preview worker (`process_claimed_preview_job`, the
+shared `_run_preview_worker` step) before the importer may claim it, so
+randomized sequences carry their accumulated candidate state through the same
+ownership boundary production uses. A matching content snapshot takes the
+front-gate reuse fast path (no full preview, the persisted candidate fact
+projected without a second scan), and the importer then reads that
+preview-produced evidence through the ordinary FK chain rather than a hand-forged
+result. The reuse/measurement contract itself is probed on that same shared step
+(`probe_candidate_preview_boundary`) across provider identity, codec, and spectral
+grade: an unchanged snapshot must reach `candidate_status=reused` with no full
+preview and no candidate analyzer call, while a changed snapshot cannot reach
+importer ownership until exactly one full preview persists fresh evidence. The
+installed HAVE scan stays an independent dispatch-side authority. The explicit
+unchanged force example uses the Rolling Stones incident identity; the exact
+12-FLAC detail is pinned in the faster generated module.
 
 The expanded lifecycle generator also shrank a separate counterexample from a
 live-census seed: a successful unverified retained FLAC import widened an
