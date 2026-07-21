@@ -146,21 +146,21 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "`_shared.py`, while issue #762 removed the obsolete request path cache; "
         "same encoder, same output, no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1331, "ef9d09dcf1118fd0"): (
+    ("lib/pipeline_db/requests.py", 1338, "ef9d09dcf1118fd0"): (
         "optional LIMIT is normalized through int before interpolation "
         "(issue #765: return type retyped to list[AlbumRequestRow], no SQL "
         "change; issue #784: `limit` parameter annotated `int | None`, "
         "changing the enclosing-scope fingerprint; issues #784 and #762 shifted "
         "the final merged line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1352, "042a7becce5f90f7"): (
+    ("lib/pipeline_db/requests.py", 1359, "042a7becce5f90f7"): (
         "ORDER is selected from two literals and LIMIT remains a value placeholder "
         "(issue #765: return type retyped to list[AlbumRequestRow], no SQL change; "
         "issue #784: `status`/`limit`/`newest_first` parameters annotated, "
         "changing the enclosing-scope fingerprint; issues #784 and #762 shifted "
         "the final merged line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1537, "714da98640ff84f0"): (
+    ("lib/pipeline_db/requests.py", 1544, "714da98640ff84f0"): (
         "attempt kind is validated against the fixed retry-counter vocabulary "
         "(issues #784 and #762 shifted this line without changing the hash; "
         "this statement is a plain string constant, not scope-bound, so no SQL "
@@ -207,19 +207,21 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "typed imported transition CASes status with rescue audit atomically "
         "(issues #784 and #762 shifted this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1044, "c062c0704de758f9"): (
-        "typed reset-to-wanted transition CASes its captured source status "
-        "(issues #784 and #762 shifted this line; no SQL change)"
+    ("lib/pipeline_db/requests.py", 1047, "26ece44e4e17577c"): (
+        "typed reset-to-wanted transition CASes its captured source status; "
+        "the Bad Rip priority timestamp is a static CASE update in the same CAS "
+        "(issues #784 and #762 shifted this line and removed the obsolete "
+        "request path cache)"
     ),
-    ("lib/pipeline_db/requests.py", 1113, "cfedc69363af13f0"): (
+    ("lib/pipeline_db/requests.py", 1120, "cfedc69363af13f0"): (
         "automatic recovery accepts only downloading as its exact source "
         "(issues #784 and #762 shifted this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1158, "2b2c27302b2ab78e"): (
+    ("lib/pipeline_db/requests.py", 1165, "2b2c27302b2ab78e"): (
         "typed download claim accepts only the explicit wanted source status "
         "(issues #784 and #762 shifted this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1194, "186e1c3ba3188478"): (
+    ("lib/pipeline_db/requests.py", 1201, "186e1c3ba3188478"): (
         "plan-aware download claim uses an exact wanted source predicate "
         "(issues #784 and #762 shifted this line; no SQL change)"
     ),

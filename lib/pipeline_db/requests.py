@@ -1009,8 +1009,9 @@ class _RequestsMixin(_PipelineDBBase):
 
         ``clear_retry_counters`` is for operator requeues that should get
         a clean slate. Automatic downloading → wanted failure paths preserve the
-        counters so backoff can keep growing. Scheduler priority is based only
-        on immutable ``created_at`` and is unaffected by either reset mode.
+        counters so backoff can keep growing. Ordinary resets preserve both
+        immutable ``created_at`` and nullable ``priority_started_at``; the Bad
+        Rip transition explicitly stamps the latter.
 
         """
         unknown = sorted(
@@ -1018,6 +1019,7 @@ class _RequestsMixin(_PipelineDBBase):
                 "search_filetype_override",
                 "min_bitrate",
                 "prev_min_bitrate",
+                "priority_started_at",
             }
         )
         if unknown:
@@ -1041,6 +1043,7 @@ class _RequestsMixin(_PipelineDBBase):
         override_present = "search_filetype_override" in fields
         min_bitrate_present = "min_bitrate" in fields
         prev_min_bitrate_present = "prev_min_bitrate" in fields
+        priority_started_at_present = "priority_started_at" in fields
         cur = self._execute(
             "UPDATE album_requests "
             "SET status = 'wanted', active_download_state = NULL, "
@@ -1055,7 +1058,9 @@ class _RequestsMixin(_PipelineDBBase):
             "ELSE prev_min_bitrate END, "
             "min_bitrate = CASE WHEN %s THEN %s ELSE min_bitrate END, "
             "search_filetype_override = CASE WHEN %s THEN %s "
-            "ELSE search_filetype_override END "
+            "ELSE search_filetype_override END, "
+            "priority_started_at = CASE WHEN %s THEN %s "
+            "ELSE priority_started_at END "
             "WHERE id = %s AND status = %s AND status != 'replaced'",
             (
                 now,
@@ -1071,6 +1076,8 @@ class _RequestsMixin(_PipelineDBBase):
                 fields.get("min_bitrate"),
                 override_present,
                 fields.get("search_filetype_override"),
+                priority_started_at_present,
+                fields.get("priority_started_at"),
                 request_id,
                 expected_status,
             ),

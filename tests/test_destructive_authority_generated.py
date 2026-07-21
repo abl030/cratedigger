@@ -742,6 +742,10 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
             initial_status=initial_status,
             final_status=str(db.request(41)["status"]),
         )
+        self.assertIsNotNone(
+            db.request(41).get("priority_started_at"),
+            "a successful bad-rip action did not start its priority window",
+        )
 
     @example(
         mb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",

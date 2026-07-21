@@ -247,6 +247,23 @@ class TestBanSourceAuthority(unittest.TestCase):
         )
         self.assertEqual(self.db.download_logs[-1].outcome, "curator_ban")
 
+    def test_bad_rip_starts_priority_window_without_rewriting_creation(self) -> None:
+        """An old request becomes urgent without losing its creation audit."""
+        before = self.db.request(41)
+        original_created_at = before["created_at"]
+        self.assertIsNone(before.get("priority_started_at"))
+
+        result = ban_source(
+            pipeline_db=self.db,
+            beets_db=self.beets,
+            request=BanSourceRequest(request_id=41),
+        )
+
+        self.assertIsInstance(result, BanSourceSuccess)
+        after = self.db.request(41)
+        self.assertEqual(after["created_at"], original_created_at)
+        self.assertIsNotNone(after.get("priority_started_at"))
+
     def test_injected_exact_delete_runs_at_the_real_service_boundary(self) -> None:
         self.beets.set_album_ids_for_release(RELEASE_A, [7])
         calls: list[BeetsDeleteRequest] = []
@@ -750,6 +767,36 @@ class TestDestructiveCurrentAuthorityRealBeets(unittest.TestCase):
 @requires_postgres
 class TestDestructiveAuthorityRealPostgres(unittest.TestCase):
     """Two real sessions prove service contention before beets mutation."""
+
+    def test_unsearchable_bad_rip_round_trips_priority_without_creation_drift(
+        self,
+    ) -> None:
+        db = make_db()
+        try:
+            request_id = db.add_request(
+                "Artist A",
+                "Album A",
+                "request",
+                mb_release_id=RELEASE_A,
+                status="unsearchable",
+            )
+            before = db.get_request(request_id)
+            assert before is not None
+
+            result = ban_source(
+                pipeline_db=db,
+                beets_db=FakeBeetsDB(),
+                request=BanSourceRequest(request_id),
+            )
+
+            self.assertIsInstance(result, BanSourceSuccess)
+            row = db.get_request(request_id)
+            assert row is not None
+            self.assertEqual(row["status"], "unsearchable")
+            self.assertEqual(row["created_at"], before["created_at"])
+            self.assertIsNotNone(row["priority_started_at"])
+        finally:
+            db.close()
 
     def test_barrier_controlled_release_lock_blocks_destructive_service(self) -> None:
         db1 = make_db()

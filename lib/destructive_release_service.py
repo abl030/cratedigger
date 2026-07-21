@@ -14,6 +14,7 @@ import json
 import logging
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal, Protocol, TYPE_CHECKING, TypeAlias
 
@@ -290,7 +291,10 @@ def _ban_source_locked(
     # conflict, and this service can never report destructive success after a
     # failed request CAS.
     quality = resolve_user_requeue_override(current.get("search_filetype_override"))
-    fields: dict[str, object] = {"search_filetype_override": quality}
+    fields: dict[str, object] = {
+        "search_filetype_override": quality,
+        "priority_started_at": datetime.now(timezone.utc),
+    }
     if current.get("min_bitrate") is not None:
         fields["min_bitrate"] = current["min_bitrate"]
     current_status = str(current["status"])

@@ -938,9 +938,10 @@ class _SearchPlanMixin(_PipelineDBBase):
           * no YouTube download/import work conflicts with Soulseek, and
           * ``album_title`` contains none of ``title_blacklist``.
 
-        A bounded result reserves a floor-rounded quarter of its page for
-        rows whose immutable ``created_at`` is less than 24 hours old (4/12
-        at production's page size 16). Each cohort is randomized, and unused
+        A bounded result reserves a floor-rounded quarter of its page for rows
+        whose immutable ``created_at`` or explicit ``priority_started_at`` is
+        less than 24 hours old (4/12 at production's page size 16). Bad Rip is
+        the sole producer of the latter. Each cohort is randomized, and unused
         capacity is borrowed in either direction. The shared ``eligible`` CTE
         applies every gate before cohort rank or capacity is assigned.
 
@@ -958,8 +959,14 @@ class _SearchPlanMixin(_PipelineDBBase):
         eligible_cte = """
             WITH eligible AS MATERIALIZED (
               SELECT ar.*,
-                     (ar.created_at
-                        + %s * INTERVAL '1 hour' > %s) AS is_new_request
+                     (
+                       ar.created_at + %s * INTERVAL '1 hour' > %s
+                       OR (
+                         ar.priority_started_at IS NOT NULL
+                         AND ar.priority_started_at
+                               + %s * INTERVAL '1 hour' > %s
+                       )
+                     ) AS is_new_request
               FROM album_requests ar
               JOIN search_plans sp ON ar.active_plan_id = sp.id
             WHERE ar.status = 'wanted'
@@ -993,6 +1000,8 @@ class _SearchPlanMixin(_PipelineDBBase):
             )
         """
         params: list[object] = [
+            NEW_REQUEST_PRIORITY_HOURS,
+            snapshot_at,
             NEW_REQUEST_PRIORITY_HOURS,
             snapshot_at,
             snapshot_at,

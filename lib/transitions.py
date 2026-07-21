@@ -155,6 +155,7 @@ def _explicit_fields(**values: object) -> dict[str, object]:
 _WANTED_FIELDS = frozenset({
     "min_bitrate",
     "prev_min_bitrate",
+    "priority_started_at",
     "search_filetype_override",
 })
 
@@ -250,6 +251,7 @@ class RequestTransition:
         search_filetype_override: object = _OMITTED,
         min_bitrate: object = _OMITTED,
         prev_min_bitrate: object = _OMITTED,
+        priority_started_at: object = _OMITTED,
     ) -> "RequestTransition":
         return cls(
             target_status="wanted",
@@ -259,6 +261,7 @@ class RequestTransition:
                 search_filetype_override=search_filetype_override,
                 min_bitrate=min_bitrate,
                 prev_min_bitrate=prev_min_bitrate,
+                priority_started_at=priority_started_at,
             ),
         )
 
@@ -278,6 +281,8 @@ class RequestTransition:
                 fields, "search_filetype_override"),
             min_bitrate=_field_or_omitted(fields, "min_bitrate"),
             prev_min_bitrate=_field_or_omitted(fields, "prev_min_bitrate"),
+            priority_started_at=_field_or_omitted(
+                fields, "priority_started_at"),
         )
 
     @classmethod
@@ -593,7 +598,12 @@ def apply_transition(
     # Presence-based: only fields explicitly passed get written.
     # Omitted fields are preserved by reset_to_wanted / update_status.
     transition_fields: dict[str, Any] = {}
-    for _key in ("search_filetype_override", "min_bitrate", "prev_min_bitrate"):
+    for _key in (
+        "search_filetype_override",
+        "min_bitrate",
+        "prev_min_bitrate",
+        "priority_started_at",
+    ):
         if _key in extra:
             transition_fields[_key] = extra.pop(_key)
     state_json = extra.pop("state_json", None)
