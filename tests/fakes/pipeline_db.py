@@ -1127,7 +1127,6 @@ class FakePipelineDB:
             if (
                 evidence is None
                 or evidence.mb_release_id != release_id
-                or evidence.source_path != source_path
                 or not evidence.snapshot_fingerprint
             ):
                 return None

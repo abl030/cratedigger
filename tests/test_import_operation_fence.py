@@ -136,6 +136,49 @@ class TestImportOperationFence(unittest.TestCase):
         assert current is not None
         self.assertIsNone(current.beets_launch_authorized_at)
 
+    def test_relocated_evidence_uses_job_path_as_launch_authority(self) -> None:
+        """Evidence location is metadata; the owned job path is authority."""
+
+        db = FakePipelineDB()
+        source_path = "/failed_imports/operator-copy"
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="release-42",
+            status="wanted",
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key=force_import_dedupe_key(7004),
+            payload=force_import_payload(
+                download_log_id=7004,
+                failed_path=source_path,
+            ),
+        )
+        fingerprint = _seed_candidate(
+            db,
+            job.id,
+            release_id="release-42",
+            source_path="/pre-quarantine/operator-copy",
+        )
+        db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
+        claimed = db.claim_next_import_job(worker_id="worker")
+        assert claimed is not None
+
+        authorized = db.authorize_import_job_launch(
+            claimed.id,
+            request_id=42,
+            release_id="release-42",
+            source_path=source_path,
+        )
+
+        assert authorized is not None
+        self.assertEqual(authorized.beets_launch_source_path, source_path)
+        self.assertEqual(
+            authorized.beets_launch_snapshot_fingerprint,
+            fingerprint,
+        )
+
     def test_startup_requeues_only_jobs_proven_not_started(self) -> None:
         from scripts import importer
 
@@ -654,6 +697,52 @@ class TestImportOperationFence(unittest.TestCase):
 
 @requires_postgres
 class TestImportOperationFencePostgres(unittest.TestCase):
+    def test_relocated_evidence_path_does_not_override_job_authority(self) -> None:
+        db = make_db()
+        self.addCleanup(db.close)
+        source_path = "/failed_imports/postgres-force"
+        request_id = db.add_request(
+            artist_name="Fence",
+            album_title="Relocated PostgreSQL evidence",
+            source="request",
+            mb_release_id="release-pg-relocated",
+            status="wanted",
+        )
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=request_id,
+            dedupe_key="force:postgres-relocated",
+            payload={"failed_path": source_path},
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="release-pg-relocated",
+            source_path="/pre-quarantine/postgres-force",
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_import_job_candidate_evidence(job.id, persisted.id)
+        db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
+        claimed = db.claim_next_import_job(worker_id="postgres-worker")
+        assert claimed is not None
+
+        launched = db.authorize_import_job_launch(
+            claimed.id,
+            request_id=request_id,
+            release_id="release-pg-relocated",
+            source_path=source_path,
+        )
+
+        assert launched is not None
+        self.assertEqual(launched.beets_launch_source_path, source_path)
+        self.assertEqual(
+            launched.beets_launch_snapshot_fingerprint,
+            evidence.snapshot_fingerprint,
+        )
+
     def test_launch_marker_survives_connection_loss_and_blocks_replay(self) -> None:
         db = make_db()
         self.addCleanup(db.close)

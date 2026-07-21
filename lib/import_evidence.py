@@ -145,7 +145,15 @@ def ensure_candidate_evidence_for_action(
     download_log_id: int | None = None,
     import_job_id: int | None = None,
 ) -> CandidateEvidenceActionResult:
-    """Load valid candidate evidence for a mutating action or fail closed."""
+    """Load valid candidate evidence for a mutating action or fail closed.
+
+    Candidate evidence is addressed by release identity plus the audio
+    snapshot, not by its observed filesystem location.  Rejected downloads
+    are moved into ``failed_imports`` after preview, so refresh ``source_path``
+    when the same snapshot is consumed from its new action path.  This is the
+    shared action boundary for automation, force, and rescue imports; callers
+    must not grow a job-type-specific relocation exception.
+    """
 
     loaded = load_candidate_evidence_for_source(
         db,
@@ -154,8 +162,15 @@ def ensure_candidate_evidence_for_action(
         import_job_id=import_job_id,
     )
     if loaded.evidence is not None:
+        evidence = loaded.evidence
+        if evidence.source_path != source_path:
+            evidence = msgspec.structs.replace(
+                evidence,
+                source_path=source_path,
+            )
+            db.upsert_album_quality_evidence(evidence)
         return CandidateEvidenceActionResult(
-            evidence=loaded.evidence,
+            evidence=evidence,
             provenance=ActionEvidenceProvenance(
                 candidate_status=CANDIDATE_STATUS_REUSED,
                 snapshot_guard=SNAPSHOT_GUARD_MATCHED,
