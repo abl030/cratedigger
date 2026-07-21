@@ -48,6 +48,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
     def _candidate_evidence(self) -> AlbumQualityEvidence:
         return make_album_quality_evidence(
             mb_release_id="release-1",
+            source_path=self.root,
             files=snapshot_audio_files(self.root),
         )
 
@@ -120,6 +121,38 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         self.assertEqual(result.provenance.candidate_status, "reused")
         self.assertEqual(result.provenance.snapshot_guard, "matched")
         self.assertFalse(result.provenance.fail_closed)
+
+    def test_matching_candidate_is_rebound_to_current_action_path(self):
+        """Same bytes at a moved path refresh authority before Beets launch."""
+
+        evidence = make_album_quality_evidence(
+            mb_release_id="release-1",
+            source_path="/pre-quarantine/Artist - Album",
+            files=snapshot_audio_files(self.root),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.db.set_download_log_candidate_evidence(
+            self.download_log_id,
+            persisted.id,
+        )
+
+        result = ensure_candidate_evidence_for_action(
+            self.db,
+            source_path=self.root,
+            download_log_id=self.download_log_id,
+        )
+
+        self.assertTrue(result.available)
+        assert result.evidence is not None
+        self.assertEqual(result.evidence.source_path, self.root)
+        rebound = self.db.load_album_quality_evidence_by_id(persisted.id)
+        assert rebound is not None
+        self.assertEqual(rebound.source_path, self.root)
 
     def test_stale_candidate_snapshot_fails_closed(self):
         self._persist_candidate()

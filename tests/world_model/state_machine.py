@@ -205,6 +205,22 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
             )
             self.assertEqual(world.beets.snapshots(), ())
 
+    def test_force_import_refreshes_relocated_candidate_authority(self) -> None:
+        """A rejected source move cannot create a force-only launch failure."""
+
+        assert TEST_DSN is not None
+        with LifecycleWorld(TEST_DSN, repository_root()) as world:
+            request_id = world.add_release(BeetsWorldRelease(
+                release_id="21000000-0000-4000-8000-000000000001",
+                artist="Relocated Evidence",
+                album="Distance Is The Only Override",
+                year=2000,
+                codec="mp3",
+            ))
+
+            self.assertTrue(world.force_import_request(request_id, codec="mp3"))
+            world.assert_invariants()
+
     def test_discogs_replace_preserves_pathway_and_exact_identity(self) -> None:
         assert TEST_DSN is not None
         with LifecycleWorld(TEST_DSN, repository_root()) as world:
@@ -694,6 +710,57 @@ TestGeneratedLifecycleWorld.settings = settings(
     print_blob=_RANDOMIZED,
     suppress_health_check=(HealthCheck.too_slow,),
 )
+
+
+class TestGeneratedRelocatedForceImportWorld(unittest.TestCase):
+    """D19: source relocation cannot make force diverge from automation."""
+
+    @given(
+        identity_source=st.sampled_from(("mb", "discogs")),
+        codec=st.sampled_from(("mp3", "flac")),
+        verified_lossless=st.booleans(),
+    )
+    def test_force_import_refreshes_relocated_candidate_authority(
+        self,
+        identity_source: str,
+        codec: str,
+        verified_lossless: bool,
+    ) -> None:
+        assert TEST_DSN is not None
+        release_id = (
+            "22000000-0000-4000-8000-000000000001"
+            if identity_source == "mb"
+            else "7220001"
+        )
+        with LifecycleWorld(TEST_DSN, repository_root()) as world:
+            request_id = world.add_release(BeetsWorldRelease(
+                release_id=release_id,
+                artist="Generated Relocation",
+                album="Same Pipeline",
+                year=2001,
+                codec=codec,
+            ))
+
+            self.assertTrue(world.force_import_request(
+                request_id,
+                codec=codec,
+                verified_lossless=(codec == "flac" and verified_lossless),
+            ))
+            world.assert_invariants()
+
+
+TestGeneratedRelocatedForceImportWorld \
+    .test_force_import_refreshes_relocated_candidate_authority = settings(
+        max_examples=int(os.environ.get("CRATEDIGGER_WORLD_EXAMPLES", "6")),
+        deadline=None,
+        derandomize=not _RANDOMIZED,
+        database=_DATABASE,
+        print_blob=_RANDOMIZED,
+        suppress_health_check=(HealthCheck.too_slow,),
+    )(
+        TestGeneratedRelocatedForceImportWorld
+        .test_force_import_refreshes_relocated_candidate_authority
+    )
 
 
 class TestGeneratedEvidenceDriftWorld(unittest.TestCase):
