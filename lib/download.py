@@ -82,6 +82,7 @@ from lib.terminal_outcomes import (
 )
 
 if TYPE_CHECKING:
+    from album_source import AlbumRecord
     from lib.context import CratediggerContext
     from lib.pipeline_db import DownloadLogOutcome
     from lib.pipeline_db.rows import AlbumRequestRow
@@ -1311,9 +1312,14 @@ def _poll_one_active_download(
 
 # === Top-level orchestration ===
 
-def grab_most_wanted(albums: list[Any],
-                     search_and_queue: Callable[..., tuple[dict, list, list]],
-                     ctx: CratediggerContext) -> int:
+def grab_most_wanted(
+    albums: "list[AlbumRecord]",
+    search_and_queue: Callable[
+        ...,
+        "tuple[dict[int, GrabListEntry], list[AlbumRecord], list[AlbumRecord]]",
+    ],
+    ctx: CratediggerContext,
+) -> int:
     """Search, enqueue, persist download state, return immediately.
 
     Does NOT block waiting for downloads. Download monitoring happens

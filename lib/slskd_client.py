@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
-from typing import Any
+from typing import Any, TypeGuard
 import uuid
 from urllib.parse import quote
 
@@ -123,7 +123,7 @@ class TransferSnapshot(msgspec.Struct, rename="camel", frozen=True):
     exception: str | None = None
 
 
-def parse_transfer_snapshot(raw: dict[str, Any]) -> TransferSnapshot | None:
+def parse_transfer_snapshot(raw: dict[str, object]) -> TransferSnapshot | None:
     """Convert one slskd transfer/file dict — typically the winning
     candidate ``match_transfer`` selected from a shared poll-cycle
     snapshot — into a ``TransferSnapshot``.
@@ -155,7 +155,8 @@ class DownloadDirectory(msgspec.Struct, rename="camel", frozen=True):
     type to keep in sync."""
 
     directory: str = ""
-    files: list[TransferSnapshot] = msgspec.field(default_factory=list)
+    files: list[TransferSnapshot] = msgspec.field(
+        default_factory=list[TransferSnapshot])
 
 
 class DownloadUser(msgspec.Struct, rename="camel", frozen=True):
@@ -166,7 +167,38 @@ class DownloadUser(msgspec.Struct, rename="camel", frozen=True):
     untouched, per its own first-slice scope note)."""
 
     username: str = ""
-    directories: list[DownloadDirectory] = msgspec.field(default_factory=list)
+    directories: list[DownloadDirectory] = msgspec.field(
+        default_factory=list[DownloadDirectory])
+
+
+def _is_dict(value: object) -> bool:
+    """``isinstance(value, dict)`` wrapped behind a plain-``bool`` return.
+
+    A bare ``isinstance(raw, dict)`` on an ``Any``-typed parameter
+    permanently flow-narrows that name to bare ``dict[Unknown, Unknown]``
+    for the rest of the function (pyright tracks the narrowed type, not
+    the original ``Any``), which then propagates Unknown through every
+    later ``.get(...)`` on it. Routing the check through a helper with no
+    ``TypeGuard`` return type keeps pyright from narrowing on the call,
+    so ``raw`` stays ``Any`` — the graceful ``.get(key, default)``
+    tolerance this external-envelope parser already relies on. The
+    parameter itself is ``object`` (not ``Any``) — a function call never
+    narrows its argument's type in the caller's scope regardless of the
+    callee's parameter type, so ``object`` here costs no new escape hatch.
+    """
+    return isinstance(value, dict)
+
+
+def _is_dict_typed(value: object) -> TypeGuard[dict[str, object]]:
+    """``isinstance`` check that DOES narrow, for call sites that need a
+    concrete ``dict[str, object]`` argument (e.g. ``parse_transfer_snapshot``).
+    A plain ``isinstance(value, dict)`` on an already-``object``-typed
+    value narrows to bare ``dict[Unknown, Unknown]`` (generic args are
+    erased at runtime, so pyright can't recover them from the class
+    check alone); declaring the full target type on a ``TypeGuard``
+    return makes the narrowed type exactly ``dict[str, object]`` instead.
+    """
+    return isinstance(value, dict)
 
 
 def _parse_download_directory(raw: Any) -> DownloadDirectory | None:
@@ -180,20 +212,21 @@ def _parse_download_directory(raw: Any) -> DownloadDirectory | None:
     would be a much bigger blast radius than the single file it actually
     affects.
     """
-    if not isinstance(raw, dict):
+    if not _is_dict(raw):
         logger.warning(
             "slskd downloads envelope: skipping malformed directory "
             "entry (type=%s)", type(raw).__name__)
         return None
     files: list[TransferSnapshot] = []
-    for file_raw in raw.get("files") or []:
+    file_entries: list[object] = raw.get("files") or []
+    for file_raw in file_entries:
         parsed = (
             parse_transfer_snapshot(file_raw)
-            if isinstance(file_raw, dict) else None
+            if _is_dict_typed(file_raw) else None
         )
         if parsed is not None:
             files.append(parsed)
-        elif not isinstance(file_raw, dict):
+        elif not _is_dict(file_raw):
             logger.warning(
                 "slskd downloads envelope: skipping non-dict file entry "
                 "(type=%s)", type(file_raw).__name__)
@@ -207,13 +240,14 @@ def _parse_download_directory(raw: Any) -> DownloadDirectory | None:
 def _parse_download_user(raw: Any) -> DownloadUser | None:
     """Convert one user-group row, salvaging valid directories from a row
     that also contains malformed ones (issue #507)."""
-    if not isinstance(raw, dict):
+    if not _is_dict(raw):
         logger.warning(
             "slskd downloads envelope: skipping malformed user-group "
             "row (type=%s)", type(raw).__name__)
         return None
     directories: list[DownloadDirectory] = []
-    for dir_raw in raw.get("directories") or []:
+    dir_entries: list[object] = raw.get("directories") or []
+    for dir_raw in dir_entries:
         parsed = _parse_download_directory(dir_raw)
         if parsed is not None:
             directories.append(parsed)
@@ -490,15 +524,15 @@ class SlskdEventsApi:
         response = self._client._request(
             "GET", "/events", params={"limit": limit, "offset": offset})
         events: list[SlskdRawEvent] = []
-        for row in msgspec.json.decode(response.content, type=list):
+        for row in msgspec.json.decode(response.content, type=list[object]):
             try:
                 events.append(msgspec.convert(row, type=SlskdRawEvent))
             except msgspec.ValidationError:
                 logger.warning(
                     "slskd events: skipping malformed envelope row "
                     "(id=%s type=%s)",
-                    row.get("id") if isinstance(row, dict) else None,
-                    row.get("type") if isinstance(row, dict) else None,
+                    row.get("id") if _is_dict_typed(row) else None,
+                    row.get("type") if _is_dict_typed(row) else None,
                     exc_info=True,
                 )
         raw_total = response.headers.get("X-Total-Count")

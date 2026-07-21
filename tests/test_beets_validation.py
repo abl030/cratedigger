@@ -88,6 +88,7 @@ class TestBeetsValidate(unittest.TestCase):
 
         self.assertTrue(result.valid)
         self.assertTrue(result.mbid_found)
+        assert result.distance is not None
         self.assertAlmostEqual(result.distance, 0.05)
         self.assertIsNone(result.error)
         # Verify skip was sent (dry-run)
@@ -110,6 +111,7 @@ class TestBeetsValidate(unittest.TestCase):
 
         self.assertFalse(result.valid)
         self.assertTrue(result.mbid_found)
+        assert result.distance is not None
         self.assertAlmostEqual(result.distance, 0.30)
 
     @patch("lib.beets.sp.Popen")
@@ -162,6 +164,7 @@ class TestBeetsValidate(unittest.TestCase):
         result = beets_validate(self.HARNESS,"/test/album", "some-mbid", 0.15)
 
         self.assertFalse(result.valid)
+        assert result.error is not None
         self.assertIn("Failed to start harness", result.error)
 
     @patch("lib.beets.sp.Popen")
@@ -408,6 +411,7 @@ class TestBeetsValidate(unittest.TestCase):
 
         self.assertTrue(result.mbid_found)
         self.assertTrue(result.valid)
+        assert result.distance is not None
         self.assertAlmostEqual(result.distance, 0.05)
         self.assertEqual(result.scenario, "strong_match")
         self.assertTrue(result.candidates[0].is_target)

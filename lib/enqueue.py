@@ -32,6 +32,24 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cratedigger")
 
 
+def _is_dict(value: object) -> bool:
+    """``isinstance(value, dict)`` wrapped behind a plain-``bool`` return.
+
+    A bare ``isinstance(x, dict)`` on an ``Any``-typed expression (e.g.
+    ``ctx.slskd``'s results — that attribute is typed ``Any`` so tests can
+    wire ``FakeSlskdAPI``) permanently flow-narrows that name to bare
+    ``dict[Unknown, Unknown]`` for the rest of the branch, propagating
+    Unknown through every later ``.get(...)`` on it. Routing the check
+    through a helper with no ``TypeGuard`` return type keeps pyright from
+    narrowing on the call, preserving the graceful ``.get(key, default)``
+    tolerance these external-response readers already rely on. The
+    parameter itself is ``object`` (not ``Any``) — a function call never
+    narrows its argument's type in the caller's scope regardless of the
+    callee's parameter type, so ``object`` here costs no new escape hatch.
+    """
+    return isinstance(value, dict)
+
+
 MatchFn = Callable[
     [Sequence["TrackRecord"], str, list[str], str, "CratediggerContext"],
     MatchResult,
@@ -429,7 +447,13 @@ def _peer_is_online_for_enqueue(username: str, ctx: CratediggerContext) -> bool:
         )
         return True
     presence = ""
-    if isinstance(status, dict):
+    # ``ctx.slskd`` is typed ``Any`` (so tests can wire ``FakeSlskdAPI``),
+    # so ``status`` is ``Any`` here too. A bare ``isinstance(status, dict)``
+    # would permanently flow-narrow it to bare ``dict[Unknown, Unknown]``
+    # for the rest of this branch, propagating Unknown through the
+    # ``.get(...)`` below — checking via a plain-``bool``-returning helper
+    # (no ``TypeGuard``) keeps ``status`` genuinely ``Any``.
+    if _is_dict(status):
         presence_value = status.get("presence")
         if isinstance(presence_value, str):
             presence = presence_value
@@ -1175,14 +1199,15 @@ def try_multi_enqueue(
     """
     split_release: list[dict[str, Any]] = []
     for media in release.media:
+        disk_tracks: list[TrackRecord] = [
+            track for track in all_tracks
+            if track["mediumNumber"] == media.medium_number
+        ]
         disk: dict[str, Any] = {}
         disk["source"] = None
-        disk["tracks"] = []
+        disk["tracks"] = disk_tracks
         disk["disk_no"] = media.medium_number
         disk["disk_count"] = len(release.media)
-        for track in all_tracks:
-            if track["mediumNumber"] == media.medium_number:
-                disk["tracks"].append(track)
         split_release.append(disk)
     total = len(split_release)
     count_found = 0
@@ -1350,7 +1375,7 @@ def try_multi_enqueue(
                 pre_filter_skip_count=pre_filter_skips[0],
             )
 
-        all_downloads = []
+        all_downloads: list[DownloadFile] = []
         enqueued = 0
         for disk in split_release:
             username, directory, file_dir = disk["source"]

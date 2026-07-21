@@ -6,6 +6,7 @@ Functions that need config receive it as a parameter.
 
 from __future__ import annotations
 
+import configparser
 import json
 import logging
 import os
@@ -17,7 +18,7 @@ import difflib
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Iterator, Sequence, TYPE_CHECKING
+from typing import Any, Callable, Iterator, Sequence, TYPE_CHECKING, TypeGuard
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
@@ -27,12 +28,34 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cratedigger")
 
 
+def _is_str_object_dict(value: object) -> TypeGuard[dict[str, object]]:
+    """Narrow a decoded-JSON value (Plex/Jellyfin API responses) to a
+    string-keyed dict.
+
+    A plain ``isinstance(value, dict)`` check narrows to the generic-erased
+    ``dict[Unknown, Unknown]`` under strict pyright, which then poisons
+    every downstream use as "partially unknown". Declaring the narrowed
+    type via ``TypeGuard`` instead gives callers the precise
+    ``dict[str, object]`` with the identical runtime check. Mirrors
+    ``lib.download_recovery._is_str_object_dict`` /
+    ``web.wrong_match_file_service._is_str_object_dict``.
+    """
+    return isinstance(value, dict)
+
+
+def _is_object_list(value: object) -> TypeGuard[list[object]]:
+    """Narrow a decoded-JSON value to a list, same rationale as
+    ``_is_str_object_dict``."""
+    return isinstance(value, list)
+
+
 @dataclass
 class AudioValidationResult:
     """Result from validate_audio() — audio integrity check."""
     valid: bool = True
     error: str | None = None
-    failed_files: list[tuple[str, str]] = field(default_factory=list)
+    failed_files: list[tuple[str, str]] = field(
+        default_factory=list[tuple[str, str]])
 
 
 def parse_mb_first_release_year(data: dict[str, Any]) -> int | None:
@@ -260,7 +283,7 @@ def validate_audio(folder_path: str, mode: str = "normal") -> AudioValidationRes
     if mode == "off":
         return AudioValidationResult()
 
-    files = []
+    files: list[str] = []
     for root, _dirs, names in os.walk(folder_path):
         for f in names:
             ext = f.rsplit(".", 1)[-1].lower() if "." in f else ""
@@ -270,7 +293,7 @@ def validate_audio(folder_path: str, mode: str = "normal") -> AudioValidationRes
     if not files:
         return AudioValidationResult()
 
-    failed = []
+    failed: list[tuple[str, str]] = []
     for filepath in files:
         # Use the path relative to folder_path so nested layouts (CD1/01.mp3,
         # CD2/01.mp3) remain distinguishable in failed_files and the error
@@ -633,7 +656,11 @@ def plex_find_album_by_path(
     container = _plex_container_path(cfg, imported_path)
     if not container:
         return None
-    fetch: FetchXml = fetch_xml or (lambda path, **p: _plex_fetch_xml(cfg, path, **p))
+
+    def _default_fetch(path: str, **p: str) -> ET.Element:
+        return _plex_fetch_xml(cfg, path, **p)
+
+    fetch: FetchXml = fetch_xml or _default_fetch
     section = cfg.plex_library_section_id or "1"
     artist, album = _parse_artist_album(imported_path)
     prefix = container.rstrip("/") + "/"
@@ -694,7 +721,11 @@ def plex_set_added_at(
     if not cfg.plex_url:
         return False
     section = cfg.plex_library_section_id or "1"
-    put: PutFn = put_fn or (lambda path, **p: _plex_put(cfg, path, **p))
+
+    def _default_put(path: str, **p: str) -> int:
+        return _plex_put(cfg, path, **p)
+
+    put: PutFn = put_fn or _default_put
     status = put(
         f"/library/sections/{section}/all",
         type="9",
@@ -891,7 +922,10 @@ def jellyfin_find_album_by_path(
     container = _jellyfin_container_path(cfg, imported_path)
     if not container:
         return None
-    get: JsonGetFn = get_json or (lambda path, **p: _jellyfin_get_json(cfg, path, **p))
+    def _default_get(path: str, **p: str) -> object:
+        return _jellyfin_get_json(cfg, path, **p)
+
+    get: JsonGetFn = get_json or _default_get
     artist, album = _parse_artist_album(imported_path)
     target = container.rstrip("/")
 
@@ -940,7 +974,10 @@ def jellyfin_get_album_children(
     """The Audio items under a Jellyfin album — the rows whose ``DateCreated``
     actually drives the 'Recently Added'/Latest ordering. Transport failures
     raise to the caller."""
-    get: JsonGetFn = get_json or (lambda path, **p: _jellyfin_get_json(cfg, path, **p))
+    def _default_get(path: str, **p: str) -> object:
+        return _jellyfin_get_json(cfg, path, **p)
+
+    get: JsonGetFn = get_json or _default_get
     doc = get("/Items", parentId=album_item_id, includeItemTypes="Audio",
               fields="DateCreated", limit="2000")
     out: list[JellyfinItemRef] = []
@@ -974,16 +1011,20 @@ def jellyfin_set_date_created(
     reading the dto, so the first user on the server is used."""
     if not cfg.jellyfin_url:
         return False
-    get: JsonGetFn = get_json or (lambda path, **p: _jellyfin_get_json(cfg, path, **p))
+    def _default_get(path: str, **p: str) -> object:
+        return _jellyfin_get_json(cfg, path, **p)
+
+    get: JsonGetFn = get_json or _default_get
     post: JsonPostFn = post_json or (
         lambda path, payload: _jellyfin_post_json(cfg, path, payload))
     users = get("/Users")
-    if not isinstance(users, list) or not users:
+    if not _is_object_list(users) or not users:
         logger.warning("JELLYFIN PIN: /Users returned no users; cannot edit items")
         return False
-    user_id = users[0].get("Id")
+    first_user = users[0]
+    user_id = first_user.get("Id") if _is_str_object_dict(first_user) else None
     dto = get(f"/Items/{item_id}", userId=str(user_id))
-    if not isinstance(dto, dict) or not dto.get("Id"):
+    if not _is_str_object_dict(dto) or not dto.get("Id"):
         logger.warning("JELLYFIN PIN: item %s dto fetch returned no item", item_id)
         return False
     dto["DateCreated"] = date_created
@@ -1020,8 +1061,10 @@ def log_validation_result(album_data: GrabListEntry, result: ValidationResult,
 # === Misc utilities ===
 
 
-def setup_logging(config: Any) -> None:
-    section = config["Logging"] if "Logging" in config else {}
+def setup_logging(config: configparser.RawConfigParser) -> None:
+    section: configparser.SectionProxy | dict[str, str] = (
+        config["Logging"] if "Logging" in config else {}
+    )
     logging.basicConfig(
         level=section.get("level", "INFO"),
         format=section.get(

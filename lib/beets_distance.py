@@ -69,6 +69,26 @@ from lib.validation_envelope import decode_validation_envelope
 
 log = logging.getLogger(__name__)
 
+# ``beets.library.models.Item.from_path``/``.get`` carry no type annotations
+# upstream (``from_path``'s ``path`` param is bare; ``Item.get`` overrides
+# the properly-typed ``dbcore.db.Model.get`` with an unannotated version),
+# so a direct reference propagates Unknown through pyright strict mode.
+# ``getattr`` retrieves the exact same bound callables at runtime
+# (behaviorally identical) but types as ``Any`` under typeshed's two-argument
+# ``getattr`` overload, breaking the Unknown cascade without a suppression
+# comment — same technique as ``lib.pipeline_db._shared.pg_execute_values``.
+_item_from_path_fn = getattr(_beets_library.Item, "from_path")
+
+
+def _item_from_path(path: str) -> _beets_library.Item:
+    return _item_from_path_fn(path)
+
+
+def _item_field(
+    item: _beets_library.Item, key: str, default: object = None,
+) -> int | float | str | None:
+    return getattr(item, "get")(key, default)
+
 
 class BeetsDistanceResult(msgspec.Struct, kw_only=True):
     """Typed result of a single distance computation.
@@ -226,7 +246,7 @@ def _fingerprint_file(path: str) -> Optional[_AudioFileFingerprint]:
     fail the whole picker query.
     """
     try:
-        item = _beets_library.Item.from_path(path)
+        item = _item_from_path(path)
     except Exception as exc:  # noqa: BLE001 — beets raises a mediafile mess
         log.warning("beets_distance: tag read failed for %s: %s", path, exc)
         return None
@@ -241,17 +261,17 @@ def _fingerprint_file(path: str) -> Optional[_AudioFileFingerprint]:
         path=path,
         mtime=st.st_mtime,
         size=st.st_size,
-        title=str(item.get("title", "") or ""),
-        artist=str(item.get("artist", "") or ""),
-        album=str(item.get("album", "") or ""),
-        albumartist=str(item.get("albumartist", "") or ""),
-        track=int(item.get("track", 0) or 0),
-        tracktotal=int(item.get("tracktotal", 0) or 0),
-        disc=int(item.get("disc", 0) or 0),
-        disctotal=int(item.get("disctotal", 0) or 0),
-        length=float(item.get("length", 0.0) or 0.0),
-        format=str(item.get("format", "") or ""),
-        media=str(item.get("media", "") or ""),
+        title=str(_item_field(item, "title", "") or ""),
+        artist=str(_item_field(item, "artist", "") or ""),
+        album=str(_item_field(item, "album", "") or ""),
+        albumartist=str(_item_field(item, "albumartist", "") or ""),
+        track=int(_item_field(item, "track", 0) or 0),
+        tracktotal=int(_item_field(item, "tracktotal", 0) or 0),
+        disc=int(_item_field(item, "disc", 0) or 0),
+        disctotal=int(_item_field(item, "disctotal", 0) or 0),
+        length=float(_item_field(item, "length", 0.0) or 0.0),
+        format=str(_item_field(item, "format", "") or ""),
+        media=str(_item_field(item, "media", "") or ""),
     )
 
 
@@ -302,16 +322,51 @@ def _file_cache_key(path: str, mtime: float, size: int) -> str:
     return f"beets-distance:fp:{path}:{int(mtime)}:{size}"
 
 
+def _mb_release_track_dicts(mb_release: dict[str, object]) -> list[dict[str, object]]:
+    """Narrow ``mb_get_release()``'s ``tracks`` field to a typed list.
+
+    Graceful narrowing over the external MB/Discogs JSON boundary (both
+    sources feed this same slim shape — CLAUDE.md's "no adapter code
+    between MB and Discogs" invariant): ``msgspec.convert`` validates the
+    list-of-objects SHAPE only (the target ``dict[str, object]`` accepts
+    any per-track field values), so this behaves the same as the untyped
+    ``.get(..., [])`` it replaces for any real response — it only raises
+    if ``tracks`` is present but isn't structurally a list of
+    string-keyed objects, a failure ``compute_beets_distance``'s step-8
+    ``try/except`` already turns into a ``distance_failed`` outcome.
+    """
+    tracks = mb_release.get("tracks")
+    if not isinstance(tracks, list):
+        return []
+    return msgspec.convert(tracks, type=list[dict[str, object]])
+
+
 def _mb_release_tracks(mb_release: dict[str, object]) -> list[object]:
     """Narrow ``mb_get_release()``'s ``tracks`` field for a bare length check."""
-    tracks = mb_release.get("tracks")
-    return tracks if isinstance(tracks, list) else []
+    return list(_mb_release_track_dicts(mb_release))
+
+
+def _mb_str_field(mb_release: dict[str, object], key: str) -> str | None:
+    value = mb_release.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _mb_float_field(mb_release: dict[str, object], key: str) -> float | None:
+    value = mb_release.get(key)
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _mb_int_field(mb_release: dict[str, object], key: str) -> int | None:
+    value = mb_release.get(key)
+    return value if isinstance(value, int) else None
 
 
 # === MB → AlbumInfo / TrackInfo conversion ==============================
 
 
-def _build_album_info(mb_release: dict, mbid: str):
+def _build_album_info(
+    mb_release: dict[str, object], mbid: str,
+) -> _beets_hooks.AlbumInfo:
     """Construct a beets ``AlbumInfo`` from the local MB mirror's JSON.
 
     Only fields beets ``distance()`` actually reads are populated.
@@ -319,47 +374,50 @@ def _build_album_info(mb_release: dict, mbid: str):
     helpers skip the missing comparison (no penalty for unknowable
     fields — appropriate for picker-time triage).
     """
-    tracks = []
-    artist_name = mb_release.get("artist_name") or ""
-    artist_id = mb_release.get("artist_id")
-    for t in mb_release.get("tracks") or []:
+    tracks: list[_beets_hooks.TrackInfo] = []
+    artist_name = _mb_str_field(mb_release, "artist_name") or ""
+    artist_id = _mb_str_field(mb_release, "artist_id")
+    for t in _mb_release_track_dicts(mb_release):
         # MB pre-gap tracks ride as track_number=0; beets'
         # ``assign_items`` is fine with that.
+        track_number = _mb_int_field(t, "track_number")
         tracks.append(_beets_hooks.TrackInfo(
-            title=t.get("title") or "",
+            title=_mb_str_field(t, "title") or "",
             track_id=None,
             artist=artist_name,
             artist_id=artist_id,
-            length=t.get("length_seconds"),
-            index=t.get("track_number") or None,
-            medium=t.get("disc_number") or 1,
-            medium_index=t.get("track_number") or None,
+            length=_mb_float_field(t, "length_seconds"),
+            index=track_number or None,
+            medium=_mb_int_field(t, "disc_number") or 1,
+            medium_index=track_number or None,
         ))
 
-    year = mb_release.get("year")
-    rg_id = mb_release.get("release_group_id")
+    year = _mb_int_field(mb_release, "year")
+    rg_id = _mb_str_field(mb_release, "release_group_id")
     return _beets_hooks.AlbumInfo(
         tracks=tracks,
-        album=mb_release.get("title") or "",
+        album=_mb_str_field(mb_release, "title") or "",
         album_id=mbid,
         artist=artist_name,
         artist_id=artist_id,
         releasegroup_id=rg_id,
-        year=year if isinstance(year, int) else None,
-        country=mb_release.get("country") or None,
-        albumstatus=mb_release.get("status") or None,
+        year=year,
+        country=_mb_str_field(mb_release, "country"),
+        albumstatus=_mb_str_field(mb_release, "status"),
         va=False,
     )
 
 
-def _build_items(fingerprints: Sequence[_AudioFileFingerprint]):
+def _build_items(
+    fingerprints: Sequence[_AudioFileFingerprint],
+) -> list[_beets_library.Item]:
     """Construct in-memory beets ``Item`` instances from fingerprints.
 
     Reconstructing rather than re-reading is the whole point of the
     fingerprint cache — beets ``library.Item`` is a dict-like, so we
     just splat the fields in and skip the MediaFile roundtrip.
     """
-    items = []
+    items: list[_beets_library.Item] = []
     for fp in fingerprints:
         item = _beets_library.Item(
             path=fp.path.encode("utf-8"),
@@ -379,7 +437,9 @@ def _build_items(fingerprints: Sequence[_AudioFileFingerprint]):
     return items
 
 
-def _build_items_from_synthetic(items: Sequence[SyntheticItem]):
+def _build_items_from_synthetic(
+    items: Sequence[SyntheticItem],
+) -> list[_beets_library.Item]:
     """Construct in-memory beets ``Item`` instances from synthetic items.
 
     Mirrors ``_build_items`` for the ``items_override`` path. ``path`` is
@@ -388,7 +448,7 @@ def _build_items_from_synthetic(items: Sequence[SyntheticItem]):
     are empty strings — beets' distance helpers skip missing-field
     comparisons rather than penalising them.
     """
-    out = []
+    out: list[_beets_library.Item] = []
     for i, si in enumerate(items):
         item = _beets_library.Item(
             path=f"synthetic://{i}".encode("utf-8"),

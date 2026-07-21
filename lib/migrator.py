@@ -28,6 +28,7 @@ import re
 from dataclasses import dataclass
 
 import psycopg2
+import psycopg2.extensions
 
 logger = logging.getLogger(__name__)
 
@@ -91,13 +92,13 @@ def discover_migrations(migrations_dir: str) -> list[Migration]:
     return sorted(found, key=lambda m: m.version)
 
 
-def _ensure_tracking_table(conn) -> None:
+def _ensure_tracking_table(conn: psycopg2.extensions.connection) -> None:
     with conn.cursor() as cur:
         cur.execute(_TRACKING_TABLE_SQL)
     conn.commit()
 
 
-def _applied_versions(conn) -> set[int]:
+def _applied_versions(conn: psycopg2.extensions.connection) -> set[int]:
     with conn.cursor() as cur:
         cur.execute("SELECT version FROM schema_migrations")
         return {row[0] for row in cur.fetchall()}
@@ -147,7 +148,7 @@ def assert_schema_current(dsn: str, migrations_dir: str | None = None) -> None:
     try:
         conn.autocommit = True
         try:
-            applied = _applied_versions(conn)
+            applied: set[int] = _applied_versions(conn)
         except psycopg2.errors.UndefinedTable:
             applied = set()
     finally:

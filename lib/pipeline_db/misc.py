@@ -426,7 +426,7 @@ class _MiscMixin(_PipelineDBBase):
         if row is None:
             return None
         # psycopg2 returns BYTEA as memoryview; coerce to bytes for the typed row.
-        raw = row["hash_value"]
+        raw: bytes | memoryview[int] = row["hash_value"]
         if isinstance(raw, memoryview):
             raw = bytes(raw)
         return BadAudioHashRow(

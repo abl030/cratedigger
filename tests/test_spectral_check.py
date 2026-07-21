@@ -75,16 +75,17 @@ class TestGradientCalculation(unittest.TestCase):
     """Test spectral gradient (cliff) detection."""
 
     def test_flat_spectrum_no_cliff(self):
-        from lib.spectral_check import detect_cliff
+        from lib.spectral_check import _Slice, detect_cliff
         # All slices at roughly the same dB level
-        slices = [{"freq": 12000 + i * 500, "db": -50.0} for i in range(16)]
+        slices: list[_Slice] = [
+            {"freq": 12000 + i * 500, "db": -50.0} for i in range(16)]
         result = detect_cliff(slices, threshold_db_per_khz=-12, min_slices=2, slice_width_hz=500)
         self.assertIsNone(result)
 
     def test_steep_dropoff_detects_cliff(self):
-        from lib.spectral_check import detect_cliff
+        from lib.spectral_check import _Slice, detect_cliff
         # Normal until 16kHz, then cliff
-        slices = []
+        slices: list[_Slice] = []
         for i in range(16):
             freq = 12000 + i * 500
             if freq < 16000:
@@ -99,18 +100,20 @@ class TestGradientCalculation(unittest.TestCase):
         self.assertLessEqual(result, 16500)
 
     def test_single_steep_slice_no_cliff(self):
-        from lib.spectral_check import detect_cliff
+        from lib.spectral_check import _Slice, detect_cliff
         # One steep drop, then recovery — not a cliff
-        slices = [{"freq": 12000 + i * 500, "db": -50.0} for i in range(16)]
+        slices: list[_Slice] = [
+            {"freq": 12000 + i * 500, "db": -50.0} for i in range(16)]
         slices[5]["db"] = -70.0  # single spike
         slices[6]["db"] = -50.0  # recovery
         result = detect_cliff(slices, threshold_db_per_khz=-12, min_slices=2, slice_width_hz=500)
         self.assertIsNone(result)
 
     def test_gradual_rolloff_no_cliff(self):
-        from lib.spectral_check import detect_cliff
+        from lib.spectral_check import _Slice, detect_cliff
         # Smooth rolloff at -5 dB/kHz (natural, not a cliff)
-        slices = [{"freq": 12000 + i * 500, "db": -50.0 - i * 2.5} for i in range(16)]
+        slices: list[_Slice] = [
+            {"freq": 12000 + i * 500, "db": -50.0 - i * 2.5} for i in range(16)]
         result = detect_cliff(slices, threshold_db_per_khz=-12, min_slices=2, slice_width_hz=500)
         self.assertIsNone(result)
 

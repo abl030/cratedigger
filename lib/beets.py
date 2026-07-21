@@ -16,7 +16,12 @@ from lib.util import beets_subprocess_env
 logger = logging.getLogger("cratedigger")
 
 
-def beets_validate(harness_path, album_path, mb_release_id, distance_threshold=0.15):
+def beets_validate(
+    harness_path: str,
+    album_path: str,
+    mb_release_id: str,
+    distance_threshold: float = 0.15,
+) -> ValidationResult:
     """Dry-run beets import with specific MBID. Returns ValidationResult.
 
     Args:
