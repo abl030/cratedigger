@@ -6,6 +6,7 @@ import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import msgspec
 
@@ -35,7 +36,10 @@ from lib.import_evidence import (
     CurrentEvidenceActionResult,
     load_current_evidence_for_action,
 )
-from lib.import_preview import enrich_incomplete_current_evidence_for_request
+from lib.import_preview import (
+    ImportPreviewResult,
+    enrich_incomplete_current_evidence_for_request,
+)
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
@@ -56,7 +60,12 @@ from lib.quality import (
     VerifiedLosslessProof,
     resolve_user_requeue_override,
 )
-from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
+from lib.measurement import ExistingSpectralAuditLookup
+from lib.quality_evidence import (
+    EvidenceBuildResult,
+    snapshot_audio_files,
+    snapshot_fingerprint,
+)
 from lib.mbid_replace_service import (
     MbidReplaceService,
     REPLACE_REASON_SOURCE_IDENTITY_INVALID,
@@ -105,6 +114,7 @@ from tests.world_model.census_seeds import (
     EvidenceDriftMutationSeed,
     WorldCensusSeed,
 )
+from scripts.import_preview_worker import process_claimed_preview_job
 
 
 class LifecycleWorld:
@@ -465,6 +475,185 @@ class LifecycleWorld:
                 outcome = row.get("outcome")
                 return str(outcome) if outcome is not None else None
         return None
+
+    def exercise_candidate_preview_boundary(
+        self,
+        request_id: int,
+        *,
+        job_mode: str,
+        snapshot_changed: bool,
+        codec: str,
+        spectral_grade: str,
+    ) -> tuple[int, list[str], str | None]:
+        """Drive the real preview front gate over one disposable candidate."""
+
+        if job_mode not in {"automation", "force"}:
+            raise ValueError(f"unknown preview job mode: {job_mode!r}")
+        row = self._require_request(request_id)
+        if row["status"] != "wanted":
+            raise AssertionError("preview boundary world requires a wanted row")
+        release = replace(self._release_by_request[request_id], codec=codec)
+        self._dispatch_counter += 1
+        source = (
+            self.beets.incoming_root
+            / f"preview-{job_mode}-{request_id}-{self._dispatch_counter:04d}"
+        )
+        self.beets.stage_release(release, source_dir=source)
+        candidate_files = snapshot_audio_files(str(source))
+        measurement = AudioQualityMeasurement(
+            min_bitrate_kbps=900 if codec == "flac" else 245,
+            avg_bitrate_kbps=900 if codec == "flac" else 256,
+            median_bitrate_kbps=900 if codec == "flac" else 252,
+            format=codec.upper(),
+            is_cbr=False,
+            spectral_grade=spectral_grade,
+            spectral_subject=EVIDENCE_SUBJECT_SOURCE,
+            spectral_provenance=EVIDENCE_PROVENANCE_MEASURED,
+        )
+        candidate = make_album_quality_evidence(
+            mb_release_id=release.release_id,
+            source_path=str(source),
+            files=candidate_files,
+            measurement=measurement,
+            codec=codec,
+            container=codec,
+            storage_format=codec.upper(),
+        )
+        self.db.upsert_album_quality_evidence(candidate)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=release.release_id,
+            snapshot_fingerprint=candidate.snapshot_fingerprint,
+        )
+        if persisted is None or persisted.id is None:
+            raise AssertionError("preview boundary candidate did not persist")
+
+        download_log_id: int | None = None
+        if job_mode == "automation":
+            require_transition_applied(finalize_request(
+                self.db,
+                request_id,
+                RequestTransition.to_downloading(
+                    from_status="wanted",
+                    state_json=make_active_download_state_json([]),
+                ),
+            ))
+            self.db.update_download_state_current_path(request_id, str(source))
+            import_job = self.db.enqueue_import_job(
+                IMPORT_JOB_AUTOMATION,
+                request_id=request_id,
+                dedupe_key=automation_import_dedupe_key(request_id),
+                payload=automation_import_payload(),
+                message="World-model preview boundary",
+            )
+        else:
+            download_log_id = self.db.log_download(
+                request_id,
+                soulseek_username="world-preview-peer",
+                outcome="rejected",
+                validation_result=msgspec.json.encode({
+                    "scenario": "high_distance",
+                    "failed_path": str(source),
+                }).decode(),
+            )
+            self.db.set_download_log_candidate_evidence(
+                download_log_id,
+                persisted.id,
+            )
+            import_job = self.db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=request_id,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=str(source),
+                    source_username="world-preview-peer",
+                ),
+                message="World-model preview boundary",
+            )
+        self.db.set_import_job_candidate_evidence(import_job.id, persisted.id)
+
+        if snapshot_changed:
+            changed_file = source / candidate_files[-1].relative_path
+            changed_file.write_bytes(changed_file.read_bytes() + b"snapshot-drift")
+
+        claimed = self.db.claim_next_import_preview_job(worker_id="world-preview")
+        if claimed is None or claimed.id != import_job.id:
+            raise AssertionError("world preview job was not claimable")
+        full_preview_calls = 0
+        analyzer_paths: list[str] = []
+
+        def analyze(path: str) -> SpectralAnalysisDetail:
+            analyzer_paths.append(path)
+            return SpectralAnalysisDetail(
+                attempted=True,
+                grade=spectral_grade,
+            )
+
+        def full_preview(db: Any, _job: Any) -> ImportPreviewResult:
+            nonlocal full_preview_calls
+            full_preview_calls += 1
+            fresh = make_album_quality_evidence(
+                mb_release_id=release.release_id,
+                source_path=str(source),
+                files=snapshot_audio_files(str(source)),
+                measurement=measurement,
+                codec=codec,
+                container=codec,
+                storage_format=codec.upper(),
+            )
+            db.upsert_album_quality_evidence(fresh)
+            linked = db.find_album_quality_evidence(
+                mb_release_id=release.release_id,
+                snapshot_fingerprint=fresh.snapshot_fingerprint,
+            )
+            if linked is None or linked.id is None:
+                raise AssertionError("fresh preview evidence did not persist")
+            db.set_import_job_candidate_evidence(import_job.id, linked.id)
+            if download_log_id is not None:
+                db.set_download_log_candidate_evidence(
+                    download_log_id,
+                    linked.id,
+                )
+            return ImportPreviewResult(
+                mode="path",
+                verdict="evidence_ready",
+                decision="import",
+                reason="import",
+                source_path=str(source),
+                request_id=request_id,
+                download_log_id=download_log_id,
+            )
+
+        cfg = CratediggerConfig(
+            pipeline_db_enabled=True,
+            beets_directory=str(self.beets.library_root),
+            beets_library_db=str(self.beets.library_db),
+        )
+        with patch(
+            "scripts.import_preview_worker.read_runtime_config",
+            return_value=cfg,
+        ):
+            updated = process_claimed_preview_job(
+                self.db,
+                claimed,
+                spectral_detail_analyzer=analyze,
+                existing_spectral_resolver=(
+                    lambda _release_id: ExistingSpectralAuditLookup()
+                ),
+                preview_fn=full_preview,
+                current_evidence_loader=(
+                    lambda *_args, **_kwargs: EvidenceBuildResult(
+                        None,
+                        "empty_current",
+                        "exact album not in beets",
+                    )
+                ),
+            )
+        if updated is None:
+            raise AssertionError("preview boundary lost its claimed job")
+        raw_status = (updated.preview_result or {}).get("candidate_status")
+        candidate_status = raw_status if isinstance(raw_status, str) else None
+        return full_preview_calls, analyzer_paths, candidate_status
 
     def import_request(
         self,
