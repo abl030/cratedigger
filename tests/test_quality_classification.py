@@ -137,6 +137,64 @@ class TestLiveBugReproductions(unittest.TestCase):
         self.assertTrue(r["imported"])
         self.assertTrue(r["keep_searching"])
 
+    def test_deerhunter_rhapsody_original_identical_transcode_not_upgrade(self):
+        """BUG: an identical transcode scored as an upgrade via a one-sided clamp.
+
+        Deerhunter - Rhapsody Original (request 6795, download_log 37725,
+        serkanovat, 2026-07-21). The candidate and the on-disk copy are
+        quality-identical: MP3 256 CBR, spectral grade ``likely_transcode``,
+        spectral estimate 192, native-lossy V0 research 241/232. The candidate
+        was a wrong-pressing match (beets distance 0.199) so validation rejected
+        it; the wrong-match cleanup then re-scored it on quality and stamped
+        ``kept_would_import`` / ``requeue_upgrade`` — treating an identical
+        transcode as an upgrade over what is already installed.
+
+        Root cause (issue #813 Finding 1): the existing-side spectral-floor
+        ``override_min_bitrate`` floored the installed copy to its spectral
+        estimate (256 -> 192) while the candidate kept its raw container bitrate
+        (256). The raw ``metric_tiebreak`` then compared candidate container 256
+        against existing spectral 192 and called it ``better``. Both sides carry
+        a spectral estimate, so ``_shared_spectral_bitrates`` already floors both
+        symmetrically for rank; the one-sided override is now skipped when the
+        shared clamp governs, so the tiebreak compares TRUE containers (256 vs
+        256) -> ``equivalent`` -> not an upgrade. The request keeps searching for
+        a genuinely-better copy (the installed one is still a transcode) — it
+        just no longer re-grabs identical transcodes as phantom upgrades.
+
+        Must-still-work guard:
+        ``test_mark_denardo_lion_tiger_bear_equal_spectral_higher_bitrate_imports``
+        (higher container 192 > 128, equal spectral) STILL imports as better.
+        """
+        r = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=256,
+            is_cbr=True,
+            avg_bitrate=256,
+            new_format="MP3",
+            spectral_grade="likely_transcode",
+            spectral_bitrate=192,
+            existing_min_bitrate=256,
+            existing_avg_bitrate=256,
+            existing_format="MP3",
+            existing_is_cbr=True,
+            existing_spectral_grade="likely_transcode",
+            existing_spectral_bitrate=192,
+            # The existing-side spectral floor the real pipeline derives from
+            # the installed transcode (min(256, 192)); the fix must neutralise
+            # its one-sided effect now that the candidate also carries spectral.
+            override_min_bitrate=192,
+        )
+        self.assertEqual(r["stage1_spectral"], "import")
+        self.assertEqual(r["stage2_import"], "downgrade")
+        self.assertEqual(r["comparison_basis"]["verdict"], "equivalent")
+        self.assertEqual(r["comparison_basis"]["branch"], "metric_tiebreak")
+        # True containers compared symmetrically — existing NOT floored to 192.
+        self.assertEqual(r["comparison_basis"]["new_value_kbps"], 256)
+        self.assertEqual(r["comparison_basis"]["existing_value_kbps"], 256)
+        self.assertFalse(r["imported"])
+        # Never stop searching: the installed copy is still a transcode.
+        self.assertTrue(r["keep_searching"])
+
     def test_taboo_vi_fake_flac_192_accepted(self):
         """Fake FLAC (192k source) converted to V0 at 224kbps is provisional.
 
@@ -586,6 +644,47 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         self.assertEqual(r["stage2_import"], "import")
         self.assertEqual(r["comparison_basis"]["verdict"], "better")
         self.assertTrue(r["imported"])
+        self.assertTrue(r["keep_searching"])
+
+    def test_deerhunter_identical_transcode_not_upgrade_via_evidence(self):
+        """Deerhunter request 6795 through the production evidence decider.
+
+        Parity twin of
+        ``TestLiveBugReproductions.test_deerhunter_rhapsody_original_identical_transcode_not_upgrade``.
+        The evidence pipeline derives the existing-side spectral-floor override
+        itself (``override_bitrate_from_current_evidence``: min(256, 192) = 192),
+        so this proves the real wrong-match cleanup path — not just the simulator
+        — no longer mints a phantom upgrade for an identical transcode. The
+        symmetric-representation gate skips the one-sided override because both
+        sides carry a spectral estimate. Issue #813 Finding 1.
+        """
+        from lib.quality import full_pipeline_decision_from_evidence
+
+        candidate = self._build_candidate(
+            is_flac=False,
+            min_bitrate=256,
+            avg_bitrate=256,
+            is_cbr=True,
+            spectral_grade="likely_transcode",
+            spectral_bitrate=192,
+        )
+        current = self._build_current(
+            min_bitrate=256,
+            avg_bitrate=256,
+            format="MP3",
+            is_cbr=True,
+            spectral_grade="likely_transcode",
+            spectral_bitrate=192,
+        )
+
+        r = full_pipeline_decision_from_evidence(candidate, current)
+
+        self.assertEqual(r["stage2_import"], "downgrade")
+        self.assertEqual(r["comparison_basis"]["verdict"], "equivalent")
+        # True containers compared symmetrically — existing NOT floored to 192.
+        self.assertEqual(r["comparison_basis"]["new_value_kbps"], 256)
+        self.assertEqual(r["comparison_basis"]["existing_value_kbps"], 256)
+        self.assertFalse(r["imported"])
         self.assertTrue(r["keep_searching"])
 
     def test_lil_wayne_da_drought_3_transcoded_flac_rejects_duplicate_via_evidence(self):
