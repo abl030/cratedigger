@@ -1,5 +1,6 @@
 """Generated invariant for independent two-sided spectral attempt audit."""
 
+import configparser
 from contextlib import contextmanager
 import logging
 import os
@@ -8,12 +9,12 @@ import subprocess as sp
 import tempfile
 import unittest
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import patch
 
 import msgspec
 
-from hypothesis import given, strategies as st
+from hypothesis import example, given, strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads active profile)
 
@@ -56,10 +57,11 @@ def _have_scan_boundary_holds(
     analyzer_calls: list[str],
     *,
     preserve_existing_source: bool,
+    candidate_reused: bool,
 ) -> bool:
-    expected = ["candidate"] if preserve_existing_source else [
-        "candidate", "existing",
-    ]
+    expected = [] if candidate_reused else ["candidate"]
+    if not preserve_existing_source:
+        expected.append("existing")
     return analyzer_calls == expected
 
 
@@ -265,6 +267,284 @@ def _run_have_boundary_through_both_adapters(
         measured.spectral_audit,
         reused,
     )
+
+
+PreviewJobMode = Literal["automation", "force"]
+
+
+def assert_candidate_snapshot_reuse(
+    *,
+    snapshot_changed: bool,
+    has_have: bool,
+    full_preview_calls: int,
+    analyzer_roles: list[str],
+    candidate_status: str | None,
+    persisted_candidate_grade: str | None,
+    expected_candidate_grade: str,
+) -> None:
+    """Candidate work is once per snapshot; HAVE authority stays separate."""
+
+    if snapshot_changed:
+        if full_preview_calls != 1:
+            raise AssertionError("changed candidate snapshot did not remeasure")
+        if candidate_status == "reused":
+            raise AssertionError("changed candidate snapshot was marked reused")
+        return
+
+    if full_preview_calls:
+        raise AssertionError("matching candidate snapshot ran full preview")
+    if "candidate" in analyzer_roles:
+        raise AssertionError("matching candidate evidence was analyzed again")
+    expected_roles = ["existing"] if has_have else []
+    if analyzer_roles != expected_roles:
+        raise AssertionError(
+            "candidate reuse changed the independent HAVE scan boundary"
+        )
+    if candidate_status != "reused":
+        raise AssertionError("matching candidate snapshot lost reuse provenance")
+    if persisted_candidate_grade != expected_candidate_grade:
+        raise AssertionError("reused preview dropped persisted candidate spectral")
+
+
+def _run_candidate_snapshot_reuse_world(
+    *,
+    job_mode: PreviewJobMode,
+    snapshot_changed: bool,
+    has_have: bool,
+    candidate_grade: str,
+    track_count: int,
+) -> tuple[int, list[str], str | None, str | None]:
+    from lib.config import CratediggerConfig
+    from lib.import_queue import (
+        IMPORT_JOB_AUTOMATION,
+        IMPORT_JOB_FORCE,
+        automation_import_dedupe_key,
+        force_import_dedupe_key,
+        force_import_payload,
+    )
+    from lib.import_preview import ImportPreviewResult
+    from lib.measurement import ExistingSpectralAuditLookup
+    from lib.quality import (
+        AudioQualityMeasurement,
+        ImportResult,
+        SpectralAnalysisDetail,
+    )
+    from lib.quality_evidence import EvidenceBuildResult, snapshot_audio_files
+    from scripts.import_preview_worker import process_claimed_preview_job
+    from tests.fakes import FakePipelineDB
+    from tests.helpers import make_album_quality_evidence, make_request_row
+
+    request_id = 8883
+    mbid = "generated-candidate-reuse-mbid"
+    with tempfile.TemporaryDirectory() as candidate, \
+         tempfile.TemporaryDirectory() as existing:
+        for track in range(1, track_count + 1):
+            Path(candidate, f"{track:02d}.mp3").write_bytes(
+                f"candidate-{track}".encode()
+            )
+        Path(existing, "01.mp3").write_bytes(b"installed-have")
+
+        db = FakePipelineDB()
+        active_state = {
+            "filetype": "mp3",
+            "enqueued_at": "2026-07-21T00:00:00+00:00",
+            "current_path": candidate,
+            "files": [
+                {
+                    "username": "generated-peer",
+                    "filename": f"Artist\\Album\\{track:02d}.mp3",
+                    "file_dir": "Artist\\Album",
+                    "size": track,
+                }
+                for track in range(1, track_count + 1)
+            ],
+        }
+        db.seed_request(make_request_row(
+            id=request_id,
+            mb_release_id=mbid,
+            status="downloading" if job_mode == "automation" else "wanted",
+            active_download_state=(
+                active_state if job_mode == "automation" else None
+            ),
+        ))
+
+        current = None
+        if has_have:
+            current = make_album_quality_evidence(
+                mb_release_id=mbid,
+                source_path=existing,
+                files=snapshot_audio_files(existing),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=192,
+                    avg_bitrate_kbps=196,
+                    median_bitrate_kbps=195,
+                    format="MP3",
+                    spectral_grade="genuine",
+                    spectral_subject="installed",
+                    spectral_provenance="measured",
+                ),
+            )
+            db.upsert_album_quality_evidence(current)
+            current = db.find_album_quality_evidence(
+                mb_release_id=mbid,
+                snapshot_fingerprint=current.snapshot_fingerprint,
+            )
+            assert current is not None and current.id is not None
+            db.set_request_current_evidence(request_id, current.id)
+
+        download_log_id: int | None = None
+        if job_mode == "force":
+            download_log_id = db.log_download(request_id, outcome="rejected")
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=request_id,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=candidate,
+                    source_username="generated-peer",
+                ),
+            )
+        else:
+            job = db.enqueue_import_job(
+                IMPORT_JOB_AUTOMATION,
+                request_id=request_id,
+                dedupe_key=automation_import_dedupe_key(request_id),
+                payload={},
+            )
+
+        candidate_evidence = make_album_quality_evidence(
+            mb_release_id=mbid,
+            source_path=candidate,
+            files=snapshot_audio_files(candidate),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=252,
+                format="MP3",
+                spectral_grade=candidate_grade,
+                spectral_subject="source",
+                spectral_provenance="measured",
+            ),
+        )
+        db.upsert_album_quality_evidence(candidate_evidence)
+        stored_candidate = db.find_album_quality_evidence(
+            mb_release_id=mbid,
+            snapshot_fingerprint=candidate_evidence.snapshot_fingerprint,
+        )
+        assert stored_candidate is not None and stored_candidate.id is not None
+        if download_log_id is not None:
+            db.set_download_log_candidate_evidence(
+                download_log_id,
+                stored_candidate.id,
+            )
+        else:
+            db.set_import_job_candidate_evidence(job.id, stored_candidate.id)
+
+        if snapshot_changed:
+            Path(candidate, f"{track_count:02d}.mp3").write_bytes(
+                b"changed-candidate-snapshot"
+            )
+
+        claimed = db.claim_next_import_preview_job(worker_id="generated")
+        assert claimed is not None and claimed.id == job.id
+        full_preview_calls = 0
+        analyzer_roles: list[str] = []
+
+        def analyze(path: str):
+            role = "existing" if path == existing else "candidate"
+            analyzer_roles.append(role)
+            return SpectralAnalysisDetail(
+                attempted=True,
+                grade="suspect" if role == "existing" else candidate_grade,
+                bitrate_kbps=128 if role == "existing" else None,
+            )
+
+        def full_preview(db_arg: Any, _job: Any) -> ImportPreviewResult:
+            nonlocal full_preview_calls
+            full_preview_calls += 1
+            fresh = make_album_quality_evidence(
+                mb_release_id=mbid,
+                source_path=candidate,
+                files=snapshot_audio_files(candidate),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    avg_bitrate_kbps=256,
+                    median_bitrate_kbps=252,
+                    format="MP3",
+                    spectral_grade=candidate_grade,
+                    spectral_subject="source",
+                    spectral_provenance="measured",
+                ),
+            )
+            db_arg.upsert_album_quality_evidence(fresh)
+            persisted = db_arg.find_album_quality_evidence(
+                mb_release_id=mbid,
+                snapshot_fingerprint=fresh.snapshot_fingerprint,
+            )
+            assert persisted is not None and persisted.id is not None
+            if download_log_id is not None:
+                db_arg.set_download_log_candidate_evidence(
+                    download_log_id,
+                    persisted.id,
+                )
+            else:
+                db_arg.set_import_job_candidate_evidence(job.id, persisted.id)
+            return ImportPreviewResult(
+                mode="path",
+                verdict="evidence_ready",
+                decision="import",
+                reason="import",
+                source_path=candidate,
+            )
+
+        def load_current(*_args: Any, **_kwargs: Any) -> EvidenceBuildResult:
+            if current is None:
+                return EvidenceBuildResult(
+                    None,
+                    "empty_current",
+                    "exact album not in beets",
+                )
+            return EvidenceBuildResult(current, "ready")
+
+        ini = configparser.ConfigParser()
+        ini["Beets Validation"] = {
+            "harness_path": "/fake/harness/run_beets_harness.sh",
+            "audio_check": "off",
+        }
+        ini["Pipeline DB"] = {"enabled": "true"}
+        cfg = CratediggerConfig.from_ini(ini)
+        with patch(
+            "scripts.import_preview_worker.read_runtime_config",
+            return_value=cfg,
+        ):
+            updated = process_claimed_preview_job(
+                db,
+                claimed,
+                spectral_detail_analyzer=analyze,
+                existing_spectral_resolver=lambda _release_id: (
+                    ExistingSpectralAuditLookup(
+                        path=existing if has_have else None,
+                    )
+                ),
+                preview_fn=full_preview,
+                current_evidence_loader=load_current,
+            )
+        assert updated is not None
+        preview_result = updated.preview_result or {}
+        candidate_status = preview_result.get("candidate_status")
+        persisted_grade = None
+        import_result_raw = preview_result.get("import_result")
+        if isinstance(import_result_raw, dict):
+            import_result = ImportResult.from_dict(import_result_raw)
+            if import_result.spectral.candidate is not None:
+                persisted_grade = import_result.spectral.candidate.grade
+        return (
+            full_preview_calls,
+            analyzer_roles,
+            candidate_status if isinstance(candidate_status, str) else None,
+            persisted_grade,
+        )
 
 
 def _authoritative_have_matches(detail, grade, bitrate) -> bool:
@@ -509,16 +789,105 @@ class TestAttemptAuditCheckerQualification(unittest.TestCase):
         self.assertFalse(_have_scan_boundary_holds(
             ["candidate"],
             preserve_existing_source=False,
+            candidate_reused=False,
         ))
 
     def test_have_boundary_checker_rejects_blanket_scan_mutant(self):
         self.assertFalse(_have_scan_boundary_holds(
             ["candidate", "existing"],
             preserve_existing_source=True,
+            candidate_reused=True,
         ))
+
+    def test_have_boundary_checker_rejects_reused_candidate_rescan(self):
+        self.assertFalse(_have_scan_boundary_holds(
+            ["candidate", "existing"],
+            preserve_existing_source=False,
+            candidate_reused=True,
+        ))
+
+    def test_candidate_reuse_checker_rejects_matching_snapshot_rescan(self):
+        with self.assertRaises(AssertionError):
+            assert_candidate_snapshot_reuse(
+                snapshot_changed=False,
+                has_have=False,
+                full_preview_calls=0,
+                analyzer_roles=["candidate"],
+                candidate_status="reused",
+                persisted_candidate_grade="genuine",
+                expected_candidate_grade="genuine",
+            )
+
+    def test_candidate_reuse_checker_rejects_changed_snapshot_skip(self):
+        with self.assertRaises(AssertionError):
+            assert_candidate_snapshot_reuse(
+                snapshot_changed=True,
+                has_have=False,
+                full_preview_calls=0,
+                analyzer_roles=[],
+                candidate_status="reused",
+                persisted_candidate_grade="genuine",
+                expected_candidate_grade="genuine",
+            )
 
 
 class TestAttemptAuditGenerated(unittest.TestCase):
+    @given(
+        job_mode=st.sampled_from(("automation", "force")),
+        snapshot_changed=st.booleans(),
+        has_have=st.booleans(),
+        candidate_grade=st.sampled_from((
+            "genuine",
+            "marginal",
+            "suspect",
+            "likely_transcode",
+        )),
+        track_count=st.integers(min_value=1, max_value=12),
+    )
+    @example(
+        job_mode="force",
+        snapshot_changed=False,
+        has_have=False,
+        candidate_grade="genuine",
+        track_count=12,
+    )
+    @example(
+        job_mode="automation",
+        snapshot_changed=False,
+        has_have=True,
+        candidate_grade="suspect",
+        track_count=1,
+    )
+    def test_candidate_measurement_is_once_per_snapshot_across_job_modes(
+        self,
+        job_mode: PreviewJobMode,
+        snapshot_changed: bool,
+        has_have: bool,
+        candidate_grade: str,
+        track_count: int,
+    ):
+        (
+            full_preview_calls,
+            analyzer_roles,
+            candidate_status,
+            persisted_candidate_grade,
+        ) = _run_candidate_snapshot_reuse_world(
+            job_mode=job_mode,
+            snapshot_changed=snapshot_changed,
+            has_have=has_have,
+            candidate_grade=candidate_grade,
+            track_count=track_count,
+        )
+        assert_candidate_snapshot_reuse(
+            snapshot_changed=snapshot_changed,
+            has_have=has_have,
+            full_preview_calls=full_preview_calls,
+            analyzer_roles=analyzer_roles,
+            candidate_status=candidate_status,
+            persisted_candidate_grade=persisted_candidate_grade,
+            expected_candidate_grade=candidate_grade,
+        )
+
     def test_gespenst_mp3_scans_exact_have_through_both_adapters(self):
         (
             preserve_source,
@@ -537,7 +906,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
 
         self.assertFalse(preserve_source)
         self.assertEqual(normal_calls, ["candidate", "existing"])
-        self.assertEqual(reused_calls, ["candidate", "existing"])
+        self.assertEqual(reused_calls, ["existing"])
         for audit in (normal_audit, reused_audit):
             assert audit.existing is not None
             self.assertEqual(audit.existing.grade, "suspect")
@@ -684,11 +1053,16 @@ class TestAttemptAuditGenerated(unittest.TestCase):
                 or lossless_v0_lineage
             ),
         )
-        for calls in (normal_calls, reused_calls):
-            self.assertTrue(_have_scan_boundary_holds(
-                calls,
-                preserve_existing_source=preserve_existing_source,
-            ))
+        self.assertTrue(_have_scan_boundary_holds(
+            normal_calls,
+            preserve_existing_source=preserve_existing_source,
+            candidate_reused=False,
+        ))
+        self.assertTrue(_have_scan_boundary_holds(
+            reused_calls,
+            preserve_existing_source=preserve_existing_source,
+            candidate_reused=True,
+        ))
         for audit in (normal_audit, reused_audit):
             assert audit.existing is not None
             if preserve_existing_source:
