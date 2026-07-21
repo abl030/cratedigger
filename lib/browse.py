@@ -11,7 +11,7 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
     from lib.context import CratediggerContext
-    from cratedigger import SlskdDirectory
+    from cratedigger import SlskdDirectory, SlskdFile
 
 
 logger = logging.getLogger("cratedigger")
@@ -33,8 +33,8 @@ def _routine_browse_http_status(error: Exception) -> int | None:
 
 @dataclass(frozen=True)
 class BrowseManyResult:
-    directories: dict[tuple[str, str], Any] = field(default_factory=dict)
-    negative_skips: set[tuple[str, str]] = field(default_factory=set)
+    directories: dict[tuple[str, str], Any] = field(default_factory=lambda: {})
+    negative_skips: set[tuple[str, str]] = field(default_factory=lambda: set())
     browse_attempts: int = 0
 
 
@@ -328,7 +328,7 @@ def download_filter(
                 ext.lower().lstrip(".")
                 for ext in download_cfg.extensions_whitelist
             }
-        kept = []
+        kept: list[SlskdFile] = []
         for file in directory["files"]:
             filename = file["filename"]
             ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""

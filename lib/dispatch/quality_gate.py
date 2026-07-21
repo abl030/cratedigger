@@ -238,7 +238,7 @@ def _check_quality_gate_core(
                     search_filetype_override=search_override,
                     min_bitrate=min_br_kbps,
                 )
-                usernames = extract_usernames(files) if action.denylist else set()
+                usernames = extract_usernames(files) if action.denylist else set[str]()
                 reason = (
                     "quality gate: transparent installed copy independently "
                     "verified genuine; continuing lossless-only search"

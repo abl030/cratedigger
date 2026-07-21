@@ -68,22 +68,25 @@ class CratediggerContext:
     download_ownership: Any = None
 
     # --- Runtime caches (reset each cycle) ---
-    search_cache: dict[int, Any] = field(default_factory=dict)
-    folder_cache: dict[str, Any] = field(default_factory=dict)
-    user_upload_speed: dict[str, int] = field(default_factory=dict)
-    broken_user: set[str] = field(default_factory=set)
-    search_dir_audio_count: dict[str, dict[str, int]] = field(default_factory=dict)
-    negative_matches: set[tuple[str, str, int, str]] = field(default_factory=set)
-    current_album_cache: dict[int, Any] = field(default_factory=dict)
-    denied_users_cache: dict[int, set[str]] = field(default_factory=dict)
-    cooled_down_users: set[str] = field(default_factory=set)
+    search_cache: dict[int, Any] = field(default_factory=lambda: {})
+    folder_cache: dict[str, Any] = field(default_factory=lambda: {})
+    user_upload_speed: dict[str, int] = field(default_factory=lambda: {})
+    broken_user: set[str] = field(default_factory=lambda: set())
+    search_dir_audio_count: dict[str, dict[str, int]] = (
+        field(default_factory=lambda: {}))
+    negative_matches: set[tuple[str, str, int, str]] = (
+        field(default_factory=lambda: set()))
+    current_album_cache: dict[int, Any] = field(default_factory=lambda: {})
+    denied_users_cache: dict[int, set[str]] = field(default_factory=lambda: {})
+    cooled_down_users: set[str] = field(default_factory=lambda: set())
     prefetched_album_tracks: dict[int, list[TrackRecord]] = (
-        field(default_factory=dict))
+        field(default_factory=lambda: {}))
     peer_cache: Any = None
-    peer_cache_negative_skips: set[tuple[str, str]] = field(default_factory=set)
+    peer_cache_negative_skips: set[tuple[str, str]] = (
+        field(default_factory=lambda: set()))
     # Distinct peers cold-browsed this cycle; flushed to the
     # peer_observations roster at end of cycle (#227).
-    peer_observations: set[str] = field(default_factory=set)
+    peer_observations: set[str] = field(default_factory=lambda: set())
 
     # --- Per-cycle timing accumulators (issue #198 U1 instrumentation).
     # browse / match are wrapped at the call sites in lib/matching.py;

@@ -16,6 +16,8 @@ import statistics
 from dataclasses import dataclass
 from typing import Literal, Optional, TYPE_CHECKING, TypeAlias
 
+import msgspec
+
 from lib.release_identity import (
     ReleaseIdentity,
     detect_release_source,
@@ -1020,7 +1022,17 @@ class BeetsDB:
             if raw_path is not None:
                 paths = entry["paths"]
                 assert isinstance(paths, list)
-                paths.append(self._resolve_path(raw_path))
+                # ``paths``'s bare-list narrow leaves pyright with a
+                # partially unknown ``list[Unknown]`` even though the
+                # element type is known (same quirk documented on
+                # ``lib.youtube_album_service._json_dict``), which taints
+                # even a re-reference of the narrowed local. Re-reading
+                # the still-``object``-typed ``entry["paths"]`` (the
+                # identical list — a dict subscript, not a copy) and
+                # calling ``append`` via ``getattr`` types the callable as
+                # ``Any``, breaking the cascade without a suppression
+                # comment; the ``assert`` above still enforces the shape.
+                getattr(entry["paths"], "append")(self._resolve_path(raw_path))
 
         albums: list[BeetsWorldAlbum] = []
         for album_id, entry in grouped.items():
@@ -1034,7 +1046,8 @@ class BeetsDB:
             }
             raw_paths = entry["paths"]
             assert isinstance(raw_paths, list)
-            item_paths = tuple(str(path) for path in raw_paths)
+            paths_list: list[object] = msgspec.convert(raw_paths, type=list[object])
+            item_paths = tuple(str(path) for path in paths_list)
             album_path = os.path.dirname(item_paths[0]) if item_paths else ""
             albums.append(BeetsWorldAlbum(
                 album_id=album_id,

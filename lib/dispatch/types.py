@@ -12,6 +12,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Callable, Protocol, Sequence, TYPE_CHECKING
 
+import msgspec
+
 from lib.wrong_match_policy import PREIMPORT_FACT_REJECTION_SCENARIOS
 
 logger = logging.getLogger("cratedigger")
@@ -185,7 +187,18 @@ class ImportAttemptResult:
             )
             if isinstance(raw, dict):
                 from lib.quality import ImportResult
-                audit = ImportResult.from_dict(raw).spectral
+                # ``ImportJob.preview_result`` is ``dict[str, Any]``, so
+                # ``.get(...)`` returns ``Any`` and the isinstance narrow
+                # above leaves pyright with a partially unknown
+                # ``dict[Unknown, Unknown]`` — same quirk documented on
+                # ``lib.youtube_album_service._json_dict``. The stored
+                # payload is always JSON-decoded (string-keyed);
+                # ``msgspec.convert`` hands back a fully known
+                # ``dict[str, object]`` matching ``from_dict``'s contract.
+                raw_dict: dict[str, object] = msgspec.convert(
+                    raw, type=dict[str, object],
+                )
+                audit = ImportResult.from_dict(raw_dict).spectral
         except Exception:
             logger.warning(
                 "Unable to decode preview spectral audit for import job %s",

@@ -43,7 +43,7 @@ def reconstruct_grab_list_entry(
     transfer IDs keyed by ``(username, filename)``; persisted-only callers
     leave them empty.
     """
-    files = []
+    files: list[DownloadFile] = []
     for file_state in state.files:
         restored_status = _restored_terminal_status(
             file_state.last_state,

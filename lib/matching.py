@@ -8,6 +8,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence, TYPE_CHECKING
 
+import msgspec
+
 from lib.browse import (
     _browse_directories_for_ctx,
     _browse_directories_for_ctx_result,
@@ -95,7 +97,7 @@ class MatchResult:
     matched: bool
     directory: Any
     file_dir: str
-    candidates: list[CandidateScore] = field(default_factory=list)
+    candidates: list[CandidateScore] = field(default_factory=lambda: [])
     # Authoritative count of dirs rejected by the asymmetric pre-filter
     # before browse; sample rows in ``candidates`` are bounded by
     # ``PRE_FILTER_SKIP_SAMPLE_CAP``.
@@ -436,13 +438,32 @@ def _matched_directory_for_filetype(
     directory: SlskdDirectory,
     allowed_filetype: str,
 ) -> SlskdDirectory:
-    files = []
+    files: list[SlskdFile] = []
     for file in directory["files"]:
         filename = file["filename"]
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
         if audio_file_matches(file, allowed_filetype) or ext not in AUDIO_EXTENSIONS:
             files.append(file)
     return {**directory, "files": files}
+
+
+def _shallow_cache_dict(value: Any) -> dict[str, Any]:
+    """Narrow one level of ``ctx.search_cache``'s untyped nesting.
+
+    ``ctx.search_cache`` is declared ``dict[int, Any]`` (cratedigger.py
+    populates its per-album/user/filetype entries directly); a bare
+    ``isinstance(value, dict)`` check degrades pyright's narrowed type to
+    ``dict[Unknown, Unknown]`` even though the true runtime shape is
+    always string-keyed — the same quirk documented on
+    ``lib.youtube_album_service._json_dict``. ``msgspec.convert`` performs
+    the identical runtime check plus real key-type validation and hands
+    back a fully known ``dict[str, Any]``; values stay ``Any`` so no
+    deeper (nested-shape) validation risk is introduced. Malformed input
+    degrades to ``{}`` exactly like the isinstance check it replaces.
+    """
+    if not isinstance(value, dict):
+        return {}
+    return msgspec.convert(value, type=dict[str, Any])
 
 
 def _search_cache_concrete_codecs_for_dir(
@@ -453,10 +474,8 @@ def _search_cache_concrete_codecs_for_dir(
 ) -> set[str]:
     from lib.quality import parse_filetype_config
 
-    album_cache = ctx.search_cache.get(album_id, {})
-    user_cache = album_cache.get(username, {}) if isinstance(album_cache, dict) else {}
-    if not isinstance(user_cache, dict):
-        return set()
+    album_cache = _shallow_cache_dict(ctx.search_cache.get(album_id, {}))
+    user_cache = _shallow_cache_dict(album_cache.get(username, {}))
     codecs: set[str] = set()
     for filetype, dirs in user_cache.items():
         if file_dir not in dirs:
@@ -587,7 +606,9 @@ def check_for_match(
     if not dirs_to_try:
         return _build_no_match()
 
-    peer_cache_negative_skips = getattr(ctx, "peer_cache_negative_skips", set())
+    peer_cache_negative_skips = getattr(
+        ctx, "peer_cache_negative_skips", set[tuple[str, str]](),
+    )
     if peer_cache_negative_skips:
         dirs_to_try = [
             file_dir for file_dir in dirs_to_try

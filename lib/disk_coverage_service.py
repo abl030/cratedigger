@@ -138,7 +138,9 @@ def disk_coverage(
         request_ids[int(row["id"])] = set(release_ids)
         all_release_ids.extend(release_ids)
 
-    matched_ids = set(beets_db.check_mbids(all_release_ids)) if beets_db else set()
+    matched_ids = (
+        set(beets_db.check_mbids(all_release_ids)) if beets_db else set[str]()
+    )
 
     by_status: Counter[str] = Counter()
     on_disk_by_status: Counter[str] = Counter()

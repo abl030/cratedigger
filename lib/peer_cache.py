@@ -250,7 +250,14 @@ def connect_from_config(cfg: CratediggerConfig) -> PeerCache:
             socket_timeout=cfg.peer_cache_redis_operation_timeout_ms / 1000,
             decode_responses=False,
         )
-        client.ping()
+        # redis-py's Redis.ping declares `**kwargs: Unknown` upstream, so a
+        # direct call propagates Unknown through pyright strict mode.
+        # getattr retrieves the identical bound method (behaviorally
+        # identical) but types as Any under typeshed's two-argument
+        # getattr overload, breaking the Unknown cascade without a
+        # suppression comment — same technique as
+        # lib.beets_distance._item_from_path_fn.
+        getattr(client, "ping")()
     except Exception:
         stats.cache_errors += 1
         logger.info(

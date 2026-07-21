@@ -25,6 +25,7 @@ from lib.wrong_match_policy import rejection_scenario_is_wrong_match_candidate
 
 if TYPE_CHECKING:
     from lib.context import CratediggerContext
+    from lib.pipeline_db import PipelineDB
 
 logger = logging.getLogger("cratedigger")
 
@@ -75,7 +76,7 @@ def _resolved_request_rejection_id(
     ctx: CratediggerContext,
 ) -> tuple[Any | None, int | None]:
     """Resolve the backing request row for defensive auto-import rejects."""
-    db = ctx.pipeline_db_source._get_db()
+    db: "PipelineDB" = ctx.pipeline_db_source._get_db()
     if album_data.db_request_id is not None:
         return db, album_data.db_request_id
 

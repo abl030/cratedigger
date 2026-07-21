@@ -72,8 +72,12 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/terminal_outcomes.py", 306, "6cfaff9c6507c211"): (
         "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
     ),
-    ("lib/beets_db.py", 408, "9f590a0174ed4a0f"): (
-        "joined Beets snapshot WHERE terms contain only '?' value placeholders"
+    ("lib/beets_db.py", 410, "9f590a0174ed4a0f"): (
+        "joined Beets snapshot WHERE terms contain only '?' value placeholders "
+        "(issue #784: lib group C annotation sweep added an `import msgspec` "
+        "line near the top of the file, shifting this line by +2; hash "
+        "unchanged since this call sits outside every edited scope — no SQL "
+        "change)"
     ),
     ("lib/pipeline_db/dashboard.py", 490, "5e3b8177198ccbed"): (
         "dashboard WHERE and ORDER fragments come from closed enum branches "

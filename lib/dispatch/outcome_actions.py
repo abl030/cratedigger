@@ -606,9 +606,18 @@ def _record_preview_measurement_failed(
             "cannot persist terminal preview outcome without request_id"
         )
     validation_json = msgspec.json.encode(payload).decode("utf-8")
-    job_result = msgspec.to_builtins(payload)
-    assert isinstance(job_result, dict), \
+    job_result_raw = msgspec.to_builtins(payload)
+    assert isinstance(job_result_raw, dict), \
         "msgspec.to_builtins on a Struct returns a dict"
+    # ``to_builtins`` declares ``-> Any`` upstream, so the isinstance
+    # narrow above leaves pyright with a partially unknown
+    # ``dict[Unknown, Unknown]`` even though every key is a Struct field
+    # name (always ``str``) — same quirk documented on
+    # ``lib.youtube_album_service._json_dict``. ``msgspec.convert`` hands
+    # back a fully known ``dict[str, object]`` with the identical content.
+    job_result: dict[str, object] = msgspec.convert(
+        job_result_raw, type=dict[str, object],
+    )
     denylists = (
         (TerminalDenylist(denylist_username, denylist_reason),)
         if denylist_username
