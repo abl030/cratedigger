@@ -31,9 +31,11 @@ if not TEST_DSN and shutil.which("initdb") and shutil.which("pg_ctl"):
         print(f"[WARN] Could not start ephemeral PostgreSQL: {e}", file=sys.stderr)
         _pg = None
 
-if TEST_DSN:
+if TEST_DSN and os.environ.get("CRATEDIGGER_TEST_SCHEMA_READY") != "1":
     # Apply schema once at session start for either an externally supplied
-    # TEST_DB_DSN or the ephemeral DB above. Test helpers TRUNCATE between tests.
+    # TEST_DB_DSN or the ephemeral DB above. Parallel-suite module subprocesses
+    # inherit an already-migrated worker-local DSN and explicitly skip this
+    # redundant step. Test helpers TRUNCATE between tests.
     from lib.migrator import apply_migrations
     try:
         apply_migrations(TEST_DSN)

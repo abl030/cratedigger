@@ -38,7 +38,10 @@ bash "$(dirname "$0")/find_dead_code.sh"
 echo ""
 
 echo "=== Python tests ==="
-python3 -m unittest discover -s tests -t . -p 'test*.py' -v
+# Four long-lived workers amortize ephemeral PostgreSQL startup while using
+# the host's idle cores; each module still gets a fresh Python interpreter.
+# Override with CRATEDIGGER_TEST_JOBS when diagnosing worker-specific behavior.
+python3 scripts/run_python_tests.py
 
 echo ""
 echo "=== Deterministic cross-engine world model ==="
