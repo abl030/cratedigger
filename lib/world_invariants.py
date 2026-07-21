@@ -523,7 +523,17 @@ def derive_denylist_authorities(
         if isinstance(raw_result, str):
             encoded_result = raw_result
         elif isinstance(raw_result, Mapping):
-            encoded_result = msgspec.json.encode(dict(raw_result)).decode()
+            # ``entry``'s value type is ``Any``, so the bare isinstance
+            # narrow above leaves pyright with a partially unknown
+            # ``Mapping[Unknown, Unknown]`` even though every key is a
+            # JSON object key (same quirk documented on
+            # ``lib.youtube_album_service._json_dict``). ``msgspec.convert``
+            # hands back a fully known ``dict[str, object]`` with the
+            # identical content for encoding.
+            result_dict: dict[str, object] = msgspec.convert(
+                raw_result, type=dict[str, object],
+            )
+            encoded_result = msgspec.json.encode(result_dict).decode()
         else:
             continue
         try:

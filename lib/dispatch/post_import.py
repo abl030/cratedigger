@@ -115,7 +115,7 @@ def _resolve_post_import_search_policy(
         else action.denylist
     )
     file_list = list(files or ())
-    usernames = extract_usernames(file_list) if should_denylist else set()
+    usernames = extract_usernames(file_list) if should_denylist else set[str]()
     if should_denylist and fallback_username:
         usernames.add(fallback_username)
     return search_action, should_denylist, usernames, file_list

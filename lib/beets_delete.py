@@ -14,7 +14,7 @@ import logging
 import os
 import subprocess as sp
 from pathlib import Path
-from typing import Any, Callable, Literal, TypeAlias
+from typing import Any, Callable, Iterable, Literal, TypeAlias
 
 import msgspec
 
@@ -129,6 +129,27 @@ def _remove_album_metadata_atomically(lib: Any, album: Any) -> None:
         except BaseException:
             lib._connection().rollback()
             raise
+
+
+def _album_field(album: Any, key: str) -> object:
+    """Read one field off a beets ``Album``.
+
+    ``dbcore.db.Model.get`` is unannotated upstream, cascading Unknown
+    through pyright strict. ``getattr`` retrieves the identical bound
+    method but types as ``Any`` under typeshed's two-argument overload,
+    breaking the cascade without a suppression comment (same technique as
+    ``lib.beets_distance._item_field``).
+    """
+    return getattr(album, "get")(key)
+
+
+def _library_items(lib: Any, query: str) -> Iterable[object]:
+    """Call beets ``Library.items``.
+
+    Its ``query``/``sort`` parameters are unannotated upstream, cascading
+    Unknown. Same ``getattr`` containment as :func:`_album_field`.
+    """
+    return getattr(lib, "items")(query)
 
 
 def _decode_path(raw: object) -> str:
@@ -459,7 +480,8 @@ def execute_pinned_beets_delete(request: BeetsDeleteRequest) -> BeetsDeleteOutco
                 album_still_present=False,
             )
         identity = ReleaseIdentity.from_fields(
-            album.get("mb_albumid"), album.get("discogs_albumid"),
+            _album_field(album, "mb_albumid"),
+            _album_field(album, "discogs_albumid"),
         )
         expected = ReleaseIdentity.from_id(request.expected_release_id)
         if identity is None or expected is None or identity != expected:
@@ -550,12 +572,15 @@ def execute_pinned_beets_delete(request: BeetsDeleteRequest) -> BeetsDeleteOutco
         def metadata_present() -> bool:
             if lib.get_album(request.album_id) is not None:
                 return True
-            return next(iter(lib.items(f"album_id:{request.album_id}")), None) is not None
+            found = next(
+                iter(_library_items(lib, f"album_id:{request.album_id}")), None,
+            )
+            return found is not None
 
         return _delete_manifest(
             album_id=request.album_id,
-            album_name=str(album.get("album") or ""),
-            artist_name=str(album.get("albumartist") or ""),
+            album_name=str(_album_field(album, "album") or ""),
+            artist_name=str(_album_field(album, "albumartist") or ""),
             owned_paths=owned,
             album_dirs=album_dirs,
             metadata_remove=lambda: _remove_album_metadata_atomically(lib, album),

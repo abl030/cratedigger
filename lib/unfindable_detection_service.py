@@ -381,7 +381,7 @@ def fuzzy_artist_observed_in_probe(
         username = str(resp.get("username") or "")
         if needle in _fuzz(username):
             return True
-        for f in resp.get("files") or []:
+        for f in resp.get("files") or list[dict[str, Any]]():
             fname = str(f.get("filename") or "")
             if needle in _fuzz(fname):
                 return True

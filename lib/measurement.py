@@ -262,7 +262,7 @@ class PreimportMeasurement(msgspec.Struct, frozen=True):
     attempt-local ``lossless_candidate`` fact additionally lets preview and
     harness routing reuse the exact classification that selected the scan.
     """
-    corrupt_files: list[str] = msgspec.field(default_factory=list)
+    corrupt_files: list[str] = msgspec.field(default_factory=lambda: [])
     audio_corrupt: bool = False
     audio_error: str | None = None
     matched_bad_hash_id: int | None = None
@@ -377,6 +377,30 @@ class AudioCodecProbeError(RuntimeError):
     """Raised when an ambiguous container's codec cannot be measured."""
 
 
+def _json_dict(value: object) -> dict[str, object]:
+    """Narrow an untyped ffprobe JSON value to a plain string-keyed dict.
+
+    A bare ``isinstance(value, dict)`` leaves pyright with a partially
+    unknown ``dict[Unknown, Unknown]`` even when ``value`` was already
+    fully known — strict mode never lets an ``isinstance`` narrowing
+    inherit a generic's type argument (same quirk documented on
+    ``lib.youtube_album_service._json_dict``). Routing through
+    ``msgspec.convert`` gives every caller a fully known
+    ``dict[str, object]`` back. A non-dict value gracefully returns
+    ``{}`` — this is subprocess JSON, never an assertion.
+    """
+    if not isinstance(value, dict):
+        return {}
+    return msgspec.convert(value, type=dict[str, object])
+
+
+def _json_list(value: object) -> list[object]:
+    """List counterpart of ``_json_dict`` — see its docstring."""
+    if not isinstance(value, list):
+        return []
+    return msgspec.convert(value, type=list[object])
+
+
 def ffprobe_audio_codec_name(fpath: str) -> str | None:
     """Return the first audio stream codec name reported by ffprobe."""
     try:
@@ -396,14 +420,10 @@ def ffprobe_audio_codec_name(fpath: str) -> str | None:
     except Exception:
         return None
 
-    if not isinstance(payload, dict):
+    streams = _json_list(_json_dict(payload).get("streams"))
+    if not streams:
         return None
-    streams = payload.get("streams")
-    if not isinstance(streams, list) or not streams:
-        return None
-    stream = streams[0]
-    if not isinstance(stream, dict):
-        return None
+    stream = _json_dict(streams[0])
     codec = stream.get("codec_name")
     if not isinstance(codec, str):
         return None

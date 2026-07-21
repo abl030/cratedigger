@@ -210,4 +210,4 @@ class TerminalOutcomeResult:
     download_log_id: int
     job: ImportJob
     transitions: tuple[TransitionApplied, ...]
-    cooled_down_users: frozenset[str] = field(default_factory=frozenset)
+    cooled_down_users: frozenset[str] = field(default_factory=lambda: frozenset())

@@ -599,7 +599,10 @@ def _record_preview_measurement_failed(
             "cannot persist terminal preview outcome without request_id"
         )
     validation_json = msgspec.json.encode(payload).decode("utf-8")
-    job_result = msgspec.to_builtins(payload)
+    # ``to_builtins`` is declared ``-> Any``; annotate the target so pyright
+    # sees ``dict[str, object]`` without reshaping the value (a re-``convert``
+    # here is NOT identity in the terminal-outcome path — issue #784).
+    job_result: dict[str, object] = msgspec.to_builtins(payload)
     assert isinstance(job_result, dict), \
         "msgspec.to_builtins on a Struct returns a dict"
     denylists = (

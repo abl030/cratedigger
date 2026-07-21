@@ -81,7 +81,13 @@ def probe_duration_seconds(path: str) -> float | None:
     """Read source duration cheaply for a duration-scaled ffmpeg timeout."""
 
     try:
-        from mutagen import File as mutagen_file  # pyright: ignore[reportPrivateImportUsage]
+        # getattr (not `from mutagen import File`) keeps this Any-typed:
+        # mutagen's File() factory has an untyped `filething` parameter and
+        # a partially-unknown overloaded return (many mutagen format
+        # classes) — third-party, not ours to annotate. Same technique as
+        # harness.import_one._probe_source_channels.
+        import mutagen
+        mutagen_file = getattr(mutagen, "File")
         media = mutagen_file(path)
     except Exception:  # noqa: BLE001 - absence/unreadable is a normal fallback
         return None

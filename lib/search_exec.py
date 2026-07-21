@@ -105,7 +105,7 @@ class SearchExecutionResult:
       * ``elapsed_s`` — wall time of the ``execute_search`` call.
     """
 
-    responses: list[dict[str, Any]] = field(default_factory=list)
+    responses: list[dict[str, Any]] = field(default_factory=lambda: [])
     final_state: str | None = None
     response_count_terminal: int | None = None
     watchdog_fired: bool = False
