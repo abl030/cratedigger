@@ -403,19 +403,6 @@ class MbidReplaceService:
 
         source_rg = source.get("mb_release_group_id")
         if not source_rg:
-            # A source row without an MBID (Discogs-only) cannot be
-            # RG-resolved — same TARGET_INVALID outcome the lookup
-            # exception path produced before the typed narrowing.
-            if not isinstance(source_mbid, str) or not source_mbid:
-                return ReplaceResult(
-                    outcome=RESULT_TARGET_INVALID,
-                    request_id=request_id,
-                    error_message=(
-                        f"source MBID {source_mbid!r} could not be "
-                        "resolved: source request has no MB release id"
-                    ),
-                    reason=REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
-                )
             # Lazy-backfill: resolve the source MBID's RG fresh.
             src_data, err = self._mb_lookup_or_error(
                 source_mbid,
