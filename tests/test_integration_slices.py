@@ -7254,11 +7254,13 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         self.assertIn(("rejected", "empty_fileset"), outcomes)
 
     def test_spectral_reject_evidence_routes_through_evidence_pipeline(self):
-        """likely_transcode candidate spectral matches existing transcode
-        spectral → ``full_pipeline_decision_from_evidence`` rejects at
-        stage1_spectral (spectral evidence vs spectral evidence). The
-        importer routes the reject through ``_reject_import_from_evidence_decision``;
-        beets never runs and the download_log records the rejection.
+        """likely_transcode candidate spectral STRICTLY below existing
+        transcode spectral (96 < 128) → ``full_pipeline_decision_from_evidence``
+        rejects at stage1_spectral (spectral evidence vs spectral evidence).
+        (An equal floor would tie and defer to Stage 2 — Mark DeNardo request
+        1308; only a strictly-lower estimate rejects here.) The importer routes
+        the reject through ``_reject_import_from_evidence_decision``; beets never
+        runs and the download_log records the rejection.
 
         Spectral comparison lives in the full pipeline (the same function
         the album test set pins) — not in ``preimport_decide``, which only
@@ -7299,7 +7301,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
                     owner_id=job.id,
                     files=files,
                     spectral_grade="likely_transcode",
-                    spectral_bitrate_kbps=128,
+                    spectral_bitrate_kbps=96,
                     min_bitrate_kbps=128,
                 ),
             )

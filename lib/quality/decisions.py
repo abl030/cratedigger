@@ -103,10 +103,27 @@ def spectral_import_decision(
     file is genuine, only that we haven't measured it yet).
 
     Returns one of:
-        "import"          — spectral says genuine/marginal, proceed
+        "import"          — spectral says genuine/marginal, OR the spectral
+                            estimate ties the existing one (defer the verdict
+                            to the full codec-aware comparison in Stage 2)
         "import_upgrade"  — spectral says suspect but better than existing
         "import_no_exist" — spectral says suspect but nothing on disk yet
-        "reject"          — spectral says suspect and not better than existing
+        "reject"          — spectral says suspect and STRICTLY worse than existing
+
+    A tie on the spectral estimate is NOT evidence the candidate is worse — it
+    is evidence the two sides carry the same amount of real content on the one
+    metric this coarse stage measures. Rejecting on a tie let a strictly-better
+    copy (higher container bitrate / better grade / higher V0) be discarded as
+    "not better", because this stage short-circuits before Stage 2 ever runs
+    (Mark DeNardo "Lion, Tiger, Bear", request 1308: MP3 192 CBR / suspect /
+    spectral 128 rejected against MP3 128 CBR / likely_transcode / spectral
+    128). So a tie defers to ``compare_quality`` — the single codec-aware
+    comparison built to break exactly this tie on the raw metric
+    (``_shared_spectral_bitrates``). Only a STRICTLY lower spectral estimate is
+    affirmative evidence the candidate has less real content; that still
+    rejects here, which also protects Stage 2's transcode-vs-transcode blind
+    spot (``_transcode_candidate_real_rank_regresses`` only guards a
+    transcode over a NON-transcode existing album).
 
     Inputs:
         spectral_grade:             "genuine" | "marginal" | "suspect" | "likely_transcode"
@@ -119,7 +136,9 @@ def spectral_import_decision(
     new_q = spectral_bitrate or 0
     existing_q = existing_spectral_bitrate or 0
 
-    if new_q and existing_q and new_q <= existing_q:
+    # Strictly-less-than, not <=: an equal spectral floor is a tie, not a
+    # downgrade — it defers to Stage 2's raw-metric tiebreak (see docstring).
+    if new_q and existing_q and new_q < existing_q:
         return "reject"
     elif new_q and existing_q and new_q > existing_q:
         return "import_upgrade"
