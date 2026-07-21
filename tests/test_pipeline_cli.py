@@ -2163,12 +2163,53 @@ class TestCmdShowSearchForensics(unittest.TestCase):
         row = make_request_row(**overrides)
         return row
 
-    def _capture(self, db, request_id):
+    def _capture(self, db, request_id, beets=None):
+        beets = beets or FakeBeetsDB()
         stdout = io.StringIO()
         with redirect_stdout(stdout):
             pipeline_cli.cmd_show(
-                cast(Any, db), cast(Any, SimpleNamespace(id=request_id)))
+                cast(Any, db),
+                argparse.Namespace(
+                    id=request_id, beets_db=None, beets_directory=None,
+                ),
+                open_beets_fn=lambda **_kwargs: beets,
+            )
         return stdout.getvalue()
+
+    def test_show_renders_fresh_current_path_not_request_cache(self):
+        db = _ForensicsDB()
+        db.seed_request(self._row(
+            id=1844,
+            status="imported",
+            mb_release_id=RELEASE_A,
+            imported_path="/stale/request/cache",
+        ))
+        beets = FakeBeetsDB(library_root="/current/library")
+        beets.set_album_ids_for_release(RELEASE_A, [44])
+        beets.set_item_paths(
+            RELEASE_A, [(4401, "/current/library/Moved/01.flac")],
+        )
+
+        out = self._capture(db, 1844, beets)
+
+        self.assertIn("Current Library: unique", out)
+        self.assertIn("Current Path:    /current/library/Moved", out)
+        self.assertNotIn("/stale/request/cache", out)
+
+    def test_show_renders_typed_missing_and_ambiguous_states(self):
+        db = _ForensicsDB()
+        db.seed_request(self._row(
+            id=1845, status="imported", mb_release_id=RELEASE_A,
+        ))
+        missing = self._capture(db, 1845, FakeBeetsDB())
+        self.assertIn("Current Library: missing", missing)
+
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release(RELEASE_A, [11, 12])
+        ambiguous = self._capture(db, 1845, beets)
+        self.assertIn("Current Library: ambiguous", ambiguous)
+        self.assertIn("Reason:          multiple_matches", ambiguous)
+        self.assertIn("Album IDs:       11, 12", ambiguous)
 
     def test_show_renders_variant_final_state_and_top_3(self):
         db = _ForensicsDB()

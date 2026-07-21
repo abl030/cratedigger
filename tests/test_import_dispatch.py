@@ -1296,6 +1296,7 @@ class TestDispatchImport(unittest.TestCase):
             "db": db,
             "outcome": outcome,
             "mock_cleanup": ext.cleanup,
+            "mock_plex": ext.plex,
             "mock_jellyfin": ext.jellyfin,
             "mock_gate": mock_gate,
         }
@@ -1363,6 +1364,8 @@ class TestDispatchImport(unittest.TestCase):
         self.assertEqual(r["db"].request(42)["status"], "imported")
         self.assertEqual(len(r["db"].download_logs), 1)
         self.assertEqual(r["db"].download_logs[0].outcome, "success")
+        r["mock_plex"].assert_called_once()
+        self.assertEqual(r["mock_plex"].call_args.args[1], imported_path)
         r["mock_jellyfin"].assert_called_once()
         self.assertEqual(
             r["mock_jellyfin"].call_args.args[1], imported_path)

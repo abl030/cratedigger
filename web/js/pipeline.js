@@ -213,6 +213,35 @@ function renderPipelineStatusButtons(requestId, status) {
 }
 
 /**
+ * Render the typed current Beets authority returned by request detail.
+ * @param {Object|null|undefined} current
+ * @returns {string}
+ */
+function renderCurrentLibraryRow(current) {
+  if (current?.state === 'unique') {
+    return renderDetailRow('Imported to', esc(current.path || ''), {
+      valueStyle: 'font-size:0.9em;',
+    });
+  }
+  if (current?.state === 'missing') {
+    return renderDetailRow('Current library', 'Not installed in Beets');
+  }
+  if (current?.state === 'ambiguous') {
+    const ids = Array.isArray(current.album_ids) && current.album_ids.length > 0
+      ? `; album IDs ${current.album_ids.join(', ')}`
+      : '';
+    return renderDetailRow(
+      'Current library',
+      `Manual review — ambiguous (${esc(current.reason || 'unknown')}${ids})`,
+    );
+  }
+  return renderDetailRow(
+    'Current library',
+    `Unavailable — manual review (${esc(current?.reason || 'beets_unavailable')})`,
+  );
+}
+
+/**
  * Toggle detail panel for a pipeline or recents item.
  * @param {string|number} elId - DOM id for the detail panel
  * @param {number} [requestId] - album_requests.id (defaults to elId for pipeline tab)
@@ -234,9 +263,7 @@ export async function toggleDetail(elId, requestId) {
     let html = '';
     // External link (MB or Discogs)
     html += renderExternalLinkRow(req.mb_release_id || '');
-    if (req.imported_path) {
-      html += renderDetailRow('Imported to', esc(req.imported_path), { valueStyle: 'font-size:0.9em;' });
-    }
+    html += renderCurrentLibraryRow(data.current_library);
 
     const beetsTracks = data.beets_tracks || [];
     html += renderCurrentQualityRow(req, beetsTracks);
@@ -371,6 +398,7 @@ export async function updateStatus(id, newStatus) {
 export const __test__ = {
   renderPipelineNav,
   renderPipelineStatusButtons,
+  renderCurrentLibraryRow,
   renderCurrentQualityRow,
   renderRequestEvidenceSections,
 };

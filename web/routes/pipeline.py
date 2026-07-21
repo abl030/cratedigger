@@ -23,6 +23,12 @@ import msgspec
 from pydantic import BaseModel, Field
 
 from lib.import_queue import ImportJob
+from lib.beets_db import CurrentBeetsUnique
+from lib.current_library_display import (
+    CurrentLibraryUnavailable,
+    current_library_display,
+    resolve_request_current_library,
+)
 
 if TYPE_CHECKING:
     from lib.pipeline_db import LatestDownloadSummary
@@ -446,18 +452,40 @@ def get_pipeline_detail(h: RouteHandler, params: dict[str, list[str]], req_id_st
     history_items = [item.to_dict() for item in build_download_history_rows(history)]
     search_history = s._db().get_search_history(req_id)
     last_search = _build_last_search_payload(search_history)
+    request_payload = s._serialize_row(req)
+    request_payload.pop("imported_path", None)
+    try:
+        b = s._beets_db()
+        current = resolve_request_current_library(req, b)
+    except Exception:
+        logger.exception(
+            "current Beets display unavailable for request %s", req_id,
+        )
+        current = CurrentLibraryUnavailable("beets_unavailable")
     result: dict[str, object] = {
-        "request": s._serialize_row(req),
+        "request": request_payload,
         "tracks": tracks,
         "history": history_items,
         "last_search": last_search,
+        "current_library": msgspec.to_builtins(current_library_display(current)),
     }
-    mbid = req.get("mb_release_id")
-    b = s._beets_db()
-    if mbid and b:
-        tracks = b.get_tracks_by_mb_release_id(mbid)
-        if tracks is not None:
-            result["beets_tracks"] = tracks
+    if isinstance(current, CurrentBeetsUnique):
+        result["beets_tracks"] = [
+            {
+                "title": item.title,
+                "track": item.track,
+                "disc": item.disc,
+                "length": item.length,
+                "format": item.format,
+                "bitrate": item.bitrate,
+                "samplerate": item.samplerate,
+                "bitdepth": item.bitdepth,
+            }
+            for item in sorted(
+                current.items,
+                key=lambda item: (item.disc or 0, item.track or 0, item.id),
+            )
+        ]
     h._json(result)
 
 
