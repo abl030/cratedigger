@@ -92,7 +92,15 @@ class _EvidenceMixin(_PipelineDBBase):
                 )
                 ON CONFLICT (mb_release_id, snapshot_fingerprint)
                 DO UPDATE SET
-                    source_path = EXCLUDED.source_path,
+                    -- A content-addressed row's source_path is the immutable
+                    -- historical capture location. Current Beets location is
+                    -- resolved separately at the point of use.
+                    source_path = CASE
+                        WHEN NULLIF(BTRIM(album_quality_evidence.source_path), '')
+                            IS NULL
+                        THEN EXCLUDED.source_path
+                        ELSE album_quality_evidence.source_path
+                    END,
                     measured_at = EXCLUDED.measured_at,
                     codec = EXCLUDED.codec,
                     container = EXCLUDED.container,

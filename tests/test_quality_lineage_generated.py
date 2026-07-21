@@ -11,6 +11,10 @@ from hypothesis import example, given, strategies as st
 import msgspec
 
 from harness.import_one import projected_is_cbr_from_bitrates
+from lib.beets_db import (
+    CurrentBeetsUnique,
+    release_identity_for_lookup,
+)
 from lib.import_evidence import ensure_current_evidence_for_action
 from lib.measurement import PreimportMeasurement
 from lib.import_preview import (
@@ -161,11 +165,11 @@ def assert_failure_v1_refresh_phases(
     refresh_status: str,
     final_lineage: int | None,
 ) -> None:
-    """A failed attempt defers v1 rebuilding until the request is wanted."""
+    """Failure preparation refreshes identity before later enrichment."""
     if outcome != "ready":
         raise AssertionError("installed current evidence was not prepared")
-    if initial_lineage == 1 and prepared_lineage != 1:
-        raise AssertionError("failure preparation rebuilt v1 before wanted")
+    if initial_lineage == 1 and prepared_lineage != 4:
+        raise AssertionError("failure preparation retained ambiguous lineage")
     if refresh_status != "wanted":
         raise AssertionError("failure refresh ran before request became wanted")
     if final_lineage != 4:
@@ -234,14 +238,14 @@ class TestQualityLineagePins(unittest.TestCase):
                 outcome="no_current_evidence",
             )
 
-    def test_failure_lineage_checker_rejects_eager_v1_rebuild(self):
-        with self.assertRaisesRegex(AssertionError, "before wanted"):
+    def test_failure_lineage_checker_rejects_retained_v1(self):
+        with self.assertRaisesRegex(AssertionError, "ambiguous lineage"):
             assert_failure_v1_refresh_phases(
                 outcome="ready",
                 initial_lineage=1,
-                prepared_lineage=3,
+                prepared_lineage=1,
                 refresh_status="wanted",
-                final_lineage=3,
+                final_lineage=4,
             )
 
     def test_import_attempt_checker_rejects_v1_decision_evidence(self):
@@ -467,12 +471,7 @@ class TestQualityLineagePins(unittest.TestCase):
                 format="AAC",
             ))
 
-            with patch(
-                "lib.beets_db.BeetsDB",
-                side_effect=AssertionError(
-                    "pre-log failure phase must not open Beets"
-                ),
-            ):
+            with patch("lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets):
                 prepared = prepare_current_evidence_for_failure(
                     db,
                     request_id=42,
@@ -595,15 +594,17 @@ class TestQualityLineagePins(unittest.TestCase):
             with patch(
                 "lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets,
             ):
-                current = load_current_evidence_for_preview(
+                result = load_current_evidence_for_preview(
                     db,
                     request_id=42,
                     mb_release_id="mbid-42",
                     quality_ranks=QualityRankConfig.defaults(),
                     beets_library_root=source,
                     preloaded_evidence=stored,
-                    preloaded_authoritative=True,
                 )
+            assert result.status == "ready"
+            current = result.evidence
+            assert current is not None
 
             action_db = FakePipelineDB()
             action_db.seed_request(make_request_row(
@@ -623,11 +624,15 @@ class TestQualityLineagePins(unittest.TestCase):
             )
             assert action_stored is not None and action_stored.id is not None
             action_db.set_request_current_evidence(42, action_stored.id)
+            identity = release_identity_for_lookup("mbid-42")
+            assert identity is not None
+            current_release = fake_beets.resolve_current_release(identity)
+            assert isinstance(current_release, CurrentBeetsUnique)
             action = ensure_current_evidence_for_action(
                 action_db,
                 request_id=42,
                 mb_release_id="mbid-42",
-                current_album_path=source,
+                current_release=current_release,
                 album_info=AlbumInfo(
                     album_id=1,
                     track_count=3,
@@ -644,7 +649,6 @@ class TestQualityLineagePins(unittest.TestCase):
             initial_lineage=1,
             decision_lineage=(current.lineage_version if current is not None else None),
         )
-        assert current is not None
         self.assertEqual(current.measurement.min_bitrate_kbps, minimum)
         self.assertEqual(current.measurement.avg_bitrate_kbps, average)
         self.assertEqual(current.measurement.median_bitrate_kbps, median)
@@ -899,6 +903,7 @@ class TestQualityLineagePins(unittest.TestCase):
                     request_id=42,
                     expected_evidence_id=stored.id,
                     expected_snapshot_fingerprint=stored.snapshot_fingerprint,
+                    current_album_path=source,
                     probe_fn=failed_probe,
                 )
 

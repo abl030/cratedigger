@@ -4695,6 +4695,38 @@ class TestDownloadLogOriginMigration(unittest.TestCase):
 
 
 @requires_postgres
+class TestDropRequestImportedPathCurrentSchema(unittest.TestCase):
+    def test_request_cache_is_gone_but_media_pin_paths_remain(self) -> None:
+        conn = psycopg2.connect(TEST_DSN)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT name FROM schema_migrations WHERE version = 61"
+                )
+                self.assertEqual(
+                    cur.fetchone(), ("drop_album_requests_imported_path",)
+                )
+                cur.execute("""
+                    SELECT table_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND column_name = 'imported_path'
+                      AND table_name IN (
+                          'album_requests',
+                          'plex_added_at_pins',
+                          'jellyfin_date_created_pins'
+                      )
+                    ORDER BY table_name
+                """)
+                self.assertEqual(cur.fetchall(), [
+                    ("jellyfin_date_created_pins",),
+                    ("plex_added_at_pins",),
+                ])
+        finally:
+            conn.close()
+
+
+@requires_postgres
 class TestSimplifySlskdTransferOwnershipCurrentSchema(unittest.TestCase):
     def test_current_schema_records_051_without_attempt_indexes(self) -> None:
         conn = psycopg2.connect(TEST_DSN)

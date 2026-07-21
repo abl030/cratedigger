@@ -4,6 +4,19 @@ The pipeline DB is PostgreSQL. DSN: `10.20.0.11:5432/cratedigger`. Access via `p
 
 Full schema lives in `migrations/*.sql`. This doc covers the fields that appear in debugging and the JSONB audit blobs.
 
+## `album_requests` — scheduler priority
+
+- `created_at TIMESTAMPTZ NOT NULL` is the immutable creation audit and starts
+  the ordinary 24-hour new-request window.
+- `priority_started_at TIMESTAMPTZ NULL` starts the same 24-hour scheduler
+  window for an explicit urgent operator action. Bad Rip is its sole producer:
+  it requeues the existing exact-release request without falsifying
+  `created_at`. Ordinary/manual requeues leave the field unchanged and do not
+  start a new window.
+
+Both timestamps affect only cohort allocation after the normal status, retry,
+active-plan, conflicting-work, and title gates pass. They never bypass backoff.
+
 ## `album_quality_evidence` — active quality evidence
 
 Active reusable album-quality evidence is stored relationally, not in JSONB.

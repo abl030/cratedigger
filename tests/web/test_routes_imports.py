@@ -172,7 +172,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                 mb_release_group_id="rg-abc-123",
                 min_bitrate=None, verified_lossless=False,
                 current_spectral_grade=None,
-                current_spectral_bitrate=None, imported_path=None,
+                current_spectral_bitrate=None,
                 **(request_overrides or {}),
             ))
         elif request_overrides:
@@ -819,8 +819,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         """Imported album: quality_label, quality_rank, verified_lossless reflect on-disk state."""
         self.assertTrue(self.db.mark_imported_with_rescue(
             100, expected_status="wanted", min_bitrate=207,
-            verified_lossless=True, current_spectral_grade="genuine",
-            imported_path="/mnt/virtio/Music/Beets/Artist/Album"))
+            verified_lossless=True, current_spectral_grade="genuine"))
         status, data = self._get("/api/wrong-matches")
         group = data["groups"][0]
         self.assertEqual(group["status"], "imported")

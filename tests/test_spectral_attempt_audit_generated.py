@@ -73,6 +73,7 @@ def _run_have_boundary_through_both_adapters(
     scanned_bitrate: int | None,
 ):
     """Drive normal measurement and reused front-gate through one boundary."""
+    from lib.beets_db import AlbumInfo
     from lib.config import CratediggerConfig
     from lib.import_queue import (
         IMPORT_JOB_FORCE,
@@ -94,7 +95,7 @@ def _run_have_boundary_through_both_adapters(
     )
     from lib.quality_evidence import snapshot_audio_files
     from scripts.import_preview_worker import process_claimed_preview_job
-    from tests.fakes import FakePipelineDB
+    from tests.fakes import FakeBeetsDB, FakePipelineDB
     from tests.helpers import make_album_quality_evidence, make_request_row
 
     request_id = 42
@@ -104,46 +105,61 @@ def _run_have_boundary_through_both_adapters(
         (converted_from or "").lower() in {"flac", "alac", "wav"}
         or lossless_v0_lineage
     )
-    current_evidence = make_album_quality_evidence(
-        mb_release_id=mbid,
-        measurement=AudioQualityMeasurement(
-            min_bitrate_kbps=320,
-            avg_bitrate_kbps=320,
-            median_bitrate_kbps=320,
-            format="MP3",
-            spectral_grade=persisted_grade,
-            spectral_bitrate_kbps=persisted_bitrate,
-            was_converted_from=converted_from,
-            spectral_subject=(
-                "source" if carries_lossless_lineage else "installed"
-            ),
-            spectral_provenance=(
-                "carried" if carries_lossless_lineage else "measured"
-            ),
+    current_measurement = AudioQualityMeasurement(
+        min_bitrate_kbps=320,
+        avg_bitrate_kbps=320,
+        median_bitrate_kbps=320,
+        format="MP3",
+        spectral_grade=persisted_grade,
+        spectral_bitrate_kbps=persisted_bitrate,
+        was_converted_from=converted_from,
+        spectral_subject=(
+            "source" if carries_lossless_lineage else "installed"
         ),
-        v0_metric=(
-            AlbumQualityV0Metric(
-                min_bitrate_kbps=200,
-                avg_bitrate_kbps=228,
-                median_bitrate_kbps=225,
-                subject=EVIDENCE_SUBJECT_SOURCE,
-                provenance="measured",
-            )
-            if lossless_v0_lineage
-            else None
+        spectral_provenance=(
+            "carried" if carries_lossless_lineage else "measured"
         ),
     )
-    preserve_source = preserve_existing_source_spectral(current_evidence)
-    persisted = SpectralAnalysisDetail(
-        attempted=True,
-        grade=persisted_grade,
-        bitrate_kbps=persisted_bitrate,
+    current_v0_metric = (
+        AlbumQualityV0Metric(
+            min_bitrate_kbps=200,
+            avg_bitrate_kbps=228,
+            median_bitrate_kbps=225,
+            subject=EVIDENCE_SUBJECT_SOURCE,
+            provenance="measured",
+        )
+        if lossless_v0_lineage
+        else None
     )
 
     with tempfile.TemporaryDirectory() as candidate, \
          tempfile.TemporaryDirectory() as existing:
         Path(candidate, "01.mp3").write_bytes(b"candidate")
         Path(existing, "01.mp3").write_bytes(b"existing")
+        current_evidence = make_album_quality_evidence(
+            mb_release_id=mbid,
+            source_path=existing,
+            files=snapshot_audio_files(existing),
+            measurement=current_measurement,
+            v0_metric=current_v0_metric,
+        )
+        preserve_source = preserve_existing_source_spectral(current_evidence)
+        persisted = SpectralAnalysisDetail(
+            attempted=True,
+            grade=persisted_grade,
+            bitrate_kbps=persisted_bitrate,
+        )
+        fake_beets = FakeBeetsDB()
+        fake_beets.set_album_info(mbid, AlbumInfo(
+            album_id=1,
+            track_count=1,
+            min_bitrate_kbps=320,
+            avg_bitrate_kbps=320,
+            median_bitrate_kbps=320,
+            is_cbr=True,
+            album_path=existing,
+            format="MP3",
+        ))
 
         normal_calls: list[str] = []
         reused_calls: list[str] = []
@@ -227,7 +243,10 @@ def _run_have_boundary_through_both_adapters(
         )
         claimed = db.claim_next_import_preview_job(worker_id="generated")
         assert claimed is not None and claimed.id == job.id
-        with _silence_logs():
+        with _silence_logs(), patch(
+            "lib.beets_db.BeetsDB",
+            lambda *_args, **_kwargs: fake_beets,
+        ):
             updated = process_claimed_preview_job(
                 db,
                 claimed,

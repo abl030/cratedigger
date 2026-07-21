@@ -155,6 +155,7 @@ def _explicit_fields(**values: object) -> dict[str, object]:
 _WANTED_FIELDS = frozenset({
     "min_bitrate",
     "prev_min_bitrate",
+    "priority_started_at",
     "search_filetype_override",
 })
 
@@ -167,7 +168,6 @@ _IMPORTED_FIELDS = frozenset({
     "current_lossless_source_v0_probe_median_bitrate",
     "current_lossless_source_v0_probe_min_bitrate",
     "final_format",
-    "imported_path",
     "last_download_spectral_bitrate",
     "last_download_spectral_grade",
     "min_bitrate",
@@ -251,6 +251,7 @@ class RequestTransition:
         search_filetype_override: object = _OMITTED,
         min_bitrate: object = _OMITTED,
         prev_min_bitrate: object = _OMITTED,
+        priority_started_at: object = _OMITTED,
     ) -> "RequestTransition":
         return cls(
             target_status="wanted",
@@ -260,6 +261,7 @@ class RequestTransition:
                 search_filetype_override=search_filetype_override,
                 min_bitrate=min_bitrate,
                 prev_min_bitrate=prev_min_bitrate,
+                priority_started_at=priority_started_at,
             ),
         )
 
@@ -279,6 +281,8 @@ class RequestTransition:
                 fields, "search_filetype_override"),
             min_bitrate=_field_or_omitted(fields, "min_bitrate"),
             prev_min_bitrate=_field_or_omitted(fields, "prev_min_bitrate"),
+            priority_started_at=_field_or_omitted(
+                fields, "priority_started_at"),
         )
 
     @classmethod
@@ -307,7 +311,6 @@ class RequestTransition:
         current_lossless_source_v0_probe_median_bitrate: object = _OMITTED,
         current_lossless_source_v0_probe_min_bitrate: object = _OMITTED,
         final_format: object = _OMITTED,
-        imported_path: object = _OMITTED,
         last_download_spectral_bitrate: object = _OMITTED,
         last_download_spectral_grade: object = _OMITTED,
         min_bitrate: object = _OMITTED,
@@ -333,7 +336,6 @@ class RequestTransition:
                     current_lossless_source_v0_probe_min_bitrate
                 ),
                 final_format=final_format,
-                imported_path=imported_path,
                 last_download_spectral_bitrate=last_download_spectral_bitrate,
                 last_download_spectral_grade=last_download_spectral_grade,
                 min_bitrate=min_bitrate,
@@ -366,7 +368,6 @@ class RequestTransition:
             current_lossless_source_v0_probe_min_bitrate=_field_or_omitted(
                 fields, "current_lossless_source_v0_probe_min_bitrate"),
             final_format=_field_or_omitted(fields, "final_format"),
-            imported_path=_field_or_omitted(fields, "imported_path"),
             last_download_spectral_bitrate=_field_or_omitted(
                 fields, "last_download_spectral_bitrate"),
             last_download_spectral_grade=_field_or_omitted(
@@ -597,7 +598,12 @@ def apply_transition(
     # Presence-based: only fields explicitly passed get written.
     # Omitted fields are preserved by reset_to_wanted / update_status.
     transition_fields: dict[str, Any] = {}
-    for _key in ("search_filetype_override", "min_bitrate", "prev_min_bitrate"):
+    for _key in (
+        "search_filetype_override",
+        "min_bitrate",
+        "prev_min_bitrate",
+        "priority_started_at",
+    ):
         if _key in extra:
             transition_fields[_key] = extra.pop(_key)
     state_json = extra.pop("state_json", None)

@@ -83,7 +83,7 @@ import msgspec
 
 
 class AlbumRequestRow(TypedDict):
-    """One ``SELECT * FROM album_requests`` row (53 columns as of schema 060)."""
+    """One ``SELECT * FROM album_requests`` row (53 columns as of schema 062)."""
 
     id: int
     mb_release_id: str | None
@@ -106,8 +106,8 @@ class AlbumRequestRow(TypedDict):
     next_retry_after: datetime | None
     beets_distance: float | None
     beets_scenario: str | None
-    imported_path: str | None
     created_at: datetime
+    priority_started_at: datetime | None
     updated_at: datetime
     min_bitrate: int | None
     prev_min_bitrate: int | None
@@ -354,7 +354,6 @@ class WrongMatchCandidateRow(TypedDict):
     request_verified_lossless: bool | None
     request_current_spectral_grade: str | None
     request_current_spectral_bitrate: int | None
-    request_imported_path: str | None
 
 
 def wrong_match_candidate_row(raw: Mapping[str, object]) -> WrongMatchCandidateRow:

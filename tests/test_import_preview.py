@@ -503,6 +503,22 @@ class TestImportPreviewPath(unittest.TestCase):
             handle.write(b"not real audio but never inspected in this test")
         return source
 
+    def _beets_current(self, source: str) -> FakeBeetsDB:
+        from lib.beets_db import AlbumInfo
+
+        beets = FakeBeetsDB(library_root=source)
+        beets.set_album_info("mbid-42", AlbumInfo(
+            album_id=1,
+            track_count=1,
+            min_bitrate_kbps=320,
+            avg_bitrate_kbps=320,
+            median_bitrate_kbps=320,
+            is_cbr=True,
+            album_path=source,
+            format="MP3",
+        ))
+        return beets
+
     def _seed_current_without_v0(
         self,
         db: FakePipelineDB,
@@ -775,16 +791,17 @@ class TestImportPreviewPath(unittest.TestCase):
                 format="MP3",
             ))
             with patch("lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets):
-                current = load_current_evidence_for_preview(
+                result = load_current_evidence_for_preview(
                     db,
                     request_id=42,
                     mb_release_id="mbid-42",
                     quality_ranks=QualityRankConfig.defaults(),
                     beets_library_root="",
                     preloaded_evidence=stored,
-                    preloaded_authoritative=True,
                 )
 
+            self.assertEqual(result.status, "ready")
+            current = result.evidence
             assert current is not None
             self.assertEqual(current.source_path, source)
             linked_id = db.get_request_current_evidence_id(42)
@@ -839,16 +856,17 @@ class TestImportPreviewPath(unittest.TestCase):
                 format="AAC",
             ))
             with patch("lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets):
-                current = load_current_evidence_for_preview(
+                result = load_current_evidence_for_preview(
                     db,
                     request_id=42,
                     mb_release_id="mbid-42",
                     quality_ranks=QualityRankConfig.defaults(),
                     beets_library_root=source,
                     preloaded_evidence=stored,
-                    preloaded_authoritative=True,
                 )
 
+            self.assertEqual(result.status, "ready")
+            current = result.evidence
             assert current is not None
             self.assertEqual(current.id, stored.id)
             self.assertEqual(current.lineage_version, 4)
@@ -977,7 +995,7 @@ class TestImportPreviewPath(unittest.TestCase):
             import shutil
             shutil.rmtree(source, ignore_errors=True)
 
-    def test_attempt_scan_cannot_persist_for_a_different_installed_path(self):
+    def test_attempt_scan_accepts_moved_path_with_the_exact_fingerprint(self):
         db = self._db()
         source = self._source_dir()
         other = self._source_dir()
@@ -1014,11 +1032,12 @@ class TestImportPreviewPath(unittest.TestCase):
                 measured_existing_path=other,
             )
 
-            self.assertEqual(result.status, "stale")
+            self.assertEqual(result.status, "ready")
             persisted = db.load_album_quality_evidence_by_id(current.id)
             assert persisted is not None
-            self.assertIsNone(persisted.measurement.spectral_grade)
-            self.assertIsNone(persisted.measurement.spectral_bitrate_kbps)
+            self.assertEqual(persisted.measurement.spectral_grade, "genuine")
+            self.assertEqual(persisted.measurement.spectral_bitrate_kbps, 96)
+            self.assertEqual(persisted.source_path, source)
         finally:
             import shutil
             shutil.rmtree(source, ignore_errors=True)
@@ -1113,6 +1132,9 @@ class TestImportPreviewPath(unittest.TestCase):
                 mb_release_id="mbid-42-candidate"
             )
             with patch(
+                "lib.beets_db.BeetsDB",
+                return_value=self._beets_current(source),
+            ), patch(
                 "lib.config.read_runtime_config",
                 return_value=CratediggerConfig(
                     beets_harness_path="/fake/harness/run_beets_harness.sh",
@@ -1163,6 +1185,7 @@ class TestImportPreviewPath(unittest.TestCase):
                 request_id=42,
                 expected_evidence_id=current.id,
                 expected_snapshot_fingerprint=current.snapshot_fingerprint,
+                current_album_path=source,
                 probe_fn=failed_probe,
             )
             second = enrich_current_v0_research_for_preview(
@@ -1170,6 +1193,7 @@ class TestImportPreviewPath(unittest.TestCase):
                 request_id=42,
                 expected_evidence_id=current.id,
                 expected_snapshot_fingerprint=current.snapshot_fingerprint,
+                current_album_path=source,
                 probe_fn=failed_probe,
             )
 
@@ -1194,6 +1218,7 @@ class TestImportPreviewPath(unittest.TestCase):
                 request_id=42,
                 expected_evidence_id=current.id,
                 expected_snapshot_fingerprint=current.snapshot_fingerprint,
+                current_album_path=source,
                 probe_fn=lambda _path: V0ProbeEvidence(
                     kind="on_disk_research_v0",
                     min_bitrate_kbps=201,
@@ -1233,6 +1258,7 @@ class TestImportPreviewPath(unittest.TestCase):
                 request_id=42,
                 expected_evidence_id=current.id + 1,
                 expected_snapshot_fingerprint=current.snapshot_fingerprint,
+                current_album_path=source,
                 probe_fn=probe,
             )
             with open(os.path.join(source, "01.mp3"), "ab") as handle:
@@ -1242,6 +1268,7 @@ class TestImportPreviewPath(unittest.TestCase):
                 request_id=42,
                 expected_evidence_id=current.id,
                 expected_snapshot_fingerprint=current.snapshot_fingerprint,
+                current_album_path=source,
                 probe_fn=probe,
             )
 
@@ -1274,10 +1301,61 @@ class TestImportPreviewPath(unittest.TestCase):
                 request_id=42,
                 expected_evidence_id=current.id,
                 expected_snapshot_fingerprint=current.snapshot_fingerprint,
+                current_album_path=source,
                 probe_fn=mutating_probe,
             )
 
             self.assertEqual(result.status, "stale")
+            persisted = db.load_album_quality_evidence_by_id(current.id)
+            assert persisted is not None
+            self.assertFalse(persisted.on_disk_v0_research_attempted)
+            self.assertIsNone(persisted.v0_metric)
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_preview_loader_rejects_have_when_v0_probe_changes_files(self):
+        """A stale enrichment result must invalidate the whole preview HAVE."""
+        from lib.import_preview import load_current_evidence_for_preview
+
+        db = self._db()
+        source = self._source_dir()
+        try:
+            current = self._seed_current_without_v0(db, source)
+
+            def mutating_probe(path: str) -> V0ProbeEvidence:
+                with open(os.path.join(path, "01.mp3"), "ab") as handle:
+                    handle.write(b"changed during wrapper probe")
+                return V0ProbeEvidence(
+                    kind="on_disk_research_v0",
+                    min_bitrate_kbps=201,
+                    avg_bitrate_kbps=259,
+                    median_bitrate_kbps=255,
+                )
+
+            def mutating_enrichment(*args: Any, **kwargs: Any):
+                return enrich_current_v0_research_for_preview(
+                    *args,
+                    **kwargs,
+                    probe_fn=mutating_probe,
+                )
+
+            with patch(
+                "lib.beets_db.BeetsDB",
+                return_value=self._beets_current(source),
+            ):
+                result = load_current_evidence_for_preview(
+                    db,
+                    request_id=42,
+                    mb_release_id="mbid-42",
+                    quality_ranks=QualityRankConfig.defaults(),
+                    beets_library_root=source,
+                    preloaded_evidence=current,
+                    enrich_current_fn=mutating_enrichment,
+                )
+
+            self.assertEqual(result.status, "stale")
+            self.assertIsNone(result.evidence)
             persisted = db.load_album_quality_evidence_by_id(current.id)
             assert persisted is not None
             self.assertFalse(persisted.on_disk_v0_research_attempted)
@@ -1307,6 +1385,7 @@ class TestImportPreviewPath(unittest.TestCase):
                 request_id=42,
                 expected_evidence_id=current.id,
                 expected_snapshot_fingerprint=current.snapshot_fingerprint,
+                current_album_path=source,
                 probe_fn=relinking_probe,
             )
 
@@ -1399,7 +1478,188 @@ class TestImportPreviewPath(unittest.TestCase):
         assert persisted is not None and persisted.id is not None
         db.set_request_current_evidence(42, persisted.id)
 
-        self.assertEqual(self._direct_preview_override(db), 320)
+        # Exact absence discards the stale linked row wholesale: no HAVE
+        # bitrate/spectral/V0/override input may survive into the dry run.
+        self.assertIsNone(self._direct_preview_override(db))
+
+    def test_direct_preview_ambiguous_current_fails_before_measurement(self):
+        db = self._db()
+        source = self._source_dir()
+        fake_beets = FakeBeetsDB()
+        fake_beets.set_album_ids_for_release("mbid-42", [1, 2])
+        try:
+            with patch(
+                "lib.config.read_runtime_config",
+                return_value=CratediggerConfig(
+                    beets_harness_path="/fake/harness/run_beets_harness.sh",
+                    pipeline_db_enabled=True,
+                ),
+            ), patch(
+                "lib.beets_db.BeetsDB",
+                lambda **_kwargs: fake_beets,
+            ), patch(
+                "lib.import_preview.measure_preimport_state",
+            ) as mock_measure:
+                preview = preview_import_from_path(
+                    db,
+                    request_id=42,
+                    path=source,
+                )
+
+            self.assertEqual(preview.verdict, "measurement_failed")
+            self.assertEqual(preview.decision, "current_evidence_failed")
+            self.assertIn("ambiguous_current", preview.detail or "")
+            mock_measure.assert_not_called()
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_measurement_worker_stale_have_enrichment_fails_before_measurement(
+        self,
+    ):
+        """A lost HAVE authority cannot degrade into an absent comparison."""
+        db = self._db()
+        source = self._source_dir()
+        try:
+            def stale_current(*_args: Any, **_kwargs: Any) -> EvidenceBuildResult:
+                return EvidenceBuildResult(
+                    None,
+                    "stale",
+                    "current files changed during V0 probe",
+                )
+
+            with patch(
+                "lib.import_preview.inspect_local_files",
+            ) as inspect, patch(
+                "lib.import_preview.run_import_one",
+            ) as run_import:
+                result = measure_and_persist_candidate_evidence(
+                    db,
+                    request_id=42,
+                    path=source,
+                    current_evidence_loader=stale_current,
+                )
+
+            self.assertEqual(result.verdict, "measurement_failed")
+            self.assertEqual(result.decision, "current_evidence_failed")
+            self.assertIn("stale", result.detail or "")
+            inspect.assert_not_called()
+            run_import.assert_not_called()
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_direct_preview_rebuilds_changed_or_poisoned_link_before_use(self):
+        for poisoned_identity in (False, True):
+            with self.subTest(poisoned_identity=poisoned_identity):
+                db = self._db()
+                candidate = self._source_dir()
+                current = self._source_dir()
+                fake_beets = FakeBeetsDB()
+                try:
+                    linked = make_album_quality_evidence(
+                        mb_release_id=(
+                            "other-exact-release"
+                            if poisoned_identity
+                            else "mbid-42"
+                        ),
+                        files=snapshot_audio_files(current),
+                        measurement=AudioQualityMeasurement(
+                            min_bitrate_kbps=320,
+                            avg_bitrate_kbps=320,
+                            format="MP3",
+                            spectral_grade="likely_transcode",
+                            spectral_bitrate_kbps=96,
+                            spectral_subject="source",
+                            spectral_provenance="measured",
+                        ),
+                    )
+                    db.upsert_album_quality_evidence(linked)
+                    stored = db.find_album_quality_evidence(
+                        mb_release_id=linked.mb_release_id,
+                        snapshot_fingerprint=linked.snapshot_fingerprint,
+                    )
+                    assert stored is not None and stored.id is not None
+                    db.set_request_current_evidence(42, stored.id)
+                    if not poisoned_identity:
+                        with open(os.path.join(current, "01.mp3"), "ab") as fh:
+                            fh.write(b"changed-current-bytes")
+                    from lib.beets_db import AlbumInfo
+                    fake_beets.set_album_info(
+                        "mbid-42",
+                        AlbumInfo(
+                            album_id=1,
+                            track_count=1,
+                            min_bitrate_kbps=128,
+                            avg_bitrate_kbps=128,
+                            median_bitrate_kbps=128,
+                            is_cbr=True,
+                            album_path=current,
+                            format="MP3",
+                        ),
+                    )
+                    run = SimpleNamespace(import_result=ImportResult(
+                        decision="import",
+                        source_measurement=AudioQualityMeasurement(
+                            min_bitrate_kbps=245,
+                            avg_bitrate_kbps=245,
+                            format="MP3",
+                        ),
+                    ))
+                    with patch(
+                        "lib.config.read_runtime_config",
+                        return_value=CratediggerConfig(
+                            beets_harness_path="/fake/harness/run_beets_harness.sh",
+                            pipeline_db_enabled=True,
+                        ),
+                    ), patch(
+                        "lib.beets_db.BeetsDB",
+                        lambda **_kwargs: fake_beets,
+                    ), patch(
+                        "lib.import_preview.inspect_local_files",
+                        return_value=LocalFileInspection(filetype="mp3"),
+                    ), patch(
+                        "lib.import_preview.measure_preimport_state",
+                        return_value=PreimportMeasurement(
+                            folder_layout="flat",
+                            audio_file_count=1,
+                        ),
+                    ) as mock_measure, patch(
+                        "lib.import_preview.run_import_one",
+                        return_value=run,
+                    ) as mock_run:
+                        preview_import_from_path(
+                            db,
+                            request_id=42,
+                            path=candidate,
+                        )
+
+                    measurement_args = mock_measure.call_args.kwargs
+                    self.assertFalse(
+                        measurement_args["preserve_existing_source_spectral"]
+                    )
+                    if poisoned_identity:
+                        self.assertIsNone(
+                            measurement_args["existing_spectral_evidence"].grade
+                        )
+                    refreshed = db.load_album_quality_evidence_by_id(
+                        db.get_request_current_evidence_id(42)
+                    )
+                    assert refreshed is not None
+                    self.assertEqual(refreshed.mb_release_id, "mbid-42")
+                    self.assertEqual(refreshed.source_path, current)
+                    self.assertEqual(
+                        refreshed.snapshot_fingerprint,
+                        snapshot_fingerprint(snapshot_audio_files(current)),
+                    )
+                    self.assertNotEqual(
+                        mock_run.call_args.kwargs["override_min_bitrate"],
+                        320,
+                    )
+                    self.assertIsNone(
+                        mock_run.call_args.kwargs["existing_v0_probe"]
+                    )
+                finally:
+                    shutil.rmtree(candidate, ignore_errors=True)
+                    shutil.rmtree(current, ignore_errors=True)
 
     def test_real_path_preview_runs_harness_dry_run_without_db_writes(self):
         db = self._db()
@@ -1859,6 +2119,9 @@ class TestImportPreviewPath(unittest.TestCase):
         try:
             self._seed_current_without_v0(db, source)
             with patch(
+                "lib.beets_db.BeetsDB",
+                return_value=self._beets_current(source),
+            ), patch(
                 "lib.config.read_runtime_config",
                 return_value=CratediggerConfig(
                     beets_harness_path="/fake/harness/run_beets_harness.sh",
@@ -2289,6 +2552,21 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
         )
 
     def _enrich(self, db, analyzer, probe):
+        def load_current(db_arg, **_kwargs):
+            evidence_id = db_arg.get_request_current_evidence_id(42)
+            evidence = db_arg.load_album_quality_evidence_by_id(evidence_id)
+            if evidence is None:
+                return EvidenceBuildResult(
+                    None,
+                    "empty_current",
+                    "exact album not in beets",
+                )
+            return EvidenceBuildResult(
+                evidence,
+                "ready",
+                current_album_path=evidence.source_path,
+            )
+
         return enrich_incomplete_current_evidence_for_request(
             db,
             request_id=42,
@@ -2297,6 +2575,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
             beets_library_root="",
             spectral_analyzer=analyzer,
             probe_fn=probe,
+            load_fn=load_current,
         )
 
     def test_complete_row_skips_all_measurement(self):
@@ -2322,27 +2601,31 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
             v0_attempted=True,
         )
 
-        with patch(
-            "lib.beets_db.BeetsDB",
-            side_effect=AssertionError("complete HAVE must not open Beets"),
-        ):
-            outcome = prepare_current_evidence_for_failure(
-                db,
-                request_id=42,
-                mb_release_id="mbid-42",
-                quality_ranks=QualityRankConfig.defaults(),
-                beets_library_root=source,
-            )
+        calls: list[object] = []
+
+        def load_current(*_args, **_kwargs):
+            calls.append(_kwargs.get("preloaded_evidence"))
+            return EvidenceBuildResult(before, "ready")
+
+        outcome = prepare_current_evidence_for_failure(
+            db,
+            request_id=42,
+            mb_release_id="mbid-42",
+            quality_ranks=QualityRankConfig.defaults(),
+            beets_library_root=source,
+            load_fn=load_current,
+        )
 
         current_id = db.get_request_current_evidence_id(42)
         self.assertEqual(outcome, "ready")
+        self.assertEqual(calls, [before])
         self.assertEqual(current_id, before.id)
         self.assertEqual(
             db.load_album_quality_evidence_by_id(current_id),
             before,
         )
 
-    def test_failure_defers_complete_v1_rebuild_until_after_wanted(self):
+    def test_failure_refreshes_complete_v1_through_current_beets(self):
         from lib.beets_db import AlbumInfo
         from tests.fakes import FakeBeetsDB
 
@@ -2383,10 +2666,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
         ))
 
         db.update_status(42, "downloading", expected_status="wanted")
-        with patch(
-            "lib.beets_db.BeetsDB",
-            side_effect=AssertionError("pre-log failure phase must not open Beets"),
-        ):
+        with patch("lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets):
             prepared = prepare_current_evidence_for_failure(
                 db,
                 request_id=42,
@@ -2400,7 +2680,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
         self.assertEqual(current_id, before.id)
         current = db.load_album_quality_evidence_by_id(current_id)
         assert current is not None
-        self.assertEqual(current.lineage_version, 1)
+        self.assertEqual(current.lineage_version, 4)
         self.assertEqual(db.request(42)["status"], "downloading")
 
         db.update_status(42, "wanted", expected_status="downloading")

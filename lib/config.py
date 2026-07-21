@@ -128,8 +128,7 @@ class CratediggerConfig:
     # Absolute path to the beets library root (matches `directory:` in
     # ~/.config/beets/config.yaml). Beets stores file paths in its SQLite
     # DB as relative to this root, so `BeetsDB.get_album_info().album_path`
-    # is also relative. Consumers that perform host-side filesystem ops
-    # (cleanup_disambiguation_orphans) or send absolute paths to external
+    # is also relative. Consumers that send absolute paths to external
     # services (trigger_plex_scan on bare-metal Plex) need to absolutize
     # against this root. Optional — leave empty if the equivalent
     # absolutization is provided via `plex_path_map` instead.

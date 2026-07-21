@@ -85,18 +85,19 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "hash unchanged since this call sits outside every edited scope — "
         "no SQL change)"
     ),
-    ("lib/pipeline_db/download_log.py", 782, "ac41f71665bf6826"): (
+    ("lib/pipeline_db/download_log.py", 782, "8fea92f576d79b49"): (
         "validation key is selected from a closed server-owned vocabulary "
-        "(issue #784: return type retyped to list[WrongMatchCandidateRow], "
-        "no SQL change)"
+        "(issue #762: the removed request imported-path projection changed "
+        "the enclosing query fingerprint; dynamic validation-key grammar is "
+        "unchanged)"
     ),
-    ("lib/pipeline_db/download_log.py", 840, "e0154e89026dc8ef"): (
+    ("lib/pipeline_db/download_log.py", 839, "e0154e89026dc8ef"): (
         "validation key is selected from a closed server-owned vocabulary"
     ),
-    ("lib/pipeline_db/download_log.py", 858, "1ca75e0c21fa6d7e"): (
+    ("lib/pipeline_db/download_log.py", 857, "1ca75e0c21fa6d7e"): (
         "validation key is closed vocabulary and IN list is value placeholders"
     ),
-    ("lib/pipeline_db/download_log.py", 875, "d87a36ba1d1768e7"): (
+    ("lib/pipeline_db/download_log.py", 874, "d87a36ba1d1768e7"): (
         "JSON path key is selected from a closed server-owned vocabulary"
     ),
     ("lib/pipeline_db/import_jobs.py", 111, "ecf3d1844c67f653"): (
@@ -136,42 +137,41 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "issue #784: `add_request` annotated above, shifting this line by "
         "+10; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 474, "44234eb14b8ecd52"): (
+    ("lib/pipeline_db/requests.py", 471, "44234eb14b8ecd52"): (
         "metadata keys are validated identifiers, lifecycle fields are reserved, "
         "and values use one typed JSONB record parameter "
         "(issue #784: `dumps=lambda value: msgspec.json.encode(value).decode()` "
         "replaced with the shared `_msgspec_json_dumps` helper from "
-        "`_shared.py`, and `add_request` annotated above shifting this line "
-        "by +10 — same encoder, same output, no SQL change)"
+        "`_shared.py`, while issue #762 removed the obsolete request path cache; "
+        "same encoder, same output, no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 492, "d969cab8f56eead9"): (
+    ("lib/pipeline_db/requests.py", 489, "d969cab8f56eead9"): (
         "metadata keys are validated identifiers, lifecycle fields are reserved, "
         "and values use one typed JSONB record parameter "
         "(issue #784: `dumps=lambda value: msgspec.json.encode(value).decode()` "
         "replaced with the shared `_msgspec_json_dumps` helper from "
-        "`_shared.py`, and `add_request` annotated above shifting this line "
-        "by +10 — same encoder, same output, no SQL change)"
+        "`_shared.py`, while issue #762 removed the obsolete request path cache; "
+        "same encoder, same output, no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1340, "ef9d09dcf1118fd0"): (
+    ("lib/pipeline_db/requests.py", 1338, "ef9d09dcf1118fd0"): (
         "optional LIMIT is normalized through int before interpolation "
         "(issue #765: return type retyped to list[AlbumRequestRow], no SQL "
         "change; issue #784: `limit` parameter annotated `int | None`, "
-        "changing the enclosing-scope fingerprint; `add_request` annotated "
-        "above shifting this line a further +10; no SQL change)"
+        "changing the enclosing-scope fingerprint; issues #784 and #762 shifted "
+        "the final merged line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1361, "042a7becce5f90f7"): (
+    ("lib/pipeline_db/requests.py", 1359, "042a7becce5f90f7"): (
         "ORDER is selected from two literals and LIMIT remains a value placeholder "
         "(issue #765: return type retyped to list[AlbumRequestRow], no SQL change; "
         "issue #784: `status`/`limit`/`newest_first` parameters annotated, "
-        "changing the enclosing-scope fingerprint; `add_request` annotated "
-        "above shifting this line a further +10; no SQL change)"
+        "changing the enclosing-scope fingerprint; issues #784 and #762 shifted "
+        "the final merged line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1546, "714da98640ff84f0"): (
+    ("lib/pipeline_db/requests.py", 1544, "714da98640ff84f0"): (
         "attempt kind is validated against the fixed retry-counter vocabulary "
-        "(issue #784: `get_by_status` parameters annotated above, shifting "
-        "this line by +6, and `add_request` annotated further above shifting "
-        "it a further +10; hash unchanged — this statement is a plain string "
-        "constant, not scope-bound, so no SQL change)"
+        "(issues #784 and #762 shifted this line without changing the hash; "
+        "this statement is a plain string constant, not scope-bound, so no SQL "
+        "change)"
     ),
 }
 
@@ -197,53 +197,40 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/download_log.py", 428, "6c7d7519e8c91827"): (
         "atomic abandoned-import recovery performs downloading-to-wanted CAS"
     ),
-    ("lib/pipeline_db/requests.py", 299, "558917722283199d"): (
+    ("lib/pipeline_db/requests.py", 299, "b3d1cf06b29bd1d6"): (
         "Replace holds the row lock and CASes the captured active source status "
-        "(issue #784: `add_request` annotated above, shifting this line by "
-        "+10; hash unchanged since this method's own scope is untouched — "
-        "no SQL change)"
+        "(issue #784 shifted the line and issue #762 removed the obsolete "
+        "imported-path assignment from this lifecycle scope; SQL unchanged)"
     ),
-    ("lib/pipeline_db/requests.py", 782, "3c900d15e8bfd2b2"): (
+    ("lib/pipeline_db/requests.py", 779, "3c900d15e8bfd2b2"): (
         "operator idempotence uses a no-op CAS against the observed status "
-        "(issue #784: `add_request` annotated above, shifting this line by "
-        "+10; hash unchanged since this method's own scope is untouched — "
-        "no SQL change)"
+        "(issues #784 and #762 shifted this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 817, "cb4bc190bb194188"): (
+    ("lib/pipeline_db/requests.py", 814, "cb4bc190bb194188"): (
         "ordinary typed transitions CAS the source status selected by the DAG "
-        "(issue #784: `add_request` annotated above, shifting this line by "
-        "+10; hash unchanged since this method's own scope is untouched — "
-        "no SQL change)"
+        "(issues #784 and #762 shifted this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 915, "c99b75cd27718b63"): (
+    ("lib/pipeline_db/requests.py", 912, "c99b75cd27718b63"): (
         "typed imported transition CASes status with rescue audit atomically "
-        "(issue #784: `add_request` annotated above, shifting this line by "
-        "+10; hash unchanged since this method's own scope is untouched — "
-        "no SQL change)"
+        "(issues #784 and #762 shifted this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1053, "c062c0704de758f9"): (
-        "typed reset-to-wanted transition CASes its captured source status "
-        "(issue #784: `add_request` annotated above, shifting this line by "
-        "+10; hash unchanged since this method's own scope is untouched — "
-        "no SQL change)"
+    ("lib/pipeline_db/requests.py", 1047, "26ece44e4e17577c"): (
+        "typed reset-to-wanted transition CASes its captured source status; "
+        "the Bad Rip priority timestamp is a static CASE update in the same CAS "
+        "(issues #784 and #762 shifted this line and removed the obsolete "
+        "request path cache)"
     ),
-    ("lib/pipeline_db/requests.py", 1122, "cfedc69363af13f0"): (
+    ("lib/pipeline_db/requests.py", 1120, "cfedc69363af13f0"): (
         "automatic recovery accepts only downloading as its exact source "
-        "(issue #784: `add_request` annotated above, shifting this line by "
-        "+10; hash unchanged since this method's own scope is untouched — "
-        "no SQL change)"
+        "(issues #784 and #762 shifted this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1167, "2b2c27302b2ab78e"): (
+    ("lib/pipeline_db/requests.py", 1165, "2b2c27302b2ab78e"): (
         "typed download claim accepts only the explicit wanted source status "
-        "(issue #784: `add_request` annotated above, shifting this line by "
-        "+10; hash unchanged since this method's own scope is untouched — "
-        "no SQL change)"
+        "(issues #784 and #762 shifted this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1203, "186e1c3ba3188478"): (
+    ("lib/pipeline_db/requests.py", 1201, "186e1c3ba3188478"): (
         "plan-aware download claim uses an exact wanted source predicate "
-        "(issue #784: `add_request` annotated above, shifting this line by "
-        "+10; hash unchanged since this method's own scope is untouched — "
-        "no SQL change)"
+        "(issues #784 and #762 shifted this line; no SQL change)"
     ),
 }
 

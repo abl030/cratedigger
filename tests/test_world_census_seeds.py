@@ -31,6 +31,7 @@ class TestWorldCensusSeeds(unittest.TestCase):
         )
         self.assertIn("Opus", {seed.storage_format for seed in WORLD_CENSUS_SEEDS})
         self.assertIn("MP3", {seed.storage_format for seed in WORLD_CENSUS_SEEDS})
+        self.assertIn("both", {seed.identity_shape for seed in WORLD_CENSUS_SEEDS})
         self.assertTrue(all(seed.observed_rows > 0 for seed in WORLD_CENSUS_SEEDS))
 
     def test_committed_census_contains_no_production_identity_or_path(self) -> None:
@@ -45,6 +46,12 @@ class TestWorldCensusSeeds(unittest.TestCase):
         self.assertEqual(
             {seed.status for seed in STATEFUL_WORLD_CENSUS_SEEDS},
             {"imported", "wanted"},
+        )
+        self.assertNotIn(
+            "both",
+            {seed.identity_shape for seed in STATEFUL_WORLD_CENSUS_SEEDS},
+            "conflicting dual-provider rows remain census and pinned-operation "
+            "fixtures, but cannot be clean state-machine starting worlds",
         )
 
     def test_anonymization_checker_trips_on_a_planted_path(self) -> None:

@@ -638,7 +638,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             # import_job is via the FK we wired in the helper.
             self.assertEqual(payload.candidate.mb_release_id, "mbid-123")
             assert payload.current is not None
-            self.assertEqual(payload.current.mb_release_id, "mbid-123-current")
+            self.assertEqual(payload.current.mb_release_id, "mbid-123")
             self.assertIs(payload.decision["imported"], True)
         finally:
             import shutil

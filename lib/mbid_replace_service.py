@@ -299,8 +299,7 @@ class MbidReplaceService:
            pre-supersede state (artist/title for staging path, exact release
            identity, status), then resolve the current Beets album snapshot.
         3. DB transaction: ``supersede_request_mbid`` atomically flips
-           the old row's status, clears ``imported_path``, inserts the
-           new row, inserts tracks.
+           the old row's status, inserts the new row, and inserts tracks.
         4. Filesystem cleanup (non-fatal warnings collected):
            - beets removal of the old release whenever its id resolves —
              request status is irrelevant (backfill rows are wanted with
@@ -798,7 +797,7 @@ class MbidReplaceService:
         """
         # Phase 1 — acquire IMPORT advisory lock. See docs/advisory-locks.md.
         # We acquire BEFORE re-reading the source row so the importer
-        # worker cannot finish (and flip status / set imported_path)
+        # worker cannot finish and flip status
         # between our state capture and the supersede mutation.
         warnings: list[str] = []
         with self.db.advisory_lock(

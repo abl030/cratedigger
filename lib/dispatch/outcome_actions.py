@@ -208,7 +208,6 @@ def _do_mark_done(
     dest_path: str | None,
     outcome_label: DownloadLogOutcome = "success",
     detail: str | None = None,
-    imported_path: str | None = None,
     clear_stale_v0_probe: bool = True,
     attempt_result: ImportAttemptResult | None = None,
     import_job_id: int | None = None,
@@ -219,14 +218,9 @@ def _do_mark_done(
     Takes PipelineDB directly instead of going through DatabaseSource.
     Uses outcome_label for download_log (e.g. "force_import" instead of "success").
 
-    ``imported_path`` is the beets destination (from
-    ``ImportResult.postflight.imported_path``) — what shows up in the UI's
-    "Imported to" label. ``dest_path`` is the source/staging path passed to
-    the importer. When callers have both (automation/force paths that ran
-    beets), they pass ``imported_path`` so ``album_requests.imported_path``
-    reflects the actual on-disk location. Callers that only stage for manual
-    review (``album_source.mark_done``) leave ``imported_path=None``; it
-    falls back to ``dest_path`` so legacy behavior is preserved (issue #93).
+    ``dest_path`` is the source/staging path recorded on the download audit.
+    Current library location is resolved from Beets and is never copied onto
+    the request row.
     """
     from lib.quality import SpectralMeasurement, is_verified_lossless
     from lib.pipeline_db import RequestSpectralStateUpdate, RequestV0ProbeStateUpdate
@@ -234,7 +228,6 @@ def _do_mark_done(
     update_fields: dict[str, object] = dict(
         beets_distance=distance,
         beets_scenario=scenario,
-        imported_path=imported_path if imported_path else dest_path,
     )
     verified_lossless = (
         bool(dl_info.verified_lossless_override)

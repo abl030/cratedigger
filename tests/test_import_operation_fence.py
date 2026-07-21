@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from lib.dispatch import DispatchOutcome
 from lib.dispatch.types import PostCommitCleanup
+from lib.import_evidence import ensure_candidate_evidence_for_action
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
@@ -21,6 +22,7 @@ from lib.import_queue import (
     youtube_import_payload,
 )
 from lib.pipeline_db import PipelineDB
+from lib.quality_evidence import snapshot_audio_files
 from lib.import_job_recovery_service import resolve_import_job_recovery
 from lib.terminal_outcomes import (
     ImportJobTerminal,
@@ -137,47 +139,72 @@ class TestImportOperationFence(unittest.TestCase):
         self.assertIsNone(current.beets_launch_authorized_at)
 
     def test_relocated_evidence_uses_job_path_as_launch_authority(self) -> None:
-        """Evidence location is metadata; the owned job path is authority."""
+        """Moved bytes use owned job path without rewriting evidence metadata."""
 
         db = FakePipelineDB()
-        source_path = "/failed_imports/operator-copy"
-        db.seed_request(make_request_row(
-            id=42,
-            mb_release_id="release-42",
-            status="wanted",
-        ))
-        job = db.enqueue_import_job(
-            IMPORT_JOB_FORCE,
-            request_id=42,
-            dedupe_key=force_import_dedupe_key(7004),
-            payload=force_import_payload(
-                download_log_id=7004,
-                failed_path=source_path,
-            ),
-        )
-        fingerprint = _seed_candidate(
-            db,
-            job.id,
-            release_id="release-42",
-            source_path="/pre-quarantine/operator-copy",
-        )
-        db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
-        claimed = db.claim_next_import_job(worker_id="worker")
-        assert claimed is not None
+        with tempfile.TemporaryDirectory() as action_path:
+            with open(os.path.join(action_path, "01.mp3"), "wb") as handle:
+                handle.write(b"moved-but-identical")
+            capture_path = "/pre-quarantine/operator-copy"
+            db.seed_request(make_request_row(
+                id=42,
+                mb_release_id="release-42",
+                status="wanted",
+            ))
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(7004),
+                payload=force_import_payload(
+                    download_log_id=7004,
+                    failed_path=action_path,
+                ),
+            )
+            evidence = make_album_quality_evidence(
+                mb_release_id="release-42",
+                source_path=capture_path,
+                files=snapshot_audio_files(action_path),
+            )
+            db.upsert_album_quality_evidence(evidence)
+            persisted = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert persisted is not None and persisted.id is not None
+            db.set_import_job_candidate_evidence(job.id, persisted.id)
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+            )
+            claimed = db.claim_next_import_job(worker_id="worker")
+            assert claimed is not None
 
-        authorized = db.authorize_import_job_launch(
-            claimed.id,
-            request_id=42,
-            release_id="release-42",
-            source_path=source_path,
-        )
+            candidate = ensure_candidate_evidence_for_action(
+                db,
+                source_path=action_path,
+                import_job_id=claimed.id,
+            )
+            self.assertTrue(candidate.available)
+            assert candidate.evidence is not None
+            self.assertEqual(candidate.evidence.source_path, capture_path)
 
-        assert authorized is not None
-        self.assertEqual(authorized.beets_launch_source_path, source_path)
-        self.assertEqual(
-            authorized.beets_launch_snapshot_fingerprint,
-            fingerprint,
-        )
+            active_job_path = str(claimed.payload["failed_path"])
+            authorized = db.authorize_import_job_launch(
+                claimed.id,
+                request_id=42,
+                release_id="release-42",
+                source_path=active_job_path,
+            )
+
+            assert authorized is not None
+            self.assertEqual(authorized.beets_launch_source_path, action_path)
+            self.assertEqual(
+                authorized.beets_launch_snapshot_fingerprint,
+                evidence.snapshot_fingerprint,
+            )
+            unchanged = db.load_album_quality_evidence_by_id(persisted.id)
+            assert unchanged is not None
+            self.assertEqual(unchanged.source_path, capture_path)
 
     def test_startup_requeues_only_jobs_proven_not_started(self) -> None:
         from scripts import importer
@@ -456,8 +483,6 @@ class TestImportOperationFence(unittest.TestCase):
                 terminal_outcome=pending,
                 post_commit_cleanup=PostCommitCleanup(
                     staged_path="/tmp/operator-copy",
-                    disambiguation_imported_path="/library/Artist/Album",
-                    beets_directory="/library",
                 ),
             )
 

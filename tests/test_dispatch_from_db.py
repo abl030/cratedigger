@@ -75,26 +75,43 @@ def _seed_current_for_request(db, request_id: int, *, mb_release_id: str,
     return persisted
 
 
-def _mock_beets_db_for_dispatch():
-    """Mock BeetsDB so ``_load_evidence_import_gate`` can fetch a stub
-    ``AlbumInfo`` without a real beets connection.
+def _mock_beets_db_for_dispatch(
+    album_path: str,
+    *,
+    mb_release_id: str = "mbid-123",
+    bitrate_kbps: int = 180,
+):
+    """Exact typed Beets authority for a real temporary album snapshot."""
 
-    ``album_path=None`` makes ``ensure_current_evidence_for_action`` skip
-    the audio-snapshot guard and trust the seeded REQUEST_CURRENT
-    evidence row outright — exactly what the orchestration tests need.
-    """
-    from lib.beets_db import AlbumInfo
-    info = AlbumInfo(
+    from lib.beets_db import (
+        CurrentBeetsItem,
+        CurrentBeetsMissing,
+        CurrentBeetsUnique,
+        release_identity_for_lookup,
+    )
+
+    identity = release_identity_for_lookup(mb_release_id)
+    assert identity is not None
+    current = CurrentBeetsUnique(
+        identity=identity,
         album_id=1,
-        track_count=10,
-        min_bitrate_kbps=180,
-        avg_bitrate_kbps=180,
-        format="MP3",
-        is_cbr=True,
-        album_path=None,  # type: ignore[arg-type]
+        album_path=album_path,
+        items=(CurrentBeetsItem(
+            id=101,
+            path=os.path.join(album_path, "01.mp3"),
+            format="MP3",
+            bitrate=bitrate_kbps * 1000,
+        ),),
+        selectors=(f"mb_albumid:{identity.release_id}",),
     )
     instance = MagicMock()
-    instance.get_album_info.return_value = info
+
+    def resolve(requested_identity):
+        if requested_identity != identity:
+            return CurrentBeetsMissing(identity=requested_identity)
+        return current
+
+    instance.resolve_current_release.side_effect = resolve
     cls = MagicMock()
     cls.return_value.__enter__ = MagicMock(return_value=instance)
     cls.return_value.__exit__ = MagicMock(return_value=False)
@@ -149,11 +166,14 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         if ir is None:
             ir = make_import_result(decision="import", new_min_bitrate=320)
         tmpdir = tempfile.mkdtemp()
+        current_dir = tempfile.mkdtemp()
         try:
             # Realistic candidate file so snapshot_audio_files produces a
             # stable hash for the evidence row's file manifest.
             with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
+            with open(os.path.join(current_dir, "01.mp3"), "wb") as handle:
+                handle.write(b"installed-current-audio")
 
             # Enqueue an import_job — the importer-supplied ID is now
             # mandatory at the dispatch boundary.
@@ -201,7 +221,9 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             # min_bitrate=180 vs likely_transcode spectral=128 → 128).
             _seed_current_for_request(
                 db, 42,
-                mb_release_id="mbid-current",
+                mb_release_id="mbid-123",
+                source_path=current_dir,
+                files=snapshot_audio_files(current_dir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=req_kwargs.get("min_bitrate", 180),
                     avg_bitrate_kbps=req_kwargs.get("min_bitrate", 180),
@@ -219,7 +241,13 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             mock_gate = RecordingQualityGate(result=quality_gate_plan)
             with patch_dispatch_externals() as ext, \
                  patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
-                 patch("lib.beets_db.BeetsDB", _mock_beets_db_for_dispatch()), \
+                 patch(
+                     "lib.beets_db.BeetsDB",
+                     _mock_beets_db_for_dispatch(
+                         current_dir,
+                         bitrate_kbps=req_kwargs.get("min_bitrate", 180),
+                     ),
+                 ), \
                  patch("lib.config.read_runtime_config",
                        return_value=CratediggerConfig(
                            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
@@ -238,6 +266,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
+            shutil.rmtree(current_dir, ignore_errors=True)
 
         return {
             "result": result,
@@ -385,9 +414,12 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         )
         ir = make_import_result(decision="import", new_min_bitrate=245)
         tmpdir = tempfile.mkdtemp()
+        current_dir = tempfile.mkdtemp()
         try:
             with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
+            with open(os.path.join(current_dir, "01.mp3"), "wb") as handle:
+                handle.write(b"installed-current-audio")
             files = snapshot_audio_files(tmpdir)
             _seed_candidate_for_download_log(
                 db, download_log_id,
@@ -435,7 +467,9 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             assert claimed is not None and claimed.id == job.id
             _seed_current_for_request(
                 db, 42,
-                mb_release_id="mbid-current",
+                mb_release_id="mbid-123",
+                source_path=current_dir,
+                files=snapshot_audio_files(current_dir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=128,
                     avg_bitrate_kbps=128,
@@ -449,7 +483,13 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             )
             with patch_dispatch_externals() as ext, \
                  patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
-                 patch("lib.beets_db.BeetsDB", _mock_beets_db_for_dispatch()), \
+                 patch(
+                     "lib.beets_db.BeetsDB",
+                     _mock_beets_db_for_dispatch(
+                         current_dir,
+                         bitrate_kbps=128,
+                     ),
+                 ), \
                  patch("lib.config.read_runtime_config",
                        return_value=CratediggerConfig(
                            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
@@ -472,6 +512,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
+            shutil.rmtree(current_dir, ignore_errors=True)
 
     def test_force_import_with_stale_candidate_evidence_requeues_to_preview(self):
         """U2: stale candidate evidence requeues the import_job for preview

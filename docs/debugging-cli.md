@@ -71,7 +71,7 @@ Every top-level `pipeline-cli` subcommand, one line each. Run `pipeline-cli rout
 | `add` | Add a new request by MBID or Discogs ID |
 | `audit` | Run read-only cross-engine audits; `audit world` checks current PipelineDB, Beets, evidence, denylist, and disk coherence |
 | `beets-distance` | Real beets-distance between a download_log's audio and an MBID (refuses if MBID is outside the request's release group) |
-| `ban-source` | Mark a request's server-resolved exact release as a bad rip and remove it from beets; an `unsearchable` stop is preserved, otherwise the request is requeued as `wanted` (requires `--confirm BAN`) |
+| `ban-source` | Mark a request's server-resolved exact release as a bad rip, remove it from beets, and start a 24-hour new-request priority window; an `unsearchable` stop is preserved, otherwise the request is requeued as `wanted` (requires `--confirm BAN`) |
 | `disk-coverage` | Show which active pipeline rows are actually present in beets |
 | `force-import` | Force-import a rejected download by download_log ID |
 | `import-jobs` | List recent import queue jobs |

@@ -10,6 +10,7 @@ Usage:
             print(info.format, info.min_bitrate_kbps, info.avg_bitrate_kbps, info.is_cbr)
 """
 
+import json
 import os
 import sqlite3
 import statistics
@@ -160,6 +161,27 @@ def _lookup_identity(raw: object | None) -> ReleaseIdentity | None:
     return ReleaseIdentity(source="musicbrainz", release_id=normalized)
 
 
+def release_identity_for_lookup(
+    raw: object | None,
+) -> ReleaseIdentity | None:
+    """Build the exact typed identity used by Beets column lookups."""
+
+    return _lookup_identity(raw)
+
+
+def exact_release_identity_matches(
+    expected: object | None,
+    actual: object | None,
+) -> bool:
+    """Whether two stored release ids name the same exact pressing."""
+
+    expected_identity = _lookup_identity(expected)
+    return (
+        expected_identity is not None
+        and _lookup_identity(actual) == expected_identity
+    )
+
+
 def _lookup_identities(
     release_ids: list[str],
 ) -> dict[str, ReleaseIdentity]:
@@ -256,6 +278,42 @@ class AlbumInfo:
     avg_bitrate_kbps: Optional[int] = None
     median_bitrate_kbps: Optional[int] = None
     format: str = ""
+
+
+def album_info_from_current(
+    current: CurrentBeetsUnique,
+    cfg: "QualityRankConfig",
+) -> AlbumInfo | None:
+    """Project quality aggregates from one already-resolved Beets snapshot."""
+
+    measured = [
+        (item, bitrate)
+        for item in current.items
+        if (bitrate := item.bitrate) is not None and bitrate > 0
+    ]
+    if not measured:
+        return None
+
+    numeric_bitrates = [bitrate for _item, bitrate in measured]
+    return AlbumInfo(
+        album_id=current.album_id,
+        track_count=len(measured),
+        min_bitrate_kbps=int(min(numeric_bitrates) / 1000),
+        avg_bitrate_kbps=int(
+            sum(numeric_bitrates) / len(numeric_bitrates) / 1000
+        ),
+        median_bitrate_kbps=int(statistics.median(numeric_bitrates) / 1000),
+        is_cbr=len(set(numeric_bitrates)) == 1,
+        album_path=current.album_path,
+        format=_reduce_album_format(
+            {
+                item.format
+                for item, _bitrate in measured
+                if item.format
+            },
+            cfg,
+        ),
+    )
 
 
 class BeetsDB:
@@ -383,37 +441,29 @@ class BeetsDB:
             if identity.source == "discogs"
         }
 
-        conditions: list[str] = []
-        parameters: list[object] = []
-        if mb_by_release_id:
-            mb_values = tuple(mb_by_release_id)
-            conditions.append(
-                f"a.mb_albumid IN ({','.join('?' for _ in mb_values)})"
-            )
-            parameters.extend(mb_values)
-        if discogs_by_release_id:
-            discogs_values = tuple(
-                int(release_id) for release_id in discogs_by_release_id
-            )
-            conditions.append(
-                f"a.discogs_albumid IN "
-                f"({','.join('?' for _ in discogs_values)})"
-            )
-            parameters.extend(discogs_values)
-
         # One joined SELECT is the snapshot boundary. Beets can move an album
         # concurrently; separate album and item queries could otherwise return
         # a cardinality from before the move and paths from after it.
         item_rows_by_album_id: dict[int, list[_RawCurrentItem]] = {}
         conflicting_album_ids: set[int] = set()
-        if conditions:
+        if unique_identities:
             rows = self._conn.execute(
-                "SELECT a.id, a.mb_albumid, a.discogs_albumid, "
+                "WITH wanted_mb AS ("
+                "SELECT CAST(value AS TEXT) AS release_id FROM json_each(?)"
+                "), wanted_discogs AS ("
+                "SELECT CAST(value AS INTEGER) AS release_id FROM json_each(?)"
+                ") SELECT a.id, a.mb_albumid, a.discogs_albumid, "
                 "i.id, i.path, i.title, i.track, i.disc, i.length, i.format, "
                 "i.bitrate, i.samplerate, i.bitdepth "
                 "FROM albums a LEFT JOIN items i ON i.album_id = a.id "
-                f"WHERE {' OR '.join(conditions)} ORDER BY a.id, i.id",
-                parameters,
+                "WHERE a.mb_albumid IN (SELECT release_id FROM wanted_mb) "
+                "OR a.discogs_albumid IN ("
+                "SELECT release_id FROM wanted_discogs"
+                ") ORDER BY a.id, i.id",
+                (
+                    json.dumps(tuple(mb_by_release_id)),
+                    json.dumps(tuple(discogs_by_release_id)),
+                ),
             ).fetchall()
             for (
                 raw_album_id,
@@ -705,42 +755,7 @@ class BeetsDB:
         current = self._resolve_unique(mb_release_id)
         if current is None:
             return None
-
-        measured = [
-            (item, bitrate)
-            for item in current.items
-            if (bitrate := item.bitrate) is not None and bitrate > 0
-        ]
-        if not measured:
-            return None
-
-        numeric_bitrates = [bitrate for _item, bitrate in measured]
-        min_br = min(numeric_bitrates)
-        avg_br = sum(numeric_bitrates) / len(numeric_bitrates)
-        # statistics.median() returns the middle value (or the mean of the two
-        # middle values for even counts) — robust to per-track outliers like
-        # short interludes or hidden tracks at the album boundary. Computed in
-        # Python because the beets DB is SQLite, which has no native median.
-        median_br = statistics.median(numeric_bitrates)
-        is_cbr = len(set(numeric_bitrates)) == 1
-        track_count = len(measured)
-
-        # Reduce multi-format albums via cfg.mixed_format_precedence.
-        formats_on_disk = {
-            item.format for item, _bitrate in measured if item.format
-        }
-        album_format = _reduce_album_format(formats_on_disk, cfg)
-
-        return AlbumInfo(
-            album_id=current.album_id,
-            track_count=track_count,
-            min_bitrate_kbps=int(min_br / 1000),
-            avg_bitrate_kbps=int(avg_br / 1000),
-            median_bitrate_kbps=int(median_br / 1000),
-            is_cbr=is_cbr,
-            album_path=current.album_path,
-            format=album_format,
-        )
+        return album_info_from_current(current, cfg)
 
     def get_min_bitrate(self, mb_release_id: str) -> Optional[int]:
         """Get min track bitrate (kbps) for a release. Returns None if not found."""

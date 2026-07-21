@@ -724,7 +724,7 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
     def test_wanted_row_uses_current_evidence_from_beets(self) -> None:
         """Parts & Labor: wanted row whose MBID is in Beets feeds current evidence to the reducer."""
         # Before the fix, cleanup short-circuited current=None for wanted rows
-        # (no imported_path, status != 'imported'), so the reducer never saw the
+        # (status != 'imported'), so the reducer never saw the
         # parent quality and a downgrade candidate could pass as would_import.
         source = _make_source(self.tmp, "wanted-current-source")
         log_id = _log_wrong_match(self.db, 1, source)

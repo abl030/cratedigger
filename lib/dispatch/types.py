@@ -80,8 +80,6 @@ class PostCommitCleanup:
     """
 
     staged_path: str | None = None
-    disambiguation_imported_path: str | None = None
-    beets_directory: str = ""
     duplicate_guard_source_path: str | None = None
     duplicate_guard_staging_dir: str | None = None
     duplicate_guard_request_id: int | None = None

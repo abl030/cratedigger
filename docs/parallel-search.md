@@ -36,22 +36,28 @@ match the current generator, it must have no conflicting YouTube download or
 import job, and its title must pass the configured title blacklist. Priority
 never bypasses the existing 30/60/120/240-minute retry backoff.
 
-A request is in the new cohort while its immutable `created_at + 24 hours` is
-later than the Phase 2 snapshot time. With the production page size of 16,
-Phase 2 draws up to four randomized new requests and at least 12 randomized
-established requests. Other positive page sizes reserve a floor-rounded
-quarter share for new work (at least one slot). Either cohort borrows slots the
-other cannot fill, so an eligible row is never left idle while the page has
-space. More than four due new requests still use only four production slots
-while established work is available;
+A request is in the new cohort while either its immutable
+`created_at + 24 hours` or its nullable `priority_started_at + 24 hours` is
+later than the Phase 2 snapshot time. The Bad Rip operator action stamps
+`priority_started_at`, so an old request whose installed copy was unusable gets
+the same prompt retry treatment as a newly added request without rewriting its
+creation audit. Ordinary/manual requeues do not stamp it.
+
+With the production page size of 16, Phase 2 draws up to four randomized new
+requests and at least 12 randomized established requests. Other positive page
+sizes reserve a floor-rounded quarter share for new work (at least one slot).
+Either cohort borrows slots the other cannot fill, so an eligible row is never
+left idle while the page has space. More than four due new or Bad Rip-priority
+requests still use only four production slots while established work is available;
 once a request reaches the exact 24-hour boundary it joins the established
-lottery even if it has never been attempted.
+lottery even if it has never been attempted, unless a later Bad Rip window is
+still active.
 
 For a low-volume addition, "first eligible cycle" means the next Phase 2
 snapshot after its backoff expires. It does not trigger a cycle immediately or
-skip the retry deadline. Manual requeue preserves the original `created_at`;
-a Replace successor is a newly inserted request and receives its own 24-hour
-window.
+skip the retry deadline. Manual requeue preserves the original `created_at` and
+does not start a priority window; a Replace successor is a newly inserted
+request and receives its own 24-hour window.
 
 ### Pre-attempt vs accepted-search consumption boundary
 

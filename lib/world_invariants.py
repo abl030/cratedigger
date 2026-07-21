@@ -10,6 +10,11 @@ from typing import Any
 
 import msgspec
 
+from lib.beets_db import (
+    CurrentBeetsAmbiguous,
+    CurrentBeetsMissing,
+    CurrentBeetsResolution,
+)
 from lib.quality import ImportResult, dispatch_action
 from lib.quality.decisions import post_import_search_action_if_known
 from lib.validation_envelope import decode_validation_envelope
@@ -25,16 +30,20 @@ class LibraryAlbumSnapshot(msgspec.Struct, frozen=True):
 
 
 class RequestMembershipSnapshot(msgspec.Struct, frozen=True):
-    """The request fields needed to compare pipeline state with Beets."""
+    """The request fields needed to evaluate current Beets membership."""
 
     request_id: int
     release_id: str
     status: str
-    imported_path: str | None
 
 
 class EvidenceDiskSnapshot(msgspec.Struct, frozen=True):
-    """One request's linked evidence beside its exact Beets snapshot."""
+    """One request's linked evidence beside its exact Beets snapshot.
+
+    ``evidence_source_path`` is capture-time history. Current coherence uses
+    the content fingerprint resolved from fresh Beets authority, never path
+    equality with that historical snapshot.
+    """
 
     request_id: int
     release_id: str
@@ -192,66 +201,50 @@ def assert_replaced_row_frozen(
 
 def check_status_membership(
     requests: Sequence[RequestMembershipSnapshot],
-    albums: Sequence[LibraryAlbumSnapshot],
+    resolutions: Mapping[str, CurrentBeetsResolution],
 ) -> tuple[WorldViolation, ...]:
-    """Require every imported request to resolve to one exact Beets pressing."""
-
-    by_release: dict[str, list[LibraryAlbumSnapshot]] = defaultdict(list)
-    for album in albums:
-        by_release[album.release_id].append(album)
+    """Require shared typed authority for every installed exact pressing."""
 
     violations: list[WorldViolation] = []
     for request in requests:
-        if request.status != "imported":
-            continue
-        matches = by_release.get(request.release_id, [])
-        if not matches:
+        resolution = resolutions.get(request.release_id)
+        if resolution is None:
             violations.append(WorldViolation(
-                code="imported_release_missing",
+                code="current_beets_authority_unavailable",
+                detail=(
+                    f"request {request.request_id} release "
+                    f"{request.release_id!r} was not resolved"
+                ),
+                request_id=request.request_id,
+                release_id=request.release_id,
+            ))
+            continue
+        if isinstance(resolution, CurrentBeetsAmbiguous):
+            violations.append(WorldViolation(
+                code="current_beets_ambiguous",
+                detail=(
+                    f"request {request.request_id} release "
+                    f"{request.release_id!r} has ambiguous current Beets "
+                    f"authority ({resolution.reason}) across albums "
+                    f"{resolution.album_ids!r}"
+                ),
+                request_id=request.request_id,
+                release_id=request.release_id,
+                album_ids=resolution.album_ids,
+            ))
+            continue
+        if (
+            request.status == "imported"
+            and isinstance(resolution, CurrentBeetsMissing)
+        ):
+            violations.append(WorldViolation(
+                code="current_beets_missing",
                 detail=(
                     f"imported request {request.request_id} release "
-                    f"{request.release_id!r} is absent from Beets"
+                    f"{request.release_id!r} is missing from current Beets"
                 ),
                 request_id=request.request_id,
                 release_id=request.release_id,
-            ))
-            continue
-        if len(matches) > 1:
-            album_ids = tuple(sorted(album.album_id for album in matches))
-            violations.append(WorldViolation(
-                code="imported_release_duplicate",
-                detail=(
-                    f"imported request {request.request_id} release "
-                    f"{request.release_id!r} resolves to Beets albums "
-                    f"{album_ids!r}"
-                ),
-                request_id=request.request_id,
-                release_id=request.release_id,
-                album_ids=album_ids,
-            ))
-            continue
-        if not request.imported_path:
-            violations.append(WorldViolation(
-                code="imported_path_missing",
-                detail=f"imported request {request.request_id} has no imported_path",
-                request_id=request.request_id,
-                release_id=request.release_id,
-                album_ids=(matches[0].album_id,),
-            ))
-            continue
-        actual = _normal_path(matches[0].album_path)
-        expected = _normal_path(request.imported_path)
-        if actual != expected:
-            violations.append(WorldViolation(
-                code="imported_path_mismatch",
-                detail=(
-                    f"imported request {request.request_id} points at "
-                    f"{request.imported_path!r}; Beets uses "
-                    f"{matches[0].album_path!r}"
-                ),
-                request_id=request.request_id,
-                release_id=request.release_id,
-                album_ids=(matches[0].album_id,),
             ))
 
     return tuple(violations)
@@ -260,7 +253,7 @@ def check_status_membership(
 def check_evidence_disk_coherence(
     snapshots: Sequence[EvidenceDiskSnapshot],
 ) -> tuple[WorldViolation, ...]:
-    """Require each active installed request to link its exact disk evidence."""
+    """Require exact linked bytes plus nonblank historical capture metadata."""
 
     violations: list[WorldViolation] = []
     for snapshot in snapshots:
@@ -313,17 +306,12 @@ def check_evidence_disk_coherence(
                 request_id=snapshot.request_id,
                 release_id=snapshot.release_id,
             ))
-        if (
-            snapshot.evidence_source_path is None
-            or _normal_path(snapshot.evidence_source_path)
-            != _normal_path(snapshot.album_path)
-        ):
+        if not (snapshot.evidence_source_path or "").strip():
             violations.append(WorldViolation(
-                code="evidence_path_mismatch",
+                code="evidence_capture_path_missing",
                 detail=(
-                    f"request {snapshot.request_id} evidence path "
-                    f"{snapshot.evidence_source_path!r} does not match "
-                    f"Beets path {snapshot.album_path!r}"
+                    f"request {snapshot.request_id} linked evidence has no "
+                    "capture-time source path"
                 ),
                 request_id=snapshot.request_id,
                 release_id=snapshot.release_id,

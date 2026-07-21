@@ -535,6 +535,7 @@ def process_claimed_preview_job(
     preview_fn: PreviewFn | None = None,
     prepare_failure_have_fn: FailureHavePrepareFn | None = None,
     enrich_failure_have_fn: FailureHaveEnrichFn | None = None,
+    current_evidence_loader: Callable[..., EvidenceBuildResult] | None = None,
 ) -> ImportJob | None:
     def handle_measurement_failed(result: ImportPreviewResult) -> ImportJob | None:
         return _handle_measurement_failed(
@@ -544,6 +545,28 @@ def process_claimed_preview_job(
             prepare_failure_have_fn=prepare_failure_have_fn,
             enrich_failure_have_fn=enrich_failure_have_fn,
         )
+
+    def handle_current_authority_failed(
+        detail: str,
+        *,
+        source_path: str,
+    ) -> ImportJob | None:
+        failure = MeasurementFailure(
+            reason="measurement_crashed",
+            detail=detail,
+            source_path=source_path,
+        )
+        return handle_measurement_failed(ImportPreviewResult(
+            mode="path",
+            verdict=PREVIEW_VERDICT_MEASUREMENT_FAILED,
+            decision="current_evidence_failed",
+            reason="measurement_crashed",
+            detail=detail,
+            source_path=source_path,
+            request_id=job.request_id,
+            download_log_id=_download_log_id_from_job(job),
+            failure=failure,
+        ))
 
     # Front-gate: if stored candidate evidence already passes the cheap
     # snapshot guard, mark the job importable without invoking measurement.
@@ -568,14 +591,18 @@ def process_claimed_preview_job(
                 # without touching ``db``'s parameter type.
                 req: dict[str, object] = db.get_request(job.request_id) or {}
                 mb_release_id = str(req.get("mb_release_id") or "")
-                current_evidence, persisted_existing, authoritative = (
+                current_evidence, persisted_existing, _authoritative = (
                     load_persisted_existing_spectral(
                         db,
                         job.request_id,
                     )
                 )
                 preview_cfg = read_runtime_config()
-                current_evidence = load_current_evidence_for_preview(
+                load_current = (
+                    current_evidence_loader
+                    or load_current_evidence_for_preview
+                )
+                current_result = load_current(
                     db,
                     request_id=job.request_id,
                     mb_release_id=mb_release_id,
@@ -584,9 +611,26 @@ def process_claimed_preview_job(
                         preview_cfg, "beets_directory", ""
                     ),
                     preloaded_evidence=current_evidence,
-                    preloaded_authoritative=authoritative,
                 )
-                if current_evidence is not None:
+                if current_result.status == "empty_current":
+                    current_evidence = None
+                    persisted_existing = SpectralAnalysisDetail(
+                        attempted=False,
+                    )
+                elif (
+                    current_result.status != "ready"
+                    or current_result.evidence is None
+                ):
+                    detail = (
+                        f"{current_result.status}: "
+                        f"{current_result.reason or 'current authority unavailable'}"
+                    )
+                    return handle_current_authority_failed(
+                        detail,
+                        source_path=front_gate_source,
+                    )
+                else:
+                    current_evidence = current_result.evidence
                     persisted_existing = spectral_detail_from_persisted_source(
                         current_evidence.measurement.spectral_grade,
                         current_evidence.measurement.spectral_bitrate_kbps,
@@ -594,10 +638,14 @@ def process_claimed_preview_job(
                 preserve_have_source = preserve_existing_source_spectral(
                     current_evidence,
                 )
-            except Exception:
+            except Exception as exc:
                 logger.exception(
                     "Unable to load reused HAVE evidence for request %s",
                     job.request_id,
+                )
+                return handle_current_authority_failed(
+                    f"{type(exc).__name__}: {exc}",
+                    source_path=front_gate_source,
                 )
         # Explicit annotation gives the fallback lambda below an expected
         # type to infer its parameter from (otherwise its parameter type is

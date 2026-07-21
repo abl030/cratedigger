@@ -298,8 +298,7 @@ class _RequestsMixin(_PipelineDBBase):
         """Canonical locked-row status CAS used only by Replace."""
         cur.execute(
             "UPDATE album_requests "
-            "SET status = 'replaced', imported_path = NULL, "
-            "updated_at = %s "
+            "SET status = 'replaced', updated_at = %s "
             "WHERE id = %s AND status = %s "
             "RETURNING id",
             (now, request_id, expected_status),
@@ -326,10 +325,8 @@ class _RequestsMixin(_PipelineDBBase):
         In one ``autocommit=False`` transaction:
 
         1. ``SELECT ... FOR UPDATE`` on the old row (acquire row lock).
-        2. ``UPDATE`` old row's ``status`` to ``'replaced'``, clear
-           ``imported_path`` (R14 carve-out — Phase 4 deletes the files
-           at that path so the pointer would dangle). All other columns
-           on the old row stay untouched as historical truth.
+        2. ``UPDATE`` old row's ``status`` to ``'replaced'``. All other
+           columns on the old row stay untouched as historical truth.
         3. ``INSERT`` a new ``album_requests`` row with the target MBID,
            ``status='wanted'``, ``replaces_request_id=old_request_id``,
            and the source inherited from the old row.
@@ -370,7 +367,7 @@ class _RequestsMixin(_PipelineDBBase):
                         f"old request {old_request_id} was already replaced"
                     )
 
-                # 2. Flip old row's status; clear imported_path (R14).
+                # 2. Flip the old row's status.
                 if not self._mark_request_replaced(
                     cur,
                     old_request_id,
@@ -973,11 +970,6 @@ class _RequestsMixin(_PipelineDBBase):
         - ``current_spectral_*`` (spectral grade of files currently in
           beets)
         - ``current_evidence_id`` (content-addressed snapshot of those files)
-        - ``imported_path`` (beets filesystem path for the release, shown
-          directly by the web UI — leaving it populated after a remove
-          means the pipeline tab still claims the album is imported at a
-          path that has just been deleted)
-
         ``min_bitrate`` and ``prev_min_bitrate`` are preserved deliberately
         — they still act as a conservative baseline for the next quality-
         gate comparison. ``last_download_spectral_*`` is also preserved:
@@ -994,7 +986,6 @@ class _RequestsMixin(_PipelineDBBase):
                    current_lossless_source_v0_probe_avg_bitrate = NULL,
                    current_lossless_source_v0_probe_median_bitrate = NULL,
                    current_evidence_id = NULL,
-                   imported_path = NULL,
                    updated_at = %s
                WHERE id = %s AND status != 'replaced'""",
             (now, request_id),
@@ -1018,8 +1009,9 @@ class _RequestsMixin(_PipelineDBBase):
 
         ``clear_retry_counters`` is for operator requeues that should get
         a clean slate. Automatic downloading → wanted failure paths preserve the
-        counters so backoff can keep growing. Scheduler priority is based only
-        on immutable ``created_at`` and is unaffected by either reset mode.
+        counters so backoff can keep growing. Ordinary resets preserve both
+        immutable ``created_at`` and nullable ``priority_started_at``; the Bad
+        Rip transition explicitly stamps the latter.
 
         """
         unknown = sorted(
@@ -1027,6 +1019,7 @@ class _RequestsMixin(_PipelineDBBase):
                 "search_filetype_override",
                 "min_bitrate",
                 "prev_min_bitrate",
+                "priority_started_at",
             }
         )
         if unknown:
@@ -1050,6 +1043,7 @@ class _RequestsMixin(_PipelineDBBase):
         override_present = "search_filetype_override" in fields
         min_bitrate_present = "min_bitrate" in fields
         prev_min_bitrate_present = "prev_min_bitrate" in fields
+        priority_started_at_present = "priority_started_at" in fields
         cur = self._execute(
             "UPDATE album_requests "
             "SET status = 'wanted', active_download_state = NULL, "
@@ -1064,7 +1058,9 @@ class _RequestsMixin(_PipelineDBBase):
             "ELSE prev_min_bitrate END, "
             "min_bitrate = CASE WHEN %s THEN %s ELSE min_bitrate END, "
             "search_filetype_override = CASE WHEN %s THEN %s "
-            "ELSE search_filetype_override END "
+            "ELSE search_filetype_override END, "
+            "priority_started_at = CASE WHEN %s THEN %s "
+            "ELSE priority_started_at END "
             "WHERE id = %s AND status = %s AND status != 'replaced'",
             (
                 now,
@@ -1080,6 +1076,8 @@ class _RequestsMixin(_PipelineDBBase):
                 fields.get("min_bitrate"),
                 override_present,
                 fields.get("search_filetype_override"),
+                priority_started_at_present,
+                fields.get("priority_started_at"),
                 request_id,
                 expected_status,
             ),

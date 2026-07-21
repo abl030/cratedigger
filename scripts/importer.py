@@ -118,25 +118,6 @@ def _run_post_commit_cleanup(outcome: DispatchOutcome) -> dict[str, object] | No
                 "error": f"{type(exc).__name__}: {exc}",
             }
 
-    if plan.disambiguation_imported_path is not None:
-        try:
-            from lib.util import cleanup_disambiguation_orphans
-
-            removed = cleanup_disambiguation_orphans(
-                plan.disambiguation_imported_path,
-                beets_directory=plan.beets_directory,
-            )
-            details["disambiguation_orphans"] = {
-                "imported_path": plan.disambiguation_imported_path,
-                "removed": removed,
-            }
-        except Exception as exc:  # noqa: BLE001 - terminal commit must stand
-            logger.exception("Post-commit disambiguation cleanup failed")
-            details["disambiguation_orphans"] = {
-                "imported_path": plan.disambiguation_imported_path,
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-
     return details or None
 
 

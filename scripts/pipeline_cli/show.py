@@ -14,6 +14,17 @@ from typing import Any, Mapping, Protocol, TYPE_CHECKING
 
 import msgspec
 
+from lib.beets_db import BeetsDB, open_beets_db
+from lib.current_library_display import (
+    CurrentLibraryAmbiguousDisplay,
+    CurrentLibraryDisplay,
+    CurrentLibraryMissingDisplay,
+    CurrentLibraryReader,
+    CurrentLibraryUnavailable,
+    CurrentLibraryUniqueDisplay,
+    current_library_display,
+    resolve_request_current_library,
+)
 from lib.import_evidence import HaveAnalysisFailure
 from lib.quality import ImportResult
 
@@ -255,6 +266,46 @@ def _render_youtube_metadata(row: "Mapping[str, object]") -> list[str]:
     return lines
 
 
+def _open_beets(path: str | None, library_root: str | None) -> BeetsDB:
+    return open_beets_db(db_path=path, library_root=library_root)
+
+
+class _OpenedBeets(CurrentLibraryReader, Protocol):
+    def __enter__(self) -> "_OpenedBeets": ...
+
+    def __exit__(self, *_args: object) -> None: ...
+
+
+class _OpenBeetsFn(Protocol):
+    def __call__(
+        self,
+        *,
+        path: str | None,
+        library_root: str | None,
+    ) -> _OpenedBeets: ...
+
+
+def _render_current_library(display: CurrentLibraryDisplay) -> None:
+    """Render every typed current-library authority state explicitly."""
+
+    if isinstance(display, CurrentLibraryUniqueDisplay):
+        print("  Current Library: unique")
+        print(f"  Current Path:    {display.path}")
+        print(f"  Beets Album ID: {display.album_id}")
+    elif isinstance(display, CurrentLibraryMissingDisplay):
+        print("  Current Library: missing")
+    elif isinstance(display, CurrentLibraryAmbiguousDisplay):
+        print("  Current Library: ambiguous")
+        print(f"  Reason:          {display.reason}")
+        print(
+            "  Album IDs:       "
+            + ", ".join(str(album_id) for album_id in display.album_ids)
+        )
+    else:
+        print("  Current Library: unavailable (manual review)")
+        print(f"  Reason:          {display.reason}")
+
+
 class _ShowDB(Protocol):
     """``db`` shape ``cmd_show`` touches (issue #784, #409 pattern)."""
 
@@ -271,7 +322,12 @@ class _ShowDB(Protocol):
     def get_denylisted_users(self, request_id: int) -> list[dict[str, Any]]: ...
 
 
-def cmd_show(db: "_ShowDB", args: argparse.Namespace) -> None:
+def cmd_show(
+    db: "_ShowDB",
+    args: argparse.Namespace,
+    *,
+    open_beets_fn: _OpenBeetsFn = _open_beets,
+) -> None:
     req = db.get_request(args.id)
     if not req:
         print(f"  Request {args.id} not found.")
@@ -297,7 +353,15 @@ def cmd_show(db: "_ShowDB", args: argparse.Namespace) -> None:
     if reasoning:
         print(f"  Reasoning:    {reasoning[:120]}...")
     print(f"  Distance:     {req['beets_distance']}")
-    print(f"  Imported:     {req['imported_path']}")
+    try:
+        with open_beets_fn(
+            path=getattr(args, "beets_db", None),
+            library_root=getattr(args, "beets_directory", None),
+        ) as beets:
+            resolution = resolve_request_current_library(req, beets)
+    except Exception:
+        resolution = CurrentLibraryUnavailable("beets_unavailable")
+    _render_current_library(current_library_display(resolution))
     print(f"  Attempts:     search={req['search_attempts']} dl={req['download_attempts']} val={req['validation_attempts']}")
     print(f"  Created:      {req['created_at']}")
     print(f"  Updated:      {req['updated_at']}")
@@ -402,3 +466,13 @@ def add_show_subparser(
     verbatim argument definitions)."""
     p_show = sub.add_parser("show", help="Show full details of a request")
     p_show.add_argument("id", type=int, help="Request ID")
+    p_show.add_argument(
+        "--beets-db",
+        default=None,
+        help="Explicit Beets SQLite override; requires --beets-directory.",
+    )
+    p_show.add_argument(
+        "--beets-directory",
+        default=None,
+        help="Library root paired with --beets-db.",
+    )

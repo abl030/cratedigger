@@ -2018,6 +2018,7 @@ class FakePipelineDB:
                 "search_filetype_override",
                 "min_bitrate",
                 "prev_min_bitrate",
+                "priority_started_at",
             }
         )
         if unknown:
@@ -2053,6 +2054,8 @@ class FakePipelineDB:
             ):
                 row["prev_min_bitrate"] = current_min_bitrate
             row["min_bitrate"] = fields["min_bitrate"]
+        if "priority_started_at" in fields:
+            row["priority_started_at"] = fields["priority_started_at"]
         self.status_history.append((request_id, "wanted"))
         return True
 
@@ -3131,6 +3134,15 @@ class FakePipelineDB:
                 evidence,
                 current_enrichment_required=True,
             )
+        if (
+            existing is not None
+            and existing.source_path.strip()
+            and evidence.source_path != existing.source_path
+        ):
+            evidence = msgspec.structs.replace(
+                evidence,
+                source_path=existing.source_path,
+            )
         if existing is not None and existing.id is not None:
             evidence_id = existing.id
         else:
@@ -3353,7 +3365,6 @@ class FakePipelineDB:
         row["current_lossless_source_v0_probe_avg_bitrate"] = None
         row["current_lossless_source_v0_probe_median_bitrate"] = None
         row["current_evidence_id"] = None
-        row["imported_path"] = None
         row["updated_at"] = _utcnow()
 
     def get_downloading(self) -> "list[AlbumRequestRow]":
@@ -3737,7 +3748,6 @@ class FakePipelineDB:
             "next_retry_after": None,
             "beets_distance": None,
             "beets_scenario": None,
-            "imported_path": None,
             "search_filetype_override": None,
             "target_format": None,
             "min_bitrate": None,
@@ -3773,6 +3783,9 @@ class FakePipelineDB:
             # Migration 023 — supersede lineage.
             "replaces_request_id": None,
             "created_at": now,
+            # Migration 062 — Bad Rip starts a fresh scheduler-priority
+            # window without rewriting the request's creation audit.
+            "priority_started_at": None,
             "updated_at": now,
         }
         return rid
@@ -3820,10 +3833,9 @@ class FakePipelineDB:
 
         now = _utcnow()
         old_source = old_row.get("source", "request")
-        # Flip old row: status=replaced + clear imported_path. Nothing
-        # else is mutated — characteristic fields stay frozen.
+        # Flip the old row. Nothing else is mutated — characteristic fields
+        # stay frozen.
         old_row["status"] = "replaced"
-        old_row["imported_path"] = None
         old_row["updated_at"] = now
 
         # Insert new row via add_request to inherit the seeded defaults,
@@ -5347,7 +5359,6 @@ class FakePipelineDB:
                     "current_spectral_grade"),
                 "request_current_spectral_bitrate": req.get(
                     "current_spectral_bitrate"),
-                "request_imported_path": req.get("imported_path"),
             })
         rows.sort(key=lambda r: (
             r["request_id"], -int(r["download_log_id"])))  # type: ignore[arg-type, operator]
@@ -6301,11 +6312,19 @@ class FakePipelineDB:
         cutoff = snapshot_at - timedelta(hours=NEW_REQUEST_PRIORITY_HOURS)
         new = [
             row for row in eligible
-            if self._as_utc(_as_datetime(row.get("created_at"))) > cutoff
+            if (
+                self._as_utc(_as_datetime(row.get("created_at"))) > cutoff
+                or (
+                    row.get("priority_started_at") is not None
+                    and self._as_utc(_as_datetime(
+                        row.get("priority_started_at"))) > cutoff
+                )
+            )
         ]
+        new_ids = {int(row["id"]) for row in new}
         established = [
             row for row in eligible
-            if self._as_utc(_as_datetime(row.get("created_at"))) <= cutoff
+            if int(row["id"]) not in new_ids
         ]
         selected = new[:slots.new] + established[:slots.established]
         selected_ids = {int(row["id"]) for row in selected}

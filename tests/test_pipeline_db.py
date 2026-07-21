@@ -1683,15 +1683,21 @@ class TestUpdateStatus(unittest.TestCase):
 
     def test_update_status_with_extra_fields(self):
         self.db.update_status(self.req_id, "imported",
-                              beets_distance=0.05,
-                              imported_path="/Beets/A/2020 - B")
+                              beets_distance=0.05)
         req = self.db.get_request(self.req_id)
         assert req is not None
         self.assertEqual(req["status"], "imported")
         distance = req["beets_distance"]
         assert distance is not None
         self.assertAlmostEqual(distance, 0.05)
-        self.assertEqual(req["imported_path"], "/Beets/A/2020 - B")
+
+    def test_removed_imported_path_field_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "no longer exist"):
+            self.db.update_status(
+                self.req_id,
+                "imported",
+                imported_path="/Beets/A/2020 - B",
+            )
 
     def test_update_status_metadata_rejects_lifecycle_and_malformed_fields(self):
         before = self.db.get_request(self.req_id)
@@ -3717,6 +3723,22 @@ class TestResetToWanted(unittest.TestCase):
         self.assertEqual(req["validation_attempts"], 1)
         self.assertEqual(req["next_retry_after"], before_retry)
 
+    def test_reset_to_wanted_round_trips_priority_started_at(self):
+        req_id = self._make_request("priority-window")
+        priority_started_at = datetime(
+            2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+
+        applied = self.db.reset_to_wanted(
+            req_id,
+            expected_status="imported",
+            priority_started_at=priority_started_at,
+        )
+
+        self.assertTrue(applied)
+        req = self.db.get_request(req_id)
+        assert req is not None
+        self.assertEqual(req["priority_started_at"], priority_started_at)
+
     def test_abandon_auto_import_request_audits_and_resets_atomically(self):
         req_id = self.db.add_request(
             mb_release_id="abandon-auto-import",
@@ -3945,24 +3967,6 @@ class TestClearOnDiskQualityFields(unittest.TestCase):
         self.assertIsNone(req["current_lossless_source_v0_probe_min_bitrate"])
         self.assertIsNone(req["current_lossless_source_v0_probe_avg_bitrate"])
         self.assertIsNone(req["current_lossless_source_v0_probe_median_bitrate"])
-
-    def test_clears_imported_path(self):
-        """After ``beet remove -d`` the on-disk path is stale — the pipeline
-        tab renders ``imported_path`` directly, so leaving it populated
-        would claim the album is imported at a directory that has just
-        been deleted.
-        """
-        req_id = self._make_request("path")
-        self.db.update_request_fields(
-            req_id,
-            imported_path="/mnt/virtio/Music/Beets/Stale/Path",
-        )
-
-        self.db.clear_on_disk_quality_fields(req_id)
-
-        req = self.db.get_request(req_id)
-        assert req is not None
-        self.assertIsNone(req["imported_path"])
 
     def test_clears_current_evidence_link_but_preserves_audit_row(self):
         req_id = self._make_request("evidence")
@@ -4912,6 +4916,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         # current-evidence repair relies on this exact v1 -> v3 in-place path.
         replaced = msgspec.structs.replace(
             first,
+            source_path="/different/current/location",
             storage_format="mp3",
             lineage_version=3,
         )
@@ -4923,6 +4928,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         )
         assert loaded is not None
         self.assertEqual(loaded.id, original.id)
+        self.assertEqual(loaded.source_path, original.source_path)
         self.assertEqual(loaded.storage_format, "mp3")
         self.assertEqual(loaded.lineage_version, 3)
 
@@ -6681,10 +6687,9 @@ class TestGetWrongMatches(unittest.TestCase):
         self.db._execute(
             "UPDATE album_requests SET status = %s, min_bitrate = %s, "
             "verified_lossless = %s, current_spectral_grade = %s, "
-            "current_spectral_bitrate = %s, imported_path = %s "
+            "current_spectral_bitrate = %s "
             "WHERE id = %s",
-            ("imported", 207, True, "genuine", None,
-             "/mnt/virtio/Music/Beets/Artist/Album", self.req1),
+            ("imported", 207, True, "genuine", None, self.req1),
         )
         self._log_rejected(self.req1, "alice", "/fi/a")
 
@@ -6695,8 +6700,6 @@ class TestGetWrongMatches(unittest.TestCase):
         self.assertTrue(row["request_verified_lossless"])
         self.assertEqual(row["request_current_spectral_grade"], "genuine")
         self.assertIsNone(row["request_current_spectral_bitrate"])
-        self.assertEqual(row["request_imported_path"],
-                         "/mnt/virtio/Music/Beets/Artist/Album")
 
     def test_get_wrong_matches_keyset_parity(self):
         """#523 -- fake<->production parity for the widest read projection.
@@ -7604,6 +7607,7 @@ class TestGetWantedSearchable(unittest.TestCase):
         *,
         created_at: datetime,
         attempts: int = 0,
+        priority_started_at: datetime | None = None,
     ) -> int:
         request_id = self._add_wanted(mbid)
         self._make_active(request_id, "g1")
@@ -7611,12 +7615,20 @@ class TestGetWantedSearchable(unittest.TestCase):
             """
             UPDATE album_requests
             SET created_at = %s,
+                priority_started_at = %s,
                 search_attempts = %s,
                 download_attempts = %s,
                 validation_attempts = %s
             WHERE id = %s
             """,
-            (created_at, attempts, attempts, attempts, request_id),
+            (
+                created_at,
+                priority_started_at,
+                attempts,
+                attempts,
+                attempts,
+                request_id,
+            ),
         )
         self.db.conn.commit()
         return request_id
@@ -7769,12 +7781,18 @@ class TestGetWantedSearchable(unittest.TestCase):
             "exact-boundary", created_at=now - timedelta(hours=24),
             attempts=1,
         )
-        established_ids = {boundary_id} | {
+        priority_boundary_id = self._add_searchable(
+            "priority-exact-boundary",
+            created_at=now - timedelta(days=10),
+            priority_started_at=now - timedelta(hours=24),
+            attempts=1,
+        )
+        established_ids = {boundary_id, priority_boundary_id} | {
             self._add_searchable(
                 f"beyond-{index}", created_at=now - timedelta(days=2),
                 attempts=1,
             )
-            for index in range(11)
+            for index in range(10)
         }
 
         for _ in range(8):
@@ -7899,6 +7917,39 @@ class TestGetWantedSearchable(unittest.TestCase):
 
         self.assertEqual(len(new_ids & selected), 4)
         self.assertEqual(established_ids & selected, established_ids)
+
+    def test_recent_bad_rip_priority_puts_aged_request_in_new_cohort(self):
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        bad_rip_id = self._add_searchable(
+            "aged-bad-rip",
+            created_at=now - timedelta(days=10),
+            priority_started_at=now - timedelta(hours=1),
+            attempts=3,
+        )
+        new_ids = {bad_rip_id} | {
+            self._add_searchable(
+                f"ordinary-new-{index}",
+                created_at=now - timedelta(hours=1),
+                attempts=1,
+            )
+            for index in range(3)
+        }
+        established_ids = {
+            self._add_searchable(
+                f"bad-rip-old-{index}",
+                created_at=now - timedelta(days=2),
+                attempts=1,
+            )
+            for index in range(20)
+        }
+
+        selected = {
+            int(row["id"])
+            for row in self.db.get_wanted_searchable("g1", limit=16, now=now)
+        }
+
+        self.assertEqual(new_ids & selected, new_ids)
+        self.assertEqual(len(established_ids & selected), 12)
 
     def test_title_blacklist_is_applied_before_capacity(self):
         now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
