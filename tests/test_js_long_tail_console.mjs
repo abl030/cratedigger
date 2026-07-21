@@ -31,6 +31,7 @@ const {
   consoleYoutubeResult,
   consoleSetYoutubeResult,
   consoleOpenIds,
+  renderSpectralFragment,
 } = __test__;
 
 let passed = 0;
@@ -52,6 +53,22 @@ function assertEqual(actual, expected, msg) {
     failed++;
     console.error(`  FAIL: ${msg} — expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
   }
+}
+
+console.log('long-tail current quality uses the shared ordered spectral palette');
+for (const [grade, tone] of [
+  ['likely_transcode', 'poor'],
+  ['suspect', 'acceptable'],
+  ['marginal', 'good'],
+  ['genuine', 'lossless'],
+]) {
+  const html = renderSpectralFragment({
+    current_spectral_grade: grade,
+    current_spectral_bitrate: 128,
+  });
+  assert(html.includes(`quality-tone-${tone}`), `${grade} uses shared ${tone} tone`);
+  assert(html.includes(grade.replaceAll('_', ' ')), `${grade} is humanized`);
+  if (grade.includes('_')) assert(!html.includes(grade), `${grade} raw token stays hidden`);
 }
 
 // --- consoleOpen / consoleClose / consoleIsOpen / consoleToken ---

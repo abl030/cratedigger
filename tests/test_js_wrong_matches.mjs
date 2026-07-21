@@ -747,6 +747,47 @@ console.log('renderQualityBadges() labels current average and retained floor fal
   );
 }
 
+console.log('wrong-match headers use the shared ordered spectral badge palette');
+for (const [grade, tone] of [
+  ['likely_transcode', 'poor'],
+  ['suspect', 'acceptable'],
+  ['marginal', 'good'],
+]) {
+  const html = __test__.renderQualityBadges({
+    in_library: true,
+    quality_label: 'MP3 V2',
+    quality_rank: 'excellent',
+    current_spectral_grade: grade,
+    current_spectral_bitrate: 128,
+  });
+  assert(html.includes(`badge-rank-${tone}`), `${grade} uses shared ${tone} badge`);
+  assert(html.includes(grade.replaceAll('_', ' ')), `${grade} is humanized`);
+  if (grade.includes('_')) assert(!html.includes(grade), `${grade} raw token stays hidden`);
+}
+
+console.log('wrong-match bucket badges use the same canonical classes as every other view');
+for (const rank of ['poor', 'acceptable', 'good', 'excellent', 'transparent', 'lossless']) {
+  const html = __test__.renderQualityBadges({
+    in_library: true,
+    quality_label: rank,
+    quality_rank: rank,
+  });
+  assert(html.includes(`badge-rank-${rank}`), `${rank} uses its canonical rank class`);
+}
+
+console.log('wrong-match verified-lossless identity reuses the lossless bucket colour');
+{
+  const html = __test__.renderQualityBadges({
+    in_library: true,
+    quality_label: 'FLAC',
+    quality_rank: 'lossless',
+    verified_lossless: true,
+  });
+  assert(html.includes('verified lossless'), 'verified identity remains explicit');
+  assert(countOccurrences(html, 'badge-rank-lossless') === 3,
+    'quality label, verified identity, and rank label share lossless colour');
+}
+
 console.log('renderEntry() embeds evidence cells without preview hooks');
 {
   installStorage();
@@ -759,6 +800,8 @@ console.log('renderEntry() embeds evidence cells without preview hooks');
   __test__.renderWrongMatches(data, dom.wrongMatches);
   const html = dom.wrongMatches.innerHTML;
   assert(html.includes('suspect'), 'rendered HTML carries the spectral grade');
+  assert(html.includes('quality-tone-acceptable'),
+    'candidate spectral metadata uses the same orange suspect tone');
   assert(html.includes('265'), 'rendered HTML carries the lossless-source V0 average');
   assert(html.includes('Downloaded as'), 'rendered HTML surfaces preserved source folders');
   assert(html.includes('wm-explorer-100'), 'rendered HTML includes an explorer mount');
