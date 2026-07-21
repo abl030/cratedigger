@@ -112,7 +112,7 @@ WORLD_CENSUS_SEEDS = (
         v0_subject=None, v0_provenance=None, verified_lossless=False,
     ),
     WorldCensusSeed(
-        name="wanted_mb_lineage1_with_evidence",
+        name="wanted_mb_lineage1_evidence",
         observed_rows=249,
         status="wanted", identity_shape="musicbrainz", search_override=None,
         has_current_evidence=True, lineage_version=1,
@@ -155,7 +155,7 @@ WORLD_CENSUS_SEEDS = (
         verified_lossless=False,
     ),
     WorldCensusSeed(
-        name="wanted_mb_lineage3_with_evidence",
+        name="wanted_mb_lineage3_evidence",
         observed_rows=19,
         status="wanted", identity_shape="musicbrainz", search_override=None,
         has_current_evidence=True, lineage_version=3,
@@ -204,11 +204,11 @@ _STATEFUL_NAMES = frozenset({
     "imported_mb_lineage4_verified_without_v0",
     "imported_dual_lineage1_verified_v0",
     "wanted_mb_pristine",
-    "wanted_mb_lineage1_with_evidence",
+    "wanted_mb_lineage1_evidence",
     "wanted_mb_lossless_lineage1_installed",
     "wanted_mb_three_tier_without_evidence",
     "wanted_mb_full_legacy_ladder_lineage1",
-    "wanted_mb_lineage3_with_evidence",
+    "wanted_mb_lineage3_evidence",
 })
 STATEFUL_WORLD_CENSUS_SEEDS = tuple(
     seed for seed in WORLD_CENSUS_SEEDS if seed.name in _STATEFUL_NAMES
