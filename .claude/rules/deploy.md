@@ -37,7 +37,7 @@
   owned by `scripts/verify_cratedigger_cycle.sh`.
 - Always derive the active cratedigger wrapper from `systemctl show cratedigger.service --property=ExecStart --value`, extract its exact `*-source` path from the wrapper, and verify the unique source string there; never glob historical store generations, which can produce a false positive. For module changes, inspect `systemctl cat cratedigger.service` and the rendered `/var/lib/cratedigger/config.ini`.
 - Before deploying changes to `nix/module.nix`, run the VM check: `nix build .#checks.x86_64-linux.moduleVm`.
-- **Every `nix flake update` in cratedigger must re-run the real-beets drift gate** (`tests/test_harness_beets2_contract.py` inside the re-pinned shell, plus the full suite): since tier-2 packaging, the flake.lock — not the consumer's nixpkgs — decides the beets version production runs. A lock bump is a beets upgrade until proven otherwise.
+- **Every `nix flake update` in cratedigger must re-run the real-beets drift gate** (`tests/test_harness_beets2_contract.py` inside the re-pinned shell, plus the full suite): the repository lock is Cratedigger's last verified standalone unstable snapshot. Fleet deliberately replaces that input edge through `cratedigger-src.inputs.nixpkgs.follows = "nixpkgs"`; there, nixosconfig's unstable pin is authoritative. `scripts/daily_flake_update.sh` automates the standalone lock update and all drift gates; no package override is permitted.
 - Before the first cratedigger branch push, the agent runs whole-repo threaded
   Pyright and the full suite once on the final committed tree. Do not replay
   those gates during deploy when the pushed revision is unchanged.
