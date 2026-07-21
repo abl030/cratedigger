@@ -9,6 +9,22 @@
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
 <style>
+  :root {
+    --quality-unknown-fg: #888;
+    --quality-unknown-bg: #2a2a2a;
+    --quality-poor-fg: #d66;
+    --quality-poor-bg: #4a1a1a;
+    --quality-acceptable-fg: #d96;
+    --quality-acceptable-bg: #4a2a1a;
+    --quality-good-fg: #ec6;
+    --quality-good-bg: #4a3a1a;
+    --quality-excellent-fg: #cd6;
+    --quality-excellent-bg: #2a4a1a;
+    --quality-transparent-fg: #6d6;
+    --quality-transparent-bg: #1a4a2a;
+    --quality-lossless-fg: #8f8;
+    --quality-lossless-bg: #164a24;
+  }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, system-ui, sans-serif; background: #111; color: #eee; padding: 16px; max-width: 800px; margin: 0 auto; }
   h1 { font-size: 1.4em; margin-bottom: 16px; color: #aaa; }
@@ -76,22 +92,29 @@
   .badge-rejected { background: #4a1a1a; color: #d66; }
   .badge-transcode { background: #3a3a1a; color: #da6; }
   .badge-provisional { background: #1f3a24; color: #9d8; }
-  .badge-verified { background: #1a4a2a; color: #6d6; }
+  .badge-verified { background: var(--quality-lossless-bg); color: var(--quality-lossless-fg); }
   .badge-force { background: #1a2a4a; color: #6af; }
   .badge-failed { background: #4a1a1a; color: #d66; }
   .badge-warn { background: #3a3a1a; color: #ec6; }
   .badge-library { background: #1a3a5a; color: #6af; }
-  /* Codec-aware rank tiers — same colour scheme as the rest of the
-     status badges. Used for the "in library" badge when the backend
-     supplies library_rank (computed via lib.quality.quality_rank, which
-     is what the import gate uses — single source of truth). */
-  .badge-rank-lossless    { background: #1a3a5a; color: #6cf; }
-  .badge-rank-transparent { background: #1a4a2a; color: #6d6; }
-  .badge-rank-excellent   { background: #2a4a1a; color: #cd6; }
-  .badge-rank-good        { background: #4a3a1a; color: #ec6; }
-  .badge-rank-acceptable  { background: #4a2a1a; color: #d96; }
-  .badge-rank-poor        { background: #4a1a1a; color: #d66; }
-  .badge-rank-unknown     { background: #2a2a2a; color: #888; }
+  /* Codec-aware ranks and spectral grades share this one red-to-green
+     palette. Inline evidence uses quality-tone-*; badges consume the same
+     foreground plus its matching dark background. */
+  .quality-tone-unknown { color: var(--quality-unknown-fg); }
+  .quality-tone-poor { color: var(--quality-poor-fg); }
+  .quality-tone-acceptable { color: var(--quality-acceptable-fg); }
+  .quality-tone-good { color: var(--quality-good-fg); }
+  .quality-tone-excellent { color: var(--quality-excellent-fg); }
+  .quality-tone-transparent { color: var(--quality-transparent-fg); }
+  .quality-tone-lossless { color: var(--quality-lossless-fg); }
+  .badge-rank-lossless { background: var(--quality-lossless-bg); color: var(--quality-lossless-fg); }
+  .badge-rank-transparent { background: var(--quality-transparent-bg); color: var(--quality-transparent-fg); }
+  .badge-rank-excellent { background: var(--quality-excellent-bg); color: var(--quality-excellent-fg); }
+  .badge-rank-good { background: var(--quality-good-bg); color: var(--quality-good-fg); }
+  .badge-rank-acceptable { background: var(--quality-acceptable-bg); color: var(--quality-acceptable-fg); }
+  .badge-rank-poor { background: var(--quality-poor-bg); color: var(--quality-poor-fg); }
+  .badge-rank-unknown { background: var(--quality-unknown-bg); color: var(--quality-unknown-fg); }
+  .badge-quality-outline { border: 1px solid currentColor; }
   .badge-wanted { background: #5a3a1a; color: #fa6; }
   .badge-downloading { background: #1a3a5a; color: #6cf; }
   .badge-imported { background: #1a4a2a; color: #6d6; }

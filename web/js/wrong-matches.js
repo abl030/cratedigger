@@ -2,6 +2,13 @@
 import { API, toast } from './state.js';
 import { esc, externalReleaseUrl, sourceLabel } from './util.js';
 import { renderReplaceButton } from './release_actions.js';
+import {
+  qualityRankBadgeClass,
+  qualityToneClass,
+  spectralGradeBadgeClass,
+  spectralGradeClass,
+  spectralGradeLabel,
+} from './quality_palette.js';
 
 /** @type {boolean} */
 let _loaded = false;
@@ -506,8 +513,8 @@ function formatEntryEvidence(entry) {
   const bitrate = entry && Number.isFinite(entry.spectral_bitrate)
     ? entry.spectral_bitrate : null;
   let spectral = '—';
-  if (grade && bitrate != null) spectral = `${grade} · ${bitrate} kbps`;
-  else if (grade) spectral = grade;
+  if (grade && bitrate != null) spectral = `${spectralGradeLabel(grade)} · ${bitrate} kbps`;
+  else if (grade) spectral = spectralGradeLabel(grade);
   else if (bitrate != null) spectral = `${bitrate} kbps`;
 
   const kind = entry && typeof entry.v0_probe_kind === 'string'
@@ -792,23 +799,6 @@ function renderWrongMatches(data, el) {
 }
 
 /**
- * Return a tier color for a quality_rank name (matches library tab palette).
- * @param {string} rank
- * @returns {string}
- */
-function rankColor(rank) {
-  switch (rank) {
-    case 'lossless':     return '#7cf';
-    case 'transparent':  return '#6d6';
-    case 'excellent':    return '#6d6';
-    case 'good':         return '#da6';
-    case 'acceptable':   return '#da6';
-    case 'poor':         return '#f88';
-    default:             return '#888';
-  }
-}
-
-/**
  * Build the quality badge strip for a group header. Shows format + bitrate,
  * verified-lossless marker, spectral grade (when suspect/likely_transcode),
  * and the rank tier — so the user can tell at a glance whether there's
@@ -849,8 +839,7 @@ function renderQualityBadges(g) {
   const parts = [];
   const label = g.quality_label || (g.format ? String(g.format).toUpperCase() : null);
   if (label) {
-    const color = rankColor(g.quality_rank || '');
-    parts.push(`<span class="badge" style="background:#222;color:${color};border:1px solid ${color};">${esc(label)}</span>`);
+    parts.push(`<span class="badge badge-quality-outline ${qualityRankBadgeClass(g.quality_rank)}">${esc(label)}</span>`);
   } else if (avgBr !== null || minBr !== null) {
     const fallback = [];
     if (avgBr !== null) fallback.push(`avg ${avgBr}k`);
@@ -858,18 +847,15 @@ function renderQualityBadges(g) {
     parts.push(`<span class="badge" style="background:#222;color:#aaa;">${fallback.join(' · ')}</span>`);
   }
   if (g.verified_lossless) {
-    parts.push('<span class="badge" style="background:#1a3a4a;color:#7cf;">verified lossless</span>');
+    parts.push('<span class="badge badge-verified badge-rank-lossless">verified lossless</span>');
   }
   // Spectral badge only when it's worth flagging.
   if (g.current_spectral_grade && g.current_spectral_grade !== 'genuine') {
-    const sColor = g.current_spectral_grade === 'suspect' || g.current_spectral_grade === 'likely_transcode'
-      ? '#f88' : '#da6';
     const suffix = g.current_spectral_bitrate ? ` (${g.current_spectral_bitrate}k)` : '';
-    parts.push(`<span class="badge" style="background:#2a1a1a;color:${sColor};">${esc(g.current_spectral_grade)}${suffix}</span>`);
+    parts.push(`<span class="${spectralGradeBadgeClass(g.current_spectral_grade)}">${esc(spectralGradeLabel(g.current_spectral_grade))}${suffix}</span>`);
   }
   if (g.quality_rank) {
-    const rColor = rankColor(g.quality_rank);
-    parts.push(`<span class="badge" style="background:#1a1a1a;color:${rColor};font-family:monospace;font-size:0.72em;">${esc(g.quality_rank)}</span>`);
+    parts.push(`<span class="badge ${qualityRankBadgeClass(g.quality_rank)}" style="font-family:monospace;font-size:0.72em;">${esc(g.quality_rank)}</span>`);
   }
   return parts.join(' ');
 }
@@ -1036,10 +1022,10 @@ function renderEntry(e, thresholdMilli, requestId) {
   // since FLAC can show up before/after we know it's actually lossless.
   const rank = typeof e.quality_rank === 'string' ? e.quality_rank : '';
   const rankBadge = rank && rank !== 'unknown'
-    ? `<span class="badge" style="background:#1a1a1a;color:${rankColor(rank)};font-family:monospace;font-size:0.72em;margin-left:6px;">${esc(rank)}</span>`
+    ? `<span class="badge ${qualityRankBadgeClass(rank)}" style="font-family:monospace;font-size:0.72em;margin-left:6px;">${esc(rank)}</span>`
     : '';
   const verifiedBadge = e.verified_lossless
-    ? '<span class="badge" style="background:#1a2a1a;color:#6d6;margin-left:6px;">verified lossless</span>'
+    ? '<span class="badge badge-verified badge-rank-lossless" style="margin-left:6px;">verified lossless</span>'
     : '';
 
   const header = `
@@ -1056,7 +1042,7 @@ function renderEntry(e, thresholdMilli, requestId) {
         <span id="wm-entry-dist-${e.download_log_id}" style="color:${distColor};">dist: ${dist}</span>
         <span>${esc(e.scenario || '')}</span>
         <span style="color:#bbb;">${esc(evidence.format)}</span>
-        <span style="color:#888;">spectral: ${esc(evidence.spectral)}</span>
+        <span class="${e.spectral_grade ? spectralGradeClass(e.spectral_grade) : qualityToneClass('unknown')}">spectral: ${esc(evidence.spectral)}</span>
         <span style="color:#888;">${esc(evidence.v0)}</span>
       </div>
     </div>

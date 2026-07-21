@@ -10,6 +10,7 @@ import { renderSearchPlanDetail } from './search_plan.js';
 import { loadLongTail, renderLongTailBody } from './long_tail.js';
 import { restoreLongTailConsoles } from './long_tail_console.js';
 import { renderPipelineDashboard as renderDashboardCards } from './pipeline_dashboard.js';
+import { qualityToneClass, spectralGradeClass, spectralGradeLabel } from './quality_palette.js';
 
 const VISIBLE_HISTORY_ATTEMPTS = 10;
 
@@ -306,18 +307,14 @@ function renderCurrentQualityRow(req, beetsTracks) {
   const verified = req.verified_lossless === true || req.verified_lossless === 'True';
   let qualitySummary = nominal;
   if (verified) {
-    qualitySummary += ' <span style="color:#6d6;">verified lossless</span>';
-  } else if (spectralGrade === 'suspect' || spectralGrade === 'likely_transcode') {
+    qualitySummary += ` <span class="${qualityToneClass('lossless')}">verified lossless</span>`;
+  } else if (spectralGrade) {
+    // Show every measured grade through the shared palette. Keep the spectral
+    // floor even on a genuine rollup: a non-null bitrate there means some
+    // tracks tripped the cliff detector below the album suspect threshold,
+    // and the shared-spectral clamp still consults that floor (Eno case).
     const brStr = spectralBr ? ` ~${spectralBr}kbps` : '';
-    qualitySummary += ` <span style="color:#d88;">spectral: ${spectralGrade}${brStr}</span>`;
-  } else if (spectralGrade === 'genuine') {
-    // Show the spectral floor even on a genuine rollup. A non-null
-    // spectral_bitrate under genuine means some tracks tripped the
-    // cliff detector but the album-level grade stayed below the
-    // suspect-pct threshold — the 96k signal is what the shared-
-    // spectral clamp in compare_quality now consults (Eno case).
-    const brStr = spectralBr ? ` ~${spectralBr}kbps` : '';
-    qualitySummary += ` <span style="color:#6d6;">spectral: genuine${brStr}</span>`;
+    qualitySummary += ` <span class="${spectralGradeClass(spectralGrade)}">spectral: ${esc(spectralGradeLabel(spectralGrade))}${brStr}</span>`;
   }
   return renderDetailRow('Quality', qualitySummary);
 }
