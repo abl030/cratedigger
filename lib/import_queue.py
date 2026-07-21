@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+import msgspec
+
 IMPORT_JOB_FORCE = "force_import"
 IMPORT_JOB_AUTOMATION = "automation_import"
 # YouTube rescue ingest (U2 of the YT rescue plan). The YT worker stages
@@ -283,14 +285,26 @@ class ImportJob:
 
 
 def _json_dict(value: Any) -> dict[str, Any]:
+    """Narrow a JSONB/JSON-decoded value to a plain string-keyed dict.
+
+    A bare ``isinstance(value, dict)`` leaves pyright with a partially
+    unknown ``dict[Unknown, Unknown]`` even when ``value`` was already
+    fully known — strict mode never lets an ``isinstance`` narrowing
+    inherit a generic's type argument (same quirk documented on
+    ``lib.youtube_album_service._json_dict``). ``msgspec.convert`` gives
+    every caller a fully known ``dict[str, Any]`` back — a real
+    reconstruction rather than a shallow ``dict(value)`` copy, but with
+    the identical result for JSON-shaped (string-keyed) input, which is
+    the only shape this JSONB/JSON-decoded payload ever carries.
+    """
     if value is None:
         return {}
     if isinstance(value, dict):
-        return dict(value)
+        return msgspec.convert(value, type=dict[str, Any])
     if isinstance(value, str):
-        parsed = json.loads(value)
+        parsed: object = json.loads(value)
         if isinstance(parsed, dict):
-            return parsed
+            return msgspec.convert(parsed, type=dict[str, Any])
     raise ValueError("import job JSON payload must be an object")
 
 

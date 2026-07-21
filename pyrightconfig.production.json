@@ -28,6 +28,10 @@
   "reportTypeCommentUsage": "error",
   "reportMatchNotExhaustive": "error",
   "reportShadowedImports": "error",
+  "typeCheckingMode": "strict",
+  "reportPrivateUsage": "none",
+  "reportUnusedFunction": "none",
+  "reportUnusedClass": "none",
   "exclude": [
     "build",
     "tools/vulture",

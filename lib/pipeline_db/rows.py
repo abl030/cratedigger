@@ -83,7 +83,7 @@ import msgspec
 
 
 class AlbumRequestRow(TypedDict):
-    """One ``SELECT * FROM album_requests`` row (52 columns as of schema 061)."""
+    """One ``SELECT * FROM album_requests`` row (53 columns as of schema 062)."""
 
     id: int
     mb_release_id: str | None
@@ -107,6 +107,7 @@ class AlbumRequestRow(TypedDict):
     beets_distance: float | None
     beets_scenario: str | None
     created_at: datetime
+    priority_started_at: datetime | None
     updated_at: datetime
     min_bitrate: int | None
     prev_min_bitrate: int | None

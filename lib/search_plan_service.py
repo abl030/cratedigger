@@ -290,24 +290,48 @@ _CYCLE_MARKER = "[CYCLE]"
 _TRUNCATED_MARKER = "[TRUNCATED]"
 
 
+def _is_container_like(value: object) -> bool:
+    """``isinstance(value, (dict, list, tuple))`` behind a plain boundary.
+
+    Same rationale as ``lib.youtube_album_service._is_dict_like``: an
+    inline ``isinstance`` check narrows the caller's ``Any``-typed
+    ``value`` to a partially-unknown parameterized type (``dict[Unknown,
+    Unknown] | list[Unknown] | tuple[Unknown, ...]``), tainting every
+    downstream ``id()``/``.items()``/iteration call in strict mode. A
+    plain (non-``TypeGuard``) function performs the identical runtime
+    check without narrowing the caller's variable.
+    """
+    return isinstance(value, (dict, list, tuple))
+
+
+def _is_dict_like(value: object) -> bool:
+    """``isinstance(value, dict)`` behind a plain boundary — see above."""
+    return isinstance(value, dict)
+
+
+def _is_list_like(value: object) -> bool:
+    """``isinstance(value, list)`` behind a plain boundary — see above."""
+    return isinstance(value, list)
+
+
 def _sanitize_obj(value: Any, *, _depth: int, _seen: set[int]) -> Any:
     if _depth > _SANITIZE_MAX_DEPTH:
         return _TRUNCATED_MARKER
     if isinstance(value, str):
         cleaned = sanitize_error_message(value)
         return cleaned if cleaned is not None else value
-    if isinstance(value, (dict, list, tuple)):
+    if _is_container_like(value):
         ident = id(value)
         if ident in _seen:
             return _CYCLE_MARKER
         _seen.add(ident)
         try:
-            if isinstance(value, dict):
+            if _is_dict_like(value):
                 return {
                     k: _sanitize_obj(v, _depth=_depth + 1, _seen=_seen)
                     for k, v in value.items()
                 }
-            if isinstance(value, list):
+            if _is_list_like(value):
                 return [
                     _sanitize_obj(v, _depth=_depth + 1, _seen=_seen)
                     for v in value
@@ -1043,7 +1067,7 @@ class SearchPlanService:
         if snap is None:
             return False
         recorded = getattr(snap, "track_count", None)
-        if recorded is None and isinstance(snap, dict):
+        if recorded is None and _is_dict_like(snap):
             recorded = snap.get("track_count")
         if recorded is None:
             return False

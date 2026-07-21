@@ -153,7 +153,7 @@ class WrongMatchCleanupOutcome(msgspec.Struct, frozen=True):
     deleted_path: str | None = None
     path_missing: bool = False
     error: str | None = None
-    decision: dict[str, Any] = msgspec.field(default_factory=dict)
+    decision: dict[str, Any] = msgspec.field(default_factory=lambda: {})
     candidate_measurement: AudioQualityMeasurement | None = None
     current_measurement: AudioQualityMeasurement | None = None
     candidate_v0_probe: V0ProbeEvidence | None = None

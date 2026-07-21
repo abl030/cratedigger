@@ -133,8 +133,15 @@ def derive_validation_log_columns(
         # ``decode_validation_envelope`` above has already proved this is a
         # JSON object and raised its established msgspec.ValidationError for
         # every non-object shape; the assert records that fact for pyright.
+        # The bare isinstance narrow still leaves ``parsed`` a partially
+        # unknown ``dict[Unknown, Unknown]`` (strict mode never lets an
+        # isinstance narrowing inherit a generic's type argument — same
+        # quirk documented on ``lib.youtube_album_service._json_dict``);
+        # ``msgspec.convert`` performs the identical (here: redundant,
+        # per the comment above) validation and hands back a fully known
+        # ``dict[str, Any]``.
         assert isinstance(parsed, dict)
-        raw_object = parsed
+        raw_object = msgspec.convert(parsed, type=dict[str, Any])
 
     if DISTANCE_KEY in raw_object:
         if not isinstance(beets_distance, ValidationProjectionUnset):
