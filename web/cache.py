@@ -86,11 +86,29 @@ def init(host: str, port: int = 6379) -> None:
         import redis
         _redis = redis.Redis(host=host, port=port, decode_responses=True,
                              socket_connect_timeout=1, socket_timeout=1)
-        _redis.ping()
+        _redis_call("ping")
         log.info("Redis connected: %s:%d", host, port)
     except Exception as e:
         log.warning("Redis unavailable (%s), running without cache", e)
         _redis = None
+
+
+def _redis_call(method_name: str, /, *args: object, **kwargs: object) -> object:
+    """Call a bound redis-py client method via ``getattr``.
+
+    redis-py types every sync command with ``**kwargs: Unknown`` in its
+    signature (shared with the async client), so a direct method
+    reference (``_redis.info(...)``) propagates Unknown through pyright
+    strict mode at every call site. ``getattr`` retrieves the exact same
+    bound method at runtime (identical behavior) but types as ``Any``
+    under typeshed's two-argument ``getattr`` overload, breaking the
+    Unknown cascade without a suppression comment — same technique as
+    ``lib.pipeline_db._shared.pg_execute_values``. Callers narrow the
+    ``object`` result via ``_redis_dict`` / ``msgspec.convert`` same as
+    before.
+    """
+    assert _redis is not None
+    return getattr(_redis, method_name)(*args, **kwargs)
 
 
 def _redis_dict(value: object) -> dict[str, object]:
@@ -119,10 +137,10 @@ def redis_metrics() -> dict[str, Any]:
     try:
         # redis-py types sync command returns as ``ResponseT`` (an
         # Awaitable union); narrow each to the sync shape we consume.
-        memory_resp = _redis.info("memory")
-        keyspace_resp = _redis.info("keyspace")
-        clients_resp = _redis.info("clients")
-        dbsize = _redis.dbsize()
+        memory_resp = _redis_call("info", "memory")
+        keyspace_resp = _redis_call("info", "keyspace")
+        clients_resp = _redis_call("info", "clients")
+        dbsize = _redis_call("dbsize")
         memory = _redis_dict(memory_resp)
         clients = _redis_dict(clients_resp)
         keyspace = _redis_dict(keyspace_resp)
@@ -274,7 +292,7 @@ def invalidate_pattern(pattern: str) -> None:
     try:
         cursor = 0
         while True:
-            resp = _redis.scan(cursor=cursor, match=pattern, count=100)
+            resp = _redis_call("scan", cursor=cursor, match=pattern, count=100)
             # ``scan``'s sync return shape is ``(next_cursor, keys)``; the
             # redis-py stubs type it as ``Awaitable[Any] | Any`` (the same
             # method serves the async client), so this is the wire-boundary

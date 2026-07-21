@@ -6,7 +6,6 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
-import msgspec
 import psycopg2.extras
 
 from lib.pipeline_db.rows import AlbumRequestRow, album_request_row
@@ -28,6 +27,7 @@ from lib.pipeline_db._core import _PipelineDBBase
 from lib.pipeline_db._shared import (
     BACKOFF_BASE_MINUTES,
     BACKOFF_MAX_MINUTES,
+    _msgspec_json_dumps,
     validate_request_metadata_fields,
 )
 
@@ -99,7 +99,7 @@ class _TransactionalTransitionsDB:
                 now,
                 psycopg2.extras.Json(
                     fields,
-                    dumps=lambda value: msgspec.json.encode(value).decode(),
+                    dumps=_msgspec_json_dumps,
                 ),
                 request_id,
                 expected_status,
@@ -777,7 +777,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
         cooled: set[str] = set()
         with self._atomic():
             transition_db = _TransactionalTransitionsDB(self, boundary)
-            applied = []
+            applied: list[transitions.TransitionApplied] = []
             current_status = self._lock_terminal_request_status(
                 command.request_id
             )

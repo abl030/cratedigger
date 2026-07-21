@@ -15,6 +15,7 @@ from lib.import_queue import (
 from lib.pipeline_db._shared import (
     PersistedYoutubeRow,
     YoutubeInFlightError,
+    pg_execute_values,
 )
 
 from lib.pipeline_db._core import _PipelineDBBase
@@ -527,7 +528,7 @@ class _YoutubeMixin(_PipelineDBBase):
                     (release_group_identifier, source),
                 )
                 if rows:
-                    values = []
+                    values: list[tuple[object, ...]] = []
                     for row in rows:
                         row_values: list[Any] = [
                             release_group_identifier, source,
@@ -539,7 +540,7 @@ class _YoutubeMixin(_PipelineDBBase):
                                     msgspec.to_builtins(value))
                             row_values.append(value)
                         values.append(tuple(row_values))
-                    psycopg2.extras.execute_values(
+                    pg_execute_values(
                         cur,
                         f"INSERT INTO youtube_album_mappings ({col_sql}) "
                         f"VALUES %s",

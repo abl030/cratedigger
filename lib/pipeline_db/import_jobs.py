@@ -429,7 +429,9 @@ class _ImportJobsMixin(_PipelineDBBase):
 
                 expected_source = None
                 if original.job_type == "automation_import":
-                    state = authority["active_download_state"]
+                    state: dict[str, object] | None = (
+                        authority["active_download_state"]
+                    )
                     expected_source = (
                         state.get("current_path")
                         if isinstance(state, dict)

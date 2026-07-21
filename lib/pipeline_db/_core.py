@@ -1,5 +1,5 @@
 """PipelineDB core primitives: connection, _execute, advisory_lock, _atomic."""
-from collections.abc import Generator
+from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Any
 import psycopg2
@@ -43,7 +43,7 @@ class _PipelineDBBase:
 class _CoreMixin(_PipelineDBBase):
     """Connection lifecycle + the shared transaction / advisory-lock
     primitives every other cluster mixin builds on."""
-    def __init__(self, dsn=None):
+    def __init__(self, dsn: str | None = None) -> None:
         self.dsn = dsn or DEFAULT_DSN
         self.conn = self._connect()
 
@@ -71,7 +71,11 @@ class _CoreMixin(_PipelineDBBase):
         self.conn.close()
 
 
-    def _execute(self, sql, params=()):
+    def _execute(
+        self,
+        sql: str,
+        params: Sequence[object] | Mapping[str, object] = (),
+    ):
         self._ensure_conn()
         try:
             cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)

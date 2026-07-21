@@ -8,7 +8,21 @@ Multiple pressings of the same release group are unioned.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+# This module is pure logic — no HTTP client dependency — so the MB release
+# JSON shape it consumes is imported ``TYPE_CHECKING``-only: zero runtime
+# coupling to ``web.mb`` (no import-time cost, no risk of pulling in HTTP
+# client deps), but the SAME structural type as the one real producer
+# (``web.mb.get_artist_releases_with_recordings``) rather than a
+# hand-maintained parallel that could silently drift from it. TypedDict
+# nested fields are invariant even under ``Sequence`` covariance, so
+# reusing the exact producer type (not a structurally-similar local one)
+# is what lets ``web/routes/browse.py`` pass the result straight through.
+if TYPE_CHECKING:
+    from web.mb import _MBReleaseFullJSON
 
 
 # Tier ordering: lower number = higher priority (Album beats EP beats Single).
@@ -80,18 +94,20 @@ def _normalize_title_for_rg_dedup(title: str) -> str:
     return _REMASTER_RE.sub("", title).strip().lower()
 
 
-def filter_non_live(releases: list[dict]) -> list[dict]:
+def filter_non_live(releases: Sequence[_MBReleaseFullJSON]) -> list[_MBReleaseFullJSON]:
     """Drop releases whose release-group has 'Live' in secondary-types."""
-    result: list[dict] = []
+    result: list[_MBReleaseFullJSON] = []
     for r in releases:
         rg = r.get("release-group", {})
-        secondary = rg.get("secondary-types", [])
+        secondary = rg.get("secondary-types") or []
         if "Live" not in secondary:
             result.append(r)
     return result
 
 
-def analyse_artist_releases(releases: list[dict]) -> list[ReleaseGroupInfo]:
+def analyse_artist_releases(
+    releases: Sequence[_MBReleaseFullJSON],
+) -> list[ReleaseGroupInfo]:
     """Analyse releases and return coverage info per release group.
 
     Algorithm:
@@ -115,7 +131,7 @@ def analyse_artist_releases(releases: list[dict]) -> list[ReleaseGroupInfo]:
         if rg_id not in rg_data:
             rg_data[rg_id] = _RGData(
                 rg_id=rg_id,
-                title=rg.get("title", ""),
+                title=rg.get("title") or "",
                 primary_type=rg.get("primary-type") or "Other",
                 tier=_get_tier(rg.get("primary-type") or "Other"),
                 is_bootleg=r.get("status") == "Bootleg",
@@ -128,7 +144,7 @@ def analyse_artist_releases(releases: list[dict]) -> list[ReleaseGroupInfo]:
             )
 
         data = rg_data[rg_id]
-        data.release_ids.append(r["id"])
+        data.release_ids.append(r.get("id", ""))
         if r.get("status") == "Bootleg":
             data.is_bootleg = True
 
@@ -143,7 +159,7 @@ def analyse_artist_releases(releases: list[dict]) -> list[ReleaseGroupInfo]:
                 if rec_id:
                     pressing_rec_ids.append(rec_id)
         data.pressings.append(PressingInfo(
-            release_id=r["id"],
+            release_id=r.get("id", ""),
             title=r.get("title", ""),
             date=r.get("date", ""),
             format=", ".join(formats) if formats else "?",
@@ -151,10 +167,11 @@ def analyse_artist_releases(releases: list[dict]) -> list[ReleaseGroupInfo]:
             country=r.get("country", ""),
             recording_ids=pressing_rec_ids,
         ))
-        if data.first_date and r.get("date", "") and r["date"] < data.first_date:
-            data.first_date = r["date"]
+        release_date = r.get("date", "")
+        if data.first_date and release_date and release_date < data.first_date:
+            data.first_date = release_date
         elif not data.first_date:
-            data.first_date = r.get("date", "")
+            data.first_date = release_date
 
         # Union recordings; deduplicate track list by normalized title within RG
         for medium in r.get("media", []):

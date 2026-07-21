@@ -610,7 +610,7 @@ class TestTransferSnapshot(unittest.TestCase):
     def test_decodes_exception_field(self):
         # Issue #564 root cause #1: slskd's real per-transfer failure
         # reason lives here and was previously discarded entirely.
-        raw = {
+        raw: dict[str, object] = {
             "id": "t1", "username": "u", "filename": "f.flac",
             "state": "Completed, Rejected",
             "exception": "Transfer rejected: Banned",
@@ -633,8 +633,8 @@ class TestTransferSnapshot(unittest.TestCase):
     def test_exception_wrong_type_degrades_to_none_via_parse_transfer_snapshot(self):
         # The tolerant wrapper must degrade this to "no status observed"
         # for just this entry (issue #564), not raise into the poll loop.
-        raw = {"id": "t1", "filename": "f.flac", "state": "InProgress",
-               "exception": 12345}
+        raw: dict[str, object] = {"id": "t1", "filename": "f.flac",
+               "state": "InProgress", "exception": 12345}
 
         snap = parse_transfer_snapshot(raw)
 
@@ -643,7 +643,7 @@ class TestTransferSnapshot(unittest.TestCase):
     def test_missing_fields_default(self):
         # A bare match-lookup style entry (only filename/id) still decodes —
         # every other field defaults rather than raising.
-        raw = {"filename": "f.flac", "id": "t1"}
+        raw: dict[str, object] = {"filename": "f.flac", "id": "t1"}
 
         snap = parse_transfer_snapshot(raw)
 
@@ -654,7 +654,7 @@ class TestTransferSnapshot(unittest.TestCase):
         self.assertIsNone(snap.ended_at)
 
     def test_lifecycle_timestamps_round_trip(self):
-        raw = {
+        raw: dict[str, object] = {
             "id": "t1", "filename": "f.flac", "state": "Completed, Succeeded",
             "requestedAt": "2026-04-03T20:00:00+00:00",
             "enqueuedAt": "2026-04-03T20:00:01+00:00",
@@ -675,8 +675,8 @@ class TestTransferSnapshot(unittest.TestCase):
         # shared by every in-flight album in the 5-min poll loop — one
         # malformed row must degrade to "no status observed", never crash
         # or void matching for every other transfer in the cycle.
-        raw = {"id": "t1", "filename": "f.flac", "state": "InProgress",
-               "bytesTransferred": "not-a-number"}
+        raw: dict[str, object] = {"id": "t1", "filename": "f.flac",
+               "state": "InProgress", "bytesTransferred": "not-a-number"}
 
         snap = parse_transfer_snapshot(raw)
 

@@ -1,6 +1,8 @@
 """Tests for lib.artist_releases — release group coverage analysis."""
 
 import unittest
+from typing import TYPE_CHECKING, Required, TypedDict
+
 from lib.artist_releases import (
     TrackInfo,
     PressingInfo,
@@ -9,11 +11,23 @@ from lib.artist_releases import (
     analyse_artist_releases,
 )
 
+if TYPE_CHECKING:
+    from web.mb import _MBReleaseFullJSON, _MBTrackFullJSON
+
+
+class _TrackSpec(TypedDict, total=False):
+    """One ``_release()`` input track — the (title, rec_id, length) triple
+    every test constructs a candidate track from. ``length`` is the only
+    genuinely optional field; every call site provides ``title``/``rec_id``."""
+    title: Required[str]
+    rec_id: Required[str]
+    length: int
+
 
 def _release(
     release_id: str,
     title: str,
-    tracks: list[dict],
+    tracks: list[_TrackSpec],
     *,
     primary_type: str = "Album",
     secondary_types: list[str] | None = None,
@@ -21,8 +35,27 @@ def _release(
     rg_id: str = "rg-1",
     rg_title: str = "RG Title",
     status: str = "Official",
-) -> dict:
-    """Build a fake MB release dict matching the shape from the API."""
+) -> "_MBReleaseFullJSON":
+    """Build a fake MB release dict matching the shape from the API.
+
+    Matches ``web.mb._MBReleaseFullJSON`` exactly (the type
+    ``lib.artist_releases`` now declares its input as) — ``number`` is
+    ``int`` and ``recording`` carries no ``title`` because neither is
+    read by ``analyse_artist_releases``/``filter_non_live`` (only
+    ``recording.id`` and the track's own ``title`` are), and
+    ``media[].track-count`` isn't a real field on this endpoint's medium
+    shape (that's a different, summary-only MB endpoint).
+    """
+    track_dicts: list["_MBTrackFullJSON"] = [
+        {
+            "position": i + 1,
+            "number": i + 1,
+            "title": t["title"],
+            "length": t.get("length") or 0,
+            "recording": {"id": t["rec_id"]},
+        }
+        for i, t in enumerate(tracks)
+    ]
     return {
         "id": release_id,
         "title": title,
@@ -38,17 +71,7 @@ def _release(
             {
                 "position": 1,
                 "format": "CD",
-                "track-count": len(tracks),
-                "tracks": [
-                    {
-                        "position": i + 1,
-                        "number": str(i + 1),
-                        "title": t["title"],
-                        "length": t.get("length"),
-                        "recording": {"id": t["rec_id"], "title": t["title"]},
-                    }
-                    for i, t in enumerate(tracks)
-                ],
+                "tracks": track_dicts,
             }
         ],
     }
@@ -62,7 +85,7 @@ class TestFilterNonLive(unittest.TestCase):
         ]
         result = filter_non_live(releases)
         self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["id"], "r1")
+        self.assertEqual(result[0].get("id"), "r1")
 
     def test_removes_live_broadcasts(self) -> None:
         releases = [

@@ -13,7 +13,7 @@ import os
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, TypedDict
 
 # --- Thresholds ---
 HF_DEFICIT_SUSPECT = 60.0   # dB — above this = suspect (no cliff needed)
@@ -44,6 +44,12 @@ from lib.quality import AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS
 
 # --- Data classes ---
 
+class _Slice(TypedDict):
+    """One 500Hz-wide band measurement: center frequency + measured dB."""
+    freq: int
+    db: float
+
+
 @dataclass
 class TrackResult:
     grade: str                                  # "genuine" | "marginal" | "suspect" | "error"
@@ -59,12 +65,12 @@ class AlbumResult:
     grade: str                                  # "genuine" | "suspect" | "likely_transcode"
     estimated_bitrate_kbps: Optional[int] = None
     suspect_pct: float = 0.0
-    tracks: list = field(default_factory=list)
+    tracks: list[TrackResult] = field(default_factory=list[TrackResult])
 
 
 # --- Core functions ---
 
-def parse_rms_from_stat(stderr_output):
+def parse_rms_from_stat(stderr_output: str) -> float | None:
     """Parse RMS amplitude from sox stat stderr output. Returns float or None.
 
     Rejects NaN and inf — those are sentinels for sox internal failures
@@ -84,15 +90,19 @@ def parse_rms_from_stat(stderr_output):
     return None
 
 
-def rms_to_db(rms):
+def rms_to_db(rms: float) -> float:
     """Convert RMS amplitude to dB. Returns DB_FLOOR for zero/negative."""
     if rms <= 0:
         return DB_FLOOR
     return 20.0 * math.log10(rms)
 
 
-def detect_cliff(slices, threshold_db_per_khz=CLIFF_THRESHOLD_DB_PER_KHZ,
-                 min_slices=MIN_CLIFF_SLICES, slice_width_hz=SLICE_WIDTH):
+def detect_cliff(
+    slices: list[_Slice],
+    threshold_db_per_khz: float = CLIFF_THRESHOLD_DB_PER_KHZ,
+    min_slices: int = MIN_CLIFF_SLICES,
+    slice_width_hz: int = SLICE_WIDTH,
+) -> int | None:
     """Detect spectral cliff from a list of {"freq": Hz, "db": dB} slices.
 
     Returns the frequency (Hz) where the cliff starts, or None.
@@ -102,7 +112,7 @@ def detect_cliff(slices, threshold_db_per_khz=CLIFF_THRESHOLD_DB_PER_KHZ,
 
     khz_step = slice_width_hz / 1000.0
     cliff_count = 0
-    cliff_start = None
+    cliff_start: int | None = None
 
     for i in range(1, len(slices)):
         grad = (slices[i]["db"] - slices[i - 1]["db"]) / khz_step
@@ -119,7 +129,7 @@ def detect_cliff(slices, threshold_db_per_khz=CLIFF_THRESHOLD_DB_PER_KHZ,
     return None
 
 
-def estimate_bitrate_from_cliff(cliff_freq_hz):
+def estimate_bitrate_from_cliff(cliff_freq_hz: int | None) -> int | None:
     """Estimate original bitrate from cliff frequency using LAME lowpass table.
 
     The cliff appears at or just below the encoder's lowpass frequency.
@@ -146,7 +156,7 @@ def estimate_bitrate_from_cliff(cliff_freq_hz):
         return 320
 
 
-def classify_track(hf_deficit_db, cliff_freq_hz):
+def classify_track(hf_deficit_db: float, cliff_freq_hz: int | None) -> TrackResult:
     """Classify a single track based on HF deficit and cliff detection.
 
     Returns a TrackResult.
@@ -172,7 +182,9 @@ def classify_track(hf_deficit_db, cliff_freq_hz):
     )
 
 
-def classify_album(track_results):
+def classify_album(
+    track_results: list[TrackResult],
+) -> tuple[str, float]:
     """Classify album from list of TrackResults. Returns (grade, suspect_pct)."""
     if not track_results:
         return "genuine", 0.0
@@ -223,7 +235,12 @@ def _safe_path(filepath: str) -> str:
     return "./" + filepath
 
 
-def _get_band_rms(filepath, lo_hz, hi_hz, trim_seconds=30):
+def _get_band_rms(
+    filepath: str,
+    lo_hz: int,
+    hi_hz: int,
+    trim_seconds: int = 30,
+) -> float:
     """Get RMS amplitude of audio filtered to a frequency band via sox.
 
     Returns the measured RMS (float, possibly ~0 for silent input). Raises
@@ -247,7 +264,7 @@ def _get_band_rms(filepath, lo_hz, hi_hz, trim_seconds=30):
     return rms
 
 
-def _ffmpeg_to_wav(src, dst, trim_seconds=30):
+def _ffmpeg_to_wav(src: str, dst: str, trim_seconds: int = 30) -> None:
     """Decode src to WAV at dst (trimmed to trim_seconds).
 
     One ffmpeg call per file replaces 17 ffmpeg calls (one per sox band)
@@ -272,7 +289,7 @@ def _ffmpeg_to_wav(src, dst, trim_seconds=30):
         raise _DecodeFailedError(f"ffmpeg: {last_line}")
 
 
-def analyze_track(filepath, trim_seconds=30):
+def analyze_track(filepath: str, trim_seconds: int = 30) -> TrackResult:
     """Analyze a single audio file for spectral quality.
 
     Runs 17 sox commands (1 reference band + 16 test slices). Non-sox
@@ -300,7 +317,7 @@ def analyze_track(filepath, trim_seconds=30):
         return TrackResult(grade="error", error=str(e))
 
 
-def _analyze_decoded(sox_input, sox_trim):
+def _analyze_decoded(sox_input: str, sox_trim: int) -> TrackResult:
     """Run the 17 sox calls against a decode-ready file. Extracted from
     analyze_track so the sox-native and ffmpeg-fallback paths share one
     body. Reference-band None RMS now grades 'error' (was 'genuine' as the
@@ -317,7 +334,7 @@ def _analyze_decoded(sox_input, sox_trim):
 
     ref_db = rms_to_db(ref_rms)
 
-    slices = []
+    slices: list[_Slice] = []
     for freq in SLICE_FREQS:
         # In-band slices CAN legitimately measure as silent (genuine
         # rolloff), so a missing measurement here is just floored, not
@@ -336,7 +353,7 @@ def _analyze_decoded(sox_input, sox_trim):
     return classify_track(hf_deficit, cliff_freq)
 
 
-def analyze_album(folder_path, trim_seconds=30):
+def analyze_album(folder_path: str, trim_seconds: int = 30) -> AlbumResult:
     """Analyze all audio files in a folder (walks subdirectories).
 
     Returns an AlbumResult with album-level grade and per-track results.
@@ -346,13 +363,13 @@ def analyze_album(folder_path, trim_seconds=30):
     folder so recursion is a no-op there; force-import and
     post-conversion callers can point at user folders with nested discs.
     """
-    files = []
+    files: list[str] = []
     for root, _dirs, names in os.walk(folder_path):
         for f in sorted(names):
             if os.path.splitext(f)[1].lower() in AUDIO_EXTENSIONS:
                 files.append(os.path.join(root, f))
 
-    track_results = []
+    track_results: list[TrackResult] = []
     error_count = 0
     for filepath in files:
         result = analyze_track(filepath, trim_seconds)

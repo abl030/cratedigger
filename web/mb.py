@@ -209,7 +209,14 @@ _MBReleaseGroupReleasesResponseJSON = TypedDict(
 
 
 class _MBRecordingRefJSON(TypedDict, total=False):
-    """Slice of a MusicBrainz ``recording`` object this module reads."""
+    """Slice of a MusicBrainz ``recording`` object this module reads.
+
+    ``id`` isn't read by anything in this module today but is declared here
+    (issue #784) so ``lib.artist_releases`` — which needs the recording id
+    for cross-release-group coverage analysis — can reuse this exact shape
+    via a ``TYPE_CHECKING`` import instead of maintaining a parallel type.
+    """
+    id: str
     length: int
 
 
@@ -233,10 +240,14 @@ _MBPregapJSON = TypedDict("_MBPregapJSON", {
 
 _MBFullMediumJSON = TypedDict("_MBFullMediumJSON", {
     "position": int,
+    "format": str,
     "pregap": _MBPregapJSON,
     "tracks": list[_MBTrackFullJSON],
 }, total=False)
-"""Slice of a full-release-lookup ``medium`` object."""
+"""Slice of a full-release-lookup ``medium`` object. ``format`` isn't read
+by anything in this module today but is declared here (issue #784) so
+``lib.artist_releases`` can reuse this exact shape — see
+``_MBRecordingRefJSON``'s docstring."""
 
 
 _MBReleaseFullJSON = TypedDict("_MBReleaseFullJSON", {
@@ -767,7 +778,7 @@ def get_artist_name(artist_mbid: str) -> str:
 
 def get_artist_releases_with_recordings(
     artist_mbid: str,
-) -> list[dict[str, object]]:
+) -> list[_MBReleaseFullJSON]:
     """Paginated fetch of all releases for an artist with recordings and release-group info.
 
     Returns raw MB release dicts with media[].tracks[].recording and release-group fields.
@@ -790,4 +801,4 @@ def get_artist_releases_with_recordings(
 
     cached = _cache.memoize_meta(
         f"mb:artist:{artist_mbid}:releases_with_recordings", _fetch)
-    return [dict(item) for item in cached]
+    return [{**item} for item in cached]
