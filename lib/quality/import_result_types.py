@@ -67,7 +67,9 @@ class SpectralAnalysisDetail(msgspec.Struct, frozen=True):
     grade: Optional[str] = None
     bitrate_kbps: Optional[int] = None
     suspect_pct: Optional[float] = None
-    per_track: list[SpectralTrackDetail] = msgspec.field(default_factory=list)
+    per_track: list[SpectralTrackDetail] = msgspec.field(
+        default_factory=list[SpectralTrackDetail]
+    )
     error: Optional[str] = None
 
 
@@ -199,6 +201,39 @@ class QualityEvidenceActionProvenance(msgspec.Struct, frozen=True):
     fallback_reason: str | None = None
 
 
+def _legacy_json_dict(value: object) -> dict[str, object]:
+    """Narrow an untyped legacy-row sub-object to a plain string-keyed dict.
+
+    The v1/v2/v3 legacy readers below read arbitrary historical JSONB
+    shapes where a given key's value is documented to be either absent or a
+    JSON object. ``isinstance(value, dict)`` narrowing alone leaves pyright
+    with a partially-unknown ``dict[Unknown, Unknown]``; routing through
+    ``msgspec.convert`` (the project's one typed-boundary decoder, see
+    ``.claude/rules/code-quality.md`` § "Wire-boundary types") gives a fully
+    known ``dict[str, object]`` instead. A genuinely non-dict value — never
+    observed in production — raises ``msgspec.ValidationError``, which
+    ``parse_import_result`` already treats the same as any other malformed
+    sentinel payload (previously such a value would have been passed
+    through unconverted and raised ``AttributeError`` on first ``.get()``,
+    which nothing along this path catches).
+    """
+    if value is None:
+        return {}
+    return msgspec.convert(value, type=dict[str, object])
+
+
+def _as_legacy_str(value: object) -> str | None:
+    """Narrow an untyped legacy dict value to ``str | None``.
+
+    ``VerifiedLosslessProof.source`` is a plain ``str``; the legacy
+    ``conversion.original_filetype`` / measurement ``was_converted_from``
+    fields this feeds are documented to be either absent or a string on
+    every real historical row. A non-string value (never observed) is
+    treated the same as absent rather than passed through untyped.
+    """
+    return value if isinstance(value, str) else None
+
+
 class ImportResult(msgspec.Struct):
     """Structured result emitted by import_one.py as JSON.
 
@@ -295,7 +330,7 @@ class ImportResult(msgspec.Struct):
         return IMPORT_RESULT_SENTINEL + self.to_json()
 
     @classmethod
-    def _migrate_v1(cls, d: dict) -> "ImportResult":
+    def _migrate_v1(cls, d: dict[str, object]) -> "ImportResult":
         """Project version 1 (QualityInfo + SpectralInfo) into the v4 model.
 
         v1 rows in production (~226 on doc2 as of 2026-04) carry
@@ -303,9 +338,9 @@ class ImportResult(msgspec.Struct):
         This method first reconstructs the historical v2 shape, then routes it
         through the quarantined legacy projection in ``from_dict``.
         """
-        quality = d.get("quality") or {}
-        spectral = d.get("spectral") or {}
-        conv_d = dict(d.get("conversion") or {})
+        quality = _legacy_json_dict(d.get("quality"))
+        spectral = _legacy_json_dict(d.get("spectral"))
+        conv_d = dict(_legacy_json_dict(d.get("conversion")))
 
         # Migrate process fields from QualityInfo → ConversionInfo
         conv_d.setdefault("post_conversion_min_bitrate",
@@ -379,11 +414,17 @@ class ImportResult(msgspec.Struct):
         source_measurement = projected.get("source_measurement")
         legacy_verified = False
         if isinstance(source_measurement, dict):
-            legacy_verified = bool(source_measurement.pop("verified_lossless", False))
+            sm = _legacy_json_dict(projected.get("source_measurement"))
+            legacy_verified = bool(sm.pop("verified_lossless", False))
+            projected["source_measurement"] = sm
         if legacy_verified:
             conversion = projected.get("conversion")
             original_filetype = (
-                conversion.get("original_filetype")
+                _as_legacy_str(
+                    _legacy_json_dict(projected.get("conversion")).get(
+                        "original_filetype"
+                    )
+                )
                 if isinstance(conversion, dict)
                 else None
             )
@@ -412,7 +453,11 @@ class ImportResult(msgspec.Struct):
 
         conversion = projected.get("conversion")
         original_filetype = (
-            conversion.get("original_filetype")
+            _as_legacy_str(
+                _legacy_json_dict(projected.get("conversion")).get(
+                    "original_filetype"
+                )
+            )
             if isinstance(conversion, dict)
             else None
         )
@@ -425,7 +470,7 @@ class ImportResult(msgspec.Struct):
             raw_measurement = projected.get(field_name)
             if not isinstance(raw_measurement, dict):
                 continue
-            measurement = dict(raw_measurement)
+            measurement = _legacy_json_dict(projected.get(field_name))
             if field_name == "source_measurement":
                 legacy_verified = bool(
                     measurement.pop("verified_lossless", False)
@@ -444,7 +489,7 @@ class ImportResult(msgspec.Struct):
 
         raw_proof = projected.get("verified_lossless_proof")
         if isinstance(raw_proof, dict):
-            proof = dict(raw_proof)
+            proof = _legacy_json_dict(projected.get("verified_lossless_proof"))
             proof_origin = proof.pop("proof_origin", None)
             if proof.get("provenance") is None and proof_origin is not None:
                 proof["provenance"] = (
@@ -456,7 +501,11 @@ class ImportResult(msgspec.Struct):
         elif legacy_verified:
             source_measurement = projected.get("source_measurement")
             converted_from = (
-                source_measurement.get("was_converted_from")
+                _as_legacy_str(
+                    _legacy_json_dict(projected.get("source_measurement")).get(
+                        "was_converted_from"
+                    )
+                )
                 if isinstance(source_measurement, dict)
                 else None
             )
@@ -477,27 +526,32 @@ class ImportResult(msgspec.Struct):
         projected = dict(d)
         if "postflight" not in projected:
             return projected
-        pf = projected["postflight"]
-        if not isinstance(pf, dict):
+        pf_raw = projected["postflight"]
+        if not isinstance(pf_raw, dict):
             projected["postflight"] = {}
             return projected
+        pf: dict[str, object] = _legacy_json_dict(projected["postflight"])
         if (
             "moved_siblings" in pf
             and not isinstance(pf["moved_siblings"], list)
         ):
-            pf = {**pf, "moved_siblings": []}
-        guard = pf.get("duplicate_remove_guard")
-        if guard is not None:
-            if not isinstance(guard, dict):
+            empty_siblings: list[object] = []
+            pf = {**pf, "moved_siblings": empty_siblings}
+        guard_raw = pf.get("duplicate_remove_guard")
+        if guard_raw is not None:
+            if not isinstance(guard_raw, dict):
                 pf = {**pf, "duplicate_remove_guard": None}
-            elif not isinstance(guard.get("candidates", []), list):
-                pf = {
-                    **pf,
-                    "duplicate_remove_guard": {
-                        **guard,
-                        "candidates": [],
-                    },
-                }
+            else:
+                guard = _legacy_json_dict(pf.get("duplicate_remove_guard"))
+                if not isinstance(guard.get("candidates", []), list):
+                    empty_candidates: list[object] = []
+                    pf = {
+                        **pf,
+                        "duplicate_remove_guard": {
+                            **guard,
+                            "candidates": empty_candidates,
+                        },
+                    }
         projected["postflight"] = pf
         return projected
 

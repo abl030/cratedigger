@@ -38,7 +38,7 @@ class DownloadDecision(enum.Enum):
 class DownloadVerdict:
     """Result of decide_download_action — typed decision for the poller."""
     decision: DownloadDecision
-    files_to_retry: list[str] = field(default_factory=list)
+    files_to_retry: list[str] = field(default_factory=list[str])
     reason: str = ""
 
 
@@ -64,7 +64,7 @@ class PollCycleVerdict:
     """Side-effect instruction returned by :func:`reduce_poll_cycle`."""
 
     decision: PollCycleDecision
-    files_to_retry: list[str] = field(default_factory=list)
+    files_to_retry: list[str] = field(default_factory=list[str])
     reason: str = ""
     import_job_id: int | None = None
     import_job_status: str | None = None
@@ -84,7 +84,7 @@ class PollFileSnapshot:
 class PollCycleSnapshot:
     """All impure observations supplied to the pure poll-cycle reducer."""
 
-    files: list[PollFileSnapshot] = field(default_factory=list)
+    files: list[PollFileSnapshot] = field(default_factory=list[PollFileSnapshot])
     active_import_job_id: int | None = None
     active_import_job_status: str | None = None
     processing_current_path: str | None = None
@@ -181,7 +181,7 @@ def decide_download_action(
                 reason=f"all {total_files} files errored")
 
         # Check which files can be retried
-        files_to_retry = []
+        files_to_retry: list[str] = []
         for fn in error_filenames:
             retries = file_retries.get(fn, 0)
             if retries >= max_file_retries:
@@ -336,7 +336,14 @@ class ActiveDownloadState(msgspec.Struct, omit_defaults=True):
         earlier falsy guard at one of its two call sites.
         """
         if isinstance(raw, dict):
-            return ActiveDownloadState.from_dict(raw)
+            # Bypass ``from_dict``'s ``dict[str, object]`` parameter here:
+            # the isinstance narrowing above makes ``raw``'s inferred type
+            # ``dict[Unknown, Unknown]``, which pyright strict flags as an
+            # unknown argument at a *declared*-type parameter regardless of
+            # that declared type. ``msgspec.convert``'s own first parameter
+            # tolerates it, and this is exactly ``from_dict``'s one-line
+            # body, so behavior is identical.
+            return msgspec.convert(raw, type=ActiveDownloadState)
         if isinstance(raw, str):
             return ActiveDownloadState.from_json(raw)
         raise ValueError(

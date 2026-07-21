@@ -4,9 +4,21 @@ Issue #548. Hypothesis-driven generated tests assert **policy invariants**
 over large generated state spaces instead of hand-picked examples. The normal
 pure/fake-backed modules are ordinary members of the unittest suite — no seed
 bookkeeping or standing service. The deterministic cross-engine world model is
-also part of the normal suite at its measured small budget. Deeper randomized,
-mirror-backed, long-fuzz, and live-audit runs remain separate scheduled work
-tracked by issue #498.
+also part of the normal suite at its measured small budget. The deeper
+randomized, mirror-backed, and long-fuzz runs execute together in the daily
+unstable compatibility gate tracked by issue #498. The read-only live audit
+joins that same run after issue #762 establishes current-path authority.
+
+## Daily unstable compatibility gate
+
+`scripts/daily_flake_update.sh` is the single unattended entry point. It
+checks out current `main`, advances `flake.lock` to current nixpkgs unstable,
+and runs whole-repository Pyright, the deterministic suite, `nix flake check`,
+the default lifecycle hammer, the full fuzz burst, and the mirror-harness
+smoke. Independent test stages all run so one notification contains the whole
+day's result. A completely green candidate commits and pushes only
+`flake.lock`; a red candidate pushes nothing. Scheduling, state paths, and
+notification belong to the downstream nixosconfig service.
 
 ## Bug hunting — the house method
 
@@ -196,7 +208,7 @@ all six module tests in 8.470 test-seconds (10 seconds wrapper wall time). The
 default 25 × 100 profile completed cleanly in 449.930 test-seconds (451 seconds
 wrapper wall time). That measured depth is not part of `scripts/run_tests.sh`.
 Its exact-revision doc1 schedule, alongside the long generated fuzz burst, is
-tracked by issue #498.
+the daily `scripts/daily_flake_update.sh` gate tracked by issue #498.
 
 The default hammer uses the in-process production adapter that performs real
 Beets model/database/filesystem mutations beneath the real dispatch services.
@@ -221,8 +233,9 @@ loads the shipped path template, exact-ID duplicate keys, inline field, match
 policy, and MusicBrainz plugin; unrelated production fetchart/lyrics/scrub hooks
 stay disabled so the boundary test cannot make external content requests. A
 2-world × 5-step mirror smoke completed cleanly in 5 seconds on doc1 on
-2026-07-19. It remains outside the normal suite; exact-revision scheduled
-execution and separate mirror-failure reporting are tracked by issue #498.
+2026-07-19. It remains outside the normal suite and runs as a separately named
+stage inside the daily issue-#498 gate, so mirror availability stays distinct
+in the combined result.
 
 When the hammer finds a defect:
 
@@ -257,9 +270,11 @@ nix-shell --run "bash scripts/fuzz_burst.sh tests.test_quality_generated"  # sub
 `scripts/fuzz_burst.sh` runs each generated module in its own process,
 parallelised to the host's core count (`nproc`) — Hypothesis is
 single-threaded, so a serial burst pegs one core and leaves the rest of
-whatever machine you are on idle. Per-module logs surface only on failure;
-the 20k-example budget is unchanged. The serial equivalent, when you need
-one module's live output:
+whatever machine you are on idle. Per-module logs surface only on failure.
+Set `HYPOTHESIS_STORAGE_DIRECTORY` for a persistent replay database and
+`CRATEDIGGER_FUZZ_OUTPUT_DIR` to retain a failed run's complete module logs;
+green-run logs are removed. The 20k-example budget is unchanged. The serial
+equivalent, when you need one module's live output:
 
 ```bash
 nix-shell --run "CRATEDIGGER_HYPOTHESIS_PROFILE=fuzz \

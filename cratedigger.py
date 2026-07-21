@@ -1273,8 +1273,30 @@ def _search_and_queue_parallel(
     return grab_list, failed_search, failed_grab
 
 
-from lib.download import grab_most_wanted as _grab_most_wanted_impl
 from lib.slskd_transfers import cancel_and_delete as _cancel_and_delete_impl
+
+# ``lib.download.grab_most_wanted`` is Group B's file (issue #784 tranche
+# split) and still carries bare-generic parameter/return types
+# (``list[Any]`` / ``tuple[dict, list, list]``), which makes both an
+# ``import ... as`` alias AND an explicitly-annotated variable assigned
+# from it partially unknown under strict mode (pyright reports the
+# *source* expression's type at the assignment regardless of the
+# declared annotation). A ``TYPE_CHECKING``-only stub redeclaration is
+# the standard idiom for typing an external unannotated callable without
+# touching its defining module: pyright only ever sees the fully-typed
+# stub signature; at runtime ``TYPE_CHECKING`` is ``False`` so the real
+# import runs unchanged.
+if TYPE_CHECKING:
+    def _grab_most_wanted_impl(
+        albums: "list[AlbumRecord]",
+        search_and_queue: Callable[
+            ["list[AlbumRecord]"],
+            "tuple[dict[int, GrabListEntry], list[AlbumRecord], list[AlbumRecord]]",
+        ],
+        ctx: "CratediggerContext",
+    ) -> int: ...
+else:
+    from lib.download import grab_most_wanted as _grab_most_wanted_impl
 
 
 def _make_ctx():

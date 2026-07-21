@@ -1,5 +1,10 @@
 // @ts-check
 import { awstDateTime, esc } from './util.js';
+import {
+  qualityToneClass,
+  spectralGradeClass,
+  spectralGradeLabel,
+} from './quality_palette.js';
 
 /**
  * Render a single V0 probe value with its provenance suffix.
@@ -54,20 +59,15 @@ function stripV0Phrase(avg, min = undefined) {
  * @param {string} grade
  * @param {number|string|undefined} bitrate
  */
-function spectralGradeLabel(grade) {
-  return esc(String(grade || '').replace(/_/g, ' '));
-}
-
 function formatSpectral(grade, bitrate) {
-  const sgColor = grade === 'genuine' ? '#6d6' : grade === 'suspect' ? '#d66' : '#aa8';
   // Show the spectral floor whenever it's present — even when the album's
   // rollup grade is `genuine`, a non-null spectral_bitrate means at least
   // one track triggered a cliff and the min-across-tracks is this value
   // (Eno case, download_log 3291).
   const label = bitrate
-    ? `${spectralGradeLabel(grade)} (~${esc(bitrate)}kbps)`
-    : spectralGradeLabel(grade);
-  return `<span style="color:${sgColor};">${label}</span>`;
+    ? `${esc(spectralGradeLabel(grade))} (~${esc(bitrate)}kbps)`
+    : esc(spectralGradeLabel(grade));
+  return `<span class="${spectralGradeClass(grade)}">${label}</span>`;
 }
 
 /**
@@ -267,11 +267,9 @@ function buildEvidenceCardModel(h) {
     );
     const floor = (h.spectral_bitrate && !basisAlreadyHasFloor)
       ? `~${esc(h.spectral_bitrate)}k ` : '';
-    const sgColor = h.spectral_grade === 'genuine' ? '#6d6'
-      : h.spectral_grade === 'suspect' ? '#d66' : '#aa8';
-    inCells.spectral = `<span style="color:${sgColor};">${floor}${spectralGradeLabel(h.spectral_grade)}</span>`;
+    inCells.spectral = `<span class="${spectralGradeClass(h.spectral_grade)}">${floor}${esc(spectralGradeLabel(h.spectral_grade))}</span>`;
   } else if (h.spectral_attempted && h.spectral_error) {
-    inCells.spectral = `<span style="color:#d66;" title="${esc(h.spectral_error)}">spectral failed</span>`;
+    inCells.spectral = `<span class="${qualityToneClass('poor')}" title="${esc(h.spectral_error)}">spectral failed</span>`;
   }
   // V0 on every candidate: keep the compact comparison numeric and bounded.
   // Probe-kind provenance remains in the expanded V0 probe row.
@@ -308,11 +306,9 @@ function buildEvidenceCardModel(h) {
   }
   if (h.existing_spectral_grade) {
     const floor = h.existing_spectral_bitrate ? `~${esc(h.existing_spectral_bitrate)}k ` : '';
-    const color = h.existing_spectral_grade === 'genuine' ? '#6d6'
-      : h.existing_spectral_grade === 'suspect' ? '#d66' : '#aa8';
-    haveCells.spectral = `<span style="color:${color};">${floor}${spectralGradeLabel(h.existing_spectral_grade)}</span>`;
+    haveCells.spectral = `<span class="${spectralGradeClass(h.existing_spectral_grade)}">${floor}${esc(spectralGradeLabel(h.existing_spectral_grade))}</span>`;
   } else if (h.existing_spectral_attempted && h.existing_spectral_error) {
-    haveCells.spectral = `<span style="color:#d66;" title="${esc(h.existing_spectral_error)}">spectral failed</span>`;
+    haveCells.spectral = `<span class="${qualityToneClass('poor')}" title="${esc(h.existing_spectral_error)}">spectral failed</span>`;
   } else if (h.existing_spectral_bitrate) {
     // Historical attempts measured only the existing floor, not its grade.
     haveCells.spectral = `ungraded (~${esc(h.existing_spectral_bitrate)}k)`;
@@ -497,16 +493,16 @@ export function renderDownloadHistoryItem(h) {
   if (h.spectral_grade || h.existing_spectral_grade || h.existing_spectral_bitrate
       || h.spectral_error || h.existing_spectral_error) {
     const candidate = h.spectral_error
-      ? `<span style="color:#d66;" title="${esc(h.spectral_error)}">analysis failed</span>`
+      ? `<span class="${qualityToneClass('poor')}" title="${esc(h.spectral_error)}">analysis failed</span>`
       : h.spectral_grade
       ? formatSpectral(h.spectral_grade, h.spectral_bitrate)
       : 'unmeasured';
     const existing = h.existing_spectral_error
-      ? `<span style="color:#d66;" title="${esc(h.existing_spectral_error)}">analysis failed</span>`
+      ? `<span class="${qualityToneClass('poor')}" title="${esc(h.existing_spectral_error)}">analysis failed</span>`
       : h.existing_spectral_grade
       ? formatSpectral(h.existing_spectral_grade, h.existing_spectral_bitrate)
       : h.existing_spectral_bitrate
-        ? `<span style="color:#aa8;">ungraded (~${esc(h.existing_spectral_bitrate)}kbps)</span>`
+        ? `<span class="${qualityToneClass('unknown')}">ungraded (~${esc(h.existing_spectral_bitrate)}kbps)</span>`
         : 'unmeasured';
     rows.push(['Spectral', `<span class="r-ev-tag">IN</span> ${candidate} `
       + `<span class="r-ev-tag">HAVE</span> ${existing}`]);

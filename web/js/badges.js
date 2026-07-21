@@ -17,6 +17,7 @@
 
 import { pipelineStore, pipelineStoreKey } from './state.js';
 import { qualityLabelShort } from './util.js';
+import { qualityRankBadgeClass } from './quality_palette.js';
 
 /**
  * @typedef {Object} BadgeItem
@@ -62,14 +63,14 @@ export function renderStatusBadges(item) {
     // Rank colour overrides the default blue when the backend supplied
     // a codec-aware tier. Falls back to badge-library blue when not.
     const rank = (item.library_rank || '').toLowerCase();
-    const cls = rank ? `badge-rank-${rank}` : 'badge-library';
+    const cls = rank ? qualityRankBadgeClass(rank) : 'badge-library';
     html += `<span class="badge ${cls}">in library${suffix}</span>`;
   }
   // Quality identity of the tracked install (issue #711 provisional
   // surfacing): verified is terminal; provisional means an unverified
   // lossless-source conversion the pipeline is still trying to verify.
   if (item.pipeline_verified_lossless) {
-    html += '<span class="badge badge-verified" title="verified lossless source — search complete">verified</span>';
+    html += '<span class="badge badge-verified badge-rank-lossless" title="verified lossless source — search complete">verified</span>';
   } else if (item.pipeline_provisional) {
     html += '<span class="badge badge-provisional" title="unverified lossless-source conversion — still hunting a verified lossless copy">provisional</span>';
   }
