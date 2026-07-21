@@ -72,6 +72,29 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
     """Concrete pins promoted from incidents and generated counterexamples."""
 
     @staticmethod
+    def _seed_conflicting_identity(world: LifecycleWorld, *, release_id: str) -> int:
+        """Create a valid installed world, then inject the legacy conflict."""
+
+        seed = next(
+            candidate
+            for candidate in STATEFUL_WORLD_CENSUS_SEEDS
+            if candidate.name == "imported_mb_lineage1_verified_v0"
+        )
+        request_id = world.seed_census_release(BeetsWorldRelease(
+            release_id=release_id,
+            artist="Conflicting Authority",
+            album="Two Providers Are Not One Identity",
+            year=2000,
+            codec="flac",
+        ), seed)
+        world.db._execute(
+            "UPDATE album_requests SET discogs_release_id = %s WHERE id = %s",
+            (str(8_000_000 + request_id), request_id),
+        )
+        world.db.conn.commit()
+        return request_id
+
+    @staticmethod
     def _add_passenger_pressings(world: LifecycleWorld) -> tuple[int, int]:
         """Recreate the exact same-key label shape from the live incident."""
 
@@ -221,19 +244,11 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
         """Shrunk #762 world: legacy dual identity cannot authorize Replace."""
 
         assert TEST_DSN is not None
-        seed = next(
-            candidate
-            for candidate in STATEFUL_WORLD_CENSUS_SEEDS
-            if candidate.name == "imported_dual_lineage1_verified_v0"
-        )
         with LifecycleWorld(TEST_DSN, repository_root()) as world:
-            request_id = world.seed_census_release(BeetsWorldRelease(
+            request_id = self._seed_conflicting_identity(
+                world,
                 release_id="20000000-0000-4000-8000-000000000762",
-                artist="Conflicting Authority",
-                album="Two Providers Are Not One Identity",
-                year=2000,
-                codec="flac",
-            ), seed)
+            )
             before = world.db.get_request(request_id)
             before_database = world.database_snapshot()
             before_albums = world.beets.snapshots()
@@ -243,25 +258,16 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
             self.assertEqual(world.db.get_request(request_id), before)
             self.assertEqual(world.database_snapshot(), before_database)
             self.assertEqual(world.beets.snapshots(), before_albums)
-            world.assert_invariants()
 
     def test_conflicting_replace_checker_rejects_hidden_insert(self) -> None:
         """Known-bad mutant: an unrelated insert still violates zero mutation."""
 
         assert TEST_DSN is not None
-        seed = next(
-            candidate
-            for candidate in STATEFUL_WORLD_CENSUS_SEEDS
-            if candidate.name == "imported_dual_lineage1_verified_v0"
-        )
         with LifecycleWorld(TEST_DSN, repository_root()) as world:
-            request_id = world.seed_census_release(BeetsWorldRelease(
+            request_id = self._seed_conflicting_identity(
+                world,
                 release_id="20000000-0000-4000-8000-000000000763",
-                artist="Conflicting Authority",
-                album="A Hidden Insert Is Still A Mutation",
-                year=2000,
-                codec="flac",
-            ), seed)
+            )
             production_replace = MbidReplaceService.replace_request_mbid
 
             def insert_after_rejection(

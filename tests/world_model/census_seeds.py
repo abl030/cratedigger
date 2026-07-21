@@ -202,7 +202,6 @@ _STATEFUL_NAMES = frozenset({
     "imported_mb_lineage1_verified_v0",
     "imported_mb_lineage4_verified_v0",
     "imported_mb_lineage4_verified_without_v0",
-    "imported_dual_lineage1_verified_v0",
     "wanted_mb_pristine",
     "wanted_mb_lineage1_evidence",
     "wanted_mb_lossless_lineage1_installed",
