@@ -71,7 +71,6 @@ from lib.slskd_client import DownloadUser
 from lib.slskd_transfers import (
     _get_all_downloads_snapshot,
     cancel_and_delete,
-    match_transfer,
     match_transfer_for_attempt,
     slskd_do_enqueue,
 )
@@ -527,6 +526,20 @@ def harvest_terminal_transfer_evidence(ctx: CratediggerContext) -> None:
     ``processing_started_at`` are skipped — their files already moved to
     local processing and are no longer purely slskd-side transfers.
 
+    Matching is attempt-scoped (issue #820): the bulk snapshot's
+    ``includeRemoved=True`` history can still contain a terminal record
+    from a much older attempt at the SAME ``(username, filename)`` queue
+    key (slskd never expires removed history). Matching with the plain
+    ``match_transfer`` here — no attempt boundary — let a months-old
+    ``Completed, Succeeded`` record outrank and get stamped over the
+    CURRENT attempt's genuine terminal state (e.g. a real
+    ``Completed, Errored``), laundering a real failure into a false
+    "download complete" the next poll cycle then trusted. Every match
+    here goes through ``match_transfer_for_attempt`` with
+    ``not_before=state.enqueued_at`` — the same attempt boundary the poll
+    path (``_poll_one_active_download``) already applies — so only
+    evidence belonging to THIS attempt is ever stamped.
+
     Best-effort and silent on the happy path: a snapshot failure skips
     the whole pass, and ANY per-row failure (undecodable
     ``active_download_state``, a matcher error, the state write raising)
@@ -566,8 +579,9 @@ def harvest_terminal_transfer_evidence(ctx: CratediggerContext) -> None:
             for f in state.files:
                 if f.last_state and f.last_state.startswith("Completed,"):
                     continue
-                transfer = match_transfer(
-                    snapshot, f.filename, username=f.username)
+                transfer = match_transfer_for_attempt(
+                    snapshot, f.filename, username=f.username,
+                    not_before=state.enqueued_at)
                 if (transfer is None
                         or not transfer.state.startswith("Completed,")):
                     continue

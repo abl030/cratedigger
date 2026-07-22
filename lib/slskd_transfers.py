@@ -441,12 +441,15 @@ def _is_terminal_transfer_before(
     return latest_ts < threshold
 
 
-def match_transfer(
+def _transfer_candidates(
     downloads: DownloadUser | list[DownloadUser],
     target_filename: str,
     username: str | None = None,
-) -> TransferSnapshot | None:
-    """Find the best slskd transfer snapshot for a username+filename pair."""
+) -> list[TransferSnapshot]:
+    """Collect every slskd transfer snapshot for a username+filename pair,
+    across every directory grouping in the snapshot -- the shared
+    candidate-collection walk behind both ``match_transfer`` and
+    ``match_transfer_for_attempt`` (issue #820)."""
     groups = downloads if isinstance(downloads, list) else [downloads]
     candidates: list[TransferSnapshot] = []
     for group in groups:
@@ -456,7 +459,22 @@ def match_transfer(
             for slskd_file in directory.files:
                 if slskd_file.filename == target_filename:
                     candidates.append(slskd_file)
+    return candidates
 
+
+def match_transfer(
+    downloads: DownloadUser | list[DownloadUser],
+    target_filename: str,
+    username: str | None = None,
+) -> TransferSnapshot | None:
+    """Find the best slskd transfer snapshot for a username+filename pair.
+
+    Reasons over ALL history in the snapshot (including terminal records
+    from long-past attempts) -- callers that need to bind evidence to one
+    specific attempt must use ``match_transfer_for_attempt`` instead
+    (issue #820).
+    """
+    candidates = _transfer_candidates(downloads, target_filename, username=username)
     if not candidates:
         return None
     return max(candidates, key=_transfer_priority)
@@ -469,19 +487,36 @@ def match_transfer_for_attempt(
     username: str,
     not_before: str | None,
 ) -> TransferSnapshot | None:
-    """Match one transfer without binding a new attempt to stale history."""
+    """Match the best transfer for ONE attempt, never binding it to a
+    stale cross-attempt terminal record (issue #820).
 
-    transfer = match_transfer(
-        downloads,
-        target_filename,
-        username=username,
-    )
-    if transfer is not None and _is_terminal_transfer_before(
-        transfer,
-        not_before,
-    ):
+    Filters the candidate set FIRST -- excluding every terminal record
+    whose lifecycle predates ``not_before`` (``_is_terminal_transfer_before``)
+    -- then ranks the SURVIVORS with ``_transfer_priority`` (success still
+    outranks recency, but only among candidates that belong to this
+    attempt). Returns ``None`` only when no survivor remains (a genuinely
+    vanished current attempt), never as a side effect of a stale
+    pre-boundary record outranking a genuine post-boundary one.
+
+    Pre-#820, this ranked ALL candidates first and staleness-checked only
+    the single winner -- when the winner was pre-boundary it returned
+    ``None`` outright, discarding a lower-ranked but genuine post-boundary
+    candidate (e.g. the current attempt's own terminal error) right along
+    with the stale one. A months-old ``Completed, Succeeded`` record for
+    the same ``(username, filename)`` queue key (slskd's ``includeRemoved``
+    history never expires it) could then shadow -- and, via
+    ``harvest_terminal_transfer_evidence``'s un-guarded ``match_transfer``
+    call, get stamped as -- the current attempt's terminal state, silently
+    laundering a genuinely errored file into a false "download complete".
+    """
+    candidates = _transfer_candidates(downloads, target_filename, username=username)
+    survivors = [
+        c for c in candidates
+        if not _is_terminal_transfer_before(c, not_before)
+    ]
+    if not survivors:
         return None
-    return transfer
+    return max(survivors, key=_transfer_priority)
 
 
 def _get_all_downloads_snapshot(

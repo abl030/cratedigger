@@ -1400,6 +1400,143 @@ class TestMatchTransferId(unittest.TestCase):
         self.assertEqual(result.id, "new-succeeded")
 
 
+class TestMatchTransferForAttempt(unittest.TestCase):
+    """Test match_transfer_for_attempt() — issue #820: a stale prior-attempt
+    terminal record for the SAME (username, filename) queue key must never
+    shadow, nor silently suppress, the current attempt's genuine transfer.
+    """
+
+    def test_no_survivors_returns_none(self):
+        """Only a pre-boundary terminal record exists — a genuinely
+        vanished current attempt still returns None (must-still-work
+        guard: this is NOT a regression to fall back on)."""
+        from lib.slskd_transfers import match_transfer_for_attempt
+        downloads = make_download_user(username="user1", directories=[
+            make_download_directory(directory="d", files=[
+                make_transfer_snapshot(
+                    filename="shared\\01.flac",
+                    id="old-completed",
+                    state="Completed, Succeeded",
+                    ended_at="2026-04-03T21:00:00+00:00",
+                ),
+            ]),
+        ])
+        result = match_transfer_for_attempt(
+            downloads, "shared\\01.flac", username="user1",
+            not_before="2026-04-03T22:00:00+00:00",
+        )
+        self.assertIsNone(result)
+
+    def test_active_current_transfer_outranks_stale_terminal_record(self):
+        """Must-still-work guard: an ACTIVE (non-terminal) current
+        transfer still outranks any terminal record, stale or not."""
+        from lib.slskd_transfers import match_transfer_for_attempt
+        downloads = make_download_user(username="user1", directories=[
+            make_download_directory(directory="d", files=[
+                make_transfer_snapshot(
+                    filename="shared\\01.flac",
+                    id="old-completed",
+                    state="Completed, Succeeded",
+                    ended_at="2026-04-03T21:00:00+00:00",
+                ),
+                make_transfer_snapshot(
+                    filename="shared\\01.flac",
+                    id="active-id",
+                    state="InProgress",
+                    started_at="2026-04-03T22:30:00+00:00",
+                ),
+            ]),
+        ])
+        result = match_transfer_for_attempt(
+            downloads, "shared\\01.flac", username="user1",
+            not_before="2026-04-03T22:00:00+00:00",
+        )
+        assert result is not None
+        self.assertEqual(result.id, "active-id")
+
+    def test_succeeded_still_outranks_errored_within_one_attempt(self):
+        """Must-still-work guard: within ONE attempt (both post-boundary),
+        success-preference is unchanged — a Succeeded record still
+        outranks an Errored duplicate for the same key."""
+        from lib.slskd_transfers import match_transfer_for_attempt
+        downloads = make_download_user(username="user1", directories=[
+            make_download_directory(directory="d", files=[
+                make_transfer_snapshot(
+                    filename="shared\\01.flac",
+                    id="retry-errored",
+                    state="Completed, Errored",
+                    ended_at="2026-04-03T22:10:00+00:00",
+                ),
+                make_transfer_snapshot(
+                    filename="shared\\01.flac",
+                    id="retry-succeeded",
+                    state="Completed, Succeeded",
+                    ended_at="2026-04-03T22:20:00+00:00",
+                ),
+            ]),
+        ])
+        result = match_transfer_for_attempt(
+            downloads, "shared\\01.flac", username="user1",
+            not_before="2026-04-03T22:00:00+00:00",
+        )
+        assert result is not None
+        self.assertEqual(result.id, "retry-succeeded")
+
+    def test_stale_succeeded_never_shadows_genuine_post_boundary_errored(self):
+        """I2 core pin (issue #820): a stale pre-boundary
+        Completed,Succeeded record must never shadow — nor, via the old
+        'rank first, staleness-check only the winner' bug, silently
+        suppress into None — the current attempt's genuine post-boundary
+        Completed,Errored record. Real production values: request 4190
+        track 09 (HumDrum, The Pictures - Pieces of Eight, 2026-07-22)."""
+        from lib.slskd_transfers import match_transfer_for_attempt
+        filename = (
+            "@@fdcrt\\POWER POP - Tagged\\Pictures, The - "
+            "Pieces Of Eight (2005)\\09 - Downhill From Here.mp3"
+        )
+        downloads = make_download_user(username="HumDrum", directories=[
+            make_download_directory(
+                directory="@@fdcrt\\POWER POP - Tagged\\Pictures, The - "
+                          "Pieces Of Eight (2005)",
+                files=[
+                    make_transfer_snapshot(
+                        filename=filename,
+                        id="stale-may-id",
+                        state="Completed, Succeeded",
+                        requested_at="2026-05-18T23:01:32+00:00",
+                        ended_at="2026-05-18T23:04:58+00:00",
+                        bytes_transferred=5274623,
+                    ),
+                    make_transfer_snapshot(
+                        filename=filename,
+                        id="current-errored-id",
+                        state="Completed, Errored",
+                        requested_at="2026-07-22T02:01:26.725+00:00",
+                        started_at="2026-07-22T02:05:00.222+00:00",
+                        ended_at="2026-07-22T02:05:00.222+00:00",
+                        bytes_transferred=0,
+                        exception=(
+                            "Download of 09 - Downhill From Here.mp3 "
+                            "reported as failed by HumDrum"
+                        ),
+                    ),
+                ],
+            ),
+        ])
+        result = match_transfer_for_attempt(
+            downloads, filename, username="HumDrum",
+            not_before="2026-07-22T02:01:25.759358+00:00",
+        )
+        assert result is not None
+        self.assertEqual(result.id, "current-errored-id")
+        self.assertEqual(result.state, "Completed, Errored")
+        self.assertEqual(
+            result.exception,
+            "Download of 09 - Downhill From Here.mp3 reported as failed "
+            "by HumDrum",
+        )
+
+
 class TestRederiveTransferIds(unittest.TestCase):
     """Test rederive_transfer_ids() — re-derive IDs from slskd API."""
 
@@ -3250,6 +3387,138 @@ class TestHarvestTerminalTransferEvidence(unittest.TestCase):
 
         self.assertEqual(fake_db.update_download_state_calls, [])
 
+    def _row_with_boundary(self, request_id, *, enqueued_at, files):
+        """Like ``_row`` but with a caller-controlled ``enqueued_at``
+        attempt boundary — issue #820's stale-shadowing scenarios need a
+        boundary strictly AFTER a months-old prior-attempt record."""
+        return {
+            "id": request_id,
+            "album_title": "Test Album",
+            "artist_name": "Test Artist",
+            "year": 2020,
+            "mb_release_id": f"test-mbid-{request_id}",
+            "source": "request",
+            "search_filetype_override": None,
+            "target_format": None,
+            "status": "downloading",
+            "active_download_state": {
+                "filetype": "mp3",
+                "enqueued_at": enqueued_at,
+                "files": files,
+            },
+        }
+
+    def test_stale_prior_attempt_terminal_record_is_not_stamped(self):
+        """I1 orchestration pin (issue #820, seam 1): with no OTHER
+        candidate for the key, the harvest must not stamp a pre-boundary
+        terminal record — it must leave the file's evidence exactly as
+        unobserved as ``rederive_transfer_ids``/the poll path already
+        require of themselves."""
+        username = "HumDrum"
+        filename = (
+            "@@fdcrt\\POWER POP - Tagged\\Pictures, The - "
+            "Pieces Of Eight (2005)\\09 - Downhill From Here.mp3"
+        )
+        row = self._row_with_boundary(
+            1,
+            enqueued_at="2026-07-22T02:01:25.759358+00:00",
+            files=[
+                {"username": username, "filename": filename,
+                 "file_dir": "@@fdcrt\\POWER POP - Tagged\\Pictures, The - "
+                              "Pieces Of Eight (2005)",
+                 "size": 5274623},
+            ],
+        )
+        slskd_downloads = [{
+            "username": username,
+            "directories": [{
+                "directory": "@@fdcrt\\POWER POP - Tagged\\Pictures, The - "
+                              "Pieces Of Eight (2005)",
+                "files": [{
+                    "filename": filename,
+                    "id": "stale-may-id",
+                    "state": "Completed, Succeeded",
+                    "requestedAt": "2026-05-18T23:01:32+00:00",
+                    "endedAt": "2026-05-18T23:04:58+00:00",
+                    "bytesTransferred": 5274623,
+                }],
+            }],
+        }]
+        ctx, fake_db = self._ctx([row], slskd_downloads)
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)
+
+        self.assertEqual(fake_db.update_download_state_calls, [])
+        state = fake_db.request(1)["active_download_state"]
+        self.assertIsNone(state["files"][0].get("last_state"))
+
+    def test_genuine_post_boundary_terminal_record_is_stamped_despite_stale_shadow(
+        self,
+    ):
+        """I1+I2 orchestration pin (issue #820, seam 1 — the core fix):
+        the harvest must stamp the CURRENT attempt's genuine terminal
+        state, never the stale prior-attempt record it ranks above by
+        success-preference alone. Real production values: request 4190
+        track 09 (HumDrum, The Pictures - Pieces of Eight, 2026-07-22)."""
+        username = "HumDrum"
+        file_dir = (
+            "@@fdcrt\\POWER POP - Tagged\\Pictures, The - "
+            "Pieces Of Eight (2005)"
+        )
+        filename = file_dir + "\\09 - Downhill From Here.mp3"
+        row = self._row_with_boundary(
+            1,
+            enqueued_at="2026-07-22T02:01:25.759358+00:00",
+            files=[
+                {"username": username, "filename": filename,
+                 "file_dir": file_dir, "size": 5274623},
+            ],
+        )
+        slskd_downloads = [{
+            "username": username,
+            "directories": [{"directory": file_dir, "files": [
+                {
+                    # Prior HumDrum attempt, months old — still visible
+                    # via includeRemoved=True.
+                    "filename": filename,
+                    "id": "stale-may-id",
+                    "state": "Completed, Succeeded",
+                    "requestedAt": "2026-05-18T23:01:32+00:00",
+                    "endedAt": "2026-05-18T23:04:58+00:00",
+                    "bytesTransferred": 5274623,
+                },
+                {
+                    # Current attempt's genuine terminal error.
+                    "filename": filename,
+                    "id": "current-errored-id",
+                    "state": "Completed, Errored",
+                    "requestedAt": "2026-07-22T02:01:26.725+00:00",
+                    "startedAt": "2026-07-22T02:05:00.222+00:00",
+                    "endedAt": "2026-07-22T02:05:00.222+00:00",
+                    "bytesTransferred": 0,
+                    "exception": (
+                        "Download of 09 - Downhill From Here.mp3 "
+                        "reported as failed by HumDrum"
+                    ),
+                },
+            ]}],
+        }]
+        ctx, fake_db = self._ctx([row], slskd_downloads)
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)
+
+        state = fake_db.request(1)["active_download_state"]
+        harvested = state["files"][0]
+        self.assertEqual(harvested["last_state"], "Completed, Errored")
+        self.assertEqual(
+            harvested["last_exception"],
+            "Download of 09 - Downhill From Here.mp3 reported as failed "
+            "by HumDrum",
+        )
+        self.assertEqual(harvested.get("bytes_transferred", 0), 0)
+
 
 class TestPollActiveDownloads(unittest.TestCase):
     """Test poll_active_downloads() — core polling function."""
@@ -3284,8 +3553,17 @@ class TestPollActiveDownloads(unittest.TestCase):
         downloading_rows=None,
         slskd_downloads=None,
         fake_db: FakePipelineDB | None = None,
+        slskd: FakeSlskdAPI | None = None,
     ):
-        """Build context with fake DB + fake slskd for polling."""
+        """Build context with fake DB + fake slskd for polling.
+
+        ``slskd`` lets a caller pass an already-constructed
+        ``FakeSlskdAPI`` and keep a properly-typed local reference to it
+        (avoiding a ``cast(FakeSlskdAPI, ctx.slskd)`` round-trip through
+        the loosely-typed context field) — used by tests that need to
+        both seed the initial snapshot AND queue follow-up snapshots or
+        inspect call recordings after the poll runs.
+        """
         if slskd_downloads is None:
             # Default: return transfers that match the files
             slskd_downloads = [{
@@ -3336,7 +3614,8 @@ class TestPollActiveDownloads(unittest.TestCase):
         ctx = make_ctx_with_fake_db(
             fake_db,
             cfg=cfg,
-            slskd=FakeSlskdAPI(downloads=slskd_downloads),
+            slskd=slskd if slskd is not None
+            else FakeSlskdAPI(downloads=slskd_downloads),
         )
         return ctx, fake_db
 
@@ -4034,6 +4313,130 @@ class TestPollActiveDownloads(unittest.TestCase):
         fake_db.assert_log(self, 0, outcome="timeout")
         self.assertEqual(fake_db.request(1)["status"], "wanted")
         self.assertEqual(fake_db.list_import_jobs(), [])
+
+    def test_stale_prior_attempt_never_launders_current_errored_file_to_complete(
+        self,
+    ):
+        """I3 end-to-end regression pin (issue #820). Real production
+        world: request 4190 track 09 (HumDrum, The Pictures - Pieces of
+        Eight, 2026-07-22) — a months-old prior-attempt
+        ``Completed, Succeeded`` slskd record (removed) for the same
+        (username, filename) queue key sits alongside the current
+        attempt's genuine ``Completed, Errored`` record. Exercises BOTH
+        seams together: the end-of-cycle harvest (seam 1) must capture
+        the genuine error, and the next poll's matcher (seam 2) must
+        still observe it fresh rather than return None. The file must be
+        routed to the errored-file path (retry_files → eventual timeout
+        + cooldown), NEVER laundered into a false 'download complete'.
+        """
+        from lib.download import (
+            harvest_terminal_transfer_evidence,
+            poll_active_downloads,
+        )
+
+        username = "HumDrum"
+        file_dir = (
+            "@@fdcrt\\POWER POP - Tagged\\Pictures, The - "
+            "Pieces Of Eight (2005)"
+        )
+        errored_filename = file_dir + "\\09 - Downhill From Here.mp3"
+        ok_filename = file_dir + "\\01 - Track One.mp3"
+        enqueued_at = "2026-07-22T02:01:25.759358+00:00"
+
+        state_dict = {
+            "filetype": "mp3",
+            "enqueued_at": enqueued_at,
+            "files": [
+                {"username": username, "filename": ok_filename,
+                 "file_dir": file_dir, "size": 6000000,
+                 "last_state": "Completed, Succeeded",
+                 "bytes_transferred": 6000000},
+                {"username": username, "filename": errored_filename,
+                 "file_dir": file_dir, "size": 5274623,
+                 "local_path": None},
+            ],
+        }
+        row = self._make_downloading_row(state_dict=state_dict)
+
+        dual_candidate_snapshot = [{
+            "username": username,
+            "directories": [{"directory": file_dir, "files": [
+                {
+                    "filename": ok_filename,
+                    "id": "ok-id",
+                    "state": "Completed, Succeeded",
+                    "bytesTransferred": 6000000,
+                },
+                {
+                    # Prior HumDrum attempt, months old, removed — still
+                    # visible via includeRemoved=True.
+                    "filename": errored_filename,
+                    "id": "stale-may-id",
+                    "state": "Completed, Succeeded",
+                    "requestedAt": "2026-05-18T23:01:32+00:00",
+                    "endedAt": "2026-05-18T23:04:58+00:00",
+                    "bytesTransferred": 5274623,
+                },
+                {
+                    # Current attempt's genuine terminal error.
+                    "filename": errored_filename,
+                    "id": "current-errored-id",
+                    "state": "Completed, Errored",
+                    "requestedAt": "2026-07-22T02:01:26.725+00:00",
+                    "startedAt": "2026-07-22T02:05:00.222+00:00",
+                    "endedAt": "2026-07-22T02:05:00.222+00:00",
+                    "bytesTransferred": 0,
+                    "exception": (
+                        "Download of 09 - Downhill From Here.mp3 "
+                        "reported as failed by HumDrum"
+                    ),
+                },
+            ]}],
+        }]
+
+        slskd = FakeSlskdAPI(downloads=dual_candidate_snapshot)
+        ctx, fake_db = self._make_poll_ctx(
+            downloading_rows=[row], slskd_downloads=dual_candidate_snapshot,
+            slskd=slskd,
+        )
+
+        # Cycle N end-of-cycle harvest — must capture the GENUINE
+        # current-attempt error, never the stale May success.
+        harvest_terminal_transfer_evidence(ctx)
+        harvested = fake_db.request(1)["active_download_state"]["files"][1]
+        self.assertEqual(harvested["last_state"], "Completed, Errored")
+        self.assertEqual(harvested.get("bytes_transferred", 0), 0)
+
+        # Cycle N+1 poll — the same slskd history is still visible; the
+        # matcher must observe the genuine error fresh (not return None
+        # and fall back to trusting persisted state), routing to retry —
+        # never to 'complete'.
+        slskd.queue_download_snapshots(dual_candidate_snapshot, [{
+            "username": username,
+            "directories": [{"directory": file_dir, "files": [{
+                "filename": errored_filename,
+                "id": "retry-id",
+                "state": "Queued, Locally",
+            }]}],
+        }])
+
+        with patch("time.sleep"):
+            poll_active_downloads(ctx)
+
+        # Never routed to complete: no import job was ever enqueued.
+        self.assertEqual(fake_db.list_import_jobs(), [])
+        self.assertEqual(fake_db.download_logs, [])
+        # Routed to the errored-file path: re-enqueue attempted for the
+        # errored file, not the already-succeeded one.
+        self.assertEqual(len(slskd.transfers.enqueue_calls), 1)
+        enqueue_call = slskd.transfers.enqueue_calls[0]
+        self.assertEqual(enqueue_call.username, username)
+        self.assertEqual(
+            enqueue_call.files,
+            [{"filename": errored_filename, "size": 5274623}],
+        )
+        persisted = self._download_state(fake_db)
+        self.assertEqual(persisted["files"][1]["retry_count"], 1)
 
     def test_poll_active_in_progress(self):
         """Files still downloading with fresh state transition → persist progress snapshot."""
