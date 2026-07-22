@@ -49,6 +49,18 @@ genuine transfer). Three more invariants, same PAIR discipline, prefixed
     must never produce a ``complete`` decision unless the current
     attempt's own state genuinely is ``Completed, Succeeded``.
 
+Also covers issue #822 item 2 — post-#820 reflection: a terminal record
+that carries ZERO parseable lifecycle timestamps cannot prove it belongs
+to ANY attempt (it isn't merely pre-boundary; there is no boundary
+evidence at all), so it must fail closed rather than survive the #820
+attempt-boundary filter the way a genuinely current record would:
+
+#822-I1. **No timestampless terminal binding.** ``match_transfer_for_attempt``
+    never returns a terminal candidate that has no parseable lifecycle
+    timestamp (``requested_at``/``enqueued_at``/``started_at``/``ended_at``
+    all unset or unparseable) — regardless of how it ranks against other
+    candidates on state alone.
+
 Checkers are module-level functions with known-bad self-tests per the
 house method (CLAUDE.md "Bug Hunting — Generated-First" /
 code-quality.md Red/Green TDD). Profiles and promotion policy:
@@ -507,6 +519,7 @@ def _harvest_worlds(draw: Any) -> dict:
 
 _HARVEST_USERNAME = "peer1"
 _HARVEST_FILENAME = "peer1\\Music\\01.flac"
+_HARVEST_ENQUEUED_AT = "2026-01-01T00:00:00+00:00"
 
 
 def _run_harvest(world: dict) -> dict:
@@ -517,10 +530,10 @@ def _run_harvest(world: dict) -> dict:
         bytes_transferred=world["prev_bytes"],
     )
     state = ActiveDownloadState(
-        filetype="flac", enqueued_at="2026-01-01T00:00:00+00:00",
+        filetype="flac", enqueued_at=_HARVEST_ENQUEUED_AT,
         files=[file_state],
         processing_started_at=(
-            "2026-01-01T00:00:00+00:00" if world["processing_started"] else None
+            _HARVEST_ENQUEUED_AT if world["processing_started"] else None
         ),
     )
     row = make_request_row(
@@ -535,6 +548,14 @@ def _run_harvest(world: dict) -> dict:
             filename=_HARVEST_FILENAME, id="tid-1",
             state=world["snap_state"], bytesTransferred=world["snap_bytes"],
             exception=world["snap_exception"],
+            # Real slskd always stamps requestedAt at enqueue time (issue
+            # #822 item 2: a terminal candidate with NO lifecycle
+            # timestamp at all cannot prove attempt membership and is
+            # now excluded fail-closed) -- I1b's own invariant is about
+            # state/exception/bytes propagation, not attempt-boundary
+            # scoping, so the fixture stays production-shaped rather
+            # than exercising the orthogonal #822 boundary here.
+            requestedAt=_HARVEST_ENQUEUED_AT,
         )
     ctx = make_ctx_with_fake_db(db, slskd=slskd)
 
@@ -1147,6 +1168,114 @@ class TestStaleShadowCheckerTripsOnViolations(unittest.TestCase):
         assert_stale_shadow_never_produces_false_complete(
             current_state="Completed, Errored",
             decision=PollCycleDecision.retry_files)
+
+
+# ---- #822-I1: no timestampless terminal binding ----------------------------
+#
+# A terminal record with NO parseable lifecycle timestamp at all (every one
+# of requested_at/enqueued_at/started_at/ended_at unset) cannot prove it
+# belongs to ANY attempt -- this is the shape a synthetic/reconstructed
+# TransferSnapshot can carry (e.g. lib/download_reconstruction.py's
+# _restored_terminal_status, or the vanished-transfer fallback in
+# lib/download.py). Pre-fix, _is_terminal_transfer_before special-cased
+# latest_ts == datetime.min to return False ("not before" -> survives
+# filtering), so a timestampless Completed record could still win on state
+# priority alone and shadow a genuine post-boundary candidate -- reusing
+# the #820-boundary-worlds machinery, but drawing "no timestamp at all" as
+# a third possibility alongside "before" and "after" the boundary.
+
+def _822_is_timestampless_terminal(spec: tuple[str, int | None]) -> bool:
+    state, offset = spec
+    return state.startswith("Completed,") and offset is None
+
+
+def _822_build_downloads(specs: tuple[tuple[str, int | None], ...]):
+    files = []
+    for i, (state, offset) in enumerate(specs):
+        kwargs: dict[str, str] = dict(filename=_820_FILENAME, id=f"c{i}", state=state)
+        if offset is not None:
+            kwargs["ended_at"] = (
+                _820_BOUNDARY + timedelta(seconds=offset)).isoformat()
+        files.append(make_transfer_snapshot(**kwargs))
+    return make_download_user(
+        username=_820_USERNAME,
+        directories=[make_download_directory(
+            directory=_820_DIRECTORY, files=files)],
+    )
+
+
+def _822_run_timestampless_world(specs: tuple[tuple[str, int | None], ...]) -> int | None:
+    downloads = _822_build_downloads(specs)
+    result = match_transfer_for_attempt(
+        downloads, _820_FILENAME, username=_820_USERNAME,
+        not_before=_820_BOUNDARY.isoformat(),
+    )
+    if result is None:
+        return None
+    return int(result.id[1:])
+
+
+@st.composite
+def _822_timestampless_worlds(draw: st.DrawFn) -> tuple[tuple[str, int | None], ...]:
+    n = draw(st.integers(min_value=1, max_value=5))
+    specs: list[tuple[str, int | None]] = []
+    for _ in range(n):
+        state = draw(st.sampled_from(_ALL_STATES))
+        has_timestamp = draw(st.booleans())
+        offset: int | None = (
+            draw(st.integers(min_value=-90 * 86400, max_value=90 * 86400))
+            if has_timestamp else None
+        )
+        specs.append((state, offset))
+    return tuple(specs)
+
+
+def assert_never_binds_timestampless_terminal(
+    *,
+    specs: tuple[tuple[str, int | None], ...],
+    result_index: int | None,
+) -> None:
+    """Module-level checker (known-bad self-test below)."""
+    if result_index is None:
+        return
+    if _822_is_timestampless_terminal(specs[result_index]):
+        state, _offset = specs[result_index]
+        raise AssertionError(
+            f"matcher bound a timestampless terminal candidate: "
+            f"state={state!r} — cannot prove attempt membership")
+
+
+class TestGeneratedNeverBindsTimestamplessTerminal(unittest.TestCase):
+    @given(specs=_822_timestampless_worlds())
+    @example(specs=(
+        ("Completed, Succeeded", None),
+        ("Completed, Errored", 1),
+    ))
+    def test_never_binds_timestampless_terminal(self, specs):
+        result_index = _822_run_timestampless_world(specs)
+        assert_never_binds_timestampless_terminal(
+            specs=specs, result_index=result_index)
+
+
+class TestTimestamplessTerminalCheckerTripsOnViolations(unittest.TestCase):
+    def test_trips_when_timestampless_terminal_is_returned(self):
+        with self.assertRaises(AssertionError):
+            assert_never_binds_timestampless_terminal(
+                specs=(("Completed, Succeeded", None),),
+                result_index=0)
+
+    def test_does_not_trip_on_none(self):
+        assert_never_binds_timestampless_terminal(
+            specs=(("Completed, Succeeded", None),),
+            result_index=None)
+
+    def test_does_not_trip_on_timestamped_terminal(self):
+        assert_never_binds_timestampless_terminal(
+            specs=(("Completed, Errored", 10),), result_index=0)
+
+    def test_does_not_trip_on_timestampless_non_terminal(self):
+        assert_never_binds_timestampless_terminal(
+            specs=(("InProgress", None),), result_index=0)
 
 
 if __name__ == "__main__":

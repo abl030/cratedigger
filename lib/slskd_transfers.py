@@ -463,6 +463,26 @@ def _is_terminal_transfer_before(
     transfer: TransferSnapshot,
     not_before: str | None,
 ) -> bool:
+    """Decide whether a terminal candidate must be excluded as belonging
+    to an attempt that predates ``not_before`` (issue #820), including
+    the fail-closed case where it has no lifecycle timestamp at all
+    (issue #822 item 2).
+
+    A terminal record with every one of ``requested_at``/``enqueued_at``/
+    ``started_at``/``ended_at`` unset or unparseable cannot prove it
+    belongs to THIS attempt any more than one with a genuine pre-boundary
+    timestamp can -- it has strictly LESS evidence, not more. Its
+    ``_transfer_latest_timestamp`` is ``datetime.min`` (year 1), which
+    naturally compares less than any real ``not_before`` boundary, so no
+    special case is needed to exclude it: excluding the old carve-out
+    that forced this comparison to False for exactly that value IS the
+    fix. Pre-#822, that carve-out let a timestampless terminal record
+    survive attempt-boundary filtering the way a genuine current-attempt
+    record would, so it could still win the priority ranking in
+    ``match_transfer_for_attempt`` and shadow a real post-boundary
+    candidate (the same laundering shape #820 fixed for dated stale
+    records, but for records that carry no dating evidence whatsoever).
+    """
     if not_before is None:
         return False
     state = transfer.state
@@ -470,8 +490,6 @@ def _is_terminal_transfer_before(
         return False
     threshold = _parse_transfer_timestamp(not_before)
     latest_ts = _transfer_latest_timestamp(transfer)
-    if latest_ts == datetime.min.replace(tzinfo=timezone.utc):
-        return False
     return latest_ts < threshold
 
 
@@ -553,6 +571,12 @@ def match_transfer_for_attempt(
     issue #822 item 1) -- get stamped as the current attempt's terminal
     state, silently laundering a genuinely errored file into a false
     "download complete".
+
+    A terminal candidate with NO parseable lifecycle timestamp at all is
+    excluded the same way (issue #822 item 2, fail-closed): it cannot
+    prove it belongs to this attempt any more than a genuinely
+    pre-boundary record can, so it never survives filtering either --
+    see ``_is_terminal_transfer_before``.
     """
     candidates = _transfer_candidates(downloads, target_filename, username=username)
     survivors = [

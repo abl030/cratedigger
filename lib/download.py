@@ -870,6 +870,15 @@ def _enqueue_completed_processing(
                 outcome="failed",
                 error_message=detail,
             )
+            # Issue #822 item 4: apply the standard user cooldown on this
+            # reset, exactly consistent with the retry/timeout paths
+            # (_timeout_album) -- without it, a future phantom-complete
+            # mechanism could loop with the same peer at zero cost.
+            # Authority: "to the cooldown issue, yes apply the
+            # cooldown." — https://github.com/abl030/cratedigger/issues/822#issuecomment-5042163957
+            for username in extract_usernames(entry.files):
+                if db.check_and_apply_cooldown(username):
+                    ctx.cooled_down_users.add(username)
             transitions.require_transition_applied(transitions.finalize_request(
                 db,
                 request_id,
