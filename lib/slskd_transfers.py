@@ -269,8 +269,19 @@ def slskd_enqueue_with_outcome(
     *,
     request_id: int | None = None,
     attempt_fp: str | None = None,
+    not_before: str | None = None,
 ) -> SlskdEnqueueOutcome:
-    """Enqueue files for download via slskd with an explicit outcome."""
+    """Enqueue files for download via slskd with an explicit outcome.
+
+    ``not_before`` (issue #822 item 3) scopes the post-POST transfer-ID
+    reconciliation below to this attempt via ``match_transfer_id``'s own
+    ``not_before`` — the caller's own pre-POST timestamp (``claim.enqueued_at``
+    / ``state.enqueued_at``), the same attempt boundary
+    ``match_transfer_for_attempt`` uses everywhere else. Omitting it (the
+    default) falls back to the deliberate all-history reconciliation this
+    function has always done — the callers with no ownership tracking wired
+    (no boundary available) rely on that default.
+    """
     _write_ahead_transfer_ledger(
         username, files, ctx, request_id=request_id, attempt_fp=attempt_fp)
     try:
@@ -316,7 +327,9 @@ def slskd_enqueue_with_outcome(
         if download_list is None:
             continue
         if all(
-            match_transfer_id(download_list, f["filename"], username=username)
+            match_transfer_id(
+                download_list, f["filename"], username=username,
+                not_before=not_before)
             is not None
             for f in files
         ):
@@ -329,6 +342,7 @@ def slskd_enqueue_with_outcome(
                 download_list,
                 file["filename"],
                 username=username,
+                not_before=not_before,
             )
             if download_list is not None
             else None
@@ -356,11 +370,12 @@ def slskd_enqueue_with_outcome(
 def slskd_do_enqueue(username: str, files: list[dict[str, Any]],
                      file_dir: str, ctx: CratediggerContext,
                      *, request_id: int | None = None,
-                     attempt_fp: str | None = None) -> list[DownloadFile] | None:
+                     attempt_fp: str | None = None,
+                     not_before: str | None = None) -> list[DownloadFile] | None:
     """Enqueue files for download via slskd. Returns DownloadFile list or None."""
     outcome = slskd_enqueue_with_outcome(
         username, files, file_dir, ctx,
-        request_id=request_id, attempt_fp=attempt_fp)
+        request_id=request_id, attempt_fp=attempt_fp, not_before=not_before)
     if outcome.status != "accepted":
         return None
     return outcome.downloads
@@ -372,6 +387,8 @@ def match_transfer_id(
     downloads: DownloadUser | list[DownloadUser],
     target_filename: str,
     username: str | None = None,
+    *,
+    not_before: str | None = None,
 ) -> str | None:
     """Find the slskd transfer ID for a filename in slskd download responses.
 
@@ -379,8 +396,25 @@ def match_transfer_id(
     slskd.transfers.get_all_downloads(). When a list is provided, username
     narrows the search to one peer.
     Returns the transfer ID string, or None if not found.
+
+    This is the ONE production seam still allowed to reach all-history
+    matching (issue #822 item 1) -- ``slskd_enqueue_with_outcome``'s
+    post-POST reconciliation, the only caller. Passing ``not_before`` scopes
+    the match to that attempt boundary via ``match_transfer_for_attempt``
+    instead; omitting it (the default) reaches the deliberate private
+    all-history walk, ``_match_transfer_all_history``, for callers with no
+    attempt boundary available. ``not_before`` requires an explicit
+    ``username`` -- an attempt boundary is always scoped to one peer, which
+    is exactly what ``match_transfer_for_attempt`` itself requires.
     """
-    transfer = match_transfer(downloads, target_filename, username=username)
+    if not_before is not None:
+        assert username is not None, (
+            "match_transfer_id: not_before requires an explicit username")
+        transfer = match_transfer_for_attempt(
+            downloads, target_filename, username=username, not_before=not_before)
+    else:
+        transfer = _match_transfer_all_history(
+            downloads, target_filename, username=username)
     if transfer is None:
         return None
     return transfer.id
@@ -448,8 +482,8 @@ def _transfer_candidates(
 ) -> list[TransferSnapshot]:
     """Collect every slskd transfer snapshot for a username+filename pair,
     across every directory grouping in the snapshot -- the shared
-    candidate-collection walk behind both ``match_transfer`` and
-    ``match_transfer_for_attempt`` (issue #820)."""
+    candidate-collection walk behind both ``_match_transfer_all_history``
+    and ``match_transfer_for_attempt`` (issue #820)."""
     groups = downloads if isinstance(downloads, list) else [downloads]
     candidates: list[TransferSnapshot] = []
     for group in groups:
@@ -462,17 +496,26 @@ def _transfer_candidates(
     return candidates
 
 
-def match_transfer(
+def _match_transfer_all_history(
     downloads: DownloadUser | list[DownloadUser],
     target_filename: str,
     username: str | None = None,
 ) -> TransferSnapshot | None:
-    """Find the best slskd transfer snapshot for a username+filename pair.
+    """Find the best slskd transfer snapshot for a username+filename pair,
+    reasoning over ALL history in the snapshot (including terminal records
+    from long-past attempts).
 
-    Reasons over ALL history in the snapshot (including terminal records
-    from long-past attempts) -- callers that need to bind evidence to one
-    specific attempt must use ``match_transfer_for_attempt`` instead
-    (issue #820).
+    Private and deliberately narrow (issue #822 item 1): the ONLY caller is
+    ``match_transfer_id``'s default (no ``not_before``) branch, itself
+    reached only by ``slskd_enqueue_with_outcome``'s post-POST
+    reconciliation when no attempt boundary is available. Every other
+    production site that matches transfers binds evidence to a specific
+    attempt and MUST use ``match_transfer_for_attempt`` -- the #820 bug was
+    exactly this function (then public as ``match_transfer``) being equally
+    reachable from an attempt-evidence writer as the attempt-scoped
+    matcher, so the un-narrowed choice read as the default. Renaming and
+    hiding it makes that shape unrepresentable rather than merely
+    tested-against; do not re-export or widen this back to public.
     """
     candidates = _transfer_candidates(downloads, target_filename, username=username)
     if not candidates:
@@ -506,8 +549,10 @@ def match_transfer_for_attempt(
     the same ``(username, filename)`` queue key (slskd's ``includeRemoved``
     history never expires it) could then shadow -- and, via
     ``harvest_terminal_transfer_evidence``'s un-guarded ``match_transfer``
-    call, get stamped as -- the current attempt's terminal state, silently
-    laundering a genuinely errored file into a false "download complete".
+    call (since renamed and made private as ``_match_transfer_all_history``,
+    issue #822 item 1) -- get stamped as the current attempt's terminal
+    state, silently laundering a genuinely errored file into a false
+    "download complete".
     """
     candidates = _transfer_candidates(downloads, target_filename, username=username)
     survivors = [

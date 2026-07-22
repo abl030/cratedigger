@@ -810,6 +810,14 @@ def _enqueue_with_claim_outcome(
             [(f.username, f.filename) for f in claim.entry.files])
         if claim.entry.files else None
     )
+    # not_before (issue #822 item 3): claim.enqueued_at is captured strictly
+    # before this POST (_claim_initial_download_ownership stamps it via
+    # build_active_download_state before writer.claim_downloading runs),
+    # so it's a valid lower bound for the reconciliation match below --
+    # the same boundary rederive_transfer_ids already uses via
+    # claim.enqueued_at (_visible_claim_transfers). None in the untracked
+    # fallback (no ctx.download_ownership / no request_id), which degrades
+    # to the existing all-history reconciliation.
     if claim.claimed:
         return slskd_enqueue_with_outcome(
             username=username,
@@ -818,6 +826,7 @@ def _enqueue_with_claim_outcome(
             ctx=ctx,
             request_id=claim.request_id,
             attempt_fp=attempt_fp,
+            not_before=claim.enqueued_at,
         )
     downloads = slskd_do_enqueue(
         username=username,
@@ -826,6 +835,7 @@ def _enqueue_with_claim_outcome(
         ctx=ctx,
         request_id=claim.request_id,
         attempt_fp=attempt_fp,
+        not_before=claim.enqueued_at,
     )
     if downloads is None:
         return SlskdEnqueueOutcome(status="unknown")

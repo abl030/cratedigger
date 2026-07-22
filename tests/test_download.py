@@ -935,6 +935,70 @@ class TestSlskdEnqueueWithOutcome(unittest.TestCase):
         assert outcome.downloads is not None
         self.assertEqual(outcome.downloads[0].id, "tid-1")
 
+    def _duplicate_key_snapshot(self) -> "FakeSlskdAPI":
+        """Two records for the SAME (username, filename) queue key: a
+        stale Succeeded record from a much older attempt, and the
+        current attempt's genuine Errored record — the exact #820 shape,
+        reused here for reconciliation (issue #822 item 3)."""
+        return FakeSlskdAPI(downloads=[{
+            "username": "user1",
+            "directories": [{
+                "directory": "user1\\Music",
+                "files": [
+                    {
+                        "filename": "shared\\01.flac",
+                        "id": "stale-succeeded",
+                        "state": "Completed, Succeeded",
+                        "endedAt": "2026-01-01T00:00:00+00:00",
+                    },
+                    {
+                        "filename": "shared\\01.flac",
+                        "id": "current-errored",
+                        "state": "Completed, Errored",
+                        "endedAt": "2026-06-01T00:00:10+00:00",
+                    },
+                ],
+            }],
+        }])
+
+    def test_not_before_omitted_can_reconcile_to_stale_prior_attempt_id(self):
+        """Documents the accepted default-branch risk (issue #822 item 3
+        review): without a not_before boundary, reconciliation can pick a
+        stale prior-attempt id over the genuine current one. The #821
+        review found the worst case is a transient stale id whose cancel
+        is a no-op, corrected next poll — defensible, but this pin makes
+        the risk visible rather than implicit."""
+        from lib.slskd_transfers import slskd_enqueue_with_outcome
+        slskd = self._duplicate_key_snapshot()
+        ctx = _make_ctx(slskd=slskd)
+
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "user1", [{"filename": "shared\\01.flac", "size": 100}],
+                "user1\\Music", ctx)
+
+        assert outcome.downloads is not None
+        self.assertEqual(outcome.downloads[0].id, "stale-succeeded")
+
+    def test_not_before_scopes_reconciliation_to_the_current_attempt(self):
+        """The fix half of the pin above: passing not_before (threaded
+        from claim.enqueued_at / state.enqueued_at in production, issue
+        #822 item 3) excludes the stale pre-boundary record and
+        reconciles to the current attempt's own id."""
+        from lib.slskd_transfers import slskd_enqueue_with_outcome
+        slskd = self._duplicate_key_snapshot()
+        ctx = _make_ctx(slskd=slskd)
+
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "user1", [{"filename": "shared\\01.flac", "size": 100}],
+                "user1\\Music", ctx,
+                not_before="2026-06-01T00:00:00+00:00",
+            )
+
+        assert outcome.downloads is not None
+        self.assertEqual(outcome.downloads[0].id, "current-errored")
+
 
 class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
     """T1 pin (issue #571): slskd_enqueue_with_outcome -- the ONE
@@ -1351,8 +1415,69 @@ class TestMatchTransferId(unittest.TestCase):
         )
         self.assertEqual(result, "right-id")
 
+    def test_not_before_omitted_reaches_all_history_matching(self):
+        """Default (no not_before) still reaches the private all-history
+        walk (issue #822 item 1/3) — a stale prior-attempt Succeeded
+        record can still outrank a fresher Errored one, exactly as
+        ``_match_transfer_all_history`` alone would. This is the
+        documented, still-accepted default for callers with no attempt
+        boundary available (see ``test_not_before_scopes_to_attempt_boundary``
+        below for the scoped alternative)."""
+        from lib.slskd_transfers import match_transfer_id
+        downloads = make_download_user(username="user1", directories=[
+            make_download_directory(directory="d", files=[
+                make_transfer_snapshot(
+                    filename="shared\\01.flac",
+                    id="stale-succeeded",
+                    state="Completed, Succeeded",
+                    ended_at="2026-01-01T00:00:00+00:00",
+                ),
+                make_transfer_snapshot(
+                    filename="shared\\01.flac",
+                    id="current-errored",
+                    state="Completed, Errored",
+                    ended_at="2026-06-01T00:00:10+00:00",
+                ),
+            ]),
+        ])
+        result = match_transfer_id(downloads, "shared\\01.flac", username="user1")
+        self.assertEqual(result, "stale-succeeded")
+
+    def test_not_before_scopes_to_attempt_boundary(self):
+        """Passing not_before (issue #822 item 3) routes to
+        ``match_transfer_for_attempt`` and excludes the stale pre-boundary
+        record the default branch above returns."""
+        from lib.slskd_transfers import match_transfer_id
+        downloads = make_download_user(username="user1", directories=[
+            make_download_directory(directory="d", files=[
+                make_transfer_snapshot(
+                    filename="shared\\01.flac",
+                    id="stale-succeeded",
+                    state="Completed, Succeeded",
+                    ended_at="2026-01-01T00:00:00+00:00",
+                ),
+                make_transfer_snapshot(
+                    filename="shared\\01.flac",
+                    id="current-errored",
+                    state="Completed, Errored",
+                    ended_at="2026-06-01T00:00:10+00:00",
+                ),
+            ]),
+        ])
+        result = match_transfer_id(
+            downloads, "shared\\01.flac", username="user1",
+            not_before="2026-06-01T00:00:00+00:00",
+        )
+        self.assertEqual(result, "current-errored")
+
+
+class TestMatchTransferAllHistory(unittest.TestCase):
+    """Test _match_transfer_all_history() — the private, deliberately
+    narrow all-history walk behind match_transfer_id's default branch
+    (issue #822 item 1; renamed from the formerly-public match_transfer)."""
+
     def test_bulk_downloads_prefers_active_over_old_completed(self):
-        from lib.slskd_transfers import match_transfer
+        from lib.slskd_transfers import _match_transfer_all_history
         downloads = [
             make_download_user(username="user1", directories=[
                 make_download_directory(directory="d", files=[
@@ -1371,12 +1496,13 @@ class TestMatchTransferId(unittest.TestCase):
                 ]),
             ]),
         ]
-        result = match_transfer(downloads, "shared\\01.flac", username="user1")
+        result = _match_transfer_all_history(
+            downloads, "shared\\01.flac", username="user1")
         assert result is not None
         self.assertEqual(result.id, "active-id")
 
     def test_bulk_downloads_prefers_latest_successful_attempt(self):
-        from lib.slskd_transfers import match_transfer
+        from lib.slskd_transfers import _match_transfer_all_history
         downloads = [
             make_download_user(username="user1", directories=[
                 make_download_directory(directory="d", files=[
@@ -1395,7 +1521,8 @@ class TestMatchTransferId(unittest.TestCase):
                 ]),
             ]),
         ]
-        result = match_transfer(downloads, "shared\\01.flac", username="user1")
+        result = _match_transfer_all_history(
+            downloads, "shared\\01.flac", username="user1")
         assert result is not None
         self.assertEqual(result.id, "new-succeeded")
 

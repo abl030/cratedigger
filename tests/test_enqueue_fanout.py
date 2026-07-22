@@ -740,6 +740,60 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         # via .get() as production does.
         self.assertIsNone(observed["state"].get("current_path"))
 
+    def test_claim_enqueued_at_threads_as_reconciliation_not_before(self):
+        """issue #822 item 3: the claim's own pre-POST timestamp
+        (captured before writer.claim_downloading, strictly before the
+        slskd POST — same source as the not_before already threaded to
+        rederive_transfer_ids via ``_visible_claim_transfers``) is passed
+        as slskd_enqueue_with_outcome's not_before boundary, so post-POST
+        transfer-ID reconciliation is attempt-scoped rather than
+        all-history."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db)
+        users = ["u00"]
+        results = _make_results(users)
+        file_dir = "Music\\u00\\Album"
+        match = MatchResult(
+            matched=True,
+            directory={
+                "directory": file_dir,
+                "files": [{"filename": "01.flac", "size": 123}],
+            },
+            file_dir=file_dir,
+            candidates=[],
+        )
+
+        observed: dict[str, str | None] = {}
+
+        def fake_enqueue(
+            *, username, files, file_dir, ctx, not_before=None, **_ledger_kwargs,
+        ):
+            row = db.request(1)
+            observed["not_before"] = not_before
+            observed["state_enqueued_at"] = json.loads(
+                row["active_download_state"])["enqueued_at"]
+            return SlskdEnqueueOutcome(status="accepted", downloads=[
+                DownloadFile(
+                    filename=files[0]["filename"],
+                    id="transfer-1",
+                    file_dir=file_dir,
+                    username=username,
+                    size=files[0]["size"],
+                ),
+            ])
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.slskd_enqueue_with_outcome", side_effect=fake_enqueue):
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=_const_match(match),
+            )
+
+        self.assertTrue(attempt.matched)
+        self.assertIsNotNone(observed["not_before"])
+        self.assertEqual(observed["not_before"], observed["state_enqueued_at"])
+
     def test_process_death_after_claim_leaves_planned_state_owned(self):
         cfg = _make_cfg(browse_top_k=20)
         db = FakePipelineDB()
