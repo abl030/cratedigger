@@ -95,13 +95,139 @@ def _quality_preview_target_label(
     return "V0"
 
 
+def _print_decision_outcome(
+    name: str,
+    result: dict[str, object],
+    *,
+    q_override: str | None,
+    gate_unavailable_reason: str | None,
+) -> None:
+    """Print one decision-dict outcome in the shared ``cmd_quality`` format.
+
+    Shared by the synthetic scenario matrix and the live-candidate replay
+    tier (issue #813 tooling tier) — one display path, not two.
+    """
+    from lib.quality import search_tiers
+
+    imported = "IMPORT" if result["imported"] else "REJECT"
+    parts = [imported]
+    if result["denylisted"]:
+        parts.append("denylist")
+    if result["keep_searching"]:
+        parts.append("keep searching")
+    final = result["final_status"] or "?"
+    decision_chain = " → ".join(
+        f"{s}={result[s]}"
+        for s in ["preimport_audio", "preimport_nested", "preimport_bad_hash",
+                  "preimport_empty_fileset", "preimport_mixed_source",
+                  "stage0_spectral_gate", "stage1_spectral",
+                  "stage2_import", "stage3_quality_gate"]
+        if result[s] is not None)
+
+    print(f"    {name}:")
+    print(f"      → {', '.join(parts)} (final: {final})")
+    if decision_chain:
+        print(f"      chain: {decision_chain}")
+
+    # For rejections that keep searching: simulate what happens after
+    if not result["imported"] and result["keep_searching"]:
+        if q_override:
+            tiers, _ = search_tiers(q_override, [])
+            print(f"      next search: {', '.join(tiers)}")
+        elif gate_unavailable_reason is not None:
+            print("      no backfill simulation (linked evidence unavailable)")
+        else:
+            # Importer narrowing requires an independent attempt-local
+            # audit of the exact HAVE copy. Candidate spectral fields in
+            # this scenario are deliberately not substituted for it.
+            print("      no backfill simulation "
+                  "(attempt-local HAVE audit not modeled; keep all tiers)")
+
+
+def _print_live_candidate_replay(
+    db: "PipelineDB",
+    request_id: int,
+    *,
+    rank_cfg: "QualityRankConfig",
+    target_format: str | None,
+    verified_lossless_target: str | None,
+    runtime_audio_check: str,
+    q_override: str | None,
+    gate_unavailable_reason: str | None,
+) -> None:
+    """Replay the request's actual last-candidate evidence through the real
+    decider (issue #813 tooling tier).
+
+    Every synthetic scenario above is a canned grade/bitrate combo — none
+    reproduce the exact live candidate a real download produced, so live
+    verification of a quality-decision change previously needed an offline
+    decider run (PR #812's Mark DeNardo/request 1308 verification). This
+    replays the SAME persisted ``AlbumQualityEvidence`` the importer itself
+    would have decided from, through the SAME production decider
+    (``full_pipeline_decision_from_evidence``) — never a second reimplementation.
+
+    Read-only: loads persisted rows, decides, prints. No writes.
+    """
+    from lib.quality import (
+        AlbumQualityEvidenceDecisionFacts,
+        full_pipeline_decision_from_evidence,
+    )
+
+    print("\n  What the last real candidate actually decided:")
+
+    candidate_evidence_id = db.get_latest_download_log_candidate_evidence_id(
+        request_id)
+    if candidate_evidence_id is None:
+        print("    (no download attempt has left measured candidate "
+              "evidence yet)")
+        return
+    candidate = db.load_album_quality_evidence_by_id(candidate_evidence_id)
+    if candidate is None:
+        print(f"    (candidate evidence #{candidate_evidence_id} is "
+              "referenced but missing — data integrity issue)")
+        return
+
+    current_evidence_id = db.get_request_current_evidence_id(request_id)
+    current = (
+        db.load_album_quality_evidence_by_id(current_evidence_id)
+        if current_evidence_id is not None
+        else None
+    )
+
+    facts = AlbumQualityEvidenceDecisionFacts(
+        audio_check_mode=runtime_audio_check,
+        target_format=target_format,
+        verified_lossless_target=verified_lossless_target,
+    )
+    m = candidate.measurement
+    label = (
+        f"Candidate evidence #{candidate.id} "
+        f"(measured {m.format or '(unknown)'} "
+        f"{_fmt_br(m.min_bitrate_kbps)}, "
+        f"spectral={m.spectral_grade or 'n/a'}, "
+        f"measured_at={candidate.measured_at})"
+    )
+    try:
+        result = full_pipeline_decision_from_evidence(
+            candidate, current, facts=facts, cfg=rank_cfg)
+    except ValueError as exc:
+        print(f"    {label}:")
+        print(f"      → could not decide: {exc}")
+        return
+    _print_decision_outcome(
+        label, result,
+        q_override=q_override,
+        gate_unavailable_reason=gate_unavailable_reason,
+    )
+
+
 def cmd_quality(db: "PipelineDB", args: argparse.Namespace) -> None:
     """Show quality state and simulate decisions for common download scenarios."""
     from lib.dispatch import load_quality_gate_state
     from lib.quality import (full_pipeline_decision, quality_gate_decision,
                              gate_rank,
                              rejection_backfill_override,
-                             search_tiers, compute_effective_override_bitrate)
+                             compute_effective_override_bitrate)
 
     rank_cfg = _load_runtime_rank_config()
 
@@ -394,38 +520,21 @@ def cmd_quality(db: "PipelineDB", args: argparse.Namespace) -> None:
             ),
             **params_with_runtime)
 
-        imported = "IMPORT" if result["imported"] else "REJECT"
-        parts = [imported]
-        if result["denylisted"]:
-            parts.append("denylist")
-        if result["keep_searching"]:
-            parts.append("keep searching")
-        final = result["final_status"] or "?"
-        decision_chain = " → ".join(
-            f"{s}={result[s]}"
-            for s in ["preimport_audio", "preimport_nested",
-                      "stage0_spectral_gate", "stage1_spectral",
-                      "stage2_import", "stage3_quality_gate"]
-            if result[s] is not None)
+        _print_decision_outcome(
+            name, result,
+            q_override=q_override,
+            gate_unavailable_reason=gate_unavailable_reason,
+        )
 
-        print(f"    {name}:")
-        print(f"      → {', '.join(parts)} (final: {final})")
-        if decision_chain:
-            print(f"      chain: {decision_chain}")
-
-        # For rejections that keep searching: simulate what happens after
-        if not result["imported"] and result["keep_searching"]:
-            if q_override:
-                tiers, _ = search_tiers(q_override, [])
-                print(f"      next search: {', '.join(tiers)}")
-            elif gate_unavailable_reason is not None:
-                print("      no backfill simulation (linked evidence unavailable)")
-            else:
-                # Importer narrowing requires an independent attempt-local
-                # audit of the exact HAVE copy. Candidate spectral fields in
-                # this scenario are deliberately not substituted for it.
-                print("      no backfill simulation "
-                      "(attempt-local HAVE audit not modeled; keep all tiers)")
+    _print_live_candidate_replay(
+        db, args.id,
+        rank_cfg=rank_cfg,
+        target_format=target_format,
+        verified_lossless_target=verified_lossless_target,
+        runtime_audio_check=runtime_audio_check,
+        q_override=q_override,
+        gate_unavailable_reason=gate_unavailable_reason,
+    )
 
 
 def cmd_repair_spectral(

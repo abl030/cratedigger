@@ -2,7 +2,7 @@
 
 ```bash
 pipeline-cli show <request_id>               # quality columns + download history with import decisions
-pipeline-cli quality <request_id>            # simulate gate for genuine FLAC / V0 / CBR 320 / suspect FLAC
+pipeline-cli quality <request_id>            # simulate gate for genuine FLAC / V0 / CBR 320 / suspect FLAC, PLUS a replay of the request's actual last download_log candidate evidence through the real decider
 pipeline-cli debug-download <download_log_id>  # raw JSONB audit for one attempt
 pipeline-cli search-plan show <request_id>   # active plan + cursor + per-slot usefulness stats (--json for machine output)
 pipeline-cli triage quarantine --json       # unreferenced immediate failed_imports album folders (read-only)
@@ -38,7 +38,7 @@ Note the escaped `\$` and `\"` — they are evaluated inside the inner
 `pipeline-cli query - <<'SQL' ... SQL` *inside* the `sudo bash -c` body, or
 write the query to a temp file and pass it as an argument.
 
-`pipeline-cli query` sets `default_transaction_read_only = on` — safe for diagnostics. When debugging pipeline behavior, start with the simulator (`pipeline-cli quality`) and add scenarios that expose the bug FIRST — see `.claude/rules/code-quality.md` § "Pipeline Decision Debugging — Simulator-First TDD".
+`pipeline-cli query` sets `default_transaction_read_only = on` — safe for diagnostics. When debugging pipeline behavior, start with the simulator (`pipeline-cli quality`) and add scenarios that expose the bug FIRST — see `.claude/rules/code-quality.md` § "Pipeline Decision Debugging — Simulator-First TDD". `pipeline-cli quality`'s synthetic scenarios are canned grade/bitrate combos that may not reproduce the exact live candidate; the trailing "What the last real candidate actually decided" section (issue #813 tooling tier) replays the request's actual last-candidate `album_quality_evidence` row (the newest `download_log.candidate_evidence_id` for the request) through the real production decider (`full_pipeline_decision_from_evidence`) — read-only, no offline decider run needed to verify a live album's quality decision.
 
 ## Beets operation recovery
 

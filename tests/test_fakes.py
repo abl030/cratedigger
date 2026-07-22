@@ -171,6 +171,63 @@ class TestFakePipelineDB(unittest.TestCase):
         assert loaded is not None
         self.assertEqual(loaded.mb_release_id, "mb-dl-fk-1")
 
+    def test_get_latest_download_log_candidate_evidence_id(self):
+        """Issue #813 tooling tier: replaying the request's real last
+        candidate needs the newest download_log candidate_evidence_id."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42))
+        db.seed_request(make_request_row(id=99))
+
+        # No download attempts yet.
+        self.assertIsNone(db.get_latest_download_log_candidate_evidence_id(42))
+
+        older_log_id = db.log_download(request_id=42, outcome="rejected")
+        older_evidence = make_album_quality_evidence(mb_release_id="mb-older")
+        db.upsert_album_quality_evidence(older_evidence)
+        older_persisted = db.find_album_quality_evidence(
+            mb_release_id=older_evidence.mb_release_id,
+            snapshot_fingerprint=older_evidence.snapshot_fingerprint,
+        )
+        assert older_persisted is not None and older_persisted.id is not None
+        db.set_download_log_candidate_evidence(older_log_id, older_persisted.id)
+
+        # A download attempt with no candidate evidence (e.g. failed before
+        # measurement) must not shadow the older one, and must not win over
+        # the newer evidence-bearing row added below.
+        db.log_download(request_id=42, outcome="failed")
+
+        newer_log_id = db.log_download(request_id=42, outcome="rejected")
+        newer_evidence = make_album_quality_evidence(mb_release_id="mb-newer")
+        db.upsert_album_quality_evidence(newer_evidence)
+        newer_persisted = db.find_album_quality_evidence(
+            mb_release_id=newer_evidence.mb_release_id,
+            snapshot_fingerprint=newer_evidence.snapshot_fingerprint,
+        )
+        assert newer_persisted is not None and newer_persisted.id is not None
+        db.set_download_log_candidate_evidence(newer_log_id, newer_persisted.id)
+
+        # A row on a DIFFERENT request must never leak in.
+        other_log_id = db.log_download(request_id=99, outcome="rejected")
+        other_evidence = make_album_quality_evidence(mb_release_id="mb-other")
+        db.upsert_album_quality_evidence(other_evidence)
+        other_persisted = db.find_album_quality_evidence(
+            mb_release_id=other_evidence.mb_release_id,
+            snapshot_fingerprint=other_evidence.snapshot_fingerprint,
+        )
+        assert other_persisted is not None and other_persisted.id is not None
+        db.set_download_log_candidate_evidence(other_log_id, other_persisted.id)
+
+        self.assertEqual(
+            db.get_latest_download_log_candidate_evidence_id(42),
+            newer_persisted.id,
+        )
+        self.assertEqual(
+            db.get_latest_download_log_candidate_evidence_id(99),
+            other_persisted.id,
+        )
+        self.assertIsNone(
+            db.get_latest_download_log_candidate_evidence_id(12345))
+
     def test_album_quality_evidence_supports_import_job_addressing(self):
         from lib.import_queue import IMPORT_JOB_FORCE
 

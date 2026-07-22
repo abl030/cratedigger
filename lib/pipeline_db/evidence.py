@@ -646,6 +646,32 @@ class _EvidenceMixin(_PipelineDBBase):
         return int(row["candidate_evidence_id"])
 
 
+    def get_latest_download_log_candidate_evidence_id(
+        self,
+        request_id: int,
+    ) -> int | None:
+        """Return the newest download_log candidate evidence id for this
+        request, or None if no download attempt left candidate evidence.
+
+        Candidate evidence is addressed per-attempt (``download_log_id``),
+        not per-request — this is the one place that walks attempt history
+        to find "the request's last candidate", for diagnostics
+        (``pipeline-cli quality <id>``'s live-candidate replay tier, issue
+        #813). Production dispatch never needs this: it always already
+        knows the exact ``download_log_id``/``import_job_id`` in flight.
+        """
+        cur = self._execute("""
+            SELECT candidate_evidence_id
+            FROM download_log
+            WHERE request_id = %s
+              AND candidate_evidence_id IS NOT NULL
+            ORDER BY id DESC
+            LIMIT 1
+        """, (int(request_id),))
+        row = cur.fetchone()
+        return int(row["candidate_evidence_id"]) if row else None
+
+
     def get_request_current_evidence_id(
         self,
         request_id: int,

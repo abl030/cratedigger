@@ -3345,6 +3345,21 @@ class FakePipelineDB:
                 )
         return None
 
+    def get_latest_download_log_candidate_evidence_id(
+        self,
+        request_id: int,
+    ) -> int | None:
+        candidate_ids = [
+            (row.id, row.candidate_evidence_id)
+            for row in self.download_logs
+            if row.request_id == request_id
+            and row.candidate_evidence_id is not None
+        ]
+        if not candidate_ids:
+            return None
+        candidate_ids.sort(key=lambda pair: pair[0], reverse=True)
+        return int(candidate_ids[0][1])
+
     def get_request_current_evidence_id(
         self,
         request_id: int,

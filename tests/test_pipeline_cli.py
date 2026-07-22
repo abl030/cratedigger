@@ -2111,6 +2111,197 @@ class TestCmdQuality(unittest.TestCase):
         self.assertNotIn("(rank=EXCELLENT)", output)
 
 
+class TestCmdQualityLiveCandidateReplay(unittest.TestCase):
+    """pipeline-cli quality <id>'s live-candidate replay tier (issue #813
+    tooling tier). Every synthetic scenario in TestCmdQuality is a canned
+    grade/bitrate combo; this tier replays the request's actual last
+    download_log candidate evidence through the real production decider
+    (full_pipeline_decision_from_evidence) — PR #812's Mark DeNardo
+    verification needed an offline decider run because no tier reproduced
+    the exact live candidate; this one does.
+    """
+
+    def _run(self, db: FakePipelineDB, request_id: int) -> str:
+        from lib.quality import QualityRankConfig
+
+        stdout = io.StringIO()
+        with patch("scripts.pipeline_cli.quality._load_runtime_rank_config",
+                   return_value=QualityRankConfig.defaults()), \
+             patch("scripts.pipeline_cli.quality._load_runtime_verified_lossless_target",
+                   return_value=""), \
+             redirect_stdout(stdout):
+            pipeline_cli.cmd_quality(cast(Any, db), MagicMock(id=request_id))
+        return stdout.getvalue()
+
+    def test_no_candidate_evidence_shows_diagnostic(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=5001, mb_release_id="mbid-no-candidate", status="wanted",
+        ))
+
+        output = self._run(db, 5001)
+
+        self.assertIn("What the last real candidate actually decided", output)
+        self.assertIn(
+            "no download attempt has left measured candidate evidence yet",
+            output,
+        )
+
+    def test_replays_the_actual_last_candidate_decision(self):
+        from lib.quality import AudioQualityMeasurement
+
+        db = FakePipelineDB()
+        request_row = make_request_row(
+            id=5002, mb_release_id="mbid-replay", status="wanted",
+            min_bitrate=320, current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=160,
+        )
+        db.seed_request(request_row)
+
+        # The installed ("current") copy: MP3 320 CBR, likely_transcode/160.
+        current = make_album_quality_evidence(
+            mb_release_id="mbid-replay",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320, avg_bitrate_kbps=320,
+                format="MP3", is_cbr=True,
+                spectral_grade="likely_transcode", spectral_bitrate_kbps=160,
+            ),
+        )
+        db.upsert_album_quality_evidence(current)
+        current_persisted = db.find_album_quality_evidence(
+            mb_release_id=current.mb_release_id,
+            snapshot_fingerprint=current.snapshot_fingerprint,
+        )
+        assert current_persisted is not None and current_persisted.id is not None
+        db.set_request_current_evidence(5002, current_persisted.id)
+
+        # The actual last candidate: an identical-quality MP3 320 CBR
+        # transcode — a real downgrade (Tyler Lamberts / Deerhunter shape).
+        log_id = db.log_download(request_id=5002, outcome="rejected")
+        candidate = make_album_quality_evidence(
+            mb_release_id="mbid-replay",
+            source_path="/tmp/candidate-source",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320, avg_bitrate_kbps=320,
+                format="MP3", is_cbr=True,
+                spectral_grade="likely_transcode", spectral_bitrate_kbps=160,
+            ),
+        )
+        db.upsert_album_quality_evidence(candidate)
+        candidate_persisted = db.find_album_quality_evidence(
+            mb_release_id=candidate.mb_release_id,
+            snapshot_fingerprint=candidate.snapshot_fingerprint,
+        )
+        assert (
+            candidate_persisted is not None
+            and candidate_persisted.id is not None
+        )
+        db.set_download_log_candidate_evidence(log_id, candidate_persisted.id)
+
+        output = self._run(db, 5002)
+
+        self.assertIn("What the last real candidate actually decided", output)
+        self.assertIn(f"Candidate evidence #{candidate_persisted.id}", output)
+        # Real decision: an identical-rank transcode is a downgrade, and
+        # issue #813 Finding 2 requires the display to show the denylist
+        # production actually applies for that decision.
+        self.assertIn("REJECT, denylist", output)
+        self.assertIn("stage2_import=downgrade", output)
+
+    def test_uses_the_newest_candidate_when_several_exist(self):
+        from lib.quality import AudioQualityMeasurement
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=5003, mb_release_id="mbid-latest", status="wanted",
+        ))
+
+        # Distinct file snapshots (evidence is content-addressed by
+        # (mb_release_id, snapshot_fingerprint) — a shared default file
+        # list would collide the two rows into one).
+        from lib.quality import AlbumQualityEvidenceFile
+
+        older_log_id = db.log_download(request_id=5003, outcome="rejected")
+        older = make_album_quality_evidence(
+            mb_release_id="mbid-latest",
+            source_path="/tmp/older-source",
+            files=[AlbumQualityEvidenceFile(
+                relative_path="01 - older.mp3", size_bytes=111,
+                mtime_ns=1, extension="mp3", container="mp3", codec="mp3",
+            )],
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128, format="MP3", is_cbr=True,
+            ),
+        )
+        db.upsert_album_quality_evidence(older)
+        older_persisted = db.find_album_quality_evidence(
+            mb_release_id=older.mb_release_id,
+            snapshot_fingerprint=older.snapshot_fingerprint,
+        )
+        assert older_persisted is not None and older_persisted.id is not None
+        db.set_download_log_candidate_evidence(
+            older_log_id, older_persisted.id)
+
+        newer_log_id = db.log_download(request_id=5003, outcome="success")
+        newer = make_album_quality_evidence(
+            mb_release_id="mbid-latest",
+            source_path="/tmp/newer-source",
+            files=[AlbumQualityEvidenceFile(
+                relative_path="01 - newer.mp3", size_bytes=222,
+                mtime_ns=2, extension="mp3", container="mp3", codec="mp3",
+            )],
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320, format="MP3", is_cbr=True,
+            ),
+        )
+        db.upsert_album_quality_evidence(newer)
+        newer_persisted = db.find_album_quality_evidence(
+            mb_release_id=newer.mb_release_id,
+            snapshot_fingerprint=newer.snapshot_fingerprint,
+        )
+        assert newer_persisted is not None and newer_persisted.id is not None
+        db.set_download_log_candidate_evidence(
+            newer_log_id, newer_persisted.id)
+
+        output = self._run(db, 5003)
+
+        self.assertIn(f"Candidate evidence #{newer_persisted.id}", output)
+        self.assertNotIn(f"Candidate evidence #{older_persisted.id}", output)
+
+    def test_policy_incomplete_candidate_shows_diagnostic_not_a_crash(self):
+        """A legacy/partial evidence row (e.g. missing bitrate + format)
+        must not crash the CLI — full_pipeline_decision_from_evidence's
+        _require_evidence_ready raises ValueError; this is a read-only
+        diagnostic and must degrade gracefully."""
+        from lib.quality import AudioQualityMeasurement
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=5004, mb_release_id="mbid-incomplete", status="wanted",
+        ))
+        log_id = db.log_download(request_id=5004, outcome="rejected")
+        candidate = make_album_quality_evidence(
+            mb_release_id="mbid-incomplete",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=None, avg_bitrate_kbps=None,
+                median_bitrate_kbps=None, format=None,
+            ),
+        )
+        db.upsert_album_quality_evidence(candidate)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=candidate.mb_release_id,
+            snapshot_fingerprint=candidate.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_download_log_candidate_evidence(log_id, persisted.id)
+
+        output = self._run(db, 5004)
+
+        self.assertIn(f"Candidate evidence #{persisted.id}", output)
+        self.assertIn("could not decide", output)
+        self.assertNotIn("Traceback", output)
+
+
 class _ForensicsDB(FakePipelineDB):
     """Minimal FakePipelineDB subclass that lets each test return a
     fixed list from ``get_search_history`` without forcing tests to
