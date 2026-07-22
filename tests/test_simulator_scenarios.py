@@ -462,7 +462,17 @@ _REJECT_DENYLIST_CAUSES = (
 
 def assert_denylist_has_valid_cause(r: "SimResult") -> None:
     """A denylisted outcome must trace to a real reject/retained-nonterminal
-    decision — never a bare default with no decision behind it."""
+    decision — never a bare default with no decision behind it.
+
+    ``causes`` is deliberately scoped to decisions reachable through
+    ``simulate()`` (Stage 1 / Stage 2 / Stage 3). The five folder/audio-
+    integrity denylist decisions (``audio_corrupt``, ``bad_audio_hash``,
+    ``nested_layout``, ``empty_fileset``, ``mixed_source``) are only
+    reachable via ``full_pipeline_decision_from_evidence`` — ``simulate()``
+    has no flat-kwargs surface for them (see ``dl_params`` in this module)
+    — so their absence here is intentional, not a gap. If ``dl_params``
+    ever grows those facts, this checker needs a matching cause, not a
+    silent false failure."""
     if not r.denylisted:
         return
     causes = (
