@@ -59,19 +59,27 @@ from tests.test_integration_slices import _mock_beets_db
 def _have_state_is_never_candidate(
     *,
     persisted_current_grade: str | None,
+    persisted_current_bitrate: int | None,
     existing_spectral: SpectralMeasurement | None,
     download_spectral: SpectralMeasurement | None,
 ) -> bool:
-    """Invariant A checker: the request's on-disk grade is never the candidate's.
+    """Invariant A checker: on-disk state is never adopted from the candidate.
 
-    Holds iff: when there is no real existing measurement, NO on-disk grade is
-    written at all; when there is one, the on-disk grade equals it. The
+    Holds iff: when there is no real existing measurement, NO on-disk state is
+    written at all (grade AND bitrate stay None); when there is one, the on-disk
+    state equals that REAL existing measurement — grade AND bitrate. The
     candidate's ``download_spectral`` is never adopted as HAVE state (#815).
     """
     del download_spectral  # named to make the anti-adoption contrast explicit
     if existing_spectral is None:
-        return persisted_current_grade is None
-    return persisted_current_grade == existing_spectral.grade
+        return (
+            persisted_current_grade is None
+            and persisted_current_bitrate is None
+        )
+    return (
+        persisted_current_grade == existing_spectral.grade
+        and persisted_current_bitrate == existing_spectral.bitrate_kbps
+    )
 
 
 def _analyze_result(grade: str, bitrate: int | None, suspect_pct: float = 0.0,
@@ -406,8 +414,10 @@ class TestNoCandidateSpectralAdoptedAsHave(unittest.TestCase):
         self,
         *,
         candidate_grade: str = "likely_transcode",
+        candidate_bitrate: int | None = 128,
         existing_outcome: str,  # "measured" | "none" | "raises"
         existing_grade: str = "genuine",
+        existing_bitrate: int | None = 160,
     ) -> tuple[FakePipelineDB, PreimportMeasurement]:
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -421,9 +431,11 @@ class TestNoCandidateSpectralAdoptedAsHave(unittest.TestCase):
                 if existing_outcome == "raises":
                     raise RuntimeError("stale album_path: sox found nothing")
                 return SpectralAnalysisDetail(
-                    attempted=True, grade=existing_grade, bitrate_kbps=160)
+                    attempted=True, grade=existing_grade,
+                    bitrate_kbps=existing_bitrate)
             return SpectralAnalysisDetail(
-                attempted=True, grade=candidate_grade, bitrate_kbps=128)
+                attempted=True, grade=candidate_grade,
+                bitrate_kbps=candidate_bitrate)
 
         def resolver(_mbid: str) -> ExistingSpectralAuditLookup:
             if existing_outcome == "none":
@@ -480,55 +492,77 @@ class TestNoCandidateSpectralAdoptedAsHave(unittest.TestCase):
         candidate_grade=st.sampled_from((
             "genuine", "marginal", "suspect", "likely_transcode",
         )),
+        candidate_bitrate=st.one_of(
+            st.none(), st.integers(min_value=32, max_value=500)),
         existing_outcome=st.sampled_from(("measured", "none", "raises")),
         existing_grade=st.sampled_from(
             ("genuine", "suspect", "likely_transcode")),
+        existing_bitrate=st.one_of(
+            st.none(), st.integers(min_value=32, max_value=500)),
     )
     @example(
         candidate_grade="likely_transcode",
+        candidate_bitrate=128,
         existing_outcome="none",
         existing_grade="genuine",
+        existing_bitrate=None,
     )
     @example(
         candidate_grade="likely_transcode",
+        candidate_bitrate=128,
         existing_outcome="raises",
         existing_grade="genuine",
+        existing_bitrate=160,
     )
     def test_candidate_spectral_never_becomes_have_state(
         self,
         candidate_grade: str,
+        candidate_bitrate: int | None,
         existing_outcome: str,
         existing_grade: str,
+        existing_bitrate: int | None,
     ) -> None:
-        """Issue #815 Invariant A (bail) property: across candidate grades ×
-        existing-audit outcomes, the request's on-disk (HAVE) spectral state,
-        when written, always equals a REAL existing measurement — never the
-        candidate's. When the on-disk audit yields nothing, no HAVE state is
-        written at all."""
+        """Issue #815 Invariant A (bail) property. Across generated candidate
+        grade × bitrate × existing-audit outcome (measured / none / raises)
+        worlds driving the real ``measure_preimport_state``, the request's
+        on-disk (HAVE) spectral state, when present, always equals a REAL
+        existing measurement — grade AND bitrate — and never the candidate's.
+        When the on-disk audit yields nothing, no HAVE state is written."""
         db, measurement = self._measure(
             candidate_grade=candidate_grade,
+            candidate_bitrate=candidate_bitrate,
             existing_outcome=existing_outcome,
             existing_grade=existing_grade,
+            existing_bitrate=existing_bitrate,
         )
-        persisted = db.request(42).get("current_spectral_grade")
-        persisted_grade = persisted if isinstance(persisted, str) else None
+        row = db.request(42)
+        raw_grade = row.get("current_spectral_grade")
+        persisted_grade = raw_grade if isinstance(raw_grade, str) else None
+        raw_bitrate = row.get("current_spectral_bitrate")
+        persisted_bitrate = raw_bitrate if isinstance(raw_bitrate, int) else None
         # The candidate WAS measured — candidate state is unaffected.
         assert measurement.download_spectral is not None
         self.assertEqual(measurement.download_spectral.grade, candidate_grade)
-        # The on-disk state is never the candidate's.
+        self.assertEqual(
+            measurement.download_spectral.bitrate_kbps, candidate_bitrate)
+        # The on-disk state is never the candidate's — it equals the real
+        # existing measurement (grade + bitrate), or is absent entirely.
         self.assertTrue(_have_state_is_never_candidate(
             persisted_current_grade=persisted_grade,
+            persisted_current_bitrate=persisted_bitrate,
             existing_spectral=measurement.existing_spectral,
             download_spectral=measurement.download_spectral,
         ))
         # Explicit anti-adoption: no existing measurement → nothing written.
         if measurement.existing_spectral is None:
             self.assertIsNone(persisted_grade)
+            self.assertIsNone(persisted_bitrate)
 
     def test_have_state_checker_trips_on_adopted_candidate(self):
         # Known-bad self-test: a request whose on-disk grade was adopted from
         # the candidate (no existing measurement) must trip the checker.
         self.assertFalse(_have_state_is_never_candidate(
+            persisted_current_bitrate=128,
             persisted_current_grade="likely_transcode",
             existing_spectral=None,
             download_spectral=SpectralMeasurement(
@@ -537,6 +571,15 @@ class TestNoCandidateSpectralAdoptedAsHave(unittest.TestCase):
         # ...and it holds on the correct bail case.
         self.assertTrue(_have_state_is_never_candidate(
             persisted_current_grade=None,
+            persisted_current_bitrate=None,
+            existing_spectral=None,
+            download_spectral=SpectralMeasurement(
+                grade="likely_transcode", bitrate_kbps=128),
+        ))
+        # It also trips when only the bitrate leaked from the candidate.
+        self.assertFalse(_have_state_is_never_candidate(
+            persisted_current_grade=None,
+            persisted_current_bitrate=128,
             existing_spectral=None,
             download_spectral=SpectralMeasurement(
                 grade="likely_transcode", bitrate_kbps=128),
