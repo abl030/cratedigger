@@ -1663,6 +1663,82 @@ class TestMatchTransferForAttempt(unittest.TestCase):
             "by HumDrum",
         )
 
+    def test_timestampless_terminal_record_excluded_fail_closed(self):
+        """Issue #822 item 2: a terminal record with ZERO parseable
+        lifecycle timestamps cannot prove it belongs to this attempt and
+        must not bind to it (fail-closed) -- even though its bare
+        "Completed, Succeeded" state would otherwise outrank a genuine
+        post-boundary Errored record on priority alone. Pre-fix,
+        ``_is_terminal_transfer_before`` special-cased ``latest_ts ==
+        datetime.min`` to return False (survives filtering); this is the
+        exact shape that let it launder past attempt-boundary scoping."""
+        from lib.slskd_transfers import match_transfer_for_attempt
+        downloads = make_download_user(username="user1", directories=[
+            make_download_directory(directory="d", files=[
+                make_transfer_snapshot(
+                    filename="shared\\01.flac",
+                    id="timestampless-succeeded",
+                    state="Completed, Succeeded",
+                    # No requested_at/started_at/ended_at/enqueued_at --
+                    # nothing proves which attempt this belongs to.
+                ),
+                make_transfer_snapshot(
+                    filename="shared\\01.flac",
+                    id="current-errored",
+                    state="Completed, Errored",
+                    ended_at="2026-07-22T02:05:00+00:00",
+                ),
+            ]),
+        ])
+        result = match_transfer_for_attempt(
+            downloads, "shared\\01.flac", username="user1",
+            not_before="2026-07-22T02:01:25+00:00",
+        )
+        assert result is not None
+        self.assertEqual(result.id, "current-errored")
+
+    def test_timestampless_terminal_record_alone_returns_none(self):
+        """Must-still-work guard: when the ONLY candidate is a
+        timestampless terminal record, the matcher returns None -- same
+        as any other zero-survivor world -- never the unprovable
+        candidate itself."""
+        from lib.slskd_transfers import match_transfer_for_attempt
+        downloads = make_download_user(username="user1", directories=[
+            make_download_directory(directory="d", files=[
+                make_transfer_snapshot(
+                    filename="shared\\01.flac",
+                    id="timestampless-succeeded",
+                    state="Completed, Succeeded",
+                ),
+            ]),
+        ])
+        result = match_transfer_for_attempt(
+            downloads, "shared\\01.flac", username="user1",
+            not_before="2026-07-22T02:01:25+00:00",
+        )
+        self.assertIsNone(result)
+
+    def test_timestampless_non_terminal_record_still_survives(self):
+        """Must-still-work guard: non-terminal records are untouched by
+        this fix -- they always survive attempt-boundary filtering
+        regardless of timestamps, exactly as before."""
+        from lib.slskd_transfers import match_transfer_for_attempt
+        downloads = make_download_user(username="user1", directories=[
+            make_download_directory(directory="d", files=[
+                make_transfer_snapshot(
+                    filename="shared\\01.flac",
+                    id="active-no-ts",
+                    state="InProgress",
+                ),
+            ]),
+        ])
+        result = match_transfer_for_attempt(
+            downloads, "shared\\01.flac", username="user1",
+            not_before="2026-07-22T02:01:25+00:00",
+        )
+        assert result is not None
+        self.assertEqual(result.id, "active-no-ts")
+
 
 class TestRederiveTransferIds(unittest.TestCase):
     """Test rederive_transfer_ids() — re-derive IDs from slskd API."""
@@ -3284,10 +3360,12 @@ class TestHarvestTerminalTransferEvidence(unittest.TestCase):
         return ctx, fake_db
 
     def test_stamps_terminal_transfer_before_local_processing(self):
+        enqueued_at = _utc_now_iso()
         row = self._row(1, files=[
             {"username": "user1", "filename": "user1\\Music\\01.flac",
              "file_dir": "user1\\Music", "size": 1000, "last_state": "InProgress"},
         ])
+        row["active_download_state"]["enqueued_at"] = enqueued_at
         slskd_downloads = [{
             "username": "user1",
             "directories": [{"directory": "user1\\Music", "files": [{
@@ -3296,6 +3374,10 @@ class TestHarvestTerminalTransferEvidence(unittest.TestCase):
                 "state": "Completed, Rejected",
                 "bytesTransferred": 500,
                 "exception": "Transfer rejected: Banned",
+                # requestedAt at/after enqueued_at -- issue #822 item 2:
+                # a timestampless terminal record can't prove attempt
+                # membership and is excluded fail-closed.
+                "requestedAt": enqueued_at,
             }]}],
         }]
         ctx, fake_db = self._ctx([row], slskd_downloads)
@@ -3445,6 +3527,9 @@ class TestHarvestTerminalTransferEvidence(unittest.TestCase):
                     "state": "Completed, Rejected",
                     "bytesTransferred": 0,
                     "exception": "Transfer rejected: Banned",
+                    # requestedAt at/after row2's enqueued_at -- issue
+                    # #822 item 2 fail-closed exclusion otherwise.
+                    "requestedAt": row2["active_download_state"]["enqueued_at"],
                 }]}],
             },
         ]
@@ -3905,6 +3990,9 @@ class TestPollActiveDownloads(unittest.TestCase):
                     "id": "tid-1",
                     "state": "Completed, Succeeded",
                     "bytesTransferred": 30000000,
+                    # requestedAt at/after enqueued_at -- issue #822
+                    # item 2 fail-closed exclusion otherwise.
+                    "requestedAt": row["active_download_state"]["enqueued_at"],
                 }]}],
             }],
         )
@@ -4114,6 +4202,9 @@ class TestPollActiveDownloads(unittest.TestCase):
                     "id": "tid-1",
                     "state": "Completed, Succeeded",
                     "bytesTransferred": 30000000,
+                    # requestedAt at/after enqueued_at -- issue #822
+                    # item 2 fail-closed exclusion otherwise.
+                    "requestedAt": row["active_download_state"]["enqueued_at"],
                 }]}],
             }],
         )
@@ -4141,6 +4232,9 @@ class TestPollActiveDownloads(unittest.TestCase):
                     "id": "tid-1",
                     "state": "Completed, Succeeded",
                     "bytesTransferred": 30000000,
+                    # requestedAt at/after enqueued_at -- issue #822
+                    # item 2 fail-closed exclusion otherwise.
+                    "requestedAt": row["active_download_state"]["enqueued_at"],
                 }]}],
             }],
         )
@@ -4565,6 +4659,128 @@ class TestPollActiveDownloads(unittest.TestCase):
         persisted = self._download_state(fake_db)
         self.assertEqual(persisted["files"][1]["retry_count"], 1)
 
+    def test_stale_prior_attempt_timestampless_never_launders_current_errored_file_to_complete(
+        self,
+    ):
+        """Issue #822 item 2 end-to-end pin: a prior-attempt terminal
+        ``Completed, Succeeded`` record with ZERO parseable lifecycle
+        timestamps -- the shape a synthetic/reconstructed
+        ``TransferSnapshot`` can carry (e.g.
+        ``lib/download_reconstruction.py``'s ``_restored_terminal_status``
+        or the vanished-transfer fallback in ``lib/download.py``) -- must
+        never bind to this attempt, even though its bare state alone
+        would outrank the genuine current-attempt Errored record on
+        priority. Same two-seam shape as the dated #820-I3 pin
+        (``test_stale_prior_attempt_never_launders_current_errored_file_to_complete``
+        above), but the stale record's staleness is proven by ABSENCE of
+        evidence rather than an old timestamp -- pre-fix,
+        ``_is_terminal_transfer_before`` let a timestampless record
+        survive filtering (``latest_ts == datetime.min`` special-cased to
+        False), so it won on priority and got stamped/trusted as
+        'complete'; the decided/persisted outcome asserted below must
+        route to retry instead."""
+        from lib.download import (
+            harvest_terminal_transfer_evidence,
+            poll_active_downloads,
+        )
+
+        username = "user-822"
+        file_dir = "user-822\\Album"
+        errored_filename = file_dir + "\\09.flac"
+        ok_filename = file_dir + "\\01.flac"
+        enqueued_at = "2026-07-22T02:01:25.759358+00:00"
+
+        state_dict = {
+            "filetype": "flac",
+            "enqueued_at": enqueued_at,
+            "files": [
+                {"username": username, "filename": ok_filename,
+                 "file_dir": file_dir, "size": 6000000,
+                 "last_state": "Completed, Succeeded",
+                 "bytes_transferred": 6000000},
+                {"username": username, "filename": errored_filename,
+                 "file_dir": file_dir, "size": 5274623,
+                 "local_path": None},
+            ],
+        }
+        row = self._make_downloading_row(state_dict=state_dict)
+
+        dual_candidate_snapshot = [{
+            "username": username,
+            "directories": [{"directory": file_dir, "files": [
+                {
+                    "filename": ok_filename,
+                    "id": "ok-id",
+                    "state": "Completed, Succeeded",
+                    "bytesTransferred": 6000000,
+                },
+                {
+                    # Timestampless prior attempt -- no requestedAt/
+                    # startedAt/endedAt at all (unlike #820's dated-stale
+                    # shape), so it cannot prove which attempt it belongs
+                    # to.
+                    "filename": errored_filename,
+                    "id": "timestampless-stale-id",
+                    "state": "Completed, Succeeded",
+                    "bytesTransferred": 5274623,
+                },
+                {
+                    # Current attempt's genuine terminal error.
+                    "filename": errored_filename,
+                    "id": "current-errored-id",
+                    "state": "Completed, Errored",
+                    "requestedAt": "2026-07-22T02:01:26.725+00:00",
+                    "startedAt": "2026-07-22T02:05:00.222+00:00",
+                    "endedAt": "2026-07-22T02:05:00.222+00:00",
+                    "bytesTransferred": 0,
+                    "exception": "Read error: Connection reset by peer",
+                },
+            ]}],
+        }]
+
+        slskd = FakeSlskdAPI(downloads=dual_candidate_snapshot)
+        ctx, fake_db = self._make_poll_ctx(
+            downloading_rows=[row], slskd_downloads=dual_candidate_snapshot,
+            slskd=slskd,
+        )
+
+        # Cycle N end-of-cycle harvest -- must capture the GENUINE
+        # current-attempt error, never the timestampless stale success.
+        harvest_terminal_transfer_evidence(ctx)
+        harvested = fake_db.request(1)["active_download_state"]["files"][1]
+        self.assertEqual(harvested["last_state"], "Completed, Errored")
+        self.assertEqual(harvested.get("bytes_transferred", 0), 0)
+
+        # Cycle N+1 poll -- the same slskd history is still visible; the
+        # matcher must observe the genuine error fresh, routing to
+        # retry -- never laundering into 'complete'.
+        slskd.queue_download_snapshots(dual_candidate_snapshot, [{
+            "username": username,
+            "directories": [{"directory": file_dir, "files": [{
+                "filename": errored_filename,
+                "id": "retry-id",
+                "state": "Queued, Locally",
+            }]}],
+        }])
+
+        with patch("time.sleep"):
+            poll_active_downloads(ctx)
+
+        # Never routed to complete: no import job was ever enqueued.
+        self.assertEqual(fake_db.list_import_jobs(), [])
+        self.assertEqual(fake_db.download_logs, [])
+        # Routed to the errored-file path: re-enqueue attempted for the
+        # errored file, not the already-succeeded one.
+        self.assertEqual(len(slskd.transfers.enqueue_calls), 1)
+        enqueue_call = slskd.transfers.enqueue_calls[0]
+        self.assertEqual(enqueue_call.username, username)
+        self.assertEqual(
+            enqueue_call.files,
+            [{"filename": errored_filename, "size": 5274623}],
+        )
+        persisted = self._download_state(fake_db)
+        self.assertEqual(persisted["files"][1]["retry_count"], 1)
+
     def test_poll_active_in_progress(self):
         """Files still downloading with fresh state transition → persist progress snapshot."""
         from lib.download import poll_active_downloads
@@ -4615,6 +4831,9 @@ class TestPollActiveDownloads(unittest.TestCase):
                         "id": "tid-1",
                         "state": "Completed, Succeeded",
                         "bytesTransferred": 30000000,
+                        # requestedAt at/after enqueued_at -- issue #822
+                        # item 2 fail-closed exclusion otherwise.
+                        "requestedAt": row1["active_download_state"]["enqueued_at"],
                     }]}],
                 },
                 {
@@ -4676,6 +4895,9 @@ class TestPollActiveDownloads(unittest.TestCase):
                         "filename": "user1\\Music\\01.flac",
                         "id": "tid-1",
                         "state": "Completed, Errored",
+                        # requestedAt at/after enqueued_at -- issue #822
+                        # item 2 fail-closed exclusion otherwise.
+                        "requestedAt": row["active_download_state"]["enqueued_at"],
                     },
                 ]}],
             }],
@@ -4843,6 +5065,9 @@ class TestPollActiveDownloads(unittest.TestCase):
 
         # First snapshot is the poll cycle; second snapshot is the
         # post-requeue transfer-id lookup.
+        # requestedAt at/after enqueued_at on every terminal entry --
+        # issue #822 item 2 fail-closed exclusion otherwise.
+        enqueued_at = row["active_download_state"]["enqueued_at"]
         poll_snapshot = [{
             "username": "user1",
             "directories": [{"directory": "user1\\Music", "files": [
@@ -4850,16 +5075,19 @@ class TestPollActiveDownloads(unittest.TestCase):
                     "filename": "user1\\Music\\01.flac",
                     "id": "tid-1",
                     "state": "Completed, Succeeded",
+                    "requestedAt": enqueued_at,
                 },
                 {
                     "filename": "user1\\Music\\02.flac",
                     "id": "tid-2",
                     "state": "Completed, Succeeded",
+                    "requestedAt": enqueued_at,
                 },
                 {
                     "filename": "user1\\Music\\03.flac",
                     "id": "tid-3",
                     "state": "Completed, Errored",
+                    "requestedAt": enqueued_at,
                 },
             ]}],
         }]
@@ -4923,6 +5151,9 @@ class TestPollActiveDownloads(unittest.TestCase):
                     "id": "tid-1",
                     "state": "Completed, Succeeded",
                     "bytesTransferred": 30000000,
+                    # requestedAt at/after enqueued_at -- issue #822
+                    # item 2 fail-closed exclusion otherwise.
+                    "requestedAt": row["active_download_state"]["enqueued_at"],
                 }]}],
             }],
         )
@@ -5815,6 +6046,9 @@ class TestPollActiveDownloads(unittest.TestCase):
                     "id": "tid-1",
                     "state": "Completed, Succeeded",
                     "bytesTransferred": 30000000,
+                    # requestedAt at/after enqueued_at -- issue #822
+                    # item 2 fail-closed exclusion otherwise.
+                    "requestedAt": row["active_download_state"]["enqueued_at"],
                 }]}],
             }],
         )
