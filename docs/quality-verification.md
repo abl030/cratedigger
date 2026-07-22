@@ -457,9 +457,13 @@ both still match, the immutable evidence row is reused without rewriting it.
 After the download log and request-state reset are safely persisted,
 `enrich_incomplete_current_evidence_for_request`
 plans exactly the missing pieces (`plan_current_evidence_enrichment`, pure),
-measures the on-disk copy directly, and persists through the same
-preview-owned once-only helpers — never overwriting present evidence, never
-re-probing an attempted snapshot, and refusing stale on-disk state. Adapter
+measures the on-disk copy directly, and persists through the
+preview-owned helpers — measuring only the pieces the plan reports missing,
+never re-probing an already-attempted V0 snapshot (the V0 research marker is
+once-only), and refusing stale on-disk state. (The HAVE spectral helper is
+*not* once-only — a fresh audit overwrites a disagreeing grade; see the
+fresh-audit-wins policy below.)
+Adapter
 or backfill failures and actual measurement work consume the per-cycle
 `CratediggerContext.evidence_enrichment_budget`; complete or authoritatively
 absent library copies cost nothing. Over time the failed-download cohort's
@@ -494,12 +498,45 @@ a fresh row, repoints the FK, and persists the changed-snapshot enrichment
 gate described above. Either way enrichment can then complete the surviving
 row. The candidate-reuse preview fast path first verifies the content
 snapshot, then projects the candidate spectral fact from that content-addressed
-evidence without scanning those bytes again. It separately persists any
-required attempt-time HAVE scan through
+evidence without scanning those bytes again. It separately persists the
+attempt-time HAVE scan through
 `persist_exact_current_spectral_from_attempt` before marking the job
 importable, so reused-evidence force and automation imports decide against the
 same completed HAVE the full measurement path would see. A changed candidate
 snapshot misses the front gate and runs full preview measurement again.
+
+**HAVE spectral persistence is fail-closed on absence and fresh-audit-wins on
+disagreement (issue #815).** Two rules govern how the request's on-disk (HAVE)
+spectral fact is written:
+
+- **Bail, never infer.** The candidate download's spectral is NEVER adopted as
+  the request's on-disk state. When the on-disk audit of the installed files
+  yields no measurement — a stale/missing Beets path, an analyzer error — the
+  measurement helper (`lib/measurement.py::_persist_spectral_state`) writes
+  nothing; the container bitrate remains the HAVE comparison fallback. The old
+  "reasonable proxy" branch that adopted a candidate's grade is deleted: on
+  2026-05-12 it wrote a rejected fake-320's `likely_transcode`/128 as the HAVE
+  state of a genuine 192 copy, the evidence seeder froze it, and on 2026-07-21
+  it drove a real library downgrade (request 4351, dl 37742). Same fail-closed
+  doctrine as #762/#723 — if we cannot ascertain evidence of the on-disk files,
+  we surface the absence rather than infer.
+- **Fresh-audit-wins.** A SUCCESSFUL fresh on-disk HAVE audit of matched-
+  fingerprint bytes (grade non-null, no error) re-persists grade + bitrate over
+  a disagreeing persisted installed-subject value, with
+  `spectral_provenance='measured'` (`persist_current_spectral_measurement` and
+  `persist_exact_current_spectral_from_attempt`). This replaced the old
+  fill-only-if-NULL policy, which silently discarded a fresh genuine/160 audit
+  and let the frozen 128 landmine keep deciding. The class self-heals at the
+  next preview, which always re-scans the installed bytes. Guards preserved: a
+  FAILED fresh audit never clears a persisted grade (fail-soft `incomplete`),
+  and an R19 lossless-sourced row keeps its source spectral — an installed-
+  derivative scan is never persisted as its grade (`preserve_existing_source_spectral`
+  plus the DB CHECK `album_quality_evidence_lossless_lineage_spectral_subject`).
+
+`spectral_provenance='measured'` means the analyzer ran over the exact bytes the
+snapshot fingerprint identifies; anything else is `'carried'` (a source-lineage
+fact propagated across a byte change) and is never authoritative against a fresh
+audit of the installed bytes.
 
 **Search narrowing companion.** When `lossless_source_locked` fires —
 in the importer (`lib/dispatch/core.py`) or wrong-match cleanup
