@@ -374,25 +374,43 @@ class StageParityWorld:
     is the same established convention as
     ``test_existing_spectral_override_is_noop_when_candidate_has_spectral``
     (which clamps ``candidate_spectral``/``existing_spectral`` to their own
-    containers). A stale/mismatched spectral estimate that legitimately
-    EXCEEDS a fresher container reading is real (evidence carry-forward
-    across snapshots, not a fresh single measurement) but is a data-hygiene
-    gap in a different subsystem, not a Stage1/Stage2 decision disagreement
-    — out of scope here, and precisely the domain this property does NOT
-    reach, which is why Stage 1 remains load-bearing (issue #813 Finding 1
-    audit conclusion) even though this property finds zero disagreement
-    inside its own (consistent-evidence) domain.
+    containers).
+
+    ``spectral > own container`` IS reachable from an ordinary FRESH single
+    measurement, not only via evidence carried forward across snapshots
+    (correction, PR #827 review F3 — the original text here overclaimed
+    cross-snapshot carry-forward as the only path). ``estimate_bitrate_from_
+    cliff`` (``lib/spectral_check.py``) maps a per-track cliff frequency to
+    a fixed, container-INDEPENDENT bucket (96/128/.../320), and
+    ``analyze_album`` aggregates the album-level estimate as
+    ``min(track estimates)`` over ONLY the tracks that had a cliff detected
+    at all — tracks with no cliff are excluded from that ``min``, and the
+    album's overall grade classification (``classify_album``'s 60%/75%
+    suspect-percentage thresholds) is computed independently of this
+    aggregation. So a single outlier track with a cliff at or above the
+    highest lowpass bucket (≥19,550 Hz) yields an album spectral estimate
+    of 320 even when the album's overall grade stays "genuine" (too few
+    suspect tracks to cross the percentage threshold) and its real average
+    container bitrate is much lower (e.g. 246). This domain remains a data-
+    hygiene/aggregation-policy question in a different subsystem
+    (``lib/spectral_check.py::analyze_album``'s own min-over-cliffed-tracks
+    policy), not a Stage1/Stage2 decision disagreement — out of scope here,
+    and precisely the domain this property does NOT reach, which is why
+    Stage 1 remains load-bearing (issue #813 Finding 1 audit conclusion)
+    even though this property finds zero disagreement inside its own
+    (consistent-evidence) domain.
 
     ``new_format``/``existing_format`` are deliberately the SAME codec
     family on both sides (see ``stage_parity_worlds``). Random probing
     (millions of iterations, outside this property) found the shared
     spectral clamp ALSO disagrees when the two sides are DIFFERENT codec
     families — but the spectral bucket table (``LAME_LOWPASS``) is
-    calibrated to MP3/LAME specifically, so a cross-codec spectral pairing
-    is itself evidence of the SAME carry-forward mismatch this docstring
-    already scopes out (spectral analysis runs on the MP3/CBR preimport
-    path or FLAC->V0 conversion evaluation — a fresh single measurement
-    never produces one codec's spectral estimate paired against a
+    calibrated to MP3/LAME specifically, and candidate-side spectral
+    analysis is only gated to run on MP3-shaped/CBR or FLAC->V0-conversion
+    candidates (``spectral_gate_trigger``), so a cross-codec spectral
+    pairing is itself evidence of a mismatch this docstring already scopes
+    as a separate-subsystem question (a fresh single measurement never
+    produces one codec's spectral estimate paired against a
     DIFFERENT codec's raw measurement), not an independent decision-logic
     gap. A correct fix would require deciding whether spectral evidence is
     even comparable across codec families at all — out of scope for this
@@ -1168,6 +1186,14 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
            reasonable budget — this class needed the deterministic pin to
            be caught reliably) found this at roughly a 1-in-8000 rate over
            the general world space.
+
+        PR #827 review round: both fixes above shipped requiring only ONE
+        side spectral-bound to fire, which introduced two NEW flip worlds
+        (findings F1/F2, pinned in
+        ``tests/test_quality_classification.py::TestLiveBugReproductions``'s
+        ``test_stage_parity_review_f1_*``/``test_stage_parity_review_f2_*``).
+        Both fixes now require BOTH sides bound before firing — see
+        ``both_spectral_bound`` in ``lib/quality/compare.py``.
         """
         stage1, stage2 = _stage_parity_verdicts(world)
         assert_stage1_never_contradicts_stage2(stage1, stage2)

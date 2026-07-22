@@ -165,7 +165,11 @@ def _shared_spectral_bitrates(
     (128=acceptable, 192=good, 256=excellent, 320=transparent), not
     ``mp3_vbr``'s more generous ones. Classifying a spectral-bound value
     through a VBR-tagged side's own ``is_cbr=False`` inflates its rank
-    purely from table choice, not real content — see the caller.
+    purely from table choice, not real content. The caller only forces CBR
+    bands when BOTH sides are bound (symmetric) — forcing it on one bound
+    side while an unbound side keeps its own (possibly more generous VBR)
+    table mixes a spectral-calibrated number against a raw-metric number
+    under two different band tables, which can itself invert the ordering.
     """
     if (new.spectral_bitrate_kbps is None
             or existing.spectral_bitrate_kbps is None):
@@ -236,22 +240,29 @@ def compare_quality(
 
     Shared-spectral bucket: when BOTH measurements carry ``spectral_bitrate_kbps``,
     clamp each side's classified bitrate to ``min(selected_metric, spectral)``
-    for rank. When the clamped values land in the SAME rank but still differ
-    from each other, that difference decides the same-rank tiebreak directly
-    (branch ``spectral_tiebreak``) — otherwise the coarse rank band could
-    bucket two genuinely unequal spectral readings together and the fully
+    for rank. When the clamp binds on BOTH sides (the clamped value on each
+    side IS its spectral estimate, not its raw metric) and the clamped
+    values land in the SAME rank but still differ from each other, that
+    difference decides the same-rank tiebreak directly (branch
+    ``spectral_tiebreak``) — otherwise the coarse rank band could bucket
+    two genuinely unequal spectral readings together and the fully
     unclamped raw metric would decide instead, which can reverse a real
-    spectral ordering (issue #813 Finding 1). Only a TRUE spectral tie
-    (clamped values EQUAL) falls through to the raw configured metric, so
-    higher-average files can still replace lower-average files within an
-    identical spectral bucket — this keeps spectral as a demotion signal
-    without letting a pessimistic estimate permanently freeze the album at
-    the first source that happened to land in that bucket (Mark DeNardo
-    request 1308). See ``_shared_spectral_bitrates`` for the narrow guard
-    that keeps the Springsteen case (single stale estimate) on the
-    container path. A transcode-grade candidate over a non-transcode-grade
-    existing album has one extra guard before any of this: if its real
-    selected-metric rank is lower before the spectral clamp, it is worse.
+    spectral ordering (issue #813 Finding 1). When only one (or neither)
+    side is spectral-bound, that "both bound" requirement intentionally
+    withholds this tiebreak — comparing a spectral estimate against a raw
+    configured metric with no tolerance is not a like-for-like comparison,
+    and it falls through to the raw-metric tiebreak below instead. Only a
+    TRUE spectral tie (clamped values EQUAL, both bound) also falls through
+    to the raw configured metric, so higher-average files can still replace
+    lower-average files within an identical spectral bucket — this keeps
+    spectral as a demotion signal without letting a pessimistic estimate
+    permanently freeze the album at the first source that happened to land
+    in that bucket (Mark DeNardo request 1308). See
+    ``_shared_spectral_bitrates`` for the narrow guard that keeps the
+    Springsteen case (single stale estimate) on the container path. A
+    transcode-grade candidate over a non-transcode-grade existing album has
+    one extra guard before any of this: if its real selected-metric rank is
+    lower before the spectral clamp, it is worse.
 
     Returns a ``QualityComparisonBasis`` — the verdict plus the branch that
     fired and the values that decided it, emitted HERE per-branch so the
@@ -362,16 +373,23 @@ def compare_quality(
         # A spectral-bound side's clamped value is the spectral estimate,
         # calibrated to the CBR band thresholds regardless of that side's
         # own encoding mode (see ``_shared_spectral_bitrates``'s docstring)
-        # — classify it with CBR bands. A side whose clamp did NOT bind
-        # still carries its own genuine raw metric, classified with its own
-        # encoding mode as before.
+        # — classify it with CBR bands. This only applies when BOTH sides
+        # are spectral-bound: forcing CBR on a bound side while an UNBOUND
+        # side keeps its own (possibly more generous VBR) bands mixes a
+        # spectral-calibrated number against a raw-metric number under two
+        # different band tables, which can itself invert the ordering (a
+        # bound side demoted into CBR's stricter table while an unbound
+        # side keeps VBR's more generous one). A side whose clamp did NOT
+        # bind still carries its own genuine raw metric, classified with
+        # its own encoding mode as before.
+        both_spectral_bound = new_bound and existing_bound
         new_rank = quality_rank(
             new_format, clamped_new_br,
-            True if new_bound else projected_is_cbr, cfg,
+            True if both_spectral_bound else projected_is_cbr, cfg,
         )
         existing_rank = quality_rank(
             existing.format, clamped_existing_br,
-            True if existing_bound else existing.is_cbr, cfg,
+            True if both_spectral_bound else existing.is_cbr, cfg,
         )
         rank_new_value, rank_existing_value = clamped_new_br, clamped_existing_br
         spectral_clamped = True
@@ -385,6 +403,7 @@ def compare_quality(
         existing_rank = measurement_rank(existing, cfg)
         rank_new_value, rank_existing_value = new_br, existing_br
         spectral_clamped = False
+        both_spectral_bound = False
 
     if new_rank > existing_rank:
         return _basis(
@@ -438,23 +457,32 @@ def compare_quality(
             spectral_clamped=spectral_clamped,
         )
 
-    # When the shared-spectral clamp fired AND the clamped values themselves
-    # still differ, that difference decides the tiebreak directly — issue
-    # #813 Finding 1's remaining Stage1/Stage2 disagreement. The coarse
-    # QualityRank band can bucket two genuinely UNEQUAL spectral estimates
-    # into the same rank (e.g. spectral 287 and 317 both land in
-    # "transparent"); falling through to the fully-unclamped raw metric at
-    # that point lets a worse-spectral candidate win purely because its
-    # (already known-unreliable, that's why spectral exists) declared
-    # container happens to be higher. The clamped values are the more
-    # direct evidence and decide with the same strict (no-tolerance)
-    # comparison Stage 1 (``spectral_import_decision``) already uses — this
-    # is what makes the two stages agree instead of disagree. A TRUE
-    # spectral tie (clamped values EQUAL) carries no differentiating signal
-    # and still falls through to the raw-metric tiebreak below, exactly as
-    # before (Mark DeNardo request 1308: tied spectral 128==128, raw 192
-    # beats 128 must still import).
+    # When the shared-spectral clamp fired, BOTH sides are spectral-bound
+    # (the clamped value on each side IS the spectral estimate, not the raw
+    # metric — see ``_shared_spectral_bitrates``), AND the clamped values
+    # themselves still differ, that difference decides the tiebreak
+    # directly — issue #813 Finding 1's remaining Stage1/Stage2
+    # disagreement. The coarse QualityRank band can bucket two genuinely
+    # UNEQUAL spectral estimates into the same rank (e.g. spectral 287 and
+    # 317 both land in "transparent"); falling through to the fully-
+    # unclamped raw metric at that point lets a worse-spectral candidate
+    # win purely because its (already known-unreliable, that's why spectral
+    # exists) declared container happens to be higher. The clamped values
+    # are the more direct evidence and decide with the same strict
+    # (no-tolerance) comparison Stage 1 (``spectral_import_decision``)
+    # already uses — this is what makes the two stages agree instead of
+    # disagree. Requiring BOTH bound is essential: when only one (or
+    # neither) side is spectral-bound, the "clamped value" on the unbound
+    # side is just its raw configured metric, and comparing a spectral
+    # estimate against a raw metric with no tolerance is not a like-for-
+    # like tiebreak — it silently becomes the ``metric_tiebreak`` below
+    # minus its ±5 kbps tolerance. A TRUE spectral tie (clamped values
+    # EQUAL) carries no differentiating signal and still falls through to
+    # the raw-metric tiebreak below, exactly as before (Mark DeNardo
+    # request 1308: tied spectral 128==128, raw 192 beats 128 must still
+    # import).
     if (spectral_clamped
+            and both_spectral_bound
             and rank_new_value is not None
             and rank_existing_value is not None
             and rank_new_value != rank_existing_value):

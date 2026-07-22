@@ -325,27 +325,40 @@ when BOTH sides carry `spectral_bitrate_kbps`):
    container). A TRUE spectral tie (clamped values EQUAL) still defers to
    the raw metric exactly as before — this is what lets Mark DeNardo
    (request 1308, tied spectral 128==128) still import on its higher raw
-   container.
+   container. **Requires BOTH sides spectral-bound** (`spectral <= raw` on
+   each side individually) — a PR #827 review finding: gating on only
+   `rank_new_value != rank_existing_value` without consulting which side is
+   actually bound turns the branch into a stealth `metric_tiebreak` with no
+   `±5kbps` tolerance whenever one (or neither) side is bound, since the
+   "clamped" value on an unbound side is just its raw metric.
 2. **CBR/VBR band-table mismatch** (`rank` branch). The spectral bucket
    values (`lib/spectral_check.py`'s `LAME_LOWPASS` table — 96/128/160/192/
    256/320) are calibrated to `QualityRankConfig.mp3_cbr`'s thresholds
    (128=acceptable, 192=good, 256=excellent, 320=transparent), not
-   `mp3_vbr`'s more generous ones. A side whose clamp is spectral-bound
-   (`spectral <= raw`) now always classifies via CBR bands regardless of
-   that side's own `is_cbr` — otherwise a VBR-tagged candidate's
-   spectral-bound clamp could outrank a CBR-tagged existing's purely from
-   table choice. A side whose clamp did NOT bind (raw is the tighter value)
-   still classifies with its own encoding mode, unaffected.
+   `mp3_vbr`'s more generous ones. A side whose clamp is spectral-bound now
+   classifies via CBR bands regardless of that side's own `is_cbr` — but
+   **only when BOTH sides are bound** (another PR #827 review finding):
+   forcing CBR on one bound side while an unbound side keeps its own
+   (possibly more generous VBR) table mixes a spectral-calibrated number
+   against a raw-metric number under two different band tables, which can
+   itself invert the ordering. A side whose clamp did NOT bind (raw is the
+   tighter value) always classifies with its own encoding mode.
 
 Stage 1 remains load-bearing and was NOT folded into Stage 2: the property
 is deliberately scoped to internally-consistent evidence (`spectral <=` the
 side's own raw metric, the domain `_shared_spectral_bitrates` assumes — see
 `StageParityWorld`'s docstring). A self-inconsistent existing measurement
-(raw container measured LOWER than its own spectral estimate — reachable
-via evidence carried forward across snapshots, not a single fresh
-measurement) is outside that domain and is a residual case only Stage 1's
-coarse spectral-vs-spectral comparison protects; likewise a candidate with
-no existing spectral estimate at all (`spectral_import_decision` returns
+(raw container measured LOWER than its own spectral estimate) is outside
+that domain and is a residual case only Stage 1's coarse spectral-vs-
+spectral comparison protects — this shape is reachable from an ORDINARY
+FRESH measurement, not only cross-snapshot carry-forward: `analyze_album`
+(`lib/spectral_check.py`) aggregates the album-level spectral estimate as
+`min()` over only the tracks with a detected cliff (container-independent
+per-track buckets), computed independently of the album's overall grade
+threshold, so a single outlier track's cliff can produce a spectral
+estimate well above the album's real average container bitrate even while
+the album's overall grade stays "genuine". Likewise a candidate with no
+existing spectral estimate at all (`spectral_import_decision` returns
 `"import_no_exist"`, deferring by design — absence of a measurement is not
 evidence the installed copy is genuine).
 

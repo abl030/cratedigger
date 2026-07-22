@@ -162,19 +162,23 @@ class TestCompareQualityBasisBranches(unittest.TestCase):
                  spectral_clamped=True),
         ),
         (
-            # Issue #813 Finding 1: the coarse "good" band buckets spectral
-            # 200 and 240 together, but they are NOT a spectral tie — the
-            # clamped values (200 vs 196, since existing's raw 196 is
-            # already below its own 240 spectral floor) decide directly
-            # instead of falling through to the fully-unclamped raw metric
-            # (288 vs 196), which would launder the worse-spectral candidate
-            # in purely on its higher declared container.
+            # Issue #813 Finding 1: BOTH sides are spectral-bound (each raw
+            # container of 1000 is far above its own spectral estimate),
+            # and the coarse "good" band buckets spectral 200 and 196
+            # together, but they are NOT a spectral tie — the clamped
+            # (spectral) values decide directly instead of falling through
+            # to the fully-unclamped raw metric (1000 vs 1000, which would
+            # be an uninformative wash and mask the real spectral signal).
+            # PR #827 review (F1): the spectral_tiebreak branch requires
+            # BOTH sides bound, or this degenerates into comparing raw
+            # metrics with no tolerance — this case is deliberately
+            # constructed so both sides genuinely are bound.
             "shared-spectral clamp: differing clamped values decide the "
             "same-rank tiebreak directly",
-            _m(avg_bitrate_kbps=288, format="MP3",
+            _m(avg_bitrate_kbps=1000, format="MP3",
                spectral_grade="genuine", spectral_bitrate_kbps=200),
-            _m(avg_bitrate_kbps=196, format="MP3",
-               spectral_grade="genuine", spectral_bitrate_kbps=240),
+            _m(avg_bitrate_kbps=1000, format="MP3",
+               spectral_grade="genuine", spectral_bitrate_kbps=196),
             dict(verdict="better", branch="spectral_tiebreak",
                  new_rank="good", existing_rank="good",
                  new_value_kbps=200, existing_value_kbps=196,
