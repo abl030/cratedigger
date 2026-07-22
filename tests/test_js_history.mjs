@@ -1385,6 +1385,27 @@ console.log('renderEvidenceStrip() marks spectral-clamped rank values with ~');
   assertExcludes(strip, 'avg 250k', 'clamped value must not claim a metric');
 }
 
+console.log('renderEvidenceStrip() marks spectral_tiebreak values with ~ too (issue #813)');
+{
+  // Same clamped-value display rule as the rank branch — the coarse
+  // rank band bucketed differing spectral estimates together, so the
+  // same-rank tiebreak decided directly on the clamped values.
+  const strip = renderEvidenceFixture({
+    actual_min_bitrate: 1000,
+    comparison_basis: {
+      verdict: 'worse', branch: 'spectral_tiebreak',
+      new_rank: 'good', existing_rank: 'good',
+      new_metric: 'avg', existing_metric: 'avg',
+      new_value_kbps: 200, existing_value_kbps: 230,
+      new_format: 'MP3', existing_format: 'MP3',
+      spectral_clamped: true, tolerance_kbps: null,
+      verified_lossless_bypass: false,
+    },
+  });
+  assertContains(strip, '~200k', 'clamped value gets the ~ prefix, no metric label');
+  assertExcludes(strip, 'avg 200k', 'clamped value must not claim a metric');
+}
+
 console.log('renderEvidenceStrip() escapes basis strings');
 {
   const strip = renderEvidenceFixture({

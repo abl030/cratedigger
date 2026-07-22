@@ -206,6 +206,72 @@ class TestLiveBugReproductions(unittest.TestCase):
         # Issue #813 Finding 2: downgrade always denylists in production.
         self.assertTrue(r["denylisted"])
 
+    def test_stage_parity_review_f1_unbound_tied_spectral_stays_equivalent(self):
+        """PR #827 review finding F1: neither side is spectral-bound here
+        (both containers are LOWER than their own tied 256 spectral
+        estimate), so the compared values are the raw avg metrics — a
+        stealth ``metric_tiebreak`` with no tolerance, not a genuine
+        ``spectral_tiebreak``. Before the fix (gating the tiebreak on
+        ``new_bound and existing_bound``), the tied 256/256 spectral values
+        made both sides classify identically (rank ties), and the
+        UNGATED spectral_tiebreak branch then compared the RAW avg values
+        (250 vs 247) with NO tolerance, flipping this into a phantom
+        "better"/imported=True. With the ±5kbps tolerance restored via the
+        raw ``metric_tiebreak`` fallback, delta=3 stays "equivalent" —
+        not imported.
+        """
+        r = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=250,
+            is_cbr=False,
+            avg_bitrate=250,
+            new_format="MP3",
+            spectral_grade="genuine",
+            spectral_bitrate=256,
+            existing_min_bitrate=247,
+            existing_avg_bitrate=247,
+            existing_format="MP3",
+            existing_is_cbr=False,
+            existing_spectral_grade="genuine",
+            existing_spectral_bitrate=256,
+        )
+        self.assertEqual(r["comparison_basis"]["verdict"], "equivalent")
+        self.assertEqual(r["comparison_basis"]["branch"], "metric_tiebreak")
+        self.assertFalse(r["imported"])
+
+    def test_stage_parity_review_f2_asymmetric_cbr_forcing_stays_worse(self):
+        """PR #827 review finding F2: existing's spectral (256) IS bound
+        (256 <= its own 260 container) but candidate's spectral (320)
+        is NOT bound (320 > its own 246 container) — an asymmetric case.
+        Before the fix (requiring BOTH sides bound before forcing CBR
+        bands), existing alone got demoted from VBR "transparent" to CBR
+        "excellent" while candidate kept VBR "transparent" unforced,
+        letting a lower-container V0 candidate (246) outrank a
+        higher-container V0 existing (260) purely from an asymmetric
+        table swap driven by cliff-bucket noise at the V0 lowpass
+        boundary. With CBR-forcing withheld unless both sides are bound,
+        both classify under their own (matching) VBR table and the raw
+        containers correctly decide: candidate 246 stays worse than
+        existing 260 — not imported.
+        """
+        r = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=246,
+            is_cbr=False,
+            avg_bitrate=246,
+            new_format="MP3",
+            spectral_grade="genuine",
+            spectral_bitrate=320,
+            existing_min_bitrate=260,
+            existing_avg_bitrate=260,
+            existing_format="MP3",
+            existing_is_cbr=False,
+            existing_spectral_grade="genuine",
+            existing_spectral_bitrate=256,
+        )
+        self.assertEqual(r["comparison_basis"]["verdict"], "worse")
+        self.assertFalse(r["imported"])
+
     def test_taboo_vi_fake_flac_192_accepted(self):
         """Fake FLAC (192k source) converted to V0 at 224kbps is provisional.
 

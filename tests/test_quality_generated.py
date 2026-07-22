@@ -51,12 +51,16 @@ from lib.quality import (
     AudioQualityMeasurement,
     COMPARISON_BASIS_BRANCHES,
     QUALITY_UPGRADE_TIERS,
+    EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_SOURCE,
     EVIDENCE_SUBJECT_INSTALLED,
+    QualityComparisonBasis,
     QualityRankConfig,
     TargetQualityContract,
     VerifiedLosslessProof,
+    build_existing_quality_measurement,
     classify_full_pipeline_decision,
+    compare_quality,
     compute_effective_override_bitrate,
     determine_verified_lossless,
     evidence_decision_name,
@@ -355,13 +359,151 @@ def assert_existing_override_noop_under_shared_clamp(
         )
 
 
+@dataclass(frozen=True)
+class StageParityWorld:
+    """Primitive candidate/existing facts shared by Stage 1
+    (``spectral_import_decision``) and Stage 2 (``compare_quality``) for the
+    SAME evidence — the world space issue #813 Finding 1's no-disagreement
+    property patrols.
+
+    Spectral estimates are kept ``<= their own container`` (``new_spectral
+    <= new_container``, ``existing_spectral <= existing_container``) — the
+    domain ``_shared_spectral_bitrates``/``compute_effective_override_bitrate``
+    assume, since a cliff estimate is a pessimistic FLOOR on real content,
+    never evidence of MORE content than the container itself measured. This
+    is the same established convention as
+    ``test_existing_spectral_override_is_noop_when_candidate_has_spectral``
+    (which clamps ``candidate_spectral``/``existing_spectral`` to their own
+    containers).
+
+    ``spectral > own container`` IS reachable from an ordinary FRESH single
+    measurement, not only via evidence carried forward across snapshots
+    (correction, PR #827 review F3 — the original text here overclaimed
+    cross-snapshot carry-forward as the only path). ``estimate_bitrate_from_
+    cliff`` (``lib/spectral_check.py``) maps a per-track cliff frequency to
+    a fixed, container-INDEPENDENT bucket (96/128/.../320), and
+    ``analyze_album`` aggregates the album-level estimate as
+    ``min(track estimates)`` over ONLY the tracks that had a cliff detected
+    at all — tracks with no cliff are excluded from that ``min``, and the
+    album's overall grade classification (``classify_album``'s 60%/75%
+    suspect-percentage thresholds) is computed independently of this
+    aggregation. So a single outlier track with a cliff at or above the
+    highest lowpass bucket (≥19,550 Hz) yields an album spectral estimate
+    of 320 even when the album's overall grade stays "genuine" (too few
+    suspect tracks to cross the percentage threshold) and its real average
+    container bitrate is much lower (e.g. 246). This domain remains a data-
+    hygiene/aggregation-policy question in a different subsystem
+    (``lib/spectral_check.py::analyze_album``'s own min-over-cliffed-tracks
+    policy), not a Stage1/Stage2 decision disagreement — out of scope here,
+    and precisely the domain this property does NOT reach, which is why
+    Stage 1 remains load-bearing (issue #813 Finding 1 audit conclusion)
+    even though this property finds zero disagreement inside its own
+    (consistent-evidence) domain.
+
+    ``new_format``/``existing_format`` are deliberately the SAME codec
+    family on both sides (see ``stage_parity_worlds``). Random probing
+    (millions of iterations, outside this property) found the shared
+    spectral clamp ALSO disagrees when the two sides are DIFFERENT codec
+    families — but the spectral bucket table (``LAME_LOWPASS``) is
+    calibrated to MP3/LAME specifically, and candidate-side spectral
+    analysis is only gated to run on MP3-shaped/CBR or FLAC->V0-conversion
+    candidates (``spectral_gate_trigger``), so a cross-codec spectral
+    pairing is itself evidence of a mismatch this docstring already scopes
+    as a separate-subsystem question (a fresh single measurement never
+    produces one codec's spectral estimate paired against a
+    DIFFERENT codec's raw measurement), not an independent decision-logic
+    gap. A correct fix would require deciding whether spectral evidence is
+    even comparable across codec families at all — out of scope for this
+    audit.
+    """
+    grade: str
+    new_container: int
+    new_spectral: int
+    existing_container: int
+    existing_spectral: int
+    existing_grade: str | None
+    new_is_cbr: bool
+    existing_is_cbr: bool
+    new_format: str
+    existing_format: str
+
+
+def _stage_parity_verdicts(
+    world: StageParityWorld,
+) -> tuple[str, QualityComparisonBasis]:
+    """Drive the REAL Stage 1 and Stage 2 deciders over the same evidence.
+
+    Builds the candidate/existing ``AudioQualityMeasurement`` pair exactly
+    the way ``full_pipeline_decision``'s native-lossy branch does before
+    calling ``compare_quality`` — ``AudioQualityMeasurement`` directly for
+    the candidate, ``build_existing_quality_measurement`` (the real
+    production constructor) for the existing side. This does not create a
+    new decision path: both are pure data constructors, and every verdict
+    comes only from ``spectral_import_decision``/``compare_quality``
+    themselves — the two decision surfaces this property patrols.
+    """
+    new_m = AudioQualityMeasurement(
+        min_bitrate_kbps=world.new_container,
+        avg_bitrate_kbps=world.new_container,
+        format=world.new_format,
+        is_cbr=world.new_is_cbr,
+        spectral_grade=world.grade,
+        spectral_bitrate_kbps=world.new_spectral,
+        spectral_subject=EVIDENCE_SUBJECT_SOURCE,
+        spectral_provenance=EVIDENCE_PROVENANCE_MEASURED,
+    )
+    existing_m = build_existing_quality_measurement(
+        min_bitrate_kbps=world.existing_container,
+        avg_bitrate_kbps=world.existing_container,
+        format=world.existing_format,
+        is_cbr=world.existing_is_cbr,
+        override_min_bitrate=None,
+        spectral_grade=world.existing_grade,
+        spectral_bitrate_kbps=world.existing_spectral,
+    )
+    # world.existing_container is a definite int, so the builder's
+    # min_bitrate_kbps-is-None early return can never fire here.
+    assert existing_m is not None
+    stage1 = spectral_import_decision(
+        world.grade, world.new_spectral, world.existing_spectral)
+    stage2 = compare_quality(new_m, existing_m, QualityRankConfig.defaults())
+    return stage1, stage2
+
+
+def assert_stage1_never_contradicts_stage2(
+    stage1: str, stage2: QualityComparisonBasis,
+) -> None:
+    """Issue #813 Finding 1 — the core no-disagreement parity contract.
+
+    Operational semantics, from how ``full_pipeline_decision`` actually
+    combines the two stages (``lib/quality/pipeline.py``): Stage 1's ONLY
+    gating effect is its ``"reject"`` verdict, which short-circuits BEFORE
+    Stage 2 ever runs. Every other Stage 1 verdict (``"import"``,
+    ``"import_upgrade"``, ``"import_no_exist"``) defers unconditionally —
+    Stage 2 decides. So the only verdict pair that can operationally
+    "disagree" is Stage 1 rejecting a candidate that Stage 2, given the
+    same evidence, would score ``"better"`` (an upgrade Stage 1's
+    short-circuit would have discarded) — exactly the shape of both the
+    Mark DeNardo (#812) and this PR's remaining same-rank-tiebreak bug.
+    Stage 1 rejecting while Stage 2 says ``"worse"``/``"equivalent"`` is NOT
+    a disagreement: both stages agree the candidate should not be accepted.
+    """
+    if stage1 == "reject" and stage2.verdict == "better":
+        raise AssertionError(
+            "Stage 1 rejected a candidate Stage 2 scores as an upgrade: "
+            f"stage1={stage1!r} stage2.verdict={stage2.verdict!r} "
+            f"stage2.branch={stage2.branch!r}"
+        )
+
+
 _MEASURED_STAGE2_DECISIONS = frozenset({
     "import", "downgrade", "transcode_upgrade", "transcode_downgrade",
     "transcode_first",
 })
 _BASIS_SAME_RANK_BRANCHES = frozenset({
     "lossless_same_rank", "cross_family_same_rank",
-    "label_contract_same_rank", "metric_tiebreak", "metric_missing",
+    "label_contract_same_rank", "spectral_tiebreak", "metric_tiebreak",
+    "metric_missing",
 })
 _BASIS_METRICS = frozenset({"min", "avg", "median", "contract"})
 
@@ -581,6 +723,45 @@ def obvious_lower_rank_lossy_downloads(draw) -> DownloadScenario:
         new_format=draw(st.sampled_from(_LOSSY_FORMATS)),
         is_vbr=not is_cbr,
         avg_bitrate=bitrate,
+    )
+
+
+@st.composite
+def stage_parity_worlds(draw) -> StageParityWorld:
+    """Worlds for the issue #813 Finding 1 no-disagreement property.
+
+    Only ``suspect``/``likely_transcode`` grades ever let Stage 1 reject
+    (``spectral_import_decision`` returns ``"import"`` unconditionally for
+    every other grade) — sampling only these two focuses the search on the
+    space where a disagreement could exist, the same convention
+    ``test_only_strictly_lower_spectral_rejects_at_stage1`` already uses.
+    ``existing_grade`` is free (the shared clamp is grade-tolerant by
+    design — see ``_shared_spectral_bitrates``'s own docstring). Format is
+    shared across both sides (like
+    ``test_existing_spectral_override_is_noop_when_candidate_has_spectral``'s
+    fixed ``"MP3"``) so the search spends its budget on the same-codec-
+    family same-rank tiebreak this property patrols, rather than diluting
+    across the ``cross_family_same_rank`` branch, which can never emit
+    ``"better"`` and so can never disagree with a Stage-1 reject.
+    """
+    new_container = draw(_bitrates(min_value=1, max_value=3000))
+    new_spectral = draw(_bitrates(min_value=1, max_value=new_container))
+    existing_container = draw(_bitrates(min_value=1, max_value=3000))
+    existing_spectral = draw(
+        _bitrates(min_value=1, max_value=existing_container))
+    shared_format = draw(st.sampled_from(_LOSSY_FORMATS))
+    return StageParityWorld(
+        grade=draw(st.sampled_from(("suspect", "likely_transcode"))),
+        new_container=new_container,
+        new_spectral=new_spectral,
+        existing_container=existing_container,
+        existing_spectral=existing_spectral,
+        existing_grade=draw(st.sampled_from(
+            (None, "genuine", "marginal", "suspect", "likely_transcode"))),
+        new_is_cbr=draw(st.booleans()),
+        existing_is_cbr=draw(st.booleans()),
+        new_format=shared_format,
+        existing_format=shared_format,
     )
 
 
@@ -930,6 +1111,92 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
         assert_existing_override_noop_under_shared_clamp(
             decide(override), decide(None),
         )
+
+    @given(world=stage_parity_worlds())
+    @example(  # Mark DeNardo request 1308: Stage 1 defers, Stage 2 scores.
+        world=StageParityWorld(
+            grade="suspect", new_container=192, new_spectral=128,
+            existing_container=128, existing_spectral=128,
+            existing_grade="likely_transcode",
+            new_is_cbr=True, existing_is_cbr=True,
+            new_format="MP3", existing_format="MP3",
+        )
+    )
+    @example(  # Deerhunter dl 37725: identical transcode, Stage 1 defers.
+        world=StageParityWorld(
+            grade="likely_transcode", new_container=256, new_spectral=192,
+            existing_container=256, existing_spectral=192,
+            existing_grade="likely_transcode",
+            new_is_cbr=True, existing_is_cbr=True,
+            new_format="MP3", existing_format="MP3",
+        )
+    )
+    @example(  # Shrunk regression: coarse rank band buckets UNEQUAL
+        # spectral (200 vs 230) into the same "good" tier; before the
+        # spectral_tiebreak fix the fully-unclamped raw metric (1000 vs
+        # 235) would launder the worse-spectral candidate in as "better".
+        world=StageParityWorld(
+            grade="likely_transcode", new_container=1000, new_spectral=200,
+            existing_container=235, existing_spectral=230,
+            existing_grade="likely_transcode",
+            new_is_cbr=True, existing_is_cbr=True,
+            new_format="MP3", existing_format="MP3",
+        )
+    )
+    @example(  # Shrunk regression #2: CBR/VBR band-table mismatch. The
+        # spectral bucket values (LAME_LOWPASS) are calibrated to the CBR
+        # thresholds, not the more generous VBR ones. Before the CBR-forced
+        # classification fix, a VBR-tagged candidate's spectral-bound clamp
+        # (245, VBR "transparent") outranked a CBR-tagged existing's
+        # spectral-bound clamp (300, CBR "excellent") purely from table
+        # choice — despite 245 < 300 (Stage 1 correctly rejects).
+        world=StageParityWorld(
+            grade="likely_transcode", new_container=1000, new_spectral=245,
+            existing_container=1000, existing_spectral=300,
+            existing_grade="likely_transcode",
+            new_is_cbr=False, existing_is_cbr=True,
+            new_format="MP3", existing_format="MP3",
+        )
+    )
+    def test_stage1_never_contradicts_stage2(self, world):
+        """PAIR (generated half) — issue #813 Finding 1's core deliverable:
+        for every world, Stage 1's verdict never contradicts Stage 2's.
+
+        Drives the REAL ``spectral_import_decision`` (Stage 1) and
+        ``compare_quality`` (Stage 2) over the same evidence. This property
+        found and pins TWO independent Stage2 gaps, both inside the shared
+        spectral clamp:
+
+        1. Same-rank tiebreak (``spectral_tiebreak`` branch, first
+           ``@example``): the coarse rank band can bucket two genuinely
+           UNEQUAL spectral estimates together, and the fully-unclamped raw
+           metric tiebreak used to decide instead — reversing a real
+           spectral ordering. Deterministic pin twin:
+           ``tests/test_quality_comparison_basis.py``'s "differing clamped
+           values decide the same-rank tiebreak directly" case.
+        2. CBR/VBR band-table mismatch (second ``@example``): the
+           spectral-bucket values are calibrated to the CBR band
+           thresholds (``LAME_LOWPASS`` — see ``_shared_spectral_bitrates``'s
+           docstring), not the more generous VBR ones. Classifying a
+           spectral-bound clamped value through a VBR-tagged side's own
+           ``is_cbr=False`` let a worse-spectral VBR-tagged candidate
+           outrank a better-spectral CBR-tagged existing purely from table
+           choice. Random probing (millions of iterations, not reproduced
+           by Hypothesis at either the suite or fuzz tier within a
+           reasonable budget — this class needed the deterministic pin to
+           be caught reliably) found this at roughly a 1-in-8000 rate over
+           the general world space.
+
+        PR #827 review round: both fixes above shipped requiring only ONE
+        side spectral-bound to fire, which introduced two NEW flip worlds
+        (findings F1/F2, pinned in
+        ``tests/test_quality_classification.py::TestLiveBugReproductions``'s
+        ``test_stage_parity_review_f1_*``/``test_stage_parity_review_f2_*``).
+        Both fixes now require BOTH sides bound before firing — see
+        ``both_spectral_bound`` in ``lib/quality/compare.py``.
+        """
+        stage1, stage2 = _stage_parity_verdicts(world)
+        assert_stage1_never_contradicts_stage2(stage1, stage2)
 
     @given(
         codec_label=_unmapped_codec_labels(),
@@ -1846,6 +2113,45 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
              "comparison_basis": {"verdict": "equivalent"}},
             {"stage2_import": "downgrade",
              "comparison_basis": {"verdict": "equivalent"}},
+        )
+
+    def test_stage1_stage2_parity_checker_trips_on_planted_disagreement(self):
+        """Issue #813 Finding 1 known-bad self-test: a planted Stage-1
+        reject alongside a planted Stage-2 "better" must trip the checker;
+        every other verdict pairing (including a real reject-vs-worse
+        agreement) must NOT."""
+        with self.assertRaises(AssertionError):
+            assert_stage1_never_contradicts_stage2(
+                "reject",
+                QualityComparisonBasis(
+                    verdict="better", branch="spectral_tiebreak",
+                    new_rank="good", existing_rank="good",
+                ),
+            )
+        # Stage 1 rejecting while Stage 2 agrees (worse/equivalent) is not
+        # a disagreement — must not trip.
+        assert_stage1_never_contradicts_stage2(
+            "reject",
+            QualityComparisonBasis(
+                verdict="worse", branch="spectral_tiebreak",
+                new_rank="good", existing_rank="good",
+            ),
+        )
+        assert_stage1_never_contradicts_stage2(
+            "reject",
+            QualityComparisonBasis(
+                verdict="equivalent", branch="metric_tiebreak",
+                new_rank="good", existing_rank="good",
+            ),
+        )
+        # Stage 1 deferring (any non-reject verdict) never trips, whatever
+        # Stage 2 says — Stage 1 has no gating effect in that case.
+        assert_stage1_never_contradicts_stage2(
+            "import",
+            QualityComparisonBasis(
+                verdict="better", branch="rank",
+                new_rank="transparent", existing_rank="good",
+            ),
         )
 
     def test_unmapped_codec_checker_trips_on_terminal_narrowing(self):
