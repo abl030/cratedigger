@@ -37,6 +37,7 @@ from lib.import_evidence import (
 from lib.import_preview import (
     ImportPreviewResult,
     enrich_incomplete_current_evidence_for_request,
+    persist_exact_current_spectral_from_attempt,
 )
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
@@ -488,6 +489,70 @@ class LifecycleWorld:
                 f"reason={current.provenance.fallback_reason!r}"
             )
         return outcome
+
+    def drive_spectral_landmine_heal(
+        self,
+        request_id: int,
+        *,
+        stale_grade: str,
+        stale_bitrate: int | None,
+        fresh_grade: str,
+        fresh_bitrate: int | None,
+    ) -> tuple[str | None, int | None, str]:
+        """Seed a legacy spectral landmine on the linked HAVE evidence, then run
+        the REAL fresh-audit-wins persist over the real installed beets bytes.
+
+        The landmine — a stale installed/measured spectral grade that disagrees
+        with a fresh audit of the exact same bytes — is a state a clean forward
+        run can never produce (issue #815). Returns
+        ``(reloaded_grade, reloaded_bitrate, persist_status)``.
+        """
+        release = self._release_by_request[request_id]
+        album = self._album_for_release(release.release_id)
+        if album is None:
+            raise AssertionError("landmine heal requires an installed album")
+        evidence_id = self.db.get_request_current_evidence_id(request_id)
+        evidence = self.db.load_album_quality_evidence_by_id(evidence_id)
+        if evidence is None or evidence.id is None:
+            raise AssertionError(
+                "landmine heal requires linked current evidence"
+            )
+        self.db._execute(
+            """
+            UPDATE album_quality_evidence
+            SET spectral_grade = %s,
+                spectral_bitrate_kbps = %s,
+                spectral_subject = 'installed',
+                spectral_provenance = 'measured'
+            WHERE id = %s
+            """,
+            (stale_grade, stale_bitrate, evidence.id),
+        )
+        self.db.conn.commit()
+        seeded = self.db.load_album_quality_evidence_by_id(evidence.id)
+        if seeded is None:
+            raise AssertionError("landmine seed disappeared")
+        if seeded.measurement.spectral_grade != stale_grade:
+            raise AssertionError("landmine seed did not persist")
+        result = persist_exact_current_spectral_from_attempt(
+            self.db,
+            request_id=request_id,
+            current_evidence=seeded,
+            measured_existing=SpectralAnalysisDetail(
+                attempted=True,
+                grade=fresh_grade,
+                bitrate_kbps=fresh_bitrate,
+            ),
+            measured_existing_path=album.album_path,
+        )
+        reloaded = self.db.load_album_quality_evidence_by_id(evidence.id)
+        if reloaded is None:
+            raise AssertionError("current evidence disappeared during heal")
+        return (
+            reloaded.measurement.spectral_grade,
+            reloaded.measurement.spectral_bitrate_kbps,
+            result.status,
+        )
 
     def latest_download_outcome(self, request_id: int) -> str | None:
         """Return the newest audit outcome for one generated request."""

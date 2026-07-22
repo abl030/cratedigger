@@ -1123,5 +1123,79 @@ TestGeneratedEvidenceDriftWorld.test_live_drift_worlds_relink_without_retry_bypa
 )
 
 
+class TestGeneratedSpectralLandmineWorld(unittest.TestCase):
+    """Issue #815: a legacy spectral landmine on real installed evidence is
+    overwritten by a fresh audit of the exact same real Beets bytes.
+
+    A stale installed/measured spectral grade that disagrees with a fresh audit
+    of its matched-fingerprint bytes is a state a clean forward run can never
+    produce (the May-2026 adoption + fill-only-if-NULL freeze). Fresh-audit-wins
+    must overwrite it; the stale grade must never survive. Driven end-to-end
+    against real PostgreSQL and a real Beets album so the persist path's
+    fingerprint guard is exercised against genuine installed bytes."""
+
+    @given(
+        identity_source=st.sampled_from(("mb", "discogs")),
+        stale_grade=st.sampled_from(("suspect", "likely_transcode")),
+        fresh_grade=st.sampled_from(("genuine", "marginal")),
+    )
+    @example(
+        identity_source="mb",
+        stale_grade="likely_transcode",
+        fresh_grade="genuine",
+    )
+    def test_fresh_audit_overwrites_installed_spectral_landmine(
+        self,
+        identity_source: str,
+        stale_grade: str,
+        fresh_grade: str,
+    ) -> None:
+        assert TEST_DSN is not None
+        release_id = (
+            "33000000-0000-4000-8000-000000000815"
+            if identity_source == "mb"
+            else "7330815"
+        )
+        with LifecycleWorld(TEST_DSN, repository_root()) as world:
+            request_id = world.add_release(BeetsWorldRelease(
+                release_id=release_id,
+                artist="Shugo Tokumaru",
+                album="Exit",
+                year=2007,
+                codec="mp3",
+            ))
+            self.assertTrue(world.import_request(request_id, codec="mp3"))
+
+            grade, bitrate, status = world.drive_spectral_landmine_heal(
+                request_id,
+                stale_grade=stale_grade,
+                stale_bitrate=128,
+                fresh_grade=fresh_grade,
+                fresh_bitrate=160,
+            )
+
+            self.assertEqual(status, "ready")
+            self.assertEqual(
+                grade, fresh_grade,
+                "fresh-audit-wins: the stale landmine grade must not survive",
+            )
+            self.assertEqual(bitrate, 160)
+            world.assert_invariants()
+
+
+TestGeneratedSpectralLandmineWorld \
+    .test_fresh_audit_overwrites_installed_spectral_landmine = settings(
+        max_examples=int(os.environ.get("CRATEDIGGER_WORLD_EXAMPLES", "6")),
+        deadline=None,
+        derandomize=not _RANDOMIZED,
+        database=_DATABASE,
+        print_blob=_RANDOMIZED,
+        suppress_health_check=(HealthCheck.too_slow,),
+    )(
+        TestGeneratedSpectralLandmineWorld
+        .test_fresh_audit_overwrites_installed_spectral_landmine
+    )
+
+
 if __name__ == "__main__":
     unittest.main()

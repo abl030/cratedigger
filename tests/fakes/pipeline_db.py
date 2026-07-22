@@ -3213,10 +3213,12 @@ class FakePipelineDB:
             or request.get("current_evidence_id") != int(expected_evidence_id)
             or evidence is None
             or evidence.snapshot_fingerprint != expected_snapshot_fingerprint
-            or evidence.measurement.spectral_grade is not None
-            or evidence.measurement.spectral_bitrate_kbps is not None
         ):
             return False
+        # Fresh-audit-wins (issue #815): overwrite ANY disagreeing persisted
+        # spectral with the fresh measured installed-subject audit. The old
+        # fill-only-if-NULL guard is gone; mirrors the production SQL. The R19
+        # lossless-lineage CHECK still fires in _store_album_quality_evidence.
         measurement = msgspec.structs.replace(
             evidence.measurement,
             spectral_grade=grade,

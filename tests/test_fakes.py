@@ -278,6 +278,9 @@ class TestFakePipelineDB(unittest.TestCase):
             grade="genuine",
             bitrate_kbps=96,
         )
+        # Issue #815 fresh-audit-wins: a disagreeing fresh measured audit of
+        # the SAME snapshot overwrites (mirrors the production SQL, which
+        # dropped the fill-only-if-NULL guard).
         overwrite = db.persist_current_spectral_measurement(
             request_id=42,
             expected_evidence_id=persisted.id,
@@ -285,15 +288,16 @@ class TestFakePipelineDB(unittest.TestCase):
             grade="likely_transcode",
             bitrate_kbps=160,
         )
-        db.upsert_album_quality_evidence(evidence)
 
         self.assertFalse(wrong_fingerprint)
         self.assertTrue(exact)
-        self.assertFalse(overwrite)
+        self.assertTrue(overwrite)
         stored = db.load_album_quality_evidence_by_id(persisted.id)
         assert stored is not None
-        self.assertEqual(stored.measurement.spectral_grade, "genuine")
-        self.assertEqual(stored.measurement.spectral_bitrate_kbps, 96)
+        self.assertEqual(stored.measurement.spectral_grade, "likely_transcode")
+        self.assertEqual(stored.measurement.spectral_bitrate_kbps, 160)
+        self.assertEqual(stored.measurement.spectral_subject, "installed")
+        self.assertEqual(stored.measurement.spectral_provenance, "measured")
 
     def test_album_quality_evidence_attempt_marker_is_monotonic(self):
         db = FakePipelineDB()

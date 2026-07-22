@@ -1375,6 +1375,92 @@ class TestQualityLineageGenerated(unittest.TestCase):
             )
 
     @given(
+        stale_grade=st.sampled_from(("genuine", "suspect", "likely_transcode")),
+        stale_bitrate=st.one_of(
+            st.none(), st.integers(min_value=32, max_value=500)),
+        fresh_grade=st.sampled_from(("genuine", "suspect", "likely_transcode")),
+        fresh_bitrate=st.one_of(
+            st.none(), st.integers(min_value=32, max_value=500)),
+        payload_size=st.integers(min_value=1, max_value=128),
+    )
+    @example(
+        stale_grade="likely_transcode", stale_bitrate=128,
+        fresh_grade="genuine", fresh_bitrate=160, payload_size=27,
+    )
+    def test_fresh_audit_overwrites_stale_landmine_grade(
+        self,
+        stale_grade: str,
+        stale_bitrate: int | None,
+        fresh_grade: str,
+        fresh_bitrate: int | None,
+        payload_size: int,
+    ) -> None:
+        """Issue #815 fresh-audit-wins property. A legacy landmine — an
+        installed-subject evidence row whose spectral grade disagrees with a
+        fresh audit of its matched-fingerprint bytes (a state a clean forward
+        run can never produce) — is always overwritten by a successful fresh
+        measured audit; the stale grade never survives."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, mb_release_id="landmine-have"))
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"y" * payload_size)
+            evidence = make_album_quality_evidence(
+                mb_release_id="landmine-have",
+                source_path=source,
+                files=snapshot_audio_files(source),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=192,
+                    avg_bitrate_kbps=192,
+                    median_bitrate_kbps=192,
+                    format="MP3",
+                    spectral_grade=stale_grade,
+                    spectral_bitrate_kbps=stale_bitrate,
+                    spectral_subject="installed",
+                    spectral_provenance="measured",
+                ),
+            )
+            db.upsert_album_quality_evidence(evidence)
+            stored = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            db.set_request_current_evidence(42, stored.id)
+
+            result = persist_exact_current_spectral_from_attempt(
+                db,
+                request_id=42,
+                current_evidence=stored,
+                measured_existing=SpectralAnalysisDetail(
+                    attempted=True,
+                    grade=fresh_grade,
+                    bitrate_kbps=fresh_bitrate,
+                ),
+                measured_existing_path=source,
+            )
+
+            assert result.evidence is not None
+            # The fresh audit wins on the returned row...
+            assert_exact_current_spectral_persisted(
+                expected_grade=fresh_grade,
+                expected_bitrate=fresh_bitrate,
+                actual_grade=result.evidence.measurement.spectral_grade,
+                actual_bitrate=(
+                    result.evidence.measurement.spectral_bitrate_kbps
+                ),
+            )
+            # ...and durably, not just in the returned struct.
+            reloaded = db.load_album_quality_evidence_by_id(stored.id)
+            assert reloaded is not None
+            assert_exact_current_spectral_persisted(
+                expected_grade=fresh_grade,
+                expected_bitrate=fresh_bitrate,
+                actual_grade=reloaded.measurement.spectral_grade,
+                actual_bitrate=reloaded.measurement.spectral_bitrate_kbps,
+            )
+
+    @given(
         label=st.sampled_from(("mp3 v0", "MP3 V0", "mp3 320", " MP3 320 ")),
         supplied_mode=st.booleans(),
     )
@@ -1906,6 +1992,17 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 expected_bitrate=96,
                 actual_grade=None,
                 actual_bitrate=None,
+            )
+
+    def test_exact_current_spectral_checker_rejects_surviving_landmine(self):
+        # #815 fresh-audit-wins: a stale likely_transcode/128 grade that
+        # survived a fresh genuine/160 audit must trip the checker.
+        with self.assertRaisesRegex(AssertionError, "exact current evidence"):
+            assert_exact_current_spectral_persisted(
+                expected_grade="genuine",
+                expected_bitrate=160,
+                actual_grade="likely_transcode",
+                actual_bitrate=128,
             )
 
     def test_source_target_checker_rejects_target_labelled_proxy(self):

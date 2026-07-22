@@ -496,57 +496,42 @@ def _persist_spectral_state(
     *,
     db: "PipelineDB",
     request_id: int,
-    download_spectral: SpectralMeasurement | None,
     existing_spectral: SpectralMeasurement | None,
-    existing_min_bitrate: int | None,
-    label: str,
-    propagate_download_to_existing: bool = True,
 ) -> SpectralMeasurement | None:
-    """Write the on-disk spectral state to album_requests.
+    """Persist a real measured on-disk (HAVE) spectral state to album_requests.
 
-    When ``propagate_download_to_existing`` is True and there's no measured
-    existing spectral but there IS an existing album on disk
-    (existing_min_bitrate set), adopt the download's spectral as the current
-    on-disk measurement. This helps same-tier downgrade detection for
-    subsequent imports — the download and on-disk characterize the same
-    quality tier, so reusing the download's spectral is a reasonable proxy.
+    Writes ONLY a spectral measurement that was actually taken from the
+    existing installed files. When ``existing_spectral`` is None the on-disk
+    audit produced nothing, so this bails and writes nothing — the candidate
+    download's spectral is NEVER adopted as the request's on-disk state.
 
-    Pass ``propagate_download_to_existing=False`` from the force-import
-    import path: that path evaluates the gate *before* the subprocess import
-    runs, so propagating a download's spectral into on-disk state would be
-    speculative. If the downstream import fails (downgrade, no JSON,
-    timeout) the DB would otherwise be left claiming that the failed
-    download is on-disk, skewing later ``compute_effective_override_bitrate``
-    and quality-gate decisions.
+    Issue #815 (fail-closed doctrine, same as #762/#723): the old "reasonable
+    proxy" branch adopted a rejected fake-320 candidate's likely_transcode/128
+    as the HAVE grade of a genuine 192 copy; the evidence seeder froze it, and
+    fill-only-if-NULL persistence kept it until it drove a real library
+    downgrade (request 4351, dl 37742). If we cannot ascertain evidence of the
+    on-disk files, we bail — we never infer HAVE state from the candidate.
 
     Returns the measurement actually written (or None if nothing to write).
     """
-    to_write = existing_spectral
-    if (to_write is None
-            and propagate_download_to_existing
-            and download_spectral is not None
-            and existing_min_bitrate is not None):
-        to_write = download_spectral
-        logger.info(
-            f"SPECTRAL PROPAGATE: {label} on-disk spectral=NULL, "
-            f"adopting download spectral grade={to_write.grade}")
-    if to_write is not None:
-        try:
-            applied = db.update_spectral_state(
+    if existing_spectral is None:
+        return None
+    try:
+        applied = db.update_spectral_state(
+            request_id,
+            RequestSpectralStateUpdate(current=existing_spectral),
+        )
+        if not applied:
+            logger.warning(
+                "Skipped on-disk spectral update for frozen/missing "
+                "request %s",
                 request_id,
-                RequestSpectralStateUpdate(current=to_write),
             )
-            if not applied:
-                logger.warning(
-                    "Skipped on-disk spectral update for frozen/missing "
-                    "request %s",
-                    request_id,
-                )
-                return None
-        except Exception:
-            logger.exception("Failed to update on-disk spectral data")
             return None
-    return to_write
+    except Exception:
+        logger.exception("Failed to update on-disk spectral data")
+        return None
+    return existing_spectral
 
 
 @dataclass(frozen=True)
@@ -635,7 +620,6 @@ def measure_preimport_state(
     request_id: int | None = None,
     existing_spectral_evidence: SpectralAnalysisDetail | None = None,
     preserve_existing_source_spectral: bool = False,
-    propagate_download_to_existing: bool = True,
     precomputed_inspection: "LocalFileInspection | None" = None,
     spectral_detail_analyzer: SpectralDetailAnalyzer | None = None,
     existing_spectral_resolver: ExistingSpectralResolver | None = None,
@@ -644,10 +628,10 @@ def measure_preimport_state(
 
     This is the pure measurement helper introduced in U3. It has NO decision
     fields, no denylist writes, no requeue decisions. It DOES persist on-disk
-    spectral state to ``album_requests`` via ``_persist_spectral_state`` when
-    a DB is wired — that propagation is part of "we measured this candidate"
-    and must fire whether or not the downstream decision is accept or reject
-    (issue #90).
+    (HAVE) spectral state to ``album_requests`` via ``_persist_spectral_state``
+    when a DB is wired — but ONLY a real measured existing spectral. The
+    candidate download's spectral is never adopted as HAVE state; when the
+    on-disk audit produces nothing, nothing is written (issue #815 bail).
 
     As of U11 there is exactly one decision function: persisted evidence
     flows into ``lib.quality.full_pipeline_decision_from_evidence``, whose
@@ -912,24 +896,20 @@ def measure_preimport_state(
         )
         existing_spectral_path = existing_lookup.path
 
-    # --- Persist spectral state to DB (issue #90 propagation) ---
-    # This MUST fire on every measurement where spectral was collected,
-    # regardless of whether the downstream decision accepts or rejects. The
-    # request stamps remain accurate for audit and rendering. Persists AFTER
-    # the existing_spectral snapshot
-    # used by the decision is taken — propagation can't poison the comparison
-    # because the decision runs in ``full_pipeline_decision_from_evidence``
-    # on the *persisted* candidate evidence row (or the returned Struct for
-    # legacy callers), neither of which reads the request stamps.
-    if download_spectral is not None and db is not None and request_id is not None:
+    # --- Persist on-disk (HAVE) spectral state to DB ---
+    # Only a real measured existing spectral is written. The candidate's
+    # ``download_spectral`` is NEVER adopted as the request's on-disk state
+    # (issue #815): inferring HAVE from the candidate froze a rejected
+    # fake-320's grade onto a genuine copy and drove a real downgrade. When the
+    # on-disk audit yields nothing, ``existing_spectral`` is None and nothing is
+    # written (bail). The request stamps stay accurate for audit and rendering;
+    # the decision runs in ``full_pipeline_decision_from_evidence`` on the
+    # persisted candidate evidence row, which never reads the request stamps.
+    if existing_spectral is not None and db is not None and request_id is not None:
         try:
             _persist_spectral_state(
                 db=db, request_id=request_id,
-                download_spectral=download_spectral,
                 existing_spectral=existing_spectral,
-                existing_min_bitrate=existing_min_bitrate,
-                label=label,
-                propagate_download_to_existing=propagate_download_to_existing,
             )
         except Exception:
             logger.exception("failed to persist spectral state")

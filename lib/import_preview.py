@@ -220,13 +220,21 @@ def persist_exact_current_spectral_from_attempt(
     measured_existing: SpectralAnalysisDetail | None,
     measured_existing_path: str | None,
 ) -> EvidenceBuildResult:
-    """Fill missing HAVE spectral fields from its exact attempt-time scan.
+    """Persist the exact attempt-time HAVE scan onto current evidence.
 
     ``measure_preimport_state`` independently scans the exact installed
     release before an import decision. This helper makes that successful scan
-    durable on the already-linked, content-addressed current evidence row. It
-    never rescans, never overwrites spectral provenance, and refuses a Beets
-    path that is not the path snapshotted by the evidence row.
+    durable on the already-linked, content-addressed current evidence row.
+
+    A successful fresh audit of the matched-fingerprint bytes is authoritative
+    (issue #815 fresh-audit-wins): it re-persists grade + bitrate over a
+    disagreeing persisted installed-subject value with
+    ``spectral_provenance='measured'``, so a stale legacy grade cannot survive a
+    fresh scan of the same bytes. It still refuses a Beets path that is not the
+    path snapshotted by the evidence row; a FAILED fresh audit never clears a
+    persisted grade (fail-soft ``incomplete``); and a lossless-sourced row keeps
+    its source spectral (R19) — an installed-derivative scan is never persisted
+    as its grade, whatever the caller's preserve flag said.
     """
     if current_evidence is None or current_evidence.id is None:
         return EvidenceBuildResult(None, "missing", "current evidence is missing")
@@ -301,12 +309,11 @@ def persist_exact_current_spectral_from_attempt(
             "skipped",
             "lossless-sourced copy keeps its source spectral (R19)",
         )
-    refreshed_measurement = refreshed.measurement
-    if (
-        refreshed_measurement.spectral_grade is not None
-        or refreshed_measurement.spectral_bitrate_kbps is not None
-    ):
-        return EvidenceBuildResult(refreshed, "ready")
+    # Fresh-audit-wins (issue #815): a successful fresh audit of the
+    # matched-fingerprint bytes re-persists over ANY disagreeing persisted
+    # installed-subject grade. The fill-only-if-NULL early return that used to
+    # sit here silently discarded a fresh genuine/160 audit and let a stale
+    # likely_transcode/128 landmine drive a real library downgrade.
     try:
         persisted = db.persist_current_spectral_measurement(
             request_id=request_id,
@@ -1620,14 +1627,13 @@ def measure_and_persist_candidate_evidence(
                 download_min_bitrate_bps=inspection.min_bitrate_bps,
                 download_is_vbr=inspection.is_vbr,
                 cfg=cfg,
-                # db=None / request_id=None: spectral propagation happens
-                # later via the persisted AlbumQualityEvidence row that the
-                # importer reads. Preview is now a pure measurement surface.
+                # db=None / request_id=None: HAVE spectral state is persisted
+                # later via the content-addressed AlbumQualityEvidence row that
+                # the importer reads. Preview is a pure measurement surface.
                 db=None,
                 request_id=None,
                 existing_spectral_evidence=existing_spectral_evidence,
                 preserve_existing_source_spectral=preserve_have_source,
-                propagate_download_to_existing=False,
                 precomputed_inspection=inspection,
                 spectral_detail_analyzer=spectral_detail_analyzer,
                 existing_spectral_resolver=existing_spectral_resolver,
@@ -2127,10 +2133,9 @@ def preview_import_from_path(
         # pattern: collect facts via ``measure_preimport_state`` (no denylist
         # writes, no decision branches), then surface the five folder/audio-
         # integrity facts as a confident reject for the CLI/triage UI.
-        # ``db=None`` / ``request_id=None`` / ``propagate_download_to_existing=False``:
-        # spectral propagation belongs to the persisted ``AlbumQualityEvidence``
-        # row that the importer reads — preview is now a pure measurement
-        # surface.
+        # ``db=None`` / ``request_id=None``: HAVE spectral state belongs to the
+        # persisted ``AlbumQualityEvidence`` row that the importer reads —
+        # preview is a pure measurement surface.
         try:
             measurement = measure_preimport_state(
                 path=preview_path,
@@ -2146,7 +2151,6 @@ def preview_import_from_path(
                     existing_spectral_evidence
                 ),
                 preserve_existing_source_spectral=preserve_have_source,
-                propagate_download_to_existing=False,
                 precomputed_inspection=inspection,
             )
             spectral_result = persist_exact_current_spectral_from_attempt(

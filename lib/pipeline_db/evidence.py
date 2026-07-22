@@ -448,7 +448,16 @@ class _EvidenceMixin(_PipelineDBBase):
         grade: str,
         bitrate_kbps: int | None,
     ) -> bool:
-        """Fill spectral fields on one exact, still-current empty snapshot."""
+        """Persist a fresh measured installed-subject spectral on one exact snapshot.
+
+        Fresh-audit-wins (issue #815): the caller only reaches here with a
+        successful fresh audit of the exact matched-fingerprint bytes, so this
+        re-persists ``grade``/``bitrate`` as ``installed``/``measured`` over ANY
+        disagreeing persisted value on the still-current row — the old
+        fill-only-if-NULL guard let a stale legacy grade survive a fresh scan.
+        The lossless-lineage R19 CHECK still fires against the hardcoded
+        ``installed`` subject, so a source-lineage row is never written here.
+        """
         cur = self._execute(
             """
             UPDATE album_quality_evidence AS evidence
@@ -462,8 +471,6 @@ class _EvidenceMixin(_PipelineDBBase):
               AND request.current_evidence_id = evidence.id
               AND evidence.id = %s
               AND evidence.snapshot_fingerprint = %s
-              AND evidence.spectral_grade IS NULL
-              AND evidence.spectral_bitrate_kbps IS NULL
             RETURNING evidence.id
             """,
             (
