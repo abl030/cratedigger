@@ -29,6 +29,26 @@ I3. **Enqueue-failure reasons propagate to the eventual timeout.** When
     ``lib.download.summarize_file_failures`` and both timeout-message
     composers.
 
+Also covers issue #820 — attempt-scoped transfer matching (a stale
+prior-attempt terminal record for the same ``(username, filename)`` slskd
+queue key must never shadow, nor silently suppress, the CURRENT attempt's
+genuine transfer). Three more invariants, same PAIR discipline, prefixed
+``#820`` to disambiguate from the #564 invariants above:
+
+#820-I1. **Attempt-scoped binding.** ``match_transfer_for_attempt`` never
+    returns a terminal candidate whose lifecycle predates the attempt's
+    ``not_before`` boundary.
+#820-I2. **No stale shadowing.** When at least one post-boundary
+    candidate ("survivor") exists for the key, ``match_transfer_for_attempt``
+    returns the highest-priority survivor — never ``None``, never the
+    stale pre-boundary record.
+#820-I3. **End-to-end.** A prior-attempt terminal ``Completed, Succeeded``
+    record (pre-boundary) alongside the current attempt's own terminal
+    state (post-boundary) — driven through the REAL
+    ``harvest_terminal_transfer_evidence`` and ``reduce_poll_cycle`` —
+    must never produce a ``complete`` decision unless the current
+    attempt's own state genuinely is ``Completed, Succeeded``.
+
 Checkers are module-level functions with known-bad self-tests per the
 house method (CLAUDE.md "Bug Hunting — Generated-First" /
 code-quality.md Red/Green TDD). Profiles and promotion policy:
@@ -39,7 +59,7 @@ import os
 import sys
 import unittest
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -66,8 +86,16 @@ from lib.quality import (
     PollFileSnapshot,
     reduce_poll_cycle,
 )
+from lib.slskd_transfers import match_transfer_for_attempt
 from tests.fakes import FakePipelineDB, FakeSlskdAPI
-from tests.helpers import make_ctx_with_fake_db, make_download_file, make_request_row
+from tests.helpers import (
+    make_ctx_with_fake_db,
+    make_download_directory,
+    make_download_file,
+    make_download_user,
+    make_request_row,
+    make_transfer_snapshot,
+)
 
 _TERMINAL_STATES = (
     "Completed, Succeeded",
@@ -804,6 +832,321 @@ class TestStampedReasonCheckerTripsOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_stamped_reason_propagates(
                 None, "1× 'some ghost reason'", "irrelevant", "irrelevant")
+
+
+# ============================================================================
+# Issue #820 -- attempt-scoped transfer matching
+# ============================================================================
+#
+# A stale prior-attempt terminal record for the SAME (username, filename)
+# slskd queue key (visible forever via includeRemoved=True) must never
+# shadow, nor silently suppress via a bare None return, the CURRENT
+# attempt's own genuine transfer.
+
+_820_USERNAME = "peer-820"
+_820_DIRECTORY = "peer-820\\Album"
+_820_FILENAME = "peer-820\\Album\\01.flac"
+_820_BOUNDARY = datetime(2026, 7, 22, 2, 1, 25, tzinfo=timezone.utc)
+
+
+def _820_is_survivor(spec: tuple[str, int]) -> bool:
+    """A candidate survives attempt-boundary filtering unless it is BOTH
+    terminal AND pre-boundary -- mirrors ``_is_terminal_transfer_before``:
+    a non-terminal (in-progress/queued) candidate always survives,
+    whatever its own timestamps."""
+    state, offset_seconds = spec
+    return not (state.startswith("Completed,") and offset_seconds < 0)
+
+
+def _820_reference_priority(state: str, offset_seconds: int) -> tuple[int, int, int]:
+    """Independent re-derivation of ``_transfer_priority``'s ranking
+    tuple, over the same (state, offset) shape the strategy draws --
+    deliberately NOT calling the production function, so the property
+    doesn't just check the implementation against itself."""
+    is_terminal = state.startswith("Completed,")
+    is_success = state == "Completed, Succeeded"
+    return (0 if is_terminal else 1, 1 if is_success else 0, offset_seconds)
+
+
+def _820_build_downloads(specs: tuple[tuple[str, int], ...]):
+    files = [
+        make_transfer_snapshot(
+            filename=_820_FILENAME,
+            id=f"c{i}",
+            state=state,
+            ended_at=(_820_BOUNDARY + timedelta(seconds=offset)).isoformat(),
+        )
+        for i, (state, offset) in enumerate(specs)
+    ]
+    return make_download_user(
+        username=_820_USERNAME,
+        directories=[make_download_directory(
+            directory=_820_DIRECTORY, files=files)],
+    )
+
+
+def _820_run_boundary_world(specs: tuple[tuple[str, int], ...]) -> int | None:
+    downloads = _820_build_downloads(specs)
+    result = match_transfer_for_attempt(
+        downloads, _820_FILENAME, username=_820_USERNAME,
+        not_before=_820_BOUNDARY.isoformat(),
+    )
+    if result is None:
+        return None
+    return int(result.id[1:])
+
+
+@st.composite
+def _820_boundary_worlds(draw: st.DrawFn) -> tuple[tuple[str, int], ...]:
+    n = draw(st.integers(min_value=1, max_value=5))
+    specs = []
+    for _ in range(n):
+        state = draw(st.sampled_from(_ALL_STATES))
+        offset = draw(st.integers(min_value=-90 * 86400, max_value=90 * 86400))
+        specs.append((state, offset))
+    return tuple(specs)
+
+
+# ---- #820-I1: attempt-scoped binding --------------------------------------
+
+def assert_never_returns_pre_boundary_terminal(
+    *,
+    specs: tuple[tuple[str, int], ...],
+    result_index: int | None,
+) -> None:
+    """Module-level checker (known-bad self-tests below)."""
+    if result_index is None:
+        return
+    if not _820_is_survivor(specs[result_index]):
+        state, offset = specs[result_index]
+        raise AssertionError(
+            f"matcher returned a pre-boundary terminal candidate: "
+            f"state={state!r} offset={offset}s — attempt boundary violated")
+
+
+class TestGeneratedMatchNeverReturnsPreBoundaryTerminal(unittest.TestCase):
+    @given(specs=_820_boundary_worlds())
+    @example(specs=(
+        ("Completed, Succeeded", -65 * 86400),
+        ("Completed, Errored", 1),
+    ))
+    def test_match_never_returns_pre_boundary_terminal(self, specs):
+        result_index = _820_run_boundary_world(specs)
+        assert_never_returns_pre_boundary_terminal(
+            specs=specs, result_index=result_index)
+
+
+class TestPreBoundaryCheckerTripsOnViolations(unittest.TestCase):
+    def test_trips_when_pre_boundary_terminal_is_returned(self):
+        with self.assertRaises(AssertionError):
+            assert_never_returns_pre_boundary_terminal(
+                specs=(("Completed, Succeeded", -10),), result_index=0)
+
+    def test_does_not_trip_on_none(self):
+        assert_never_returns_pre_boundary_terminal(
+            specs=(("Completed, Succeeded", -10),), result_index=None)
+
+    def test_does_not_trip_on_post_boundary_result(self):
+        assert_never_returns_pre_boundary_terminal(
+            specs=(("Completed, Errored", 10),), result_index=0)
+
+
+# ---- #820-I2: no stale shadowing -------------------------------------------
+
+def assert_returns_best_survivor_when_any_exist(
+    *,
+    specs: tuple[tuple[str, int], ...],
+    result_index: int | None,
+) -> None:
+    """Module-level checker (known-bad self-tests below)."""
+    survivor_indices = [i for i, s in enumerate(specs) if _820_is_survivor(s)]
+    if not survivor_indices:
+        if result_index is not None:
+            raise AssertionError(
+                "matcher returned a result despite zero survivors")
+        return
+    if result_index is None:
+        raise AssertionError(
+            f"matcher returned None despite {len(survivor_indices)} "
+            f"survivor(s): {[specs[i] for i in survivor_indices]}")
+    if result_index not in survivor_indices:
+        raise AssertionError(
+            f"matcher returned a non-survivor: {specs[result_index]}")
+    best = max(
+        survivor_indices, key=lambda i: _820_reference_priority(*specs[i]))
+    if (_820_reference_priority(*specs[result_index])
+            != _820_reference_priority(*specs[best])):
+        raise AssertionError(
+            "matcher did not return the highest-priority survivor: "
+            f"returned={specs[result_index]} best={specs[best]}")
+
+
+class TestGeneratedMatchReturnsBestSurvivor(unittest.TestCase):
+    @given(specs=_820_boundary_worlds())
+    @example(specs=(
+        ("Completed, Succeeded", -65 * 86400),
+        ("Completed, Errored", 1),
+    ))
+    def test_match_returns_best_survivor(self, specs):
+        result_index = _820_run_boundary_world(specs)
+        assert_returns_best_survivor_when_any_exist(
+            specs=specs, result_index=result_index)
+
+
+class TestBestSurvivorCheckerTripsOnViolations(unittest.TestCase):
+    def test_trips_when_none_returned_despite_survivor(self):
+        with self.assertRaises(AssertionError):
+            assert_returns_best_survivor_when_any_exist(
+                specs=(("Completed, Errored", 5),), result_index=None)
+
+    def test_trips_when_non_survivor_returned(self):
+        with self.assertRaises(AssertionError):
+            assert_returns_best_survivor_when_any_exist(
+                specs=(
+                    ("Completed, Succeeded", -5),
+                    ("Completed, Errored", 5),
+                ),
+                result_index=0)
+
+    def test_trips_when_lower_priority_survivor_returned(self):
+        with self.assertRaises(AssertionError):
+            assert_returns_best_survivor_when_any_exist(
+                specs=(
+                    ("Completed, Errored", 5),
+                    ("Completed, Succeeded", 10),
+                ),
+                result_index=0)
+
+    def test_does_not_trip_when_no_survivors_and_none_returned(self):
+        assert_returns_best_survivor_when_any_exist(
+            specs=(("Completed, Succeeded", -5),), result_index=None)
+
+
+# ---- #820-I3: end-to-end — no false 'complete' -----------------------------
+
+_820_STALE_ENDED_AT = "2026-05-18T23:04:58+00:00"  # real ~65-day May gap
+
+
+def _820_run_stale_shadow_world(world: dict) -> PollCycleDecision:
+    """Drive the REAL harvest, matcher, and reducer together over a
+    two-record world: a prior-attempt terminal Succeeded record fixed at
+    the real May gap (pre-boundary), alongside a current-attempt record
+    at the drawn state/offset (post-boundary)."""
+    row = make_request_row(
+        id=1, status="downloading",
+        active_download_state={
+            "filetype": "flac",
+            "enqueued_at": _820_BOUNDARY.isoformat(),
+            "files": [{
+                "username": _820_USERNAME, "filename": _820_FILENAME,
+                "file_dir": _820_DIRECTORY, "size": 1000,
+            }],
+        },
+    )
+    db = FakePipelineDB()
+    db.seed_request(row)
+    slskd = FakeSlskdAPI()
+    slskd.add_transfer(
+        username=_820_USERNAME, directory=_820_DIRECTORY,
+        filename=_820_FILENAME, id="stale",
+        state="Completed, Succeeded", endedAt=_820_STALE_ENDED_AT,
+    )
+    current_ended_at = (
+        _820_BOUNDARY + timedelta(seconds=world["post_offset"])
+    ).isoformat()
+    slskd.add_transfer(
+        username=_820_USERNAME, directory=_820_DIRECTORY,
+        filename=_820_FILENAME, id="current",
+        state=world["current_state"], endedAt=current_ended_at,
+        exception=world["exception"],
+    )
+    ctx = make_ctx_with_fake_db(db, slskd=slskd)
+
+    # Seam 1: end-of-cycle harvest.
+    harvest_terminal_transfer_evidence(ctx)
+
+    # Seam 2: the next poll's own matcher + reducer, over whatever
+    # harvest just persisted.
+    state = ActiveDownloadState.from_raw(
+        db.request(1)["active_download_state"])
+    transfer = match_transfer_for_attempt(
+        slskd.transfers.get_all_downloads(includeRemoved=True),
+        _820_FILENAME, username=_820_USERNAME,
+        not_before=_820_BOUNDARY.isoformat(),
+    )
+    snapshot = PollFileSnapshot(
+        transfer_id=transfer.id if transfer is not None else None,
+        state=transfer.state if transfer is not None else None,
+        bytes_transferred=(
+            transfer.bytes_transferred if transfer is not None else 0),
+        exception=transfer.exception if transfer is not None else None,
+    )
+    now = _820_BOUNDARY + timedelta(seconds=max(world["post_offset"], 0) + 60)
+    result = reduce_poll_cycle(
+        state,
+        PollCycleSnapshot(files=[snapshot], completion_current_path="/canon"),
+        now,
+        PollCycleConfig(
+            remote_queue_timeout=1_000_000, stalled_timeout=1_000_000,
+            max_file_retries=5),
+    )
+    return result.verdict.decision
+
+
+def assert_stale_shadow_never_produces_false_complete(
+    *,
+    current_state: str,
+    decision: PollCycleDecision,
+) -> None:
+    """Module-level checker (known-bad self-tests below)."""
+    if (
+        current_state != "Completed, Succeeded"
+        and decision == PollCycleDecision.complete
+    ):
+        raise AssertionError(
+            f"stale prior-attempt record laundered current_state="
+            f"{current_state!r} into decision=PollCycleDecision.complete")
+
+
+@st.composite
+def _820_stale_shadow_worlds(draw: st.DrawFn) -> dict:
+    return dict(
+        current_state=draw(st.sampled_from(_ALL_STATES)),
+        post_offset=draw(st.integers(min_value=0, max_value=7200)),
+        exception=draw(st.one_of(st.none(), st.sampled_from(_EXCEPTIONS))),
+    )
+
+
+class TestGeneratedStaleShadowNeverProducesFalseComplete(unittest.TestCase):
+    @given(world=_820_stale_shadow_worlds())
+    @example(world=dict(
+        current_state="Completed, Errored", post_offset=1,
+        exception=(
+            "Download of 09 - Downhill From Here.mp3 reported as "
+            "failed by HumDrum"),
+    ))
+    def test_stale_shadow_never_produces_false_complete(self, world):
+        decision = _820_run_stale_shadow_world(world)
+        assert_stale_shadow_never_produces_false_complete(
+            current_state=world["current_state"], decision=decision)
+
+
+class TestStaleShadowCheckerTripsOnViolations(unittest.TestCase):
+    def test_trips_when_errored_state_produces_complete(self):
+        with self.assertRaises(AssertionError):
+            assert_stale_shadow_never_produces_false_complete(
+                current_state="Completed, Errored",
+                decision=PollCycleDecision.complete)
+
+    def test_does_not_trip_when_genuinely_succeeded_produces_complete(self):
+        assert_stale_shadow_never_produces_false_complete(
+            current_state="Completed, Succeeded",
+            decision=PollCycleDecision.complete)
+
+    def test_does_not_trip_when_non_complete_decision(self):
+        assert_stale_shadow_never_produces_false_complete(
+            current_state="Completed, Errored",
+            decision=PollCycleDecision.retry_files)
 
 
 if __name__ == "__main__":
