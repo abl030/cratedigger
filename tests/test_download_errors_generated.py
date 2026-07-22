@@ -1192,7 +1192,7 @@ def _822_is_timestampless_terminal(spec: tuple[str, int | None]) -> bool:
 def _822_build_downloads(specs: tuple[tuple[str, int | None], ...]):
     files = []
     for i, (state, offset) in enumerate(specs):
-        kwargs: dict[str, Any] = dict(filename=_820_FILENAME, id=f"c{i}", state=state)
+        kwargs: dict[str, str] = dict(filename=_820_FILENAME, id=f"c{i}", state=state)
         if offset is not None:
             kwargs["ended_at"] = (
                 _820_BOUNDARY + timedelta(seconds=offset)).isoformat()
