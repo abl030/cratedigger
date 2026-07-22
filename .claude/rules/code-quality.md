@@ -196,6 +196,20 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   a single-point mutant immediately proved was the load-bearing half).
   Subagent implementation briefs state the pair requirement verbatim and
   never offer a deterministic-only alternative.
+- **A decision-consequence pin must assert the decided outcome, not a proxy
+  field.** If a pin claims "this world changes what the pipeline decides,"
+  it must drive the real decider and assert the *decided outcome*
+  (import/reject/requeue) flipping between the bug world and the fixed
+  world — a rank, grade, or other intermediate field is not the
+  consequence, however plausible-looking. When the flip doesn't reproduce,
+  the probe world is wrong (check missing-value routing such as
+  `import_no_exist`) — verify empirically before writing a rationale that
+  it "can't flip". Lesson (#815 review): an implementer pinned a proxy
+  metric (`existing_rank` good→acceptable) because their probe world used
+  `genuine/None`, which routed through `import_no_exist` and hid the flip;
+  the real fresh-audit value (`genuine/160`) flips `imported` False↔True
+  through `full_pipeline_decision_from_evidence` — the actual consequence
+  and the strictly stronger regression guard.
 - **Every invariant checker owes a known-bad self-test**: a planted
   violating decision/state proving the checker trips. A property that has
   never failed anything is unfalsifiable until proven otherwise. Keep
