@@ -4467,7 +4467,11 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         self.assertTrue(claimed.on_disk_v0_research_attempted)
         self.assertIsNone(claimed.v0_metric)
 
-    def test_current_spectral_write_requires_exact_empty_current_snapshot(self):
+    def test_current_spectral_write_overwrites_with_fresh_measured_audit(self):
+        """Issue #815 fresh-audit-wins (real-PG round-trip). A fresh measured
+        installed-subject audit of the exact snapshot re-persists over ANY
+        disagreeing persisted grade; only the identity guards (request FK,
+        evidence id, snapshot fingerprint) still gate the write."""
         evidence = self._seed(
             mb_release_id="evidence-uuid",
             measurement=AudioQualityMeasurement(
@@ -4488,6 +4492,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         self.assertTrue(self.db.set_request_current_evidence(
             self.req_id, stored.id))
 
+        # A wrong fingerprint is still refused.
         self.assertFalse(self.db.persist_current_spectral_measurement(
             request_id=self.req_id,
             expected_evidence_id=stored.id,
@@ -4495,6 +4500,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
             grade="genuine",
             bitrate_kbps=96,
         ))
+        # First exact write fills the empty slot.
         self.assertTrue(self.db.persist_current_spectral_measurement(
             request_id=self.req_id,
             expected_evidence_id=stored.id,
@@ -4502,19 +4508,22 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
             grade="genuine",
             bitrate_kbps=96,
         ))
-        self.assertFalse(self.db.persist_current_spectral_measurement(
+        # A disagreeing fresh measured audit of the SAME snapshot now WINS
+        # (pre-#815 this was fill-only-if-NULL and returned False).
+        self.assertTrue(self.db.persist_current_spectral_measurement(
             request_id=self.req_id,
             expected_evidence_id=stored.id,
             expected_snapshot_fingerprint=stored.snapshot_fingerprint,
             grade="likely_transcode",
             bitrate_kbps=160,
         ))
-        self.db.upsert_album_quality_evidence(evidence)
 
         loaded = self.db.load_album_quality_evidence_by_id(stored.id)
         assert loaded is not None
-        self.assertEqual(loaded.measurement.spectral_grade, "genuine")
-        self.assertEqual(loaded.measurement.spectral_bitrate_kbps, 96)
+        self.assertEqual(loaded.measurement.spectral_grade, "likely_transcode")
+        self.assertEqual(loaded.measurement.spectral_bitrate_kbps, 160)
+        self.assertEqual(loaded.measurement.spectral_subject, "installed")
+        self.assertEqual(loaded.measurement.spectral_provenance, "measured")
 
     def test_current_spectral_write_rejects_lossless_lineage(self):
         from lib.quality import AlbumQualityV0Metric

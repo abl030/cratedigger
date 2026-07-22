@@ -1222,27 +1222,20 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         self.assertEqual(row["current_spectral_grade"], "genuine")
         self.assertEqual(row["current_spectral_bitrate"], 320)
 
-    def test_stale_album_path_does_not_self_compare(self):
-        """Issue #90: when BeetsDB returns an album whose on-disk path has
-        gone stale (``os.path.isdir`` returns False), propagation must not
-        mutate ``existing_spectral`` *before* ``spectral_import_decision``
-        runs — otherwise the download is compared against itself and
-        legitimate suspect-grade downloads get rejected by their own
-        spectral estimate.
+    def test_stale_album_path_bails_without_adopting_candidate(self):
+        """Issue #815 (supersedes the #90 self-compare pin): when BeetsDB
+        returns an album whose on-disk path has gone stale (``os.path.isdir``
+        False), the candidate's spectral must NOT be adopted as the request's
+        on-disk state.
 
         Setup: beets says the album exists (min_bitrate=320) but
         isdir(album_path) is False. Download is suspect at 128kbps.
 
-        With the bug: propagation writes download's 128kbps into
-        existing_spectral, then decision sees new=128 vs existing=128 →
-        reject (self-compare).
-
-        Correct behavior: decision compares download's 128 against the
-        container's 320 (fallback via existing_min_bitrate) → reject with a
-        legitimate comparison; OR if existing_min_bitrate also isn't
-        trustworthy (e.g. caller treats stale path as no-existing),
-        import_no_exist. The key invariant: the reject reason must NOT
-        read ``spectral {x}kbps <= existing {x}kbps`` with equal numbers.
+        Pre-#815 the ``_persist_spectral_state`` "reasonable proxy" branch
+        copied the download's 128kbps into ``current_spectral_*`` (and the old
+        self-compare bug then read 128<=128). Now the on-disk audit yields no
+        measurement, so nothing is written; the importer compares the
+        candidate against the container bitrate (via existing_min_bitrate).
         """
         from lib.config import CratediggerConfig
         from lib.measurement import measure_preimport_state
@@ -1281,29 +1274,25 @@ class TestSpectralPropagationSlice(unittest.TestCase):
                 cfg=cfg,
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
-                propagate_download_to_existing=True,
             )
 
-        # The self-compare bug — propagation must not have copied the
-        # download's spectral into existing_spectral. existing_spectral
-        # may stay None (stale path on disk) or come from beets, but it
-        # must NOT equal the download's spectral exactly.
-        if measurement.download_spectral and measurement.existing_spectral:
-            self.assertNotEqual(
-                measurement.existing_spectral,
-                measurement.download_spectral,
-                "self-compare bug: existing_spectral propagated from download",
-            )
+        # No on-disk (HAVE) measurement, and the candidate's spectral is never
+        # adopted as the request's current on-disk state.
+        self.assertIsNone(measurement.existing_spectral)
+        row = db.request(42)
+        self.assertIsNone(row.get("current_spectral_grade"))
+        self.assertIsNone(row.get("current_spectral_bitrate"))
+        # The container bitrate remains the HAVE comparison fallback.
+        self.assertEqual(measurement.existing_min_bitrate, 320)
 
-    def test_stale_album_path_imports_when_download_beats_container(self):
-        """Issue #90 correctness: a suspect download above the container
-        bitrate must persist its spectral state to album_requests for the
-        importer's evidence pipeline to consume.
+    def test_stale_album_path_leaves_have_state_unwritten(self):
+        """Issue #815: a suspect download above the container bitrate on a
+        stale album path leaves the request's on-disk spectral UNWRITTEN.
 
-        Pre-fix: propagation wrote 280 into existing_spectral, decision saw
-        280 <= 280 → reject. After the fix the measurement keeps
-        existing_spectral disjoint from the download's; the importer's
-        full pipeline then sees 280 vs container 256 and imports.
+        Pre-#815 propagation wrote 280 into ``current_spectral_*`` (and the
+        old self-compare bug read 280<=280 → reject). Now the importer's full
+        pipeline compares the candidate 280 against the container 256; the
+        candidate's spectral is never frozen as HAVE state.
         """
         from lib.config import CratediggerConfig
         from lib.measurement import measure_preimport_state
@@ -1341,15 +1330,17 @@ class TestSpectralPropagationSlice(unittest.TestCase):
                 cfg=cfg,
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
-                propagate_download_to_existing=True,
             )
 
         # Measurement is fact-only — accept/reject lives in the importer.
         self.assertFalse(measurement.audio_corrupt)
-        # Propagation still persisted the download's spectral for future runs.
+        self.assertIsNone(measurement.existing_spectral)
+        # BAIL: the candidate's spectral is never written as on-disk state.
         row = db.request(42)
-        self.assertEqual(row["current_spectral_grade"], "suspect")
-        self.assertEqual(row["current_spectral_bitrate"], 280)
+        self.assertIsNone(row.get("current_spectral_grade"))
+        self.assertIsNone(row.get("current_spectral_bitrate"))
+        # The container bitrate remains the HAVE comparison fallback.
+        self.assertEqual(measurement.existing_min_bitrate, 256)
 
 
 class TestSpectralPropagationOnAccept(unittest.TestCase):
@@ -1383,20 +1374,20 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
         persisted = _persist_spectral_state(
             db=db,  # type: ignore[arg-type]
             request_id=42,
-            download_spectral=None,
             existing_spectral=SpectralMeasurement(
                 grade="genuine",
                 bitrate_kbps=320,
             ),
-            existing_min_bitrate=320,
-            label="Frozen Artist - Frozen Album",
         )
 
         self.assertIsNone(persisted)
         self.assertEqual(db.request(42), before)
 
     def test_accept_suspect_upgrade_still_persists_spectral(self):
-        """Accept (suspect grade but bitrate upgrades existing) → spectral state still propagates."""
+        """Accept (suspect grade but bitrate upgrades existing) → the REAL
+        measured existing spectral state is still persisted (must-still-work
+        for #815: a genuine on-disk measurement IS written; only candidate
+        adoption is removed)."""
         from lib.config import CratediggerConfig
         from lib.measurement import measure_preimport_state
         from lib.quality import SpectralAnalysisDetail
@@ -1462,8 +1453,9 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
         # Measurement never writes denylist.
         self.assertEqual(len(db.denylist), 0)
 
-    def test_accept_import_no_exist_still_persists_spectral(self):
-        """Accept (suspect grade, no existing on disk) → spectral state propagates the download's spectral."""
+    def test_accept_import_no_exist_writes_no_have_state(self):
+        """Accept (suspect grade, no existing on disk) → no on-disk spectral is
+        written; the candidate's spectral is never adopted as HAVE state (#815)."""
         from lib.config import CratediggerConfig
         from lib.measurement import measure_preimport_state
 
@@ -1496,10 +1488,10 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
                 request_id=42,
             )
 
-        # Measurement is fact-only; no existing album means no
-        # existing-spectral propagation. Per ``_persist_spectral_state``
-        # semantics, when existing_spectral is None AND existing_min_bitrate
-        # is None, nothing is persisted.
+        # Measurement is fact-only; no existing album means no on-disk
+        # measurement. Per ``_persist_spectral_state`` semantics, when
+        # existing_spectral is None nothing is persisted — the candidate's
+        # spectral is never adopted (#815).
         self.assertFalse(measurement.audio_corrupt)
         row = db.request(42)
         self.assertIsNone(row.get("current_spectral_grade"))

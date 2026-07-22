@@ -932,6 +932,138 @@ class TestImportPreviewPath(unittest.TestCase):
             import shutil
             shutil.rmtree(source, ignore_errors=True)
 
+    def test_fresh_have_audit_overwrites_stale_installed_grade(self):
+        """Issue #815 fresh-audit-wins pin (Shugo Tokumaru EXIT, request 4351).
+
+        An installed-subject evidence row carrying a STALE likely_transcode/128
+        (a legacy landmine seeded on a matched fingerprint — a state a clean
+        forward run can never produce) is re-persisted to the fresh genuine/160
+        audit of the exact same bytes. Pre-#815 the fill-only-if-NULL early
+        return discarded the fresh audit; the stale 128 then decided the
+        dl 37742 import and a fake-320 replaced the genuine 192 copy.
+        """
+        db = self._db()
+        source = self._source_dir()
+        try:
+            evidence = make_album_quality_evidence(
+                mb_release_id="mbid-42",
+                source_path=source,
+                files=snapshot_audio_files(source),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=192,
+                    avg_bitrate_kbps=192,
+                    median_bitrate_kbps=192,
+                    format="MP3",
+                    spectral_grade="likely_transcode",
+                    spectral_bitrate_kbps=128,
+                    spectral_subject="installed",
+                    spectral_provenance="measured",
+                ),
+            )
+            db.upsert_album_quality_evidence(evidence)
+            stored = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            db.set_request_current_evidence(42, stored.id)
+
+            result = persist_exact_current_spectral_from_attempt(
+                db,
+                request_id=42,
+                current_evidence=stored,
+                measured_existing=SpectralAnalysisDetail(
+                    attempted=True,
+                    grade="genuine",
+                    bitrate_kbps=160,
+                    suspect_pct=30.0,
+                ),
+                measured_existing_path=source,
+            )
+
+            self.assertEqual(result.status, "ready")
+            assert result.evidence is not None
+            self.assertEqual(
+                result.evidence.measurement.spectral_grade, "genuine")
+            self.assertEqual(
+                result.evidence.measurement.spectral_bitrate_kbps, 160)
+            # The overwrite is durable and stamped measured/installed.
+            reloaded = db.load_album_quality_evidence_by_id(stored.id)
+            assert reloaded is not None
+            self.assertEqual(reloaded.measurement.spectral_grade, "genuine")
+            self.assertEqual(reloaded.measurement.spectral_bitrate_kbps, 160)
+            self.assertEqual(
+                reloaded.measurement.spectral_subject, "installed")
+            self.assertEqual(
+                reloaded.measurement.spectral_provenance, "measured")
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_fresh_audit_never_overwrites_lossless_source_carried_grade(self):
+        """R19 must-still-work: a lossless-sourced row that already carries a
+        source-subject grade is NEVER overwritten by an installed-derivative
+        fresh audit, even under #815 fresh-audit-wins."""
+        from lib.quality import EVIDENCE_SUBJECT_SOURCE, AlbumQualityV0Metric
+
+        db = self._db()
+        source = self._source_dir()
+        try:
+            evidence = make_album_quality_evidence(
+                mb_release_id="mbid-42",
+                source_path=source,
+                files=snapshot_audio_files(source),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=129,
+                    avg_bitrate_kbps=129,
+                    median_bitrate_kbps=129,
+                    format="Opus",
+                    spectral_grade="suspect",
+                    spectral_bitrate_kbps=140,
+                    spectral_subject=EVIDENCE_SUBJECT_SOURCE,
+                    spectral_provenance="carried",
+                ),
+                v0_metric=AlbumQualityV0Metric(
+                    min_bitrate_kbps=187,
+                    avg_bitrate_kbps=213,
+                    median_bitrate_kbps=210,
+                    subject=EVIDENCE_SUBJECT_SOURCE,
+                    provenance="carried",
+                ),
+                codec="opus",
+                container="opus",
+                storage_format="Opus",
+            )
+            db.upsert_album_quality_evidence(evidence)
+            stored = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            db.set_request_current_evidence(42, stored.id)
+
+            result = persist_exact_current_spectral_from_attempt(
+                db,
+                request_id=42,
+                current_evidence=stored,
+                measured_existing=SpectralAnalysisDetail(
+                    attempted=True,
+                    grade="genuine",
+                    bitrate_kbps=200,
+                ),
+                measured_existing_path=source,
+            )
+
+            self.assertEqual(result.status, "skipped")
+            reloaded = db.load_album_quality_evidence_by_id(stored.id)
+            assert reloaded is not None
+            self.assertEqual(reloaded.measurement.spectral_grade, "suspect")
+            self.assertEqual(
+                reloaded.measurement.spectral_subject, EVIDENCE_SUBJECT_SOURCE)
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
     def test_attempt_scan_never_persists_onto_lossless_sourced_row(self):
         """R19 guard: a lossless-sourced row (source anchor, empty spectral)
         must refuse the installed-derivative scan — the source grade

@@ -501,6 +501,54 @@ class TestLiveBugReproductions(unittest.TestCase):
         self.assertEqual(basis["existing_value_kbps"], 256)
 
 
+class TestSpectralLandmineDecisionConsequence(unittest.TestCase):
+    """Issue #815: the persisted HAVE spectral grade is decision-load-bearing.
+
+    Shugo Tokumaru EXIT (request 4351, dl 37742). The installed genuine 192
+    copy carried a STALE ``likely_transcode``/128 landmine (a rejected fake-320
+    candidate's grade adopted in May-2026 and frozen into evidence). Fresh
+    audit of the installed bytes says ``genuine`` — and #815 fresh-audit-wins
+    now re-persists it. This pins the downstream consequence through the REAL
+    production decider (``full_pipeline_decision_from_evidence``): the stale
+    landmine drags the installed copy's rank down from its true ``good`` to a
+    degraded ``acceptable``, making the genuine copy far easier for a lossy
+    candidate to displace. With the fresh genuine grade the installed rank is
+    honest again.
+    """
+
+    def _existing_rank(self, have_grade: str | None, have_bitrate: int | None):
+        from lib.quality import full_pipeline_decision_from_evidence
+        candidate = build_parity_candidate_evidence(
+            is_flac=False, min_bitrate=320, is_cbr=True, avg_bitrate=320,
+            spectral_grade="likely_transcode", spectral_bitrate=128,
+        )
+        current = build_parity_current_evidence(
+            min_bitrate=192, avg_bitrate=192, format="MP3", is_cbr=True,
+            spectral_grade=have_grade, spectral_bitrate=have_bitrate,
+        )
+        r = full_pipeline_decision_from_evidence(candidate, current)
+        return r["comparison_basis"]["existing_rank"]
+
+    def test_fresh_genuine_have_ranks_installed_copy_honestly(self):
+        # Fresh-audit-wins: the installed 192 copy ranks by its true genuine
+        # grade — ``good``.
+        self.assertEqual(self._existing_rank("genuine", None), "good")
+
+    def test_stale_transcode_landmine_degrades_installed_rank(self):
+        # The pre-#815 landmine (frozen likely_transcode/128) drags the very
+        # same installed copy down to ``acceptable`` — a strictly weaker rank
+        # than the honest ``good`` above, which is what let a fake-320 displace
+        # the genuine copy on dl 37742.
+        self.assertEqual(self._existing_rank("likely_transcode", 128),
+                         "acceptable")
+        self.assertNotEqual(
+            self._existing_rank("likely_transcode", 128),
+            self._existing_rank("genuine", None),
+            "the persisted HAVE grade must change the installed copy's rank — "
+            "otherwise the fresh-audit-wins fix would be inert",
+        )
+
+
 class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
     """Every TestLiveBugReproductions scenario must produce the same outcome
     when run through ``full_pipeline_decision_from_evidence`` — the function
