@@ -437,6 +437,86 @@ def simulate(
     )
 
 
+# Stage2/early-exit decisions that denylist their source (issue #813 Finding
+# 2). Deliberately hardcoded here rather than delegated to
+# ``lib.quality.dispatch_actions.decision_denylists`` — this independent
+# oracle must keep catching drift in every consumer, same rationale as the
+# post-import ``expected_actions`` table inside ``simulate()`` above
+# ("Deliberately do not call post_import_search_action() here"). Before the
+# #813 fix, ``"downgrade"`` was missing from this list — the simulator's
+# decision dict silently stayed ``denylisted=False`` for a decision
+# production always denylists (``dispatch_action("downgrade").denylist``),
+# so this checker would NOT have caught the live lie. It is included now
+# and the known-bad self-test below proves the checker trips on its absence.
+_REJECT_DENYLIST_CAUSES = (
+    "downgrade",
+    "transcode_upgrade",
+    "transcode_downgrade",
+    "transcode_first",
+    "provisional_lossless_upgrade",
+    "suspect_lossless_downgrade",
+    "suspect_lossless_probe_missing",
+    "lossless_source_locked",
+)
+
+
+def assert_denylist_has_valid_cause(r: "SimResult") -> None:
+    """A denylisted outcome must trace to a real reject/retained-nonterminal
+    decision — never a bare default with no decision behind it."""
+    if not r.denylisted:
+        return
+    causes = (
+        r.stage1_spectral == "reject",
+        r.stage2_import in _REJECT_DENYLIST_CAUSES,
+        r.stage3_quality_gate in ("requeue_upgrade", "requeue_lossless"),
+    )
+    if not any(causes):
+        raise AssertionError(f"Denylisted without valid cause: {r!r}")
+
+
+class TestAssertDenylistHasValidCauseTripsOnViolations(unittest.TestCase):
+    """Known-bad self-test (issue #813): proves the checker actually trips."""
+
+    def _result(self, **overrides: object) -> "SimResult":
+        base = SimResult(
+            imported=False,
+            keep_searching=True,
+            denylisted=True,
+            final_status="wanted",
+            stage0_spectral_gate=None,
+            stage1_spectral=None,
+            stage2_import=None,
+            stage3_quality_gate=None,
+            backfill_override=None,
+            search_filetype_override_after=None,
+        )
+        return replace(base, **overrides)
+
+    def test_trips_on_denylisted_with_no_decision_at_all(self):
+        """A denylisted outcome with no stage decision anywhere is the
+        planted violation this checker exists to catch."""
+        with self.assertRaises(AssertionError):
+            assert_denylist_has_valid_cause(self._result())
+
+    def test_passes_on_downgrade(self):
+        """The exact issue #813 Finding 2 shape: production always
+        denylists a downgrade — must NOT trip."""
+        assert_denylist_has_valid_cause(
+            self._result(stage2_import="downgrade", final_status="imported")
+        )
+
+    def test_passes_when_not_denylisted(self):
+        assert_denylist_has_valid_cause(self._result(denylisted=False))
+
+    def test_passes_on_requeue_upgrade(self):
+        assert_denylist_has_valid_cause(
+            self._result(
+                imported=True, final_status="wanted",
+                stage2_import="import", stage3_quality_gate="requeue_upgrade",
+            )
+        )
+
+
 # ============================================================================
 # Invariant tests — properties that hold across the full matrix
 # ============================================================================
@@ -525,23 +605,7 @@ class TestSimulatorInvariants(unittest.TestCase):
         for album in ALBUM_STATES:
             for dl in DOWNLOAD_SCENARIOS:
                 with self.subTest(album=album.name, dl=dl.name):
-                    r = simulate(album, dl)
-                    if r.denylisted:
-                        causes = (
-                            r.stage1_spectral == "reject",
-                            r.stage2_import in ("transcode_upgrade",
-                                                "transcode_downgrade",
-                                                "transcode_first",
-                                                "provisional_lossless_upgrade",
-                                                "suspect_lossless_downgrade",
-                                                "suspect_lossless_probe_missing",
-                                                "lossless_source_locked"),
-                            r.stage3_quality_gate in (
-                                "requeue_upgrade", "requeue_lossless"
-                            ),
-                        )
-                        self.assertTrue(any(causes),
-                                        f"Denylisted without valid cause: {r}")
+                    assert_denylist_has_valid_cause(simulate(album, dl))
 
     def test_provisional_locked_album_rejects_all_lossy_candidates(self):
         """When existing has a recorded lossless-source V0 probe, every lossy

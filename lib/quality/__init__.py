@@ -171,6 +171,7 @@ from lib.quality.dispatch_actions import (
     DispatchAction,
     RejectionSearchOverrideResolution,
     compute_effective_override_bitrate,
+    decision_denylists,
     dispatch_action,
     extract_usernames,
     narrow_override_on_downgrade,
@@ -198,6 +199,7 @@ from lib.quality.pipeline import (
     full_pipeline_decision,
     full_pipeline_decision_from_evidence,
     override_bitrate_from_current_evidence,
+    resolve_pipeline_decision_denylist,
 )
 
 __all__ = [
@@ -321,6 +323,7 @@ __all__ = [
     "comparison_format_hint",
     "compute_effective_override_bitrate",
     "decide_download_action",
+    "decision_denylists",
     "determine_verified_lossless",
     "mint_verified_lossless_proof",
     "dispatch_action",
@@ -353,6 +356,7 @@ __all__ = [
     "reduce_poll_cycle",
     "rejected_download_tier",
     "rejection_backfill_override",
+    "resolve_pipeline_decision_denylist",
     "resolve_rejection_search_override",
     "resolve_retained_search_override",
     "resolve_user_requeue_override",

@@ -537,7 +537,6 @@ def dispatch_import_core(
                     file_list,
                 ) = _resolve_post_import_search_policy(
                     decision=decision,
-                    action=action,
                     files=files,
                     fallback_username=dl_info.username,
                 )

@@ -45,10 +45,15 @@ class TestLiveBugReproductions(unittest.TestCase):
         rejects — it defers to Stage 2, which rejects this equal-rank
         candidate as a ``downgrade``. The bug this guards is *acceptance* of a
         320 transcode from a 160k source; that is still prevented — the
-        candidate is never imported and the search continues. (Denylist is a
-        production-side ``dispatch_action("downgrade")`` concern, not reflected
-        in the simulator dict for the native-lossy downgrade branch; out of
-        scope for this quality assertion.)
+        candidate is never imported and the search continues.
+
+        Issue #813 Finding 2: the native-lossy ``downgrade`` return site used
+        to leave the decision dict's ``denylisted`` field at its default
+        ``False`` — a lie, since ``dispatch_action("downgrade").denylist``
+        is ``True`` in production (the offering peer never gets a better
+        candidate from re-grabbing the same source). Now single-sourced via
+        ``resolve_pipeline_decision_denylist``, so the display matches the
+        real write.
         """
         r = full_pipeline_decision(
             is_flac=False,
@@ -65,6 +70,10 @@ class TestLiveBugReproductions(unittest.TestCase):
         self.assertEqual(r["stage2_import"], "downgrade")
         self.assertFalse(r["imported"])
         self.assertTrue(r["keep_searching"])
+        # Issue #813 Finding 2 pin: the display must match production exactly.
+        from lib.quality import dispatch_action
+        self.assertTrue(r["denylisted"])
+        self.assertEqual(r["denylisted"], dispatch_action("downgrade").denylist)
 
     def test_tyler_lamberts_grave_no_spectral_bitrate(self):
         """Same bug but when spectral_bitrate is None (HF deficit only, no cliff).
@@ -194,6 +203,8 @@ class TestLiveBugReproductions(unittest.TestCase):
         self.assertFalse(r["imported"])
         # Never stop searching: the installed copy is still a transcode.
         self.assertTrue(r["keep_searching"])
+        # Issue #813 Finding 2: downgrade always denylists in production.
+        self.assertTrue(r["denylisted"])
 
     def test_taboo_vi_fake_flac_192_accepted(self):
         """Fake FLAC (192k source) converted to V0 at 224kbps is provisional.
@@ -646,9 +657,15 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
 
     def test_heretic_pride_downgrade_via_evidence(self):
         """test_heretic_pride second-pass downgrade case via the evidence
-        pipeline — MP3 192 vs existing MP3 192."""
+        pipeline — MP3 192 vs existing MP3 192.
+
+        Issue #813 Finding 2 pin: this is the production decider (the
+        function the real importer calls) — proves the fix through the
+        actual entry point, not just the flat-kwargs simulator twin.
+        """
         from lib.quality import (
             AlbumQualityEvidenceDecisionFacts,
+            dispatch_action,
             full_pipeline_decision_from_evidence,
         )
 
@@ -668,6 +685,8 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
 
         self.assertEqual(r["stage2_import"], "downgrade")
         self.assertFalse(r["imported"])
+        self.assertTrue(r["denylisted"])
+        self.assertEqual(r["denylisted"], dispatch_action("downgrade").denylist)
 
     def test_mark_denardo_equal_spectral_higher_bitrate_imports_via_evidence(self):
         """Mark DeNardo request 1308 through the production evidence decider.
@@ -745,6 +764,8 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         self.assertEqual(r["comparison_basis"]["existing_value_kbps"], 256)
         self.assertFalse(r["imported"])
         self.assertTrue(r["keep_searching"])
+        # Issue #813 Finding 2: downgrade always denylists in production.
+        self.assertTrue(r["denylisted"])
 
     def test_lil_wayne_da_drought_3_transcoded_flac_rejects_duplicate_via_evidence(self):
         """Parity sibling of

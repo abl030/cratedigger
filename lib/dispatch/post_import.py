@@ -23,7 +23,7 @@ from lib.quality.decisions import (
     PostImportSearchAction,
     post_import_search_action_if_known,
 )
-from lib.quality.dispatch_actions import DispatchAction
+from lib.quality.dispatch_actions import decision_denylists
 
 from lib.dispatch.quality_gate import QualityGatePlan
 from lib.dispatch.types import QualityGateFn
@@ -97,7 +97,6 @@ def _run_or_stage_quality_gate(
 def _resolve_post_import_search_policy(
     *,
     decision: str,
-    action: DispatchAction,
     files: Sequence[object] | None,
     fallback_username: str | None,
 ) -> tuple[PostImportSearchAction | None, bool, set[str], list[object]]:
@@ -109,11 +108,7 @@ def _resolve_post_import_search_policy(
     """
 
     search_action = post_import_search_action_if_known(decision)
-    should_denylist = (
-        search_action.denylist
-        if search_action is not None
-        else action.denylist
-    )
+    should_denylist = decision_denylists(decision)
     file_list = list(files or ())
     usernames = extract_usernames(file_list) if should_denylist else set[str]()
     if should_denylist and fallback_username:

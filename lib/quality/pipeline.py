@@ -51,7 +51,10 @@ from lib.quality.decisions import (
     transcode_detection,
     v0_probe_overrides_spectral,
 )
-from lib.quality.dispatch_actions import compute_effective_override_bitrate
+from lib.quality.dispatch_actions import (
+    compute_effective_override_bitrate,
+    decision_denylists,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +135,12 @@ def full_pipeline_decision(
             "stage3_quality_gate": str,   # post-import quality gate decision
             "final_status": str,          # what the pipeline DB ends up as
             "imported": bool,             # whether files were imported to beets
-            "denylisted": bool,           # whether source user gets denylisted
+            "denylisted": bool,           # whether source user gets denylisted —
+                                           # single-sourced by _finalize_denylist
+                                           # (resolve_pipeline_decision_denylist),
+                                           # matching production's real
+                                           # dispatch_action/post_import_search_action
+                                           # write exactly (issue #813 Finding 2)
             "keep_searching": bool,       # whether the system keeps looking for better
             "comparison_basis": dict | None,  # QualityComparisonBasis builtins from stage 2
         }
@@ -182,7 +190,7 @@ def full_pipeline_decision(
     if current_verified_lossless_proof:
         result["stage2_import"] = DECISION_VERIFIED_LOSSLESS_LOCKED
         result["final_status"] = "imported"
-        return result
+        return _finalize_denylist(result)
 
     # --- Preimport gates (issue #91) ---
     # Ordering mirrors the live flow: lib.dispatch.dispatch_import_from_db
@@ -197,15 +205,14 @@ def full_pipeline_decision(
     if nested_outcome == "reject_nested":
         result["final_status"] = "wanted"
         result["keep_searching"] = True
-        return result
+        return _finalize_denylist(result)
 
     audio_outcome = preimport_audio_gate(audio_check_mode, audio_corrupt)
     result["preimport_audio"] = audio_outcome
     if audio_outcome == "reject_corrupt":
         result["final_status"] = "wanted"
         result["keep_searching"] = True
-        result["denylisted"] = True
-        return result
+        return _finalize_denylist(result)
 
     # --- Stage 0: Spectral gate trigger (issue #93) ---
     # Mirrors lib.measurement._needs_spectral_check. Tells the operator
@@ -249,9 +256,8 @@ def full_pipeline_decision(
                 and not (provisional_source_candidate
                          and has_provisional_probe_input)):
             result["final_status"] = "wanted"  # stays wanted, denylist user
-            result["denylisted"] = True
             result["keep_searching"] = True
-            return result
+            return _finalize_denylist(result)
 
     # --- Stage 2: Import decision ---
     # Existing measurement — carries format if the caller provided one,
@@ -357,16 +363,14 @@ def full_pipeline_decision(
             result["stage2_import"] = provisional.decision
             if provisional.confident_reject:
                 result["final_status"] = "wanted"
-                result["denylisted"] = True
                 result["keep_searching"] = True
-                return result
+                return _finalize_denylist(result)
             search_action = post_import_search_action(provisional.decision)
             result["imported"] = True
-            result["denylisted"] = search_action.denylist
             result["keep_searching"] = search_action.status == "wanted"
             result["final_status"] = search_action.status
             result["target_final_format"] = stage2_new_format
-            return result
+            return _finalize_denylist(result)
         measured = measured_import_decision(
             MeasuredImportDecisionInput(
                 new_m,
@@ -383,7 +387,7 @@ def full_pipeline_decision(
         if result["stage2_import"] == "downgrade":
             result["final_status"] = "imported"
             result["keep_searching"] = True
-            return result
+            return _finalize_denylist(result)
         result["imported"] = True
 
         # Genuine FLAC on disk is verified lossless (for quality gate). Route
@@ -483,17 +487,15 @@ def full_pipeline_decision(
             result["stage2_import"] = provisional.decision
             if provisional.confident_reject:
                 result["final_status"] = "wanted"
-                result["denylisted"] = True
                 result["keep_searching"] = True
-                return result
+                return _finalize_denylist(result)
             search_action = post_import_search_action(provisional.decision)
             result["imported"] = True
-            result["denylisted"] = search_action.denylist
             result["keep_searching"] = search_action.status == "wanted"
             result["final_status"] = search_action.status
             if verified_lossless_target:
                 result["target_final_format"] = verified_lossless_target
-            return result
+            return _finalize_denylist(result)
         target_contract = None
         if stage2_new_format is not None:
             target_contract = (
@@ -536,15 +538,13 @@ def full_pipeline_decision(
         if result["stage2_import"] == "downgrade":
             result["final_status"] = "imported"  # keeps existing
             result["keep_searching"] = True
-            return result
+            return _finalize_denylist(result)
         elif result["stage2_import"] == "transcode_downgrade":
             result["final_status"] = "wanted"
-            result["denylisted"] = True
             result["keep_searching"] = True
-            return result
+            return _finalize_denylist(result)
         elif result["stage2_import"] in ("transcode_upgrade", "transcode_first"):
             result["imported"] = True
-            result["denylisted"] = True
             result["keep_searching"] = True
             # Still runs quality gate after import
         else:
@@ -633,9 +633,8 @@ def full_pipeline_decision(
         if lossy_lock.decision == DECISION_LOSSLESS_SOURCE_LOCKED:
             result["stage2_import"] = lossy_lock.decision
             result["final_status"] = "wanted"
-            result["denylisted"] = True
             result["keep_searching"] = True
-            return result
+            return _finalize_denylist(result)
         measured = measured_import_decision(
             MeasuredImportDecisionInput(
                 new_m,
@@ -652,7 +651,7 @@ def full_pipeline_decision(
         if result["stage2_import"] == "downgrade":
             result["final_status"] = "imported"  # keeps existing
             result["keep_searching"] = True
-            return result
+            return _finalize_denylist(result)
 
         result["imported"] = True
         gate_bitrate = min_bitrate
@@ -703,10 +702,9 @@ def full_pipeline_decision(
     )
     search_action = post_import_search_action(result["stage3_quality_gate"])
     result["final_status"] = search_action.status
-    result["denylisted"] = search_action.denylist
     result["keep_searching"] = search_action.status == "wanted"
 
-    return result
+    return _finalize_denylist(result)
 
 
 class AlbumQualityEvidenceDecisionFacts(msgspec.Struct, frozen=True):
@@ -781,6 +779,43 @@ def evidence_decision_name(
     ):
         return "spectral_reject"
     return default
+
+
+def resolve_pipeline_decision_denylist(result: dict[str, object]) -> bool:
+    """Whether a decision dict's outcome denylists its source — single-
+    sourced from production's real write (issue #813 Finding 2).
+
+    Production resolves denylist policy from a decision string via
+    ``lib.quality.dispatch_actions.decision_denylists`` (the two-tier
+    ``post_import_search_action`` -> ``dispatch_action`` lookup shared with
+    ``lib.dispatch.post_import._resolve_post_import_search_policy``, the
+    real importer write). A decision dict can carry TWO governing decisions:
+    the stage2/early-exit decision that fires when the outcome never reaches
+    Stage 3 (``evidence_decision_name``), and — independently — the Stage-3
+    quality-gate decision when the import *does* reach that gate
+    (``lib.dispatch.quality_gate`` re-evaluates denylist policy fresh from
+    the post-import state, so an outcome can be denylisted by either stage).
+    """
+    denylisted = decision_denylists(evidence_decision_name(result))
+    stage3 = result.get("stage3_quality_gate")
+    if isinstance(stage3, str) and stage3:
+        denylisted = denylisted or decision_denylists(stage3)
+    return denylisted
+
+
+def _finalize_denylist(result: dict[str, object]) -> dict[str, object]:
+    """Single choke point every ``full_pipeline_decision``/
+    ``full_pipeline_decision_from_evidence`` return path funnels through.
+
+    Issue #813 Finding 2: three separate ``downgrade`` return sites each
+    independently forgot to set ``denylisted``, silently diverging from what
+    ``dispatch_action("downgrade").denylist`` (and the real importer) always
+    writes. Computing it here, once, from the decision(s) already recorded
+    on ``result`` makes that whole bug class structurally impossible — a new
+    branch cannot "forget" a step it never performs.
+    """
+    result["denylisted"] = resolve_pipeline_decision_denylist(result)
+    return result
 
 
 def comparison_basis_from_decision(
@@ -1042,7 +1077,7 @@ def full_pipeline_decision_from_evidence(
             "stage3_quality_gate": str | None,
             "final_status": str | None,
             "imported": bool,
-            "denylisted": bool,
+            "denylisted": bool,  # see resolve_pipeline_decision_denylist — #813
             "keep_searching": bool,
             "target_final_format": str | None,
             "verified_lossless": bool,
@@ -1085,7 +1120,7 @@ def full_pipeline_decision_from_evidence(
         current is not None
         and current.verified_lossless_proof is not None
     ):
-        return {
+        return _finalize_denylist({
             "preimport_audio": None,
             "preimport_nested": None,
             "preimport_bad_hash": None,
@@ -1102,7 +1137,7 @@ def full_pipeline_decision_from_evidence(
             "target_final_format": None,
             "verified_lossless": candidate.verified_lossless_proof is not None,
             "comparison_basis": None,
-        }
+        })
 
     # --- U11 folder/audio-integrity early-exit rejects ---
     # The four facts live directly on the persisted ``AlbumQualityEvidence``
@@ -1122,12 +1157,13 @@ def full_pipeline_decision_from_evidence(
         preimport_bad_hash: str | None = None,
         preimport_empty_fileset: str | None = None,
         preimport_mixed_source: str | None = None,
-        denylisted: bool,
     ) -> dict[str, Any]:
         # The acquisition verdict remains wanted. Caller identity is absent
         # from this reducer; the dispatch boundary decides whether that verdict
-        # may mutate an operator-owned request status.
-        return {
+        # may mutate an operator-owned request status. ``denylisted`` is
+        # derived by ``_finalize_denylist`` from the fact just recorded above
+        # (issue #813 Finding 2) — never a per-call literal.
+        return _finalize_denylist({
             "preimport_audio": preimport_audio,
             "preimport_nested": preimport_nested,
             "preimport_bad_hash": preimport_bad_hash,
@@ -1139,29 +1175,26 @@ def full_pipeline_decision_from_evidence(
             "stage3_quality_gate": None,
             "final_status": "wanted",
             "imported": False,
-            "denylisted": bool(denylisted),
+            "denylisted": False,
             "keep_searching": True,
             "target_final_format": None,
             "verified_lossless": False,
             "comparison_basis": None,
-        }
+        })
 
     if candidate.audio_corrupt:
         return _early_reject_result(
             preimport_audio="reject_corrupt",
-            denylisted=True,
         )
 
     if candidate.matched_bad_audio_hash_id is not None:
         return _early_reject_result(
             preimport_bad_hash="reject_bad_hash",
-            denylisted=True,
         )
 
     if candidate.folder_layout == "nested":
         return _early_reject_result(
             preimport_nested="reject_nested",
-            denylisted=False,
         )
 
     # Reconcile audio_file_count against snapshot files: legacy rows decode
@@ -1174,7 +1207,6 @@ def full_pipeline_decision_from_evidence(
     if effective_audio_file_count == 0:
         return _early_reject_result(
             preimport_empty_fileset="reject_empty",
-            denylisted=False,
         )
 
     # Mixed-source reject: lossless + lossy containers in the same folder.
@@ -1184,7 +1216,6 @@ def full_pipeline_decision_from_evidence(
     if has_mixed_lossless_and_lossy(candidate.files):
         return _early_reject_result(
             preimport_mixed_source="reject_mixed_source",
-            denylisted=True,
         )
 
     candidate_measurement = candidate.measurement

@@ -15,8 +15,9 @@ from lib.beets_db import (
     CurrentBeetsMissing,
     CurrentBeetsResolution,
 )
-from lib.quality import ImportResult, dispatch_action
+from lib.quality import ImportResult
 from lib.quality.decisions import post_import_search_action_if_known
+from lib.quality.dispatch_actions import decision_denylists
 from lib.validation_envelope import decode_validation_envelope
 
 
@@ -429,11 +430,10 @@ _LEGACY_TRANSCODE_REASON = re.compile(r"transcode: \d+kbps\Z")
 
 
 def _decision_denylists(decision: str) -> bool:
-    search_action = post_import_search_action_if_known(decision)
-    return bool(
-        (search_action is not None and search_action.denylist)
-        or dispatch_action(decision).denylist
-    )
+    """Issue #813: delegates to the one production policy lookup shared with
+    ``lib.dispatch.post_import`` and the quality simulator/evidence-pipeline
+    display — no second reimplementation."""
+    return decision_denylists(decision)
 
 
 def _denylist_reason_authorities(reason: str) -> tuple[str, ...]:

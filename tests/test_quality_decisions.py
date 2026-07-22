@@ -2238,6 +2238,90 @@ class TestDispatchAction(unittest.TestCase):
 
 
 # ============================================================================
+# decision_denylists (issue #813 Finding 2) — single-source denylist policy
+# ============================================================================
+
+class TestDecisionDenylists(unittest.TestCase):
+    """decision_denylists: the two-tier lookup (``post_import_search_action``
+    for retained-import decisions, else ``dispatch_action``) production
+    applies to resolve denylist policy from a decision string. Both the real
+    write (``lib.dispatch.post_import._resolve_post_import_search_policy``)
+    and the simulator/evidence-pipeline display
+    (``lib.quality.pipeline.resolve_pipeline_decision_denylist``) call this
+    ONE function — no second reimplementation.
+
+    Deterministic pin for the exact issue #813 Finding 2 lie: ``"downgrade"``
+    -> True. The decision dict used to leave ``denylisted=False`` for this
+    decision (three separate return sites forgot to set it) while
+    ``dispatch_action("downgrade").denylist`` was always True in production.
+    """
+
+    # (decision, expected denylist)
+    CASES = [
+        # --- stage2/early-exit decisions: resolved via dispatch_action
+        # fallback (not in _POST_IMPORT_SEARCH_ACTIONS) ---
+        ("import", False),
+        ("preflight_existing", False),
+        ("downgrade", True),  # <- issue #813 Finding 2 pin
+        ("transcode_downgrade", True),
+        ("suspect_lossless_downgrade", True),
+        ("suspect_lossless_probe_missing", True),
+        ("lossless_source_locked", True),
+        ("verified_lossless_locked", False),
+        ("spectral_reject", True),
+        ("audio_corrupt", True),
+        ("bad_audio_hash", True),
+        ("nested_layout", False),
+        ("empty_fileset", False),
+        ("mixed_source", True),
+        ("duplicate_remove_guard_failed", True),
+        ("import_failed", False),
+        ("unknown_decision_not_in_any_table", False),
+        # --- stage3/retained-import decisions: resolved via
+        # post_import_search_action_if_known ---
+        ("accept", False),
+        ("requeue_upgrade", True),
+        ("requeue_lossless", True),
+        ("provisional_lossless_upgrade", True),
+        ("transcode_upgrade", True),
+        ("transcode_first", True),
+    ]
+
+    def test_matches_production_two_tier_policy(self):
+        from lib.quality.dispatch_actions import decision_denylists
+        for decision, expected in self.CASES:
+            with self.subTest(decision=decision):
+                self.assertEqual(
+                    decision_denylists(decision), expected,
+                    f"decision_denylists({decision!r}): expected {expected!r}")
+
+    def test_matches_dispatch_action_exactly_when_no_search_action(self):
+        """Issue #813's literal invariant: for every decision NOT in the
+        retained-import policy table, decision_denylists(...) must equal
+        dispatch_action(...).denylist exactly — this is the comparison the
+        pre-fix decision dict silently violated for ``downgrade``."""
+        from lib.quality import dispatch_action
+        from lib.quality.decisions import post_import_search_action_if_known
+        from lib.quality.dispatch_actions import decision_denylists
+        for decision, _expected in self.CASES:
+            if post_import_search_action_if_known(decision) is not None:
+                continue
+            with self.subTest(decision=decision):
+                self.assertEqual(
+                    decision_denylists(decision),
+                    dispatch_action(decision).denylist,
+                )
+
+    def test_known_bad_downgrade_lie_would_have_failed_pre_fix(self):
+        """Known-bad self-test: the pre-#813 shape (decision dict hardcodes
+        denylisted=False for downgrade) disagrees with decision_denylists —
+        proves this table is not vacuously true."""
+        from lib.quality.dispatch_actions import decision_denylists
+        pre_fix_lie = False
+        self.assertNotEqual(decision_denylists("downgrade"), pre_fix_lie)
+
+
+# ============================================================================
 # extract_usernames
 # ============================================================================
 
