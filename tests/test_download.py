@@ -4045,7 +4045,14 @@ class TestPollActiveDownloads(unittest.TestCase):
         """Once the grace window expires with the file still unstamped
         (event permanently lost: pre-bootstrap completion or cursor gap),
         the request self-heals via re-download instead of retrying the
-        materialize forever."""
+        materialize forever. Issue #822 item 4: this reset applies the
+        standard user cooldown, exactly consistent with the
+        retry/timeout paths (``_timeout_album``) -- a future phantom-
+        complete mechanism must not be free to loop with the same peer
+        at zero cost.
+        Authority: "to the cooldown issue, yes apply the cooldown." —
+        https://github.com/abl030/cratedigger/issues/822#issuecomment-5042163957
+        """
         from lib.download import poll_active_downloads
         old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
         row = self._make_downloading_row(state_dict={
@@ -4082,6 +4089,9 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(len(fake_db.download_logs), 1)
         self.assertEqual(fake_db.download_logs[0].outcome, "failed")
         self.assertIn("EVENT-PATH MISSING", "\n".join(logs.output))
+        # Issue #822 item 4: the standard user cooldown is applied on
+        # this reset, same as the retry/timeout paths.
+        self.assertEqual(fake_db.cooldowns_applied, ["user1"])
 
     def test_materialize_failure_defers_v1_refresh_until_after_wanted(self):
         from lib.beets_db import AlbumInfo
