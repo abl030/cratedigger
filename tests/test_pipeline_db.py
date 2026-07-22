@@ -4983,6 +4983,58 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         evidence_id = self.db.get_download_log_candidate_evidence_id(log_id)
         self.assertEqual(evidence_id, persisted.id)
 
+    def test_get_latest_download_log_candidate_evidence_id(self):
+        """Issue #813 tooling tier: pipeline-cli quality's live-candidate
+        replay walks attempt history for the newest candidate evidence."""
+        self.assertIsNone(
+            self.db.get_latest_download_log_candidate_evidence_id(
+                self.req_id))
+
+        older_log_id = self.db.log_download(
+            request_id=self.req_id, outcome="rejected")
+        older = self._seed(mb_release_id="mbid-latest-older")
+        self.db.upsert_album_quality_evidence(older)
+        older_persisted = self.db.find_album_quality_evidence(
+            mb_release_id=older.mb_release_id,
+            snapshot_fingerprint=older.snapshot_fingerprint,
+        )
+        assert older_persisted is not None and older_persisted.id is not None
+        self.db.set_download_log_candidate_evidence(
+            older_log_id, older_persisted.id)
+
+        self.assertEqual(
+            self.db.get_latest_download_log_candidate_evidence_id(
+                self.req_id),
+            older_persisted.id,
+        )
+
+        # A later attempt with no candidate evidence must not shadow the
+        # older evidence-bearing row.
+        self.db.log_download(request_id=self.req_id, outcome="failed")
+        self.assertEqual(
+            self.db.get_latest_download_log_candidate_evidence_id(
+                self.req_id),
+            older_persisted.id,
+        )
+
+        newer_log_id = self.db.log_download(
+            request_id=self.req_id, outcome="rejected")
+        newer = self._seed(mb_release_id="mbid-latest-newer")
+        self.db.upsert_album_quality_evidence(newer)
+        newer_persisted = self.db.find_album_quality_evidence(
+            mb_release_id=newer.mb_release_id,
+            snapshot_fingerprint=newer.snapshot_fingerprint,
+        )
+        assert newer_persisted is not None and newer_persisted.id is not None
+        self.db.set_download_log_candidate_evidence(
+            newer_log_id, newer_persisted.id)
+
+        self.assertEqual(
+            self.db.get_latest_download_log_candidate_evidence_id(
+                self.req_id),
+            newer_persisted.id,
+        )
+
     def test_fk_chain_resolves_import_job_candidate_evidence(self):
         job = self.db.enqueue_import_job(
             "force_import",

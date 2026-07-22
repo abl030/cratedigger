@@ -76,6 +76,7 @@ from tests.test_simulator_scenarios import (
     AlbumState,
     DownloadScenario,
     SimResult,
+    assert_denylist_has_valid_cause,
     simulate,
 )
 
@@ -617,6 +618,20 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
     def test_generated_decisions_are_definitive(self, album, download):
         result = simulate(album, download)
         assert_decision_is_definitive(result)
+
+    @given(album=album_states(), download=download_scenarios())
+    def test_generated_denylist_always_has_valid_cause(self, album, download):
+        """Issue #813 Finding 2, generated half of the PAIR: over randomly
+        generated (album, download) worlds driven through the real decider
+        (``full_pipeline_decision`` via ``simulate()``), a denylisted
+        outcome must always trace to a real reject/retained-nonterminal
+        decision. Deterministic pin:
+        ``TestLiveBugReproductions.test_tyler_lamberts_grave_cbr320_transcode_accepted``
+        (``tests/test_quality_classification.py``) and
+        ``TestSimulatorInvariants.test_denylist_requires_cause`` (fixture
+        matrix, same module as this checker)."""
+        result = simulate(album, download)
+        assert_denylist_has_valid_cause(result)
 
     @given(album=raw_verified_lossless_albums(), download=lossy_downloads())
     def test_raw_verified_lossless_never_imports_lossy_candidate(

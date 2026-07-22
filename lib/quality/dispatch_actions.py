@@ -21,6 +21,7 @@ from lib.quality.decisions import (
     DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
     DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
     DECISION_VERIFIED_LOSSLESS_LOCKED,
+    post_import_search_action_if_known,
 )
 
 
@@ -104,6 +105,31 @@ def dispatch_action(decision: str) -> DispatchAction:
                               cleanup=False)
     else:  # import_failed, conversion_failed, mbid_missing, crash, etc.
         return DispatchAction(record_rejection=True)
+
+
+def decision_denylists(decision: str) -> bool:
+    """Whether ``decision`` denylists its source — the ONE production policy.
+
+    Issue #813 Finding 2: the ``full_pipeline_decision``/
+    ``full_pipeline_decision_from_evidence`` decision dict used to carry a
+    hand-set ``denylisted`` bool that three separate branches independently
+    forgot to set (all three ``downgrade`` return sites), silently diverging
+    from what the real importer writes. This is the two-tier lookup
+    production actually applies to resolve denylist policy from a decision
+    string: a retained-import decision (``accept``/``requeue_upgrade``/
+    ``requeue_lossless``/``provisional_lossless_upgrade``/
+    ``transcode_upgrade``/``transcode_first``) is governed by
+    ``post_import_search_action``; every other decision falls back to
+    ``dispatch_action``. Both ``lib.dispatch.post_import.
+    _resolve_post_import_search_policy`` (the real write) and
+    ``lib.quality.pipeline.resolve_pipeline_decision_denylist`` (the
+    simulator/evidence-pipeline display) call this one function — no second
+    reimplementation.
+    """
+    search_action = post_import_search_action_if_known(decision)
+    if search_action is not None:
+        return search_action.denylist
+    return dispatch_action(decision).denylist
 
 
 def compute_effective_override_bitrate(
