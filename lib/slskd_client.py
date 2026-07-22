@@ -129,8 +129,8 @@ class TransferSnapshot(msgspec.Struct, rename="camel", frozen=True):
 
 def parse_transfer_snapshot(raw: dict[str, object]) -> TransferSnapshot | None:
     """Convert one slskd transfer/file dict — typically the winning
-    candidate ``match_transfer`` selected from a shared poll-cycle
-    snapshot — into a ``TransferSnapshot``.
+    candidate ``match_transfer_for_attempt`` selected from a shared
+    poll-cycle snapshot — into a ``TransferSnapshot``.
 
     Returns ``None`` (logging a warning) on a ``msgspec.ValidationError``
     instead of raising. This runs inside the 5-minute poll loop against a
@@ -245,10 +245,10 @@ def parse_downloads_envelope(raw: list[Any]) -> list[DownloadUser]:
     decoder), a malformed directory or user-group row is dropped and
     logged. One bad entry anywhere in the tree degrades to "no status
     this cycle" for just that entry — the same signal already used for
-    "no matching transfer found" (``match_transfer`` returning ``None``)
-    — it never aborts the whole poll cycle for every other in-flight
-    download. This runs inside the 5-minute poll loop against a bulk
-    snapshot shared by every in-flight album.
+    "no matching transfer found" (``match_transfer_for_attempt`` returning
+    ``None``) — it never aborts the whole poll cycle for every other
+    in-flight download. This runs inside the 5-minute poll loop against a
+    bulk snapshot shared by every in-flight album.
     """
     users: list[DownloadUser] = []
     for row in raw:

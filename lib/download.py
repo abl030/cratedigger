@@ -1298,6 +1298,13 @@ def _poll_one_active_download(
                         request_id=request_id,
                         attempt_fp=attempt_fingerprint(
                             [(f.username, f.filename) for f in entry.files]),
+                        # issue #822 item 3: same attempt boundary the
+                        # poll/harvest matchers already use for this row
+                        # (not_before=state.enqueued_at) -- a per-file
+                        # retry is still part of THIS attempt, not a fresh
+                        # one, so the original enqueue time is the correct
+                        # lower bound for reconciling its transfer ID.
+                        not_before=state.enqueued_at,
                     )
                     if not requeue:
                         logger.warning(f"Failed to re-enqueue file: {retry_filename}")
