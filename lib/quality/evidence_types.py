@@ -502,8 +502,9 @@ class QualityComparisonBasis(msgspec.Struct, frozen=True):
     numbers that DECIDED that branch (spectral-clamped values on a clamped
     rank comparison, raw configured-metric values on a same-rank tiebreak).
     Consumers reading ``(metric, value)`` pairs must suppress the metric
-    label when ``branch == "rank" and spectral_clamped`` — the value there
-    is ``min(metric, spectral floor)``, not the named statistic.
+    label when ``spectral_clamped and branch in ("rank", "spectral_tiebreak")``
+    — the value there is ``min(metric, spectral floor)``, not the named
+    statistic.
     ``new_metric`` / ``existing_metric`` name the per-side statistic actually
     classified — ``measurement_rank()`` falls back to min when the configured
     metric is unmeasured, and a basis claiming "avg" for a min value would be
@@ -544,6 +545,7 @@ COMPARISON_BASIS_BRANCHES: frozenset[str] = frozenset({
     "lossless_same_rank",          # both LOSSLESS: equivalent by identity
     "cross_family_same_rank",      # same rank, different codec family
     "label_contract_same_rank",    # same rank, explicit label is authoritative
+    "spectral_tiebreak",           # same rank, differing clamped spectral values decide
     "metric_tiebreak",             # same rank, raw metric delta vs tolerance
     "metric_missing",              # same rank, a side has no classifiable value
     "transcode_rank_regression",   # transcode-grade candidate regresses real rank

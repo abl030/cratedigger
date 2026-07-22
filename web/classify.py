@@ -1059,13 +1059,16 @@ def _verdict_from_basis(basis: QualityComparisonBasis) -> str:
     """
     new_fmt = (basis.new_format or "?").upper()
     ex_fmt = (basis.existing_format or "?").upper()
-    clamped = basis.spectral_clamped and basis.branch == "rank"
+    # spectral_tiebreak (issue #813 Finding 1) carries the same clamped
+    # min(metric, spectral floor) value as the rank branch — the metric
+    # label would lie there too.
+    clamped = basis.spectral_clamped and basis.branch in ("rank", "spectral_tiebreak")
     new_val = _basis_value_phrase(basis.new_metric, basis.new_value_kbps, clamped)
     ex_val = _basis_value_phrase(
         basis.existing_metric, basis.existing_value_kbps, clamped)
 
     if basis.verdict == "better":
-        if basis.branch == "metric_tiebreak":
+        if basis.branch in ("metric_tiebreak", "spectral_tiebreak"):
             return (f"Upgrade: {ex_fmt} {ex_val} → {new_val} "
                     f"(both {basis.new_rank})")
         new_side = new_val if new_fmt == ex_fmt else f"{new_fmt} {new_val}"

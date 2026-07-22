@@ -222,6 +222,19 @@ Unverifiable CBR only reaches TRANSPARENT at 320 because the pipeline can't
 prove a CBR file came from lossless source. Spectral cliff detection may
 clamp it down further.
 
+**Spectral-bound values always classify via this table.** The spectral cliff
+estimate (`lib/spectral_check.py`'s `LAME_LOWPASS` table: 96/112/128/160/
+192/224/256/320) is calibrated to these exact CBR thresholds, not the more
+generous MP3 VBR ones — a cliff-detected 192 IS a `good`-band reading, by
+construction. When `compare_quality`'s shared spectral clamp
+(`_shared_spectral_bitrates`) binds on a side (`spectral <= that side's raw
+metric`), that side's clamped value classifies through this table
+regardless of the file's own `is_cbr` — a VBR-tagged file's spectral-bound
+clamp does NOT get the more generous VBR bands (issue #813 Finding 1's
+second sub-finding; `docs/quality-verification.md` § "Stage 1 / Stage 2
+parity"). A side whose clamp did NOT bind (raw is the tighter value) still
+classifies with its own encoding mode.
+
 ### AAC
 
 | Band | Threshold (kbps) |

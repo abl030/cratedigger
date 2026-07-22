@@ -3408,7 +3408,13 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
                          "downgrade")
 
     def test_transcode_guard_requires_known_non_transcode_existing_grade(self):
-        """Unknown existing grade keeps the backward-compatible shared bucket."""
+        """Unknown existing grade keeps the backward-compatible shared bucket.
+
+        Issue #813 Finding 1: both clamped values (160, 128) land in the
+        same CBR-calibrated "acceptable" band, so the ``spectral_tiebreak``
+        branch decides directly on the differing clamped values — not the
+        raw ``rank`` branch, and not the fully-unclamped raw metric.
+        """
         new = self._m(
             format="MP3",
             avg_bitrate_kbps=196,
@@ -3421,10 +3427,19 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
             spectral_bitrate_kbps=128,
         )
 
-        self.assertEqual(compare_quality(new, existing, CFG).verdict, "better")
+        basis = compare_quality(new, existing, CFG)
+        self.assertEqual(basis.verdict, "better")
+        self.assertEqual(basis.branch, "spectral_tiebreak")
+        self.assertEqual(basis.new_rank, "acceptable")
+        self.assertEqual(basis.existing_rank, "acceptable")
 
     def test_transcode_candidate_can_still_import_when_real_rank_does_not_regress(self):
-        """Bay of Biscay shape: spectral and actual selected metric both improve."""
+        """Bay of Biscay shape: spectral and actual selected metric both improve.
+
+        Issue #813 Finding 1: both clamped values (160, 128) land in the
+        same CBR-calibrated "acceptable" band — ``spectral_tiebreak``, not
+        the ``rank`` branch, decides.
+        """
         new = self._m(
             format="MP3",
             min_bitrate_kbps=119,
@@ -3444,12 +3459,20 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
             spectral_bitrate_kbps=128,
         )
 
-        self.assertEqual(compare_quality(new, existing, CFG).verdict, "better")
+        basis = compare_quality(new, existing, CFG)
+        self.assertEqual(basis.verdict, "better")
+        self.assertEqual(basis.branch, "spectral_tiebreak")
         self.assertEqual(import_quality_decision(new, existing, cfg=CFG).decision,
                          "import")
 
     def test_transcode_over_transcode_still_uses_shared_spectral_floor(self):
-        """The guard only covers transcode-grade over known non-transcode."""
+        """The guard only covers transcode-grade over known non-transcode.
+
+        Issue #813 Finding 1 line-189 audit: transcode-over-transcode
+        routes to the shared clamp (never the raw pre-check), and both
+        clamped values (160, 128) land in the same CBR-calibrated
+        "acceptable" band — ``spectral_tiebreak`` decides directly.
+        """
         new = self._m(
             format="MP3",
             avg_bitrate_kbps=196,
@@ -3463,7 +3486,11 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
             spectral_bitrate_kbps=128,
         )
 
-        self.assertEqual(compare_quality(new, existing, CFG).verdict, "better")
+        basis = compare_quality(new, existing, CFG)
+        self.assertEqual(basis.verdict, "better")
+        self.assertEqual(basis.branch, "spectral_tiebreak")
+        self.assertEqual(basis.new_rank, "acceptable")
+        self.assertEqual(basis.existing_rank, "acceptable")
 
     def test_equal_spectral_bucket_keeps_raw_avg_tiebreaker(self):
         """Grouper live case: equal spectral floor must not erase avg upgrade."""

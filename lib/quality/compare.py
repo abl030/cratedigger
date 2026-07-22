@@ -129,7 +129,7 @@ def _shared_spectral_bitrates(
     cfg: QualityRankConfig,
     *,
     new_v0_probe: V0ProbeEvidence | None = None,
-) -> "tuple[Optional[int], Optional[int]] | None":
+) -> "tuple[Optional[int], Optional[int], bool, bool] | None":
     """Return rank-bucket bitrates when BOTH sides carry spectral estimates.
 
     The clamp takes ``min(selected_metric, spectral_bitrate)`` per side — the
@@ -153,18 +153,34 @@ def _shared_spectral_bitrates(
     asymmetric case where a transcode-grade candidate would otherwise use a
     higher spectral floor to replace a non-transcode-grade existing album with
     a higher real quality rank.
+
+    Returns ``(new_value, existing_value, new_spectral_bound,
+    existing_spectral_bound)`` — the two ``*_spectral_bound`` flags tell the
+    caller which side's returned value IS the spectral estimate (clamp
+    bound, ``spectral <= raw``) versus which is still the untouched raw
+    metric (clamp did not bind, ``spectral > raw``). This matters for rank
+    classification (issue #813 Finding 1): the spectral bucket values
+    (``lib/spectral_check.py``'s ``LAME_LOWPASS`` table — 96/128/160/192/
+    256/320) are calibrated to ``QualityRankConfig.mp3_cbr``'s thresholds
+    (128=acceptable, 192=good, 256=excellent, 320=transparent), not
+    ``mp3_vbr``'s more generous ones. Classifying a spectral-bound value
+    through a VBR-tagged side's own ``is_cbr=False`` inflates its rank
+    purely from table choice, not real content — see the caller.
     """
     if (new.spectral_bitrate_kbps is None
             or existing.spectral_bitrate_kbps is None):
         return None
     new_br = _selected_quality_bitrate_with_source(new, cfg, new_v0_probe)[0]
     existing_br = _selected_bitrate(existing, cfg)
-    new_br = (min(new_br, new.spectral_bitrate_kbps)
-              if new_br is not None else new.spectral_bitrate_kbps)
-    existing_br = (min(existing_br, existing.spectral_bitrate_kbps)
-                   if existing_br is not None
-                   else existing.spectral_bitrate_kbps)
-    return new_br, existing_br
+    new_bound = new_br is None or new.spectral_bitrate_kbps <= new_br
+    existing_bound = (
+        existing_br is None or existing.spectral_bitrate_kbps <= existing_br
+    )
+    new_value = new.spectral_bitrate_kbps if new_bound else new_br
+    existing_value = (
+        existing.spectral_bitrate_kbps if existing_bound else existing_br
+    )
+    return new_value, existing_value, new_bound, existing_bound
 
 
 def _transcode_candidate_real_rank_regresses(
@@ -220,14 +236,21 @@ def compare_quality(
 
     Shared-spectral bucket: when BOTH measurements carry ``spectral_bitrate_kbps``,
     clamp each side's classified bitrate to ``min(selected_metric, spectral)``
-    for rank only. Same-rank tie-breaks still use the raw configured metric
-    so higher-average files can replace lower-average files within the same
-    spectral bucket. This keeps spectral as a demotion signal without letting
-    a pessimistic estimate permanently freeze the album at the first source
-    that happened to land in that bucket. See ``_shared_spectral_bitrates``
-    for the narrow guard that keeps the Springsteen case (single stale
-    estimate) on the container path. A transcode-grade candidate over a
-    non-transcode-grade existing album has one extra guard: if its real
+    for rank. When the clamped values land in the SAME rank but still differ
+    from each other, that difference decides the same-rank tiebreak directly
+    (branch ``spectral_tiebreak``) — otherwise the coarse rank band could
+    bucket two genuinely unequal spectral readings together and the fully
+    unclamped raw metric would decide instead, which can reverse a real
+    spectral ordering (issue #813 Finding 1). Only a TRUE spectral tie
+    (clamped values EQUAL) falls through to the raw configured metric, so
+    higher-average files can still replace lower-average files within an
+    identical spectral bucket — this keeps spectral as a demotion signal
+    without letting a pessimistic estimate permanently freeze the album at
+    the first source that happened to land in that bucket (Mark DeNardo
+    request 1308). See ``_shared_spectral_bitrates`` for the narrow guard
+    that keeps the Springsteen case (single stale estimate) on the
+    container path. A transcode-grade candidate over a non-transcode-grade
+    existing album has one extra guard before any of this: if its real
     selected-metric rank is lower before the spectral clamp, it is worse.
 
     Returns a ``QualityComparisonBasis`` — the verdict plus the branch that
@@ -330,17 +353,26 @@ def compare_quality(
         new, existing, cfg, new_v0_probe=new_v0_probe
     )
     if shared is not None:
-        clamped_new_br, clamped_existing_br = shared
+        clamped_new_br, clamped_existing_br, new_bound, existing_bound = shared
         projected_is_cbr = (
             new_target_contract.is_cbr
             if new_target_contract is not None
             else new.is_cbr
         )
+        # A spectral-bound side's clamped value is the spectral estimate,
+        # calibrated to the CBR band thresholds regardless of that side's
+        # own encoding mode (see ``_shared_spectral_bitrates``'s docstring)
+        # — classify it with CBR bands. A side whose clamp did NOT bind
+        # still carries its own genuine raw metric, classified with its own
+        # encoding mode as before.
         new_rank = quality_rank(
-            new_format, clamped_new_br, projected_is_cbr, cfg
+            new_format, clamped_new_br,
+            True if new_bound else projected_is_cbr, cfg,
         )
         existing_rank = quality_rank(
-            existing.format, clamped_existing_br, existing.is_cbr, cfg)
+            existing.format, clamped_existing_br,
+            True if existing_bound else existing.is_cbr, cfg,
+        )
         rank_new_value, rank_existing_value = clamped_new_br, clamped_existing_br
         spectral_clamped = True
     else:
@@ -403,6 +435,33 @@ def compare_quality(
         return _basis(
             "equivalent", "label_contract_same_rank", new_rank, existing_rank,
             new_value=new_br, existing_value=existing_br,
+            spectral_clamped=spectral_clamped,
+        )
+
+    # When the shared-spectral clamp fired AND the clamped values themselves
+    # still differ, that difference decides the tiebreak directly — issue
+    # #813 Finding 1's remaining Stage1/Stage2 disagreement. The coarse
+    # QualityRank band can bucket two genuinely UNEQUAL spectral estimates
+    # into the same rank (e.g. spectral 287 and 317 both land in
+    # "transparent"); falling through to the fully-unclamped raw metric at
+    # that point lets a worse-spectral candidate win purely because its
+    # (already known-unreliable, that's why spectral exists) declared
+    # container happens to be higher. The clamped values are the more
+    # direct evidence and decide with the same strict (no-tolerance)
+    # comparison Stage 1 (``spectral_import_decision``) already uses — this
+    # is what makes the two stages agree instead of disagree. A TRUE
+    # spectral tie (clamped values EQUAL) carries no differentiating signal
+    # and still falls through to the raw-metric tiebreak below, exactly as
+    # before (Mark DeNardo request 1308: tied spectral 128==128, raw 192
+    # beats 128 must still import).
+    if (spectral_clamped
+            and rank_new_value is not None
+            and rank_existing_value is not None
+            and rank_new_value != rank_existing_value):
+        verdict = "better" if rank_new_value > rank_existing_value else "worse"
+        return _basis(
+            verdict, "spectral_tiebreak", new_rank, existing_rank,
+            new_value=rank_new_value, existing_value=rank_existing_value,
             spectral_clamped=spectral_clamped,
         )
 

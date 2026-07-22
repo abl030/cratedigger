@@ -2110,6 +2110,34 @@ class TestClassifyComparisonBasis(unittest.TestCase):
         assert c.comparison_basis is not None
         self.assertEqual(c.comparison_basis["tolerance_kbps"], 5)
 
+    def test_spectral_tiebreak_upgrade_shows_clamped_values_not_raw(self):
+        """Issue #813 Finding 1: the coarse "good" band buckets spectral 230
+        and 200 together, so the same-rank tiebreak decides on the clamped
+        values (~230k / ~200k), never the fully-unclamped raw containers
+        (1000 / 235) that would launder a worse-spectral candidate in on a
+        higher declared bitrate alone."""
+        basis = self._basis_dict(
+            dict(min_bitrate_kbps=1000, avg_bitrate_kbps=1000, format="MP3",
+                 is_cbr=True, spectral_grade="likely_transcode",
+                 spectral_bitrate_kbps=230),
+            dict(min_bitrate_kbps=235, avg_bitrate_kbps=235, format="MP3",
+                 is_cbr=True, spectral_grade="likely_transcode",
+                 spectral_bitrate_kbps=200),
+        )
+        self.assertEqual(basis["branch"], "spectral_tiebreak")
+        self.assertEqual(basis["verdict"], "better")
+        entry = _entry(
+            outcome="success",
+            existing_min_bitrate=235,
+            actual_min_bitrate=1000,
+            import_result={"version": 2, "decision": "import",
+                           "comparison_basis": basis},
+        )
+        c = classify_log_entry(entry)
+        self.assertEqual(c.verdict, "Upgrade: MP3 ~200k → ~230k (both good)")
+        self.assertNotIn("1000", c.verdict)
+        self.assertNotIn("235", c.verdict)
+
     def test_verified_lossless_bypass_names_the_bypass(self):
         basis = self._bypass_basis_dict(
             dict(avg_bitrate_kbps=250, format="MP3"),

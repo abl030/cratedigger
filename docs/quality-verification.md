@@ -279,16 +279,17 @@ bitrate alone is not proof in the current policy.
 
 Every `compare_quality()` call returns a `QualityComparisonBasis`
 (`lib/quality/evidence_types.py`): the verdict plus which branch fired
-(`rank`, `metric_tiebreak`, `label_contract_same_rank`,
+(`rank`, `spectral_tiebreak`, `metric_tiebreak`, `label_contract_same_rank`,
 `cross_family_same_rank`, `lossless_same_rank`, `metric_missing`,
 `transcode_rank_regression`), the per-side ranks, the values that decided
-that branch (spectral-clamped values on a clamped rank comparison, raw
-configured-metric values on a tiebreak), and the per-side statistic actually
-classified (`min`/`avg`/`median` — the configured metric falls back to min
-when unmeasured). An explicit codec label such as `opus 128` is instead
-persisted as `contract`: the label's declared bitrate is policy, not a measured
-statistic. A temporary V0 probe may still inform source quality, but it never
-becomes an `OPUS` measurement. `import_quality_decision()` stamps
+that branch (spectral-clamped values on a clamped rank comparison or
+`spectral_tiebreak`, raw configured-metric values on `metric_tiebreak`), and
+the per-side statistic actually classified (`min`/`avg`/`median` — the
+configured metric falls back to min when unmeasured). An explicit codec
+label such as `opus 128` is instead persisted as `contract`: the label's
+declared bitrate is policy, not a measured statistic. A temporary V0 probe
+may still inform source quality, but it never becomes an `OPUS`
+measurement. `import_quality_decision()` stamps
 `verified_lossless_bypass=True` only when the bypass changed the outcome
 (an "equivalent" verdict imported).
 
@@ -299,6 +300,54 @@ plain dict — the dict crosses json.dumps'd API responses), the evidence
 action file, and the dispatch-synthesized reject `ImportResult`. Re-typing
 back from the dict goes through `comparison_basis_from_decision()` — the one
 converter.
+
+### Stage 1 / Stage 2 parity (issue #813 Finding 1)
+
+`spectral_import_decision` (Stage 1, pre-import spectral gate,
+`lib/quality/decisions.py`) and `compare_quality` (Stage 2, the full
+codec-aware comparison this section documents) are two separate decision
+surfaces over the same evidence. Stage 1's only operative effect is its
+`"reject"` verdict, which short-circuits `full_pipeline_decision` /
+`full_pipeline_decision_from_evidence` before Stage 2 ever runs — every
+other Stage 1 verdict defers unconditionally. A generated property
+(`tests/test_quality_generated.py::TestGeneratedSimulatorInvariants
+::test_stage1_never_contradicts_stage2`) drives both deciders directly over
+the same evidence and asserts Stage 1 never rejects a candidate Stage 2
+would score `"better"` — the audit found and fixed two independent gaps,
+both inside the shared spectral clamp (`_shared_spectral_bitrates`, fires
+when BOTH sides carry `spectral_bitrate_kbps`):
+
+1. **Same-rank tiebreak** (`spectral_tiebreak` branch). The coarse
+   `QualityRank` band can bucket two genuinely UNEQUAL clamped spectral
+   values together; before this fix the same-rank tiebreak fell through to
+   the fully-unclamped raw metric, which can reverse a real spectral
+   ordering (a worse-spectral candidate winning purely on a higher declared
+   container). A TRUE spectral tie (clamped values EQUAL) still defers to
+   the raw metric exactly as before — this is what lets Mark DeNardo
+   (request 1308, tied spectral 128==128) still import on its higher raw
+   container.
+2. **CBR/VBR band-table mismatch** (`rank` branch). The spectral bucket
+   values (`lib/spectral_check.py`'s `LAME_LOWPASS` table — 96/128/160/192/
+   256/320) are calibrated to `QualityRankConfig.mp3_cbr`'s thresholds
+   (128=acceptable, 192=good, 256=excellent, 320=transparent), not
+   `mp3_vbr`'s more generous ones. A side whose clamp is spectral-bound
+   (`spectral <= raw`) now always classifies via CBR bands regardless of
+   that side's own `is_cbr` — otherwise a VBR-tagged candidate's
+   spectral-bound clamp could outrank a CBR-tagged existing's purely from
+   table choice. A side whose clamp did NOT bind (raw is the tighter value)
+   still classifies with its own encoding mode, unaffected.
+
+Stage 1 remains load-bearing and was NOT folded into Stage 2: the property
+is deliberately scoped to internally-consistent evidence (`spectral <=` the
+side's own raw metric, the domain `_shared_spectral_bitrates` assumes — see
+`StageParityWorld`'s docstring). A self-inconsistent existing measurement
+(raw container measured LOWER than its own spectral estimate — reachable
+via evidence carried forward across snapshots, not a single fresh
+measurement) is outside that domain and is a residual case only Stage 1's
+coarse spectral-vs-spectral comparison protects; likewise a candidate with
+no existing spectral estimate at all (`spectral_import_decision` returns
+`"import_no_exist"`, deferring by design — absence of a measurement is not
+evidence the installed copy is genuine).
 
 Version 4 import results persist five disjoint concerns:
 
