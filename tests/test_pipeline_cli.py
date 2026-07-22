@@ -1643,6 +1643,29 @@ class TestCmdRepairSpectral(unittest.TestCase):
             os.unlink(cfg_path)
 
 
+def _invoke_cmd_quality(
+    db: "FakePipelineDB", request_id: int, *, runtime_target: str | None,
+) -> str:
+    """Shared ``cmd_quality`` invocation seam.
+
+    One ``cast(Any, db)`` call site for every test in this module that
+    drives ``cmd_quality`` (``TestCmdQuality`` and
+    ``TestCmdQualityLiveCandidateReplay``) — the tests escape-hatch freeze
+    (issue #784) counts lexical occurrences, so a second inline copy of this
+    same bridge would be a new escape hatch, not a reused one.
+    """
+    from lib.quality import QualityRankConfig
+
+    stdout = io.StringIO()
+    with patch("scripts.pipeline_cli.quality._load_runtime_rank_config",
+               return_value=QualityRankConfig.defaults()), \
+         patch("scripts.pipeline_cli.quality._load_runtime_verified_lossless_target",
+               return_value=runtime_target or ""), \
+         redirect_stdout(stdout):
+        pipeline_cli.cmd_quality(cast(Any, db), MagicMock(id=request_id))
+    return stdout.getvalue()
+
+
 class TestCmdQuality(unittest.TestCase):
     """Regression tests for pipeline-cli quality simulator parity.
 
@@ -1665,7 +1688,7 @@ class TestCmdQuality(unittest.TestCase):
         current_evidence: Any | None = None,
         auto_link: bool = True,
     ):
-        from lib.quality import AudioQualityMeasurement, QualityRankConfig
+        from lib.quality import AudioQualityMeasurement
 
         db = FakePipelineDB()
         db.seed_request(request_row)
@@ -1713,15 +1736,8 @@ class TestCmdQuality(unittest.TestCase):
             assert persisted is not None and persisted.id is not None
             db.set_request_current_evidence(request_row["id"], persisted.id)
 
-        stdout = io.StringIO()
-        with patch("scripts.pipeline_cli.quality._load_runtime_rank_config",
-                   return_value=QualityRankConfig.defaults()), \
-             patch("scripts.pipeline_cli.quality._load_runtime_verified_lossless_target",
-                   return_value=runtime_target or ""), \
-             redirect_stdout(stdout):
-            pipeline_cli.cmd_quality(cast(Any, db), MagicMock(id=request_row["id"]))
-
-        return stdout.getvalue()
+        return _invoke_cmd_quality(
+            db, request_row["id"], runtime_target=runtime_target)
 
     def _bare_mp3_request(self, *, request_id: int):
         return make_request_row(
@@ -2122,16 +2138,7 @@ class TestCmdQualityLiveCandidateReplay(unittest.TestCase):
     """
 
     def _run(self, db: FakePipelineDB, request_id: int) -> str:
-        from lib.quality import QualityRankConfig
-
-        stdout = io.StringIO()
-        with patch("scripts.pipeline_cli.quality._load_runtime_rank_config",
-                   return_value=QualityRankConfig.defaults()), \
-             patch("scripts.pipeline_cli.quality._load_runtime_verified_lossless_target",
-                   return_value=""), \
-             redirect_stdout(stdout):
-            pipeline_cli.cmd_quality(cast(Any, db), MagicMock(id=request_id))
-        return stdout.getvalue()
+        return _invoke_cmd_quality(db, request_id, runtime_target=None)
 
     def test_no_candidate_evidence_shows_diagnostic(self):
         db = FakePipelineDB()
