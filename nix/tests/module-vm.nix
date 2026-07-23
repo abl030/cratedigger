@@ -482,30 +482,42 @@ pkgs.testers.nixosTest {
     # User= value.  Its private processing descendants must be writable by it
     # and inaccessible to the unrelated VM user.
     machine.succeed("test $(id -u cratedigger) -ne 0")
-    machine.succeed("test \"$(stat -c %U:%a /var/lib/cratedigger/processing)\" = cratedigger:700")
-    machine.succeed("test \"$(stat -c %U:%a /var/lib/cratedigger/processing/albums)\" = cratedigger:700")
-    machine.succeed("test \"$(stat -c %U:%a /var/lib/cratedigger/processing/preview)\" = cratedigger:700")
+    machine.succeed("test \"$(stat -c %U:%G:%a /var/lib/cratedigger/processing)\" = cratedigger:beets-library:700")
+    machine.succeed("test \"$(stat -c %U:%G:%a /var/lib/cratedigger/processing/albums)\" = cratedigger:beets-library:700")
+    machine.succeed("test \"$(stat -c %U:%G:%a /var/lib/cratedigger/processing/preview)\" = cratedigger:beets-library:700")
     machine.succeed("runuser -u cratedigger -- mkdir /var/lib/cratedigger/processing/preview/vm-nonroot-snapshot")
     machine.fail("runuser -u unrelated-user -- test -r /var/lib/cratedigger/processing/preview")
     machine.succeed("runuser -u cratedigger -- rmdir /var/lib/cratedigger/processing/preview/vm-nonroot-snapshot")
     machine.succeed("runuser -u slskd-writer -- sh -c 'printf source > /var/lib/cratedigger-downloads/vm-source.mp3'")
     machine.succeed("runuser -u cratedigger -- cat /var/lib/cratedigger-downloads/vm-source.mp3")
-    machine.succeed("runuser -u cratedigger -- rm /var/lib/cratedigger-downloads/vm-source.mp3")
+    machine.succeed("runuser -u cratedigger -- rm -f /var/lib/cratedigger-downloads/vm-source.mp3")
     machine.succeed("runuser -u slskd-writer -- sh -c 'printf source > /var/lib/cratedigger-downloads/vm-rename.mp3'")
     machine.fail("runuser -u slskd-writer -- test -r /var/lib/cratedigger/processing/preview")
     machine.fail("runuser -u slskd-writer -- touch /var/lib/cratedigger/processing/preview/foreign")
     machine.fail("runuser -u slskd-writer -- mv /var/lib/cratedigger-downloads/vm-rename.mp3 /var/lib/cratedigger/processing/albums/foreign")
     machine.fail("runuser -u slskd-writer -- rm /var/lib/cratedigger/processing/albums/foreign")
     machine.succeed("runuser -u slskd-writer -- rm /var/lib/cratedigger-downloads/vm-rename.mp3")
-    machine.succeed("grep -qx 'processing_dir = /var/lib/cratedigger/processing' /var/lib/cratedigger/config.ini")
-    machine.succeed("runuser -u cratedigger -- mkdir /var/lib/cratedigger/processing/preview/preview-stale")
-    machine.succeed("runuser -u cratedigger -- mkdir /var/lib/cratedigger/processing/albums/album-kept")
-    machine.succeed("runuser -u cratedigger -- touch /var/lib/cratedigger/.preview-snapshot.lock")
-    machine.succeed("touch -d '8 days ago' /var/lib/cratedigger/processing/preview/preview-stale")
+    machine.succeed("runuser -u cratedigger -- sh -c 'mkdir /var/lib/cratedigger/processing/albums/existing-canonical && printf canonical > /var/lib/cratedigger/processing/albums/existing-canonical/track.flac'")
+    machine.fail("runuser -u slskd-writer -- cat /var/lib/cratedigger/processing/albums/existing-canonical/track.flac")
+    machine.fail("runuser -u slskd-writer -- touch /var/lib/cratedigger/processing/albums/foreign-sibling")
+    machine.fail("runuser -u slskd-writer -- touch /var/lib/cratedigger/processing/albums/existing-canonical/foreign-child")
+    machine.fail("runuser -u slskd-writer -- mv /var/lib/cratedigger/processing/albums/existing-canonical /var/lib/cratedigger/processing/albums/renamed-canonical")
+    machine.fail("runuser -u slskd-writer -- mv /var/lib/cratedigger/processing/albums/existing-canonical/track.flac /var/lib/cratedigger/processing/albums/existing-canonical/renamed-track.flac")
+    machine.fail("runuser -u slskd-writer -- rm /var/lib/cratedigger/processing/albums/existing-canonical/track.flac")
+    machine.fail("runuser -u slskd-writer -- rmdir /var/lib/cratedigger/processing/albums/existing-canonical")
+    machine.succeed("awk '$0 == \"[Paths]\" { in_paths=1; next } in_paths && /^\\[/ { exit } in_paths { print }' /var/lib/cratedigger/config.ini | grep -qx 'processing_dir = /var/lib/cratedigger/processing'")
+    # tmpfiles' age calculation includes the directory birth time.  Create a
+    # genuine eight-day-old preview snapshot by temporarily moving the VM clock
+    # back, then restore it before asking tmpfiles to clean.  Merely backdating
+    # mtime with touch leaves btime new and does not exercise the configured
+    # stale-preview cleanup rule.
+    machine.succeed("now=$(date +%s); old=$((now - 8 * 24 * 60 * 60)); date -s @$old; runuser -u cratedigger -- mkdir /var/lib/cratedigger/processing/preview/preview-stale; date -s @$now")
+    machine.succeed("runuser -u cratedigger -- touch /var/lib/cratedigger/processing/.preview-snapshot.lock")
     machine.succeed("systemd-tmpfiles --clean")
     machine.fail("test -d /var/lib/cratedigger/processing/preview/preview-stale")
-    machine.succeed("test -d /var/lib/cratedigger/processing/albums/album-kept")
-    machine.succeed("test -f /var/lib/cratedigger/.preview-snapshot.lock")
+    machine.succeed("test -f /var/lib/cratedigger/processing/.preview-snapshot.lock")
+    machine.succeed("test -d /var/lib/cratedigger/processing/albums/existing-canonical")
+    machine.succeed("test \"$(cat /var/lib/cratedigger/processing/albums/existing-canonical/track.flac)\" = canonical")
     # config.ini points at the out-of-band secret, never its plaintext value.
     machine.succeed("grep -q 'api_key_file = /etc/cratedigger/slskd-api-key' /var/lib/cratedigger/config.ini")
     # The secret itself must NEVER appear in config.ini — that's the whole fix.

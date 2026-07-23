@@ -131,6 +131,23 @@ def _force_download_log(
     )
 
 
+def assert_force_preview_authority(
+    *,
+    lookup_path: str,
+    db_failed_path: str,
+    payload_failed_path: str,
+    preview_root: str,
+    preview_children: list[str],
+) -> None:
+    """Force evidence must see a cleaned DB-authorized private snapshot."""
+    if lookup_path in {db_failed_path, payload_failed_path}:
+        raise AssertionError("force front gate used an unisolated filesystem path")
+    if os.path.commonpath([lookup_path, preview_root]) != preview_root:
+        raise AssertionError("force front gate lookup escaped private preview")
+    if preview_children:
+        raise AssertionError("force front gate leaked a private preview snapshot")
+
+
 class TestAutomationEvidenceReuse(unittest.TestCase):
     def test_previewed_automation_job_skips_preimport_gates(self):
         from lib.download_validation import _process_beets_validation
@@ -4016,3 +4033,65 @@ class TestFrontGateSourcePathYoutubeImport(unittest.TestCase):
             import_preview_worker._preview_input(cast(Any, db), job)
 
         self.assertIn("malformed", str(ctx.exception).lower())
+
+
+class TestForcePreviewPathAuthority(unittest.TestCase):
+    def test_front_gate_uses_db_failed_path_not_payload_and_cleans_snapshot(self) -> None:
+        """The force payload is audit metadata, never filesystem authority."""
+        from scripts import import_preview_worker
+        from lib.quality_evidence import EvidenceBuildResult
+
+        with _force_preview_source() as db_source:
+            parent = os.path.dirname(os.path.dirname(os.path.dirname(db_source)))
+            payload_source = os.path.join(parent, "payload-source")
+            os.makedirs(payload_source)
+            with open(os.path.join(db_source, "01.mp3"), "wb") as handle:
+                handle.write(b"database")
+            with open(os.path.join(payload_source, "01.mp3"), "wb") as handle:
+                handle.write(b"payload")
+            db = FakePipelineDB()
+            download_log_id = _force_download_log(db, 42, db_source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=payload_source,
+                ),
+            )
+            seen: list[str] = []
+
+            def capture_lookup(*_args: Any, **kwargs: Any) -> EvidenceBuildResult:
+                lookup_path = str(kwargs["source_path"])
+                seen.append(lookup_path)
+                with open(os.path.join(lookup_path, "01.mp3"), "rb") as handle:
+                    self.assertEqual(handle.read(), b"database")
+                return EvidenceBuildResult(None, "missing")
+
+            with patch(
+                "scripts.import_preview_worker.load_candidate_evidence_for_source",
+                side_effect=capture_lookup,
+            ):
+                result, display_path = import_preview_worker._front_gate_check(db, job)
+
+            self.assertIsNotNone(result)
+            self.assertEqual(display_path, db_source)
+            self.assertEqual(len(seen), 1)
+            assert_force_preview_authority(
+                lookup_path=seen[0],
+                db_failed_path=db_source,
+                payload_failed_path=payload_source,
+                preview_root=os.path.join(parent, "processing", "preview"),
+                preview_children=os.listdir(os.path.join(parent, "processing", "preview")),
+            )
+
+    def test_force_authority_checker_trips_on_payload_lookup(self) -> None:
+        with self.assertRaises(AssertionError):
+            assert_force_preview_authority(
+                lookup_path="/payload",
+                db_failed_path="/database",
+                payload_failed_path="/payload",
+                preview_root="/preview",
+                preview_children=[],
+            )

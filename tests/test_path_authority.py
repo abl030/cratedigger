@@ -6,6 +6,7 @@ import os
 import tempfile
 import threading
 import unittest
+from collections.abc import Callable
 from unittest.mock import MagicMock, patch
 
 from lib.download_materialization import (
@@ -20,12 +21,79 @@ from lib.fs_authority import (
     open_configured_quarantine_directory,
     open_private_processing_root,
     open_regular_relative,
+    rename_relative_noreplace,
 )
 from lib.grab_list import DownloadFile
+from lib.import_preview import _snapshot_authorized_directory, remove_preview_snapshot
 from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
 from lib.staged_album import StagedAlbum
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_ctx_with_fake_db, make_grab_list_entry
+
+
+def assert_publication_invariant(
+    *,
+    result: object,
+    source_exists: bool,
+    expected_source_exists: bool,
+    destination_names: set[str],
+    expected_names: set[str],
+    artifact_names: list[str],
+    name_max: int,
+) -> None:
+    """Check the materialize outcome without reimplementing its publication.
+
+    Kept module-level so the known-bad pin proves this proof surface really
+    rejects a planted overwrite/source-loss outcome.
+    """
+    if source_exists != expected_source_exists:
+        raise AssertionError(
+            f"source retention mismatch: {source_exists=} {expected_source_exists=}",
+        )
+    if destination_names != expected_names:
+        raise AssertionError(
+            f"destination manifest mismatch: {destination_names=} {expected_names=}",
+        )
+    if any(len(name.encode("utf-8", "surrogateescape")) > name_max for name in artifact_names):
+        raise AssertionError("materialize artifact exceeded NAME_MAX")
+    if any(name.startswith(".materialize-tmp-") for name in artifact_names):
+        raise AssertionError("unpublished materialize temp was retained")
+    if not isinstance(result, (Materialized, MaterializeGuarded)):
+        raise AssertionError(f"unexpected materialize result {result!r}")
+
+
+def assert_preview_copy_invariant(
+    *,
+    succeeded: bool,
+    preview_children: list[str],
+    copied_bytes: int,
+    expected_bytes: int,
+    lock_path: str,
+) -> None:
+    """A failed private copy cleans its snapshot; a success copies exact bytes."""
+    if not os.path.isfile(lock_path):
+        raise AssertionError("preview copy lock is missing outside preview cleanup")
+    if not succeeded and preview_children:
+        raise AssertionError("failed preview copy retained private snapshot artifacts")
+    if succeeded and copied_bytes != expected_bytes:
+        raise AssertionError(
+            f"preview copied {copied_bytes} bytes, expected {expected_bytes}",
+        )
+
+
+def assert_relocation_invariant(
+    *,
+    result: object,
+    source_exists: bool,
+    replacement_has_canonical: bool,
+) -> None:
+    """A replaced lexical processing root cannot receive a committed album."""
+    if not isinstance(result, MaterializeGuarded) or result.detail != "processing_root_relocated":
+        raise AssertionError(f"relocation was not guarded: {result!r}")
+    if not source_exists:
+        raise AssertionError("relocation guard lost the authoritative source")
+    if replacement_has_canonical:
+        raise AssertionError("relocation guard wrote into the replacement root")
 
 
 class TestPrivateProcessingAuthority(unittest.TestCase):
@@ -96,6 +164,105 @@ class TestPrivateProcessingAuthority(unittest.TestCase):
             with self.assertRaises(FilesystemAuthorityError):
                 with open_configured_quarantine_directory(lookalike, cfg):
                     pass
+
+
+class TestPrivatePreviewCopyBounds(unittest.TestCase):
+    def _world(self) -> tuple[tempfile.TemporaryDirectory[str], str, str, MagicMock]:
+        parent = tempfile.TemporaryDirectory(dir=os.getcwd())
+        source = os.path.join(parent.name, "source")
+        processing = os.path.join(parent.name, "processing")
+        os.mkdir(source)
+        os.mkdir(processing, 0o700)
+        os.mkdir(os.path.join(processing, "albums"), 0o700)
+        os.mkdir(os.path.join(processing, "preview"), 0o700)
+        cfg = MagicMock()
+        cfg.slskd_download_dir = source
+        cfg.processing_dir = processing
+        return parent, source, processing, cfg
+
+    def test_reserved_free_space_rejects_and_cleans_private_snapshot(self) -> None:
+        parent, source, processing, cfg = self._world()
+        with parent:
+            with open(os.path.join(source, "track.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            preview = os.path.join(processing, "preview")
+            lock = os.path.join(processing, ".preview-snapshot.lock")
+            fstatvfs = MagicMock(f_bavail=2, f_frsize=1)
+            with patch("lib.import_preview._PREVIEW_FREE_RESERVE_BYTES", 3), patch(
+                "lib.import_preview.os.fstatvfs", return_value=fstatvfs,
+            ):
+                with self.assertRaisesRegex(FilesystemAuthorityError, "insufficient private preview space"):
+                    _snapshot_authorized_directory(source, cfg)
+            assert_preview_copy_invariant(
+                succeeded=False,
+                preview_children=os.listdir(preview),
+                copied_bytes=0,
+                expected_bytes=0,
+                lock_path=lock,
+            )
+
+    def test_source_growth_hits_actual_copy_cap_and_cleans_snapshot(self) -> None:
+        parent, source, processing, cfg = self._world()
+        with parent:
+            source_path = os.path.join(source, "track.mp3")
+            with open(source_path, "wb") as handle:
+                handle.write(b"tiny")
+            preview = os.path.join(processing, "preview")
+            lock = os.path.join(processing, ".preview-snapshot.lock")
+            from lib.fs_authority import copy_opened_file as real_copy_opened_file
+
+            def grow_before_real_copy(
+                source_fd: int,
+                destination_fd: int,
+                *,
+                max_bytes: int | None = None,
+                before_write: Callable[[int], None] | None = None,
+            ) -> int:
+                with open(source_path, "ab") as handle:
+                    handle.write(b"growth")
+                return real_copy_opened_file(
+                    source_fd,
+                    destination_fd,
+                    max_bytes=max_bytes,
+                    before_write=before_write,
+                )
+
+            with patch(
+                "lib.import_preview.copy_opened_file",
+                side_effect=grow_before_real_copy,
+            ):
+                with self.assertRaisesRegex(FilesystemAuthorityError, "source grew beyond copy limit"):
+                    _snapshot_authorized_directory(source, cfg)
+            assert_preview_copy_invariant(
+                succeeded=False,
+                preview_children=os.listdir(preview),
+                copied_bytes=0,
+                expected_bytes=0,
+                lock_path=lock,
+            )
+
+    def test_preview_lock_is_stable_outside_snapshot_cleanup(self) -> None:
+        parent, source, processing, cfg = self._world()
+        with parent:
+            with open(os.path.join(source, "track.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            lock = os.path.join(processing, ".preview-snapshot.lock")
+            snapshot = _snapshot_authorized_directory(source, cfg)
+            lock_inode = os.stat(lock).st_ino
+            try:
+                copied = os.path.join(snapshot, "track.mp3")
+                assert_preview_copy_invariant(
+                    succeeded=True,
+                    preview_children=os.listdir(os.path.join(processing, "preview")),
+                    copied_bytes=os.path.getsize(copied),
+                    expected_bytes=5,
+                    lock_path=lock,
+                )
+            finally:
+                remove_preview_snapshot(snapshot, cfg)
+            self.assertTrue(os.path.isfile(lock))
+            self.assertEqual(os.stat(lock).st_ino, lock_inode)
+            self.assertEqual(os.listdir(os.path.join(processing, "preview")), [])
 
 
 class TestAtomicPrivateMaterialization(unittest.TestCase):
@@ -251,7 +418,9 @@ class TestAtomicPrivateMaterialization(unittest.TestCase):
             album = make_grab_list_entry(files=[file], artist="A", title="B", year="2020")
             canonical = canonical_folder_for_row(album, processing_albums_dir(processing))
 
-            def external_winner(albums_fd: int, _temp: str, destination: str) -> bool:
+            def external_winner(albums_fd: int, temp: str, destination: str) -> bool:
+                """Timing hook only: publish the foreign winner, then invoke
+                the real Linux renameat2(RENAME_NOREPLACE) helper."""
                 os.mkdir(destination, 0o700, dir_fd=albums_fd)
                 winner_fd = os.open(
                     destination,
@@ -268,7 +437,7 @@ class TestAtomicPrivateMaterialization(unittest.TestCase):
                     os.close(fd)
                 finally:
                     os.close(winner_fd)
-                return False
+                return rename_relative_noreplace(albums_fd, temp, destination)
 
             with patch(
                 "lib.download_materialization.rename_relative_noreplace",
@@ -282,6 +451,15 @@ class TestAtomicPrivateMaterialization(unittest.TestCase):
             self.assertIsInstance(result, MaterializeGuarded)
             self.assertTrue(os.path.exists(source_path))
             self.assertEqual(os.listdir(canonical), ["foreign.mp3"])
+            assert_publication_invariant(
+                result=result,
+                source_exists=os.path.exists(source_path),
+                expected_source_exists=True,
+                destination_names=set(os.listdir(canonical)),
+                expected_names={"foreign.mp3"},
+                artifact_names=os.listdir(os.path.join(processing, "albums")),
+                name_max=os.pathconf(os.path.join(processing, "albums"), "PC_NAME_MAX"),
+            )
 
     def test_shard_collision_serializes_materialization(self) -> None:
         """A two-hex hash collision shares exactly one bounded shard lock."""
@@ -372,9 +550,66 @@ class TestAtomicPrivateMaterialization(unittest.TestCase):
             file.local_path = source_path
             album = make_grab_list_entry(files=[file], artist="A", title="B", year="2020")
             canonical = canonical_folder_for_row(album, processing_albums_dir(processing))
-            with patch("lib.download_materialization.same_open_directory", return_value=False):
+            original_rename = rename_relative_noreplace
+            relocated = f"{processing}-relocated"
+
+            def relocate_before_real_publish(
+                albums_fd: int,
+                temp: str,
+                destination: str,
+            ) -> bool:
+                # The authoritative descriptors still address the renamed old
+                # root.  A fresh lexical root must receive neither a commit
+                # nor persistence after the real no-replace publication.
+                os.rename(processing, relocated)
+                os.mkdir(processing, 0o700)
+                os.mkdir(os.path.join(processing, "albums"), 0o700)
+                os.mkdir(os.path.join(processing, "preview"), 0o700)
+                return original_rename(albums_fd, temp, destination)
+
+            with patch(
+                "lib.download_materialization.rename_relative_noreplace",
+                side_effect=relocate_before_real_publish,
+            ):
                 result = _materialize_processing_dir(
                     album, StagedAlbum.from_entry(album, default_path=canonical), self._ctx(source, processing),
                 )
-            self.assertIsInstance(result, MaterializeGuarded)
-            self.assertTrue(os.path.exists(source_path))
+            assert_relocation_invariant(
+                result=result,
+                source_exists=os.path.exists(source_path),
+                replacement_has_canonical=os.path.exists(canonical),
+            )
+
+
+class TestAuthorityInvariantCheckers(unittest.TestCase):
+    """Known-bad self-tests: the proof checkers must reject planted lies."""
+
+    def test_publication_checker_trips_on_overwrite_source_loss(self) -> None:
+        with self.assertRaises(AssertionError):
+            assert_publication_invariant(
+                result=Materialized(),
+                source_exists=False,
+                expected_source_exists=True,
+                destination_names={"foreign.mp3"},
+                expected_names={"track.mp3"},
+                artifact_names=[".materialize-tmp-orphan"],
+                name_max=255,
+            )
+
+    def test_preview_checker_trips_on_failed_snapshot_residue(self) -> None:
+        with self.assertRaises(AssertionError):
+            assert_preview_copy_invariant(
+                succeeded=False,
+                preview_children=["preview-leaked"],
+                copied_bytes=0,
+                expected_bytes=0,
+                lock_path=__file__,
+            )
+
+    def test_relocation_checker_trips_on_replacement_write(self) -> None:
+        with self.assertRaises(AssertionError):
+            assert_relocation_invariant(
+                result=MaterializeGuarded(detail="processing_root_relocated"),
+                source_exists=True,
+                replacement_has_canonical=True,
+            )
