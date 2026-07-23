@@ -10,6 +10,8 @@ import logging
 import os
 import sys
 import unittest
+from email.message import Message
+from io import BytesIO
 from unittest.mock import patch
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
@@ -21,6 +23,31 @@ from tests.web._harness import _FakeDbWebServerCase
 
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
+
+
+class _UnreadableBody(BytesIO):
+    """Fails if a rejected Content-Length attempts to consume a body."""
+
+    def read(self, _size: int | None = -1) -> bytes:
+        raise AssertionError("rejected Content-Length consumed request body")
+
+
+def _post_reader(length: str | None, body: BytesIO):
+    """Construct the real handler seam with a controlled request stream."""
+    from web.server import Handler
+
+    handler = Handler.__new__(Handler)
+    headers = Message()
+    if length is not None:
+        headers["Content-Length"] = length
+    handler.headers = headers
+    handler.rfile = body
+    errors: list[tuple[str, int]] = []
+    def record_error(msg: str, status: int = 400) -> None:
+        errors.append((msg, status))
+
+    handler._error = record_error
+    return handler, errors
 
 
 class TestServerEndpoints(_FakeDbWebServerCase):
@@ -383,6 +410,27 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         status, data = self._post("/api/nonexistent", {})
         self.assertEqual(status, 404)
 
+    def test_rejected_post_content_lengths_do_not_consume_a_body(self):
+        """Malformed, negative, and oversized lengths fail before ``read``."""
+        from web.server import MAX_POST_BODY_BYTES
+
+        cases = (
+            ("not-a-number", "Invalid Content-Length", 400),
+            ("-1", "Invalid Content-Length", 400),
+            (str(MAX_POST_BODY_BYTES + 1), "Request body too large", 413),
+        )
+        for length, expected_error, expected_status in cases:
+            with self.subTest(length=length):
+                handler, errors = _post_reader(length, _UnreadableBody())
+                self.assertIsNone(handler._read_post_body())
+                self.assertEqual(errors, [(expected_error, expected_status)])
+
+    def test_post_body_reader_accepts_valid_json(self):
+        handler, errors = _post_reader("16", BytesIO(b'{"id":100,"x":1}'))
+
+        self.assertEqual(handler._read_post_body(), {"id": 100, "x": 1})
+        self.assertEqual(errors, [])
+
     # --- datetime serialization ---
 
     def test_log_entries_have_string_dates(self):
@@ -703,9 +751,10 @@ class TestClientDisconnectHandling(_FakeDbWebServerCase):
         (e.g. ValueError) still hits the catch-all. Narrowing this
         further (so non-DB exceptions skip the reconnect) is explicitly
         out of scope per the plan — see follow-up #234."""
-        self.raising_db.update_error = ValueError("simulated handler bug")
+        secret = "simulated handler bug"
+        self.raising_db.update_error = ValueError(secret)
         with self.assertLogs("cratedigger-web", level="ERROR") as cm:
-            status, _ = self._post_may_disconnect("/api/pipeline/set-intent",
+            status, data = self._post_may_disconnect("/api/pipeline/set-intent",
                                    {"id": 100, "intent": "default"})
         self.assertEqual(
             mock_reconnect.call_count, 1,
@@ -718,6 +767,13 @@ class TestClientDisconnectHandling(_FakeDbWebServerCase):
         ]
         self.assertGreaterEqual(len(errors_with_exc), 1)
         self.assertEqual(status, 500)
+        self.assertEqual(data, {"error": "Internal server error"})
+        self.assertNotIn(secret, json.dumps(data))
+        self.assertTrue(any(
+            record.exc_info is not None and record.exc_info[1] is not None
+            and secret in str(record.exc_info[1])
+            for record in errors_with_exc
+        ))
 
     @patch("web.server._try_reconnect_db")
     def test_normal_post_no_reconnect_no_warning(self, mock_reconnect):

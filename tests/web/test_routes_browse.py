@@ -1105,7 +1105,7 @@ class TestArtistFailureBoundary(_FakeDbWebServerCase):
             )
 
         self.assertEqual(status, 500)
-        self.assertEqual(data, {"error": "downstream artist overlay unavailable"})
+        self.assertEqual(data, {"error": "Internal server error"})
         self.assertNotIn("retryable", data)
 
 
@@ -1394,6 +1394,26 @@ class TestSearchByIdResolveContract(_FakeDbWebServerCase):
         self.assertEqual(data["target_identity_kind"], "work")
         self.assertEqual(data["expand_id"], self.MB_RG_ID)
         self.assertEqual(data["leaf_id"], self.MB_RELEASE_ID)
+        mock_mb.get_release.assert_called_once_with(self.MB_RELEASE_ID)
+
+    def test_invalid_mb_id_is_rejected_before_musicbrainz_lookup(self):
+        """The resolver accepts canonical UUID MBIDs only."""
+        for raw_id in (
+            "release%2F..%3Finc%3Devil",
+            self.MB_RELEASE_ID.upper(),
+        ):
+            with self.subTest(raw_id=raw_id), patch("web.server.mb_api") as mock_mb:
+                status, data = self._get(
+                    f"/api/browse/resolve?source=mb&id={raw_id}&kind=release"
+                )
+
+            self.assertEqual(status, 400)
+            self.assertEqual(
+                data,
+                {"error": "Invalid MusicBrainz ID (must be a canonical UUID)"},
+            )
+            self.assertEqual(mock_mb.get_release.call_count, 0)
+            self.assertEqual(mock_mb.get_release_group.call_count, 0)
 
     def test_mb_release_group_resolved(self):
         """Happy path: ?source=mb&id=<mbid>&kind=release-group returns group shape."""

@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 from lib.va_identity import MB_VA_ARTIST_MBID
 from web.mb import (
     get_artist_release_groups,
+    get_release,
     search_artists,
     search_release_groups,
 )
@@ -88,6 +89,30 @@ def _mock_urlopen_by_url(responses: dict[str, dict]):
         raise AssertionError(f"unexpected URL: {req.full_url}")
 
     return patch("web.mb.urllib.request.urlopen", side_effect=_side_effect)
+
+
+class TestMusicBrainzIdentifierUrlQuoting(unittest.TestCase):
+    def test_release_identifier_is_quoted_as_one_path_component(self) -> None:
+        identifier = "release/../?inc=evil&fmt=xml"
+        with _mock_urlopen({}) as mock_urlopen:
+            get_release(identifier, fresh=True)
+
+        url = mock_urlopen.call_args.args[0].full_url
+        self.assertIn(
+            "/release/release%2F..%2F%3Finc%3Devil%26fmt%3Dxml?",
+            url,
+        )
+        self.assertNotIn("?inc=evil", url)
+
+    def test_artist_identifier_is_quoted_as_one_query_value(self) -> None:
+        identifier = "artist&inc=evil"
+        with _mock_urlopen({}) as mock_urlopen:
+            get_artist_release_groups(identifier)
+
+        urls = [call.args[0].full_url for call in mock_urlopen.call_args_list]
+        self.assertEqual(len(urls), 3)
+        self.assertTrue(all("artist=artist%26inc%3Devil" in url for url in urls))
+        self.assertTrue(all("artist=artist&inc=evil" not in url for url in urls))
 
 
 class TestSearchReleaseGroupsVaRewrite(unittest.TestCase):

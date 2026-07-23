@@ -12,7 +12,7 @@ from urllib.error import HTTPError, URLError
 from hypothesis import given, strategies as st
 
 from tests import _hypothesis_profiles  # noqa: F401 — registers active profile
-from web.routes.browse import _resolve_discogs, get_artist
+from web.routes.browse import _resolve_discogs, get_artist, get_browse_resolve
 
 
 _CLEAN_ERROR = "MusicBrainz fallback unavailable, retry"
@@ -59,9 +59,14 @@ class _RecordingHandler:
         self.status: int | None = None
         self.data: dict | None = None
 
-    def _json(self, data: dict, status: int = 200) -> None:
+    def _json(self, data: object, status: int = 200) -> None:
+        if not isinstance(data, dict):
+            raise AssertionError(f"expected JSON object, got {data!r}")
         self.status = status
         self.data = data
+
+    def _error(self, msg: str, status: int = 400) -> None:
+        self._json({"error": msg}, status)
 
 
 class TestArtistMusicBrainzFailureGenerated(unittest.TestCase):
@@ -105,7 +110,7 @@ class TestArtistMusicBrainzFailureGenerated(unittest.TestCase):
         handler = _RecordingHandler()
         with patch("web.server.mb_api") as mock_mb:
             mock_mb.get_artist_release_groups.side_effect = URLError(raw_reason)
-            get_artist(handler, {}, self.ARTIST_ID)  # type: ignore[arg-type]
+            get_artist(handler, {}, self.ARTIST_ID)
 
         assert handler.status is not None
         assert handler.data is not None
@@ -142,7 +147,7 @@ class TestArtistMusicBrainzFailureGenerated(unittest.TestCase):
         handler = _RecordingHandler()
         with patch("web.server.mb_api") as mock_mb:
             mock_mb.get_artist_release_groups.side_effect = error
-            get_artist(handler, {}, self.ARTIST_ID)  # type: ignore[arg-type]
+            get_artist(handler, {}, self.ARTIST_ID)
 
         assert handler.status is not None
         assert handler.data is not None
@@ -152,6 +157,24 @@ class TestArtistMusicBrainzFailureGenerated(unittest.TestCase):
             upstream_status,
             raw_reason,
         )
+
+
+class TestBrowseResolverMusicBrainzIdGenerated(unittest.TestCase):
+    @given(raw_id=st.text(alphabet="/?&#%=", min_size=1, max_size=80))
+    def test_invalid_mb_identifier_never_reaches_the_adapter(self, raw_id: str) -> None:
+        handler = _RecordingHandler()
+        with patch("web.server.mb_api") as mock_mb:
+            get_browse_resolve(handler, {
+                "id": [raw_id], "source": ["mb"], "kind": ["unknown"],
+            })
+
+        self.assertEqual(handler.status, 400)
+        self.assertEqual(
+            handler.data,
+            {"error": "Invalid MusicBrainz ID (must be a canonical UUID)"},
+        )
+        self.assertEqual(mock_mb.get_release.call_count, 0)
+        self.assertEqual(mock_mb.get_release_group.call_count, 0)
 
 
 def assert_discogs_target_identity(
