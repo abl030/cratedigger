@@ -10,10 +10,15 @@ from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
 
 from lib.util import FAILED_IMPORT_SEARCH_DIRS, resolve_failed_path
 from lib.validation_envelope import decode_validation_envelope
-from lib.wrong_match_policy import rejection_scenario_is_wrong_match_candidate
+from lib.wrong_match_policy import (
+    WRONG_MATCH_QUARANTINE_DIR,
+    rejection_scenario_is_wrong_match_candidate,
+)
 
 if TYPE_CHECKING:
     from lib.pipeline_db.rows import DownloadLogWithEvidenceRow, WrongMatchCandidateRow
+
+_WRONG_MATCH_SOURCE_DIR_NAMES = ("failed_imports", WRONG_MATCH_QUARANTINE_DIR)
 
 
 def wrong_match_row_is_visible(
@@ -165,20 +170,25 @@ def _resolved_candidates(candidates: list[str]) -> tuple[str | None, list[str]]:
 
 
 def unsafe_failed_import_path_reason(path: str) -> str | None:
-    """Return a reason when ``path`` is outside a failed_imports child dir."""
+    """Return a reason when ``path`` is outside a Wrong Match source root.
+
+    ``failed_imports`` remains authorized for historical rows; new match
+    failures live under the dedicated sibling ``wrong_matches`` root.
+    """
     real_path = os.path.realpath(path)
-    for root in _failed_import_roots():
+    for root in _wrong_match_source_roots():
         if _is_child_path(real_path, root):
             return None
-    if _has_failed_imports_ancestor(real_path):
+    if _has_wrong_match_source_ancestor(real_path):
         return None
     return f"unsafe_failed_import_path: {path}"
 
 
-def _failed_import_roots() -> tuple[str, ...]:
+def _wrong_match_source_roots() -> tuple[str, ...]:
     return tuple(
-        os.path.realpath(os.path.join(base, "failed_imports"))
+        os.path.realpath(os.path.join(base, root_name))
         for base in FAILED_IMPORT_SEARCH_DIRS
+        for root_name in _WRONG_MATCH_SOURCE_DIR_NAMES
     )
 
 
@@ -189,10 +199,13 @@ def _is_child_path(path: str, root: str) -> bool:
         return False
 
 
-def _has_failed_imports_ancestor(path: str) -> bool:
+def _has_wrong_match_source_ancestor(path: str) -> bool:
     parts = path.split(os.sep)
     for index, part in enumerate(parts):
-        if part == "failed_imports" and index < len(parts) - 1:
+        if (
+            part in _WRONG_MATCH_SOURCE_DIR_NAMES
+            and index < len(parts) - 1
+        ):
             return True
     return False
 

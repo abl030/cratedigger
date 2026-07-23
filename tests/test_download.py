@@ -2528,9 +2528,9 @@ class TestHandleValidResultMissingMbid(unittest.TestCase):
             assert outcome is not None
             self.assertFalse(outcome.success)
             self.assertFalse(os.path.exists(import_dir))
-            failed_dir = os.path.join(tmpdir, "failed_imports")
-            self.assertTrue(os.path.isdir(failed_dir))
-            self.assertEqual(len(os.listdir(failed_dir)), 1)
+            wrong_matches_dir = os.path.join(tmpdir, "wrong_matches")
+            self.assertTrue(os.path.isdir(wrong_matches_dir))
+            self.assertEqual(len(os.listdir(wrong_matches_dir)), 1)
 
         self.assertEqual(db.request(42)["status"], "wanted")
         self.assertEqual(db.request(42)["validation_attempts"], 1)
@@ -4596,6 +4596,7 @@ class TestPollActiveDownloads(unittest.TestCase):
                     "filename": ok_filename,
                     "id": "ok-id",
                     "state": "Completed, Succeeded",
+                    "requestedAt": enqueued_at,
                     "bytesTransferred": 6000000,
                 },
                 {
@@ -4722,6 +4723,7 @@ class TestPollActiveDownloads(unittest.TestCase):
                     "filename": ok_filename,
                     "id": "ok-id",
                     "state": "Completed, Succeeded",
+                    "requestedAt": enqueued_at,
                     "bytesTransferred": 6000000,
                 },
                 {

@@ -61,7 +61,7 @@ from lib.triage_service import (  # noqa: E402
 def get_triage_quarantine(
     h: RouteHandler, params: dict[str, list[str]],
 ) -> None:
-    """Return unreferenced immediate ``failed_imports`` album folders.
+    """Return unreferenced immediate folders from both quarantine roots.
 
     Mirrors ``pipeline-cli triage quarantine``. A complete scan returns 200;
     any configuration, DB, decode, or filesystem uncertainty returns 503
@@ -238,8 +238,9 @@ ROUTES: list[RouteRegistration] = [
     route(
         "GET", "/api/triage/quarantine", get_triage_quarantine,
         "Read-only quarantine lifecycle view — unreferenced immediate "
-        "failed_imports album folders with no visible Wrong Matches reference; excludes "
-        "code-owned bad_files and untracked_audio buckets.",
+        "failed_imports and wrong_matches album folders with no visible "
+        "Wrong Matches reference; excludes code-owned bad_files and "
+        "untracked_audio buckets from failed_imports.",
         classified=True,
     ),
     route(

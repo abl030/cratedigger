@@ -30,8 +30,9 @@ def _should_cleanup_path(scenario: str, action: "DispatchAction") -> bool:
 
     * Auto-import (scenario not in ``FORCE_IMPORT_SCENARIOS``) always
       cleans its disposable ``/Incoming`` staging dir.
-    * Force-import paths pass the user's ``failed_imports/…``
-      folder — cleanup is only safe on a successful import
+    * Force-import paths pass the user's ``wrong_matches/…`` folder (or a
+      legacy ``failed_imports/…`` folder) — cleanup is only safe on a
+      successful import
       (``action.mark_done=True``, meaning beets has moved the files out
       and the source directory is now empty). On a ``downgrade`` /
       ``transcode_downgrade`` decision (mark_done=False) the files are

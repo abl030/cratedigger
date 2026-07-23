@@ -10,6 +10,10 @@ from typing import Any, Iterable, TYPE_CHECKING
 
 from lib.quality import AUDIO_EXTENSIONS_DOTTED
 from lib.staged_album import staged_filename
+from lib.wrong_match_policy import (
+    WRONG_MATCH_QUARANTINE_DIR,
+    rejection_scenario_is_wrong_match_candidate,
+)
 
 if TYPE_CHECKING:
     from lib.grab_list import DownloadFile
@@ -51,16 +55,21 @@ def _safe_relpath(path: str) -> str | None:
 
 def _allocate_target(src_path: str, *, scenario: str | None) -> str:
     parent_dir = os.path.dirname(os.path.abspath(src_path))
-    failed_imports_dir = os.path.join(parent_dir, "failed_imports")
+    quarantine_dir_name = (
+        WRONG_MATCH_QUARANTINE_DIR
+        if rejection_scenario_is_wrong_match_candidate(scenario)
+        else "failed_imports"
+    )
+    quarantine_dir = os.path.join(parent_dir, quarantine_dir_name)
     if scenario in _BAD_FILE_SCENARIOS:
-        failed_imports_dir = os.path.join(failed_imports_dir, "bad_files")
-    os.makedirs(failed_imports_dir, exist_ok=True)
+        quarantine_dir = os.path.join(quarantine_dir, "bad_files")
+    os.makedirs(quarantine_dir, exist_ok=True)
 
     folder_name = os.path.basename(os.path.abspath(src_path))
-    target_path = os.path.join(failed_imports_dir, folder_name)
+    target_path = os.path.join(quarantine_dir, folder_name)
     counter = 1
     while os.path.exists(target_path):
-        target_path = os.path.join(failed_imports_dir, f"{folder_name}_{counter}")
+        target_path = os.path.join(quarantine_dir, f"{folder_name}_{counter}")
         counter += 1
     return target_path
 
@@ -170,10 +179,12 @@ def move_failed_import_curated(
     allowed_audio: Iterable[str],
     scenario: str | None = None,
 ) -> str | None:
-    """Move only curated files into failed_imports and quarantine leftovers.
+    """Move curated files into their rejection-specific quarantine root.
 
     Curated means the accepted audio manifest plus non-audio sidecars. Audio
-    files not present in ``allowed_audio`` never enter Wrong Matches.
+    files not present in ``allowed_audio`` never enter Wrong Matches. Match
+    failures go to ``wrong_matches``; all other failures retain the existing
+    ``failed_imports`` layout.
     """
     src_path = os.path.abspath(src_path)
     if not os.path.isdir(src_path):
@@ -225,5 +236,5 @@ def move_failed_import_curated(
         else:
             shutil.rmtree(src_path, ignore_errors=True)
 
-    logger.info("Curated failed import moved to: %s", target_path)
+    logger.info("Curated rejected import moved to: %s", target_path)
     return target_path

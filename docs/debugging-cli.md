@@ -5,7 +5,7 @@ pipeline-cli show <request_id>               # quality columns + download histor
 pipeline-cli quality <request_id>            # simulate gate for genuine FLAC / V0 / CBR 320 / suspect FLAC, PLUS a replay of the request's actual last download_log candidate evidence through the real decider
 pipeline-cli debug-download <download_log_id>  # raw JSONB audit for one attempt
 pipeline-cli search-plan show <request_id>   # active plan + cursor + per-slot usefulness stats (--json for machine output)
-pipeline-cli triage quarantine --json       # unreferenced immediate failed_imports album folders (read-only)
+pipeline-cli triage quarantine --json       # unreferenced immediate failed_imports/wrong_matches album folders (read-only)
 pipeline-cli audit world --json             # read-only PipelineDB/Beets/disk invariant audit
 pipeline-cli ban-source <request_id> --confirm BAN  # bad-rip removal; optional --release-id is confirmation-only
 pipeline-cli library-delete <album_id> --confirm DELETE --purge-pipeline  # exact beets album delete
@@ -111,7 +111,7 @@ the named PostgreSQL row remains after a purge failure.
 | `set-intent` | Toggle lossless-on-disk for a request |
 | `show` | Show full details of a request |
 | `status` | Show counts by status |
-| `triage` | Read-only operator triage — request/search forensics, cohort listing, and `triage quarantine` for unreferenced immediate `failed_imports/` album folders |
+| `triage` | Read-only operator triage — request/search forensics, cohort listing, and `triage quarantine` for unreferenced immediate `failed_imports/` and `wrong_matches/` album folders |
 | `wrong-match-delete` | Delete one visible Wrong Matches source folder |
 | `wrong-match-delete-group` | Delete visible Wrong Matches source folders for one request |
 | `wrong-match-triage` | Clean the full Wrong Matches queue using existing evidence |

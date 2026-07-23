@@ -3,10 +3,11 @@
 - All code deploys via Nix flake: push cratedigger (GitHub) → `nix flake update cratedigger-src` on doc1 → commit (SSH-signed) + push nixosconfig to **Forgejo** → from doc1 run `fleet-deploy doc2` through the locked-sibling forced-command boundary, then poll and verify the asynchronous update.
 - **Since the Forgejo cutover (2026-06-10), nixosconfig deploys come from Forgejo (`git.ablz.au`), NEVER `github:abl030/nixosconfig` — GitHub is a frozen, stale fallback.** The cratedigger repo itself still lives on GitHub; only the nixosconfig leg changed.
 - The Forgejo push needs a token header (gh's credential helper is github.com-only). Configure it through `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_0`, and `GIT_CONFIG_VALUE_0` in the environment, never a `git -c` argv value or remote URL. Never echo the token. The exact example is in `.claude/skills/deploy/SKILL.md`.
-- **Never pipe a result-bearing command through `tail`/`head`/`grep` inside an
-  `&&` chain unless `pipefail` is explicitly active** — this covers gate
-  commands (test suites, fuzz bursts), pushes, deploy triggers, and one-shots
-  alike: the downstream command's success can mask the real exit status.
+- **Never pipe a result-bearing command through any downstream pipe target
+  inside an `&&` chain unless `pipefail` is explicitly active** —
+  `tail`/`head`/`grep` are common examples. This covers gate commands (test
+  suites, fuzz bursts), pushes, deploy triggers, and one-shots alike: the
+  downstream command's success can mask the real exit status.
   Long-running commands redirect output to a file and echo `$?` explicitly,
   then the file is tailed separately, as a distinct step. Incident:
   `fuzz_burst.sh 2>&1 | tail -12` run in the background masked the script's
@@ -17,6 +18,7 @@
   to the pushed commit before any dependent action such as `gh pr merge` or
   `fleet-deploy`.
 - `fleet-deploy doc2` asynchronously triggers doc2's `nixos-upgrade.service`; the underlying verified update checks every commit in range against the SSH signing keys in `hosts.nix`, then builds from its root-owned clone at `/var/lib/fleet-update/repo`. Capture `InvocationID` before triggering, wait within a bounded timeout for a different nonempty invocation, poll that same invocation's keyed `ActiveState`/`SubState`/`Result` to inactive/dead/success, and require `/var/lib/fleet-update/last-verified-rev` to equal the signed Forgejo commit before declaring success. Direct `fleet-update` on doc2 is not the normal deployment path.
+- The fleet trigger key is forced-command authority, never an operator SSH identity. Run `fleet-deploy` and every deploy-runbook `ssh` command through `env -u SSH_AUTH_SOCK`; the explicit trigger key still works, cannot be cached into the shared agent, and a previously cached trigger key cannot consume an operator command. `scripts/verify_cratedigger_cycle.sh` independently enforces `IdentityAgent=none` on every SSH call. This boundary prevents a verification read from silently retriggering `nixos-upgrade.service` (#837).
 - The NixOS module lives in this repo at `nix/module.nix` (exposed as `nixosModules.default`). The downstream wrapper at `~/nixosconfig/modules/nixos/services/cratedigger.nix` imports it via `inputs.cratedigger-src.nixosModules.default`.
 - Flake updates MUST happen on doc1 (has the Forgejo token + signing key). NEVER from doc2.
 - `restartIfChanged = false` on the cratedigger service — deploys don't restart it. The timer (`OnUnitInactiveSec`, back-to-back cycles) picks up new code on the next cycle. `cratedigger-web` and `cratedigger-db-migrate` use the systemd default and DO restart on switch.
@@ -62,6 +64,6 @@ The end of a shipped series is the only moment its debt is cheap to see — the 
 
 - Schema lives in `migrations/NNN_name.sql`. The deploy unit `cratedigger-db-migrate.service` (oneshot, `restartIfChanged = true`) runs them automatically on every `nixos-rebuild switch`, BEFORE `cratedigger-web.service`, `cratedigger-importer.service`, `cratedigger-import-preview-worker.service`, and `cratedigger-youtube-ingest.service` start — those four `requires` the migrate unit, so a failed migration blocks them from coming up against an inconsistent schema. `cratedigger.service` and `cratedigger-unfindable.service` deliberately do NOT `requires` it (only `wants`+`after`): both are timer-driven with `restartIfChanged = false`, and the migrate unit's `ExecStart` store path changes on every deploy, so a `requires` edge would propagate the migrate unit's every-switch restart as a SIGTERM to a mid-flight cycle. Those two instead gate on schema currency themselves at startup (`lib/migrator.py::assert_schema_current`, called from `cratedigger.py::main()` / `scripts/run_unfindable_detection.py::main()`) — a behind/missing schema still aborts them before any work runs.
 - To add a schema change: drop a new numbered SQL file in `migrations/`. The next deploy applies it. No manual psql, no out-of-band steps. See `.claude/rules/pipeline-db.md` for the full workflow.
-- Backup before any destructive migration: `ssh doc2 'pg_dump -h 10.20.0.11 -U cratedigger cratedigger' > /tmp/cratedigger_backup_$(date +%Y%m%d_%H%M%S).sql`
+- Backup before any destructive migration: `env -u SSH_AUTH_SOCK ssh doc2 'pg_dump -h 10.20.0.11 -U cratedigger cratedigger' > /tmp/cratedigger_backup_$(date +%Y%m%d_%H%M%S).sql`
 - After deploy, verify the migration ran with `pipeline-cli query` on doc2 after exporting `PGPASSWORD` from `/run/secrets/cratedigger-pgpass`, passing the SQL through stdin as shown in `.claude/skills/deploy/SKILL.md`; never print the password or pass it from another host.
-- If a migration fails, check `ssh doc2 'sudo journalctl -u cratedigger-db-migrate.service'` for the error.
+- If a migration fails, check `env -u SSH_AUTH_SOCK ssh doc2 'sudo journalctl -u cratedigger-db-migrate.service'` for the error.

@@ -18,7 +18,8 @@ AND a generated property (``TestGeneratedDiskReaperInvariants`` /
 2. **Active protection** — no file under a ``downloading`` row's
    CURRENT canonical folder, and no stamped ``local_path``, is ever
    removed regardless of ledger ownership or age.
-3. **Quarantine** — nothing under ``failed_imports/`` is ever touched.
+3. **Quarantine** — nothing under ``failed_imports/`` or ``wrong_matches/``
+   is ever touched.
 4. **Age** — no ledger-owned file younger than ``ORPHAN_MIN_AGE_DAYS``
    is removed.
 5. **Empty-dir-only pruning, owned only** — directories are only
@@ -370,14 +371,36 @@ class TestDiskReaperDeterministicPins(unittest.TestCase):
             self.assertEqual(summary.unowned, 1)
 
     def test_failed_imports_quarantine_never_touched(self):
-        """Wrong Match cards reference failed_imports/ paths — never reap,
-        no matter how old."""
+        """Genuine failed imports are never reaped, no matter how old."""
         with tempfile.TemporaryDirectory() as root:
             quarantined = os.path.join(root, "failed_imports", "Some Album")
             target = os.path.join(quarantined, "01.flac")
             _write_aged_file(target, age_days=_OLD_DAYS * 10)
 
             ctx = _make_ctx(root)
+            summary = reap_disk_orphans(ctx)
+
+            self.assertTrue(os.path.exists(target))
+            self.assertEqual(summary.removed, 0)
+
+    def test_wrong_matches_quarantine_never_touched(self):
+        """Wrong Match review sources retain their existing reaper protection."""
+        with tempfile.TemporaryDirectory() as root:
+            fake_db = FakePipelineDB()
+            fake_db.seed_request(make_request_row(id=3, status="wanted"))
+            quarantined = os.path.join(root, "wrong_matches", "Some Album")
+            target = os.path.join(quarantined, "01.flac")
+            pair = ("peer", "peer\\Some Album\\01.flac")
+            _ledger_seed(
+                fake_db,
+                request_id=3,
+                file_pairs=[pair],
+                local_paths={pair: target},
+                with_fingerprint=False,
+            )
+            _write_aged_file(target, age_days=_OLD_DAYS * 10)
+
+            ctx = _make_ctx(root, fake_db=fake_db)
             summary = reap_disk_orphans(ctx)
 
             self.assertTrue(os.path.exists(target))
@@ -1166,9 +1189,16 @@ def assert_shared_canonical_protected(
 ) -> None:
     """The reaper protects exactly the shared leaf's canonical directory."""
     norm_expected = normalize_processing_path(canonical_path)
-    quarantine = normalize_processing_path(
-        os.path.join(root, "failed_imports"))
-    canonical_entries = protected_dirs - {quarantine}
+    quarantines = {
+        normalize_processing_path(os.path.join(root, "failed_imports")),
+        normalize_processing_path(os.path.join(root, "wrong_matches")),
+    }
+    if not quarantines.issubset(protected_dirs):
+        raise AssertionError(
+            "reaper protection omitted a quarantine root: "
+            f"protected={sorted(protected_dirs)!r}"
+        )
+    canonical_entries = protected_dirs - quarantines
     if canonical_entries != {norm_expected}:
         raise AssertionError(
             "reaper protection omitted or altered the shared canonical "
@@ -1273,7 +1303,10 @@ class TestSharedCanonicalCheckerTripsOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_shared_canonical_protected(
                 "/downloads/Artist - Album (2020) [deadbeef]",
-                {normalize_processing_path("/downloads/failed_imports")},
+                {
+                    normalize_processing_path("/downloads/failed_imports"),
+                    normalize_processing_path("/downloads/wrong_matches"),
+                },
                 "/downloads")
 
     def test_trips_when_protected_folder_differs_by_one_byte(self):
@@ -1281,6 +1314,7 @@ class TestSharedCanonicalCheckerTripsOnViolations(unittest.TestCase):
             assert_shared_canonical_protected(
                 "/downloads/Artist - Album (2020) [deadbeef]",
                 {normalize_processing_path("/downloads/failed_imports"),
+                 normalize_processing_path("/downloads/wrong_matches"),
                  normalize_processing_path(
                      "/downloads/Artist - Album (2020) [deadbeee]")},
                 "/downloads")

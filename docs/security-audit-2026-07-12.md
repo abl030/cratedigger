@@ -56,14 +56,14 @@ against that reality, not against a hypothetical public exposure.
 | CD-SEC-03 | Medium | Import-preview accepts an arbitrary absolute path (+ in-place `mp3val -f`) | `web/routes/imports.py`, `lib/util.py` |
 | CD-SEC-04 | Medium | No systemd sandboxing on services that process attacker-controlled bytes | `nix/module.nix` |
 | CD-SEC-05 | Low | Internal exception strings reflected in HTTP 500 bodies | `web/server.py` |
-| CD-SEC-06 | Medium | TLS verification disabled on the Plex/Jellyfin fallback path | `lib/util.py` |
+| CD-SEC-06 | Medium | Removed: notifier TLS fallback now fails closed | `lib/util.py` |
 | CD-SEC-07 | Low | Unbounded request body read + JSON parse (memory-exhaustion DoS) | `web/server.py` |
 | CD-SEC-08 | Low | Unvalidated MB `id` interpolated into the mirror URL (request-shaping) | `web/routes/browse.py`, `web/mb.py` |
 | CD-SEC-09 | Low | Latent identifier-interpolation SQLi footguns (hardcoded today) | `lib/pipeline_db/requests.py`, `lib/pipeline_db/dashboard.py` |
 | CD-SEC-10 | Low | Unescaped controlled-vocabulary metadata in a few JS rows | `web/js/pipeline.js`, `web/js/library.js`, `web/js/wrong-matches.js` |
 | CD-SEC-11 | Medium | Symlink escape in wrong-match streaming + containment asymmetries | `lib/processing_paths.py`, `web/wrong_match_file_service.py` |
 | CD-SEC-12 | Low | Vulnerable-version matches in the locked closure + narrow CI scope | `flake.lock`, `nix/package.nix` |
-| CD-SEC-13 | Info | Plex XML parsed with stdlib ElementTree under an unverified-TLS fallback | `lib/util.py` |
+| CD-SEC-13 | Info | Plex XML parsed with stdlib ElementTree | `lib/util.py` |
 | CD-SEC-14 | Critical | Remediated: destructive identifiers bind to one server-owned release | `lib/destructive_release_service.py` |
 | CD-SEC-15 | High | Remediated: typed fail-closed transitions and source-status CAS freeze `replaced` rows | `lib/transitions.py`, `lib/pipeline_db/requests.py` |
 | CD-SEC-16 | High | Remediated: destructive operations share importer locks | `lib/destructive_release_service.py` |
@@ -357,21 +357,25 @@ could reveal are already in the public repo), so severity is low.
 - **Remediation:** return a generic `{"error": "internal error"}` on the 500 path
   and keep the full trace in the server log.
 
-### CD-SEC-06 — TLS verification disabled on the Plex/Jellyfin fallback (Medium)
+### CD-SEC-06 — Removed notifier TLS fallback; fail closed (Medium)
 
-The verify-then-unverified helper in `lib/util.py` retries with
-`check_hostname = False` and `verify_mode = CERT_NONE` on `ssl.SSLError`. It is
-used by the Plex XML/PUT and Jellyfin JSON calls, which carry the
-`X-Plex-Token` / `X-Emby-Token`. An active LAN MITM can present an invalid cert
-to force the fallback and then harvest the token and inject responses. Because
-certificate failure itself deterministically activates the insecure retry,
-there is no authenticated first-attempt protection once an attacker is on path.
-The credentials authorize media-server reads/writes, making this a confirmed
-credential-confidentiality and response-integrity failure rather than an
-informational self-signed-certificate accommodation.
+The audit found a helper in `lib/util.py` that contained a `CERT_NONE` retry
+after catching raw `ssl.SSLError`. The initial reachability claim was incorrect:
+CPython's `urllib.request.urlopen` wraps a certificate-verification failure as
+`urllib.error.URLError(reason=ssl.SSLCertVerificationError)`, so it did not
+reach that raw-exception handler or automatically send an unverified retry.
+Both deployed notifier endpoints also validate with the deployed trust store.
 
-- **Remediation:** trust the homelab CA (or pin the expected self-signed cert)
-  instead of disabling verification.
+The unreachable insecure branch was nevertheless dangerous dead code. It has
+been removed. The four token-bearing notifier leaves (Plex XML/PUT and
+Jellyfin JSON GET/POST) now each make one direct
+`urllib.request.urlopen(req, timeout=15)` call, using Python's default
+CA-verified TLS context. Certificate failures escape from that one request;
+there is no custom context and no second token-bearing request.
+
+- **Remediation:** implemented in code and regression coverage. No CA/pinning
+  configuration is needed for the current deployment. The tracking issue stays
+  open until deployed and verified live.
 
 ### CD-SEC-07 — Unbounded request body / JSON parse DoS (Low)
 
@@ -490,11 +494,13 @@ tree before its first branch push.
 ### CD-SEC-13 — Plex XML parsed with stdlib ElementTree (Info)
 
 Plex responses are parsed with `xml.etree.ElementTree` in `lib/util.py`. Stdlib
-ElementTree does not resolve external entities (no classic XXE), but combined
-with the unverified-TLS fallback (CD-SEC-06) a MITM could feed crafted XML.
+ElementTree does not resolve external entities (no classic XXE). The notifier
+client uses default CA-verified TLS and fails closed on certificate errors, so
+the prior claim that a TLS-bypass retry let a MITM feed this parser was not
+reachable.
 
-- **Remediation:** use `defusedxml` for the Plex XML parse as defense-in-depth,
-  and/or fix CD-SEC-06 so the response source is authenticated.
+- **Remediation:** consider `defusedxml` for the Plex XML parse as independent
+  defense in depth; it is not contingent on an unverified-TLS response path.
 
 ## Companion code-quality findings
 
@@ -588,7 +594,9 @@ Priority containment / integrity work:
 
 - [ ] CD-SEC-03 — within-root confinement + `parse_body` on import endpoints.
 - [ ] CD-SEC-04 — systemd hardening block (gated by the module VM check).
-- [ ] CD-SEC-06 — replace `CERT_NONE` fallback with CA trust / cert pin.
+- [x] CD-SEC-06 — remove the unreachable `CERT_NONE` fallback; notifier leaves
+      use default CA-verified TLS and fail closed (tracking issue remains open
+      pending deploy/live proof).
 - [ ] CD-SEC-11 — symlink-safe stream open + `realpath` containment +
       move-source within-root check.
 - [ ] CD-SEC-18 — transactional track replacement + real-PG failure pin/property.

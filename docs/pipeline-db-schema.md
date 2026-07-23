@@ -684,7 +684,8 @@ data should query `search_log` directly. (R29)
 ## Wrong Matches and Force-Import
 
 Albums rejected by beets validation (high distance, wrong pressing) are moved
-to `failed_imports/` under the slskd download dir, with their `failed_path`
+to `wrong_matches/` under the slskd download dir, alongside
+`failed_imports/`, with their `failed_path`
 stored in `download_log.validation_result` JSONB. Wrong Matches cleanup consumes
 already-persisted candidate/current evidence only; it never previews,
 measures, or backfills evidence at delete time. Confident cleanup-eligible
@@ -696,13 +697,14 @@ Wrong Matches is a candidate/pressing-identity review surface, not a general
 failed-import bucket. Folder/audio-integrity fact rejects (`audio_corrupt`,
 `bad_audio_hash`, `nested_layout`, `empty_fileset`, `mixed_source`) and the
 quality-only `spectral_reject` scenario are excluded from both the visible
-queue and its automatic cleanup. SQL, the test fake, and post-rejection
-cleanup all consume the neutral taxonomy in `lib/wrong_match_policy.py`; a new
-non-match rejection scenario must be classified there once rather than copied
-into each adapter.
+queue and its automatic cleanup and remain under `failed_imports/`. SQL, the
+test fake, and post-rejection cleanup all consume the neutral taxonomy in
+`lib/wrong_match_policy.py`; a new non-match rejection scenario must be
+classified there once rather than copied into each adapter.
 
-The quarantine lifecycle view surfaces folders that are protected from the
-disk reaper but no longer visible in Wrong Matches:
+The quarantine lifecycle view surfaces unreferenced album folders in both
+protected roots. It also continues to account for legacy Wrong Matches rows
+whose persisted path points into `failed_imports/`:
 
 ```bash
 pipeline-cli triage quarantine --json
@@ -710,21 +712,24 @@ curl https://music.ablz.au/api/triage/quarantine
 ```
 
 Both read-only adapters wrap the same service. It scans only immediate real
-directories under the configured `<slskd_download_dir>/failed_imports/`; it
-does not recurse, follow symlinks, delete, or infer ownership. The code-owned
-`bad_files/` and `untracked_audio/` category roots are excluded rather than
-misreported as album folders or recursively expanded. A visible Wrong Matches
-row protects its immediate album root whether its persisted `failed_path` is a
-legacy relative path (`failed_imports/Artist - Album`), an absolute path, or a
-descendant of that album root. References outside the configured quarantine
-do not claim local folders. A `status='replaced'` parent is frozen audit
+directories under the configured `<slskd_download_dir>/failed_imports/` and
+`<slskd_download_dir>/wrong_matches/`; it does not recurse, follow symlinks,
+delete, or infer ownership. The code-owned `bad_files/` and `untracked_audio/`
+category roots are excluded from `failed_imports/` rather than misreported as
+album folders or recursively expanded. A visible Wrong Matches row protects
+its immediate album root in either quarantine whether its persisted
+`failed_path` is relative (`failed_imports/Artist - Album`), absolute, or a
+descendant of that album root. References outside both configured quarantine
+roots do not claim local folders. A `status='replaced'` parent is frozen audit
 history and is excluded by the shared default Wrong Matches visibility rule,
 so its reference does not hide a quarantine folder. The explicit
 `/api/wrong-matches?include_replaced=true` history view still surfaces those
 rows without changing lifecycle triage.
 
 Results are sorted by folder name and carry `name`, absolute `path`, and
-`mtime_ns`. A genuinely absent `failed_imports/` root is a valid empty state.
+`mtime_ns`; the JSON envelope reports both `quarantine_root` (the legacy
+`failed_imports/` field) and `wrong_matches_root`. A genuinely absent root is a
+valid empty state.
 Configuration, DB, validation-envelope, directory-read, and mid-scan race
 errors fail the whole view as CLI exit `5` / HTTP `503`; partial state is never
 presented as an empty or trustworthy orphan list. Deletion remains an explicit
@@ -740,7 +745,10 @@ After manual review, force-import bypasses the distance check. The request
 handler or CLI command validates the row/path synchronously, then enqueues a
 `force_import` job. `cratedigger-importer` runs the actual beets mutation.
 
-**Path resolution**: old entries stored relative paths (`failed_imports/Foo - Bar`), new entries store absolute paths. Force-import resolves relative paths against `/mnt/virtio/music/slskd/` automatically.
+**Path resolution**: old entries stored relative paths
+(`failed_imports/Foo - Bar`); new entries under `wrong_matches/` store absolute
+paths. Force-import resolves relative paths against
+`/mnt/virtio/music/slskd/` automatically.
 
 Wrong Matches Converge is a web triage layer on top of the same queue. The UI
 defaults each release to a `180` milli-distance loosen threshold, marks

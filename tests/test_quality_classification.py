@@ -790,6 +790,145 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         self.assertTrue(r["imported"])
         self.assertTrue(r["keep_searching"])
 
+    def test_tyler_lamberts_grave_cbr320_transcode_via_evidence(self):
+        """Parity twin of the CBR-320 Tyler Lamberts regression pin."""
+        from lib.quality import full_pipeline_decision_from_evidence
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=320, is_cbr=True,
+            spectral_grade="likely_transcode", spectral_bitrate=160,
+        )
+        current = self._build_current(
+            min_bitrate=320, spectral_grade="likely_transcode",
+            spectral_bitrate=160,
+        )
+
+        r = full_pipeline_decision_from_evidence(candidate, current)
+
+        self.assertEqual(r["stage1_spectral"], "import")
+        self.assertEqual(r["stage2_import"], "downgrade")
+        self.assertFalse(r["imported"])
+        self.assertTrue(r["denylisted"])
+        self.assertTrue(r["keep_searching"])
+
+    def test_tyler_lamberts_grave_no_spectral_bitrate_via_evidence(self):
+        """Parity twin of Tyler Lamberts' no-cliff reproduction."""
+        from lib.quality import full_pipeline_decision_from_evidence
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=320, is_cbr=True,
+            spectral_grade="likely_transcode",
+        )
+        current = self._build_current(
+            min_bitrate=320, spectral_grade="likely_transcode",
+            spectral_bitrate=160,
+        )
+
+        r = full_pipeline_decision_from_evidence(candidate, current)
+
+        self.assertEqual(r["stage1_spectral"], "import")
+        self.assertEqual(r["stage2_import"], "downgrade")
+        self.assertFalse(r["imported"])
+        self.assertTrue(r["denylisted"])
+        self.assertTrue(r["keep_searching"])
+
+    def test_stage_parity_review_f1_unbound_tied_spectral_via_evidence(self):
+        """Parity twin of review finding F1's tolerance-boundary pin."""
+        from lib.quality import full_pipeline_decision_from_evidence
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=250, avg_bitrate=250, is_cbr=False,
+            spectral_grade="genuine", spectral_bitrate=256,
+        )
+        current = self._build_current(
+            min_bitrate=247, avg_bitrate=247, format="MP3", is_cbr=False,
+            spectral_grade="genuine", spectral_bitrate=256,
+        )
+
+        r = full_pipeline_decision_from_evidence(candidate, current)
+
+        self.assertEqual(r["comparison_basis"]["verdict"], "equivalent")
+        self.assertEqual(r["comparison_basis"]["branch"], "metric_tiebreak")
+        self.assertFalse(r["imported"])
+
+    def test_stage_parity_review_f2_asymmetric_cbr_forcing_via_evidence(self):
+        """Parity twin of review finding F2's asymmetric-bound pin."""
+        from lib.quality import full_pipeline_decision_from_evidence
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=246, avg_bitrate=246, is_cbr=False,
+            spectral_grade="genuine", spectral_bitrate=320,
+        )
+        current = self._build_current(
+            min_bitrate=260, avg_bitrate=260, format="MP3", is_cbr=False,
+            spectral_grade="genuine", spectral_bitrate=256,
+        )
+
+        r = full_pipeline_decision_from_evidence(candidate, current)
+
+        self.assertEqual(r["comparison_basis"]["verdict"], "worse")
+        self.assertFalse(r["imported"])
+
+    def test_taboo_vi_fake_flac_192_via_evidence(self):
+        """Parity twin of Taboo VI's no-cliff fake-FLAC reproduction."""
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            full_pipeline_decision_from_evidence,
+        )
+
+        candidate = self._build_candidate(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="likely_transcode",
+        )
+        current = self._build_current(
+            min_bitrate=128, spectral_grade="likely_transcode",
+            spectral_bitrate=96,
+        )
+
+        r = full_pipeline_decision_from_evidence(
+            candidate, current,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                converted_count=10,
+                post_conversion_min_bitrate=224,
+            ),
+        )
+
+        self.assertFalse(r["verified_lossless"])
+        self.assertEqual(r["stage2_import"], "provisional_lossless_upgrade")
+        self.assertTrue(r["imported"])
+        self.assertTrue(r["denylisted"])
+        self.assertTrue(r["keep_searching"])
+
+    def test_taboo_vi_with_spectral_bitrate_via_evidence(self):
+        """Parity twin of Taboo VI's captured-spectral reproduction."""
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            full_pipeline_decision_from_evidence,
+        )
+
+        candidate = self._build_candidate(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="likely_transcode", spectral_bitrate=192,
+        )
+        current = self._build_current(
+            min_bitrate=128, spectral_grade="likely_transcode",
+            spectral_bitrate=96,
+        )
+
+        r = full_pipeline_decision_from_evidence(
+            candidate, current,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                converted_count=10,
+                post_conversion_min_bitrate=224,
+            ),
+        )
+
+        self.assertEqual(r["stage2_import"], "provisional_lossless_upgrade")
+        self.assertIsNone(r["stage3_quality_gate"])
+        self.assertTrue(r["imported"])
+        self.assertTrue(r["denylisted"])
+        self.assertTrue(r["keep_searching"])
+
     def test_deerhunter_identical_transcode_not_upgrade_via_evidence(self):
         """Deerhunter request 6795 through the production evidence decider.
 

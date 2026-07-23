@@ -4298,12 +4298,14 @@ class TestPipelineCliTriage(unittest.TestCase):
     def test_quarantine_human_output_names_folder(self):
         with tempfile.TemporaryDirectory() as root:
             os.makedirs(os.path.join(root, "failed_imports", "Visible Orphan"))
+            os.makedirs(os.path.join(root, "wrong_matches", "Wrong Orphan"))
             rc, out, err = self._run_quarantine(
                 FakePipelineDB(), root,
             )
         self.assertEqual(rc, 0)
         self.assertEqual(err, "")
         self.assertIn("Visible Orphan", out)
+        self.assertIn("Wrong Orphan", out)
 
     def test_quarantine_scan_error_returns_5_with_json_error(self):
         with tempfile.TemporaryDirectory() as root:

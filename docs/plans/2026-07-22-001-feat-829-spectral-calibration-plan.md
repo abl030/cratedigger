@@ -1,8 +1,51 @@
 # Per-Codec Spectral Calibration — Project Plan (issue #829)
 
-**Status**: Phase 1 in flight (temporary instance stood up 2026-07-22).
+**Status**: Phases 0–3 COMPLETE (2026-07-23). Phase 4 (synthesis/model design) is next.
+Holdout acquisition in flight (blind). Detailed per-phase records live as issue comments.
 **Issue**: https://github.com/abl030/cratedigger/issues/829
 **Origin**: #828 item 1 correction (2026-07-22) — the codec-blind spectral seam.
+
+## Status log
+
+- **Phase 0 ✅** (2026-07-23, PR #831): six research docs in `docs/research/`
+  (mp3-lame, aac, opus, vorbis, wma, transcode-detection), each with testable
+  Phase 3 predictions. Plan deltas: WMA dropped from the matrix; MP3
+  encoder-identity control recorded as unavailable in nixpkgs.
+- **Phase 1 ✅** (2026-07-22/23): temp instance on doc2 (scratch nspawn DB
+  `cratedigger_calib`, three `systemd-run` transient units, prod backed up
+  first). Final corpus: **34 verified-lossless albums** — 27 from the calib
+  beets tree + 7 harvested from the `failed_imports/` quarantine, attributed
+  strictly by calib ledger `attempt_fingerprint`. One fake-FLAC caught and
+  dropped at the harvest bar (Da Drought 3, 27/29 tracks cliffing).
+- **Phase 2 ✅** (2026-07-23): encode matrix — **19,698 files = 402 tracks ×
+  49 variants, 157 GB, zero failures** (`calibration-tmp/encodes/` +
+  `manifest.tsv`). One corrupt ground-truth track excluded → filed #835
+  (validate_audio rc=0 conceals recoverable frame corruption).
+- **Phase 3 ✅** (2026-07-23): all 19,698 files measured with the production
+  primitives (raw 16-slice vectors captured), zero errors. Headlines:
+  libfdk's 17 kHz CBR cap confirmed (FDK 192–320 all read as "MP3 128");
+  `detect_cliff` reads one tier low (~1 slice below the encoder lowpass, so
+  LAME-192 buckets as 160 at 75%); window truncation already bites at
+  LAME-224/256 (84–89% invisible) and below 12 kHz (CBR-64); HE-AACv1 64k
+  reads as *lossless* (SBR gate is mandatory); opus→flac fakes are fully
+  invisible; the HF-deficit metric flags 61%/14% of genuine lossless as
+  marginal/suspect (mis-thresholded for real music); Vorbis q5 (Spotify
+  tier) misses the window at scale. Tables + full scorecard on the issue.
+- **Verification additions** (operator direction, 2026-07-23): ground-truth
+  circularity audit via a 20–22 kHz ultrasonic probe — **clean, 0/34
+  ceiling signatures** (4 albums are true 96 kHz masters); a 24-album
+  **holdout corpus** now being acquired under a blind protocol (sealed until
+  the verifier exists); prod's `failed_imports/` designated the read-only
+  adversarial test set for the new verifier. Standing caveat recorded:
+  existing `verified_lossless` stamps are proofs under the OLD model's
+  assumptions.
+- **Phase 4 (next)**: per-codec verdict table; detector-space bucket
+  re-derivation from the corpus; SBR pre-classification gate; slice-window
+  extension decision (upward + the ultrasonic band); HF-deficit metric
+  redesign; evidence-schema primitive (cutoff Hz?) + migration story;
+  #827 parity-property domain extension; restated verified-lossless proof
+  semantics. Then Phase 5 implementation (quality-core PRs: fable review,
+  merges held for operator approval) and the ownership-ordered teardown.
 
 ## Why
 

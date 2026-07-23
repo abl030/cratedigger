@@ -69,6 +69,28 @@ class TestWrongMatchCleanup(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_deletes_directory_from_dedicated_wrong_matches_root(self):
+        from lib.wrong_matches import cleanup_wrong_match_source
+
+        db = self._make_db()
+        root = tempfile.mkdtemp()
+        source = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(source)
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as f:
+                f.write(b"audio")
+            log_id = self._log_rejected(db, failed_path=source)
+
+            result = cleanup_wrong_match_source(db, log_id)
+
+            self.assertTrue(result.success)
+            self.assertEqual(result.cleared_rows, 1)
+            self.assertEqual(result.deleted_path, os.path.abspath(source))
+            self.assertFalse(os.path.exists(source))
+            self.assertEqual(db.get_wrong_matches(), [])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_clears_relative_and_absolute_duplicate_rows(self):
         from lib.wrong_matches import cleanup_wrong_match_source
 

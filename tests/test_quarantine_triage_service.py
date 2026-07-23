@@ -50,12 +50,23 @@ class TestQuarantineTriageService(unittest.TestCase):
         """Relative/absolute refs protect album roots; special buckets do not list."""
         with tempfile.TemporaryDirectory() as root:
             quarantine = os.path.join(root, "failed_imports")
+            wrong_matches = os.path.join(root, "wrong_matches")
             os.makedirs(quarantine)
+            os.makedirs(wrong_matches)
             relative = os.path.join(quarantine, "Relative Album")
             absolute = os.path.join(quarantine, "Absolute Album")
             orphan_z = os.path.join(quarantine, "Zulu Orphan")
             orphan_a = os.path.join(quarantine, "Alpha Orphan")
-            for path in (relative, absolute, orphan_z, orphan_a):
+            wrong_referenced = os.path.join(wrong_matches, "Wrong Referenced")
+            wrong_orphan = os.path.join(wrong_matches, "Wrong Orphan")
+            for path in (
+                relative,
+                absolute,
+                orphan_z,
+                orphan_a,
+                wrong_referenced,
+                wrong_orphan,
+            ):
                 os.makedirs(os.path.join(path, "Disc 1"))
 
             # These are code-owned category roots, not album folders. Their
@@ -75,14 +86,16 @@ class TestQuarantineTriageService(unittest.TestCase):
             # A reference to a descendant still makes the immediate album root
             # visible in Wrong Matches and therefore not orphaned.
             _seed_wrong_match(db, os.path.join(absolute, "Disc 1"))
+            _seed_wrong_match(db, wrong_referenced)
 
             result = list_unreferenced_quarantine_folders(db, root)
 
             self.assertEqual(
                 [folder.name for folder in result.folders],
-                ["Alpha Orphan", "Zulu Orphan"],
+                ["Alpha Orphan", "Wrong Orphan", "Zulu Orphan"],
             )
             self.assertEqual(result.quarantine_root, quarantine)
+            self.assertEqual(result.wrong_matches_root, wrong_matches)
             self.assertEqual(
                 result.special_buckets,
                 ["bad_files", "untracked_audio"],
@@ -154,6 +167,17 @@ class TestQuarantineTriageService(unittest.TestCase):
             # A non-directory at the quarantine path makes scandir fail. The
             # operator must see an unavailable result, never a false empty list.
             with open(os.path.join(root, "failed_imports"), "w", encoding="utf-8") as f:
+                f.write("not a directory")
+            with self.assertRaisesRegex(
+                QuarantineScanError, "scan quarantine directory",
+            ):
+                list_unreferenced_quarantine_folders(
+                    FakePipelineDB(), root,
+                )
+
+    def test_wrong_matches_filesystem_failure_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, "wrong_matches"), "w", encoding="utf-8") as f:
                 f.write("not a directory")
             with self.assertRaisesRegex(
                 QuarantineScanError, "scan quarantine directory",

@@ -25,6 +25,7 @@ REFERENCE_KINDS = (
     "absolute_descendant",
     "outside",
 )
+QUARANTINE_DIRECTORIES = ("failed_imports", "wrong_matches")
 REQUEST_STATUSES = (
     "wanted",
     "downloading",
@@ -43,10 +44,15 @@ def assert_quarantine_listing_invariant(
     actual_paths = [folder.path for folder in result.folders]
     assert actual_paths == sorted(expected_paths, key=lambda path: os.path.basename(path))
     assert len(actual_paths) == len(set(actual_paths))
+    quarantine_roots = {
+        result.quarantine_root,
+        result.wrong_matches_root,
+    }
     for folder in result.folders:
-        assert os.path.dirname(folder.path) == result.quarantine_root
+        assert os.path.dirname(folder.path) in quarantine_roots
         assert folder.name == os.path.basename(folder.path)
-        assert folder.name not in result.special_buckets
+        if os.path.dirname(folder.path) == result.quarantine_root:
+            assert folder.name not in result.special_buckets
 
 
 def _seed_reference(
@@ -76,6 +82,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     def test_listing_checker_rejects_a_referenced_or_unexpected_folder(self) -> None:
         bad = QuarantineTriageResult(
             quarantine_root="/downloads/failed_imports",
+            wrong_matches_root="/downloads/wrong_matches",
             folders=[QuarantineFolder(
                 name="Referenced",
                 path="/downloads/failed_imports/Referenced",
@@ -90,6 +97,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
 class TestGeneratedQuarantineLifecycle(unittest.TestCase):
     @given(st.lists(
         st.tuples(
+            st.sampled_from(QUARANTINE_DIRECTORIES),
             st.sampled_from(REFERENCE_KINDS),
             st.sampled_from(REQUEST_STATUSES),
         ),
@@ -98,19 +106,26 @@ class TestGeneratedQuarantineLifecycle(unittest.TestCase):
     ))
     def test_only_unreferenced_immediate_album_roots_surface(
         self,
-        row_states: list[tuple[str, str]],
+        row_states: list[tuple[str, str, str]],
     ) -> None:
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as other:
             quarantine = os.path.join(root, "failed_imports")
+            wrong_matches = os.path.join(root, "wrong_matches")
             os.makedirs(quarantine)
+            os.makedirs(wrong_matches)
             os.makedirs(os.path.join(quarantine, "bad_files", "Bad Child"))
             os.makedirs(os.path.join(quarantine, "untracked_audio", "Leftover Child"))
             db = FakePipelineDB()
             expected: set[str] = set()
 
-            for index, (reference_kind, request_status) in enumerate(row_states):
+            for index, (
+                quarantine_directory,
+                reference_kind,
+                request_status,
+            ) in enumerate(row_states):
                 name = f"Album {index:02d}"
-                path = os.path.join(quarantine, name)
+                selected_root = os.path.join(root, quarantine_directory)
+                path = os.path.join(selected_root, name)
                 descendant = os.path.join(path, "Disc 1")
                 os.makedirs(descendant)
 
@@ -118,16 +133,20 @@ class TestGeneratedQuarantineLifecycle(unittest.TestCase):
                     expected.add(path)
                     continue
                 if reference_kind == "relative":
-                    failed_path = os.path.join("failed_imports", name)
+                    failed_path = os.path.join(quarantine_directory, name)
                 elif reference_kind == "absolute":
                     failed_path = path
                 elif reference_kind == "relative_descendant":
-                    failed_path = os.path.join("failed_imports", name, "Disc 1")
+                    failed_path = os.path.join(
+                        quarantine_directory,
+                        name,
+                        "Disc 1",
+                    )
                 elif reference_kind == "absolute_descendant":
                     failed_path = descendant
                 else:
                     failed_path = os.path.join(
-                        other, "failed_imports", name,
+                        other, quarantine_directory, name,
                     )
                     expected.add(path)
                 if request_status == "replaced":
