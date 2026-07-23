@@ -335,13 +335,17 @@ def _transition_aliases(tree: ast.AST) -> dict[str, str]:
     if not isinstance(tree, ast.Module):
         return aliases
 
+    audited_transition_names = {
+        "apply_transition",
+        "publish_initialized_request",
+    }
     for node in tree.body:
         if not isinstance(node, ast.ImportFrom):
             continue
         if node.module != "lib.transitions":
             continue
         for imported in node.names:
-            if imported.name != "apply_transition":
+            if imported.name not in audited_transition_names:
                 continue
             aliases[imported.asname or imported.name] = imported.name
 
@@ -409,6 +413,46 @@ class TestRequestStatusWriteVisitor(unittest.TestCase):
         visitor.visit(tree)
 
         self.assertEqual(len(visitor.offending), 1)
+
+    def test_rejects_aliased_initialization_publication_import(self) -> None:
+        tree = ast.parse(
+            "from lib.transitions import publish_initialized_request as publish\n"
+            "publish(db, request_id, fields={})\n"
+        )
+        visitor = _RequestStatusWriteVisitor(
+            "lib/download.py",
+            _module_string_constants(tree),
+            _transition_aliases(tree),
+        )
+
+        visitor.visit(tree)
+
+        self.assertEqual(len(visitor.offending), 1)
+        self.assertEqual(visitor.offending[0][1], "direct transition call")
+
+        service_visitor = _RequestStatusWriteVisitor(
+            "lib/request_creation_service.py",
+            _module_string_constants(tree),
+            _transition_aliases(tree),
+        )
+        service_visitor.visit(tree)
+        self.assertEqual(service_visitor.offending, [])
+
+    def test_rejects_module_aliased_initialization_publication(self) -> None:
+        tree = ast.parse(
+            "import lib.transitions as lifecycle\n"
+            "lifecycle.publish_initialized_request(db, request_id, fields={})\n"
+        )
+        visitor = _RequestStatusWriteVisitor(
+            "web/routes/pipeline.py",
+            _module_string_constants(tree),
+            _transition_aliases(tree),
+        )
+
+        visitor.visit(tree)
+
+        self.assertEqual(len(visitor.offending), 1)
+        self.assertEqual(visitor.offending[0][1], "direct transition call")
 
     def test_rejects_direct_reset_to_wanted_call(self) -> None:
         tree = ast.parse("db.reset_to_wanted(42)\n")
