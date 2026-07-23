@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from lib.dispatch.subprocess_runner import run_import_one
 from lib.util import beets_subprocess_env
 from lib.beets_db import BeetsDB
 from tests.beets_world import (
@@ -115,6 +116,47 @@ class TestShippedBeetsWorldConfig(unittest.TestCase):
                     os.environ["CRATEDIGGER_RUNTIME_CONFIG"],
                     str(deployed_runtime),
                 )
+
+    def test_explicit_runner_authority_survives_runtime_config_swap(self) -> None:
+        """The default runner must use the pair Core snapshotted at launch."""
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        with BeetsWorld(
+            repo_root,
+            subprocess_mirror_url="http://mirror.invalid:5200",
+        ) as world, tempfile.TemporaryDirectory() as root:
+            swapped = Path(root) / "swapped-runtime.ini"
+            swapped.write_text(
+                "[Beets]\n"
+                "config_dir = /swapped/beets\n"
+                "library = /swapped/library.db\n"
+                "directory = /swapped/library\n"
+                "python = /swapped/python\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {
+                "CRATEDIGGER_RUNTIME_CONFIG": str(swapped),
+            }), patch("lib.dispatch.subprocess_runner.sp.run") as run:
+                run.return_value.returncode = 1
+                run.return_value.stdout = ""
+                run.return_value.stderr = "expected test failure"
+                # This call models the instant after dispatch has snapshotted
+                # the original authority and before it launches import_one.
+                run_import_one(
+                    path="/scratch/source",
+                    mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    beets_harness_path="/scratch/harness/run_beets_harness.sh",
+                    beets_config_dir=str(world.beets_config_dir),
+                    beets_python="/original/pinned-python",
+                    beets_library_db_path=str(world.library_db),
+                    beets_library_root=str(world.library_root),
+                )
+
+            env = run.call_args.kwargs["env"]
+            self.assertEqual(env["BEETSDIR"], str(world.beets_config_dir))
+            self.assertEqual(env["BEETS_DB"], str(world.library_db))
+            self.assertEqual(
+                env["CRATEDIGGER_BEETS_PYTHON"], "/original/pinned-python",
+            )
 
 
 if __name__ == "__main__":

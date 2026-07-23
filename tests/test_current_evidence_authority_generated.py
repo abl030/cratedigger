@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import os
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+from unittest.mock import patch
 
 from hypothesis import HealthCheck, example, given, settings, strategies as st
 
@@ -166,13 +168,18 @@ class TestCurrentEvidenceAuthorityPins(unittest.TestCase):
                 store_relative_paths=True,
             )
 
-            result = load_current_evidence_for_action(
-                db,
-                request_id=42,
-                mb_release_id=MB_RELEASE_ID,
-                beets_library_db_path=str(world.library_db),
-                beets_library_root=str(world.library_root),
-            )
+            # A real runtime config points at a distinct nonexistent library.
+            # This consumer must still read the explicit scratch pair.
+            with patch.dict(os.environ, {
+                "CRATEDIGGER_RUNTIME_CONFIG": str(world.poisoned_runtime_config()),
+            }):
+                result = load_current_evidence_for_action(
+                    db,
+                    request_id=42,
+                    mb_release_id=MB_RELEASE_ID,
+                    beets_library_db_path=str(world.library_db),
+                    beets_library_root=str(world.library_root),
+                )
 
             assert_evidence_authority(result, EvidenceAuthorityExpectation(
                 exact_album_count=1,
@@ -185,6 +192,115 @@ class TestCurrentEvidenceAuthorityPins(unittest.TestCase):
             )
             assert linked is not None
             self.assertEqual(linked.source_path, historical)
+
+    def test_post_import_refresh_reads_explicit_scratch_pair_not_poisoned_runtime(self) -> None:
+        from lib.dispatch import _refresh_current_evidence_after_import
+
+        with BeetsWorld(REPO) as world:
+            snapshot = world.import_release(_release("mb"))
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=42, mb_release_id=MB_RELEASE_ID))
+            candidate = make_album_quality_evidence(
+                mb_release_id=MB_RELEASE_ID,
+                source_path="/immutable/candidate-capture",
+                files=snapshot_audio_files(snapshot.album_path),
+            )
+
+            with patch.dict(os.environ, {
+                "CRATEDIGGER_RUNTIME_CONFIG": str(world.poisoned_runtime_config()),
+            }):
+                result = _refresh_current_evidence_after_import(
+                    db,  # type: ignore[arg-type]
+                    request_id=42,
+                    mb_release_id=MB_RELEASE_ID,
+                    quality_ranks=None,
+                    source_candidate=candidate,
+                    beets_library_db_path=str(world.library_db),
+                    beets_library_root=str(world.library_root),
+                )
+
+            self.assertEqual(result.status, "ready")
+            self.assertIsNotNone(result.evidence)
+            assert result.evidence is not None
+            self.assertEqual(result.evidence.source_path, snapshot.album_path)
+            self.assertFalse((world.root / "poisoned-library").exists())
+
+    def test_post_import_sidecar_uses_explicit_scratch_root_not_poisoned_runtime(self) -> None:
+        from lib.dispatch import _write_album_sidecar_after_import
+
+        with BeetsWorld(REPO) as world:
+            snapshot = world.import_release(_release("mb"))
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42, mb_release_id=MB_RELEASE_ID, status="imported",
+            ))
+            _persist_verified_linked_evidence(
+                db,
+                release_id=MB_RELEASE_ID,
+                album_path=snapshot.album_path,
+            )
+
+            with patch.dict(os.environ, {
+                "CRATEDIGGER_RUNTIME_CONFIG": str(world.poisoned_runtime_config()),
+            }):
+                result = _write_album_sidecar_after_import(
+                    db,
+                    request_id=42,
+                    mb_release_id=MB_RELEASE_ID,
+                    cfg=None,
+                    beets_library_db_path=str(world.library_db),
+                    beets_library_root=str(world.library_root),
+                )
+
+            self.assertEqual(result.outcome, "written")
+            self.assertEqual(
+                result.path,
+                str(Path(snapshot.album_path) / SIDECAR_FILENAME),
+            )
+            assert result.path is not None
+            self.assertTrue(Path(result.path).is_file())
+            self.assertFalse((world.root / "poisoned-library").exists())
+
+    def test_partial_storage_pairs_fail_closed_at_every_evidence_consumer(self) -> None:
+        from lib.dispatch import (
+            _refresh_current_evidence_after_import,
+            _write_album_sidecar_after_import,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, mb_release_id=MB_RELEASE_ID))
+        for db_path, library_root in (("/only-db", None), (None, "/only-root")):
+            with self.subTest(consumer="current", db_path=db_path, root=library_root):
+                current = load_current_evidence_for_action(
+                    db,
+                    request_id=42,
+                    mb_release_id=MB_RELEASE_ID,
+                    beets_library_db_path=db_path,
+                    beets_library_root=library_root,
+                )
+                assert current is not None
+                self.assertTrue(current.provenance.fail_closed)
+                self.assertIn("ValueError", current.provenance.fallback_reason or "")
+            with self.subTest(consumer="refresh", db_path=db_path, root=library_root):
+                with self.assertRaisesRegex(ValueError, "supplied together"):
+                    _refresh_current_evidence_after_import(
+                        db,  # type: ignore[arg-type]
+                        request_id=42,
+                        mb_release_id=MB_RELEASE_ID,
+                        quality_ranks=None,
+                        beets_library_db_path=db_path,
+                        beets_library_root=library_root,
+                    )
+            with self.subTest(consumer="sidecar", db_path=db_path, root=library_root):
+                with self.assertRaisesRegex(ValueError, "supplied together"):
+                    _write_album_sidecar_after_import(
+                        db,
+                        request_id=42,
+                        mb_release_id=MB_RELEASE_ID,
+                        cfg=None,
+                        beets_library_db_path=db_path,
+                        beets_library_root=library_root,
+                    )
 
     def test_real_duplicate_exact_identity_is_failed_not_missing(self) -> None:
         with BeetsWorld(REPO) as world:

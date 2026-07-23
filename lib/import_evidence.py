@@ -461,7 +461,7 @@ def load_current_evidence_for_action(
     mb_release_id: str,
     quality_ranks: QualityRankConfig | None = None,
     beets_library_db_path: str | None = None,
-    beets_library_root: str = "",
+    beets_library_root: str | None = None,
 ) -> CurrentEvidenceActionResult | None:
     """Look Beets up by MBID then load/backfill; return None if no album, fail-closed on error."""
 
@@ -469,13 +469,10 @@ def load_current_evidence_for_action(
     try:
         from lib.beets_db import open_beets_db
 
-        if beets_library_db_path is None:
-            beets_handle = open_beets_db()
-        else:
-            beets_handle = open_beets_db(
-                db_path=beets_library_db_path,
-                library_root=beets_library_root,
-            )
+        beets_handle = open_beets_db(
+            db_path=beets_library_db_path,
+            library_root=beets_library_root,
+        )
         with beets_handle as beets:
             identity = release_identity_for_lookup(mb_release_id)
             if identity is None:

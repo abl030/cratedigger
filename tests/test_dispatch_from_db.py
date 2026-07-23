@@ -1014,6 +1014,24 @@ class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
         mock_read.assert_called_with()
 
 
+class TestDispatchFromDbStorageAuthority(unittest.TestCase):
+    def test_partial_storage_override_fails_before_advisory_lock(self):
+        from lib.dispatch import dispatch_import_from_db
+
+        db = FakePipelineDB()
+        for db_path, library_root in (("/only-db", None), (None, "/only-root")):
+            with self.subTest(db_path=db_path, library_root=library_root), \
+                 patch.object(db, "advisory_lock", side_effect=AssertionError):
+                with self.assertRaisesRegex(ValueError, "supplied together"):
+                    dispatch_import_from_db(
+                        db,  # type: ignore[arg-type]
+                        request_id=42,
+                        failed_path="/never-observed",
+                        beets_library_db_path=db_path,
+                        beets_library_root=library_root,
+                    )
+
+
 class TestDispatchFromDbPrecondition(unittest.TestCase):
     """U4: calling dispatch_import_from_db with neither ``import_job_id``
     nor ``download_log_id`` is a programmer error.

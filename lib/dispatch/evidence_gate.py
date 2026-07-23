@@ -322,7 +322,7 @@ def _refresh_current_evidence_after_import(
     source_candidate: AlbumQualityEvidence | None = None,
     import_result: ImportResult | None = None,
     beets_library_db_path: str | None = None,
-    beets_library_root: str = "",
+    beets_library_root: str | None = None,
 ) -> EvidenceBuildResult:
     """Persist current evidence for the just-imported Beets album.
 
@@ -364,13 +364,10 @@ def _refresh_current_evidence_after_import(
     # BeetsDB docstring. Both the U10 propagation path and the legacy
     # ``backfill_current_evidence_from_album_info`` path depend on an
     # absolute ``album_info.album_path`` to read the just-imported files.
-    if beets_library_db_path is None:
-        beets_handle = open_beets_db()
-    else:
-        beets_handle = open_beets_db(
-            db_path=beets_library_db_path,
-            library_root=beets_library_root,
-        )
+    beets_handle = open_beets_db(
+        db_path=beets_library_db_path,
+        library_root=beets_library_root,
+    )
     identity = release_identity_for_lookup(mb_release_id)
     if identity is None:
         return EvidenceBuildResult(

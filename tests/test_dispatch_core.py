@@ -5,8 +5,10 @@ denylist entries, requeue behavior. Seam tests (argv, flag forwarding) are
 in a separate class and explicitly labeled.
 """
 
+import os
 import tempfile
 import unittest
+from contextlib import nullcontext
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -14,7 +16,7 @@ import msgspec
 from lib.beets_db import AlbumInfo
 from lib.config import CratediggerConfig
 from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
-from lib.dispatch.types import EvidenceImportGate
+from lib.dispatch.types import EvidenceImportGate, ImportOneRun
 from lib.pipeline_db import DownloadLogOutcome
 from lib.terminal_outcomes import ImportJobTerminal
 from lib.quality import (
@@ -1097,9 +1099,14 @@ class TestDispatchCoreSeams(unittest.TestCase):
         from lib.dispatch import dispatch_import_core
         ir = kwargs.pop("ir", make_import_result())
         beets_directory = kwargs.pop("beets_directory", "")
+        beets_config_dir = kwargs.pop("beets_config_dir", "")
+        beets_python = kwargs.pop("beets_python", "")
+        runner_hook = kwargs.pop("runner_hook", None)
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             beets_directory=beets_directory,
+            beets_config_dir=beets_config_dir,
+            beets_python=beets_python,
             pipeline_db_enabled=True,
         )
         tmpdir = tempfile.mkdtemp()
@@ -1132,8 +1139,13 @@ class TestDispatchCoreSeams(unittest.TestCase):
                 preview_result={"ready": True},
             )
             assert db.claim_next_import_job(worker_id="seam-test") is not None
+            runner_context = (
+                patch("lib.dispatch.core.run_import_one", side_effect=runner_hook)
+                if runner_hook is not None else nullcontext()
+            )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
+                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
+                 runner_context:
                 dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
@@ -1210,6 +1222,34 @@ class TestDispatchCoreSeams(unittest.TestCase):
         cmd = self._get_cmd()
 
         self.assertNotIn("--preview-import-result-file", cmd)
+
+    def test_default_runner_gets_authority_snapshotted_before_runtime_swap(self):
+        received: dict[str, object] = {}
+        with tempfile.TemporaryDirectory() as root:
+            swapped = os.path.join(root, "swapped-runtime.ini")
+            with open(swapped, "w", encoding="utf-8") as handle:
+                handle.write("[Beets]\nlibrary = /swapped/library.db\n")
+
+            def runner_after_swap(**kwargs: object) -> ImportOneRun:
+                os.environ["CRATEDIGGER_RUNTIME_CONFIG"] = swapped
+                received.update(kwargs)
+                return ImportOneRun(
+                    command=(), returncode=1, stdout="", stderr="", import_result=None,
+                )
+
+            with patch.dict(os.environ, {}, clear=False):
+                self._get_cmd(
+                    beets_config_dir="/original/beets-config",
+                    beets_python="/original/pinned-python",
+                    beets_library_db_path="/original/library.db",
+                    beets_library_root="/original/library",
+                    runner_hook=runner_after_swap,
+                )
+
+        self.assertEqual(received["beets_config_dir"], "/original/beets-config")
+        self.assertEqual(received["beets_python"], "/original/pinned-python")
+        self.assertEqual(received["beets_library_db_path"], "/original/library.db")
+        self.assertEqual(received["beets_library_root"], "/original/library")
 
 
 if __name__ == "__main__":
