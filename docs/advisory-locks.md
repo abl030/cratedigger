@@ -136,6 +136,15 @@ generate-and-persist attempt (snapshot construction → generator →
 namespace) so a force-import and an explicit regeneration can run
 concurrently for the same request without deadlocking.
 
+### Request creation lock order
+
+Direct Add and new-row Upgrade use `RequestCreationService`. It acquires
+`RELEASE` first, rechecks exact identity, then calls `SearchPlanService`, which
+acquires `PLAN` for the new request. The required nesting is therefore
+`RELEASE → PLAN`. No production path takes `PLAN → RELEASE`; that absence is
+the deadlock argument. The source mirror fetch intentionally happens before
+`RELEASE`, so a slow metadata request never holds the cross-process lock.
+
 ### IMPORTER — worker singleton lock
 
 **Why**: The import queue is the durable state owner, but beets mutation is

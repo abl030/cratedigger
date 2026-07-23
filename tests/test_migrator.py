@@ -4023,6 +4023,29 @@ class TestUnsearchableRequestStatusMigration(unittest.TestCase):
 
 
 @requires_postgres
+class TestRequestInitializingStatusMigration(unittest.TestCase):
+    """Migration 063 adds a durable but non-runnable creation state."""
+
+    def test_current_schema_accepts_initializing_and_records_063(self) -> None:
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO album_requests "
+                    "(mb_release_id, artist_name, album_title, source, status) "
+                    "VALUES ('063-initializing', 'A', 'B', 'request', 'initializing')"
+                )
+                cur.execute(
+                    "SELECT version FROM schema_migrations WHERE version = 63"
+                )
+                self.assertEqual(cur.fetchone(), (63,))
+                cur.execute("DELETE FROM album_requests WHERE mb_release_id = '063-initializing'")
+        finally:
+            conn.close()
+
+
+@requires_postgres
 class TestLosslessLineageSpectralSubjectMigration(unittest.TestCase):
     """Migration 057 makes the full R19 lineage rule a DB invariant."""
 

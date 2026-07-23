@@ -1665,6 +1665,31 @@ class TestApplyResolveAllResult(unittest.TestCase):
         self.assertFalse(applied)
         self.assertEqual(db.track_calls, 0)
 
+    def test_strict_creation_mode_propagates_track_artist_write_failure(self):
+        class FailingTrackDB:
+            def update_request_fields(self, request_id: int, **fields: Any) -> bool:
+                return True
+
+            def update_track_artists(
+                self,
+                request_id: int,
+                track_artists: list[str | None],
+                *,
+                expected_status: str | None = None,
+            ) -> bool:
+                raise RuntimeError("track artist write failed")
+
+        with self.assertRaisesRegex(RuntimeError, "track artist write failed"):
+            apply_resolve_all_result(
+                FailingTrackDB(), 42,
+                ResolveAllResult(
+                    is_va_compilation=False,
+                    track_artists=["Late Artist"],
+                ),
+                expected_status="initializing",
+                strict=True,
+            )
+
     def test_stale_wanted_snapshot_cannot_write_manual_parent_or_tracks(self):
         db = FakePipelineDB()
         request_id = db.add_request(

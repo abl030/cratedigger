@@ -407,7 +407,7 @@ class TestCmdAddPlanGenerationFakeDB(unittest.TestCase):
         self.assertEqual(source["status"], "replaced")
         self.assertIsNone(db.get_tracks(source["id"])[0]["track_artist"])
         self.assertIsNone(db.get_active_search_plan(source["id"]))
-        self.assertIn("skipping plan generation", stderr.getvalue())
+        self.assertIn("Initialization failed", stderr.getvalue())
         self.assertEqual(exit_code, 4)
 
 

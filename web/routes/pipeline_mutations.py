@@ -8,19 +8,22 @@ requests-by-rg, active-rgs, import-jobs) stay in ``web/routes/pipeline.py``.
 
 import logging
 import urllib.error
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 import msgspec
 from pydantic import BaseModel, Field, model_validator
 
 from lib.pipeline_db import PipelineDB
+from lib.config import read_runtime_config
+from lib.request_creation_service import (
+    RequestCreationInput,
+    RequestCreationResult,
+    RequestCreationService,
+)
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, route
 from web.routes._server_access import _server
 from web.routes.pipeline import _serialize_import_job
-
-if TYPE_CHECKING:
-    from lib.field_resolver_service import ResolveAllResult
 
 logger = logging.getLogger(__name__)
 
@@ -133,138 +136,27 @@ def _request_fields_applied_or_respond(
     ))
 
 
-def _resolve_and_update_after_add(
-    db: PipelineDB,
-    req_id: int,
-    *,
-    mb_release_id: str | None,
-    discogs_release_id: str | None,
-    mb_release_group_id: str | None,
-    mb_artist_id: str | None,
-    mb_release_payload: dict[str, Any] | None = None,
-    discogs_release_payload: dict[str, Any] | None = None,
-) -> "ResolveAllResult | None":
-    """U4 helper: run ``resolve_all`` against a freshly inserted request
-    and persist the resolved fields plus the VA flag.
-
-    ``resolve_all`` is best-effort by design (proceed-with-NULL on any
-    upstream failure); we never raise back up to the HTTP handler. The
-    side-table rows recorded by the resolver service are the operator
-    visibility into unresolved fields. ``is_va_compilation`` is set ONCE
-    at enqueue per the immutability invariant — the row reads back
-    ``FALSE`` from the schema's default until this call lands the
-    resolved value.
-
-    Returns the ``ResolveAllResult`` so the caller can forward the
-    resolved ``release_group_year`` into plan generation. The resolved
-    values are also persisted via ``update_request_fields`` here, so the
-    caller does not need to know which columns the resolver touches.
-    """
-    from lib.field_resolver_service import (
-        ResolveAllResult,
-        apply_resolve_all_result,
-        resolve_all,
-    )
-
-    skeleton: dict[str, Any] = {
-        "id": req_id,
-        "mb_release_id": mb_release_id,
-        "discogs_release_id": discogs_release_id,
-        "mb_release_group_id": mb_release_group_id,
-        "mb_artist_id": mb_artist_id,
-    }
-    try:
-        result = resolve_all(
-            skeleton,
-            db,
-            mb_release_payload=mb_release_payload,
-            discogs_release_payload=discogs_release_payload,
-        )
-    except Exception as exc:  # noqa: BLE001
-        # ``resolve_all`` already catches every per-resolver failure
-        # internally; the only thing that can escape is a programmer
-        # error in the orchestrator itself. Log + proceed with defaults
-        # so the add request still lands.
-        logger.exception(
-            "post_pipeline_add: resolve_all crashed for request %s: %s",
-            req_id, exc,
-        )
-        return ResolveAllResult()
-
-    try:
-        applied = apply_resolve_all_result(
-            db, req_id, result,
-            expected_status="wanted",
-            existing_mb_release_group_id=mb_release_group_id,
-        )
-        if not applied:
-            logger.warning(
-                "post_pipeline_add: request %s changed while resolved fields "
-                "were being persisted",
-                req_id,
-            )
-            return None
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(
-            "post_pipeline_add: update_request_fields failed for "
-            "request %s: %s", req_id, exc,
-        )
-    return result
+def _creation_result_or_respond(
+    h: RouteHandler, result: RequestCreationResult,
+) -> int | None:
+    """Map the shared create-or-resume result to the HTTP contract."""
+    if result.outcome in {"created", "resumed", "exists"}:
+        return result.request_id
+    if result.outcome == "busy":
+        h._json({"error": "creation_busy", "detail": result.detail}, status=409)
+        return None
+    h._json({
+        "error": "initialization_failed", "id": result.request_id,
+        "detail": result.detail,
+    }, status=500)
+    return None
 
 
-def _generate_plan_after_add(
-    req_id: int,
-    *,
-    artist_name: str,
-    album_title: str,
-    year: object,
-    tracks: list[dict[str, Any]],
-    source: str,
-    release_group_year: object = None,
-    is_va_compilation: bool = False,
-    catalog_number: object = None,
-) -> None:
-    """Run shared plan generation after `set_tracks()` on the add path.
-
-    Failures are recorded but never bubble up — the request is repairable
-    via startup reconciliation or explicit regeneration. This keeps the
-    add API contract stable: a 200 response means the request landed,
-    even if plan generation needs another attempt.
-
-    ``release_group_year`` (U5 of search-plan-entropy) feeds the
-    generator's conditional ``unwild_rg_year`` slot for reissues. Pass
-    ``None`` when unknown — the generator handles it gracefully.
-
-    PR2 Apply #2: ``is_va_compilation`` and ``catalog_number`` are
-    forwarded so the initial plan respects the resolver's verdict — the
-    add path runs resolver → apply → generate, so by the time this is
-    called the caller has both values. Per-track ``track_artist`` flows
-    through ``tracks`` (already persisted by ``apply_resolve_all_result``
-    → ``update_track_artists`` upstream, then re-read via ``get_tracks``
-    in the caller).
-    """
-    from lib.config import read_runtime_config
-    from lib.search_plan_service import SearchPlanService
+def _create_or_resume(creation: RequestCreationInput) -> RequestCreationResult:
     s = _server()
-    try:
-        svc = SearchPlanService(s._db(), read_runtime_config())
-        svc.generate_for_new_request(
-            req_id,
-            artist_name=artist_name,
-            album_title=album_title,
-            year=year,
-            tracks=tracks or [],
-            source=source,
-            release_group_year=release_group_year,
-            is_va_compilation=is_va_compilation,
-            catalog_number=catalog_number,
-        )
-    except Exception as exc:  # noqa: BLE001
-        # Never fail the HTTP request because plan generation hiccupped.
-        logger.warning(
-            "post_pipeline_add: plan generation failed for request %s: %s",
-            req_id, exc,
-        )
+    return RequestCreationService(
+        s._db(), read_runtime_config(),
+    ).create_or_resume(creation)
 
 
 class PipelineAddRequest(BaseModel):
@@ -300,7 +192,7 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
     if discogs_id:
         # Discogs flow: store discogs ID in both columns for pipeline compat
         existing = s._db().get_request_by_release_id(discogs_id)
-        if existing:
+        if existing and existing["status"] != "initializing":
             payload: dict[str, object] = {
                 "status": "exists",
                 "id": existing["id"],
@@ -321,55 +213,24 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
         # the pipeline DB (Codex review, issue #101).
         release = discogs_api.get_release(int(discogs_id), fresh=True)
 
-        req_id = s._db().add_request(
-            mb_release_id=discogs_id,
-            discogs_release_id=discogs_id,
-            mb_artist_id=str(release.get("artist_id") or ""),
-            artist_name=_release_str(release, "artist_name"),
-            album_title=_release_str(release, "title"),
-            year=_release_int_or_none(release, "year"),
-            country=_release_str_or_none(release, "country"),
-            source=source,
-        )
-
         discogs_tracks = _release_tracks(release)
-        if discogs_tracks:
-            s._db().set_tracks(req_id, discogs_tracks)
-
-        # U4: inline field resolution + VA detection. Discogs branch
-        # never has an MB release/release-group payload, so the
-        # resolver only sees the discogs release payload (Rule 1 of
-        # VA detection covers the canonical ID match; rules 2 + 3 are
-        # MB-only).
-        resolved = _resolve_and_update_after_add(
-            s._db(),
-            req_id,
-            mb_release_id=None,
-            discogs_release_id=discogs_id,
-            mb_release_group_id=None,
-            mb_artist_id=str(release.get("artist_id") or "") or None,
-            discogs_release_payload=release,
-        )
-        if resolved is None:
-            h._error("Request changed during field resolution", 409)
+        req_id = _creation_result_or_respond(h, _create_or_resume(
+            RequestCreationInput(
+                release_id=discogs_id,
+                mb_release_id=discogs_id,
+                discogs_release_id=discogs_id,
+                mb_artist_id=str(release.get("artist_id") or "") or None,
+                artist_name=_release_str(release, "artist_name"),
+                album_title=_release_str(release, "title"),
+                year=_release_int_or_none(release, "year"),
+                country=_release_str_or_none(release, "country"),
+                source=source,
+                tracks=discogs_tracks,
+                discogs_release_payload=release,
+            ),
+        ))
+        if req_id is None:
             return
-
-        # Re-read tracks from the DB so the per-track ``track_artist``
-        # column the resolver just wrote (PR2 Apply #1) flows into the
-        # snapshot. The in-memory ``release["tracks"]`` is the raw
-        # upstream payload and does NOT carry the resolver's output.
-        post_resolve_tracks = s._db().get_tracks(req_id)
-        _generate_plan_after_add(
-            req_id,
-            artist_name=str(release["artist_name"]),
-            album_title=str(release["title"]),
-            year=release.get("year"),
-            tracks=post_resolve_tracks,
-            source=source,
-            release_group_year=resolved.release_group_year,
-            is_va_compilation=resolved.is_va_compilation,
-            catalog_number=resolved.catalog_number,
-        )
 
         h._json({
             "status": "added",
@@ -382,7 +243,7 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
 
     # MusicBrainz flow
     existing = s._db().get_request_by_release_id(mbid)
-    if existing:
+    if existing and existing["status"] != "initializing":
         payload: dict[str, object] = {
             "status": "exists",
             "id": existing["id"],
@@ -416,55 +277,24 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
 
     rg_id = _release_str_or_none(release, "release_group_id")
 
-    req_id = s._db().add_request(
-        mb_release_id=mbid,
-        mb_release_group_id=rg_id,
-        mb_artist_id=_release_str_or_none(release, "artist_id"),
-        artist_name=_release_str(release, "artist_name"),
-        album_title=_release_str(release, "title"),
-        year=_release_int_or_none(release, "year"),
-        country=_release_str_or_none(release, "country"),
-        source=source,
-    )
-
     mb_tracks = _release_tracks(release)
-    if mb_tracks:
-        s._db().set_tracks(req_id, mb_tracks)
-
-    # U4: inline field resolution + VA detection. The resolver service
-    # is the single source of truth for ``release_group_year`` (and
-    # other R15 fields); proceed-with-NULL when the mirror is unreachable
-    # or the field is missing upstream. ``is_va_compilation`` is set
-    # ONCE at enqueue per the immutability invariant.
-    resolved = _resolve_and_update_after_add(
-        s._db(),
-        req_id,
-        mb_release_id=mbid,
-        discogs_release_id=None,
-        mb_release_group_id=str(rg_id or "") or None,
-        mb_artist_id=str(release.get("artist_id") or "") or None,
-        mb_release_payload=release_raw,
-    )
-    if resolved is None:
-        h._error("Request changed during field resolution", 409)
+    req_id = _creation_result_or_respond(h, _create_or_resume(
+        RequestCreationInput(
+            release_id=mbid,
+            mb_release_id=mbid,
+            mb_release_group_id=rg_id,
+            mb_artist_id=_release_str_or_none(release, "artist_id"),
+            artist_name=_release_str(release, "artist_name"),
+            album_title=_release_str(release, "title"),
+            year=_release_int_or_none(release, "year"),
+            country=_release_str_or_none(release, "country"),
+            source=source,
+            tracks=mb_tracks,
+            mb_release_payload=release_raw,
+        ),
+    ))
+    if req_id is None:
         return
-
-    # Re-read tracks from the DB so the per-track ``track_artist``
-    # column the resolver just wrote (PR2 Apply #1) flows into the
-    # snapshot. The in-memory ``release["tracks"]`` is the raw upstream
-    # payload and does NOT carry the resolver's output.
-    post_resolve_tracks = s._db().get_tracks(req_id)
-    _generate_plan_after_add(
-        req_id,
-        artist_name=str(release["artist_name"]),
-        album_title=str(release["title"]),
-        year=release.get("year"),
-        tracks=post_resolve_tracks,
-        source=source,
-        release_group_year=resolved.release_group_year,
-        is_va_compilation=resolved.is_va_compilation,
-        catalog_number=resolved.catalog_number,
-    )
 
     h._json({
         "status": "added",
@@ -561,7 +391,7 @@ def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
         min_bitrate = b.get_min_bitrate(mbid)
 
     existing = s._db().get_request_by_release_id(mbid)
-    if existing:
+    if existing and existing["status"] != "initializing":
         # Preserve a stricter existing override (e.g. "lossless" set by
         # the quality gate after a CBR 320 import) so clicking Upgrade
         # doesn't re-open tiers the gate already closed, which would
@@ -602,15 +432,22 @@ def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
         # browse. Cheap extra mirror hit on a write path.
         if source == "discogs":
             release = discogs_api.get_release(int(mbid), fresh=True)
-            req_id = s._db().add_request(
+            creation = RequestCreationInput(
+                release_id=mbid,
                 mb_release_id=mbid,
                 discogs_release_id=mbid,
-                mb_artist_id=str(release.get("artist_id") or ""),
+                mb_artist_id=str(release.get("artist_id") or "") or None,
                 artist_name=_release_str(release, "artist_name"),
                 album_title=_release_str(release, "title"),
                 year=_release_int_or_none(release, "year"),
                 country=_release_str_or_none(release, "country"),
                 source="request",
+                tracks=_release_tracks(release),
+                discogs_release_payload=release,
+                final_fields={
+                    "search_filetype_override": quality,
+                    "min_bitrate": min_bitrate,
+                },
             )
         else:
             release = mb_api.get_release(mbid, fresh=True)
@@ -630,7 +467,8 @@ def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
                     if exc.code != 404:
                         raise
                     rg_year_upgrade = None
-            req_id = s._db().add_request(
+            creation = RequestCreationInput(
+                release_id=mbid,
                 mb_release_id=mbid,
                 mb_release_group_id=rg_id_upgrade,
                 mb_artist_id=_release_str_or_none(release, "artist_id"),
@@ -640,30 +478,15 @@ def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
                 release_group_year=rg_year_upgrade,
                 country=_release_str_or_none(release, "country"),
                 source="request",
+                tracks=_release_tracks(release),
+                mb_release_payload=mb_api.get_release_raw(mbid, fresh=True),
+                final_fields={
+                    "search_filetype_override": quality,
+                    "min_bitrate": min_bitrate,
+                },
             )
-        upgrade_tracks = _release_tracks(release)
-        if upgrade_tracks:
-            s._db().set_tracks(req_id, upgrade_tracks)
-        _generate_plan_after_add(
-            req_id,
-            artist_name=str(release["artist_name"]),
-            album_title=str(release["title"]),
-            year=release.get("year"),
-            tracks=upgrade_tracks,
-            source="request",
-            release_group_year=rg_year_upgrade,
-        )
-        # Newly added request — status is already 'wanted', set quality override
-        result = finalize_request(
-            s._db(),
-            req_id,
-            transitions.RequestTransition.to_wanted(
-                from_status="wanted",
-                search_filetype_override=quality,
-                min_bitrate=min_bitrate,
-            ),
-        )
-        if not _transition_applied_or_respond(h, result):
+        req_id = _creation_result_or_respond(h, _create_or_resume(creation))
+        if req_id is None:
             return
         h._json({
             "status": "upgrade_queued",

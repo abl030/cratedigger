@@ -239,8 +239,9 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
                 "/api/pipeline/add", {"mb_release_id": "add-race-source"},
             )
 
-        self.assertEqual(status, 409)
-        self.assertIn("changed during field resolution", data["error"])
+        self.assertEqual(status, 500)
+        self.assertEqual(data["error"], "initialization_failed")
+        self.assertIn("changed during resolution", data["detail"])
         source = racing_db.get_request_by_release_id("add-race-source")
         assert source is not None
         self.assertEqual(source["status"], "replaced")

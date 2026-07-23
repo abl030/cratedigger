@@ -4,7 +4,8 @@ Pure functions for transition validation. The imperative apply_transition()
 delegates to pipeline_db methods and is the single entry point for all
 state mutations.
 
-Active statuses: wanted, downloading, imported, unsearchable.
+Active statuses: wanted, downloading, imported, unsearchable. ``initializing``
+is a deliberately non-runnable creation state with one outgoing edge.
 Terminal audit status: replaced (no outgoing lifecycle transitions).
 """
 
@@ -539,6 +540,10 @@ class TransitionSideEffects:
 # Table of valid transitions and their required side effects.
 # Any (from, to) pair not in this table is an invalid transition.
 VALID_TRANSITIONS: dict[tuple[str, str], TransitionSideEffects] = {
+    # Creation publication. The RequestCreationService is the only caller:
+    # it has persisted tracks, resolver audit, and a plan outcome before this
+    # CAS makes the row visible to normal workers.
+    ("initializing", "wanted"): TransitionSideEffects(),
     # Normal flow
     ("wanted", "downloading"): TransitionSideEffects(),
     ("downloading", "imported"): TransitionSideEffects(),
