@@ -8,19 +8,23 @@ requests-by-rg, active-rgs, import-jobs) stay in ``web/routes/pipeline.py``.
 
 import logging
 import urllib.error
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Literal, Mapping
 
 import msgspec
 from pydantic import BaseModel, Field, model_validator
 
 from lib.pipeline_db import PipelineDB
+from lib.pipeline_db.rows import AlbumRequestRow
+from lib.config import read_runtime_config
+from lib.request_creation_service import (
+    RequestCreationInput,
+    RequestCreationResult,
+    RequestCreationService,
+)
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, route
 from web.routes._server_access import _server
 from web.routes.pipeline import _serialize_import_job
-
-if TYPE_CHECKING:
-    from lib.field_resolver_service import ResolveAllResult
 
 logger = logging.getLogger(__name__)
 
@@ -133,138 +137,88 @@ def _request_fields_applied_or_respond(
     ))
 
 
-def _resolve_and_update_after_add(
-    db: PipelineDB,
-    req_id: int,
-    *,
-    mb_release_id: str | None,
-    discogs_release_id: str | None,
-    mb_release_group_id: str | None,
-    mb_artist_id: str | None,
-    mb_release_payload: dict[str, Any] | None = None,
-    discogs_release_payload: dict[str, Any] | None = None,
-) -> "ResolveAllResult | None":
-    """U4 helper: run ``resolve_all`` against a freshly inserted request
-    and persist the resolved fields plus the VA flag.
+def _initializing_mutation_rejected(h: RouteHandler, req: Mapping[str, object]) -> bool:
+    """Keep generic operator mutations out of service-owned initialization."""
+    if req["status"] != "initializing":
+        return False
+    h._json({
+        "error": "initialization_incomplete",
+        "id": req["id"],
+        "detail": "retry the original add or upgrade to resume initialization",
+    }, status=409)
+    return True
 
-    ``resolve_all`` is best-effort by design (proceed-with-NULL on any
-    upstream failure); we never raise back up to the HTTP handler. The
-    side-table rows recorded by the resolver service are the operator
-    visibility into unresolved fields. ``is_va_compilation`` is set ONCE
-    at enqueue per the immutability invariant — the row reads back
-    ``FALSE`` from the schema's default until this call lands the
-    resolved value.
 
-    Returns the ``ResolveAllResult`` so the caller can forward the
-    resolved ``release_group_year`` into plan generation. The resolved
-    values are also persisted via ``update_request_fields`` here, so the
-    caller does not need to know which columns the resolver touches.
-    """
-    from lib.field_resolver_service import (
-        ResolveAllResult,
-        apply_resolve_all_result,
-        resolve_all,
-    )
+def _creation_result_or_respond(
+    h: RouteHandler, result: RequestCreationResult,
+) -> RequestCreationResult | None:
+    """Map failures while preserving the authoritative creation outcome."""
+    if result.outcome in {"created", "resumed", "exists"}:
+        return result
+    if result.outcome == "busy":
+        h._json({"error": "creation_busy", "detail": result.detail}, status=409)
+        return None
+    h._json({
+        "error": "initialization_failed", "id": result.request_id,
+        "detail": result.detail,
+    }, status=500)
+    return None
 
-    skeleton: dict[str, Any] = {
-        "id": req_id,
-        "mb_release_id": mb_release_id,
-        "discogs_release_id": discogs_release_id,
-        "mb_release_group_id": mb_release_group_id,
-        "mb_artist_id": mb_artist_id,
+
+def _add_exists_response(h: RouteHandler, db: PipelineDB,
+                         request_id: int | None) -> None:
+    """Return the established Add exists response from the in-lock identity."""
+    if request_id is None:
+        h._error("Request creation returned no request id", 500)
+        return
+    existing = db.get_request(request_id)
+    if existing is None:
+        h._error("Request disappeared during creation", 409)
+        return
+    payload: dict[str, object] = {
+        "status": "exists",
+        "id": existing["id"],
+        "current_status": existing["status"],
     }
-    try:
-        result = resolve_all(
-            skeleton,
-            db,
-            mb_release_payload=mb_release_payload,
-            discogs_release_payload=discogs_release_payload,
-        )
-    except Exception as exc:  # noqa: BLE001
-        # ``resolve_all`` already catches every per-resolver failure
-        # internally; the only thing that can escape is a programmer
-        # error in the orchestrator itself. Log + proceed with defaults
-        # so the add request still lands.
-        logger.exception(
-            "post_pipeline_add: resolve_all crashed for request %s: %s",
-            req_id, exc,
-        )
-        return ResolveAllResult()
-
-    try:
-        applied = apply_resolve_all_result(
-            db, req_id, result,
-            expected_status="wanted",
-            existing_mb_release_group_id=mb_release_group_id,
-        )
-        if not applied:
-            logger.warning(
-                "post_pipeline_add: request %s changed while resolved fields "
-                "were being persisted",
-                req_id,
-            )
-            return None
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(
-            "post_pipeline_add: update_request_fields failed for "
-            "request %s: %s", req_id, exc,
-        )
-    return result
+    if existing["status"] == "replaced":
+        descendant = db.get_request_by_replaces_request_id(existing["id"])
+        if descendant is not None:
+            payload["descendant_request_id"] = descendant["id"]
+            payload["descendant_status"] = descendant.get("status")
+    h._json(payload)
 
 
-def _generate_plan_after_add(
-    req_id: int,
-    *,
-    artist_name: str,
-    album_title: str,
-    year: object,
-    tracks: list[dict[str, Any]],
-    source: str,
-    release_group_year: object = None,
-    is_va_compilation: bool = False,
-    catalog_number: object = None,
-) -> None:
-    """Run shared plan generation after `set_tracks()` on the add path.
+def _queue_existing_upgrade(h: RouteHandler, db: PipelineDB,
+                            existing: AlbumRequestRow,
+                            min_bitrate: int | None) -> None:
+    """Apply the sole existing-row Upgrade policy and report its result."""
+    quality = resolve_user_requeue_override(existing.get("search_filetype_override"))
+    req_id = int(existing["id"])
+    transition_fields: dict[str, object] = {"search_filetype_override": quality}
+    if min_bitrate is not None:
+        transition_fields["min_bitrate"] = min_bitrate
+    result = finalize_request(
+        db,
+        req_id,
+        transitions.RequestTransition.to_wanted_fields(
+            from_status=str(existing["status"]), fields=transition_fields,
+        ),
+    )
+    if not _transition_applied_or_respond(h, result):
+        return
+    h._json({
+        "status": "upgrade_queued",
+        "id": req_id,
+        "min_bitrate": min_bitrate,
+        "search_filetype_override": quality,
+    })
 
-    Failures are recorded but never bubble up — the request is repairable
-    via startup reconciliation or explicit regeneration. This keeps the
-    add API contract stable: a 200 response means the request landed,
-    even if plan generation needs another attempt.
 
-    ``release_group_year`` (U5 of search-plan-entropy) feeds the
-    generator's conditional ``unwild_rg_year`` slot for reissues. Pass
-    ``None`` when unknown — the generator handles it gracefully.
-
-    PR2 Apply #2: ``is_va_compilation`` and ``catalog_number`` are
-    forwarded so the initial plan respects the resolver's verdict — the
-    add path runs resolver → apply → generate, so by the time this is
-    called the caller has both values. Per-track ``track_artist`` flows
-    through ``tracks`` (already persisted by ``apply_resolve_all_result``
-    → ``update_track_artists`` upstream, then re-read via ``get_tracks``
-    in the caller).
-    """
-    from lib.config import read_runtime_config
-    from lib.search_plan_service import SearchPlanService
+def _create_or_resume(creation: RequestCreationInput) -> RequestCreationResult:
     s = _server()
-    try:
-        svc = SearchPlanService(s._db(), read_runtime_config())
-        svc.generate_for_new_request(
-            req_id,
-            artist_name=artist_name,
-            album_title=album_title,
-            year=year,
-            tracks=tracks or [],
-            source=source,
-            release_group_year=release_group_year,
-            is_va_compilation=is_va_compilation,
-            catalog_number=catalog_number,
-        )
-    except Exception as exc:  # noqa: BLE001
-        # Never fail the HTTP request because plan generation hiccupped.
-        logger.warning(
-            "post_pipeline_add: plan generation failed for request %s: %s",
-            req_id, exc,
-        )
+    return RequestCreationService(
+        s._db(), read_runtime_config(),
+    ).create_or_resume(creation)
 
 
 class PipelineAddRequest(BaseModel):
@@ -300,19 +254,8 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
     if discogs_id:
         # Discogs flow: store discogs ID in both columns for pipeline compat
         existing = s._db().get_request_by_release_id(discogs_id)
-        if existing:
-            payload: dict[str, object] = {
-                "status": "exists",
-                "id": existing["id"],
-                "current_status": existing["status"],
-            }
-            if existing["status"] == "replaced":
-                descendant = s._db().get_request_by_replaces_request_id(
-                    existing["id"])
-                if descendant is not None:
-                    payload["descendant_request_id"] = descendant["id"]
-                    payload["descendant_status"] = descendant.get("status")
-            h._json(payload)
+        if existing and existing["status"] != "initializing":
+            _add_exists_response(h, s._db(), existing["id"])
             return
 
         # Bypass the 24h meta cache — this write path persists artist /
@@ -321,55 +264,29 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
         # the pipeline DB (Codex review, issue #101).
         release = discogs_api.get_release(int(discogs_id), fresh=True)
 
-        req_id = s._db().add_request(
-            mb_release_id=discogs_id,
-            discogs_release_id=discogs_id,
-            mb_artist_id=str(release.get("artist_id") or ""),
-            artist_name=_release_str(release, "artist_name"),
-            album_title=_release_str(release, "title"),
-            year=_release_int_or_none(release, "year"),
-            country=_release_str_or_none(release, "country"),
-            source=source,
-        )
-
         discogs_tracks = _release_tracks(release)
-        if discogs_tracks:
-            s._db().set_tracks(req_id, discogs_tracks)
-
-        # U4: inline field resolution + VA detection. Discogs branch
-        # never has an MB release/release-group payload, so the
-        # resolver only sees the discogs release payload (Rule 1 of
-        # VA detection covers the canonical ID match; rules 2 + 3 are
-        # MB-only).
-        resolved = _resolve_and_update_after_add(
-            s._db(),
-            req_id,
-            mb_release_id=None,
-            discogs_release_id=discogs_id,
-            mb_release_group_id=None,
-            mb_artist_id=str(release.get("artist_id") or "") or None,
-            discogs_release_payload=release,
-        )
-        if resolved is None:
-            h._error("Request changed during field resolution", 409)
+        creation_result = _creation_result_or_respond(h, _create_or_resume(
+            RequestCreationInput(
+                release_id=discogs_id,
+                mb_release_id=discogs_id,
+                discogs_release_id=discogs_id,
+                mb_artist_id=str(release.get("artist_id") or "") or None,
+                artist_name=_release_str(release, "artist_name"),
+                album_title=_release_str(release, "title"),
+                year=_release_int_or_none(release, "year"),
+                country=_release_str_or_none(release, "country"),
+                source=source,
+                tracks=discogs_tracks,
+                discogs_release_payload=release,
+            ),
+        ))
+        if creation_result is None:
             return
-
-        # Re-read tracks from the DB so the per-track ``track_artist``
-        # column the resolver just wrote (PR2 Apply #1) flows into the
-        # snapshot. The in-memory ``release["tracks"]`` is the raw
-        # upstream payload and does NOT carry the resolver's output.
-        post_resolve_tracks = s._db().get_tracks(req_id)
-        _generate_plan_after_add(
-            req_id,
-            artist_name=str(release["artist_name"]),
-            album_title=str(release["title"]),
-            year=release.get("year"),
-            tracks=post_resolve_tracks,
-            source=source,
-            release_group_year=resolved.release_group_year,
-            is_va_compilation=resolved.is_va_compilation,
-            catalog_number=resolved.catalog_number,
-        )
+        if creation_result.outcome == "exists":
+            _add_exists_response(h, s._db(), creation_result.request_id)
+            return
+        req_id = creation_result.request_id
+        assert req_id is not None
 
         h._json({
             "status": "added",
@@ -382,24 +299,8 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
 
     # MusicBrainz flow
     existing = s._db().get_request_by_release_id(mbid)
-    if existing:
-        payload: dict[str, object] = {
-            "status": "exists",
-            "id": existing["id"],
-            "current_status": existing["status"],
-        }
-        # R33 / U10: when the existing row is a frozen audit row from a
-        # past Replace, surface the descendant id so the UI can render a
-        # "previously abandoned — active request is at /pipeline/<id>"
-        # forward-link instead of the generic "already in pipeline"
-        # message.
-        if existing["status"] == "replaced":
-            descendant = s._db().get_request_by_replaces_request_id(
-                existing["id"])
-            if descendant is not None:
-                payload["descendant_request_id"] = descendant["id"]
-                payload["descendant_status"] = descendant.get("status")
-        h._json(payload)
+    if existing and existing["status"] != "initializing":
+        _add_exists_response(h, s._db(), existing["id"])
         return
 
     # Bypass the 24h meta cache — same reason as the Discogs branch
@@ -416,55 +317,29 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
 
     rg_id = _release_str_or_none(release, "release_group_id")
 
-    req_id = s._db().add_request(
-        mb_release_id=mbid,
-        mb_release_group_id=rg_id,
-        mb_artist_id=_release_str_or_none(release, "artist_id"),
-        artist_name=_release_str(release, "artist_name"),
-        album_title=_release_str(release, "title"),
-        year=_release_int_or_none(release, "year"),
-        country=_release_str_or_none(release, "country"),
-        source=source,
-    )
-
     mb_tracks = _release_tracks(release)
-    if mb_tracks:
-        s._db().set_tracks(req_id, mb_tracks)
-
-    # U4: inline field resolution + VA detection. The resolver service
-    # is the single source of truth for ``release_group_year`` (and
-    # other R15 fields); proceed-with-NULL when the mirror is unreachable
-    # or the field is missing upstream. ``is_va_compilation`` is set
-    # ONCE at enqueue per the immutability invariant.
-    resolved = _resolve_and_update_after_add(
-        s._db(),
-        req_id,
-        mb_release_id=mbid,
-        discogs_release_id=None,
-        mb_release_group_id=str(rg_id or "") or None,
-        mb_artist_id=str(release.get("artist_id") or "") or None,
-        mb_release_payload=release_raw,
-    )
-    if resolved is None:
-        h._error("Request changed during field resolution", 409)
+    creation_result = _creation_result_or_respond(h, _create_or_resume(
+        RequestCreationInput(
+            release_id=mbid,
+            mb_release_id=mbid,
+            mb_release_group_id=rg_id,
+            mb_artist_id=_release_str_or_none(release, "artist_id"),
+            artist_name=_release_str(release, "artist_name"),
+            album_title=_release_str(release, "title"),
+            year=_release_int_or_none(release, "year"),
+            country=_release_str_or_none(release, "country"),
+            source=source,
+            tracks=mb_tracks,
+            mb_release_payload=release_raw,
+        ),
+    ))
+    if creation_result is None:
         return
-
-    # Re-read tracks from the DB so the per-track ``track_artist``
-    # column the resolver just wrote (PR2 Apply #1) flows into the
-    # snapshot. The in-memory ``release["tracks"]`` is the raw upstream
-    # payload and does NOT carry the resolver's output.
-    post_resolve_tracks = s._db().get_tracks(req_id)
-    _generate_plan_after_add(
-        req_id,
-        artist_name=str(release["artist_name"]),
-        album_title=str(release["title"]),
-        year=release.get("year"),
-        tracks=post_resolve_tracks,
-        source=source,
-        release_group_year=resolved.release_group_year,
-        is_va_compilation=resolved.is_va_compilation,
-        catalog_number=resolved.catalog_number,
-    )
+    if creation_result.outcome == "exists":
+        _add_exists_response(h, s._db(), creation_result.request_id)
+        return
+    req_id = creation_result.request_id
+    assert req_id is not None
 
     h._json({
         "status": "added",
@@ -491,6 +366,8 @@ def post_pipeline_update(h: RouteHandler, body: dict[str, object]) -> None:
     req = s._db().get_request(int(req_id))
     if not req:
         h._error("Not found", 404)
+        return
+    if _initializing_mutation_rejected(h, req):
         return
 
     if new_status == "wanted" and req["status"] != "wanted":
@@ -561,36 +438,8 @@ def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
         min_bitrate = b.get_min_bitrate(mbid)
 
     existing = s._db().get_request_by_release_id(mbid)
-    if existing:
-        # Preserve a stricter existing override (e.g. "lossless" set by
-        # the quality gate after a CBR 320 import) so clicking Upgrade
-        # doesn't re-open tiers the gate already closed, which would
-        # re-enqueue same-quality MP3 sources that get rejected as
-        # downgrades in a loop.
-        quality = resolve_user_requeue_override(
-            existing.get("search_filetype_override"))
-        req_id = existing["id"]
-        transition_fields: dict[str, object] = {
-            "search_filetype_override": quality,
-        }
-        if min_bitrate is not None:
-            transition_fields["min_bitrate"] = min_bitrate
-        result = finalize_request(
-            s._db(),
-            req_id,
-            transitions.RequestTransition.to_wanted_fields(
-                from_status=existing["status"],
-                fields=transition_fields,
-            ),
-        )
-        if not _transition_applied_or_respond(h, result):
-            return
-        h._json({
-            "status": "upgrade_queued",
-            "id": req_id,
-            "min_bitrate": min_bitrate,
-            "search_filetype_override": quality,
-        })
+    if existing and existing["status"] != "initializing":
+        _queue_existing_upgrade(h, s._db(), existing, min_bitrate)
     else:
         # Brand-new request — no prior override to preserve.
         quality = QUALITY_UPGRADE_TIERS
@@ -602,15 +451,22 @@ def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
         # browse. Cheap extra mirror hit on a write path.
         if source == "discogs":
             release = discogs_api.get_release(int(mbid), fresh=True)
-            req_id = s._db().add_request(
+            creation = RequestCreationInput(
+                release_id=mbid,
                 mb_release_id=mbid,
                 discogs_release_id=mbid,
-                mb_artist_id=str(release.get("artist_id") or ""),
+                mb_artist_id=str(release.get("artist_id") or "") or None,
                 artist_name=_release_str(release, "artist_name"),
                 album_title=_release_str(release, "title"),
                 year=_release_int_or_none(release, "year"),
                 country=_release_str_or_none(release, "country"),
                 source="request",
+                tracks=_release_tracks(release),
+                discogs_release_payload=release,
+                final_fields={
+                    "search_filetype_override": quality,
+                    "min_bitrate": min_bitrate,
+                },
             )
         else:
             release = mb_api.get_release(mbid, fresh=True)
@@ -630,7 +486,8 @@ def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
                     if exc.code != 404:
                         raise
                     rg_year_upgrade = None
-            req_id = s._db().add_request(
+            creation = RequestCreationInput(
+                release_id=mbid,
                 mb_release_id=mbid,
                 mb_release_group_id=rg_id_upgrade,
                 mb_artist_id=_release_str_or_none(release, "artist_id"),
@@ -640,31 +497,25 @@ def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
                 release_group_year=rg_year_upgrade,
                 country=_release_str_or_none(release, "country"),
                 source="request",
+                tracks=_release_tracks(release),
+                mb_release_payload=mb_api.get_release_raw(mbid, fresh=True),
+                final_fields={
+                    "search_filetype_override": quality,
+                    "min_bitrate": min_bitrate,
+                },
             )
-        upgrade_tracks = _release_tracks(release)
-        if upgrade_tracks:
-            s._db().set_tracks(req_id, upgrade_tracks)
-        _generate_plan_after_add(
-            req_id,
-            artist_name=str(release["artist_name"]),
-            album_title=str(release["title"]),
-            year=release.get("year"),
-            tracks=upgrade_tracks,
-            source="request",
-            release_group_year=rg_year_upgrade,
-        )
-        # Newly added request — status is already 'wanted', set quality override
-        result = finalize_request(
-            s._db(),
-            req_id,
-            transitions.RequestTransition.to_wanted(
-                from_status="wanted",
-                search_filetype_override=quality,
-                min_bitrate=min_bitrate,
-            ),
-        )
-        if not _transition_applied_or_respond(h, result):
+        creation_result = _creation_result_or_respond(h, _create_or_resume(creation))
+        if creation_result is None:
             return
+        if creation_result.outcome == "exists":
+            existing_after_race = s._db().get_request(creation_result.request_id or 0)
+            if existing_after_race is None:
+                h._error("Request disappeared during creation", 409)
+                return
+            _queue_existing_upgrade(h, s._db(), existing_after_race, min_bitrate)
+            return
+        req_id = creation_result.request_id
+        assert req_id is not None
         h._json({
             "status": "upgrade_queued",
             "id": req_id,
@@ -696,6 +547,8 @@ def post_pipeline_set_quality(h: RouteHandler, body: dict[str, object]) -> None:
     existing = s._db().get_request_by_release_id(mbid)
     if not existing:
         h._error("Not found in pipeline", 404)
+        return
+    if _initializing_mutation_rejected(h, existing):
         return
 
     req_id = existing["id"]
@@ -824,6 +677,8 @@ def post_pipeline_set_intent(h: RouteHandler, body: dict[str, object]) -> None:
     req = s._db().get_request(int(req_id))
     if not req:
         h._error("Not found", 404)
+        return
+    if _initializing_mutation_rejected(h, req):
         return
 
     if req["status"] == "downloading":

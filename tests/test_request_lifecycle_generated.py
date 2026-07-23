@@ -76,7 +76,7 @@ from tests.fakes import FakePipelineDB
 from tests.helpers import make_active_download_state_json
 
 LEGAL_STATUSES = frozenset(
-    {"wanted", "downloading", "imported", "unsearchable", "replaced"})
+    {"initializing", "wanted", "downloading", "imported", "unsearchable", "replaced"})
 
 _IDENTITY_FIELDS = ("mb_release_id", "source", "created_at")
 

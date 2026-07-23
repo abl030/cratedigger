@@ -83,7 +83,7 @@ import msgspec
 
 
 class AlbumRequestRow(TypedDict):
-    """One ``SELECT * FROM album_requests`` row (53 columns as of schema 062)."""
+    """One ``SELECT * FROM album_requests`` row (53 columns as of schema 063)."""
 
     id: int
     mb_release_id: str | None

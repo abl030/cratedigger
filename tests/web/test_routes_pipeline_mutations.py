@@ -201,6 +201,84 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         _assert_required_fields(self, data, self.EXISTS_REQUIRED_FIELDS,
                                 "pipeline add exists response")
 
+    @patch("web.routes.pipeline_mutations.mb_api.get_release")
+    def test_pipeline_add_mb_preflight_race_reports_authoritative_exists(
+        self, mock_release,
+    ):
+        mock_release.return_value = {
+            "artist_name": "Race", "title": "MB", "tracks": [],
+        }
+        self.db.arm_request_creation_race(
+            "mb-add-race", status="imported",
+        )
+        status, data = self._post(
+            "/api/pipeline/add", {"mb_release_id": "mb-add-race"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "exists")
+        self.assertEqual(data["current_status"], "imported")
+
+    @patch("web.routes.pipeline_mutations.discogs_api.get_release")
+    def test_pipeline_add_discogs_preflight_race_reports_authoritative_exists(
+        self, mock_release,
+    ):
+        mock_release.return_value = {
+            "artist_name": "Race", "title": "Discogs", "tracks": [],
+        }
+        self.db.arm_request_creation_race(
+            "7912", status="imported", discogs=True,
+        )
+        status, data = self._post(
+            "/api/pipeline/add", {"discogs_release_id": "7912"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "exists")
+        self.assertEqual(data["current_status"], "imported")
+
+    @patch("web.routes.pipeline_mutations.mb_api.get_release")
+    def test_pipeline_upgrade_mb_preflight_race_uses_existing_row_policy(
+        self, mock_release,
+    ):
+        mock_release.return_value = {
+            "artist_name": "Race", "title": "MB", "tracks": [],
+        }
+        self.db.arm_request_creation_race(
+            "mb-upgrade-race", status="imported",
+        )
+        status, data = self._post(
+            "/api/pipeline/upgrade", {"mb_release_id": "mb-upgrade-race"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "upgrade_queued")
+        self.assertNotIn("created", data)
+        request_id = data["id"]
+        assert isinstance(request_id, int)
+        self.assertEqual(self.db.request(request_id)["status"], "wanted")
+
+    @patch("web.routes.pipeline_mutations.discogs_api.get_release")
+    def test_pipeline_upgrade_discogs_preflight_race_uses_existing_row_policy(
+        self, mock_release,
+    ):
+        mock_release.return_value = {
+            "artist_name": "Race", "title": "Discogs", "tracks": [],
+        }
+        self.db.arm_request_creation_race(
+            "7914", status="imported", discogs=True,
+        )
+        status, data = self._post(
+            "/api/pipeline/upgrade", {"mb_release_id": "7914"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "upgrade_queued")
+        self.assertNotIn("created", data)
+        request_id = data["id"]
+        assert isinstance(request_id, int)
+        self.assertEqual(self.db.request(request_id)["status"], "wanted")
+
     @patch("web.routes.pipeline_mutations.mb_api.get_release_raw")
     @patch("web.routes.pipeline_mutations.mb_api.get_release")
     @patch("web.routes.pipeline_mutations.mb_api.get_release_group_year")
@@ -239,8 +317,9 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
                 "/api/pipeline/add", {"mb_release_id": "add-race-source"},
             )
 
-        self.assertEqual(status, 409)
-        self.assertIn("changed during field resolution", data["error"])
+        self.assertEqual(status, 500)
+        self.assertEqual(data["error"], "initialization_failed")
+        self.assertIn("changed during resolution", data["detail"])
         source = racing_db.get_request_by_release_id("add-race-source")
         assert source is not None
         self.assertEqual(source["status"], "replaced")
@@ -674,6 +753,19 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
                 self.assertEqual(data["new_status"], request_status)
                 self.assertEqual(self.db.get_request(index), before)
 
+    def test_pipeline_update_rejects_initializing_request(self):
+        self.db.seed_request(make_request_row(
+            id=791, status="initializing", mb_release_id="initializing-update",
+        ))
+
+        status, data = self._post(
+            "/api/pipeline/update", {"id": 791, "status": "wanted"},
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "initialization_incomplete")
+        self.assertEqual(self.db.request(791)["status"], "initializing")
+
     def test_pipeline_update_imported_to_unsearchable_is_rejected(self):
         self.db.seed_request(make_request_row(
             id=604,
@@ -784,6 +876,19 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         _assert_required_fields(self, data, self.SET_QUALITY_REQUIRED_FIELDS,
                                 "pipeline set-quality response (discogs)")
 
+    def test_pipeline_set_quality_rejects_initializing_request(self):
+        self.db.seed_request(make_request_row(
+            id=792, status="initializing", mb_release_id="initializing-quality",
+        ))
+
+        status, data = self._post(
+            "/api/pipeline/set-quality",
+            {"mb_release_id": "initializing-quality", "min_bitrate": 320},
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "initialization_incomplete")
+
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_pipeline_upgrade_normalizes_uppercase_uuid(self, mock_transition):
         self.db.seed_request(make_request_row(
@@ -813,6 +918,18 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.SET_INTENT_REQUIRED_FIELDS,
                                 "pipeline set-intent response")
+
+    def test_pipeline_set_intent_rejects_initializing_request(self):
+        self.db.seed_request(make_request_row(
+            id=793, status="initializing", mb_release_id="initializing-intent",
+        ))
+
+        status, data = self._post(
+            "/api/pipeline/set-intent", {"id": 793, "intent": "lossless"},
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "initialization_incomplete")
 
     def test_pipeline_set_intent_reports_replace_race(self):
         import web.server as srv

@@ -444,6 +444,11 @@ class FakePipelineDB:
         self._cooldown_result: bool | Callable[[str], bool] = False
         self._advisory_lock_result: (
             bool | Callable[[int, int], bool]) = True
+        # Deterministic preflight-vs-in-lock request-creation race. The first
+        # identity lookup sees no row; the second materializes the competing
+        # row that won before RequestCreationService acquired RELEASE.
+        self._request_creation_race: tuple[str, str, bool, bool] | None = None
+        self._request_creation_race_lookups = 0
         # Per-request failure injection for the active_download_state
         # writers (issue #564 review): ``set_update_download_state_error``
         # makes ``update_download_state`` (and, via delegation, its
@@ -1905,6 +1910,28 @@ class FakePipelineDB:
         if not normalized:
             return None
 
+        race = self._request_creation_race
+        if race is not None and normalized == race[0]:
+            self._request_creation_race_lookups += 1
+            if self._request_creation_race_lookups == 1:
+                return None
+            if self._request_creation_race_lookups == 2:
+                _, status, discogs, disappear = race
+                request_id = self.add_request(
+                    mb_release_id=normalized,
+                    discogs_release_id=normalized if discogs else None,
+                    artist_name="Race",
+                    album_title="Concurrent request",
+                    source="request",
+                    status=status,
+                )
+                row = self.get_request(request_id)
+                assert row is not None
+                self._request_creation_race = None
+                if disappear:
+                    self._requests.pop(request_id)
+                return row
+
         identity = ReleaseIdentity.from_fields(normalized)
         if identity is None:
             return self.get_request_by_mb_release_id(normalized)
@@ -1916,6 +1943,23 @@ class FakePipelineDB:
         if req:
             return req
         return self.get_request_by_mb_release_id(identity.release_id)
+
+    def arm_request_creation_race(
+        self,
+        release_id: str,
+        *,
+        status: str,
+        discogs: bool = False,
+        disappear_after_in_lock_lookup: bool = False,
+    ) -> None:
+        """Materialize a competing row on the next in-lock identity lookup."""
+        self._request_creation_race = (
+            normalize_release_id(release_id) or release_id,
+            status,
+            discogs,
+            disappear_after_in_lock_lookup,
+        )
+        self._request_creation_race_lookups = 0
 
     def update_status(
         self,

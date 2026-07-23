@@ -157,6 +157,11 @@ class _RequestStatusWriteVisitor(ast.NodeVisitor):
         return None
 
     def _allow_direct_transition_call(self, func_name: str, node: ast.Call) -> bool:
+        if func_name == "publish_initialized_request":
+            return self.rel_path in {
+                "lib/transitions.py",
+                "lib/request_creation_service.py",
+            }
         if _is_pipeline_db_seam(self.rel_path) or self.rel_path == "lib/transitions.py":
             return True
 
@@ -199,6 +204,7 @@ class _RequestStatusWriteVisitor(ast.NodeVisitor):
             "reset_to_wanted",
             "set_downloading",
             "update_status",
+            "publish_initialized_request",
         }:
             if not self._allow_direct_transition_call(func_name, node):
                 self.offending.append((
@@ -252,6 +258,25 @@ class TestTerminalTransitionContract(unittest.TestCase):
                 "Route them through lib.transitions.finalize_request(...).\n"
                 + "\n".join(lines)
             )
+
+    def test_initialization_publication_is_reserved_to_creation_service(self) -> None:
+        allowed = ast.parse(
+            "transitions.publish_initialized_request(db, 1, fields={})",
+        )
+        service_visitor = _RequestStatusWriteVisitor(
+            "lib/request_creation_service.py", {}, {},
+        )
+        service_visitor.visit(allowed)
+        self.assertEqual(service_visitor.offending, [])
+
+        unrelated_visitor = _RequestStatusWriteVisitor(
+            "lib/download.py", {}, {},
+        )
+        unrelated_visitor.visit(allowed)
+        self.assertEqual(
+            unrelated_visitor.offending[0][1],
+            "direct transition call",
+        )
 
     def test_every_production_finalize_request_result_is_consumed(self) -> None:
         offending: list[tuple[str, int, str]] = []
@@ -310,13 +335,17 @@ def _transition_aliases(tree: ast.AST) -> dict[str, str]:
     if not isinstance(tree, ast.Module):
         return aliases
 
+    audited_transition_names = {
+        "apply_transition",
+        "publish_initialized_request",
+    }
     for node in tree.body:
         if not isinstance(node, ast.ImportFrom):
             continue
         if node.module != "lib.transitions":
             continue
         for imported in node.names:
-            if imported.name != "apply_transition":
+            if imported.name not in audited_transition_names:
                 continue
             aliases[imported.asname or imported.name] = imported.name
 
@@ -384,6 +413,46 @@ class TestRequestStatusWriteVisitor(unittest.TestCase):
         visitor.visit(tree)
 
         self.assertEqual(len(visitor.offending), 1)
+
+    def test_rejects_aliased_initialization_publication_import(self) -> None:
+        tree = ast.parse(
+            "from lib.transitions import publish_initialized_request as publish\n"
+            "publish(db, request_id, fields={})\n"
+        )
+        visitor = _RequestStatusWriteVisitor(
+            "lib/download.py",
+            _module_string_constants(tree),
+            _transition_aliases(tree),
+        )
+
+        visitor.visit(tree)
+
+        self.assertEqual(len(visitor.offending), 1)
+        self.assertEqual(visitor.offending[0][1], "direct transition call")
+
+        service_visitor = _RequestStatusWriteVisitor(
+            "lib/request_creation_service.py",
+            _module_string_constants(tree),
+            _transition_aliases(tree),
+        )
+        service_visitor.visit(tree)
+        self.assertEqual(service_visitor.offending, [])
+
+    def test_rejects_module_aliased_initialization_publication(self) -> None:
+        tree = ast.parse(
+            "import lib.transitions as lifecycle\n"
+            "lifecycle.publish_initialized_request(db, request_id, fields={})\n"
+        )
+        visitor = _RequestStatusWriteVisitor(
+            "web/routes/pipeline.py",
+            _module_string_constants(tree),
+            _transition_aliases(tree),
+        )
+
+        visitor.visit(tree)
+
+        self.assertEqual(len(visitor.offending), 1)
+        self.assertEqual(visitor.offending[0][1], "direct transition call")
 
     def test_rejects_direct_reset_to_wanted_call(self) -> None:
         tree = ast.parse("db.reset_to_wanted(42)\n")

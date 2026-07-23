@@ -132,15 +132,18 @@ that audit trail.
 
 ## `album_requests` — quality-tracking fields
 
-- `status TEXT` — active vocabulary: `wanted`, `downloading`, `imported`,
-  `unsearchable`; terminal audit vocabulary: `replaced`. `unsearchable` is an
+- `status TEXT` — `initializing` is a provisional, non-runnable direct-creation
+  state. Its publication to `wanted` is a service-owned compare-and-set after
+  canonical tracks, field-resolution audit, and an initial plan outcome are persisted.
+  Active vocabulary: `wanted`, `downloading`, `imported`, `unsearchable`;
+  terminal audit vocabulary: `replaced`. `unsearchable` is an
   explicit operator-owned search stop and is independent of source cleanup.
   Ordinary transitions are fail-closed and use SQL compare-and-set against the
   exact observed/declared source status. `replaced` has no outgoing edge and is
   created only by the one-way `supersede_request_mbid` transaction.
 
-  The explicit transition graph has 11 edges: `wanted → downloading/
-  unsearchable/imported/wanted`; `downloading → wanted/imported`; `imported →
+  The explicit operator transition graph has 11 edges (none out of
+  `initializing`): `wanted → downloading/unsearchable/imported/wanted`; `downloading → wanted/imported`; `imported →
   wanted/imported`; and `unsearchable → wanted/imported/unsearchable`.
   `downloading → unsearchable` cannot abandon an active transfer, and
   `imported → unsearchable` cannot retroactively stop a completed request.

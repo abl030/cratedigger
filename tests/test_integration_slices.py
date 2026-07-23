@@ -10829,7 +10829,10 @@ class TestEnqueueFieldResolutionSlice(unittest.TestCase):
         # Fast resolver landed.
         self.assertEqual(row["release_group_year"], 1997)
         # At least one slow field timed out.
-        self.assertGreater(len(result.timed_out_fields), 0)
+        self.assertTrue(any(
+            field_resolution.status == "unresolved_timeout"
+            for field_resolution in db.field_resolutions.values()
+        ))
 
 
 class TestVaPlanRoundTripsThroughDB(unittest.TestCase):

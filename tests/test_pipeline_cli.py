@@ -154,6 +154,65 @@ class TestCmdAdd(unittest.TestCase):
         pipeline_cli.cmd_add(self.db, args)
         mock_fetch.assert_not_called()
 
+    @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
+    def test_mb_preflight_race_reports_authoritative_existing_status(
+        self, mock_fetch,
+    ):
+        mock_fetch.return_value = SAMPLE_MB_RELEASE
+        db = FakePipelineDB()
+        db.arm_request_creation_race(
+            SAMPLE_MB_RELEASE["id"], status="imported",
+        )
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = pipeline_cli.cmd_add(
+                db, MagicMock(mbid=SAMPLE_MB_RELEASE["id"], source="request"),
+            )
+
+        self.assertIsNone(rc)
+        self.assertIn("Already in DB:", out.getvalue())
+        self.assertIn("status=imported", out.getvalue())
+
+    @patch("web.discogs.get_release")
+    def test_discogs_preflight_race_reports_authoritative_existing_status(
+        self, mock_release,
+    ):
+        mock_release.return_value = {
+            "artist_id": "1", "artist_name": "Race", "title": "Discogs",
+            "tracks": [],
+        }
+
+        db = FakePipelineDB()
+        db.arm_request_creation_race(
+            "7919", status="unsearchable", discogs=True,
+        )
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = pipeline_cli.cmd_add(db, MagicMock(mbid="7919", source="request"))
+
+        self.assertIsNone(rc)
+        self.assertIn("status=unsearchable", out.getvalue())
+
+    @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
+    def test_in_lock_exists_with_disappeared_row_is_retryable_exit_4(
+        self, mock_fetch,
+    ):
+        mock_fetch.return_value = SAMPLE_MB_RELEASE
+        db = FakePipelineDB()
+        db.arm_request_creation_race(
+            SAMPLE_MB_RELEASE["id"],
+            status="imported",
+            disappear_after_in_lock_lookup=True,
+        )
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = pipeline_cli.cmd_add(
+                db, MagicMock(mbid=SAMPLE_MB_RELEASE["id"], source="request"),
+            )
+
+        self.assertEqual(rc, 4)
+        self.assertIn("disappeared", err.getvalue())
+
     @patch("web.mb.get_release")
     @patch("web.mb.get_release_group_year")
     @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
@@ -407,7 +466,7 @@ class TestCmdAddPlanGenerationFakeDB(unittest.TestCase):
         self.assertEqual(source["status"], "replaced")
         self.assertIsNone(db.get_tracks(source["id"])[0]["track_artist"])
         self.assertIsNone(db.get_active_search_plan(source["id"]))
-        self.assertIn("skipping plan generation", stderr.getvalue())
+        self.assertIn("Initialization failed", stderr.getvalue())
         self.assertEqual(exit_code, 4)
 
 
@@ -473,6 +532,14 @@ class TestCmdList(unittest.TestCase):
 
 
 class TestCmdSet(unittest.TestCase):
+    def test_initializing_request_cannot_be_published_by_generic_set(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=791, status="initializing"))
+
+        rc = pipeline_cli.cmd_set(db, MagicMock(id=791, status="wanted"))
+
+        self.assertEqual(rc, 4)
+        self.assertEqual(db.request(791)["status"], "initializing")
     def test_same_status_is_idempotent_for_operator_statuses(self):
         for index, status in enumerate(("wanted", "imported", "unsearchable"), 1):
             with self.subTest(status=status):
@@ -1423,6 +1490,16 @@ class TestCmdStatusShowsDownloading(unittest.TestCase):
 
 
 class TestCmdSetIntent(unittest.TestCase):
+    def test_set_intent_rejects_initializing_request(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=791, status="initializing"))
+
+        result = pipeline_cli.cmd_set_intent(
+            db, MagicMock(id=791, intent="lossless"),
+        )
+
+        self.assertEqual(result, 4)
+        self.assertEqual(db.request(791)["status"], "initializing")
     """Tests for cmd_set_intent — lossless-on-disk toggle."""
 
     @patch("builtins.print")

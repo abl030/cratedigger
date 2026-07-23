@@ -18,12 +18,16 @@ from typing import Protocol, TYPE_CHECKING
 import msgspec
 
 from lib import transitions
+from lib.config import read_runtime_config
 from lib.disk_coverage_service import DiskCoveragePipelineDB, disk_coverage
 from lib.pipeline_db.rows import album_request_row
+from lib.request_creation_service import (
+    RequestCreationInput,
+    RequestCreationService,
+)
 from lib.release_identity import detect_release_source, normalize_release_id
 
 if TYPE_CHECKING:
-    from lib.field_resolver_service import ResolveAllResult
     from lib.pipeline_db import (
         ActiveSearchPlan,
         SaturationSummary,
@@ -32,7 +36,6 @@ if TYPE_CHECKING:
         SearchPlanItemInput,
     )
     from lib.pipeline_db.rows import AlbumRequestRow
-    from lib.search_plan_service import SearchPlanService
 
 
 class _DiskCoverageArgs(msgspec.Struct, frozen=True):
@@ -57,8 +60,8 @@ class _AlbumRequestsDB(
 ):
     """Pipeline DB surface this module's ``cmd_*`` handlers touch, directly
     or via the collaborator services the ``add`` path constructs
-    (``SearchPlanService`` / ``lib.field_resolver_service`` /
-    ``lib.disk_coverage_service.disk_coverage``) (issue #784, the #409
+    (``RequestCreationService`` / ``lib.disk_coverage_service.disk_coverage``)
+    (issue #784, the #409
     narrow-protocol pattern). Inherits the two PUBLIC per-consumer
     protocols whose owning modules this file ALREADY imports eagerly
     (``transitions.TransitionsDB``, ``lib.disk_coverage_service.
@@ -278,8 +281,8 @@ def _str_or(value: object, default: str) -> str:
     """``_opt_str``'s twin for a REQUIRED string field with a fallback.
 
     Used for ``artist_name``/``album_title`` — both feed
-    ``SearchPlanService.generate_for_new_request`` (a real ``str``-typed
-    lib boundary), so a concrete ``str`` is unavoidable. Falls back to
+    request-creation service (a real ``str``-typed lib boundary), so a
+    concrete ``str`` is unavoidable. Falls back to
     ``default`` instead of asserting on a malformed non-string payload.
     """
     return value if isinstance(value, str) else default
@@ -464,152 +467,10 @@ def cmd_add(db: _AlbumRequestsDB, args: argparse.Namespace) -> int | None:
     return _cmd_add_mb(db, release_id, source)
 
 
-def _build_search_plan_service(db: _AlbumRequestsDB) -> "SearchPlanService":
-    """Construct a `SearchPlanService` against the runtime config.
-
-    CLI / web / startup all share the same source so generator-id and
-    `SearchPlanConfig` cannot drift between paths.
-    """
-    from lib.config import read_runtime_config
-    from lib.search_plan_service import SearchPlanService
-    return SearchPlanService(db, read_runtime_config())
-
-
-def _generate_plan_after_add(
-    db: _AlbumRequestsDB,
-    req_id: int,
-    *,
-    artist_name: str,
-    album_title: str,
-    year: int | None,
-    tracks: list[dict[str, object]],
-    source: str,
-    release_group_year: int | None = None,
-    is_va_compilation: bool = False,
-    catalog_number: str | None = None,
-) -> None:
-    """Run plan generation for a freshly-added request.
-
-    Failures are non-fatal: a deterministic / transient failure is
-    recorded as a `search_plans` row and the CLI prints a one-liner so
-    the operator knows the request is wanted-but-not-searchable until
-    repaired.
-
-    ``release_group_year`` (U5 of search-plan-entropy) feeds the
-    generator's conditional ``unwild_rg_year`` slot. ``None`` is fine
-    — the generator handles it gracefully.
-
-    PR2 Apply #2: ``is_va_compilation`` and ``catalog_number`` are
-    forwarded so the initial plan respects the resolver's verdict —
-    mirrors the web add helper for CLI ⇄ API symmetry.
-    """
-    from lib.search_plan_service import (
-        RESULT_FAILED_DETERMINISTIC,
-        RESULT_FAILED_TRANSIENT,
-        RESULT_SUCCESS,
-    )
-
-    svc = _build_search_plan_service(db)
-    result = svc.generate_for_new_request(
-        req_id,
-        artist_name=artist_name,
-        album_title=album_title,
-        year=year,
-        tracks=tracks,
-        source=source,
-        release_group_year=release_group_year,
-        is_va_compilation=is_va_compilation,
-        catalog_number=catalog_number,
-    )
-    if result.outcome == RESULT_SUCCESS:
-        print(f"  Plan: active id={result.plan_id}")
-    elif result.outcome == RESULT_FAILED_DETERMINISTIC:
-        print(f"  Plan: FAILED ({result.failure_class}); request not searchable")
-    elif result.outcome == RESULT_FAILED_TRANSIENT:
-        print(f"  Plan: TRANSIENT FAIL ({result.failure_class}); will retry")
-
-
-def _resolve_and_update_after_add(
-    db: _AlbumRequestsDB,
-    req_id: int,
-    *,
-    mb_release_id: str | None,
-    discogs_release_id: str | None,
-    mb_release_group_id: str | None,
-    mb_artist_id: str | None,
-    mb_release_payload: dict[str, object] | None = None,
-    discogs_release_payload: dict[str, object] | None = None,
-) -> "ResolveAllResult | None":
-    """U4 helper for the CLI add path — mirrors the web helper.
-
-    Both surfaces wrap ``field_resolver_service.resolve_all`` after the
-    new request row is inserted, so the CLI and HTTP add stay symmetric
-    (CLAUDE.md § "CLI ⇄ API surface symmetry"). The CLI prints a one-
-    liner on resolver outcomes so the operator running the script
-    knows whether a field landed NULL.
-    """
-    from lib.field_resolver_service import (
-        ResolveAllResult,
-        apply_resolve_all_result,
-        resolve_all,
-    )
-
-    skeleton: dict[str, object] = {
-        "id": req_id,
-        "mb_release_id": mb_release_id,
-        "discogs_release_id": discogs_release_id,
-        "mb_release_group_id": mb_release_group_id,
-        "mb_artist_id": mb_artist_id,
-    }
-    try:
-        result = resolve_all(
-            skeleton,
-            db,
-            mb_release_payload=mb_release_payload,
-            discogs_release_payload=discogs_release_payload,
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"  Field resolution crashed: {exc}", file=sys.stderr)
-        return ResolveAllResult()
-
-    try:
-        applied = apply_resolve_all_result(
-            db, req_id, result,
-            expected_status="wanted",
-            existing_mb_release_group_id=mb_release_group_id,
-        )
-        if not applied:
-            print(
-                f"  Request {req_id} changed during field resolution; "
-                "skipping plan generation",
-                file=sys.stderr,
-            )
-            return None
-    except Exception as exc:  # noqa: BLE001
-        print(
-            f"  Failed to persist resolved fields: {exc}",
-            file=sys.stderr,
-        )
-
-    rg_year_str = (
-        str(result.release_group_year)
-        if result.release_group_year is not None else "NULL"
-    )
-    va_str = "yes" if result.is_va_compilation else "no"
-    timed_out = (
-        f" timed_out={','.join(result.timed_out_fields)}"
-        if result.timed_out_fields else ""
-    )
-    print(
-        f"  Resolved: rg_year={rg_year_str} is_va={va_str}{timed_out}"
-    )
-    return result
-
-
 def _cmd_add_mb(db: _AlbumRequestsDB, mbid: str, source: str) -> int | None:
     """Add a MusicBrainz release to the pipeline."""
     existing = db.get_request_by_release_id(mbid)
-    if existing:
+    if existing and existing["status"] != "initializing":
         print(f"  Already in DB: id={existing['id']} status={existing['status']}")
         return None
 
@@ -640,50 +501,36 @@ def _cmd_add_mb(db: _AlbumRequestsDB, mbid: str, source: str) -> int | None:
     title = _str_or(release.get("title", "Unknown"), "Unknown")
     country = _opt_str(release.get("country"))
 
-    req_id = db.add_request(
-        mb_release_id=mbid,
-        mb_release_group_id=rg_id,
-        mb_artist_id=artist_id,
-        artist_name=artist_name,
-        album_title=title,
-        year=year,
-        country=country,
-        source=source,
-    )
-
     tracks = tracks_from_mb_release(release)
-    if tracks:
-        db.set_tracks(req_id, tracks)
-
-    print(f"  Added: id={req_id} {artist_name} - {title} ({len(tracks)} tracks)")
-    # U4: inline field resolution + VA detection. Single resolver-service
-    # invocation shared with the web add path (CLI ⇄ API symmetry).
-    resolved = _resolve_and_update_after_add(
-        db, req_id,
-        mb_release_id=mbid,
-        discogs_release_id=None,
-        mb_release_group_id=rg_id,
-        mb_artist_id=artist_id,
-        mb_release_payload=release,
+    result = RequestCreationService(db, read_runtime_config()).create_or_resume(
+        RequestCreationInput(
+            release_id=mbid,
+            mb_release_id=mbid,
+            mb_release_group_id=rg_id,
+            mb_artist_id=artist_id,
+            artist_name=artist_name,
+            album_title=title,
+            year=year,
+            country=country,
+            source=source,
+            tracks=tracks,
+            mb_release_payload=release,
+        ),
     )
-    if resolved is None:
+    if result.outcome == "busy":
+        print("  Add busy; retry shortly.", file=sys.stderr)
         return 4
-    # Re-read tracks from the DB so the per-track ``track_artist``
-    # column the resolver just wrote (PR2 Apply #1) flows into the
-    # snapshot. The upstream ``tracks`` extracted from the MB payload
-    # does NOT carry the resolver's output.
-    post_resolve_tracks = db.get_tracks(req_id)
-    _generate_plan_after_add(
-        db, req_id,
-        artist_name=artist_name,
-        album_title=title,
-        year=year,
-        tracks=post_resolve_tracks,
-        source=source,
-        release_group_year=resolved.release_group_year,
-        is_va_compilation=resolved.is_va_compilation,
-        catalog_number=resolved.catalog_number,
-    )
+    if result.outcome == "initialization_failed":
+        print(f"  Initialization failed for id={result.request_id}: {result.detail}", file=sys.stderr)
+        return 4
+    if result.outcome == "exists":
+        authoritative = db.get_request(result.request_id or 0)
+        if authoritative is None:
+            print("  Existing request disappeared; retry shortly.", file=sys.stderr)
+            return 4
+        print(f"  Already in DB: id={authoritative['id']} status={authoritative['status']}")
+        return None
+    print(f"  {result.outcome.title()}: id={result.request_id} {artist_name} - {title} ({len(tracks)} tracks)")
     return None
 
 
@@ -692,7 +539,7 @@ def _cmd_add_discogs(
 ) -> int | None:
     """Add a Discogs release to the pipeline."""
     existing = db.get_request_by_release_id(discogs_id)
-    if existing:
+    if existing and existing["status"] != "initializing":
         print(f"  Already in DB: id={existing['id']} status={existing['status']}")
         return None
 
@@ -713,55 +560,40 @@ def _cmd_add_discogs(
     year = year_raw if isinstance(year_raw, int) else None
     country = _opt_str(release.get("country"))
 
-    req_id = db.add_request(
-        mb_release_id=discogs_id,
-        discogs_release_id=discogs_id,
-        mb_artist_id=artist_id,
-        artist_name=artist_name,
-        album_title=title,
-        year=year,
-        country=country,
-        source=source,
-    )
-
     tracks_raw = release.get("tracks", [])
     tracks: list[dict[str, object]] = (
         msgspec.convert(tracks_raw, type=list[dict[str, object]])
         if isinstance(tracks_raw, list) else []
     )
-    if tracks:
-        db.set_tracks(req_id, tracks)
-
-    print(f"  Added: id={req_id} {artist_name} - {title} ({len(tracks)} tracks)")
-    # U4: inline field resolution + VA detection. Discogs add path has
-    # no MB release/release-group payload available so the resolver only
-    # sees the discogs release (Rule 1 of VA detection still fires on
-    # canonical-ID match; rules 2 + 3 are MB-only).
-    resolved = _resolve_and_update_after_add(
-        db, req_id,
-        mb_release_id=None,
-        discogs_release_id=discogs_id,
-        mb_release_group_id=None,
-        mb_artist_id=artist_id or None,
-        discogs_release_payload=release,
+    result = RequestCreationService(db, read_runtime_config()).create_or_resume(
+        RequestCreationInput(
+            release_id=discogs_id,
+            mb_release_id=discogs_id,
+            discogs_release_id=discogs_id,
+            mb_artist_id=artist_id or None,
+            artist_name=artist_name,
+            album_title=title,
+            year=year,
+            country=country,
+            source=source,
+            tracks=tracks,
+            discogs_release_payload=release,
+        ),
     )
-    if resolved is None:
+    if result.outcome == "busy":
+        print("  Add busy; retry shortly.", file=sys.stderr)
         return 4
-    # Re-read tracks from the DB so the per-track ``track_artist``
-    # column the resolver just wrote (PR2 Apply #1) flows into the
-    # snapshot.
-    post_resolve_tracks = db.get_tracks(req_id)
-    _generate_plan_after_add(
-        db, req_id,
-        artist_name=artist_name,
-        album_title=title,
-        year=year,
-        tracks=post_resolve_tracks,
-        source=source,
-        release_group_year=resolved.release_group_year,
-        is_va_compilation=resolved.is_va_compilation,
-        catalog_number=resolved.catalog_number,
-    )
+    if result.outcome == "initialization_failed":
+        print(f"  Initialization failed for id={result.request_id}: {result.detail}", file=sys.stderr)
+        return 4
+    if result.outcome == "exists":
+        authoritative = db.get_request(result.request_id or 0)
+        if authoritative is None:
+            print("  Existing request disappeared; retry shortly.", file=sys.stderr)
+            return 4
+        print(f"  Already in DB: id={authoritative['id']} status={authoritative['status']}")
+        return None
+    print(f"  {result.outcome.title()}: id={result.request_id} {artist_name} - {title} ({len(tracks)} tracks)")
     return None
 
 
@@ -772,7 +604,7 @@ def cmd_status(db: _AlbumRequestsDB, args: argparse.Namespace) -> None:
         return
     total = sum(counts.values())
     print(f"  Pipeline DB status ({total} total):\n")
-    for status in ["wanted", "downloading", "imported", "unsearchable"]:
+    for status in ["initializing", "wanted", "downloading", "imported", "unsearchable"]:
         c = counts.get(status, 0)
         if c > 0:
             print(f"    {status:15s} {c:4d}")
@@ -784,6 +616,9 @@ def cmd_set(db: _AlbumRequestsDB, args: argparse.Namespace) -> int:
         print(f"  Request {args.id} not found.")
         return 2
     old_status = req["status"]
+    if old_status == "initializing":
+        print("  Request is still initializing; retry the original add or upgrade.")
+        return 4
     result = finalize_request(
         db,
         args.id,
@@ -812,6 +647,9 @@ def cmd_set_intent(db: _AlbumRequestsDB, args: argparse.Namespace) -> int:
     if not req:
         print(f"  Request {args.id} not found.")
         return 2
+    if req["status"] == "initializing":
+        print("  Request is still initializing; retry the original add or upgrade.")
+        return 4
     if req["status"] == "downloading":
         print(f"  Cannot set intent while album is downloading.")
         return 1

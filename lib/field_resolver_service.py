@@ -1289,10 +1289,6 @@ class ResolveAllResult(msgspec.Struct, kw_only=True):
     # Total wall-clock seconds the orchestrator spent. Useful for the
     # operator triage surface and the latency-budget regression test.
     elapsed_seconds: float = 0.0
-    # Names (the FIELD_* constants) of resolvers that hit the budget
-    # ceiling and were marked as unresolved_timeout. Empty in the happy
-    # path. The test guard reads this directly.
-    timed_out_fields: list[str] = msgspec.field(default_factory=list[str])
 
 
 class _DeferredRecorder:
@@ -1332,7 +1328,7 @@ class _DeferredRecorder:
         with self._lock:
             return any(fn == field_name for _rid, fn, _s, _rc in self._records)
 
-    def flush_to(self, pdb: _PdbRecorder) -> None:
+    def flush_to(self, pdb: _PdbRecorder, *, strict: bool = False) -> None:
         """Write every queued record to the real pdb (main-thread only).
 
         Each call is wrapped in try/except so a single failed UPSERT
@@ -1351,12 +1347,19 @@ class _DeferredRecorder:
                     reason_code=reason_code,
                 )
                 if not applied:
+                    if strict:
+                        raise RuntimeError(
+                            "field-resolution audit persistence lost its "
+                            f"request {request_id}"
+                        )
                     logger.info(
                         "deferred record_field_resolution skipped frozen/"
                         "missing request=%d field=%s status=%s",
                         request_id, field_name, status,
                     )
-            except Exception:  # noqa: BLE001
+            except Exception:
+                if strict:
+                    raise
                 logger.exception(
                     "deferred record_field_resolution failed for "
                     "request=%d field=%s status=%s; dropping",
@@ -1376,6 +1379,7 @@ def resolve_all(
     discogs_get_master_year: DiscogsMasterYearFn | None = None,
     mb_get_release: MBReleaseFn | None = None,
     discogs_get_release: DiscogsReleaseFn | None = None,
+    strict_persistence: bool = False,
 ) -> ResolveAllResult:
     """Run all field resolvers inline at enqueue with a wall-clock budget.
 
@@ -1447,7 +1451,6 @@ def resolve_all(
 
     futures: dict[str, concurrent.futures.Future[Any]] = {}
     outputs: dict[str, Any] = {}
-    timed_out: list[str] = []
 
     # Manage the pool by hand so we can return at budget exhaustion
     # without waiting on stuck workers (the default
@@ -1491,7 +1494,6 @@ def resolve_all(
                         status="unresolved_timeout",
                         reason_code="budget_exhausted",
                     )
-                    timed_out.append(field_name)
                 continue
             try:
                 outputs[key] = fut.result(timeout=remaining)
@@ -1504,7 +1506,6 @@ def resolve_all(
                         status="unresolved_timeout",
                         reason_code="budget_exhausted",
                     )
-                    timed_out.append(field_name)
             except Exception as exc:  # noqa: BLE001
                 # The four resolvers handle their own exception
                 # classification internally — anything escaping here is
@@ -1587,7 +1588,7 @@ def resolve_all(
     # Flush the deferred side-table writes once the budget loop has
     # settled. Main-thread only; safe against psycopg2's per-connection
     # threading constraint.
-    deferred.flush_to(pdb)
+    deferred.flush_to(pdb, strict=strict_persistence)
 
     return ResolveAllResult(
         release_group_year=release_group_year,
@@ -1596,7 +1597,6 @@ def resolve_all(
         track_artists=track_artists,
         is_va_compilation=is_va,
         elapsed_seconds=time.monotonic() - start,
-        timed_out_fields=timed_out,
     )
 
 
@@ -1638,6 +1638,7 @@ def apply_resolve_all_result(
     *,
     expected_status: str,
     existing_mb_release_group_id: str | None = None,
+    strict: bool = False,
 ) -> bool:
     """Persist a ``ResolveAllResult`` into ``album_requests``.
 
@@ -1657,7 +1658,9 @@ def apply_resolve_all_result(
     ``expected_status`` is the lifecycle snapshot taken before resolution.
     Both the request-row CAS and the parent-locked child write must still see
     that same status. Returns ``False`` when either loses to a concurrent
-    lifecycle change, so callers abort downstream plan generation.
+    lifecycle change, so callers abort downstream plan generation. Creation
+    passes ``strict=True``: a database write failure must leave its row
+    provisional rather than be logged as an ordinary best-effort omission.
     """
     update_fields: dict[str, Any] = {
         "is_va_compilation": result.is_va_compilation,
@@ -1690,7 +1693,9 @@ def apply_resolve_all_result(
                 expected_status=expected_status,
             ):
                 return False
-        except Exception:  # noqa: BLE001
+        except Exception:
+            if strict:
+                raise
             logger.exception(
                 "apply_resolve_all_result: update_track_artists failed "
                 "for request %s; per-track artists not persisted",

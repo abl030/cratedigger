@@ -956,7 +956,6 @@ class TestResolveAll(unittest.TestCase):
         self.assertEqual(result.catalog_number, "CAT-1234")
         self.assertEqual(result.track_artists, ["A1"])
         self.assertFalse(result.is_va_compilation)
-        self.assertEqual(result.timed_out_fields, [])
         # Side-table rows recorded for every resolver.
         self.assertIsNotNone(
             db.get_field_resolution(10, FIELD_RELEASE_GROUP_YEAR))
@@ -1319,8 +1318,13 @@ class TestResolveAll(unittest.TestCase):
         self.assertIsNone(result.release_group_id)
         self.assertIsNone(result.catalog_number)
         # Side-table records timed-out fields.
-        self.assertGreater(len(result.timed_out_fields), 0)
-        for field in result.timed_out_fields:
+        timed_out_fields = [
+            field
+            for (request_id, field), row in db.field_resolutions.items()
+            if request_id == 15 and row.status == "unresolved_timeout"
+        ]
+        self.assertGreater(len(timed_out_fields), 0)
+        for field in timed_out_fields:
             row = db.get_field_resolution(15, field)
             assert row is not None
             self.assertEqual(row["status"], "unresolved_timeout")
@@ -1606,12 +1610,10 @@ class TestApplyResolveAllResult(unittest.TestCase):
         caller's exception channel; the helper itself does not raise.
         Web + CLI wrappers own their own logging style — the helper
         raises so the wrapper can decide how to surface it."""
-        from typing import Any
-
         class FailingDB:
-            update_request_fields_calls: list[tuple[int, dict[str, Any]]] = []
+            update_request_fields_calls: list[tuple[int, dict[str, object]]] = []
 
-            def update_request_fields(self, request_id: int, **fields: Any) -> bool:
+            def update_request_fields(self, request_id: int, **fields: object) -> bool:
                 raise RuntimeError("db boom")
 
             def update_track_artists(
@@ -1637,7 +1639,7 @@ class TestApplyResolveAllResult(unittest.TestCase):
             track_calls = 0
 
             def update_request_fields(
-                self, request_id: int, **fields: Any,
+                self, request_id: int, **fields: object,
             ) -> bool:
                 return False
 
@@ -1664,6 +1666,33 @@ class TestApplyResolveAllResult(unittest.TestCase):
 
         self.assertFalse(applied)
         self.assertEqual(db.track_calls, 0)
+
+    def test_strict_creation_mode_propagates_track_artist_write_failure(self):
+        class FailingTrackDB:
+            def update_request_fields(
+                self, request_id: int, **fields: object,
+            ) -> bool:
+                return True
+
+            def update_track_artists(
+                self,
+                request_id: int,
+                track_artists: list[str | None],
+                *,
+                expected_status: str | None = None,
+            ) -> bool:
+                raise RuntimeError("track artist write failed")
+
+        with self.assertRaisesRegex(RuntimeError, "track artist write failed"):
+            apply_resolve_all_result(
+                FailingTrackDB(), 42,
+                ResolveAllResult(
+                    is_va_compilation=False,
+                    track_artists=["Late Artist"],
+                ),
+                expected_status="initializing",
+                strict=True,
+            )
 
     def test_stale_wanted_snapshot_cannot_write_manual_parent_or_tracks(self):
         db = FakePipelineDB()
