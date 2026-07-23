@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, Protocol
+from typing import Callable, Literal, Protocol
 
 from lib import transitions
 from lib.config import CratediggerConfig
@@ -58,8 +58,8 @@ class RequestCreationInput:
     year: int | None = None
     country: str | None = None
     release_group_year: int | None = None
-    mb_release_payload: dict[str, Any] | None = None
-    discogs_release_payload: dict[str, Any] | None = None
+    mb_release_payload: dict[str, object] | None = None
+    discogs_release_payload: dict[str, object] | None = None
     # New-row Upgrade carries its policy into the same CAS that publishes.
     final_fields: dict[str, object] = field(default_factory=_empty_final_fields)
 
@@ -102,7 +102,7 @@ class RequestCreationDB(SearchPlanDB, transitions.TransitionsDB, Protocol):
 
     def set_tracks(self, request_id: int, tracks: list[dict[str, object]]) -> None: ...
 
-    def update_request_fields(self, request_id: int, **fields: Any) -> bool: ...
+    def update_request_fields(self, request_id: int, **fields: object) -> bool: ...
 
     def update_track_artists(
         self, request_id: int, track_artists: list[str | None], *,
@@ -233,12 +233,10 @@ class RequestCreationService:
                     )
                 # Publication is deliberately not an ordinary lifecycle
                 # transition. Only this service may CAS initializing → wanted.
-                if not self.db.update_status(
-                    request_id,
-                    "wanted",
-                    expected_status="initializing",
-                    **creation.final_fields,
-                ):
+                publication = transitions.publish_initialized_request(
+                    self.db, request_id, fields=creation.final_fields,
+                )
+                if isinstance(publication, transitions.TransitionConflict):
                     return self._failed(request_id, "publication CAS lost")
             except Exception:  # noqa: BLE001
                 # Resolver/database exceptions may contain upstream URLs or

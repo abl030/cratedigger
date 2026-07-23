@@ -1610,12 +1610,10 @@ class TestApplyResolveAllResult(unittest.TestCase):
         caller's exception channel; the helper itself does not raise.
         Web + CLI wrappers own their own logging style — the helper
         raises so the wrapper can decide how to surface it."""
-        from typing import Any
-
         class FailingDB:
-            update_request_fields_calls: list[tuple[int, dict[str, Any]]] = []
+            update_request_fields_calls: list[tuple[int, dict[str, object]]] = []
 
-            def update_request_fields(self, request_id: int, **fields: Any) -> bool:
+            def update_request_fields(self, request_id: int, **fields: object) -> bool:
                 raise RuntimeError("db boom")
 
             def update_track_artists(
@@ -1641,7 +1639,7 @@ class TestApplyResolveAllResult(unittest.TestCase):
             track_calls = 0
 
             def update_request_fields(
-                self, request_id: int, **fields: Any,
+                self, request_id: int, **fields: object,
             ) -> bool:
                 return False
 
@@ -1671,7 +1669,9 @@ class TestApplyResolveAllResult(unittest.TestCase):
 
     def test_strict_creation_mode_propagates_track_artist_write_failure(self):
         class FailingTrackDB:
-            def update_request_fields(self, request_id: int, **fields: Any) -> bool:
+            def update_request_fields(
+                self, request_id: int, **fields: object,
+            ) -> bool:
                 return True
 
             def update_track_artists(

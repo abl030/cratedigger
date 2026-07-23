@@ -13,6 +13,7 @@ import tests._hypothesis_profiles  # noqa: F401
 from hypothesis import example, given, strategies as st
 
 from lib.config import CratediggerConfig
+from lib.pipeline_db import SearchPlanItemInput
 from lib.request_creation_service import RequestCreationInput, RequestCreationService
 from tests.fakes import FakePipelineDB
 
@@ -104,13 +105,15 @@ class _FaultDB(FakePipelineDB):
             raise RuntimeError("injected resolver persistence failure")
         return super().record_field_resolution(request_id, field_name, status, reason_code)
 
-    def update_request_fields(self, request_id: int, *, expected_status: str | None = None,
-                              **fields: object) -> bool:
-        if self.phase == "scalar" and expected_status == "initializing":
+    def update_request_fields(
+        self, request_id: int, **fields: object,
+    ) -> bool:
+        if (
+            self.phase == "scalar"
+            and fields.get("expected_status") == "initializing"
+        ):
             return False
-        return super().update_request_fields(
-            request_id, expected_status=expected_status, **fields,
-        )
+        return super().update_request_fields(request_id, **fields)
 
     def update_track_artists(self, request_id: int, track_artists: list[str | None], *,
                              expected_status: str | None = None) -> bool:
@@ -120,15 +123,49 @@ class _FaultDB(FakePipelineDB):
             request_id, track_artists, expected_status=expected_status,
         )
 
-    def create_successful_search_plan(self, **kwargs: object) -> int:
+    def create_successful_search_plan(
+        self,
+        *,
+        request_id: int,
+        generator_id: str,
+        items: list[SearchPlanItemInput],
+        metadata_snapshot: dict[str, object] | None = None,
+        provenance: dict[str, object] | None = None,
+        set_active: bool = True,
+    ) -> int:
         if self.phase in {"plan", "plan_transient"}:
             raise RuntimeError("injected plan persistence failure")
-        return super().create_successful_search_plan(**kwargs)  # type: ignore[arg-type]
+        return super().create_successful_search_plan(
+            request_id=request_id,
+            generator_id=generator_id,
+            items=items,
+            metadata_snapshot=metadata_snapshot,
+            provenance=provenance,
+            set_active=set_active,
+        )
 
-    def create_failed_search_plan(self, **kwargs: object) -> int:
+    def create_failed_search_plan(
+        self,
+        *,
+        request_id: int,
+        generator_id: str,
+        failure_class: str,
+        error_message: str | None = None,
+        transient: bool,
+        metadata_snapshot: dict[str, object] | None = None,
+        provenance: dict[str, object] | None = None,
+    ) -> int:
         if self.phase == "plan":
             raise RuntimeError("injected failed-plan persistence failure")
-        return super().create_failed_search_plan(**kwargs)  # type: ignore[arg-type]
+        return super().create_failed_search_plan(
+            request_id=request_id,
+            generator_id=generator_id,
+            failure_class=failure_class,
+            error_message=error_message,
+            transient=transient,
+            metadata_snapshot=metadata_snapshot,
+            provenance=provenance,
+        )
 
     def update_status(self, request_id: int, status: str, *, expected_status: str | None = None,
                       **extra: object) -> bool:

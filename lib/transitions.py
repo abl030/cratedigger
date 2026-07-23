@@ -126,6 +126,61 @@ class TransitionConflict:
 TransitionResult: TypeAlias = TransitionApplied | TransitionConflict
 
 
+def publish_initialized_request(
+    db: TransitionsDB,
+    request_id: int,
+    *,
+    fields: Mapping[str, object],
+) -> TransitionResult:
+    """Publish one fully initialized request through its dedicated CAS.
+
+    This is intentionally separate from the ordinary lifecycle graph:
+    generic operator adapters must never acquire authority to move a partial
+    ``initializing`` row into runnable ``wanted`` state.
+    """
+    expected_status = "initializing"
+    target_status = "wanted"
+    row = db.get_request(request_id)
+    if row is None:
+        return TransitionConflict(
+            request_id=request_id,
+            target_status=target_status,
+            kind=TransitionConflictKind.not_found,
+            expected_status=expected_status,
+            actual_status=None,
+        )
+    actual_status = str(row["status"])
+    if actual_status != expected_status:
+        return TransitionConflict(
+            request_id=request_id,
+            target_status=target_status,
+            kind=TransitionConflictKind.stale_source,
+            expected_status=expected_status,
+            actual_status=actual_status,
+        )
+    if db.update_status(
+        request_id,
+        target_status,
+        expected_status=expected_status,
+        **dict(fields),
+    ):
+        return TransitionApplied(request_id, expected_status, target_status)
+    refreshed = db.get_request(request_id)
+    return TransitionConflict(
+        request_id=request_id,
+        target_status=target_status,
+        kind=(
+            TransitionConflictKind.not_found
+            if refreshed is None
+            else TransitionConflictKind.stale_source
+        ),
+        expected_status=expected_status,
+        actual_status=(
+            str(refreshed["status"]) if refreshed is not None else None
+        ),
+    )
+
+
 class RequestTransitionConflict(RuntimeError):
     """Raised by imperative callers that cannot continue after a conflict."""
 

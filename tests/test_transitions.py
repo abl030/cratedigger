@@ -13,6 +13,7 @@ from lib.transitions import (
     apply_transition,
     finalize_operator_request,
     finalize_request,
+    publish_initialized_request,
     validate_transition,
 )
 from tests.fakes import FakePipelineDB
@@ -130,6 +131,45 @@ class TestTransitionTable(unittest.TestCase):
     def test_initializing_has_no_ordinary_lifecycle_edge(self):
         self.assertNotIn(("initializing", "wanted"), VALID_TRANSITIONS)
         self.assertNotIn(("initializing", "downloading"), VALID_TRANSITIONS)
+
+
+class TestPublishInitializedRequest(unittest.TestCase):
+    def test_publishes_fields_in_initializing_to_wanted_cas(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="initializing"))
+
+        result = publish_initialized_request(
+            db,
+            1,
+            fields={
+                "search_filetype_override": "upgrade",
+                "min_bitrate": 320,
+            },
+        )
+
+        self.assertEqual(
+            result,
+            TransitionApplied(
+                request_id=1,
+                from_status="initializing",
+                target_status="wanted",
+            ),
+        )
+        row = db.request(1)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["search_filetype_override"], "upgrade")
+        self.assertEqual(row["min_bitrate"], 320)
+
+    def test_rejects_non_initializing_request(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="imported"))
+
+        result = publish_initialized_request(db, 1, fields={})
+
+        self.assertIsInstance(result, TransitionConflict)
+        assert isinstance(result, TransitionConflict)
+        self.assertEqual(result.kind, TransitionConflictKind.stale_source)
+        self.assertEqual(db.request(1)["status"], "imported")
 
 
 class TestApplyTransition(unittest.TestCase):

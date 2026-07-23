@@ -67,6 +67,24 @@ class TestRecordingProcessAlbum(unittest.TestCase):
 
 
 class TestFakePipelineDB(unittest.TestCase):
+    def test_request_creation_race_materializes_only_on_in_lock_lookup(self):
+        db = FakePipelineDB()
+        db.arm_request_creation_race(
+            "race-release", status="imported",
+        )
+
+        self.assertIsNone(db.get_request_by_release_id("race-release"))
+        winner = db.get_request_by_release_id("race-release")
+
+        assert winner is not None
+        self.assertEqual(winner["status"], "imported")
+        again = db.get_request_by_release_id("race-release")
+        assert again is not None
+        self.assertEqual(
+            again["id"],
+            winner["id"],
+        )
+
     def test_add_denylist_ignores_duplicate_like_postgres(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42))
@@ -4837,6 +4855,7 @@ class TestPipelineDBFakeContract(unittest.TestCase):
             "set_advisory_lock_result",
             "set_cooldown_result",
             "set_update_download_state_error",
+            "arm_request_creation_race",
             "queue_execute_results",
             "seed_youtube_album_mapping",
         }
