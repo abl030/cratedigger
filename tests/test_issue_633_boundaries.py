@@ -47,7 +47,14 @@ class TestProcessAlbumProtocolBoundary(unittest.TestCase):
         )
         self.assertEqual(
             [argument.arg for argument in call.args.kwonlyargs],
-            ["import_job_id", "validate_fn", "handle_valid_fn", "dispatch_fn"],
+            [
+                "import_job_id",
+                "validate_fn",
+                "handle_valid_fn",
+                "dispatch_fn",
+                "materialize_before_file_copy",
+                "materialize_fn",
+            ],
         )
         self.assertEqual(
             [_annotation(argument.annotation) for argument in call.args.kwonlyargs],
@@ -56,6 +63,8 @@ class TestProcessAlbumProtocolBoundary(unittest.TestCase):
                 "download_validation.ValidateFn | None",
                 "download_validation.HandleValidFn | None",
                 "DispatchCoreFn | None",
+                "Callable[[], None] | None",
+                "Callable[..., download_materialization.MaterializeResult] | None",
             ],
         )
         self.assertEqual(_annotation(call.returns), "CompletionResult")

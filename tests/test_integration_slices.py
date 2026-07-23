@@ -3425,8 +3425,10 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         reset-to-wanted transition.
         """
         from lib import download as dl_mod
+        from lib import download_materialization
         from lib import transitions
         from lib import download_validation
+        from collections.abc import Callable
         from lib.context import CratediggerContext
         from lib.dispatch import DispatchCoreFn
         from lib.download_processing import CompletionFailed, CompletionResult
@@ -3442,9 +3444,12 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
             validate_fn: download_validation.ValidateFn | None = None,
             handle_valid_fn: download_validation.HandleValidFn | None = None,
             dispatch_fn: DispatchCoreFn | None = None,
+            materialize_before_file_copy: Callable[[], None] | None = None,
+            materialize_fn: Callable[..., download_materialization.MaterializeResult] | None = None,
         ) -> CompletionResult:
             del album_data, ctx, import_job_id
             del validate_fn, handle_valid_fn, dispatch_fn
+            del materialize_before_file_copy, materialize_fn
             transitions.finalize_request(
                 cast(Any, db),
                 42,

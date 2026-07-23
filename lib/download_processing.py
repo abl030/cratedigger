@@ -71,6 +71,8 @@ class ProcessAlbumFn(Protocol):
         validate_fn: download_validation.ValidateFn | None = None,
         handle_valid_fn: download_validation.HandleValidFn | None = None,
         dispatch_fn: DispatchCoreFn | None = None,
+        materialize_before_file_copy: Callable[[], None] | None = None,
+        materialize_fn: Callable[..., download_materialization.MaterializeResult] | None = None,
     ) -> CompletionResult: ...
 
 

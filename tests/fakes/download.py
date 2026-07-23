@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from lib import download_validation
+from lib import download_materialization, download_validation
 from lib.dispatch import DispatchCoreFn
 from lib.download_processing import (
     Completed,
@@ -26,6 +27,8 @@ class ProcessAlbumCall:
     validate_fn: download_validation.ValidateFn | None
     handle_valid_fn: download_validation.HandleValidFn | None
     dispatch_fn: DispatchCoreFn | None
+    materialize_before_file_copy: Callable[[], None] | None
+    materialize_fn: Callable[..., download_materialization.MaterializeResult] | None
 
 
 @dataclass
@@ -44,6 +47,8 @@ class RecordingProcessAlbum:
         validate_fn: download_validation.ValidateFn | None = None,
         handle_valid_fn: download_validation.HandleValidFn | None = None,
         dispatch_fn: DispatchCoreFn | None = None,
+        materialize_before_file_copy: Callable[[], None] | None = None,
+        materialize_fn: Callable[..., download_materialization.MaterializeResult] | None = None,
     ) -> CompletionResult:
         self.calls.append(ProcessAlbumCall(
             album_data=album_data,
@@ -52,6 +57,8 @@ class RecordingProcessAlbum:
             validate_fn=validate_fn,
             handle_valid_fn=handle_valid_fn,
             dispatch_fn=dispatch_fn,
+            materialize_before_file_copy=materialize_before_file_copy,
+            materialize_fn=materialize_fn,
         ))
         return self.outcome
 

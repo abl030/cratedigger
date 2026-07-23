@@ -14,7 +14,6 @@ evidence for an absent/unreadable exact release fails the negative oracle.
 
 from __future__ import annotations
 
-import configparser
 import json
 import os
 import tempfile
@@ -54,7 +53,7 @@ from lib.quality import (
     SpectralAnalysisDetail,
     V0ProbeEvidence,
 )
-from lib.quality_evidence import snapshot_audio_files
+from lib.quality_evidence import EvidenceBuildResult, snapshot_audio_files
 from scripts import import_preview_worker
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
@@ -183,6 +182,10 @@ class PreviewFailureObservation:
     expected_minimum: int
     expected_average: int
     expected_median: int
+    expected_payload_failed_path: str | None
+    force_snapshot_path: str | None
+    force_snapshot_bytes: bytes | None
+    force_preview_children: list[str] | None
 
 
 def assert_preview_failure_have_contract(
@@ -211,6 +214,29 @@ def assert_preview_failure_have_contract(
     validation = json.loads(raw_validation)
     if validation.get("source_path") != observation.expected_failure_source_path:
         raise AssertionError("terminal audit lost the authoritative source path")
+    if observation.expected_payload_failed_path is not None:
+        if (
+            observation.expected_failure_source_path
+            == observation.expected_payload_failed_path
+        ):
+            raise AssertionError("force world did not distinguish DB and payload paths")
+        if validation.get("source_path") == observation.expected_payload_failed_path:
+            raise AssertionError("terminal audit trusted the force payload path")
+        if (
+            observation.force_snapshot_path is None
+            or observation.force_snapshot_path
+            in {
+                observation.expected_failure_source_path,
+                observation.expected_payload_failed_path,
+            }
+            or observation.force_snapshot_bytes != b"generated database bytes"
+        ):
+            raise AssertionError("force preview did not snapshot DB-authorized bytes")
+        if (
+            observation.force_preview_children is None
+            or observation.force_preview_children
+        ):
+            raise AssertionError("force preview leaked its private snapshot")
     if audit.get("beets_detail") != detail or audit.get("error_message") != detail:
         raise AssertionError("terminal failure sinks disagree on the diagnostic")
     preview_result = observation.preview_result
@@ -228,6 +254,12 @@ def assert_preview_failure_have_contract(
             != observation.expected_failure_source_path
     ):
         raise AssertionError("job preview result disagrees on the diagnostic")
+    if (
+        observation.expected_payload_failed_path is not None
+        and preview_failure.get("source_path")
+            == observation.expected_payload_failed_path
+    ):
+        raise AssertionError("job preview result trusted the force payload path")
 
     if not observation.should_prepare:
         if observation.before_current_id is None \
@@ -288,15 +320,18 @@ class _UnreadableFakeBeetsDB(FakeBeetsDB):
         raise OSError("generated Beets library read failure")
 
 
-def _config(beets_directory: str) -> CratediggerConfig:
-    ini = configparser.ConfigParser()
-    ini["Beets"] = {"directory": beets_directory}
-    ini["Beets Validation"] = {
-        "harness_path": "/fake/harness/run_beets_harness.sh",
-        "audio_check": "off",
-    }
-    ini["Pipeline DB"] = {"enabled": "true"}
-    return CratediggerConfig.from_ini(ini)
+def _config(
+    beets_directory: str,
+    *,
+    slskd_download_dir: str = "",
+    processing_dir: str = "./processing",
+) -> CratediggerConfig:
+    return CratediggerConfig(
+        beets_directory=beets_directory,
+        slskd_download_dir=slskd_download_dir,
+        processing_dir=processing_dir,
+        audio_check_mode="off",
+    )
 
 
 def _job_payload(
@@ -304,10 +339,12 @@ def _job_payload(
     *,
     request_id: int,
     source_path: str,
+    force_download_log_id: int | None = None,
 ) -> dict[str, Any]:
     if job_type == IMPORT_JOB_FORCE:
+        assert force_download_log_id is not None
         return force_import_payload(
-            download_log_id=764,
+            download_log_id=force_download_log_id,
             failed_path=source_path,
             source_username="generated-peer",
         )
@@ -376,14 +413,49 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
     ]
 
     with tempfile.TemporaryDirectory(
-        prefix="cratedigger-preview-failure-gen-"
+        dir=os.getcwd(),
+        prefix="cratedigger-preview-failure-gen-",
     ) as root:
         candidate_path = os.path.join(root, "candidate")
         installed_path = os.path.join(root, "installed")
         os.makedirs(candidate_path)
         os.makedirs(installed_path)
-        with open(os.path.join(candidate_path, f"01.{extension}"), "wb") as handle:
-            handle.write(b"generated candidate bytes")
+        authoritative_failure_path = candidate_path
+        payload_failure_path: str | None = None
+        force_preview_root: str | None = None
+        cfg = _config(installed_path)
+        if world.job_type == IMPORT_JOB_FORCE:
+            download_root = os.path.join(root, "downloads")
+            processing_dir = os.path.join(root, "processing")
+            authoritative_failure_path = os.path.join(
+                download_root, "failed_imports", "database", "Album",
+            )
+            payload_failure_path = os.path.join(
+                root, "payload", "failed_imports", "payload", "Album",
+            )
+            os.makedirs(authoritative_failure_path)
+            os.makedirs(payload_failure_path)
+            os.makedirs(os.path.join(processing_dir, "albums"))
+            os.chmod(processing_dir, 0o700)
+            force_preview_root = os.path.join(processing_dir, "preview")
+            os.makedirs(force_preview_root)
+            os.chmod(force_preview_root, 0o700)
+            cfg = _config(
+                installed_path,
+                slskd_download_dir=download_root,
+                processing_dir=processing_dir,
+            )
+        with open(
+            os.path.join(authoritative_failure_path, f"01.{extension}"),
+            "wb",
+        ) as handle:
+            handle.write(b"generated database bytes")
+        if payload_failure_path is not None:
+            with open(
+                os.path.join(payload_failure_path, f"01.{extension}"),
+                "wb",
+            ) as handle:
+                handle.write(b"generated payload bytes")
         with open(os.path.join(installed_path, f"01.{extension}"), "wb") as handle:
             handle.write(b"generated installed bytes")
 
@@ -408,6 +480,10 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
                     )
                 ),
             ))
+        elif world.job_type == IMPORT_JOB_FORCE:
+            # The malformed job has no request owner, but the DB-backed force
+            # source still belongs to its real rejected-download row.
+            db.seed_request(make_request_row(id=request_id, status="unsearchable"))
 
         fake_beets: FakeBeetsDB
         if world.library == "unreadable":
@@ -462,6 +538,16 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
                 before_current_id = stored.id
 
         job_request_id = request_id if request_owned else None
+        force_download_log_id: int | None = None
+        if world.job_type == IMPORT_JOB_FORCE:
+            force_download_log_id = db.log_download(
+                request_id,
+                outcome="rejected",
+                validation_result={
+                    "scenario": "high_distance",
+                    "failed_path": authoritative_failure_path,
+                },
+            )
         job = db.enqueue_import_job(
             world.job_type,
             request_id=job_request_id,
@@ -469,11 +555,39 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
             payload=_job_payload(
                 world.job_type,
                 request_id=request_id,
-                source_path=candidate_path,
+                source_path=payload_failure_path or candidate_path,
+                force_download_log_id=force_download_log_id,
             ),
         )
         claimed = db.claim_next_import_preview_job(worker_id="generated-preview")
         assert claimed is not None and claimed.id == job.id
+
+        force_snapshot_path: str | None = None
+        force_snapshot_bytes: bytes | None = None
+        if world.job_type == IMPORT_JOB_FORCE:
+            def capture_snapshot(
+                *_args: Any,
+                **kwargs: Any,
+            ) -> EvidenceBuildResult:
+                nonlocal force_snapshot_path, force_snapshot_bytes
+                force_snapshot_path = str(kwargs["source_path"])
+                with open(
+                    os.path.join(force_snapshot_path, f"01.{extension}"),
+                    "rb",
+                ) as handle:
+                    force_snapshot_bytes = handle.read()
+                return EvidenceBuildResult(None, "missing")
+
+            front_gate_result, front_gate_path = (
+                import_preview_worker._front_gate_check(
+                    cast(Any, db),
+                    claimed,
+                    runtime_config=cfg,
+                    candidate_evidence_loader=capture_snapshot,
+                )
+            )
+            assert front_gate_result is not None
+            assert front_gate_path == authoritative_failure_path
 
         def prepare_have(db_arg: Any, **kwargs: Any) -> str:
             if world.hook_fault == "prepare":
@@ -500,9 +614,6 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
             )
 
         with patch(
-            "scripts.import_preview_worker.read_runtime_config",
-            return_value=_config(installed_path),
-        ), patch(
             "lib.beets_db.BeetsDB",
             lambda **_kwargs: fake_beets,
         ), patch(
@@ -518,10 +629,11 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
                 preview_fn=_preview_fn_for_world(
                     world,
                     request_id=job_request_id,
-                    source_path=candidate_path,
+                    source_path=authoritative_failure_path,
                 ),
                 prepare_failure_have_fn=prepare_have,
                 enrich_failure_have_fn=enrich_have,
+                runtime_config=cfg,
             )
 
         assert updated is not None
@@ -543,6 +655,11 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
             and world.library == "installed"
             and world.hook_fault != "prepare"
         )
+        force_preview_children = (
+            os.listdir(force_preview_root)
+            if force_preview_root is not None
+            else None
+        )
         return PreviewFailureObservation(
             request_owned=request_owned,
             should_prepare=should_prepare,
@@ -556,11 +673,15 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
             current_evidence=current_evidence,
             expected_mbid=mbid,
             expected_path=installed_path,
-            expected_failure_source_path=candidate_path,
+            expected_failure_source_path=authoritative_failure_path,
             expected_format=world.storage_format,
             expected_minimum=world.minimum,
             expected_average=world.average,
             expected_median=world.median,
+            expected_payload_failed_path=payload_failure_path,
+            force_snapshot_path=force_snapshot_path,
+            force_snapshot_bytes=force_snapshot_bytes,
+            force_preview_children=force_preview_children,
         )
 
 
@@ -577,11 +698,29 @@ _EARLY_SOURCE_VANISHED_WORLD = PreviewFailureWorld(
     hook_fault="none",
 )
 
+_FORCE_DB_AUTHORITY_WORLD = PreviewFailureWorld(
+    stage=_SOURCE_VANISHED_STAGE,
+    job_type=IMPORT_JOB_FORCE,
+    owner="exact",
+    library="installed",
+    current="none",
+    storage_format="Opus",
+    minimum=90,
+    average=97,
+    median=95,
+    hook_fault="none",
+)
+
 
 class TestPreviewFailureEvidenceGenerated(unittest.TestCase):
     def test_early_source_vanished_prepares_badlands_shaped_have(self) -> None:
         assert_preview_failure_have_contract(
             _run_world(_EARLY_SOURCE_VANISHED_WORLD)
+        )
+
+    def test_force_failure_snapshots_db_path_and_audits_it(self) -> None:
+        assert_preview_failure_have_contract(
+            _run_world(_FORCE_DB_AUTHORITY_WORLD)
         )
 
     def test_every_declared_failure_stage_reaches_the_same_boundary(self) -> None:
@@ -602,6 +741,7 @@ class TestPreviewFailureEvidenceGenerated(unittest.TestCase):
 
     @given(world=preview_failure_worlds())
     @example(world=_EARLY_SOURCE_VANISHED_WORLD)
+    @example(world=_FORCE_DB_AUTHORITY_WORLD)
     def test_every_failure_stage_converges_at_the_terminal_boundary(
         self,
         world: PreviewFailureWorld,
@@ -654,6 +794,10 @@ class TestPreviewFailureEvidenceCheckerKnownBad(unittest.TestCase):
             "expected_minimum": 90,
             "expected_average": 97,
             "expected_median": 95,
+            "expected_payload_failed_path": None,
+            "force_snapshot_path": None,
+            "force_snapshot_bytes": None,
+            "force_preview_children": None,
         }
         base.update(overrides)
         return PreviewFailureObservation(**base)
@@ -700,6 +844,34 @@ class TestPreviewFailureEvidenceCheckerKnownBad(unittest.TestCase):
                     "validation_result": json.dumps({
                         "detail": "decoder failed",
                         "source_path": "",
+                    }),
+                },
+            ))
+
+    def test_trips_when_force_snapshot_uses_payload_bytes(self) -> None:
+        source_path = "/database-failed-path"
+        observed_audit = self._observation().audit
+        assert observed_audit is not None
+        audit = dict(observed_audit)
+        with self.assertRaisesRegex(AssertionError, "DB-authorized bytes"):
+            assert_preview_failure_have_contract(self._observation(
+                expected_failure_source_path=source_path,
+                expected_payload_failed_path="/payload-failed-path",
+                force_snapshot_path="/private-preview/snapshot",
+                force_snapshot_bytes=b"payload bytes",
+                force_preview_children=[],
+                preview_result={
+                    "detail": "decoder failed",
+                    "failure": {
+                        "detail": "decoder failed",
+                        "source_path": source_path,
+                    },
+                },
+                audit={
+                    **audit,
+                    "validation_result": json.dumps({
+                        "detail": "decoder failed",
+                        "source_path": source_path,
                     }),
                 },
             ))
