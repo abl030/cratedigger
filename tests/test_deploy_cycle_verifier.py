@@ -43,6 +43,30 @@ class TestDeployCycleVerifier(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), self.fake.CURSOR)
 
+    def test_forced_command_agent_key_cannot_consume_verification_ssh(self) -> None:
+        """Issue #837: verification must never offer the forwarded agent."""
+        self.fake.write_state(
+            system_states=[self.fake.system_state(self.fake.NEXT)],
+            journal_snapshots={
+                self.fake.TARGET: [self.fake.success_records()],
+            },
+            forced_agent_present=True,
+        )
+
+        proc = self.fake.run(
+            SCRIPT,
+            "verify-exact",
+            self.fake.TARGET,
+            self.fake.SOURCE,
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.fake.state["forced_command_hits"], 0)
+        ssh_events = self.fake.state["events"]
+        self.assertTrue(ssh_events)
+        for event in ssh_events:
+            self.assertIn("IdentityAgent=none", event)
+
     def test_capture_target_ignores_old_source_then_returns_target(self) -> None:
         self.fake.write_state(
             system_states=[
@@ -328,7 +352,10 @@ class TestDeployCycleVerifier(unittest.TestCase):
         )
         self.assertNotIn("<value printed by step 3>", source)
         step_six = source.index("6. Derive the active wrapper")
-        source_check = source.index("ssh doc2 \"grep '<something unique>'", step_six)
+        source_check = source.index(
+            "env -u SSH_AUTH_SOCK ssh doc2 \"grep '<something unique>'",
+            step_six,
+        )
         post_switch_capture = source.index(
             "POST_SWITCH_CRATEDIGGER_CURSOR=$(",
             step_six,
@@ -336,6 +363,14 @@ class TestDeployCycleVerifier(unittest.TestCase):
         target_capture = source.index("TARGET_CRATEDIGGER_INVOCATION=$(", step_six)
         self.assertLess(source_check, post_switch_capture)
         self.assertLess(post_switch_capture, target_capture)
+
+    def test_skill_runs_fleet_trigger_without_the_shared_agent(self) -> None:
+        source = SKILL.read_text(encoding="utf-8")
+
+        self.assertIn("env -u SSH_AUTH_SOCK fleet-deploy doc2", source)
+        for line in source.splitlines():
+            if "ssh doc2" in line:
+                self.assertIn("env -u SSH_AUTH_SOCK ssh doc2", line)
 
 
 if __name__ == "__main__":

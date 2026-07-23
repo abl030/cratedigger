@@ -19,12 +19,24 @@ from pathlib import Path
 state_path = Path(os.environ["DEPLOY_CYCLE_FAKE_STATE"])
 state = json.loads(state_path.read_text(encoding="utf-8"))
 args = sys.argv[1:]
-remote = " ".join(args[1:]) if len(args) > 1 else ""
+remote = " ".join(args)
 state["events"].append(["ssh", *args])
 
 
 def save():
     state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+
+
+agent_disabled = any(
+    args[index] == "-o"
+    and index + 1 < len(args)
+    and args[index + 1] == "IdentityAgent=none"
+    for index in range(len(args))
+) or "-oIdentityAgent=none" in args
+if state["forced_agent_present"] and not agent_disabled:
+    state["forced_command_hits"] += 1
+    save()
+    raise SystemExit(0)
 
 
 if "systemctl show cratedigger.service" in remote:
@@ -168,11 +180,14 @@ class FakeDeployCycleCommands:
         system_states: list[dict[str, str]],
         journal_snapshots: dict[str, list[list[dict[str, str]]]],
         start_journal_snapshots: list[list[dict[str, str]]] | None = None,
+        forced_agent_present: bool = False,
     ) -> None:
         self.state_path.write_text(
             json.dumps(
                 {
                     "events": [],
+                    "forced_agent_present": forced_agent_present,
+                    "forced_command_hits": 0,
                     "system_states": system_states,
                     "system_state_index": 0,
                     "journal_snapshots": journal_snapshots,

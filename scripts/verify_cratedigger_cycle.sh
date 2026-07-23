@@ -4,6 +4,7 @@ set -euo pipefail
 
 readonly REMOTE_HOST="${CRATEDIGGER_DEPLOY_HOST:-doc2}"
 readonly UNIT='cratedigger.service'
+readonly -a OPERATOR_SSH=(ssh -o IdentityAgent=none)
 readonly POLL_SECONDS="${CRATEDIGGER_CYCLE_VERIFY_POLL_SECONDS:-5}"
 readonly TIMEOUT_SECONDS="${CRATEDIGGER_CYCLE_VERIFY_TIMEOUT_SECONDS:-1800}"
 readonly MAX_POLLS="${CRATEDIGGER_CYCLE_VERIFY_MAX_POLLS:-0}"
@@ -62,7 +63,7 @@ validate_cursor() {
 
 read_current_state() {
   local state
-  if ! state=$(ssh "$REMOTE_HOST" \
+  if ! state=$("${OPERATOR_SSH[@]}" "$REMOTE_HOST" \
     'systemctl show cratedigger.service --property=InvocationID --property=ActiveState --property=SubState --property=Result'); then
     die "could not read $REMOTE_HOST $UNIT state"
     return 1
@@ -81,14 +82,14 @@ read_current_state() {
 read_invocation_journal() {
   local invocation=$1
   validate_invocation "$invocation"
-  ssh "$REMOTE_HOST" \
+  "${OPERATOR_SSH[@]}" "$REMOTE_HOST" \
     "sudo journalctl -u $UNIT --invocation=$invocation --no-pager -o json"
 }
 
 read_start_journal_after_cursor() {
   local cursor=$1
   validate_cursor "$cursor"
-  ssh "$REMOTE_HOST" \
+  "${OPERATOR_SSH[@]}" "$REMOTE_HOST" \
     "sudo journalctl -u $UNIT --after-cursor='$cursor' --no-pager -o json"
 }
 
@@ -185,7 +186,7 @@ capture_current() {
 
 capture_cursor() {
   local output cursor
-  if ! output=$(ssh "$REMOTE_HOST" \
+  if ! output=$("${OPERATOR_SSH[@]}" "$REMOTE_HOST" \
     "sudo journalctl -u $UNIT -n 0 --show-cursor --no-pager"); then
     die "could not capture $REMOTE_HOST $UNIT journal cursor"
     return 1
