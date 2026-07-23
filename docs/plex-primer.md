@@ -63,8 +63,10 @@ and edits* Plex metadata (the only place it does more than the refresh GET):
   load-bearing — without it the next metadata refresh re-stamps the date.
 
 The Plex read/edit client lives in `lib/util.py` (`plex_find_album_by_path`,
-`plex_set_added_at`) with verify-then-unverified SSL fallback. Both are
-best-effort; failures never block an import or the cycle.
+`plex_set_added_at`) and uses Python's default CA-verified TLS context. A
+certificate-verification failure is fail-closed: the request is not retried
+without verification. Both operations remain best-effort; failures never block
+an import or the cycle.
 
 The Plex and Jellyfin orchestration modules deliberately remain separate.
 Their shared capture/reconcile outline is smaller than their backend
