@@ -48,6 +48,7 @@ from tests.helpers import (
     make_download_file,
     make_import_result,
     make_request_row,
+    make_requests_http_error,
     patch_dispatch_externals,
 )
 
@@ -423,12 +424,7 @@ class TestPeerOnlineProbeAtEnqueueSlice(unittest.TestCase):
         """Build a ``requests.HTTPError`` whose ``.response.text`` mirrors
         slskd's offline-peer 500. The detector matches structurally on
         ``.response.text``."""
-        import requests
-        err = requests.HTTPError("500 Server Error")
-        err.response = SimpleNamespace(
-            text="User pooyork appears to be offline",
-        )
-        return err
+        return make_requests_http_error("User pooyork appears to be offline")
 
     def _make_album(self, request_id: int):
         return SimpleNamespace(
@@ -9916,30 +9912,10 @@ class TestRefreshCurrentEvidenceUsesBeetsLibraryRoot(unittest.TestCase):
             "items.path to absolute filesystem paths.",
         )
 
-    def test_refresh_constructs_beets_db_with_library_root_kwarg(self) -> None:
+    def test_refresh_rejects_half_of_a_beets_storage_authority(self) -> None:
         from lib.dispatch import _refresh_current_evidence_after_import
 
-        captured_library_root: list[str] = []
-
-        class FakeBeetsDB:
-            def __init__(self, db_path: str = "", *, library_root: str = "") -> None:
-                captured_library_root.append(library_root)
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def resolve_current_release(self, identity):
-                # Returning missing short-circuits the function before any
-                # snapshotting — we only care that BeetsDB was constructed
-                # with the right library_root kwarg.
-                from lib.beets_db import CurrentBeetsMissing
-
-                return CurrentBeetsMissing(identity=identity)
-
-        with patch("lib.beets_db.BeetsDB", FakeBeetsDB):
+        with self.assertRaisesRegex(ValueError, "supplied together"):
             _refresh_current_evidence_after_import(
                 db=None,  # type: ignore[arg-type]
                 request_id=1,
@@ -9949,15 +9925,6 @@ class TestRefreshCurrentEvidenceUsesBeetsLibraryRoot(unittest.TestCase):
                 import_result=None,
                 beets_library_root="/mnt/virtio/Music/Beets",
             )
-
-        self.assertEqual(
-            captured_library_root,
-            ["/mnt/virtio/Music/Beets"],
-            "_refresh_current_evidence_after_import must forward "
-            "beets_library_root to the BeetsDB constructor — without "
-            "it, get_album_info returns relative paths and the "
-            "propagation silently no-ops.",
-        )
 
     def test_refresh_constructs_beets_db_with_explicit_library_path(self) -> None:
         from lib.dispatch import _refresh_current_evidence_after_import
@@ -9996,29 +9963,30 @@ class TestRefreshCurrentEvidenceUsesBeetsLibraryRoot(unittest.TestCase):
             [("/tmp/world/beets-library.db", "/tmp/world/library")],
         )
 
-    def test_dispatch_passes_cfg_beets_directory_to_refresh(self) -> None:
-        # Inspect the call site source to confirm cfg.beets_directory
-        # is wired to beets_library_root. Static check is sufficient and
-        # avoids a full dispatch-import-core orchestration test.
-        import inspect
-        from lib.dispatch import core as import_dispatch
+    def test_dispatch_beets_authority_opens_one_disposable_pair(self) -> None:
+        from lib.beets_db import open_beets_db
+        from lib.dispatch.core import _resolve_dispatch_beets_paths
+        from tests.beets_world import BeetsWorld
 
-        src = inspect.getsource(import_dispatch.dispatch_import_core)
-        # The call must include the beets_library_root kwarg sourced
-        # from cfg.beets_directory (with a None-safe fallback).
-        self.assertIn("_refresh_current_evidence_after_import(", src)
-        # Look for the resolved wiring after the function call. The explicit
-        # world-model root may override cfg, but production still derives the
-        # default from cfg.beets_directory.
-        refresh_block_start = src.index(
-            "_refresh_current_evidence_after_import("
-        )
-        refresh_block = src[refresh_block_start:refresh_block_start + 1500]
-        self.assertIn(
-            "beets_library_root=effective_beets_library_root",
-            refresh_block,
-        )
-        self.assertIn('getattr(cfg, "beets_directory", "")', src)
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        with BeetsWorld(repo_root) as world:
+            db_path, library_root = _resolve_dispatch_beets_paths(
+                CratediggerConfig(),
+                db_path=str(world.library_db),
+                library_root=str(world.library_root),
+            )
+            with open_beets_db(
+                db_path=db_path,
+                library_root=library_root,
+            ) as beets:
+                self.assertEqual(beets.library_db_path, str(world.library_db))
+                self.assertEqual(beets.library_root, str(world.library_root))
+            with self.assertRaisesRegex(ValueError, "supplied together"):
+                _resolve_dispatch_beets_paths(
+                    CratediggerConfig(),
+                    db_path=str(world.library_db),
+                    library_root=None,
+                )
 
 
 class TestReplaceFullPath(unittest.TestCase):

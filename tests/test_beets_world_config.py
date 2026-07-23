@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from lib.util import beets_subprocess_env
+from lib.beets_db import BeetsDB
 from tests.beets_world import (
     BeetsWorld,
     build_subprocess_beets_config,
@@ -81,10 +82,12 @@ class TestShippedBeetsWorldConfig(unittest.TestCase):
                 "[Beets]\nconfig_dir = /deployed/config\n",
                 encoding="utf-8",
             )
-            world = object.__new__(BeetsWorld)
-            world.beets_config_dir = Path(root) / "config"
-            world.beets_config_dir.mkdir()
-            world.library_db = Path(root) / "scratch-library.db"
+            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            world = BeetsWorld(
+                repo_root,
+                subprocess_mirror_url="http://mirror.invalid:5200",
+            )
+            self.addCleanup(world.close)
             with patch.dict(
                 os.environ,
                 {
@@ -103,6 +106,9 @@ class TestShippedBeetsWorldConfig(unittest.TestCase):
                         subprocess_env["BEETS_DB"],
                         str(world.library_db),
                     )
+                    with BeetsDB() as beets:
+                        self.assertEqual(beets.library_db_path, str(world.library_db))
+                        self.assertEqual(beets.library_root, str(world.library_root))
                 self.assertEqual(os.environ["BEETSDIR"], "/deployed/config")
                 self.assertEqual(os.environ["BEETS_DB"], "/deployed/library.db")
                 self.assertEqual(

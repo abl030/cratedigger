@@ -467,13 +467,17 @@ def load_current_evidence_for_action(
 
     cfg = quality_ranks if quality_ranks is not None else QualityRankConfig.defaults()
     try:
-        from lib.beets_db import BeetsDB
+        from lib.beets_db import open_beets_db
 
+        if beets_library_db_path is None and beets_library_root:
+            raise ValueError(
+                "Beets DB and library root overrides must be supplied together"
+            )
         if beets_library_db_path is None:
-            beets_handle = BeetsDB(library_root=beets_library_root)
+            beets_handle = open_beets_db()
         else:
-            beets_handle = BeetsDB(
-                beets_library_db_path,
+            beets_handle = open_beets_db(
+                db_path=beets_library_db_path,
                 library_root=beets_library_root,
             )
         with beets_handle as beets:

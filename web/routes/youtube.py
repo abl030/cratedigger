@@ -149,7 +149,9 @@ def _build_youtube_client():
     # private stub-only aliases (``_Params``, ``_Data``, ... in
     # typeshed's requests-stubs) that aren't part of the public API and
     # can't be imported or reconstructed without duplicating typeshed
-    # internals. ``method``/``url``/``allow_redirects`` mirror the real
+    # internals. ``method`` accepts the base class's public ``str | bytes``
+    # contract, then narrows to ``str`` before the concrete requests call;
+    # ``allow_redirects`` mirrors the real
     # base signature exactly since those are plain public types; the
     # full named parameter list (matching the base method's arity) is
     # required for ``reportIncompatibleMethodOverride``.
@@ -177,6 +179,8 @@ def _build_youtube_client():
         ) -> requests.Response:
             if timeout is _UNSET:
                 timeout = (5, 30)
+            if isinstance(method, bytes):
+                method = method.decode()
             return super().request(
                 method, url,
                 params=params, data=data, headers=headers,

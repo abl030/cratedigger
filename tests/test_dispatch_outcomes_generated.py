@@ -52,7 +52,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 from lib.config import CratediggerConfig
@@ -65,6 +65,7 @@ from lib.quality import (
     dispatch_action,
 )
 from tests.fakes import DownloadLogRow, FakePipelineDB
+from tests.beets_world import BeetsWorld
 from tests.helpers import (
     make_album_quality_evidence,
     make_download_file,
@@ -76,6 +77,7 @@ from tests.helpers import (
 )
 
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _GRADES = ("genuine", "marginal", "suspect", "likely_transcode")
 _CALLER_CONTROLLED_QUALITY_REJECTS = tuple(sorted(
     QUALITY_DECISION_REJECT_STAGE_DECISIONS - {"verified_lossless_locked"}
@@ -177,6 +179,7 @@ def dispatch_worlds(draw) -> DispatchWorld:
 def _run_dispatch(
     world: DispatchWorld,
     *,
+    beets: BeetsWorld,
     initial_status: str = "downloading",
     force: bool = False,
     queued: bool = False,
@@ -275,6 +278,8 @@ def _run_dispatch(
                 quality_gate_fn=noop_quality_gate,
                 candidate_import_job_id=import_job_id,
                 prevalidated_candidate_result=candidate_result,
+                beets_library_db_path=str(beets.library_db),
+                beets_library_root=str(beets.library_root),
             )
         if result.terminal_outcome is not None:
             from lib.terminal_outcomes import ImportJobTerminal
@@ -904,9 +909,21 @@ def assert_operator_retained_lifecycle(
 class TestGeneratedDispatchOutcomes(unittest.TestCase):
     """Properties over the legacy (subprocess-return) dispatch path."""
 
+    def setUp(self) -> None:
+        self.beets = BeetsWorld(_REPO_ROOT)
+        self.addCleanup(self.beets.close)
+        self.runtime = patch.dict(os.environ, {
+            "CRATEDIGGER_RUNTIME_CONFIG": str(
+                self.beets.root / "poisoned-runtime-config.ini"
+            ),
+            "BEETS_DB": str(self.beets.root / "poisoned-library.db"),
+        })
+        self.runtime.start()
+        self.addCleanup(self.runtime.stop)
+
     @given(world=dispatch_worlds())
     def test_terminal_outcomes_are_audited_and_ambiguity_is_not(self, world):
-        outcome = _run_dispatch(world)
+        outcome = _run_dispatch(world, beets=self.beets)
         if world.mode == "no_json":
             self.assertEqual(outcome["db"].download_logs, [])
         else:
@@ -914,7 +931,7 @@ class TestGeneratedDispatchOutcomes(unittest.TestCase):
 
     @given(world=dispatch_worlds())
     def test_outcome_matches_dispatch_action_routing(self, world):
-        outcome = _run_dispatch(world)
+        outcome = _run_dispatch(world, beets=self.beets)
         assert_dispatch_outcome_matches_routing(
             world, outcome["db"], outcome["result"])
 
@@ -1089,9 +1106,25 @@ class TestGeneratedHaveAnalysisAbortLifecycle(unittest.TestCase):
 class TestGeneratedOperatorRetainedLifecycle(unittest.TestCase):
     """Nonterminal quality policy never clears the starting search state."""
 
+    def setUp(self) -> None:
+        self.beets = BeetsWorld(_REPO_ROOT)
+        self.addCleanup(self.beets.close)
+        self.runtime = patch.dict(os.environ, {
+            "CRATEDIGGER_RUNTIME_CONFIG": str(
+                self.beets.root / "poisoned-runtime-config.ini"
+            ),
+            "BEETS_DB": str(self.beets.root / "poisoned-library.db"),
+        })
+        self.runtime.start()
+        self.addCleanup(self.runtime.stop)
+
     @given(
         decision=st.sampled_from(tuple(sorted(_AUTOMATIC_RETAINED_ACTIONS))),
         initial_status=st.sampled_from(("wanted", "unsearchable")),
+    )
+    @example(
+        decision="provisional_lossless_upgrade",
+        initial_status="wanted",
     )
     def test_retained_policy_preserves_starting_search_lifecycle(
         self,
@@ -1112,6 +1145,7 @@ class TestGeneratedOperatorRetainedLifecycle(unittest.TestCase):
         )
         outcome = _run_dispatch(
             world,
+            beets=self.beets,
             initial_status=initial_status,
             force=True,
             queued=True,

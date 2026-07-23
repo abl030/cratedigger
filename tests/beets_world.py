@@ -274,6 +274,14 @@ class BeetsWorld:
             json.dumps(config, indent=2) + "\n",
             encoding="utf-8",
         )
+        self.runtime_config_path = self.root / "runtime-config.ini"
+        self.runtime_config_path.write_text(
+            "[Beets]\n"
+            f"directory = {self.library_root}\n"
+            f"library = {self.library_db}\n"
+            f"config_dir = {self.beets_config_dir}\n",
+            encoding="utf-8",
+        )
 
     @contextmanager
     def subprocess_environment(self) -> Iterator[None]:
@@ -286,13 +294,10 @@ class BeetsWorld:
         prior_runtime = os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
         os.environ["BEETSDIR"] = str(self.beets_config_dir)
         os.environ["BEETS_DB"] = str(self.library_db)
-        # lib.util.beets_subprocess_env deliberately gives the deployed
-        # runtime config precedence over BEETSDIR. Mask that config while the
-        # test subprocess runs, otherwise invoking this profile on doc2 could
-        # select the deployed Beets config despite the scratch override.
-        os.environ["CRATEDIGGER_RUNTIME_CONFIG"] = str(
-            self.beets_config_dir / "runtime-config-disabled.ini"
-        )
+        # Runtime config is also the authority for zero-argument BeetsDB().
+        # Point both the harness and in-process readers at the exact scratch
+        # DB/root/config trio; BEETS_DB alone is not an authority there.
+        os.environ["CRATEDIGGER_RUNTIME_CONFIG"] = str(self.runtime_config_path)
         try:
             yield
         finally:

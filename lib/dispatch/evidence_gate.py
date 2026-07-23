@@ -348,12 +348,12 @@ def _refresh_current_evidence_after_import(
     """
 
     from lib.beets_db import (
-        BeetsDB,
         CurrentBeetsAmbiguous,
         CurrentBeetsMissing,
         album_info_from_current,
         exact_release_identity_matches,
         release_identity_for_lookup,
+        open_beets_db,
     )
     from lib.quality import QualityRankConfig
 
@@ -364,11 +364,15 @@ def _refresh_current_evidence_after_import(
     # BeetsDB docstring. Both the U10 propagation path and the legacy
     # ``backfill_current_evidence_from_album_info`` path depend on an
     # absolute ``album_info.album_path`` to read the just-imported files.
+    if beets_library_db_path is None and beets_library_root:
+        raise ValueError(
+            "Beets DB and library root overrides must be supplied together"
+        )
     if beets_library_db_path is None:
-        beets_handle = BeetsDB(library_root=beets_library_root)
+        beets_handle = open_beets_db()
     else:
-        beets_handle = BeetsDB(
-            beets_library_db_path,
+        beets_handle = open_beets_db(
+            db_path=beets_library_db_path,
             library_root=beets_library_root,
         )
     identity = release_identity_for_lookup(mb_release_id)
@@ -494,6 +498,8 @@ def _write_album_sidecar_after_import(
     request_id: int,
     mb_release_id: str,
     cfg: "CratediggerConfig | None",
+    beets_library_db_path: str | None = None,
+    beets_library_root: str | None = None,
     beets_factory: "Callable[..., Any] | None" = None,
 ) -> "SidecarWriteResult":
     """Write the verified-lossless ``cratedigger.json`` sidecar after import.
@@ -504,16 +510,29 @@ def _write_album_sidecar_after_import(
     backfill uses, so there is no parallel sidecar-writing code path. The
     sidecar is derived state; re-running rebuilds it idempotently.
 
-    ``beets_factory`` is a kwarg-DI seam for tests; production constructs a
-    short-lived ``BeetsDB`` (mirroring ``_refresh_current_evidence_after_import``).
+    ``beets_factory`` is a kwarg-DI seam for tests. Production opens the exact
+    dispatch DB/root pair through ``open_beets_db``.
     """
-    from lib.beets_db import BeetsDB
+    from lib.beets_db import open_beets_db
     from lib.sidecar_service import write_sidecar_for_request
 
-    factory = beets_factory if beets_factory is not None else BeetsDB
-    root = cfg.beets_directory if cfg is not None else ""
     quality_ranks = cfg.quality_ranks if cfg is not None else None
-    with factory(library_root=root) as beets:
+    if beets_factory is not None:
+        if beets_library_db_path is None:
+            beets_handle = beets_factory(library_root=beets_library_root or "")
+        else:
+            beets_handle = beets_factory(
+                beets_library_db_path,
+                library_root=beets_library_root or "",
+            )
+    elif beets_library_db_path is None:
+        beets_handle = open_beets_db(cfg)
+    else:
+        beets_handle = open_beets_db(
+            db_path=beets_library_db_path,
+            library_root=beets_library_root,
+        )
+    with beets_handle as beets:
         return write_sidecar_for_request(
             db,
             beets,

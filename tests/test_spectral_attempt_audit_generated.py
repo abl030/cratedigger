@@ -15,6 +15,7 @@ from unittest.mock import patch
 import msgspec
 
 from hypothesis import example, given, strategies as st
+from tests.beets_world import BeetsWorld
 
 import tests._hypothesis_profiles  # noqa: F401  (loads active profile)
 
@@ -595,6 +596,7 @@ def _run_dispatch_finalization_world(
     new_bitrate: int,
     existing_bitrate: int,
     converted: bool,
+    beets: BeetsWorld,
 ) -> dict[str, Any]:
     """Drive the real dispatch terminal writers with injected failure timing."""
     from lib.config import CratediggerConfig
@@ -694,6 +696,8 @@ def _run_dispatch_finalization_world(
                     failed_path=source,
                     import_job_id=job.id,
                     source_username="generated-user",
+                    beets_library_db_path=str(beets.library_db),
+                    beets_library_root=str(beets.library_root),
                 )
     else:
         from lib.import_queue import IMPORT_JOB_AUTOMATION
@@ -742,6 +746,8 @@ def _run_dispatch_finalization_world(
                     run_import_fn=run_import,
                     quality_gate_fn=quality_gate,
                     candidate_import_job_id=claimed.id,
+                    beets_library_db_path=str(beets.library_db),
+                    beets_library_root=str(beets.library_root),
                 )
                 finalize_claimed_dispatch(db, claimed, outcome)
 
@@ -832,6 +838,19 @@ class TestAttemptAuditCheckerQualification(unittest.TestCase):
 
 
 class TestAttemptAuditGenerated(unittest.TestCase):
+    def setUp(self) -> None:
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        self.beets = BeetsWorld(repo_root)
+        self.addCleanup(self.beets.close)
+        self.runtime = patch.dict(os.environ, {
+            "CRATEDIGGER_RUNTIME_CONFIG": str(
+                self.beets.root / "poisoned-runtime-config.ini"
+            ),
+            "BEETS_DB": str(self.beets.root / "poisoned-library.db"),
+        })
+        self.runtime.start()
+        self.addCleanup(self.runtime.stop)
+
     @given(
         job_mode=st.sampled_from(("automation", "force")),
         snapshot_changed=st.booleans(),
@@ -1084,6 +1103,22 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         audit_grade=st.sampled_from(("genuine", "suspect", "likely_transcode")),
         audit_bitrate=st.one_of(st.none(), st.integers(min_value=32, max_value=400)),
     )
+    @example(
+        mode="no_json",
+        new_bitrate=64,
+        existing_bitrate=64,
+        converted=False,
+        audit_grade="genuine",
+        audit_bitrate=None,
+    )
+    @example(
+        mode="success",
+        new_bitrate=64,
+        existing_bitrate=64,
+        converted=False,
+        audit_grade="genuine",
+        audit_bitrate=None,
+    )
     def test_real_dispatch_finalization_preserves_audit_without_policy_drift(
         self,
         mode: str,
@@ -1107,6 +1142,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             new_bitrate=new_bitrate,
             existing_bitrate=existing_bitrate,
             converted=converted,
+            beets=self.beets,
         )
         unaudited = _run_dispatch_finalization_world(
             mode=mode,
@@ -1114,6 +1150,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             new_bitrate=new_bitrate,
             existing_bitrate=existing_bitrate,
             converted=converted,
+            beets=self.beets,
         )
 
         ambiguous_modes = {

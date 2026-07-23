@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import msgspec
+import requests
 import types
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -771,6 +772,23 @@ def noop_quality_gate(**_kwargs: Any) -> None:
     no-op so the dispatch decision tree runs end-to-end without
     inspecting beets DB state."""
     return None
+
+
+def make_requests_http_error(
+    body: str,
+    *,
+    status_code: int = 500,
+) -> "requests.HTTPError":
+    """Build a real requests HTTPError with its immutable response supplied.
+
+    ``requests.HTTPError.response`` is read-only in current stubs.  Passing a
+    real ``Response`` to the constructor also keeps test doubles faithful to
+    the slskd client's production exception contract.
+    """
+    response = requests.Response()
+    response.status_code = status_code
+    response._content = body.encode()
+    return requests.HTTPError(f"{status_code} Server Error", response=response)
 
 
 class RecordingQualityGate:
