@@ -21,4 +21,4 @@ NOT a bug. `tagging-workspace/scripts/fix_reissues.py` deliberately retagged "Fi
 
 ## Mitigation
 
-Mitigated by the harness MBID-swap audit log at `/mnt/virtio/Music/.harness-mutations.jsonl` (see `_mbid_swap_event`).
+Mitigated by the harness MBID-swap audit log at `/mnt/virtio/cratedigger/beets-db/.harness-mutations.jsonl` (see `_mbid_swap_event`).

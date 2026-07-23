@@ -62,7 +62,7 @@ If a design drifts toward "good enough" matches, "smart" defaults, or auto-throt
 | Path | Machine | Purpose |
 |------|---------|---------|
 | `10.20.0.11:5432/cratedigger` | doc2 nspawn | Pipeline DB (PostgreSQL) |
-| `/mnt/virtio/Music/beets-library.db` | shared | Beets library DB |
+| `/mnt/virtio/cratedigger/beets-db/beets-library.db` | shared | Beets library DB, journals, import log, and harness audit |
 | `/mnt/virtio/Music/Beets` | shared | Beets library (tagged files) |
 | `/mnt/virtio/Music/Incoming` | shared | Staging root (`auto-import/` requests, `post-validation/` manual review) |
 | `/mnt/virtio/music/slskd` | doc2 | slskd download directory |

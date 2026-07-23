@@ -31,7 +31,7 @@ ssh -N -L 15432:10.20.0.11:5432 doc2 &
 export PIPELINE_DB_DSN="postgresql://cratedigger:$(ssh doc2 'sudo cat /run/secrets/cratedigger-pgpass' | grep '^PGPASSWORD=' | cut -d= -f2)@127.0.0.1:15432/cratedigger"
 setsid nix-shell --run "python3 scripts/web_dev_server.py --data live-db \
   --host 127.0.0.1 --port 8096 \
-  --beets-db /mnt/virtio/Music/beets-library.db \
+  --beets-db /mnt/virtio/cratedigger/beets-db/beets-library.db \
   --mb-api http://192.168.1.35:5200/ws/2 \
   --discogs-api https://discogs.ablz.au" \
   > /tmp/devserver.log 2>&1 < /dev/null &

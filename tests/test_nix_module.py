@@ -19,13 +19,15 @@ leaks here have caused pipeline-wide failures that were hard to trace:
 These grep-based contracts are cheap to write and catch the whole
 class of "an export in module.nix leaked into a subprocess and broke
 something five layers away". They run inside the Python suite because
-we don't want to depend on ``nix eval`` at test time — a text grep
-against the source file is enough for the invariants we care about.
+most invariants only need a source-level check. The state-directory authority
+boundary is the exception: it has a known-bad ``nix eval`` pin because the
+failure depends on Nix option assertion evaluation.
 """
 
 from __future__ import annotations
 
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -346,6 +348,55 @@ class TestRenderedBeetsConfigContract(unittest.TestCase):
         self.assertIn("library = ${cfg.beets.config.library}", text)
         self.assertIn("config_dir = ${beetsConfigDir}", text)
         self.assertIn("python = ${pythonEnv}/bin/python", text)
+
+    def test_default_library_has_a_module_owned_dedicated_parent(self) -> None:
+        """#847: fresh hardened installs need no Music-root DB write grant."""
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn('defaultBeetsDbDir = "${canonicalStateDir}-beets-db";', text)
+        self.assertIn('default = "${defaultBeetsDbDir}/beets-library.db";', text)
+        self.assertIn('"d ${defaultBeetsDbDir} 2775 ${cfg.user} ${cfg.group} -"', text)
+
+    def test_state_dir_requires_a_canonical_sibling_boundary(self) -> None:
+        """#847: a trailing slash would place the sibling DB inside stateDir."""
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn("canonicalStateDirIsValid =", text)
+        self.assertIn('!lib.hasSuffix "/" canonicalStateDir', text)
+        self.assertIn("assertion = canonicalStateDirIsValid;", text)
+
+    def test_trailing_state_dir_fails_nix_evaluation(self) -> None:
+        """#847: `/srv/cratedigger/` must not turn the DB sibling into a child."""
+        expression = '''
+          let
+            f = builtins.getFlake (toString ./.);
+            system = f.inputs.nixpkgs.lib.nixosSystem {
+              system = builtins.currentSystem;
+              modules = [
+                f.nixosModules.default
+                ({ ... }: {
+                  services.cratedigger = {
+                    enable = true;
+                    src = ./.;
+                    stateDir = "/srv/cratedigger/";
+                    slskd.apiKeyFile = "/tmp/cratedigger-test-key";
+                    slskd.downloadDir = "/srv/cratedigger-downloads";
+                  };
+                })
+              ];
+            };
+          in system.config.system.build.toplevel.drvPath
+        '''
+        result = subprocess.run(
+            ["nix", "eval", "--impure", "--expr", expression],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "services.cratedigger.stateDir must be an absolute normalized non-root path without a trailing slash",
+            result.stderr,
+        )
 
     def test_web_wrapper_exports_beetsdir(self) -> None:
         """cratedigger-web imports beets in-process (beets_distance) —

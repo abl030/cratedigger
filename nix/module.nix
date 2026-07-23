@@ -17,6 +17,20 @@
 
   cfg = config.services.cratedigger;
   src = cfg.src;
+  # A canonical stateDir is a hard boundary: the default Beets DB is its
+  # sibling, while preview and YouTube retain stateDir itself for rendering
+  # and working-directory needs.
+  canonicalStateDir = cfg.stateDir;
+  canonicalStateDirIsValid =
+    lib.hasPrefix "/" canonicalStateDir
+    && canonicalStateDir != "/"
+    && !lib.hasSuffix "/" canonicalStateDir
+    && !lib.hasInfix "//" canonicalStateDir
+    && !lib.hasInfix "/./" canonicalStateDir
+    && !lib.hasSuffix "/." canonicalStateDir
+    && !lib.hasInfix "/../" canonicalStateDir
+    && !lib.hasSuffix "/.." canonicalStateDir;
+  defaultBeetsDbDir = "${canonicalStateDir}-beets-db";
 
   # Every unit/wrapper interpolates the DSN; guard it so a missing value
   # yields the actionable message even if string coercion is forced before
@@ -651,7 +665,7 @@ in {
     stateDir = mkOption {
       type = types.str;
       default = "/var/lib/cratedigger";
-      description = "Runtime state directory (config.ini, lock file).";
+      description = "Runtime state directory (config.ini, lock file). Must be an absolute normalized non-root path without a trailing slash.";
     };
 
     processingDir = mkOption {
@@ -954,13 +968,15 @@ in {
         };
         library = mkOption {
           type = types.str;
-          default = "/mnt/virtio/Music/beets-library.db";
+          default = "${defaultBeetsDbDir}/beets-library.db";
           description = ''
-            Beets library SQLite DB (config.yaml `library:`). The import log
-            renders next to it as beets-import.log. The parent directory must
-            exist at runtime: `beet` prompts interactively ("Create it
-            (Y/n)?") when it's missing, which blocks any non-interactive
-            invocation.
+            Beets library SQLite DB (config.yaml `library:`). Defaults to a
+            dedicated sibling of stateDir so a fresh hardened install
+            does not need write access to its music root. The import log and
+            harness mutation audit render beside this file. The module creates
+            the default parent on first boot; an explicitly overridden parent
+            remains operator-owned and must already exist at runtime because
+            `beet` otherwise prompts interactively ("Create it (Y/n)?").
           '';
         };
         fetchart = {
@@ -1371,6 +1387,10 @@ in {
   config = mkIf cfg.enable {
     assertions = [
       {
+        assertion = canonicalStateDirIsValid;
+        message = "services.cratedigger.stateDir must be an absolute normalized non-root path without a trailing slash (for example, /var/lib/cratedigger).";
+      }
+      {
         assertion = cfg.slskd.apiKeyFile != null;
         message = "services.cratedigger.slskd.apiKeyFile is not set: point it at a file containing your slskd API key (readable by services.cratedigger.user).";
       }
@@ -1473,6 +1493,12 @@ in {
         # U4 renders config.yaml into it; the dir must exist regardless so
         # the wrapper works on a fresh boot.
         "d ${beetsConfigDir} 0755 ${cfg.user} ${cfg.group} -"
+        # The default library parent is module-owned and outside stateDir: the
+        # preview and YouTube workers legitimately need stateDir but must not
+        # thereby gain database authority. Do not create or chown
+        # an arbitrary explicit library override: that path is the operator's
+        # authority and its parent must be provisioned by the operator.
+        "d ${defaultBeetsDbDir} 2775 ${cfg.user} ${cfg.group} -"
       ]
       ++ optional cfg.youtubeIngest.enable
         "d ${cfg.youtubeIngest.tempDir} 0755 ${cfg.user} ${cfg.group} -";

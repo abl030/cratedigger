@@ -137,7 +137,7 @@ class CratediggerConfig:
     # SQLite database paired with ``beets_directory`` by the shipped Beets
     # config. Production readers must open both through ``open_beets_db``;
     # neither path is independently authoritative.
-    beets_library_db: str = "/mnt/virtio/Music/beets-library.db"
+    beets_library_db: str = "/var/lib/cratedigger-beets-db/beets-library.db"
 
     # Module-rendered beets runtime (tier-2 plan U5, R6). The NixOS module
     # renders these into config.ini so every beets subprocess resolves the
@@ -334,7 +334,7 @@ class CratediggerConfig:
             # which exists for legacy reasons). Empty string → unset.
             beets_directory=get("Beets", "directory", ""),
             beets_library_db=get(
-                "Beets", "library", "/mnt/virtio/Music/beets-library.db",
+                "Beets", "library", "/var/lib/cratedigger-beets-db/beets-library.db",
             ),
             beets_config_dir=get("Beets", "config_dir", ""),
             beets_python=get("Beets", "python", ""),

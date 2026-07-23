@@ -91,7 +91,7 @@ You need: **NixOS**, **a dedicated slskd instance** (`services.slskd` is in nixp
             pipelineDb.createLocally = true;   # local postgres, peer auth, no passwords
             beets.config = {
               directory = "/srv/music/library";
-              library = "/srv/music/beets-library.db";
+              library = "/var/lib/cratedigger-beets-db/beets-library.db";
             };
             beets.validation = {
               stagingDir = "/srv/music/incoming";

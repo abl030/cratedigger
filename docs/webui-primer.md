@@ -12,7 +12,7 @@ Browser → https://music.ablz.au
              → localhost:8085
                → web/server.py (stdlib http.server)
                  → PostgreSQL (pipeline DB, nspawn container 10.20.0.11)
-                 → SQLite (beets library, /mnt/virtio/Music/beets-library.db, read-only)
+                 → SQLite (beets library, /mnt/virtio/cratedigger/beets-db/beets-library.db, read-only)
                  → MusicBrainz API (local mirror, 192.168.1.35:5200)
 ```
 
@@ -400,7 +400,7 @@ Key endpoints used:
 
 ## Beets Library Integration
 
-Reads `/mnt/virtio/Music/beets-library.db` (SQLite, read-only) to show what you own:
+Reads `/mnt/virtio/cratedigger/beets-db/beets-library.db` (SQLite, read-only) to show what you own:
 - Queries `albums` table by `albumartist LIKE %name%`
 - Distinguishes MB imports (UUID in `mb_albumid`) from Discogs imports (numeric ID or `discogs_albumid` set)
 - Also checks individual release MBIDs against beets for the "in library" badge on editions

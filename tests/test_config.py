@@ -423,7 +423,7 @@ class TestReadRuntimeConfig(unittest.TestCase):
         self.assertEqual(cfg.beets_directory, "")
         self.assertEqual(
             cfg.beets_library_db,
-            "/mnt/virtio/Music/beets-library.db",
+            "/var/lib/cratedigger-beets-db/beets-library.db",
         )
 
     def test_beets_directory_read_from_config(self):
