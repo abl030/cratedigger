@@ -9,6 +9,9 @@ cleanup path.
 from __future__ import annotations
 
 
+WRONG_MATCH_QUARANTINE_DIR = "wrong_matches"
+
+
 PREIMPORT_FACT_REJECTION_SCENARIOS: frozenset[str] = frozenset({
     "audio_corrupt",
     "bad_audio_hash",

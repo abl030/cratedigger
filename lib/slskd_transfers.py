@@ -28,6 +28,7 @@ from lib.processing_paths import (
 )
 from lib.quality import ActiveDownloadState
 from lib.slskd_client import DownloadUser, TransferSnapshot
+from lib.wrong_match_policy import WRONG_MATCH_QUARANTINE_DIR
 
 if TYPE_CHECKING:
     from lib.context import CratediggerContext
@@ -864,8 +865,8 @@ def _protected_paths_for_downloading(
     ``_owned_paths_from_ledger`` for the other half, the ledger's
     positive-ownership record of past AND present attempts).
 
-    ``protected_dirs`` always includes the ``failed_imports/`` quarantine
-    subtree (Wrong Match cards reference these paths) plus, for every
+    ``protected_dirs`` always includes the ``failed_imports/`` and
+    ``wrong_matches/`` quarantine subtrees plus, for every
     ``downloading`` row, its canonical processing folder from the SAME
     ``canonical_folder_for_row`` leaf materialize calls. The row's persisted
     ``(username, filename)`` set scopes the attempt.
@@ -880,6 +881,9 @@ def _protected_paths_for_downloading(
     """
     protected_dirs = {
         normalize_processing_path(os.path.join(root, "failed_imports")),
+        normalize_processing_path(
+            os.path.join(root, WRONG_MATCH_QUARANTINE_DIR)
+        ),
     }
     protected_files: set[str] = set()
 
@@ -1107,9 +1111,9 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
     (``_protected_paths_for_downloading``; the walk prunes them without
     ever examining their files):
 
-    * the ``failed_imports/`` quarantine tree (cratedigger's own tree
-      by construction — Wrong Match cards reference these paths; its
-      lifecycle is untouched by this flip), and
+    * the ``failed_imports/`` and ``wrong_matches/`` quarantine trees
+      (cratedigger's own trees by construction; their lifecycle is untouched
+      by this reaper), and
     * a ``downloading`` row's CURRENT canonical folder/stamped paths
       (retry-safe: an abandoned earlier attempt of the SAME request is
       ledger-owned but inactive, and IS reap-eligible once aged — the
