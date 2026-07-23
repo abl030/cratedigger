@@ -12,17 +12,31 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess as sp
+import time
 import unicodedata
 import difflib
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from typing import Any, Callable, Iterator, Sequence, TYPE_CHECKING
 
 from lib.json_narrow import (
     is_object_list as _is_object_list,
     is_str_object_dict as _is_str_object_dict,
+)
+from lib.quality.audio_validation import (
+    AUDIO_VALIDATION_DIAGNOSTIC_LIMIT,
+    AUDIO_VALIDATION_POLICY_ID,
+    AudioToolDiagnostic,
+    AudioToolDiagnosticCategory,
+    AudioValidationOutcome,
+    AudioValidationReport,
+    AudioValidationResult,
+    bounded_audio_tool_diagnostic,
+    validate_audio_validation_report,
 )
 
 if TYPE_CHECKING:
@@ -31,15 +45,6 @@ if TYPE_CHECKING:
     from lib.quality import ValidationResult
 
 logger = logging.getLogger("cratedigger")
-
-
-@dataclass
-class AudioValidationResult:
-    """Result from validate_audio() — audio integrity check."""
-    valid: bool = True
-    error: str | None = None
-    failed_files: list[tuple[str, str]] = field(
-        default_factory=list[tuple[str, str]])
 
 
 def parse_mb_first_release_year(data: dict[str, Any]) -> int | None:
@@ -228,97 +233,431 @@ def repair_mp3_headers(folder_path: str) -> None:
 from lib.quality import AUDIO_EXTENSIONS as _AUDIO_EXTS
 
 
-def validate_audio(folder_path: str, mode: str = "normal") -> AudioValidationResult:
-    """Check audio integrity of downloaded files via ffmpeg full decode.
+_AUDIO_VALIDATION_TIMEOUT_SECONDS = 300
 
-    mode: "off" = skip, anything else = reject if any file fails.
+
+@dataclass(frozen=True)
+class _AudioSourceSnapshot:
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+
+
+class _AudioSourceChangedError(OSError):
+    pass
+
+
+def build_audio_validation_argv(filepath: str) -> list[str]:
+    """Build the fixed audio-only full-decode policy from issue #835."""
+    return [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
+        "-v",
+        "error",
+        "-max_error_rate",
+        "0",
+        "-abort_on",
+        "empty_output_stream",
+        "-err_detect:a",
+        "crccheck+bitstream+buffer+explode",
+        "-vn",
+        "-sn",
+        "-dn",
+        "-i",
+        filepath,
+        "-map",
+        "0:a",
+        "-map_metadata",
+        "-1",
+        "-map_chapters",
+        "-1",
+        "-f",
+        "null",
+        "-",
+    ]
+
+
+def _source_snapshot(filepath: str) -> _AudioSourceSnapshot:
+    file_stat = os.stat(filepath)
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise OSError("audio validation source is not a regular file")
+    return _AudioSourceSnapshot(
+        device=file_stat.st_dev,
+        inode=file_stat.st_ino,
+        size=file_stat.st_size,
+        mtime_ns=file_stat.st_mtime_ns,
+    )
+
+
+def _probe_file_readable(
+    filepath: str,
+    *,
+    complete: bool = False,
+    expected: _AudioSourceSnapshot | None = None,
+) -> _AudioSourceSnapshot:
+    """Read enough to prove access, or the whole file after ambiguous failure."""
+    before = _source_snapshot(filepath)
+    if expected is not None and before != expected:
+        raise _AudioSourceChangedError(
+            "source changed during audio validation",
+        )
+    with open(filepath, "rb") as stream:
+        if complete:
+            while stream.read(1024 * 1024):
+                pass
+        else:
+            stream.read(1)
+    after = _source_snapshot(filepath)
+    if after != before:
+        raise _AudioSourceChangedError(
+            "source changed during audio validation",
+        )
+    return before
+
+
+def _audio_files_in_folder(folder_path: str) -> list[str]:
+    walk_errors: list[OSError] = []
+    files: list[str] = []
+    for root, _dirs, names in os.walk(
+        folder_path,
+        onerror=walk_errors.append,
+    ):
+        for name in names:
+            ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+            if ext in _AUDIO_EXTS:
+                files.append(os.path.join(root, name))
+    if walk_errors:
+        raise walk_errors[0]
+    files.sort()
+    return files
+
+
+@lru_cache(maxsize=1)
+def _ffmpeg_version() -> str:
+    """Return one compact version identity per process."""
+    try:
+        output = sp.check_output(
+            ["ffmpeg", "-version"],
+            stderr=sp.STDOUT,
+            timeout=5,
+        )
+    except (OSError, sp.SubprocessError):
+        return ""
+    first_line = output.decode("utf-8", "replace").splitlines()
+    return first_line[0].strip() if first_line else ""
+
+
+def _audio_validation_result(
+    *,
+    outcome: AudioValidationOutcome,
+    files_checked: int,
+    files_failed: int,
+    diagnostics: list[AudioToolDiagnostic],
+    omitted_diagnostics: int = 0,
+    tool_version: str | None = None,
+    failed_paths: tuple[str, ...] = (),
+    elapsed_seconds: float | None = None,
+) -> AudioValidationResult:
+    report = AudioValidationReport(
+        policy_id=AUDIO_VALIDATION_POLICY_ID,
+        tool="ffmpeg",
+        tool_version=(
+            _ffmpeg_version() if tool_version is None else tool_version
+        ),
+        outcome=outcome,
+        files_checked=files_checked,
+        files_failed=files_failed,
+        diagnostics=diagnostics,
+        omitted_diagnostics=omitted_diagnostics,
+    )
+    validate_audio_validation_report(report)
+    first = diagnostics[0] if diagnostics else None
+    summary = (
+        f"AUDIO_CHECK outcome={outcome} files={files_checked} "
+        f"failed={files_failed} policy={AUDIO_VALIDATION_POLICY_ID}"
+    )
+    if elapsed_seconds is not None:
+        summary += f" elapsed_ms={round(elapsed_seconds * 1000)}"
+    if first is not None:
+        summary += (
+            f" first={first.relative_path or '.'}"
+            f" category={first.category}"
+        )
+    if outcome == "audio_corrupt":
+        logger.warning(summary)
+    elif outcome == "measurement_failed":
+        logger.error(summary)
+    else:
+        logger.info(summary)
+    return AudioValidationResult(report, failed_paths=failed_paths)
+
+
+def _world_failure_result(
+    *,
+    relative_path: str,
+    category: AudioToolDiagnosticCategory,
+    detail: bytes | str | None,
+    files_checked: int,
+    return_code: int | None = None,
+    tool_version: str | None = None,
+) -> AudioValidationResult:
+    return _audio_validation_result(
+        outcome="measurement_failed",
+        files_checked=files_checked,
+        files_failed=0,
+        diagnostics=[
+            bounded_audio_tool_diagnostic(
+                relative_path=relative_path,
+                category=category,
+                return_code=return_code,
+                stderr=detail,
+            ),
+        ],
+        tool_version=tool_version,
+    )
+
+
+def validate_audio(folder_path: str, mode: str = "normal") -> AudioValidationResult:
+    """Perform a read-only, audio-only strict FFmpeg full decode.
+
+    Exit-zero stderr is discarded without inspection. A positive FFmpeg exit
+    on a fully readable, stable source is bad audio. Failures to perform the
+    measurement (filesystem access, process startup, signal termination, or a
+    changing source) are reported separately and must not blame the peer.
 
     Walks subdirectories so multi-disc layouts (``Album/CD1/*.mp3``) are
     validated too. The auto-import path always passes a flattened folder
     so recursion is a no-op there; force-import paths can point at
     user folders with nested discs.
     """
+    started_at = time.monotonic()
     if mode == "off":
-        return AudioValidationResult()
+        return _audio_validation_result(
+            outcome="skipped",
+            files_checked=0,
+            files_failed=0,
+            diagnostics=[],
+            tool_version="",
+            elapsed_seconds=time.monotonic() - started_at,
+        )
 
-    files: list[str] = []
-    for root, _dirs, names in os.walk(folder_path):
-        for f in names:
-            ext = f.rsplit(".", 1)[-1].lower() if "." in f else ""
-            if ext in _AUDIO_EXTS:
-                files.append(os.path.join(root, f))
+    if not os.path.isdir(folder_path):
+        return _world_failure_result(
+            relative_path=".",
+            category="read_error",
+            detail="audio validation folder is missing or not a directory",
+            files_checked=0,
+            tool_version="",
+        )
+
+    try:
+        files = _audio_files_in_folder(folder_path)
+    except OSError as exc:
+        return _world_failure_result(
+            relative_path=".",
+            category="read_error",
+            detail=str(exc),
+            files_checked=0,
+            tool_version="",
+        )
 
     if not files:
-        return AudioValidationResult()
+        return _audio_validation_result(
+            outcome="passed",
+            files_checked=0,
+            files_failed=0,
+            diagnostics=[],
+            elapsed_seconds=time.monotonic() - started_at,
+        )
 
-    failed: list[tuple[str, str]] = []
+    diagnostics: list[AudioToolDiagnostic] = []
+    omitted_diagnostics = 0
+    files_checked = 0
+    files_failed = 0
+    failed_paths: list[str] = []
+    snapshots: dict[str, _AudioSourceSnapshot] = {}
     for filepath in files:
-        # Use the path relative to folder_path so nested layouts (CD1/01.mp3,
-        # CD2/01.mp3) remain distinguishable in failed_files and the error
-        # message — os.path.basename would collapse same-named tracks across
-        # discs into the same entry.
         display = os.path.relpath(filepath, folder_path)
         try:
-            result = sp.run(
-                ["ffmpeg", "-v", "error", "-i", filepath,
-                 "-map", "0:a", "-f", "null", "-"],
-                capture_output=True, text=True, errors="replace", timeout=300
+            snapshot = _probe_file_readable(filepath)
+        except _AudioSourceChangedError as exc:
+            return _world_failure_result(
+                relative_path=display,
+                category="source_changed",
+                detail=str(exc),
+                files_checked=files_checked,
+                tool_version="",
             )
-            ffmpeg_returncode = result.returncode
-            stderr = result.stderr.strip()
-            if filepath.lower().endswith(".flac") and "cannot check MD5 signature" in stderr:
-                logger.info(f"AUDIO_CHECK: fixing unset MD5: {display}")
-                fix = sp.run(
-                    ["flac", "-f", "--verify", filepath],
-                    capture_output=True, text=True, errors="replace",
-                    timeout=300,
+        except OSError as exc:
+            return _world_failure_result(
+                relative_path=display,
+                category="read_error",
+                detail=str(exc),
+                files_checked=files_checked,
+                tool_version="",
+            )
+        snapshots[filepath] = snapshot
+
+        try:
+            result = sp.run(
+                build_audio_validation_argv(filepath),
+                capture_output=True,
+                timeout=_AUDIO_VALIDATION_TIMEOUT_SECONDS,
+            )
+        except sp.TimeoutExpired as exc:
+            try:
+                _probe_file_readable(
+                    filepath,
+                    complete=True,
+                    expected=snapshot,
                 )
-                if fix.returncode == 0:
-                    retest = sp.run(
-                        ["ffmpeg", "-v", "error", "-i", filepath,
-                         "-map", "0:a", "-f", "null", "-"],
-                        capture_output=True, text=True, errors="replace",
-                        timeout=300,
+            except _AudioSourceChangedError as read_exc:
+                return _world_failure_result(
+                    relative_path=display,
+                    category="source_changed",
+                    detail=str(read_exc),
+                    files_checked=files_checked + 1,
+                    tool_version="",
+                )
+            except OSError as read_exc:
+                return _world_failure_result(
+                    relative_path=display,
+                    category="read_error",
+                    detail=str(read_exc),
+                    files_checked=files_checked + 1,
+                    tool_version="",
+                )
+            files_checked += 1
+            files_failed += 1
+            failed_paths.append(display)
+            diagnostic = bounded_audio_tool_diagnostic(
+                relative_path=display,
+                category="decode_timeout",
+                stderr=exc.stderr,
+            )
+        except OSError as exc:
+            return _world_failure_result(
+                relative_path=display,
+                category="process_unavailable",
+                detail=str(exc),
+                files_checked=files_checked,
+                tool_version="unavailable",
+            )
+        else:
+            files_checked += 1
+            returncode = result.returncode
+            if returncode < 0:
+                return _world_failure_result(
+                    relative_path=display,
+                    category="process_interrupted",
+                    detail=f"ffmpeg terminated by signal {-returncode}",
+                    files_checked=files_checked,
+                    return_code=returncode,
+                )
+            if returncode == 0:
+                try:
+                    current = _source_snapshot(filepath)
+                except OSError as exc:
+                    return _world_failure_result(
+                        relative_path=display,
+                        category="read_error",
+                        detail=str(exc),
+                        files_checked=files_checked,
                     )
-                    ffmpeg_returncode = retest.returncode
-                    stderr = retest.stderr.strip()
-                    if retest.returncode == 0:
-                        if stderr:
-                            logger.info(
-                                "AUDIO_CHECK: ignoring informational stderr after MD5 fix: %s",
-                                display,
-                            )
-                        continue  # fixed and clean enough for audio validation
-                else:
-                    stderr = f"MD5 fix failed: {fix.stderr.strip()[:150]}"
-                    failed.append((display, stderr))
-                    continue
+                if current != snapshot:
+                    return _world_failure_result(
+                        relative_path=display,
+                        category="source_changed",
+                        detail="source changed during audio validation",
+                        files_checked=files_checked,
+                    )
+                # Exit-zero stderr is deliberately never read, normalized,
+                # hashed, classified, logged, or persisted.
+                continue
 
-            # #251: ffmpeg's exit code is the authoritative signal for decode
-            # failure. Stderr at rc=0 is informational only (metadata-only
-            # demuxer warnings: BOM, mjpeg APP fields, mp3float backstep,
-            # attached-picture mimetype) and must not flag audio_corrupt.
-            # The previous `_IGNORABLE_AUDIO_VALIDATION_STDERR` allowlist was
-            # retired with this change: every documented "ignorable" stderr
-            # pattern had rc=0 in practice (see d7fdff7 commit history), so
-            # trusting rc alone subsumes the filter without loss of coverage.
-            if ffmpeg_returncode != 0:
-                err = stderr[:200]
-                failed.append((display, err))
-        except sp.TimeoutExpired:
-            failed.append((display, "ffmpeg timeout"))
-        except FileNotFoundError:
-            logger.error("AUDIO_CHECK: ffmpeg not found on PATH — skipping audio validation")
-            return AudioValidationResult()
+            try:
+                _probe_file_readable(
+                    filepath,
+                    complete=True,
+                    expected=snapshot,
+                )
+            except _AudioSourceChangedError as exc:
+                return _world_failure_result(
+                    relative_path=display,
+                    category="source_changed",
+                    detail=str(exc),
+                    files_checked=files_checked,
+                )
+            except OSError as exc:
+                return _world_failure_result(
+                    relative_path=display,
+                    category="read_error",
+                    detail=str(exc),
+                    files_checked=files_checked,
+                )
+            files_failed += 1
+            failed_paths.append(display)
+            diagnostic = bounded_audio_tool_diagnostic(
+                relative_path=display,
+                category=(
+                    "decode_error"
+                    if returncode == 69
+                    else "ffmpeg_failed_unclassified"
+                ),
+                return_code=returncode,
+                stderr=result.stderr,
+            )
 
-    if not failed:
-        logger.info(f"AUDIO_CHECK: all {len(files)} files passed ({mode} mode)")
-        return AudioValidationResult()
+        if len(diagnostics) < AUDIO_VALIDATION_DIAGNOSTIC_LIMIT:
+            diagnostics.append(diagnostic)
+        else:
+            omitted_diagnostics += 1
 
-    detail = "; ".join(f"{name}: {err}" for name, err in failed[:5])
-    error_msg = f"{len(failed)}/{len(files)} files failed: {detail}"
-    logger.warning(f"AUDIO_CHECK: {error_msg} → REJECT ({mode} mode)")
-    return AudioValidationResult(valid=False, error=error_msg, failed_files=failed)
+    try:
+        final_files = _audio_files_in_folder(folder_path)
+    except OSError as exc:
+        return _world_failure_result(
+            relative_path=".",
+            category="read_error",
+            detail=str(exc),
+            files_checked=files_checked,
+        )
+    if final_files != files:
+        return _world_failure_result(
+            relative_path=".",
+            category="source_changed",
+            detail="audio file set changed during validation",
+            files_checked=files_checked,
+        )
+    for filepath, expected in snapshots.items():
+        try:
+            current = _source_snapshot(filepath)
+        except OSError as exc:
+            return _world_failure_result(
+                relative_path=os.path.relpath(filepath, folder_path),
+                category="read_error",
+                detail=str(exc),
+                files_checked=files_checked,
+            )
+        if current != expected:
+            return _world_failure_result(
+                relative_path=os.path.relpath(filepath, folder_path),
+                category="source_changed",
+                detail="source changed during audio validation",
+                files_checked=files_checked,
+            )
+
+    return _audio_validation_result(
+        outcome=("audio_corrupt" if files_failed else "passed"),
+        files_checked=files_checked,
+        files_failed=files_failed,
+        diagnostics=diagnostics,
+        omitted_diagnostics=omitted_diagnostics,
+        failed_paths=tuple(failed_paths),
+        elapsed_seconds=time.monotonic() - started_at,
+    )
 
 
 # === Track title matching ===

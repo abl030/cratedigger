@@ -21,9 +21,13 @@ from lib.pipeline_db import (
 )
 from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS
 from lib.quality import (
+    AlbumQualityEvidenceFile,
+    AudioToolDiagnostic,
     AudioQualityMeasurement,
+    AudioValidationReport,
     SpectralMeasurement,
     ValidationResult,
+    legacy_unrecorded_audio_validation_report,
 )
 from tests.fakes import (
     FakeBeetsDB,
@@ -489,6 +493,10 @@ class TestFakePipelineDB(unittest.TestCase):
         db.seed_request(make_request_row(id=42))
         evidence = make_album_quality_evidence(
             mb_release_id="mb-preview-facts-1",
+            audio_corrupt=True,
+            audio_error=(
+                "01 - Track.mp3: Invalid data found when processing input"
+            ),
             files=[
                 AlbumQualityEvidenceFile(
                     relative_path="01 - Track.mp3",
@@ -502,8 +510,6 @@ class TestFakePipelineDB(unittest.TestCase):
         )
         evidence = msgspec.structs.replace(
             evidence,
-            audio_corrupt=True,
-            audio_error="01 - Track.mp3: Invalid data found when processing input",
             folder_layout="nested",
             audio_file_count=1,
             filetype_band="mp3",
@@ -527,6 +533,63 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertEqual(loaded.filetype_band, "mp3")
         self.assertEqual(loaded.matched_bad_audio_hash_id, 99)
         self.assertEqual(loaded.matched_bad_audio_hash_path, "01 - Track.mp3")
+        self.assertFalse(loaded.files[0].decode_ok)
+
+    def test_weak_writer_preserves_strong_audio_validation_tuple(self):
+        """A stale fake writer cannot erase a completed decoder audit."""
+        db = FakePipelineDB()
+        files = [
+            AlbumQualityEvidenceFile(
+                relative_path="disc-1/01.flac",
+                size_bytes=123,
+                mtime_ns=456,
+                extension="flac",
+                container="flac",
+                codec="flac",
+                decode_ok=False,
+            ),
+        ]
+        report = AudioValidationReport(
+            tool_version="8.1.1",
+            outcome="audio_corrupt",
+            files_checked=1,
+            files_failed=1,
+            diagnostics=[
+                AudioToolDiagnostic(
+                    relative_path="disc-1/01.flac",
+                    category="decode_error",
+                    return_code=69,
+                    stderr_excerpt="Invalid data",
+                    stderr_bytes=4096,
+                    stderr_sha256="a" * 64,
+                    stderr_truncated=True,
+                ),
+            ],
+        )
+        strong = make_album_quality_evidence(
+            mb_release_id="mb-audio-audit-fake",
+            files=files,
+            audio_corrupt=True,
+            audio_error="disc-1/01.flac: Invalid data",
+            audio_validation=report,
+        )
+        db.upsert_album_quality_evidence(strong)
+        db.upsert_album_quality_evidence(msgspec.structs.replace(
+            strong,
+            audio_validation=legacy_unrecorded_audio_validation_report(),
+            audio_corrupt=False,
+            audio_error=None,
+            files=[msgspec.structs.replace(files[0], decode_ok=True)],
+        ))
+
+        loaded = db.find_album_quality_evidence(
+            mb_release_id=strong.mb_release_id,
+            snapshot_fingerprint=strong.snapshot_fingerprint,
+        )
+        assert loaded is not None
+        self.assertEqual(loaded.audio_validation, report)
+        self.assertTrue(loaded.audio_corrupt)
+        self.assertEqual(loaded.audio_error, strong.audio_error)
         self.assertFalse(loaded.files[0].decode_ok)
 
     def test_album_quality_evidence_empty_fileset_accepts_zero_count_on_fake(self):
@@ -868,6 +931,29 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         ids = {r["id"] for r in rows}
         self.assertEqual(ids, {1, 3})
+
+    def test_get_retained_failure_paths(self):
+        db = FakePipelineDB()
+        db.log_download(
+            request_id=1,
+            outcome="measurement_failed",
+            staged_path="/downloads/retained",
+        )
+        db.log_download(
+            request_id=1,
+            outcome="measurement_failed",
+            staged_path="",
+        )
+        db.log_download(
+            request_id=1,
+            outcome="rejected",
+            staged_path="/downloads/rejected",
+        )
+
+        self.assertEqual(
+            db.get_retained_failure_paths(),
+            {"/downloads/retained"},
+        )
 
     def test_list_requests_by_artist_prefers_mb_artist_id_and_legacy_fallback(self):
         db = FakePipelineDB()

@@ -2,11 +2,14 @@
 import json
 from typing import Any
 
+import msgspec
+
 from lib.quality import (
     AlbumQualityEvidence,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
+    AudioValidationReport,
     VerifiedLosslessProof,
 )
 
@@ -38,6 +41,13 @@ class _EvidenceMixin(_PipelineDBBase):
         v0 = evidence.v0_metric
         proof = evidence.verified_lossless_proof
         m = evidence.measurement
+        audio_validation_json = msgspec.json.encode(
+            evidence.audio_validation,
+        ).decode()
+        preserve_existing_audio_validation = (
+            evidence.audio_validation.outcome
+            in {"legacy_unrecorded", "skipped"}
+        )
         file_rows = [
             {
                 "ordinal": ordinal,
@@ -72,7 +82,8 @@ class _EvidenceMixin(_PipelineDBBase):
                     verified_lossless_provenance,
                     verified_lossless_source, verified_lossless_classifier,
                     verified_lossless_detail,
-                    audio_corrupt, audio_error, folder_layout, audio_file_count,
+                    audio_corrupt, audio_error, audio_validation,
+                    folder_layout, audio_file_count,
                     filetype_band, matched_bad_audio_hash_id,
                     matched_bad_audio_hash_path,
                     updated_at
@@ -87,7 +98,7 @@ class _EvidenceMixin(_PipelineDBBase):
                     %s, -- on-disk V0 research attempted
                     %s, -- changed-current enrichment required
                     %s, %s, %s, %s, -- verified-lossless proof
-                    %s, %s, %s, %s, %s, %s, %s, -- preview facts
+                    %s, %s, %s, %s, %s, %s, %s, %s, -- preview facts
                     NOW()
                 )
                 ON CONFLICT (mb_release_id, snapshot_fingerprint)
@@ -248,8 +259,33 @@ class _EvidenceMixin(_PipelineDBBase):
                         EXCLUDED.verified_lossless_classifier,
                     verified_lossless_detail =
                         EXCLUDED.verified_lossless_detail,
-                    audio_corrupt = EXCLUDED.audio_corrupt,
-                    audio_error = EXCLUDED.audio_error,
+                    audio_validation = CASE
+                        WHEN EXCLUDED.audio_validation->>'outcome' IN (
+                            'legacy_unrecorded', 'skipped'
+                        )
+                        AND album_quality_evidence.audio_validation->>'outcome'
+                            NOT IN ('legacy_unrecorded', 'skipped')
+                        THEN album_quality_evidence.audio_validation
+                        ELSE EXCLUDED.audio_validation
+                    END,
+                    audio_corrupt = CASE
+                        WHEN EXCLUDED.audio_validation->>'outcome' IN (
+                            'legacy_unrecorded', 'skipped'
+                        )
+                        AND album_quality_evidence.audio_validation->>'outcome'
+                            NOT IN ('legacy_unrecorded', 'skipped')
+                        THEN album_quality_evidence.audio_corrupt
+                        ELSE EXCLUDED.audio_corrupt
+                    END,
+                    audio_error = CASE
+                        WHEN EXCLUDED.audio_validation->>'outcome' IN (
+                            'legacy_unrecorded', 'skipped'
+                        )
+                        AND album_quality_evidence.audio_validation->>'outcome'
+                            NOT IN ('legacy_unrecorded', 'skipped')
+                        THEN album_quality_evidence.audio_error
+                        ELSE EXCLUDED.audio_error
+                    END,
                     folder_layout = EXCLUDED.folder_layout,
                     audio_file_count = EXCLUDED.audio_file_count,
                     filetype_band = EXCLUDED.filetype_band,
@@ -257,11 +293,19 @@ class _EvidenceMixin(_PipelineDBBase):
                     matched_bad_audio_hash_path =
                         EXCLUDED.matched_bad_audio_hash_path,
                     updated_at = NOW()
-                RETURNING id
+                RETURNING id, %s::boolean AS preserve_existing_audio_validation
+            ),
+            preserved_file_rows AS MATERIALIZED (
+                SELECT files.relative_path, files.decode_ok
+                FROM album_quality_evidence_files files
+                JOIN upserted ON upserted.id = files.evidence_id
             ),
             deleted AS (
                 DELETE FROM album_quality_evidence_files
                 WHERE evidence_id = (SELECT id FROM upserted)
+                  AND (
+                    SELECT COUNT(*) FROM preserved_file_rows
+                  ) >= 0
                 RETURNING 1
             ),
             delete_complete AS (
@@ -287,10 +331,20 @@ class _EvidenceMixin(_PipelineDBBase):
             SELECT upserted.id, file_rows.ordinal, file_rows.relative_path,
                    file_rows.size_bytes, file_rows.mtime_ns,
                    file_rows.extension, file_rows.container, file_rows.codec,
-                   COALESCE(file_rows.decode_ok, TRUE)
+                   CASE
+                       WHEN upserted.preserve_existing_audio_validation
+                       THEN COALESCE(
+                           preserved_file_rows.decode_ok,
+                           file_rows.decode_ok,
+                           TRUE
+                       )
+                       ELSE COALESCE(file_rows.decode_ok, TRUE)
+                   END
             FROM upserted
             CROSS JOIN delete_complete
             CROSS JOIN file_rows
+            LEFT JOIN preserved_file_rows
+              ON preserved_file_rows.relative_path = file_rows.relative_path
             """,
             (
                 evidence.mb_release_id,
@@ -327,11 +381,13 @@ class _EvidenceMixin(_PipelineDBBase):
                 proof.detail if proof else None,
                 evidence.audio_corrupt,
                 evidence.audio_error,
+                audio_validation_json,
                 evidence.folder_layout,
                 evidence.audio_file_count,
                 evidence.filetype_band,
                 evidence.matched_bad_audio_hash_id,
                 evidence.matched_bad_audio_hash_path,
+                preserve_existing_audio_validation,
                 json.dumps(file_rows),
             ),
         )
@@ -757,6 +813,10 @@ class _EvidenceMixin(_PipelineDBBase):
                 row["current_enrichment_required"]
             ),
             verified_lossless_proof=proof,
+            audio_validation=msgspec.convert(
+                row["audio_validation"],
+                type=AudioValidationReport,
+            ),
             audio_corrupt=bool(row.get("audio_corrupt", False)),
             audio_error=row.get("audio_error"),
             folder_layout=row.get("folder_layout") or "flat",

@@ -8,6 +8,10 @@ import json
 from typing import Any, Optional
 import msgspec
 
+from lib.quality.audio_validation import (
+    AudioToolDiagnostic,
+    AudioValidationReport,
+)
 from lib.quality.evidence_types import (
     AudioQualityMeasurement,
     EVIDENCE_PROVENANCE_CARRIED,
@@ -47,6 +51,10 @@ class ConversionInfo(msgspec.Struct):
     # 5.1(side) FLAC otherwise breaks libopus outright (Mott / r3852). None
     # for legacy rows or when the probe fails.
     source_channels: Optional[int] = None
+    diagnostics: list[AudioToolDiagnostic] = msgspec.field(default_factory=list)
+    omitted_diagnostics: int = 0
+    source_validation: AudioValidationReport | None = None
+    source_validation_failed_paths: list[str] = msgspec.field(default_factory=list)
 
 
 class SpectralTrackDetail(msgspec.Struct, frozen=True):

@@ -31,6 +31,7 @@ from lib.quality import (
     ImportResult,
     PostflightInfo,
     ValidationResult,
+    legacy_unrecorded_audio_validation_report,
 )
 from lib.staged_album import StagedAlbum
 from tests.fakes import (
@@ -44,6 +45,7 @@ from tests.helpers import (
     RecordingQualityGate,
     finalize_claimed_dispatch,
     make_album_quality_evidence,
+    make_audio_corrupt_validation_report,
     make_ctx_with_fake_db,
     make_download_file,
     make_import_result,
@@ -6338,24 +6340,25 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
 class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
     """Integration slice for the preview-side measurement_failed entry point.
 
-    Validates the four self-healing side effects own the same sub-helper as
-    the importer-side ``_record_rejection_and_maybe_requeue``:
+    Validates the three self-healing side effects owned by the preview helper:
 
       (a) ``download_log`` row written with ``outcome='measurement_failed'``
-      (b) ``source_denylist`` write when the per-user rule applies
-      (c) parent request transitioned to ``status='wanted'`` via
+      (b) parent request transitioned to ``status='wanted'`` via
           ``transitions.finalize_request``
-      (d) ``import_jobs.status='failed'`` via ``mark_import_job_failed``
+      (c) ``import_jobs.status='failed'`` via ``mark_import_job_failed``
 
     Also covers the ``request_not_found`` no-finalize subcase — the helper
-    writes the log + marks the job failed but skips the request transition
-    (there is nothing to finalize).
+    cannot write an ownerless audit and raises before any state change.
     """
 
-    def test_measurement_failed_happy_path_fires_all_four_side_effects(self):
+    def test_measurement_failed_persists_without_denylisting_source(self):
         from lib.dispatch import _record_preview_measurement_failed
         from lib.import_queue import IMPORT_JOB_AUTOMATION, automation_import_payload
-        from lib.quality import MeasurementFailure
+        from lib.quality import (
+            AudioToolDiagnostic,
+            AudioValidationReport,
+            MeasurementFailure,
+        )
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -6375,6 +6378,16 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
             reason="snapshot_stale",
             detail="audio snapshot mismatch after retry",
             source_path="/Incoming/auto-import/Test - Album",
+            audio_validation=AudioValidationReport(
+                outcome="measurement_failed",
+                diagnostics=[
+                    AudioToolDiagnostic(
+                        relative_path="01.flac",
+                        category="source_changed",
+                        stderr_excerpt="source changed during validation",
+                    ),
+                ],
+            ),
         )
 
         _record_preview_measurement_failed(
@@ -6382,7 +6395,6 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
             request_id=42,
             import_job_id=job.id,
             payload=payload,
-            denylist_username="bob",
         )
 
         # (a) download_log row
@@ -6404,16 +6416,18 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
             decoded["source_path"],
             "/Incoming/auto-import/Test - Album",
         )
+        self.assertEqual(
+            decoded["audio_validation"]["diagnostics"][0]["category"],
+            "source_changed",
+        )
 
-        # (b) denylist write
-        self.assertEqual(len(db.denylist), 1)
-        self.assertEqual(db.denylist[0].request_id, 42)
-        self.assertEqual(db.denylist[0].username, "bob")
+        # Measurement-world failures never condemn the source.
+        self.assertEqual(len(db.denylist), 0)
 
-        # (c) request → wanted
+        # (b) request → wanted
         self.assertEqual(db.request(42)["status"], "wanted")
 
-        # (d) job → failed
+        # (c) job → failed
         job_row = db.get_import_job(job.id)
         assert job_row is not None
         self.assertEqual(job_row.status, "failed")
@@ -6451,7 +6465,6 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
                     request_id=None,
                     import_job_id=job.id,
                     payload=payload,
-                    denylist_username="bob",
                 )
             mock_finalize.assert_not_called()
 
@@ -6484,7 +6497,6 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
             request_id=7,
             import_job_id=job.id,
             payload=payload,
-            denylist_username=None,
         )
 
         self.assertEqual(len(db.denylist), 0)
@@ -6907,6 +6919,14 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             codec="mp3",
             container="mp3",
             storage_format="MP3",
+            audio_validation=(
+                make_audio_corrupt_validation_report(
+                    files[0].relative_path if files else "",
+                    files_checked=max(1, len(files)),
+                )
+                if audio_corrupt
+                else legacy_unrecorded_audio_validation_report()
+            ),
             audio_corrupt=audio_corrupt,
             folder_layout=folder_layout,
             audio_file_count=(
@@ -7983,8 +8003,8 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
 
     def test_corrupt_audio_persists_evidence_and_importer_rejects(self):
         """Audio corrupt: ffmpeg rc!=0. Preview persists evidence with
-        audio_corrupt=True; importer's preimport_decide rejects on
-        audio_corrupt before ever invoking beets."""
+        audio_corrupt=True; the unified importer decider rejects before
+        ever invoking beets."""
         from lib.measurement import PreimportMeasurement
         from scripts import import_preview_worker
 
@@ -8004,6 +8024,9 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
 
             measured_facts = PreimportMeasurement(
                 corrupt_files=["01.mp3"],
+                audio_validation=make_audio_corrupt_validation_report(
+                    "01.mp3",
+                ),
                 audio_corrupt=True,
                 download_spectral=None,
                 existing_spectral=None,

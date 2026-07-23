@@ -53,8 +53,17 @@ def _safe_relpath(path: str) -> str | None:
     return rel
 
 
-def _allocate_target(src_path: str, *, scenario: str | None) -> str:
-    parent_dir = os.path.dirname(os.path.abspath(src_path))
+def _allocate_target(
+    src_path: str,
+    *,
+    scenario: str | None,
+    quarantine_root: str | None = None,
+) -> str:
+    parent_dir = (
+        os.path.abspath(quarantine_root)
+        if quarantine_root is not None
+        else os.path.dirname(os.path.abspath(src_path))
+    )
     quarantine_dir_name = (
         WRONG_MATCH_QUARANTINE_DIR
         if rejection_scenario_is_wrong_match_candidate(scenario)
@@ -74,8 +83,16 @@ def _allocate_target(src_path: str, *, scenario: str | None) -> str:
     return target_path
 
 
-def _allocate_leftover_target(src_path: str) -> str:
-    parent_dir = os.path.dirname(os.path.abspath(src_path))
+def _allocate_leftover_target(
+    src_path: str,
+    *,
+    quarantine_root: str | None = None,
+) -> str:
+    parent_dir = (
+        os.path.abspath(quarantine_root)
+        if quarantine_root is not None
+        else os.path.dirname(os.path.abspath(src_path))
+    )
     root = os.path.join(parent_dir, "failed_imports", _LEFTOVER_QUARANTINE_DIR)
     os.makedirs(root, exist_ok=True)
 
@@ -178,6 +195,7 @@ def move_failed_import_curated(
     *,
     allowed_audio: Iterable[str],
     scenario: str | None = None,
+    quarantine_root: str | None = None,
 ) -> str | None:
     """Move curated files into their rejection-specific quarantine root.
 
@@ -191,7 +209,11 @@ def move_failed_import_curated(
         return None
 
     allowed = {rel for rel in (_safe_relpath(p) for p in allowed_audio) if rel}
-    target_path = _allocate_target(src_path, scenario=scenario)
+    target_path = _allocate_target(
+        src_path,
+        scenario=scenario,
+        quarantine_root=quarantine_root,
+    )
     os.makedirs(target_path, exist_ok=False)
 
     moved: list[tuple[str, str]] = []
@@ -226,7 +248,10 @@ def move_failed_import_curated(
         with os.scandir(src_path) as entries:
             has_leftovers = any(entries)
         if has_leftovers:
-            leftover_target = _allocate_leftover_target(src_path)
+            leftover_target = _allocate_leftover_target(
+                src_path,
+                quarantine_root=quarantine_root,
+            )
             shutil.move(src_path, leftover_target)
             logger.warning(
                 "Quarantined untracked import leftovers: %s -> %s",

@@ -1,33 +1,10 @@
 #!/usr/bin/env python3
-"""Measurement-conversion observability — generated-first bug hunt.
+"""Typed and bounded observability for validation and album conversion.
 
-THE BUG (diagnosed at the code level): a preview measurement's
-``conversion_failed`` (and sibling ``no_json_result`` /
-``missing_new_measurement``) failure only ever persisted — and logged — the
-AGGREGATE reason (e.g. "11 FLAC files failed to convert"). The per-file
-ffmpeg diagnostic that ``convert_lossless`` (``harness/import_one.py``)
-prints to stderr (``[FAIL] <file>: <ffmpeg tail>``) IS captured into
-``ImportOneRun.stderr`` by
-``lib/dispatch/subprocess_runner.py::run_import_one`` — but
-``lib/import_preview.py::_measurement_failed_result`` never read it, so it
-reached neither the journal (unlike the importer's ``dispatch_import_core``,
-which streams ``run.stderr`` line-by-line) nor the DB
-(``import_jobs.preview_result`` / ``download_log.validation_result``).
-
-INVARIANTS:
-
-1. **Observability.** A ``measurement_failed`` preview result built from an
-   ``ImportOneRun`` whose stderr carries per-file ffmpeg ``[FAIL]`` lines
-   must persist THAT diagnostic — not merely the aggregate count — in both
-   ``MeasurementFailure.detail`` (the JSONB-persisted payload) and a
-   WARNING-level journal log line.
-2. **Robustness.** ``convert_lossless`` over readable lossless sources with
-   a writable output dir always succeeds (``failed == 0``); any per-file
-   failure records a non-empty, real diagnostic (never a silent tally).
-
-Real ffmpeg is used throughout (the dev shell provides it) — no mocks of
-our own logic, only real subprocess calls and real temp files, per
-"MOCKS: LEAF-SEAM ONLY".
+Real FFmpeg fixtures prove that a failed conversion is transactional, retains
+every source, emits one concise summary, and crosses JSON with bounded typed
+diagnostics. A separate generated property covers the legacy bounded-stderr
+fallback used only when the harness cannot return a typed result.
 """
 
 import contextlib
@@ -40,20 +17,25 @@ import tempfile
 import unittest
 from dataclasses import dataclass
 
+import msgspec
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from harness.import_one import V0_SPEC, convert_lossless
-from lib.dispatch.types import ImportOneRun
 from lib.import_preview import (
-    PREVIEW_VERDICT_MEASUREMENT_FAILED,
     _STDERR_DIAGNOSTIC_MAX_CHARS,
     _diagnostic_from_stderr,
     _measurement_failed_result,
+)
+from lib.quality import (
+    AudioToolDiagnostic,
+    AudioValidationReport,
+    ConversionInfo,
 )
 from tests.helpers import make_import_result
 
@@ -81,21 +63,32 @@ def _write_corrupt_flac(path: str) -> None:
 # call it directly and prove it trips (RED/GREEN guarantee).
 # ===========================================================================
 
-def assert_measurement_failed_carries_tool_diagnostic(
-    result, *, stderr_had_fail_marker: bool,
+def assert_conversion_failure_carries_typed_diagnostic(
+    conversion: ConversionInfo,
 ) -> None:
-    """Observability invariant: when the triggering subprocess stderr had a
-    per-file ``[FAIL]`` line, the persisted failure detail must carry it —
-    not merely the aggregate decision/count.
-    """
-    assert result.verdict == PREVIEW_VERDICT_MEASUREMENT_FAILED
-    assert result.failure is not None
-    detail = result.failure.detail
-    if stderr_had_fail_marker and "[FAIL]" not in detail:
-        raise AssertionError(
-            "measurement_failed detail dropped the per-file tool "
-            f"diagnostic: {detail!r}"
-        )
+    """Every failed conversion has a bounded machine-readable explanation."""
+    if conversion.failed and not conversion.diagnostics:
+        raise AssertionError("failed conversion has no typed diagnostic")
+    for diagnostic in conversion.diagnostics:
+        if not diagnostic.category:
+            raise AssertionError("conversion diagnostic has no category")
+        if len(diagnostic.stderr_excerpt.encode("utf-8")) > 2048:
+            raise AssertionError("conversion diagnostic excerpt is unbounded")
+
+
+def assert_failed_batch_retains_sources(
+    folder: str,
+    source_names: list[str],
+) -> None:
+    """A failed album transaction retains every source and no derivative."""
+    missing = [
+        name for name in source_names
+        if not os.path.exists(os.path.join(folder, name))
+    ]
+    if missing:
+        raise AssertionError(f"failed conversion removed sources: {missing}")
+    if any(name.endswith(".mp3") for name in os.listdir(folder)):
+        raise AssertionError("failed conversion installed a partial derivative")
 
 
 # ===========================================================================
@@ -117,23 +110,93 @@ class TestConvertLosslessRobustness(unittest.TestCase):
         self.assertEqual(orig_ext, "flac")
 
     def test_pin_eleven_corrupt_files_all_fail_with_real_ffmpeg_reason(self):
-        """Deterministic pin: the exact diagnosed shape — ~11 files, all
-        conversion_failed, and the real per-file ffmpeg reason is
-        recoverable from convert_lossless's own stderr output."""
+        """Eleven failures retain typed reasons without raw stderr logging."""
         for i in range(11):
             _write_corrupt_flac(os.path.join(self.tmp, f"{i:02d}.flac"))
         buf = io.StringIO()
+        audit = ConversionInfo()
         with contextlib.redirect_stderr(buf):
-            converted, failed, _orig_ext, _channels = convert_lossless(self.tmp, V0_SPEC)
+            converted, failed, _orig_ext, _channels = convert_lossless(
+                self.tmp,
+                V0_SPEC,
+                audit=audit,
+            )
         self.assertEqual(converted, 0)
         self.assertEqual(failed, 11)
+        audit.failed = failed
+        assert_conversion_failure_carries_typed_diagnostic(audit)
+        self.assertEqual(len(audit.diagnostics), 11)
+        self.assertTrue(all(
+            diagnostic.stderr_sha256 for diagnostic in audit.diagnostics
+        ))
+        self.assertEqual(
+            audit.source_validation.outcome
+            if audit.source_validation is not None else None,
+            "audio_corrupt",
+        )
+        self.assertTrue(all(
+            os.path.exists(os.path.join(self.tmp, f"{i:02d}.flac"))
+            for i in range(11)
+        ))
+        self.assertFalse(any(name.endswith(".mp3") for name in os.listdir(self.tmp)))
         stderr_text = buf.getvalue()
-        fail_lines = [ln for ln in stderr_text.splitlines() if "[FAIL]" in ln]
-        self.assertEqual(len(fail_lines), 11, stderr_text)
-        # Every line names its own file and carries non-trivial ffmpeg
-        # output — this is the real per-file reason the bug discarded.
-        for ln in fail_lines:
-            self.assertRegex(ln, r"\[FAIL\] \d\d\.flac: .+")
+        self.assertNotIn("[FAIL]", stderr_text)
+        self.assertEqual(stderr_text.count("[CONVERT]"), 1)
+
+    def test_mixed_success_failure_is_album_transactional(self):
+        source_names = ["01-good.flac", "02-bad.flac"]
+        _write_sine_flac(os.path.join(self.tmp, source_names[0]))
+        _write_corrupt_flac(os.path.join(self.tmp, source_names[1]))
+        audit = ConversionInfo()
+
+        converted, failed, _extension, _channels = convert_lossless(
+            self.tmp,
+            V0_SPEC,
+            audit=audit,
+        )
+
+        self.assertEqual((converted, failed), (0, 1))
+        assert_failed_batch_retains_sources(self.tmp, source_names)
+        self.assertFalse(any(
+            name.startswith(".cratedigger-convert-")
+            for name in os.listdir(self.tmp)
+        ))
+
+    @settings(max_examples=8, deadline=None)
+    @given(
+        good_count=st.integers(min_value=1, max_value=3),
+        corrupt_first=st.booleans(),
+    )
+    def test_generated_failed_batch_retains_every_source(
+        self,
+        good_count: int,
+        corrupt_first: bool,
+    ):
+        with tempfile.TemporaryDirectory() as folder:
+            good_names = [
+                f"{index:02d}-good.flac" for index in range(good_count)
+            ]
+            for name in good_names:
+                _write_sine_flac(os.path.join(folder, name), duration=0.05)
+            bad_name = "00-bad.flac" if corrupt_first else "99-bad.flac"
+            _write_corrupt_flac(os.path.join(folder, bad_name))
+            source_names = good_names + [bad_name]
+
+            converted, failed, _extension, _channels = convert_lossless(
+                folder,
+                V0_SPEC,
+                audit=ConversionInfo(),
+            )
+
+            self.assertEqual(converted, 0)
+            self.assertEqual(failed, 1)
+            assert_failed_batch_retains_sources(folder, source_names)
+
+    def test_transaction_checker_trips_on_planted_partial_commit(self):
+        _write_corrupt_flac(os.path.join(self.tmp, "01.flac"))
+        os.remove(os.path.join(self.tmp, "01.flac"))
+        with self.assertRaises(AssertionError):
+            assert_failed_batch_retains_sources(self.tmp, ["01.flac"])
 
     def test_readonly_output_dir_fails_with_permission_reason(self):
         """Fault-injection sweep item: a read-only album directory is a
@@ -144,13 +207,20 @@ class TestConvertLosslessRobustness(unittest.TestCase):
         os.chmod(self.tmp, 0o555)
         try:
             buf = io.StringIO()
+            audit = ConversionInfo()
             with contextlib.redirect_stderr(buf):
-                converted, failed, _orig_ext, _channels = convert_lossless(self.tmp, V0_SPEC)
+                converted, failed, _orig_ext, _channels = convert_lossless(
+                    self.tmp,
+                    V0_SPEC,
+                    audit=audit,
+                )
         finally:
             os.chmod(self.tmp, 0o755)
         self.assertEqual(converted, 0)
         self.assertEqual(failed, 1)
-        self.assertIn("Permission denied", buf.getvalue())
+        self.assertEqual(audit.diagnostics[0].category, "read_error")
+        self.assertIn("Permission denied", audit.diagnostics[0].stderr_excerpt)
+        self.assertNotIn("Permission denied", buf.getvalue())
 
 
 # ===========================================================================
@@ -159,100 +229,68 @@ class TestConvertLosslessRobustness(unittest.TestCase):
 # ===========================================================================
 
 class TestMeasurementFailedObservability(unittest.TestCase):
-    """Drives ``_measurement_failed_result`` with a faithfully-constructed
-    ``ImportOneRun`` whose ``.stderr`` is REAL ffmpeg output captured from
-    an actual ``convert_lossless`` failure (not a fabricated string) —
-    mirroring exactly what ``run_import_one`` captures in production and
-    exactly how ``measure_and_persist_candidate_evidence``'s
-    ``conversion_failed`` branch calls the function under test.
-    """
+    """Typed conversion and world-failure audits cross the JSON boundary."""
 
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="cratedigger-test-observability-")
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        for i in range(3):
-            _write_corrupt_flac(os.path.join(self.tmp, f"{i:02d}.flac"))
-        buf = io.StringIO()
-        with contextlib.redirect_stderr(buf):
-            converted, failed, _orig_ext, _channels = convert_lossless(self.tmp, V0_SPEC)
-        assert converted == 0 and failed == 3, (converted, failed)
-        self.real_stderr = buf.getvalue()
-        assert "[FAIL]" in self.real_stderr
-        self.aggregate_error = "3 FLAC files failed to convert"
-        self.import_result = make_import_result(
+    def test_conversion_diagnostic_round_trip(self):
+        report = AudioValidationReport(
+            outcome="measurement_failed",
+            diagnostics=[
+                AudioToolDiagnostic(
+                    relative_path="01.flac",
+                    category="process_unavailable",
+                    stderr_excerpt="ffmpeg missing",
+                    stderr_bytes=14,
+                    stderr_sha256="c" * 64,
+                ),
+            ],
+        )
+        import_result = make_import_result(
             decision="conversion_failed",
-            error=self.aggregate_error,
+            error="conversion failed",
         )
+        import_result.conversion.failed = 1
+        import_result.conversion.diagnostics = [
+            AudioToolDiagnostic(
+                relative_path="01.flac",
+                category="process_unavailable",
+                stderr_excerpt="ffmpeg missing",
+            ),
+        ]
+        import_result.conversion.source_validation = report
 
-    def _build_run(self) -> ImportOneRun:
-        return ImportOneRun(
-            command=("import_one.py", self.tmp, "mb-release-id"),
-            returncode=1,
-            stdout=self.import_result.to_sentinel_line(),
-            stderr=self.real_stderr,
-            import_result=self.import_result,
+        restored = type(import_result).from_dict(
+            msgspec.json.decode(msgspec.json.encode(import_result))
         )
+        self.assertEqual(restored.conversion, import_result.conversion)
 
-    def _call_conversion_failed_site(self, run: ImportOneRun, *, thread_stderr: bool):
-        """Mirrors the exact call shape of the conversion_failed branch in
-        measure_and_persist_candidate_evidence (lib/import_preview.py)."""
-        return _measurement_failed_result(
-            mode="path",
-            reason="measurement_crashed",
-            decision="conversion_failed",
-            detail=self.aggregate_error,
-            request_id=101,
-            download_log_id=None,
-            source_path=self.tmp,
-            import_result=run.import_result,
-            subprocess_stderr=run.stderr if thread_stderr else None,
+    def test_world_failure_report_is_persisted_without_raw_stderr(self):
+        report = AudioValidationReport(
+            outcome="measurement_failed",
+            diagnostics=[
+                AudioToolDiagnostic(
+                    relative_path="01.flac",
+                    category="process_unavailable",
+                    stderr_excerpt="ffmpeg missing",
+                ),
+            ],
         )
-
-    def test_green_conversion_failed_result_carries_real_ffmpeg_reason(self):
-        run = self._build_run()
-        result = self._call_conversion_failed_site(run, thread_stderr=True)
-        assert_measurement_failed_carries_tool_diagnostic(
-            result, stderr_had_fail_marker=True)
-        assert result.failure is not None
-        # The aggregate reason survives too — this augments, not replaces.
-        self.assertIn(self.aggregate_error, result.failure.detail)
-
-    def test_red_known_bad_omitting_stderr_loses_the_diagnostic(self):
-        """Known-bad self-test: the PRE-FIX call shape (no
-        ``subprocess_stderr``) must trip the checker — proving the checker
-        is load-bearing, not a tautology that always passes."""
-        run = self._build_run()
-        result = self._call_conversion_failed_site(run, thread_stderr=False)
-        with self.assertRaises(AssertionError):
-            assert_measurement_failed_carries_tool_diagnostic(
-                result, stderr_had_fail_marker=True)
-        assert result.failure is not None
-        # Sanity: the old behavior still carries the aggregate reason —
-        # only the per-file diagnostic is missing.
-        self.assertEqual(result.failure.detail, self.aggregate_error)
-
-    def test_journal_receives_warning_with_diagnostic(self):
-        run = self._build_run()
-        with self.assertLogs("cratedigger", level="WARNING") as cm:
-            self._call_conversion_failed_site(run, thread_stderr=True)
-        joined = " ".join(cm.output)
-        self.assertIn("[FAIL]", joined)
-
-    def test_no_stderr_available_falls_back_to_aggregate_only(self):
-        """When there truly is no stderr (e.g. subprocess produced none),
-        detail is just the aggregate — no crash, no phantom diagnostic."""
         result = _measurement_failed_result(
             mode="path",
             reason="measurement_crashed",
             decision="conversion_failed",
-            detail="3 FLAC files failed to convert",
-            request_id=101,
-            source_path=self.tmp,
-            subprocess_stderr="",
+            detail="conversion failed",
+            source_path="/album",
+            audio_validation=report,
         )
         assert result.failure is not None
-        self.assertEqual(
-            result.failure.detail, "3 FLAC files failed to convert")
+        self.assertEqual(result.failure.audio_validation, report)
+        self.assertEqual(result.failure.detail, "conversion failed")
+
+    def test_known_bad_missing_typed_diagnostic_trips_checker(self):
+        with self.assertRaises(AssertionError):
+            assert_conversion_failure_carries_typed_diagnostic(
+                ConversionInfo(failed=1),
+            )
 
 
 # ===========================================================================
@@ -263,51 +301,34 @@ class TestMeasurementFailedObservability(unittest.TestCase):
 class StderrWorld:
     blob: str
     expect_nonempty: bool
-    expect_fail_marker: bool
 
 
-# Bounded, realistic line content — real import_one.py [FAIL] lines are a
-# filename plus a ~200-char ffmpeg stderr tail, so these caps comfortably
-# cover production shape while staying well under
-# _STDERR_DIAGNOSTIC_MAX_CHARS per line (the whole-line-preservation
-# guarantee needs no single generated line to approach the char budget).
+# Bounded arbitrary line content for the untyped harness-crash fallback.
 _LINE_BODY = st.text(
     alphabet=st.characters(blacklist_categories=("Cs",), blacklist_characters="\n\r"),
     min_size=0, max_size=150,
 )
-_FILENAME_TEXT = st.text(
-    alphabet=st.characters(blacklist_categories=("Cs", "Cc"), blacklist_characters="\n\r:"),
-    min_size=0, max_size=40,
-)
-
-
 @st.composite
 def stderr_worlds(draw) -> StderrWorld:
     kind = draw(st.sampled_from(
-        ("empty", "whitespace", "no_fail", "with_fail",
-         "huge_no_fail", "huge_with_fail")
+        ("empty", "whitespace", "ordinary", "huge")
     ))
     if kind == "empty":
-        return StderrWorld("", False, False)
+        return StderrWorld("", False)
     if kind == "whitespace":
         blob = draw(st.text(alphabet=" \t\n", min_size=1, max_size=20))
-        return StderrWorld(blob, False, False)
+        return StderrWorld(blob, False)
 
-    has_fail = kind in ("with_fail", "huge_with_fail")
-    is_huge = kind in ("huge_no_fail", "huge_with_fail")
+    is_huge = kind == "huge"
     n_lines = draw(st.integers(min_value=1, max_value=6))
     reps = draw(st.integers(min_value=8, max_value=60)) if is_huge else 1
 
     lines: list[str] = []
     for _ in range(n_lines):
         body = draw(_LINE_BODY)
-        if has_fail:
-            fname = draw(_FILENAME_TEXT)
-            lines.append(f"  [FAIL] {fname}: {body}")
-        else:
-            lines.append(f"  some ffmpeg trace line: {body}")
+        lines.append(f"  harness trace line: {body}")
     blob = "\n".join(lines * reps)
-    return StderrWorld(blob, True, has_fail)
+    return StderrWorld(blob, True)
 
 
 def assert_diagnostic_extraction_invariants(world: StderrWorld, diag: str) -> None:
@@ -318,7 +339,6 @@ def assert_diagnostic_extraction_invariants(world: StderrWorld, diag: str) -> No
 
     * bounded — never longer than the persisted/logged char budget
     * non-empty iff the source stderr had real (non-whitespace) content
-    * preserves the ``[FAIL]`` signal whenever the source carried one
     """
     if len(diag) > _STDERR_DIAGNOSTIC_MAX_CHARS:
         raise AssertionError(
@@ -328,18 +348,13 @@ def assert_diagnostic_extraction_invariants(world: StderrWorld, diag: str) -> No
         raise AssertionError(
             f"non-emptiness mismatch: diag={diag!r} "
             f"expect_nonempty={world.expect_nonempty}")
-    if world.expect_fail_marker and "[FAIL]" not in diag:
-        raise AssertionError(
-            f"[FAIL] marker present in source but missing from "
-            f"diagnostic: {diag!r}")
 
 
 class TestDiagnosticFromStderrGenerated(unittest.TestCase):
     """Property: over arbitrary stderr blobs (empty, whitespace-only, wild
-    unicode, huge repeated content, with/without [FAIL] markers),
+    unicode, and huge repeated content),
     ``_diagnostic_from_stderr`` never throws, is bounded in size, is
-    non-empty iff the input had real content, and preserves the [FAIL]
-    signal whenever it was present in the source.
+    non-empty exactly when the input has real content.
     """
 
     @given(world=stderr_worlds())
@@ -351,26 +366,27 @@ class TestDiagnosticFromStderrGenerated(unittest.TestCase):
         """Known-bad self-test: feed the checker planted-bad diagnostics
         directly (bypassing ``_diagnostic_from_stderr`` entirely) and prove
         each invariant actually trips rather than passing vacuously."""
-        fail_world = StderrWorld(
-            blob="[FAIL] x.flac: boom", expect_nonempty=True,
-            expect_fail_marker=True)
-        with self.assertRaises(AssertionError):
-            # [FAIL] marker was expected but the planted diagnostic lacks it.
-            assert_diagnostic_extraction_invariants(fail_world, "some other text")
+        content_world = StderrWorld(
+            blob="harness crashed",
+            expect_nonempty=True,
+        )
         with self.assertRaises(AssertionError):
             # Non-emptiness mismatch: expected empty, planted non-empty.
             assert_diagnostic_extraction_invariants(
-                StderrWorld(blob="", expect_nonempty=False, expect_fail_marker=False),
+                StderrWorld(blob="", expect_nonempty=False),
                 "unexpected content",
             )
         with self.assertRaises(AssertionError):
             # Bound violation: planted diagnostic exceeds the char budget.
             assert_diagnostic_extraction_invariants(
-                StderrWorld(blob="x", expect_nonempty=True, expect_fail_marker=False),
+                content_world,
                 "x" * (_STDERR_DIAGNOSTIC_MAX_CHARS + 1),
             )
         # Sanity: a genuinely correct diagnostic does NOT trip the checker.
-        assert_diagnostic_extraction_invariants(fail_world, "[FAIL] x.flac: boom")
+        assert_diagnostic_extraction_invariants(
+            content_world,
+            "harness crashed",
+        )
 
 
 if __name__ == "__main__":

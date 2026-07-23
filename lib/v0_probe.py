@@ -24,7 +24,11 @@ logger = logging.getLogger("cratedigger")
 
 V0_CODEC = "libmp3lame"
 V0_CODEC_ARGS = ("-q:a", "0")
-V0_METADATA_ARGS = ("-map_metadata", "0", "-id3v2_version", "3")
+V0_METADATA_ARGS = (
+    "-map_metadata", "-1",
+    "-map_chapters", "-1",
+    "-id3v2_version", "3",
+)
 
 _CONVERSION_TIMEOUT_FLOOR_S = 300
 _CONVERSION_MIN_REALTIME_FACTOR = 4
@@ -146,7 +150,13 @@ def probe_files_as_v0(
             try:
                 result = subprocess.run(
                     [
-                        "ffmpeg", "-i", src_path, "-map", "0:a",
+                        "ffmpeg",
+                        "-hide_banner", "-nostdin", "-v", "error",
+                        "-max_error_rate", "0",
+                        "-abort_on", "empty_output_stream",
+                        "-err_detect:a",
+                        "crccheck+bitstream+buffer+explode",
+                        "-i", src_path, "-map", "0:a",
                         "-ac", "2", "-c:a",
                         V0_CODEC, *V0_CODEC_ARGS, *V0_METADATA_ARGS,
                         "-y", out_path,

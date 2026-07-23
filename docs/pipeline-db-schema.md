@@ -62,14 +62,24 @@ Key fields:
   `spectral_provenance`, `was_converted_from` — the wrapped
   `AudioQualityMeasurement` facts. The measurement has no verified-lossless
   boolean; an observation about bytes cannot assert acquisition completion.
+- `audio_validation JSONB NOT NULL` — the bounded typed report from the
+  audio-only strict FFmpeg policy. New reports are `passed`,
+  `audio_corrupt`, or `skipped`; the migration uses `legacy_failure` for
+  historical rows already known corrupt and `legacy_unrecorded` everywhere
+  else. It never fabricates a historical pass. The report stores counts,
+  FFmpeg version, at most 16 per-file diagnostics, and at most 2 KiB of
+  normalized stderr per diagnostic with original byte count/hash/truncation.
+  Metadata, pictures, tags, chapters, and exit-zero stderr are not persisted.
 - `audio_corrupt BOOLEAN`, `audio_error TEXT`, `folder_layout TEXT` (`flat` | `nested`),
   `audio_file_count INTEGER`, `filetype_band TEXT`,
   `matched_bad_audio_hash_id`, `matched_bad_audio_hash_path` — the four
   folder/audio-integrity facts the importer's
   `full_pipeline_decision_from_evidence` reads as early-exit reject
   branches (U11).
-  `audio_error` preserves the exact album-level ffmpeg decoder diagnostic;
-  `album_quality_evidence_files.decode_ok` identifies the individual files.
+  `audio_corrupt` is a query/decision projection constrained to agree with
+  `audio_validation`; `audio_error` is its bounded album-level summary.
+  `album_quality_evidence_files.decode_ok` identifies the exact individual
+  files, using relative paths rather than basename guesses.
 - `v0_min_bitrate_kbps`, `v0_avg_bitrate_kbps`,
   `v0_median_bitrate_kbps`, `v0_subject`, `v0_provenance` — one neutral V0
   metric plus its two-axis markers. Legacy policy-shaped probe kinds are
@@ -196,6 +206,23 @@ rejection: cooldown lookback excludes this scenario, and the cleanup
 does not write denylist, wrong-match, or bad-audio evidence. The audit
 row and `downloading` to `wanted` reset are committed together only when
 the request still owns the same `active_download_state.current_path`.
+
+Audio-integrity failures split at the evidence boundary:
+
+- Stable readable bytes that the strict audio-only FFmpeg policy cannot fully
+  decode become `audio_corrupt` content evidence. The importer remains the
+  only decision owner: it rejects through
+  `full_pipeline_decision_from_evidence`, deny-lists the source peer, commits
+  the terminal row, and only then moves the retained source under the
+  configured `<slskd_download_dir>/failed_imports/bad_files/`.
+  `validation_result.post_commit_quarantine` records the exact source,
+  destination, move result, and any bounded error; `failed_path` points at the
+  surviving copy.
+- Permissions, changed/vanished paths, unavailable/interrupted FFmpeg, and
+  persistence failures are `measurement_failed`. Their typed report lives in
+  the preview/job validation payload, they never write a denylist, and the
+  persisted `staged_path` is an unconditional disk-reaper protection. The
+  reaper aborts the whole sweep if it cannot load this retention projection.
 
 ## `import_jobs` — shared importer queue
 

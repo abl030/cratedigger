@@ -10,7 +10,7 @@ import socket
 import sys
 import time
 from collections.abc import Callable
-from typing import Any, assert_never
+from typing import Any, Protocol, assert_never
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
@@ -24,7 +24,10 @@ from lib.dispatch import (
     DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
     DispatchOutcome,
 )
-from lib.dispatch.types import PostCommitCleanup
+from lib.dispatch.types import (
+    PostCommitCleanup,
+    PostCommitQuarantineAudit,
+)
 from lib.download_processing import (
     Completed,
     CompletionDeferred,
@@ -68,13 +71,66 @@ def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
     }
 
 
-def _run_post_commit_cleanup(outcome: DispatchOutcome) -> dict[str, object] | None:
-    """Run narrow destructive convergence only after terminal acknowledgement."""
+class _PostCommitCleanupDB(Protocol):
+    """Narrow persistence seam used after the terminal transaction."""
+
+    def record_post_commit_quarantine(
+        self,
+        log_id: int,
+        audit: PostCommitQuarantineAudit,
+    ) -> bool: ...
+
+
+def _run_post_commit_cleanup(
+    db: _PostCommitCleanupDB,
+    outcome: DispatchOutcome,
+    *,
+    download_log_id: int | None = None,
+) -> dict[str, object] | None:
+    """Run narrow convergence only after terminal acknowledgement."""
     plan = outcome.post_commit_cleanup
     if plan is None:
         return None
 
     details: dict[str, object] = {}
+    if plan.audio_quarantine_source_path is not None:
+        if download_log_id is None:
+            details["audio_quarantine"] = {
+                "source_path": plan.audio_quarantine_source_path,
+                "moved": False,
+                "error": (
+                    "terminal download_log id unavailable; source retained "
+                    "at staging"
+                ),
+            }
+        else:
+            from lib.dispatch.quarantine import (
+                quarantine_corrupt_audio_source,
+            )
+
+            audit = quarantine_corrupt_audio_source(
+                source_path=plan.audio_quarantine_source_path,
+                quarantine_root=plan.audio_quarantine_root or "",
+            )
+            audit_payload = msgspec.to_builtins(audit)
+            assert isinstance(audit_payload, dict)
+            try:
+                audit_persisted = db.record_post_commit_quarantine(
+                    download_log_id,
+                    audit,
+                )
+            except Exception as exc:  # noqa: BLE001 - commit already stands
+                logger.exception(
+                    "Failed to persist post-commit audio quarantine audit"
+                )
+                audit_payload["audit_persisted"] = False
+                audit_payload["audit_error"] = (
+                    f"{type(exc).__name__}: {exc}"
+                )[:1024]
+            else:
+                audit_payload["audit_persisted"] = audit_persisted
+            details["audio_quarantine"] = audit_payload
+
     if plan.duplicate_guard_source_path is not None:
         try:
             from lib.duplicate_remove_guard import (
@@ -615,7 +671,11 @@ def process_claimed_job(
                 ))
             )
             terminal_job = terminal.job
-            post_commit_cleanup = _run_post_commit_cleanup(outcome)
+            post_commit_cleanup = _run_post_commit_cleanup(
+                db,
+                outcome,
+                download_log_id=terminal.download_log_id,
+            )
             if post_commit_cleanup is not None:
                 merged = db.merge_import_job_result(
                     job.id,
@@ -705,7 +765,11 @@ def process_claimed_job(
             ))
         )
         terminal_job = terminal.job
-        post_commit_cleanup = _run_post_commit_cleanup(outcome)
+        post_commit_cleanup = _run_post_commit_cleanup(
+            db,
+            outcome,
+            download_log_id=terminal.download_log_id,
+        )
         if post_commit_cleanup is not None:
             merged = db.merge_import_job_result(
                 job.id,
@@ -740,7 +804,7 @@ def process_claimed_job(
     if failed is None:
         return None
     terminal_job = failed
-    post_commit_cleanup = _run_post_commit_cleanup(outcome)
+    post_commit_cleanup = _run_post_commit_cleanup(db, outcome)
     if post_commit_cleanup is not None:
         merged = db.merge_import_job_result(
             job.id,

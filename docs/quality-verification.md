@@ -29,6 +29,48 @@ unverified `TRANSPARENT` installed copy with its own `genuine` spectral fact
 stays wanted but narrows to lossless-only; every other unverified copy stays
 wanted on the full search surface.
 
+### Audio integrity full-decode gate
+
+Before spectral or conversion work, `lib.util.validate_audio` enumerates the
+stable audio-file set, proves each source readable, and maps only audio through
+a complete null-output decode:
+
+```text
+ffmpeg -hide_banner -nostdin -v error -max_error_rate 0
+  -abort_on empty_output_stream
+  -err_detect:a crccheck+bitstream+buffer+explode
+  -vn -sn -dn -i INPUT -map 0:a
+  -map_metadata -1 -map_chapters -1 -f null -
+```
+
+Metadata is deliberately irrelevant. FFmpeg must parse the container to find
+audio, but tags, pictures, lyrics, chapters, and exit-zero stderr are neither
+classified nor persisted. The validator never rewrites or repairs the source.
+
+The policy interprets process outcomes at the boundary FFmpeg actually
+documents: zero is completion; documented exit 69 is a counted decode failure;
+another positive exit on unchanged, fully readable bytes is honestly recorded
+as `ffmpeg_failed_unclassified`; a validation timeout on those same bytes is
+`decode_timeout`. All three are bad audio. In contrast, read/permission
+failure, source change, missing FFmpeg, or signal termination means the
+measurement itself failed and cannot blame the peer.
+
+Preview persists completed content facts in
+`album_quality_evidence.audio_validation`, then the importer alone decides via
+`full_pipeline_decision_from_evidence`. Corrupt audio follows the standard
+denylist plus post-terminal `failed_imports/bad_files` quarantine path and
+resumes searching. A `measurement_failed` attempt writes no denylist and its
+retained source path is protected from the disk reaper. Diagnostics are capped
+at 16 files and 2 KiB per normalized stderr excerpt; success carries no
+stderr.
+
+Lossless conversion uses the same strict input decoder flags and strips source
+metadata. It stages every derivative on the source filesystem and commits the
+album only after every file succeeds with a nonempty output. Any batch failure
+removes only temporary derivatives, retains every source, records bounded
+`ConversionInfo` diagnostics, and revalidates the retained sources to
+distinguish corrupt audio from an encoder/materialization world failure.
+
 ### 1. VBR V0 source probe (implemented)
 
 After lossless-to-V0 conversion, the resulting bitrate reveals source quality:

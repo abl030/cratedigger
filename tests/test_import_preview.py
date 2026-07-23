@@ -10,6 +10,7 @@ from typing import Any, TYPE_CHECKING
 from unittest.mock import patch
 
 from lib.config import CratediggerConfig
+from lib.dispatch.types import ImportOneRun
 from lib.import_preview import (
     ImportPreviewValues,
     _lossless_candidate_spectral_failure,
@@ -31,6 +32,8 @@ from lib.measurement import (
 )
 from lib.quality import (
     AudioQualityMeasurement,
+    AudioToolDiagnostic,
+    AudioValidationReport,
     ImportResult,
     QualityRankConfig,
     SpectralAnalysisDetail,
@@ -46,7 +49,11 @@ from lib.quality_evidence import (
 )
 
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import make_album_quality_evidence, make_request_row
+from tests.helpers import (
+    make_album_quality_evidence,
+    make_audio_corrupt_validation_report,
+    make_request_row,
+)
 
 
 def _preview_config() -> CratediggerConfig:
@@ -1244,6 +1251,9 @@ class TestImportPreviewPath(unittest.TestCase):
             measurement = PreimportMeasurement(
                 audio_corrupt=True,
                 corrupt_files=["01.mp3"],
+                audio_validation=make_audio_corrupt_validation_report(
+                    "01.mp3",
+                ),
                 folder_layout="flat",
                 audio_file_count=1,
                 existing_spectral_path=source,
@@ -2103,6 +2113,9 @@ class TestImportPreviewPath(unittest.TestCase):
                        return_value=PreimportMeasurement(
                            audio_corrupt=True,
                            corrupt_files=["01.mp3"],
+                           audio_validation=(
+                               make_audio_corrupt_validation_report("01.mp3")
+                           ),
                            folder_layout="flat",
                            audio_file_count=1,
                            spectral_audit=audit,
@@ -2171,6 +2184,10 @@ class TestImportPreviewPath(unittest.TestCase):
                 return_value=PreimportMeasurement(
                     audio_corrupt=True,
                     corrupt_files=["01.flac"],
+                    audio_validation=make_audio_corrupt_validation_report(
+                        "01.flac",
+                        detail=decode_error,
+                    ),
                     audio_error=decode_error,
                     folder_layout="flat",
                     audio_file_count=1,
@@ -2237,6 +2254,9 @@ class TestImportPreviewPath(unittest.TestCase):
             return PreimportMeasurement(
                 audio_corrupt=True,
                 corrupt_files=["01.mp3"],
+                audio_validation=make_audio_corrupt_validation_report(
+                    "01.mp3",
+                ),
                 folder_layout="flat",
                 audio_file_count=1,
             )
@@ -2416,6 +2436,9 @@ class TestImportPreviewPath(unittest.TestCase):
                        return_value=PreimportMeasurement(
                            audio_corrupt=True,
                            corrupt_files=["01.mp3"],
+                           audio_validation=(
+                               make_audio_corrupt_validation_report("01.mp3")
+                           ),
                            folder_layout="flat",
                            audio_file_count=0,
                        )), \
@@ -2513,6 +2536,154 @@ class TestImportPreviewPath(unittest.TestCase):
             mock_run.assert_not_called()
         finally:
             import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_conversion_source_corruption_becomes_persisted_evidence(self):
+        """A conversion-time decode failure rejoins the unified decider path."""
+        db = self._db()
+        download_log_id = db.log_download(request_id=42, outcome="failed")
+        source = self._source_dir()
+        report = AudioValidationReport(
+            outcome="audio_corrupt",
+            files_checked=1,
+            files_failed=1,
+            diagnostics=[
+                AudioToolDiagnostic(
+                    relative_path="01.mp3",
+                    category="decode_error",
+                    return_code=69,
+                    stderr_excerpt="invalid frame",
+                ),
+            ],
+        )
+        result = ImportResult(
+            decision="conversion_failed",
+            error="1 conversion failed",
+            source_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=256,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=256,
+                format="MP3",
+            ),
+        )
+        result.conversion.failed = 1
+        result.conversion.source_validation = report
+        result.conversion.source_validation_failed_paths = ["01.mp3"]
+        run = ImportOneRun(
+            command=("import_one.py",),
+            returncode=1,
+            stdout=result.to_sentinel_line(),
+            stderr="one concise conversion summary",
+            import_result=result,
+        )
+        try:
+            with patch(
+                "lib.config.read_runtime_config",
+                return_value=_preview_config(),
+            ), patch(
+                "lib.import_preview.inspect_local_files",
+                return_value=LocalFileInspection(
+                    filetype="mp3",
+                    min_bitrate_bps=256000,
+                    is_vbr=True,
+                ),
+            ), patch(
+                "lib.import_preview.measure_preimport_state",
+                return_value=PreimportMeasurement(
+                    folder_layout="flat",
+                    audio_file_count=1,
+                    filetype_band="mp3",
+                    min_bitrate_kbps=256,
+                ),
+            ):
+                preview = measure_and_persist_candidate_evidence(
+                    db,
+                    request_id=42,
+                    path=source,
+                    download_log_id=download_log_id,
+                    run_import_fn=lambda **_kwargs: run,
+                )
+
+            self.assertEqual(preview.verdict, "evidence_ready")
+            self.assertEqual(preview.decision, "audio_corrupt")
+            evidence_id = db.get_download_log_candidate_evidence_id(
+                download_log_id
+            )
+            loaded = db.load_album_quality_evidence_by_id(evidence_id)
+            assert loaded is not None
+            self.assertTrue(loaded.audio_corrupt)
+            self.assertEqual(loaded.audio_validation, report)
+            self.assertFalse(loaded.files[0].decode_ok)
+            self.assertEqual(db.denylist, [])
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_conversion_world_failure_keeps_typed_measurement_audit(self):
+        """An unavailable decoder is not persisted as bad content."""
+        db = self._db()
+        source = self._source_dir()
+        report = AudioValidationReport(
+            outcome="measurement_failed",
+            diagnostics=[
+                AudioToolDiagnostic(
+                    relative_path="01.mp3",
+                    category="process_unavailable",
+                    stderr_excerpt="ffmpeg missing",
+                ),
+            ],
+        )
+        result = ImportResult(
+            decision="conversion_failed",
+            error="conversion failed",
+            source_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=256,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=256,
+                format="MP3",
+            ),
+        )
+        result.conversion.failed = 1
+        result.conversion.source_validation = report
+        run = ImportOneRun(
+            command=("import_one.py",),
+            returncode=1,
+            stdout=result.to_sentinel_line(),
+            stderr="one concise conversion summary",
+            import_result=result,
+        )
+        try:
+            with patch(
+                "lib.config.read_runtime_config",
+                return_value=_preview_config(),
+            ), patch(
+                "lib.import_preview.inspect_local_files",
+                return_value=LocalFileInspection(
+                    filetype="mp3",
+                    min_bitrate_bps=256000,
+                    is_vbr=True,
+                ),
+            ), patch(
+                "lib.import_preview.measure_preimport_state",
+                return_value=PreimportMeasurement(
+                    folder_layout="flat",
+                    audio_file_count=1,
+                    filetype_band="mp3",
+                    min_bitrate_kbps=256,
+                ),
+            ):
+                preview = measure_and_persist_candidate_evidence(
+                    db,
+                    request_id=42,
+                    path=source,
+                    run_import_fn=lambda **_kwargs: run,
+                )
+
+            self.assertEqual(preview.verdict, "measurement_failed")
+            assert preview.failure is not None
+            self.assertEqual(preview.failure.audio_validation, report)
+            self.assertEqual(db.album_quality_evidence, {})
+            self.assertEqual(db.denylist, [])
+        finally:
             shutil.rmtree(source, ignore_errors=True)
 
     def test_preview_legacy_path_does_not_call_run_preimport_gates(self):

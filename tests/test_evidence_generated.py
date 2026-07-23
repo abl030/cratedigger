@@ -755,18 +755,34 @@ def _run_lossless_spectral_failure_world(
         ini["Pipeline DB"] = {"enabled": "true"}
         cfg = CratediggerConfig.from_ini(ini)
         fake_beets = FakeBeetsDB()
+        from lib.quality import (
+            AudioToolDiagnostic,
+            AudioValidationReport,
+            skipped_audio_validation_report,
+        )
         from lib.util import AudioValidationResult
 
         audio_result = AudioValidationResult(
-            valid=not audio_corrupt,
-            error=(
-                "01.flac: Invalid data found when processing input"
-                if audio_corrupt else None
+            (
+                AudioValidationReport(
+                    outcome="audio_corrupt",
+                    files_checked=1,
+                    files_failed=1,
+                    diagnostics=[
+                        AudioToolDiagnostic(
+                            relative_path="01.flac",
+                            category="decode_error",
+                            return_code=69,
+                            stderr_excerpt=(
+                                "Invalid data found when processing input"
+                            ),
+                        ),
+                    ],
+                )
+                if audio_corrupt
+                else skipped_audio_validation_report()
             ),
-            failed_files=(
-                [("01.flac", "Invalid data found when processing input")]
-                if audio_corrupt else []
-            ),
+            failed_paths=("01.flac",) if audio_corrupt else (),
         )
         with patch(
             "lib.config.read_runtime_config",

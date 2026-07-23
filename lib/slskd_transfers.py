@@ -858,6 +858,7 @@ class DiskReapOwnershipError(Exception):
 def _protected_paths_for_downloading(
     root: str,
     downloading_rows: Sequence[Mapping[str, Any]],
+    retained_failure_paths: Sequence[str] = (),
 ) -> tuple[set[str], set[str]]:
     """Return (protected_dirs, protected_files) the reaper must never touch,
     regardless of ledger ownership or age — the ACTIVE half of the
@@ -866,7 +867,8 @@ def _protected_paths_for_downloading(
     positive-ownership record of past AND present attempts).
 
     ``protected_dirs`` always includes the ``failed_imports/`` and
-    ``wrong_matches/`` quarantine subtrees plus, for every
+    ``wrong_matches/`` quarantine subtrees, every persisted
+    ``measurement_failed`` source below ``root``, plus, for every
     ``downloading`` row, its canonical processing folder from the SAME
     ``canonical_folder_for_row`` leaf materialize calls. The row's persisted
     ``(username, filename)`` set scopes the attempt.
@@ -886,6 +888,20 @@ def _protected_paths_for_downloading(
         ),
     }
     protected_files: set[str] = set()
+
+    for retained_path in retained_failure_paths:
+        if not retained_path.strip():
+            continue
+        normalized = normalize_processing_path(retained_path)
+        if not path_is_within_root(normalized, root):
+            continue
+        # Protect both shapes.  A retained path is normally a directory, but
+        # MeasurementFailure explicitly permits a file and the path may have
+        # vanished between persistence and this sweep.  Registering it in
+        # both sets keeps the policy stable without guessing from current
+        # filesystem state.
+        protected_dirs.add(normalized)
+        protected_files.add(normalized)
 
     for row in downloading_rows:
         raw_state = row.get("active_download_state")
@@ -1105,8 +1121,9 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
     going forward (``.claude/rules/scope.md`` — that cleanup is not
     product code, see the PR body).
 
-    Protection trumps ownership. Two subtrees are unconditionally
-    protected — recognised as cratedigger's own but NEVER reap-eligible,
+    Protection trumps ownership. Quarantines and persisted measurement
+    failures are unconditionally protected — recognised as cratedigger's own
+    but NEVER reap-eligible,
     whatever the ledger says and however old the files
     (``_protected_paths_for_downloading``; the walk prunes them without
     ever examining their files):
@@ -1114,6 +1131,9 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
     * the ``failed_imports/`` and ``wrong_matches/`` quarantine trees
       (cratedigger's own trees by construction; their lifecycle is untouched
       by this reaper), and
+    * every source path named by a persisted ``measurement_failed``
+      ``download_log`` row (the source is the evidence for an unresolved
+      world/infrastructure failure, regardless of request status or age), and
     * a ``downloading`` row's CURRENT canonical folder/stamped paths
       (retry-safe: an abandoned earlier attempt of the SAME request is
       ledger-owned but inactive, and IS reap-eligible once aged — the
@@ -1150,13 +1170,19 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
 
     db = ctx.pipeline_db_source._get_db()
     try:
+        retained_failure_paths = tuple(
+            db.get_retained_failure_paths()
+        )
         protected_dirs, protected_files = _protected_paths_for_downloading(
-            root, db.get_downloading())
-    except DiskReapOwnershipError:
+            root,
+            db.get_downloading(),
+            retained_failure_paths,
+        )
+    except Exception:
         logger.exception(
-            "DISK-REAP ABORTED: could not establish ownership for a "
-            "downloading row; skipping the entire sweep this cycle "
-            "(zero deletions) — fail-closed")
+            "DISK-REAP ABORTED: could not establish the complete protected "
+            "path set; skipping the entire sweep this cycle (zero deletions) "
+            "— fail-closed")
         return DiskReapSummary(aborted=True)
     owned_dirs, owned_files = _owned_paths_from_ledger(root, db)
 

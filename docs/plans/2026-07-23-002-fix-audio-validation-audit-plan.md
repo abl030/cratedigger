@@ -353,6 +353,27 @@ by current persisted evidence; it does not create an independent accept path.
 - Do not scan installed Opus and claim that it proves its deleted FLAC source
   was clean. Those historical rows remain `legacy_unrecorded`.
 
+### Implementation convergence addendum
+
+The converged implementation makes four details explicit:
+
+- Conversion is an album transaction, not merely a per-file temp write: every
+  derivative is staged first, source backups are installed only during the
+  commit phase, and a failed commit rolls the whole album back.
+- A failed conversion never decides that its input was corrupt from the
+  encoder command alone. The retained sources run through the shared strict
+  validator; only an `audio_corrupt` report becomes content evidence, while a
+  passing/world-failed recheck keeps the conversion attempt
+  `measurement_failed`.
+- Corrupt-source quarantine is post-terminal work rooted at the configured
+  slskd download directory. The exact move/failure audit is attached to the
+  committed `download_log` row, so a failed move still leaves a durable
+  retained-path authority.
+- Same-address evidence upserts are monotonic at this boundary: a
+  `legacy_unrecorded` or `skipped` writer cannot erase a stronger validation
+  report, its `audio_corrupt` projection, scalar explanation, or per-file
+  `decode_ok=false` facts.
+
 ## Focused validation
 
 During convergence:

@@ -81,9 +81,21 @@ class PostCommitCleanup:
     """
 
     staged_path: str | None = None
+    audio_quarantine_source_path: str | None = None
+    audio_quarantine_root: str | None = None
     duplicate_guard_source_path: str | None = None
     duplicate_guard_staging_dir: str | None = None
     duplicate_guard_request_id: int | None = None
+
+
+class PostCommitQuarantineAudit(msgspec.Struct, frozen=True):
+    """Durable result of preserving a rejected corrupt-audio source."""
+
+    source_path: str
+    quarantine_path: str | None = None
+    moved: bool = False
+    path_missing: bool = False
+    error: str | None = None
 
 
 @dataclass(frozen=True)

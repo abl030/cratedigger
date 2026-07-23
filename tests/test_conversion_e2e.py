@@ -97,8 +97,10 @@ class TestConversionTimeoutWiring(unittest.TestCase):
 
             captured = {}
 
-            def _fake_run(*_args, **kwargs):
-                captured["timeout"] = kwargs.get("timeout")
+            def _fake_run(*args, **kwargs):
+                command = args[0]
+                if "-c:a" in command:
+                    captured["timeout"] = kwargs.get("timeout")
                 # returncode!=0 short-circuits the post-conversion file ops;
                 # we only care that the timeout was computed and forwarded.
                 return SimpleNamespace(returncode=1, stderr="", stdout="")
