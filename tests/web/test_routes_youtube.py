@@ -34,23 +34,23 @@ class TestYoutubeClientDefaultTimeoutSession(unittest.TestCase):
         self.addCleanup(session.close)
         return session
 
-    def test_str_and_bytes_methods_normalize_identically(self) -> None:
+    def test_str_and_bytes_methods_prepare_identically(self) -> None:
         session = self._session()
         for method in ("get", b"get"):
             with self.subTest(method=method), \
-                    patch("requests.Session.request", autospec=True) as request:
+                    patch("requests.Session.send", autospec=True) as send:
                 session.request(method, "https://example.invalid")
 
-            request.assert_called_once()
-            self.assertIs(request.call_args.args[0], session)
-            self.assertEqual(request.call_args.args[1], "GET")
-            self.assertEqual(request.call_args.kwargs["timeout"], (5, 30))
+            send.assert_called_once()
+            self.assertIs(send.call_args.args[0], session)
+            self.assertEqual(send.call_args.args[1].method, "GET")
+            self.assertEqual(send.call_args.kwargs["timeout"], (5, 30))
 
     def test_non_ascii_method_preserves_requests_str_and_bytes_behavior(self) -> None:
         session = self._session()
-        with patch("requests.Session.request", autospec=True) as request:
+        with patch("requests.Session.send", autospec=True) as send:
             session.request("gét", "https://example.invalid")
-        self.assertEqual(request.call_args.args[1], "GÉT")
+        self.assertEqual(send.call_args.args[1].method, "GÉT")
 
         with self.assertRaises(UnicodeDecodeError):
             session.request(b"g\xc3\xa9t", "https://example.invalid")

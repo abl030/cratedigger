@@ -177,13 +177,15 @@ def _build_youtube_client():
         ) -> requests.Response:
             if timeout is _UNSET:
                 timeout = (5, 30)
-            # Mirror ``requests.PreparedRequest.prepare_method`` before
-            # crossing the stricter current-stubs ``str`` boundary on
-            # ``Session.request``.  This preserves requests' public method
-            # semantics: uppercase both forms, ASCII-decode bytes, and raise
-            # ``UnicodeDecodeError`` for non-ASCII bytes rather than quietly
-            # reinterpreting them as UTF-8.
-            native_method = requests.utils.to_native_string(method.upper())
+            # The current Session.request stubs require ``str`` while the
+            # base override accepts ``str | bytes``. Requests' own request
+            # preparation uppercases strings later; this boundary only
+            # converts bytes to Requests' native string form. ASCII is
+            # deliberate: non-ASCII bytes raise ``UnicodeDecodeError``
+            # instead of being silently reinterpreted as UTF-8.
+            native_method = (
+                method.decode("ascii") if isinstance(method, bytes) else method
+            )
             return super().request(
                 native_method, url,
                 params=params, data=data, headers=headers,
