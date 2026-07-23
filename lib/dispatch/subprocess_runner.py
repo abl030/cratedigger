@@ -101,6 +101,10 @@ def run_import_one(
     quality_rank_config_json: str | None = None,
     existing_v0_probe: V0ProbeEvidence | None = None,
     quality_evidence_action_file: str | None = None,
+    beets_config_dir: str | None = None,
+    beets_python: str | None = None,
+    beets_library_db_path: str | None = None,
+    beets_library_root: str | None = None,
     timeout: int = 1800,
 ) -> ImportOneRun:
     """Run import_one.py and parse its ImportResult sentinel."""
@@ -125,7 +129,12 @@ def run_import_one(
         text=True,
         errors="replace",
         timeout=timeout,
-        env=beets_subprocess_env(),
+        env=beets_subprocess_env(
+            beets_config_dir=beets_config_dir,
+            beets_python=beets_python,
+            beets_library_db_path=beets_library_db_path,
+            beets_library_root=beets_library_root,
+        ),
     )
     stdout = result.stdout or ""
     stderr = result.stderr or ""

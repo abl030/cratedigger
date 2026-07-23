@@ -261,6 +261,17 @@ class BeetsWorld:
                 "run the world model in a fresh interpreter"
             )
 
+    def poisoned_runtime_config(self) -> Path:
+        """A real config whose Beets authority must fail if consulted."""
+        path = self.root / "poisoned-runtime-config.ini"
+        path.write_text(
+            "[Beets]\n"
+            f"directory = {self.root / 'poisoned-library'}\n"
+            f"library = {self.root / 'poisoned-library.db'}\n",
+            encoding="utf-8",
+        )
+        return path
+
     def _configure_subprocess(self, mirror_url: str) -> None:
         self.beets_config_dir.mkdir()
         config = build_subprocess_beets_config(

@@ -201,7 +201,7 @@ def ensure_current_evidence_for_action(
     quality_ranks: Any = None,
     album_info: Any = None,
     backfill_builder: CurrentEvidenceBackfillBuilder | None = None,
-    beets_library_root: str = "",
+    beets_library_root: str | None = None,
 ) -> CurrentEvidenceActionResult:
     """Load or backfill current Beets evidence with action provenance."""
 
@@ -313,7 +313,7 @@ def ensure_current_evidence_for_action(
                 quality_ranks=quality_ranks,
                 preloaded_evidence=None if existing_snapshot_stale else existing,
                 preloaded=True,
-                beets_library_root=beets_library_root,
+                beets_library_root=beets_library_root or "",
                 current_release=current_release,
             )
     except Exception as exc:
@@ -469,10 +469,6 @@ def load_current_evidence_for_action(
     try:
         from lib.beets_db import open_beets_db
 
-        if beets_library_db_path is None and beets_library_root:
-            raise ValueError(
-                "Beets DB and library root overrides must be supplied together"
-            )
         if beets_library_db_path is None:
             beets_handle = open_beets_db()
         else:

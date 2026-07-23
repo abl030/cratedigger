@@ -230,7 +230,7 @@ def _load_evidence_import_gate(
     attempt_existing_spectral: SpectralAnalysisDetail | None = None,
     attempt_have_audit_available: bool = False,
     beets_library_db_path: str | None = None,
-    beets_library_root: str = "",
+    beets_library_root: str | None = None,
     current_evidence_loader: Callable[
         ..., CurrentEvidenceActionResult | None
     ] = load_current_evidence_for_action,
@@ -364,10 +364,6 @@ def _refresh_current_evidence_after_import(
     # BeetsDB docstring. Both the U10 propagation path and the legacy
     # ``backfill_current_evidence_from_album_info`` path depend on an
     # absolute ``album_info.album_path`` to read the just-imported files.
-    if beets_library_db_path is None and beets_library_root:
-        raise ValueError(
-            "Beets DB and library root overrides must be supplied together"
-        )
     if beets_library_db_path is None:
         beets_handle = open_beets_db()
     else:
@@ -517,13 +513,19 @@ def _write_album_sidecar_after_import(
     from lib.sidecar_service import write_sidecar_for_request
 
     quality_ranks = cfg.quality_ranks if cfg is not None else None
+    from lib.beets_db import validate_beets_storage_pair
+
+    validate_beets_storage_pair(
+        db_path=beets_library_db_path,
+        library_root=beets_library_root,
+    )
     if beets_factory is not None:
         if beets_library_db_path is None:
-            beets_handle = beets_factory(library_root=beets_library_root or "")
+            beets_handle = beets_factory(library_root="")
         else:
             beets_handle = beets_factory(
                 beets_library_db_path,
-                library_root=beets_library_root or "",
+                library_root=beets_library_root,
             )
     elif beets_library_db_path is None:
         beets_handle = open_beets_db(cfg)

@@ -206,7 +206,7 @@ class TestGeneratedImportOperationFence(unittest.TestCase):
         self.addCleanup(self.beets.close)
         self.runtime = patch.dict(os.environ, {
             "CRATEDIGGER_RUNTIME_CONFIG": str(
-                self.beets.root / "poisoned-runtime-config.ini"
+                self.beets.poisoned_runtime_config()
             ),
             "BEETS_DB": str(self.beets.root / "poisoned-library.db"),
         })

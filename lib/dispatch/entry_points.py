@@ -90,7 +90,17 @@ def dispatch_import_from_db(
             the real-storage world model. Production callers omit them and
             retain runtime config, subprocess import, and deployed Beets.
     """
+    from lib.beets_db import validate_beets_storage_pair
+    from lib.config import read_runtime_config
     from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
+
+    validate_beets_storage_pair(
+        db_path=beets_library_db_path,
+        library_root=beets_library_root,
+    )
+    # Snapshot the complete runtime config before locks or lifecycle effects;
+    # core uses this same snapshot for the subprocess and all Beets readers.
+    resolved_cfg = cfg or read_runtime_config()
 
     with db.advisory_lock(ADVISORY_LOCK_NAMESPACE_IMPORT, request_id) as acquired:
         if not acquired:
@@ -108,7 +118,7 @@ def dispatch_import_from_db(
             import_job_id=import_job_id,
             download_log_id=download_log_id,
             quality_gate_fn=quality_gate_fn,
-            cfg=cfg,
+            cfg=resolved_cfg,
             run_import_fn=run_import_fn,
             beets_library_db_path=beets_library_db_path,
             beets_library_root=beets_library_root,

@@ -80,16 +80,12 @@ def _resolve_dispatch_beets_paths(
     complete runtime config, rather than combining a test DB with a deployed
     root (or vice versa).
     """
-    if (db_path is None) != (library_root is None):
-        raise ValueError(
-            "Beets DB and library root overrides must be supplied together"
-        )
+    from lib.beets_db import validate_beets_storage_pair
+
+    validate_beets_storage_pair(db_path=db_path, library_root=library_root)
     if db_path is not None and library_root is not None:
         return db_path, library_root
-    if cfg is None:
-        from lib.config import read_runtime_config
-
-        cfg = read_runtime_config()
+    assert cfg is not None
     return cfg.beets_library_db, cfg.beets_directory
 
 
@@ -144,9 +140,12 @@ def dispatch_import_core(
     from lib.util import trigger_jellyfin_scan as _trigger_jellyfin
 
     source_dirs = normalize_source_dirs(source_dirs or [])
+    from lib.config import read_runtime_config
+
+    beets_cfg = cfg or read_runtime_config()
     effective_beets_library_db_path, effective_beets_library_root = (
         _resolve_dispatch_beets_paths(
-            cfg,
+            beets_cfg,
             db_path=beets_library_db_path,
             library_root=beets_library_root,
         )
@@ -507,22 +506,39 @@ def dispatch_import_core(
             # downgrade/transcode_downgrade verdicts we exit before deletion so
             # the user's FLACs survive (#111). Auto-import stages to disposable
             # /Incoming and does not need the flag.
-            run = (run_import_fn or run_import_one)(
-                path=path,
-                mb_release_id=mb_release_id,
-                request_id=request_id,
-                force=force,
-                preserve_source=scenario in FORCE_IMPORT_SCENARIOS,
-                override_min_bitrate=override_min_bitrate,
-                target_format=target_format,
-                verified_lossless_target=verified_lossless_target,
-                beets_harness_path=beets_harness_path,
-                quality_rank_config_json=(
-                    cfg.quality_ranks.to_json() if cfg is not None else None
-                ),
-                existing_v0_probe=existing_v0_probe,
-                quality_evidence_action_file=quality_evidence_action_file,
+            quality_rank_config_json = (
+                cfg.quality_ranks.to_json() if cfg is not None else None
             )
+            if run_import_fn is None:
+                run = run_import_one(
+                    path=path, mb_release_id=mb_release_id,
+                    request_id=request_id, force=force,
+                    preserve_source=scenario in FORCE_IMPORT_SCENARIOS,
+                    override_min_bitrate=override_min_bitrate,
+                    target_format=target_format,
+                    verified_lossless_target=verified_lossless_target,
+                    beets_harness_path=beets_harness_path,
+                    quality_rank_config_json=quality_rank_config_json,
+                    existing_v0_probe=existing_v0_probe,
+                    quality_evidence_action_file=quality_evidence_action_file,
+                    beets_config_dir=beets_cfg.beets_config_dir,
+                    beets_python=beets_cfg.beets_python,
+                    beets_library_db_path=effective_beets_library_db_path,
+                    beets_library_root=effective_beets_library_root,
+                )
+            else:
+                run = run_import_fn(
+                    path=path, mb_release_id=mb_release_id,
+                    request_id=request_id, force=force,
+                    preserve_source=scenario in FORCE_IMPORT_SCENARIOS,
+                    override_min_bitrate=override_min_bitrate,
+                    target_format=target_format,
+                    verified_lossless_target=verified_lossless_target,
+                    beets_harness_path=beets_harness_path,
+                    quality_rank_config_json=quality_rank_config_json,
+                    existing_v0_probe=existing_v0_probe,
+                    quality_evidence_action_file=quality_evidence_action_file,
+                )
             _remove_quality_evidence_action_file(quality_evidence_action_file)
             quality_evidence_action_file = None
             for line in run.stderr.strip().split("\n"):
