@@ -1611,10 +1611,12 @@ def open_import_beets(
 ) -> BeetsDB:
     """Open dispatch's explicit Beets pair, never ambient runtime config.
 
-    The importer child is a separate process.  ``BEETS_DB`` only controls the
-    Beets CLI and is not authority for :class:`BeetsDB`; an explicit pair on
-    this wire boundary therefore prevents a runtime-config swap between
-    dispatch and child launch from redirecting the preflight/postflight DB.
+    The importer child is a separate process. ``BEETS_DB`` is not authority
+    for :class:`BeetsDB`; the nested Beets CLI instead resolves its library
+    through ``BEETSDIR`` and that directory's ``config.yaml``. An explicit
+    pair on this wire boundary therefore prevents a runtime-config swap
+    between dispatch and child launch from redirecting the preflight/postflight
+    DB.
     """
 
     validate_beets_storage_pair(db_path=db_path, library_root=library_root)

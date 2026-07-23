@@ -211,10 +211,11 @@ the module-rendered `[Beets]` keys in config.ini; in the dev shell the
 shellHook exports it. A missing interpreter is an actionable error — there
 is no Home-Manager fallback (tier-2 R6; the old `.beet-wrapped` scraping
 is gone). Dispatch also passes its snapshotted Beets DB/root/config-dir/Python
-authority explicitly to `import_one.py`; the child opens that DB/root pair
-directly and passes the same config-dir/Python to its nested harness, so a
-runtime-config change between dispatch and child launch cannot redirect its
-preflight, postflight, or import-harness library reads.
+authority explicitly to `import_one.py`: the child opens the DB/root pair
+directly for preflight and postflight, while its nested harness resolves the
+same library through `BEETSDIR` and that config directory's `config.yaml`.
+Thus a runtime-config change between dispatch and child launch cannot redirect
+either child or harness library reads.
 
 ### Harness Options
 
