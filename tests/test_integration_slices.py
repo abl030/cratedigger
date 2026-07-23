@@ -48,6 +48,7 @@ from tests.helpers import (
     make_download_file,
     make_import_result,
     make_request_row,
+    make_requests_http_error,
     patch_dispatch_externals,
 )
 
@@ -423,12 +424,7 @@ class TestPeerOnlineProbeAtEnqueueSlice(unittest.TestCase):
         """Build a ``requests.HTTPError`` whose ``.response.text`` mirrors
         slskd's offline-peer 500. The detector matches structurally on
         ``.response.text``."""
-        import requests
-        err = requests.HTTPError("500 Server Error")
-        err.response = SimpleNamespace(
-            text="User pooyork appears to be offline",
-        )
-        return err
+        return make_requests_http_error("User pooyork appears to be offline")
 
     def _make_album(self, request_id: int):
         return SimpleNamespace(
@@ -8161,7 +8157,8 @@ class TestWrongMatchCleanupFKChainAvoidsRemeasurement(unittest.TestCase):
         cfg = _SN(
             quality_ranks=QualityRankConfig.defaults(),
             verified_lossless_target="",
-            beets_directory="",
+            beets_library_db="/tmp/cratedigger-test-beets-library.db",
+            beets_directory="/tmp/cratedigger-test-beets-library",
         )
         return patch(
             "lib.config.read_runtime_config",
@@ -8219,7 +8216,8 @@ class TestWrongMatchStaleEvidenceRefreshSlice(unittest.TestCase):
         cfg = _SN(
             quality_ranks=QualityRankConfig.defaults(),
             verified_lossless_target="",
-            beets_directory="",
+            beets_library_db="/tmp/cratedigger-test-beets-library.db",
+            beets_directory="/tmp/cratedigger-test-beets-library",
             audio_check_mode="normal",
         )
         return patch("lib.config.read_runtime_config", return_value=cfg)
@@ -8415,14 +8413,19 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
             filetype_band="lossless",
         )
 
-    def _patch_cfg(self):
-        """Pin runtime config so cleanup sees ``quality_ranks`` without disk."""
+    @staticmethod
+    def _beets_library_db_path(library_root: str) -> str:
+        return os.path.join(library_root, "beets-library.db")
+
+    def _patch_cfg(self, *, beets_library_root: str):
+        """Pin cleanup to the same explicit Beets DB/root pair as dispatch."""
         from lib.quality import QualityRankConfig
         from types import SimpleNamespace as _SN
         cfg = _SN(
             quality_ranks=QualityRankConfig.defaults(),
             verified_lossless_target="",
-            beets_directory="",
+            beets_library_db=self._beets_library_db_path(beets_library_root),
+            beets_directory=beets_library_root,
         )
         return patch("lib.config.read_runtime_config", return_value=cfg)
 
@@ -8497,9 +8500,11 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
             album_path=library_dir,
             format="Opus",
         )
-        with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+        beets_db_path = self._beets_library_db_path(library_dir)
+        mocked_beets = _mock_beets_db(beets_info)
+        with patch("lib.beets_db.BeetsDB", mocked_beets):
             _refresh_current_evidence_after_import(
-                db,  # type: ignore[arg-type]
+                db,
                 request_id=request_id,
                 mb_release_id=mb_release_id,
                 quality_ranks=None,
@@ -8507,7 +8512,13 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
                 import_result=make_import_result(
                     decision="import", new_min_bitrate=100,
                 ),
+                beets_library_db_path=beets_db_path,
+                beets_library_root=library_dir,
             )
+        mocked_beets.assert_called_once_with(
+            beets_db_path,
+            library_root=library_dir,
+        )
 
         request_row = db.request(request_id)
         new_evidence_id = request_row["current_evidence_id"]
@@ -8622,9 +8633,14 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
                 format="Opus",
             )
 
-            with self._patch_cfg(), \
-                    patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+            mocked_beets = _mock_beets_db(beets_info)
+            with self._patch_cfg(beets_library_root=library_dir), \
+                    patch("lib.beets_db.BeetsDB", mocked_beets):
                 result = cleanup_wrong_match(db, log_id)
+            mocked_beets.assert_called_once_with(
+                self._beets_library_db_path(library_dir),
+                library_root=library_dir,
+            )
 
             # Load-bearing assertions. RED today: outcome is
             # OUTCOME_KEPT_WOULD_IMPORT because the library row's NULL
@@ -8715,9 +8731,14 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
                 album_path=library_dir,
                 format="Opus",
             )
-            with self._patch_cfg(), \
-                    patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+            mocked_beets = _mock_beets_db(beets_info)
+            with self._patch_cfg(beets_library_root=library_dir), \
+                    patch("lib.beets_db.BeetsDB", mocked_beets):
                 result = cleanup_wrong_match(db, log_id)
+            mocked_beets.assert_called_once_with(
+                self._beets_library_db_path(library_dir),
+                library_root=library_dir,
+            )
 
             self.assertEqual(result.outcome, OUTCOME_KEPT_WOULD_IMPORT)
             self.assertEqual(result.verdict, "would_import")
@@ -8833,9 +8854,14 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
                 album_path=library_dir,
                 format="Opus",
             )
-            with self._patch_cfg(), \
-                    patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+            mocked_beets = _mock_beets_db(beets_info)
+            with self._patch_cfg(beets_library_root=library_dir), \
+                    patch("lib.beets_db.BeetsDB", mocked_beets):
                 result = cleanup_wrong_match(db, log_id)
+            mocked_beets.assert_called_once_with(
+                self._beets_library_db_path(library_dir),
+                library_root=library_dir,
+            )
 
             # Decision: lossless_source_locked.
             self.assertEqual(
@@ -8986,7 +9012,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             )
             with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 refresh = _refresh_current_evidence_after_import(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=42,
                     mb_release_id="mbid-r1",
                     quality_ranks=None,
@@ -9140,7 +9166,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             )
             with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 _refresh_current_evidence_after_import(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=43,
                     mb_release_id="mbid-t1",
                     quality_ranks=None,
@@ -9289,7 +9315,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             )
             with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 _refresh_current_evidence_after_import(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=5219,
                     mb_release_id="mbid-alac-m4a",
                     quality_ranks=None,
@@ -9418,7 +9444,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             )
             with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 _refresh_current_evidence_after_import(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=146,
                     mb_release_id="mbid-aac-m4a",
                     quality_ranks=None,
@@ -9543,7 +9569,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             )
             with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 _refresh_current_evidence_after_import(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=145,
                     mb_release_id="mbid-mp3-opus",
                     quality_ranks=None,
@@ -9679,7 +9705,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             )
             with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 _refresh_current_evidence_after_import(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=44,
                     mb_release_id="mbid-replace",
                     quality_ranks=None,
@@ -9765,7 +9791,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
 
             with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 _refresh_current_evidence_after_import(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=44,
                     mb_release_id="mbid-replace",
                     quality_ranks=None,
@@ -9837,7 +9863,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             # 1) Helper with source_candidate=None.
             with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 _refresh_current_evidence_after_import(
-                    db_via_helper,  # type: ignore[arg-type]
+                    db_via_helper,
                     request_id=51,
                     mb_release_id="mbid-fb",
                     quality_ranks=None,
@@ -9916,30 +9942,10 @@ class TestRefreshCurrentEvidenceUsesBeetsLibraryRoot(unittest.TestCase):
             "items.path to absolute filesystem paths.",
         )
 
-    def test_refresh_constructs_beets_db_with_library_root_kwarg(self) -> None:
+    def test_refresh_rejects_half_of_a_beets_storage_authority(self) -> None:
         from lib.dispatch import _refresh_current_evidence_after_import
 
-        captured_library_root: list[str] = []
-
-        class FakeBeetsDB:
-            def __init__(self, db_path: str = "", *, library_root: str = "") -> None:
-                captured_library_root.append(library_root)
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def resolve_current_release(self, identity):
-                # Returning missing short-circuits the function before any
-                # snapshotting — we only care that BeetsDB was constructed
-                # with the right library_root kwarg.
-                from lib.beets_db import CurrentBeetsMissing
-
-                return CurrentBeetsMissing(identity=identity)
-
-        with patch("lib.beets_db.BeetsDB", FakeBeetsDB):
+        with self.assertRaisesRegex(ValueError, "supplied together"):
             _refresh_current_evidence_after_import(
                 db=None,  # type: ignore[arg-type]
                 request_id=1,
@@ -9949,15 +9955,6 @@ class TestRefreshCurrentEvidenceUsesBeetsLibraryRoot(unittest.TestCase):
                 import_result=None,
                 beets_library_root="/mnt/virtio/Music/Beets",
             )
-
-        self.assertEqual(
-            captured_library_root,
-            ["/mnt/virtio/Music/Beets"],
-            "_refresh_current_evidence_after_import must forward "
-            "beets_library_root to the BeetsDB constructor — without "
-            "it, get_album_info returns relative paths and the "
-            "propagation silently no-ops.",
-        )
 
     def test_refresh_constructs_beets_db_with_explicit_library_path(self) -> None:
         from lib.dispatch import _refresh_current_evidence_after_import
@@ -9996,29 +9993,30 @@ class TestRefreshCurrentEvidenceUsesBeetsLibraryRoot(unittest.TestCase):
             [("/tmp/world/beets-library.db", "/tmp/world/library")],
         )
 
-    def test_dispatch_passes_cfg_beets_directory_to_refresh(self) -> None:
-        # Inspect the call site source to confirm cfg.beets_directory
-        # is wired to beets_library_root. Static check is sufficient and
-        # avoids a full dispatch-import-core orchestration test.
-        import inspect
-        from lib.dispatch import core as import_dispatch
+    def test_dispatch_beets_authority_opens_one_disposable_pair(self) -> None:
+        from lib.beets_db import open_beets_db
+        from lib.dispatch.core import _resolve_dispatch_beets_paths
+        from tests.beets_world import BeetsWorld
 
-        src = inspect.getsource(import_dispatch.dispatch_import_core)
-        # The call must include the beets_library_root kwarg sourced
-        # from cfg.beets_directory (with a None-safe fallback).
-        self.assertIn("_refresh_current_evidence_after_import(", src)
-        # Look for the resolved wiring after the function call. The explicit
-        # world-model root may override cfg, but production still derives the
-        # default from cfg.beets_directory.
-        refresh_block_start = src.index(
-            "_refresh_current_evidence_after_import("
-        )
-        refresh_block = src[refresh_block_start:refresh_block_start + 1500]
-        self.assertIn(
-            "beets_library_root=effective_beets_library_root",
-            refresh_block,
-        )
-        self.assertIn('getattr(cfg, "beets_directory", "")', src)
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        with BeetsWorld(repo_root) as world:
+            db_path, library_root = _resolve_dispatch_beets_paths(
+                CratediggerConfig(),
+                db_path=str(world.library_db),
+                library_root=str(world.library_root),
+            )
+            with open_beets_db(
+                db_path=db_path,
+                library_root=library_root,
+            ) as beets:
+                self.assertEqual(beets.library_db_path, str(world.library_db))
+                self.assertEqual(beets.library_root, str(world.library_root))
+            with self.assertRaisesRegex(ValueError, "supplied together"):
+                _resolve_dispatch_beets_paths(
+                    CratediggerConfig(),
+                    db_path=str(world.library_db),
+                    library_root=None,
+                )
 
 
 class TestReplaceFullPath(unittest.TestCase):

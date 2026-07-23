@@ -58,7 +58,13 @@ def parse_mb_first_release_year(data: dict[str, Any]) -> int | None:
         return None
 
 
-def beets_subprocess_env() -> dict[str, str]:
+def beets_subprocess_env(
+    *,
+    beets_config_dir: str | None = None,
+    beets_python: str | None = None,
+    beets_library_db_path: str | None = None,
+    beets_library_root: str | None = None,
+) -> dict[str, str]:
     """Env for subprocesses that invoke beets (directly or via the harness
     and import_one.py). Single source of truth for how a beets subprocess
     finds its config and interpreter.
@@ -82,9 +88,26 @@ def beets_subprocess_env() -> dict[str, str]:
     os.environ and the runtime config are read at CALL time, not import
     time, so tests that patch either see the patched values.
     """
+    env = {**os.environ}
+    if beets_config_dir is not None:
+        from lib.beets_db import validate_beets_storage_pair
+
+        validate_beets_storage_pair(
+            db_path=beets_library_db_path,
+            library_root=beets_library_root,
+        )
+        beetsdir = beets_config_dir or env.get("BEETSDIR", "")
+        if not beetsdir:
+            raise RuntimeError("beets config dir is not set")
+        assert beets_library_db_path is not None
+        env["BEETSDIR"] = beetsdir
+        env["BEETS_DB"] = beets_library_db_path
+        if beets_python:
+            env["CRATEDIGGER_BEETS_PYTHON"] = beets_python
+        return env
+
     from lib.config import read_runtime_config
     cfg = read_runtime_config()
-    env = {**os.environ}
     beetsdir = cfg.beets_config_dir or env.get("BEETSDIR", "")
     if not beetsdir:
         raise RuntimeError(

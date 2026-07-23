@@ -32,7 +32,8 @@ from lib.quality import (AlbumQualityEvidenceDecisionFacts, DownloadInfo,
 from lib.quality_evidence import EvidenceBuildResult, audit_v0_probe_from_metric
 from lib.dispatch.types import (DispatchOutcome, EvidenceImportGate,
                                 FORCE_IMPORT_SCENARIOS, ImportAttemptResult,
-                                ImportOneRun, PostCommitCleanup, QualityGateFn)
+                                ImportOneRunner, PostCommitCleanup,
+                                QualityGateFn)
 from lib.dispatch.subprocess_runner import run_import_one
 from lib.dispatch.helpers import (_guard_failure_detail,
                                   _log_postflight_bad_extensions,
@@ -68,6 +69,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cratedigger")
 
 
+def _resolve_dispatch_beets_paths(
+    cfg: "CratediggerConfig | None",
+    *,
+    db_path: str | None,
+    library_root: str | None,
+) -> tuple[str, str]:
+    """Resolve one Beets DB/root authority for a complete dispatch.
+
+    An isolated caller owns both values.  Production derives both from the
+    complete runtime config, rather than combining a test DB with a deployed
+    root (or vice versa).
+    """
+    from lib.beets_db import validate_beets_storage_pair
+
+    validate_beets_storage_pair(db_path=db_path, library_root=library_root)
+    if db_path is not None and library_root is not None:
+        return db_path, library_root
+    assert cfg is not None
+    return cfg.beets_library_db, cfg.beets_directory
+
+
 def dispatch_import_core(
     *,
     path: str,
@@ -95,7 +117,7 @@ def dispatch_import_core(
     candidate_download_log_id: int | None = None,
     prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
     quality_gate_fn: QualityGateFn = _check_quality_gate_core,
-    run_import_fn: Callable[..., ImportOneRun] | None = None,
+    run_import_fn: ImportOneRunner | None = None,
     evidence_gate_fn: Callable[..., EvidenceImportGate] = _load_evidence_import_gate,
     current_evidence_loader: Callable[
         ..., "CurrentEvidenceActionResult | None"
@@ -108,9 +130,9 @@ def dispatch_import_core(
     Runs import_one.py, parses result, dispatches on decision (mark_done/failed,
     denylist, quality gate, media server notifiers, cleanup). Returns DispatchOutcome.
 
-    ``beets_library_db_path`` / ``beets_library_root`` are explicit storage
-    seams for isolated real-Beets worlds. Production leaves the DB path unset
-    and derives the root from ``cfg.beets_directory`` as before.
+    ``beets_library_db_path`` / ``beets_library_root`` are an inseparable
+    explicit storage authority for isolated real-Beets worlds. Production
+    leaves both unset and derives the complete pair from runtime config.
 
     Used by the auto-import flow in ``lib.download`` and by
     ``dispatch_import_from_db()`` (force-import).
@@ -119,12 +141,16 @@ def dispatch_import_core(
     from lib.util import trigger_jellyfin_scan as _trigger_jellyfin
 
     source_dirs = normalize_source_dirs(source_dirs or [])
-    if beets_library_root is not None:
-        effective_beets_library_root = beets_library_root
-    elif cfg is not None:
-        effective_beets_library_root = getattr(cfg, "beets_directory", "")
-    else:
-        effective_beets_library_root = ""
+    from lib.config import read_runtime_config
+
+    beets_cfg = cfg or read_runtime_config()
+    effective_beets_library_db_path, effective_beets_library_root = (
+        _resolve_dispatch_beets_paths(
+            beets_cfg,
+            db_path=beets_library_db_path,
+            library_root=beets_library_root,
+        )
+    )
 
     # Operation identity is distinct from the eventual download-log outcome:
     # an automatic attempt can still reject or fail after this start message.
@@ -247,7 +273,7 @@ def dispatch_import_core(
                     else None
                 ),
                 attempt_have_audit_available=attempt_result.audit is not None,
-                beets_library_db_path=beets_library_db_path,
+                beets_library_db_path=effective_beets_library_db_path,
                 beets_library_root=effective_beets_library_root,
                 **evidence_gate_kwargs,
             )
@@ -481,22 +507,43 @@ def dispatch_import_core(
             # downgrade/transcode_downgrade verdicts we exit before deletion so
             # the user's FLACs survive (#111). Auto-import stages to disposable
             # /Incoming and does not need the flag.
-            run = (run_import_fn or run_import_one)(
-                path=path,
-                mb_release_id=mb_release_id,
-                request_id=request_id,
-                force=force,
-                preserve_source=scenario in FORCE_IMPORT_SCENARIOS,
-                override_min_bitrate=override_min_bitrate,
-                target_format=target_format,
-                verified_lossless_target=verified_lossless_target,
-                beets_harness_path=beets_harness_path,
-                quality_rank_config_json=(
-                    cfg.quality_ranks.to_json() if cfg is not None else None
-                ),
-                existing_v0_probe=existing_v0_probe,
-                quality_evidence_action_file=quality_evidence_action_file,
+            quality_rank_config_json = (
+                cfg.quality_ranks.to_json() if cfg is not None else None
             )
+            if run_import_fn is None:
+                run = run_import_one(
+                    path=path, mb_release_id=mb_release_id,
+                    request_id=request_id, force=force,
+                    preserve_source=scenario in FORCE_IMPORT_SCENARIOS,
+                    override_min_bitrate=override_min_bitrate,
+                    target_format=target_format,
+                    verified_lossless_target=verified_lossless_target,
+                    beets_harness_path=beets_harness_path,
+                    quality_rank_config_json=quality_rank_config_json,
+                    existing_v0_probe=existing_v0_probe,
+                    quality_evidence_action_file=quality_evidence_action_file,
+                    beets_config_dir=beets_cfg.beets_config_dir,
+                    beets_python=beets_cfg.beets_python,
+                    beets_library_db_path=effective_beets_library_db_path,
+                    beets_library_root=effective_beets_library_root,
+                )
+            else:
+                run = run_import_fn(
+                    path=path, mb_release_id=mb_release_id,
+                    request_id=request_id, force=force,
+                    preserve_source=scenario in FORCE_IMPORT_SCENARIOS,
+                    override_min_bitrate=override_min_bitrate,
+                    target_format=target_format,
+                    verified_lossless_target=verified_lossless_target,
+                    beets_harness_path=beets_harness_path,
+                    quality_rank_config_json=quality_rank_config_json,
+                    existing_v0_probe=existing_v0_probe,
+                    quality_evidence_action_file=quality_evidence_action_file,
+                    beets_config_dir=beets_cfg.beets_config_dir,
+                    beets_python=beets_cfg.beets_python,
+                    beets_library_db_path=effective_beets_library_db_path,
+                    beets_library_root=effective_beets_library_root,
+                )
             _remove_quality_evidence_action_file(quality_evidence_action_file)
             quality_evidence_action_file = None
             for line in run.stderr.strip().split("\n"):
@@ -581,7 +628,7 @@ def dispatch_import_core(
                             ),
                             source_candidate=evidence_gate.candidate,
                             import_result=ir,
-                            beets_library_db_path=beets_library_db_path,
+                            beets_library_db_path=effective_beets_library_db_path,
                             beets_library_root=effective_beets_library_root,
                         )
                     except Exception as exc:
@@ -601,6 +648,8 @@ def dispatch_import_core(
                             request_id=request_id,
                             mb_release_id=mb_release_id,
                             cfg=cfg,
+                            beets_library_db_path=effective_beets_library_db_path,
+                            beets_library_root=effective_beets_library_root,
                         )
                     except Exception:
                         logger.exception(

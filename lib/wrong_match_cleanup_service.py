@@ -379,6 +379,7 @@ def _cleanup_wrong_match(
             request_id=request_id,
             mb_release_id=mb_release_id,
             quality_ranks=getattr(runtime_cfg, "quality_ranks", None),
+            beets_library_db_path=getattr(runtime_cfg, "beets_library_db", None),
             beets_library_root=beets_library_root,
         )
         if current_result is not None:

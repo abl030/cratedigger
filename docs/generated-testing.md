@@ -243,11 +243,13 @@ nix-shell --run "scripts/world_model_burst.sh \
 ```
 
 The mirror fixture is public catalogue metadata selected independently of the
-production collection. `BEETSDIR` and `BEETS_DB` are both forced to the
-per-world scratch tree for each synchronous subprocess, the deployed runtime
-config is masked so it cannot override them, and all three environment values
-are restored afterward; the pipeline database is still ephemeral. Only the
-mirror is read. The profile
+production collection. Each synchronous subprocess receives a scratch runtime
+config that names the per-world library DB, library root, and Beets config
+directory; `BEETSDIR` and `BEETS_DB` match that scratch state as well. The
+runtime config is the authority for zero-argument `BeetsDB()`, so masking it
+or setting `BEETS_DB` alone is not sufficient. All environment values are
+restored afterward; the pipeline database is still ephemeral. Only the mirror
+is read. The profile
 loads the shipped path template, exact-ID duplicate keys, inline field, match
 policy, and MusicBrainz plugin; unrelated production fetchart/lyrics/scrub hooks
 stay disabled so the boundary test cannot make external content requests. A

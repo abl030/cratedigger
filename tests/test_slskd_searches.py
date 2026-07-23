@@ -37,6 +37,7 @@ from lib.slskd_searches import (
     converge_slskd_searches,
 )
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
+from tests.helpers import make_requests_http_error
 
 
 def _cfg(**overrides: Any) -> CratediggerConfig:
@@ -359,7 +360,6 @@ class TestSubmitPlanSearchWriteAheadOrdering(unittest.TestCase):
         429/409 retry mints + ledgers a fresh id so a half-created
         earlier attempt (POST reached slskd, response lost) is still
         sweepable on its own ledger row."""
-        import requests
         from album_source import AlbumRecord, MediaRecord, ReleaseRecord
 
         db = FakePipelineDB()
@@ -369,10 +369,7 @@ class TestSubmitPlanSearchWriteAheadOrdering(unittest.TestCase):
         def flaky_search_text(**kwargs):
             attempts.append(kwargs["id"])
             if len(attempts) < 3:
-                err = requests.exceptions.HTTPError("busy")
-                fake_response = type("R", (), {"status_code": 409})()
-                err.response = fake_response
-                raise err
+                raise make_requests_http_error("busy", status_code=409)
             return {"id": kwargs["id"]}
 
         slskd.searches.search_text = flaky_search_text

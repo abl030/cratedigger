@@ -48,7 +48,7 @@ def _bootstrap_import_paths() -> None:
 
 _bootstrap_import_paths()
 
-from lib.beets_db import AlbumInfo, BeetsDB
+from lib.beets_db import AlbumInfo, BeetsDB, validate_beets_storage_pair
 from lib.measurement import ffprobe_audio_codec_name
 from lib.permissions import fix_library_modes, reset_umask
 from lib.release_identity import ReleaseIdentity
@@ -928,7 +928,15 @@ def convert_lossless(album_path: str, spec: ConversionSpec,
 # Beets harness controller (JSON protocol)
 # ---------------------------------------------------------------------------
 
-def run_import(path: str, mb_release_id: str) -> RunImportOutcome:
+def run_import(
+    path: str,
+    mb_release_id: str,
+    *,
+    beets_config_dir: str | None = None,
+    beets_python: str | None = None,
+    beets_library_db_path: str | None = None,
+    beets_library_root: str | None = None,
+) -> RunImportOutcome:
     """Drive the beets harness to import one album.
 
     Returns ``RunImportOutcome``.
@@ -943,7 +951,12 @@ def run_import(path: str, mb_release_id: str) -> RunImportOutcome:
         cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True, errors="replace",
         preexec_fn=os.setsid,
-        env=beets_subprocess_env(),
+        env=beets_subprocess_env(
+            beets_config_dir=beets_config_dir,
+            beets_python=beets_python,
+            beets_library_db_path=beets_library_db_path,
+            beets_library_root=beets_library_root,
+        ),
     )
     assert proc.stdin is not None
     assert proc.stdout is not None
@@ -1444,7 +1457,11 @@ def _run_quality_evidence_authorized_import(
 
     _log(f"[IMPORT] {args.path} → beets (mbid={mbid})")
     stage_start = time.monotonic()
-    import_outcome = run_import(args.path, mbid)
+    import_outcome = run_import(
+        args.path,
+        mbid,
+        **import_beets_subprocess_kwargs(args),
+    )
     _log_timing("beets_import", stage_start)
     rc = import_outcome.exit_code
     beets_lines = import_outcome.beets_lines
@@ -1559,6 +1576,18 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Quality evidence payload: preview-time candidate "
                              "measurement for dry runs, or action-time "
                              "authorization for mutation.")
+    parser.add_argument("--beets-library-db", default=None,
+                        help="Explicit Beets library DB snapshotted by dispatch; "
+                             "must be paired with --beets-library-root.")
+    parser.add_argument("--beets-library-root", default=None,
+                        help="Explicit Beets library root snapshotted by dispatch; "
+                             "must be paired with --beets-library-db.")
+    parser.add_argument("--beets-config-dir", default=None,
+                        help="Explicit BEETSDIR snapshotted by dispatch for the "
+                             "nested Beets harness.")
+    parser.add_argument("--beets-python", default=None,
+                        help="Explicit pinned Beets Python snapshotted by dispatch "
+                             "for the nested Beets harness.")
     parser.add_argument("--existing-v0-probe-min-bitrate", type=int, default=None,
                         help="Current comparable lossless-source V0 probe min bitrate")
     parser.add_argument("--existing-v0-probe-avg-bitrate", type=int, default=None,
@@ -1573,6 +1602,41 @@ def build_parser() -> argparse.ArgumentParser:
                              "the user's only copy in failed_imports/ (#111).")
     parser.add_argument("--dry-run", action="store_true")
     return parser
+
+
+def open_import_beets(
+    *,
+    db_path: str | None,
+    library_root: str | None,
+) -> BeetsDB:
+    """Open dispatch's explicit Beets pair, never ambient runtime config.
+
+    The importer child is a separate process. ``BEETS_DB`` is not authority
+    for :class:`BeetsDB`; the nested Beets CLI instead resolves its library
+    through ``BEETSDIR`` and that directory's ``config.yaml``. An explicit
+    pair on this wire boundary therefore prevents a runtime-config swap
+    between dispatch and child launch from redirecting the preflight/postflight
+    DB.
+    """
+
+    validate_beets_storage_pair(db_path=db_path, library_root=library_root)
+    if db_path is None:
+        return BeetsDB()
+    assert library_root is not None
+    return BeetsDB(db_path, library_root=library_root)
+
+
+def import_beets_subprocess_kwargs(
+    args: argparse.Namespace,
+) -> dict[str, str | None]:
+    """Forward the child's complete snapshotted Beets authority downstream."""
+
+    return {
+        "beets_config_dir": args.beets_config_dir,
+        "beets_python": args.beets_python,
+        "beets_library_db_path": args.beets_library_db,
+        "beets_library_root": args.beets_library_root,
+    }
 
 
 def main():
@@ -1619,7 +1683,10 @@ def main():
 
     # --- Pre-flight: already imported? ---
     stage_start = time.monotonic()
-    beets = BeetsDB()
+    beets = open_import_beets(
+        db_path=args.beets_library_db,
+        library_root=args.beets_library_root,
+    )
     import atexit
     atexit.register(beets.close)
     already_in_beets = beets.album_exists(mbid)
@@ -2171,7 +2238,11 @@ def main():
     # --- Import ---
     _log(f"[IMPORT] {work_path} → beets (mbid={mbid})")
     stage_start = time.monotonic()
-    import_outcome = run_import(work_path, mbid)
+    import_outcome = run_import(
+        work_path,
+        mbid,
+        **import_beets_subprocess_kwargs(args),
+    )
     _log_timing("beets_import", stage_start)
     rc = import_outcome.exit_code
     beets_lines = import_outcome.beets_lines

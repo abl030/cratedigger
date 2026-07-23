@@ -209,6 +209,16 @@ def _dispatch_valid_result_cmd(
         # the tempdir. ``StagedAlbum.move_to`` creates the destination
         # directory itself, so we just need the staging root to exist.
         ctx.cfg.beets_staging_dir = tmpdir
+        # This argv seam deliberately has no installed album. Supply a
+        # disposable complete authority pair anyway, so an accidental return
+        # to the real current-evidence loader can never consult host Beets.
+        ctx.cfg.beets_library_db = os.path.join(tmpdir, "beets-library.db")
+        ctx.cfg.beets_directory = os.path.join(tmpdir, "beets-library")
+        os.makedirs(ctx.cfg.beets_directory)
+
+        def no_current_evidence(*_args: object, **_kwargs: object) -> None:
+            """Typed current-evidence boundary for this subprocess argv seam."""
+            return None
 
         with patch("lib.download_validation.log_validation_result"), \
              patch_dispatch_externals() as ext, \
@@ -224,6 +234,7 @@ def _dispatch_valid_result_cmd(
                 )
                 kwargs["candidate_import_job_id"] = claimed.id
                 kwargs["prevalidated_candidate_result"] = candidate
+                kwargs["current_evidence_loader"] = no_current_evidence
                 return dispatch_import_core(**kwargs)
 
             outcome = _handle_valid_result(

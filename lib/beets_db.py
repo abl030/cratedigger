@@ -207,12 +207,9 @@ def open_beets_db(
     Development/operator overrides must supply both values together.
     """
 
+    validate_beets_storage_pair(db_path=db_path, library_root=library_root)
     if config is not None and (db_path is not None or library_root is not None):
         raise ValueError("config and explicit Beets paths are mutually exclusive")
-    if (db_path is None) != (library_root is None):
-        raise ValueError(
-            "Beets DB and library root overrides must be supplied together"
-        )
     if db_path is not None and library_root is not None:
         return BeetsDB(db_path, library_root=library_root)
     if config is None:
@@ -223,6 +220,18 @@ def open_beets_db(
         config.beets_library_db,
         library_root=config.beets_directory,
     )
+
+
+def validate_beets_storage_pair(
+    *,
+    db_path: str | None,
+    library_root: str | None,
+) -> None:
+    """Reject a partial Beets storage override before any dispatch effects."""
+    if (db_path is None) != (library_root is None):
+        raise ValueError(
+            "Beets DB and library root overrides must be supplied together"
+        )
 
 
 def _reduce_album_format(
