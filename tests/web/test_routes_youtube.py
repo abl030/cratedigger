@@ -20,6 +20,42 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 
 
+class TestYoutubeClientDefaultTimeoutSession(unittest.TestCase):
+    """Pin the nested Requests override to Requests' method semantics."""
+
+    def _session(self):
+        from web.routes.youtube import _build_youtube_client
+
+        # Constructing the nested session has no network side effects, but
+        # keep this test focused on the Requests boundary rather than YTMusic
+        # initialization details.
+        with patch("ytmusicapi.YTMusic", return_value=object()):
+            _client, session = _build_youtube_client()
+        self.addCleanup(session.close)
+        return session
+
+    def test_str_and_bytes_methods_normalize_identically(self) -> None:
+        session = self._session()
+        for method in ("get", b"get"):
+            with self.subTest(method=method), \
+                    patch("requests.Session.request", autospec=True) as request:
+                session.request(method, "https://example.invalid")
+
+            request.assert_called_once()
+            self.assertIs(request.call_args.args[0], session)
+            self.assertEqual(request.call_args.args[1], "GET")
+            self.assertEqual(request.call_args.kwargs["timeout"], (5, 30))
+
+    def test_non_ascii_method_preserves_requests_str_and_bytes_behavior(self) -> None:
+        session = self._session()
+        with patch("requests.Session.request", autospec=True) as request:
+            session.request("gét", "https://example.invalid")
+        self.assertEqual(request.call_args.args[1], "GÉT")
+
+        with self.assertRaises(UnicodeDecodeError):
+            session.request(b"g\xc3\xa9t", "https://example.invalid")
+
+
 
 class TestYoutubeRouteContracts(_FakeDbWebServerCase):
     """U8 contract for ``GET /api/youtube-album?identifier=<id>``.

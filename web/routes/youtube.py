@@ -156,9 +156,9 @@ def _build_youtube_client():
     _UNSET: Any = object()
 
     class _DefaultTimeoutSession(requests.Session):
-        def request(  # pyright: ignore[reportIncompatibleMethodOverride]
+        def request(
             self,
-            method: str,
+            method: str | bytes,
             url: str | bytes,
             params: Any = None,
             data: Any = None,
@@ -177,8 +177,15 @@ def _build_youtube_client():
         ) -> requests.Response:
             if timeout is _UNSET:
                 timeout = (5, 30)
+            # Mirror ``requests.PreparedRequest.prepare_method`` before
+            # crossing the stricter current-stubs ``str`` boundary on
+            # ``Session.request``.  This preserves requests' public method
+            # semantics: uppercase both forms, ASCII-decode bytes, and raise
+            # ``UnicodeDecodeError`` for non-ASCII bytes rather than quietly
+            # reinterpreting them as UTF-8.
+            native_method = requests.utils.to_native_string(method.upper())
             return super().request(
-                method, url,
+                native_method, url,
                 params=params, data=data, headers=headers,
                 cookies=cookies, files=files, auth=auth,
                 timeout=timeout, allow_redirects=allow_redirects,
