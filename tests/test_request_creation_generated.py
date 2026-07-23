@@ -43,14 +43,35 @@ def assert_published_request_complete(
     ):
         raise AssertionError("wanted upgrade request lost its publication policy")
     if resolved:
-        expected_catalog = "DISC-791" if discogs else "CAT-791"
-        expected_artist = "Disc Artist" if discogs else "MB Artist"
-        if row.get("release_group_year") != 1991 or row.get("catalog_number") != expected_catalog:
-            raise AssertionError("wanted request lost resolved scalar metadata")
-        if db.get_tracks(request_id)[0].get("track_artist") != expected_artist:
-            raise AssertionError("wanted request lost resolved track artist")
+        if discogs:
+            # Direct Add does not pre-seed a Discogs master in the request;
+            # the flattened browse payload can still resolve the release
+            # group/master id and catalog, but deliberately has no year or
+            # per-track artist evidence.
+            if (
+                row.get("mb_release_group_id") != "791"
+                or row.get("catalog_number") != "DISC-791"
+                or row.get("release_group_year") is not None
+                or db.get_tracks(request_id)[0].get("track_artist") is not None
+            ):
+                raise AssertionError("wanted Discogs request lost its resolved metadata")
+            expected_statuses = {
+                "release_group_year": "unresolved_malformed",
+                "release_group_id": "resolved",
+                "catalog_number": "resolved",
+                "track_artist": "unresolved_field_missing_upstream",
+            }
+        else:
+            if (
+                row.get("mb_release_group_id") != "rg-791"
+                or row.get("release_group_year") != 1991
+                or row.get("catalog_number") != "CAT-791"
+                or db.get_tracks(request_id)[0].get("track_artist") != "MB Artist"
+            ):
+                raise AssertionError("wanted request lost resolved MB metadata")
+            expected_statuses = {field: "resolved" for field in required}
         if any(
-            db.field_resolutions[(request_id, field)].status != "resolved"
+            db.field_resolutions[(request_id, field)].status != expected_statuses[field]
             for field in required
         ):
             raise AssertionError("wanted request lost resolved field evidence")
@@ -122,25 +143,23 @@ def _creation(release_id: str, *, discogs: bool, tracks: list[dict[str, object]]
             "media": [{"tracks": [{"artist-credit": [{"name": "MB Artist"}]}]}],
         }
         discogs_raw = {
-            # Direct Discogs release shape: resolver consumes master id,
-            # labels and tracks, not the web adapter's tracklist shorthand.
+            # Flattened Discogs browse payload: it carries a master and
+            # catalog but has no per-track artist credits.
             "artist_id": "1", "release_group_id": "791",
             "labels": [{"catno": "DISC-791"}],
-            "tracks": [{"title": "T0", "artists": [{"name": "Disc Artist"}]}],
+            "tracks": [{"title": "T0"}],
         }
-    # Match adapters: creation's known group id comes from the source payload
-    # rather than an independently invented test value.
+    # MB Add pre-seeds its known group id from the source payload. Discogs
+    # deliberately leaves it to the resolver, matching the real adapter.
     mb_group = mb_raw.get("release-group")
     mb_group_id = (
         mb_group.get("id") if isinstance(mb_group, dict) else None
     )
-    discogs_group_id = discogs_raw.get("release_group_id")
     return RequestCreationInput(
         release_id=release_id, mb_release_id=release_id,
         discogs_release_id=release_id if discogs else None,
         mb_release_group_id=(
-            str(discogs_group_id) if discogs and discogs_group_id is not None
-            else str(mb_group_id) if mb_group_id is not None
+            str(mb_group_id) if not discogs and mb_group_id is not None
             else None
         ),
         artist_name=artist_name, album_title=album_title, source="request", tracks=tracks,
@@ -205,7 +224,7 @@ class TestRequestCreationGenerated(unittest.TestCase):
     def test_invariant_checker_rejects_each_known_bad_completion_signal(self) -> None:
         for signal in (
             "tracks", "resolution", "plan", "policy",
-            "resolved_scalar", "resolved_track_artist",
+            "resolved_scalar", "resolved_release_group_id", "resolved_track_artist",
         ):
             with self.subTest(signal=signal):
                 db = FakePipelineDB()
@@ -226,6 +245,9 @@ class TestRequestCreationGenerated(unittest.TestCase):
                 elif signal == "resolved_scalar":
                     # Audit still says resolved: only the persisted scalar is corrupt.
                     db.request(request_id)["catalog_number"] = None
+                elif signal == "resolved_release_group_id":
+                    # The scalar audit row remains resolved while its value is lost.
+                    db.request(request_id)["mb_release_group_id"] = None
                 elif signal == "resolved_track_artist":
                     # Likewise keep the resolved audit row intact.
                     db._tracks[request_id][0]["track_artist"] = None
