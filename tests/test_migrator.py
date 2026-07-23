@@ -1466,10 +1466,17 @@ class TestReplaceSupersedeSchema(unittest.TestCase):
             "mig023-fk-child", replaces_request_id=parent
         )
         try:
-            with self.assertRaises(psycopg2.errors.ForeignKeyViolation):
+            with self.assertRaises((
+                psycopg2.errors.ForeignKeyViolation,
+                psycopg2.errors.RestrictViolation,
+            )) as raised:
                 self._exec(
                     "DELETE FROM album_requests WHERE id = %s", (parent,)
                 )
+            self.assertEqual(
+                raised.exception.diag.constraint_name,
+                "album_requests_replaces_request_id_fkey",
+            )
         finally:
             self._cleanup_request(child)
             self._cleanup_request(parent)

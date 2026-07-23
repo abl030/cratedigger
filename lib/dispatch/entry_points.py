@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -29,7 +28,7 @@ from lib.terminal_outcomes import ImportJobTerminal
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
     from lib.pipeline_db import PipelineDB
-    from lib.dispatch.types import ImportOneRun, QualityGateFn
+    from lib.dispatch.types import ImportOneRunner, QualityGateFn
 
 logger = logging.getLogger("cratedigger")
 
@@ -45,7 +44,7 @@ def dispatch_import_from_db(
     download_log_id: int | None = None,
     quality_gate_fn: "QualityGateFn | None" = None,
     cfg: "CratediggerConfig | None" = None,
-    run_import_fn: "Callable[..., ImportOneRun] | None" = None,
+    run_import_fn: "ImportOneRunner | None" = None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
 ) -> "DispatchOutcome":
@@ -90,7 +89,17 @@ def dispatch_import_from_db(
             the real-storage world model. Production callers omit them and
             retain runtime config, subprocess import, and deployed Beets.
     """
+    from lib.beets_db import validate_beets_storage_pair
+    from lib.config import read_runtime_config
     from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
+
+    validate_beets_storage_pair(
+        db_path=beets_library_db_path,
+        library_root=beets_library_root,
+    )
+    # Snapshot the complete runtime config before locks or lifecycle effects;
+    # core uses this same snapshot for the subprocess and all Beets readers.
+    resolved_cfg = cfg or read_runtime_config()
 
     with db.advisory_lock(ADVISORY_LOCK_NAMESPACE_IMPORT, request_id) as acquired:
         if not acquired:
@@ -108,7 +117,7 @@ def dispatch_import_from_db(
             import_job_id=import_job_id,
             download_log_id=download_log_id,
             quality_gate_fn=quality_gate_fn,
-            cfg=cfg,
+            cfg=resolved_cfg,
             run_import_fn=run_import_fn,
             beets_library_db_path=beets_library_db_path,
             beets_library_root=beets_library_root,
@@ -126,7 +135,7 @@ def _dispatch_import_from_db_locked(
     download_log_id: int | None,
     quality_gate_fn: "QualityGateFn | None" = None,
     cfg: "CratediggerConfig | None" = None,
-    run_import_fn: "Callable[..., ImportOneRun] | None" = None,
+    run_import_fn: "ImportOneRunner | None" = None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
 ) -> "DispatchOutcome":

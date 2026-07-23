@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from uuid import UUID
 from typing import cast
 import unittest
 
@@ -13,21 +14,14 @@ from scripts.cleanup_ghost_imported import classify_imported_rows
 from tests.fakes import FakeBeetsDB
 
 
-_HEX = st.sampled_from(tuple("0123456789abcdef"))
-
-
-@st.composite
-def _mbids(draw: st.DrawFn) -> str:
-    compact = "".join(draw(st.lists(_HEX, min_size=32, max_size=32)))
-    return (
-        f"{compact[:8]}-{compact[8:12]}-{compact[12:16]}-"
-        f"{compact[16:20]}-{compact[20:]}"
-    )
+_MBIDS = st.binary(min_size=16, max_size=16).map(
+    lambda raw: str(UUID(bytes=raw))
+)
 
 
 class TestGeneratedGhostCleanupAuthority(unittest.TestCase):
     @given(
-        mbid=_mbids(),
+        mbid=_MBIDS,
         discogs_id=st.integers(min_value=1, max_value=2_000_000_000),
     )
     def test_conflicting_identity_fields_are_never_auto_deleted(
@@ -52,7 +46,7 @@ class TestGeneratedGhostCleanupAuthority(unittest.TestCase):
         self.assertEqual(manual_review, [row])
 
     @given(
-        mbid=_mbids(),
+        mbid=_MBIDS,
         discogs_id=st.integers(min_value=1, max_value=2_000_000_000),
     )
     def test_known_bad_permissive_parser_accepts_the_conflict(

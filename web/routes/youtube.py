@@ -149,7 +149,7 @@ def _build_youtube_client():
     # private stub-only aliases (``_Params``, ``_Data``, ... in
     # typeshed's requests-stubs) that aren't part of the public API and
     # can't be imported or reconstructed without duplicating typeshed
-    # internals. ``method``/``url``/``allow_redirects`` mirror the real
+    # internals. ``allow_redirects`` mirrors the real
     # base signature exactly since those are plain public types; the
     # full named parameter list (matching the base method's arity) is
     # required for ``reportIncompatibleMethodOverride``.
@@ -177,8 +177,17 @@ def _build_youtube_client():
         ) -> requests.Response:
             if timeout is _UNSET:
                 timeout = (5, 30)
+            # The current Session.request stubs require ``str`` while the
+            # base override accepts ``str | bytes``. Requests' own request
+            # preparation uppercases strings later; this boundary only
+            # converts bytes to Requests' native string form. ASCII is
+            # deliberate: non-ASCII bytes raise ``UnicodeDecodeError``
+            # instead of being silently reinterpreted as UTF-8.
+            native_method = (
+                method.decode("ascii") if isinstance(method, bytes) else method
+            )
             return super().request(
-                method, url,
+                native_method, url,
                 params=params, data=data, headers=headers,
                 cookies=cookies, files=files, auth=auth,
                 timeout=timeout, allow_redirects=allow_redirects,

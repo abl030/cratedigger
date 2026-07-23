@@ -1170,7 +1170,14 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                 import_one.main()
 
             self.assertEqual(cm.exception.code, 0)
-            mock_run_import.assert_called_once_with(album, "mbid-123")
+            mock_run_import.assert_called_once_with(
+                album,
+                "mbid-123",
+                beets_config_dir=None,
+                beets_python=None,
+                beets_library_db_path=None,
+                beets_library_root=None,
+            )
             sentinel = stdout.getvalue().strip().splitlines()[-1]
             self.assertTrue(sentinel.startswith("__IMPORT_RESULT__"))
             result = json.loads(sentinel.removeprefix("__IMPORT_RESULT__"))

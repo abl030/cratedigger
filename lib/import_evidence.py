@@ -201,7 +201,7 @@ def ensure_current_evidence_for_action(
     quality_ranks: Any = None,
     album_info: Any = None,
     backfill_builder: CurrentEvidenceBackfillBuilder | None = None,
-    beets_library_root: str = "",
+    beets_library_root: str | None = None,
 ) -> CurrentEvidenceActionResult:
     """Load or backfill current Beets evidence with action provenance."""
 
@@ -313,7 +313,7 @@ def ensure_current_evidence_for_action(
                 quality_ranks=quality_ranks,
                 preloaded_evidence=None if existing_snapshot_stale else existing,
                 preloaded=True,
-                beets_library_root=beets_library_root,
+                beets_library_root=beets_library_root or "",
                 current_release=current_release,
             )
     except Exception as exc:
@@ -461,21 +461,18 @@ def load_current_evidence_for_action(
     mb_release_id: str,
     quality_ranks: QualityRankConfig | None = None,
     beets_library_db_path: str | None = None,
-    beets_library_root: str = "",
+    beets_library_root: str | None = None,
 ) -> CurrentEvidenceActionResult | None:
     """Look Beets up by MBID then load/backfill; return None if no album, fail-closed on error."""
 
     cfg = quality_ranks if quality_ranks is not None else QualityRankConfig.defaults()
     try:
-        from lib.beets_db import BeetsDB
+        from lib.beets_db import open_beets_db
 
-        if beets_library_db_path is None:
-            beets_handle = BeetsDB(library_root=beets_library_root)
-        else:
-            beets_handle = BeetsDB(
-                beets_library_db_path,
-                library_root=beets_library_root,
-            )
+        beets_handle = open_beets_db(
+            db_path=beets_library_db_path,
+            library_root=beets_library_root,
+        )
         with beets_handle as beets:
             identity = release_identity_for_lookup(mb_release_id)
             if identity is None:

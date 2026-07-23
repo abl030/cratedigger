@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
+from lib.dispatch.subprocess_runner import run_import_one
 from lib.util import beets_subprocess_env
+from lib.beets_db import BeetsDB
 from tests.beets_world import (
     BeetsWorld,
+    BeetsWorldRelease,
     build_subprocess_beets_config,
     extract_shipped_beets_world_config,
 )
@@ -81,10 +85,12 @@ class TestShippedBeetsWorldConfig(unittest.TestCase):
                 "[Beets]\nconfig_dir = /deployed/config\n",
                 encoding="utf-8",
             )
-            world = object.__new__(BeetsWorld)
-            world.beets_config_dir = Path(root) / "config"
-            world.beets_config_dir.mkdir()
-            world.library_db = Path(root) / "scratch-library.db"
+            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            world = BeetsWorld(
+                repo_root,
+                subprocess_mirror_url="http://mirror.invalid:5200",
+            )
+            self.addCleanup(world.close)
             with patch.dict(
                 os.environ,
                 {
@@ -103,12 +109,112 @@ class TestShippedBeetsWorldConfig(unittest.TestCase):
                         subprocess_env["BEETS_DB"],
                         str(world.library_db),
                     )
+                    with BeetsDB() as beets:
+                        self.assertEqual(beets.library_db_path, str(world.library_db))
+                        self.assertEqual(beets.library_root, str(world.library_root))
                 self.assertEqual(os.environ["BEETSDIR"], "/deployed/config")
                 self.assertEqual(os.environ["BEETS_DB"], "/deployed/library.db")
                 self.assertEqual(
                     os.environ["CRATEDIGGER_RUNTIME_CONFIG"],
                     str(deployed_runtime),
                 )
+
+    def test_explicit_runner_authority_survives_runtime_config_swap(self) -> None:
+        """The default runner must use the pair Core snapshotted at launch."""
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        with BeetsWorld(
+            repo_root,
+            subprocess_mirror_url="http://mirror.invalid:5200",
+        ) as world, tempfile.TemporaryDirectory() as root:
+            swapped = Path(root) / "swapped-runtime.ini"
+            swapped.write_text(
+                "[Beets]\n"
+                "config_dir = /swapped/beets\n"
+                "library = /swapped/library.db\n"
+                "directory = /swapped/library\n"
+                "python = /swapped/python\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {
+                "CRATEDIGGER_RUNTIME_CONFIG": str(swapped),
+            }), patch("lib.dispatch.subprocess_runner.sp.run") as run:
+                run.return_value.returncode = 1
+                run.return_value.stdout = ""
+                run.return_value.stderr = "expected test failure"
+                # This call models the instant after dispatch has snapshotted
+                # the original authority and before it launches import_one.
+                run_import_one(
+                    path="/scratch/source",
+                    mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    beets_harness_path="/scratch/harness/run_beets_harness.sh",
+                    beets_config_dir=str(world.beets_config_dir),
+                    beets_python="/original/pinned-python",
+                    beets_library_db_path=str(world.library_db),
+                    beets_library_root=str(world.library_root),
+                )
+
+            env = run.call_args.kwargs["env"]
+            command = run.call_args.args[0]
+            self.assertEqual(env["BEETSDIR"], str(world.beets_config_dir))
+            self.assertEqual(env["BEETS_DB"], str(world.library_db))
+            self.assertEqual(
+                env["CRATEDIGGER_BEETS_PYTHON"], "/original/pinned-python",
+            )
+            self.assertEqual(
+                command[command.index("--beets-library-db") + 1],
+                str(world.library_db),
+            )
+            self.assertEqual(
+                command[command.index("--beets-library-root") + 1],
+                str(world.library_root),
+            )
+            self.assertEqual(
+                command[command.index("--beets-config-dir") + 1],
+                str(world.beets_config_dir),
+            )
+            self.assertEqual(
+                command[command.index("--beets-python") + 1],
+                "/original/pinned-python",
+            )
+
+    def test_real_import_one_child_uses_explicit_pair_despite_poisoned_runtime(self) -> None:
+        """The child preflight reads the scratch DB, not its ambient config."""
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        release_id = "b1111111-1111-1111-1111-111111111111"
+        with BeetsWorld(
+            repo_root,
+            subprocess_mirror_url="http://mirror.invalid:5200",
+        ) as world:
+            world.import_release(BeetsWorldRelease(
+                release_id=release_id,
+                artist="Child Authority Artist",
+                album="Child Authority Pressing",
+                year=2007,
+                track_count=1,
+            ))
+            poison = world.poisoned_runtime_config()
+            with patch.dict(os.environ, {
+                "CRATEDIGGER_RUNTIME_CONFIG": str(poison),
+                "BEETSDIR": str(world.root / "poisoned-beets-config"),
+                "BEETS_DB": str(world.root / "poisoned-library.db"),
+            }, clear=False):
+                run = run_import_one(
+                    path=str(world.root / "missing-source"),
+                    mb_release_id=release_id,
+                    beets_harness_path=str(
+                        Path(repo_root) / "harness" / "run_beets_harness.sh"
+                    ),
+                    beets_config_dir=str(world.beets_config_dir),
+                    beets_python=sys.executable,
+                    beets_library_db_path=str(world.library_db),
+                    beets_library_root=str(world.library_root),
+                )
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertIsNotNone(run.import_result)
+            assert run.import_result is not None
+            self.assertEqual(run.import_result.decision, "preflight_existing")
+            self.assertFalse((world.root / "poisoned-library.db").exists())
 
 
 if __name__ == "__main__":

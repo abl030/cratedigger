@@ -23,7 +23,8 @@ if TYPE_CHECKING:
     from lib.import_evidence import CandidateEvidenceActionResult
     from lib.pipeline_db import DownloadLogOutcome, PipelineDB
     from lib.quality import (AlbumQualityEvidence, AudioQualityMeasurement,
-                             DownloadInfo, ImportResult, SpectralDetail)
+                             DownloadInfo, ImportResult, SpectralDetail,
+                             V0ProbeEvidence)
     from lib.terminal_outcomes import PendingImportTerminalOutcome
 
 
@@ -144,6 +145,36 @@ class ImportOneRun:
     stdout: str
     stderr: str
     import_result: ImportResult | None
+
+
+class ImportOneRunner(Protocol):
+    """Explicit import-one invocation seam with complete Beets authority.
+
+    Production supplies ``run_import_one``. Isolated tests and world models
+    can inject a recorder or alternate runner, but receive the exact same
+    snapshotted Beets config, Python, database, and library root as production.
+    """
+
+    def __call__(
+        self,
+        *,
+        path: str,
+        mb_release_id: str,
+        request_id: int,
+        force: bool,
+        preserve_source: bool,
+        override_min_bitrate: int | None,
+        target_format: str | None,
+        verified_lossless_target: str,
+        beets_harness_path: str,
+        quality_rank_config_json: str | None,
+        existing_v0_probe: "V0ProbeEvidence | None",
+        quality_evidence_action_file: str | None,
+        beets_config_dir: str | None,
+        beets_python: str | None,
+        beets_library_db_path: str | None,
+        beets_library_root: str | None,
+    ) -> ImportOneRun: ...
 
 
 @dataclass

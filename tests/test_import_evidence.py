@@ -728,6 +728,7 @@ class TestLoadCurrentEvidenceForAction(unittest.TestCase):
                 request_id=42,
                 mb_release_id="release-1",
                 quality_ranks=QualityRankConfig.defaults(),
+                beets_library_db_path="/tmp/beets-library.db",
                 beets_library_root="/tmp/beets",
             )
 

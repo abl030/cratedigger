@@ -36,6 +36,7 @@ from tests.helpers import (
     make_download_user,
     make_grab_list_entry,
     make_request_row,
+    make_requests_http_error,
     make_transfer_snapshot,
 )
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
@@ -732,23 +733,12 @@ class TestSlskdEnqueueWithOutcome(unittest.TestCase):
         """Build a ``requests.HTTPError`` whose ``.response.text`` mirrors
         what slskd returns when the peer is offline. The detector matches
         structurally on ``.response.text``."""
-        from types import SimpleNamespace
-        import requests
-
-        err = requests.HTTPError("500 Server Error")
-        err.response = SimpleNamespace(text=body)
-        return err
+        return make_requests_http_error(body)
 
     def _make_http_error(self, body: str, status_code: int = 500) -> Exception:
         """Build a ``requests.HTTPError`` with a full response (body +
         status code) for the enqueue-failure reason-extraction tests."""
-        from types import SimpleNamespace
-        import requests
-
-        err = requests.HTTPError(f"{status_code} Server Error")
-        err.response = SimpleNamespace(
-            text=body, status_code=status_code)
-        return err
+        return make_requests_http_error(body, status_code=status_code)
 
     def test_offline_http_error_body_returns_rejected(self):
         """The canonical slskd response body 'User pooyork appears to be
@@ -1094,10 +1084,6 @@ class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
 
     def test_definitive_rejection_never_owns_a_later_manual_transfer(self):
         """A rejected POST leaves intent evidence, not destructive authority."""
-        from types import SimpleNamespace
-
-        import requests
-
         from lib.slskd_transfers import (
             purge_completed_transfers,
             slskd_enqueue_with_outcome,
@@ -1108,9 +1094,8 @@ class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
 
         db = FakePipelineDB()
         slskd = FakeSlskdAPI()
-        error = requests.HTTPError("500 Server Error")
-        error.response = SimpleNamespace(
-            text="User peer1 appears to be offline",
+        error = make_requests_http_error(
+            "User peer1 appears to be offline"
         )
         slskd.transfers.enqueue_error = error
         ctx = self._ctx_with_ownership(db, slskd)

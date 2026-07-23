@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 import unittest
+from unittest.mock import patch
 
 from hypothesis import given, strategies as st
 
@@ -21,6 +23,7 @@ from lib.quality import DownloadInfo
 from scripts.importer import process_claimed_job
 import tests._hypothesis_profiles  # noqa: F401
 from tests.fakes import FakePipelineDB
+from tests.beets_world import BeetsWorld
 from tests.helpers import (
     make_album_quality_evidence,
     make_import_result,
@@ -56,7 +59,11 @@ def assert_operation_fence(
         raise AssertionError("Beets ran without exact current authority")
 
 
-def _exercise_world(world: OperationWorld) -> tuple[bool, str, list[int], bool]:
+def _exercise_world(
+    world: OperationWorld,
+    *,
+    beets: BeetsWorld,
+) -> tuple[bool, str, list[int], bool]:
     db = FakePipelineDB()
     request_id = 703
     release_id = "release-703"
@@ -166,6 +173,8 @@ def _exercise_world(world: OperationWorld) -> tuple[bool, str, list[int], bool]:
                 candidate=persisted,
             ),
             run_import_fn=record_beets_invocation,
+            beets_library_db_path=str(beets.library_db),
+            beets_library_root=str(beets.library_root),
         )
 
     if world.authority != "not_executed":
@@ -191,6 +200,19 @@ def _exercise_world(world: OperationWorld) -> tuple[bool, str, list[int], bool]:
 
 
 class TestGeneratedImportOperationFence(unittest.TestCase):
+    def setUp(self) -> None:
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        self.beets = BeetsWorld(repo_root)
+        self.addCleanup(self.beets.close)
+        self.runtime = patch.dict(os.environ, {
+            "CRATEDIGGER_RUNTIME_CONFIG": str(
+                self.beets.poisoned_runtime_config()
+            ),
+            "BEETS_DB": str(self.beets.root / "poisoned-library.db"),
+        })
+        self.runtime.start()
+        self.addCleanup(self.runtime.stop)
+
     @given(
         job_type=st.sampled_from([
             IMPORT_JOB_AUTOMATION,
@@ -209,7 +231,9 @@ class TestGeneratedImportOperationFence(unittest.TestCase):
         stale_dimension: str,
     ) -> None:
         world = OperationWorld(job_type, stale_dimension, False)
-        authorized, status, invocations, replay_claimed = _exercise_world(world)
+        authorized, status, invocations, replay_claimed = _exercise_world(
+            world, beets=self.beets
+        )
         self.assertFalse(authorized)
         self.assertEqual(invocations, [])
         assert_operation_fence(
@@ -227,7 +251,8 @@ class TestGeneratedImportOperationFence(unittest.TestCase):
     ]))
     def test_definitely_not_started_recovery_may_retry(self, job_type: str) -> None:
         authorized, _status, invocations, replay_claimed = _exercise_world(
-            OperationWorld(job_type, "not_executed", False)
+            OperationWorld(job_type, "not_executed", False),
+            beets=self.beets,
         )
         self.assertFalse(authorized)
         self.assertTrue(replay_claimed)
@@ -240,7 +265,8 @@ class TestGeneratedImportOperationFence(unittest.TestCase):
     ]))
     def test_may_have_started_recovery_never_replays(self, job_type: str) -> None:
         authorized, status, invocations, replay_claimed = _exercise_world(
-            OperationWorld(job_type, "current", False)
+            OperationWorld(job_type, "current", False),
+            beets=self.beets,
         )
         assert_operation_fence(
             authorized=authorized,
@@ -258,7 +284,8 @@ class TestGeneratedImportOperationFence(unittest.TestCase):
     ]))
     def test_terminal_acknowledgement_prevents_recovery(self, job_type: str) -> None:
         authorized, status, invocations, replay_claimed = _exercise_world(
-            OperationWorld(job_type, "current", True)
+            OperationWorld(job_type, "current", True),
+            beets=self.beets,
         )
         assert_operation_fence(
             authorized=authorized,
