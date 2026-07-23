@@ -8495,7 +8495,7 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
         )
         with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
             _refresh_current_evidence_after_import(
-                db,  # type: ignore[arg-type]
+                db,
                 request_id=request_id,
                 mb_release_id=mb_release_id,
                 quality_ranks=None,
@@ -8982,7 +8982,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             )
             with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 refresh = _refresh_current_evidence_after_import(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=42,
                     mb_release_id="mbid-r1",
                     quality_ranks=None,
@@ -9136,7 +9136,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             )
             with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 _refresh_current_evidence_after_import(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=43,
                     mb_release_id="mbid-t1",
                     quality_ranks=None,
@@ -9285,7 +9285,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             )
             with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 _refresh_current_evidence_after_import(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=5219,
                     mb_release_id="mbid-alac-m4a",
                     quality_ranks=None,
@@ -9414,7 +9414,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             )
             with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 _refresh_current_evidence_after_import(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=146,
                     mb_release_id="mbid-aac-m4a",
                     quality_ranks=None,
@@ -9539,7 +9539,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             )
             with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 _refresh_current_evidence_after_import(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=145,
                     mb_release_id="mbid-mp3-opus",
                     quality_ranks=None,
@@ -9675,7 +9675,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             )
             with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 _refresh_current_evidence_after_import(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=44,
                     mb_release_id="mbid-replace",
                     quality_ranks=None,
@@ -9761,7 +9761,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
 
             with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 _refresh_current_evidence_after_import(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=44,
                     mb_release_id="mbid-replace",
                     quality_ranks=None,
@@ -9833,7 +9833,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             # 1) Helper with source_candidate=None.
             with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
                 _refresh_current_evidence_after_import(
-                    db_via_helper,  # type: ignore[arg-type]
+                    db_via_helper,
                     request_id=51,
                     mb_release_id="mbid-fb",
                     quality_ranks=None,
