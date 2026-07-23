@@ -11,7 +11,6 @@ import os
 import tempfile
 import unittest
 from collections.abc import Callable
-from typing import Any, cast
 
 import tests._hypothesis_profiles  # noqa: F401
 from hypothesis import example, given
@@ -709,7 +708,7 @@ class TestGeneratedForceFrontGateAuthority(unittest.TestCase):
             # No preview_fn: this reaches execute_preview_job through the
             # public worker pathway, and exercises its configured snapshot.
             updated = import_preview_worker.run_once(
-                cast(Any, db),
+                db,
                 worker_id="generated-preview",
                 runtime_config=cfg,
             )

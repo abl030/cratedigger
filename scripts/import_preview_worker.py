@@ -9,9 +9,9 @@ import os
 import socket
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import timedelta
-from typing import Any, TYPE_CHECKING
+from typing import Any, Protocol, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from cratedigger import TrackRecord
@@ -281,7 +281,21 @@ def _front_gate_source_path(db: Any, job: ImportJob) -> str | None:
     return None
 
 
-def _force_download_log_failed_path(db: Any, job: ImportJob) -> tuple[int, str]:
+class _DownloadLogEntryReader(Protocol):
+    def get_download_log_entry(
+        self,
+        download_log_id: int,
+    ) -> Mapping[str, object] | None: ...
+
+
+class _ImportPreviewJobClaimer(Protocol):
+    def claim_next_import_preview_job(self, *, worker_id: str) -> ImportJob | None: ...
+
+
+def _force_download_log_failed_path(
+    db: _DownloadLogEntryReader,
+    job: ImportJob,
+) -> tuple[int, str]:
     """Return the sole filesystem name authoritative for a force preview."""
     download_log_id = _download_log_id_from_job(job)
     if download_log_id is None:
@@ -467,6 +481,7 @@ def execute_preview_job(
                 force=True,
                 download_log_id=download_log_id,
                 import_job_id=job.id,
+                runtime_config=cfg,
             )
         finally:
             remove_preview_snapshot(snapshot, cfg)
@@ -971,7 +986,7 @@ def process_claimed_preview_job_with_heartbeat(
 
 
 def run_once(
-    db: PipelineDB,
+    db: _ImportPreviewJobClaimer,
     *,
     worker_id: str,
     heartbeat_interval: float = PREVIEW_HEARTBEAT_INTERVAL_SECONDS,

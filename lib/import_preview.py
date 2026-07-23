@@ -12,7 +12,7 @@ import logging
 import os
 import secrets
 import stat
-from collections.abc import Mapping, Callable
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
@@ -20,6 +20,7 @@ from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
 import msgspec
 
 if TYPE_CHECKING:
+    from lib.config import CratediggerConfig
     from lib.pipeline_db.rows import DownloadLogWithEvidenceRow
 
 from lib.dispatch import run_import_one
@@ -124,7 +125,9 @@ def _preview_available_bytes(preview_fd: int) -> int:
 
 
 @contextmanager
-def _preview_copy_lock(cfg: Any) -> Any:
+def _preview_copy_lock(
+    cfg: CratediggerConfig,
+) -> Generator[int, None, None]:
     """Serialize bounded source snapshots before they consume private disk.
 
     The lock intentionally covers only the untrusted-tree copy and its
@@ -154,7 +157,7 @@ def _assert_preview_space(
 
 def _snapshot_opened_directory(
     source_root_fd: int,
-    cfg: Any,
+    cfg: CratediggerConfig,
     *,
     limits: PreviewSnapshotLimits | None = None,
     available_bytes_fn: PreviewAvailableBytesFn | None = None,
@@ -290,7 +293,7 @@ def _snapshot_opened_directory(
 
 def _snapshot_authorized_directory(
     path: str,
-    cfg: Any,
+    cfg: CratediggerConfig,
     *,
     limits: PreviewSnapshotLimits | None = None,
     available_bytes_fn: PreviewAvailableBytesFn | None = None,
@@ -309,7 +312,7 @@ def _snapshot_authorized_directory(
 
 def snapshot_configured_quarantine_directory(
     raw_path: str,
-    cfg: Any,
+    cfg: CratediggerConfig,
     *,
     limits: PreviewSnapshotLimits | None = None,
     available_bytes_fn: PreviewAvailableBytesFn | None = None,
@@ -326,7 +329,7 @@ def snapshot_configured_quarantine_directory(
         )
 
 
-def _remove_preview_tree(path: str, cfg: Any) -> None:
+def _remove_preview_tree(path: str, cfg: CratediggerConfig) -> None:
     """Remove only a direct, service-owned private snapshot directory."""
     name = os.path.basename(path)
     if name == path or not name.startswith("preview-"):
@@ -337,7 +340,7 @@ def _remove_preview_tree(path: str, cfg: Any) -> None:
         remove_relative_tree(preview_fd, name)
 
 
-def remove_preview_snapshot(path: str, cfg: Any) -> None:
+def remove_preview_snapshot(path: str, cfg: CratediggerConfig) -> None:
     """Public counterpart for callers that own a private preview snapshot."""
     _remove_preview_tree(path, cfg)
 
@@ -1685,6 +1688,7 @@ def measure_and_persist_candidate_evidence(
     spectral_detail_analyzer: SpectralDetailAnalyzer | None = None,
     existing_spectral_resolver: ExistingSpectralResolver | None = None,
     current_evidence_loader: Callable[..., EvidenceBuildResult] | None = None,
+    runtime_config: CratediggerConfig | None = None,
 ) -> ImportPreviewResult:
     """Measure a source folder and persist candidate evidence; never decide.
 
@@ -1763,7 +1767,7 @@ def measure_and_persist_candidate_evidence(
             source_path=audit_path,
         )
 
-    cfg = read_runtime_config()
+    cfg = runtime_config or read_runtime_config()
     (
         current_evidence,
         existing_spectral_evidence,

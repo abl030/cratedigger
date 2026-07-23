@@ -14,7 +14,6 @@ import unittest
 from contextlib import contextmanager
 from email.message import Message
 from io import BufferedIOBase, BytesIO, IOBase
-from typing import cast
 from unittest.mock import patch
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
@@ -665,7 +664,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
             def __init__(self) -> None:
                 self.headers = Message()
                 self.body = BytesIO()
-                self.wfile = cast(BufferedIOBase, self.body)
+                self.wfile: BufferedIOBase = self.body
                 self.close_connection = False
                 self.status: int | None = None
                 self.response_headers: dict[str, str] = {}

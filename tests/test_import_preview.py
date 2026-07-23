@@ -77,12 +77,21 @@ def _preview_config() -> CratediggerConfig:
     return CratediggerConfig.from_ini(ini)
 
 
-def _preview_runtime_config(**overrides: Any) -> CratediggerConfig:
+def _preview_runtime_config(
+    *,
+    beets_harness_path: str = "",
+    pipeline_db_enabled: bool = False,
+    beets_directory: str = "",
+    verified_lossless_target: str = "",
+) -> CratediggerConfig:
     """Direct-test config with the same private-root contract as Nix."""
     return CratediggerConfig(
         slskd_download_dir=_PREVIEW_SOURCE_ROOT,
         processing_dir=_PREVIEW_PROCESSING_ROOT,
-        **overrides,
+        beets_harness_path=beets_harness_path,
+        pipeline_db_enabled=pipeline_db_enabled,
+        beets_directory=beets_directory,
+        verified_lossless_target=verified_lossless_target,
     )
 
 

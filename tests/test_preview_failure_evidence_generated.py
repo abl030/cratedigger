@@ -566,11 +566,15 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
         force_snapshot_bytes: bytes | None = None
         if world.job_type == IMPORT_JOB_FORCE:
             def capture_snapshot(
-                *_args: Any,
-                **kwargs: Any,
+                _db: object,
+                *,
+                source_path: str,
+                download_log_id: int | None = None,
+                import_job_id: int | None = None,
             ) -> EvidenceBuildResult:
                 nonlocal force_snapshot_path, force_snapshot_bytes
-                force_snapshot_path = str(kwargs["source_path"])
+                del download_log_id, import_job_id
+                force_snapshot_path = source_path
                 with open(
                     os.path.join(force_snapshot_path, f"01.{extension}"),
                     "rb",
@@ -580,7 +584,7 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
 
             front_gate_result, front_gate_path = (
                 import_preview_worker._front_gate_check(
-                    cast(Any, db),
+                    db,
                     claimed,
                     runtime_config=cfg,
                     candidate_evidence_loader=capture_snapshot,

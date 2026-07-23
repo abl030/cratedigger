@@ -40,6 +40,7 @@ from lib.import_preview import (
     preview_import_from_download_log,
     preview_import_from_values,
 )
+from lib.fs_authority import OpenedRegularFile
 from lib.validation_envelope import (
     ValidationResultEnvelope,
     decode_validation_envelope,
@@ -514,7 +515,9 @@ def get_wrong_match_audio(
     h: _StreamingRouteHandler,
     params: dict[str, list[str]],
     *,
-    stream_file_resolver: Callable[..., tuple[Any, str]] | None = None,
+    stream_file_resolver: (
+        Callable[..., tuple[OpenedRegularFile, str]] | None
+    ) = None,
 ) -> None:
     """Stream one wrong-match audio file with byte-range support."""
     try:

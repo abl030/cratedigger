@@ -6,6 +6,7 @@ import mimetypes
 import os
 import re
 import stat
+from collections.abc import Generator
 from contextlib import contextmanager
 from urllib.parse import quote
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from lib.json_narrow import (
 from lib.config import read_runtime_config
 from lib.fs_authority import (
     FilesystemAuthorityError,
+    HeldDirectory,
     OpenedRegularFile,
     open_configured_quarantine_directory,
     open_regular_relative,
@@ -138,10 +140,14 @@ def source_dirs_from_validation_result(
 
 @contextmanager
 def _opened_wrong_match_root(
-    entry: Mapping[str, Any],
+    entry: Mapping[str, object],
     *,
     cfg: object | None = None,
-) -> Any:
+) -> Generator[
+    tuple[ValidationResultEnvelope, HeldDirectory],
+    None,
+    None,
+]:
     """Yield a validation envelope and its held authoritative directory."""
     validation_result = decode_validation_envelope(entry.get("validation_result"))
     failed_path = validation_result.failed_path or ""

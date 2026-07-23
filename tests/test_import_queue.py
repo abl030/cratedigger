@@ -22,6 +22,7 @@ from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
     IMPORT_JOB_YOUTUBE,
+    ImportJob,
     automation_import_dedupe_key,
     force_import_dedupe_key,
     force_import_payload,
@@ -1518,6 +1519,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             force=True,
             download_log_id=download_log_id,
             import_job_id=claimed.id,
+            runtime_config=cfg,
         )
         assert updated is not None
         self.assertEqual(updated.status, "queued")
@@ -1549,7 +1551,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             with open(os.path.join(payload_source, "01.mp3"), "wb") as handle:
                 handle.write(b"payload metadata")
 
-            def new_job() -> tuple[FakePipelineDB, Any]:
+            def new_job() -> tuple[FakePipelineDB, ImportJob]:
                 db = FakePipelineDB()
                 download_log_id = _force_download_log(db, 42, source)
                 db.enqueue_import_job(
@@ -1567,7 +1569,7 @@ class TestImportPreviewWorker(unittest.TestCase):
 
             def run_with(
                 runtime_config: CratediggerConfig | None,
-            ) -> tuple[Any, FakePipelineDB]:
+            ) -> tuple[ImportJob, FakePipelineDB]:
                 db, claimed = new_job()
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,
@@ -4155,8 +4157,15 @@ class TestForcePreviewPathAuthority(unittest.TestCase):
             )
             seen: list[tuple[str, bytes]] = []
 
-            def capture_lookup(*_args: Any, **kwargs: Any) -> EvidenceBuildResult:
-                lookup_path = str(kwargs["source_path"])
+            def capture_lookup(
+                _db: object,
+                *,
+                source_path: str,
+                download_log_id: int | None = None,
+                import_job_id: int | None = None,
+            ) -> EvidenceBuildResult:
+                del download_log_id, import_job_id
+                lookup_path = source_path
                 with open(os.path.join(lookup_path, "01.mp3"), "rb") as handle:
                     seen.append((lookup_path, handle.read()))
                 return EvidenceBuildResult(None, "missing")

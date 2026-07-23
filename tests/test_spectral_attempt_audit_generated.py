@@ -103,7 +103,6 @@ def _run_have_boundary_through_both_adapters(
 
     request_id = 42
     mbid = "mbid-42"
-    cfg = CratediggerConfig(audio_check_mode="off")
     carries_lossless_lineage = (
         (converted_from or "").lower() in {"flac", "alac", "wav"}
         or lossless_v0_lineage
@@ -135,8 +134,26 @@ def _run_have_boundary_through_both_adapters(
         else None
     )
 
-    with tempfile.TemporaryDirectory() as candidate, \
+    with tempfile.TemporaryDirectory(dir=os.getcwd()) as root, \
          tempfile.TemporaryDirectory() as existing:
+        staging_dir = os.path.join(root, "Incoming")
+        candidate = os.path.join(
+            staging_dir,
+            "failed_imports",
+            "candidate",
+        )
+        os.makedirs(candidate)
+        slskd_dir = os.path.join(root, "slskd")
+        os.makedirs(slskd_dir)
+        processing_dir = os.path.join(root, "processing")
+        os.makedirs(processing_dir, mode=0o700)
+        os.makedirs(os.path.join(processing_dir, "preview"), mode=0o700)
+        cfg = CratediggerConfig(
+            audio_check_mode="off",
+            beets_staging_dir=staging_dir,
+            slskd_download_dir=slskd_dir,
+            processing_dir=processing_dir,
+        )
         Path(candidate, "01.mp3").write_bytes(b"candidate")
         Path(existing, "01.mp3").write_bytes(b"existing")
         current_evidence = make_album_quality_evidence(
@@ -218,7 +235,11 @@ def _run_have_boundary_through_both_adapters(
         )
         assert stored_current is not None and stored_current.id is not None
         db.set_request_current_evidence(request_id, stored_current.id)
-        download_log_id = db.log_download(request_id, outcome="rejected")
+        download_log_id = db.log_download(
+            request_id,
+            outcome="rejected",
+            validation_result={"failed_path": candidate},
+        )
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=request_id,
@@ -255,6 +276,7 @@ def _run_have_boundary_through_both_adapters(
                 claimed,
                 spectral_detail_analyzer=analyzer_for(reused_calls),
                 existing_spectral_resolver=resolve_existing,
+                runtime_config=cfg,
             )
         assert updated is not None and updated.preview_result is not None
         reused = ImportResult.from_dict(
@@ -337,8 +359,20 @@ def _run_candidate_snapshot_reuse_world(
 
     request_id = 8883
     mbid = "generated-candidate-reuse-mbid"
-    with tempfile.TemporaryDirectory() as candidate, \
+    with tempfile.TemporaryDirectory(dir=os.getcwd()) as root, \
          tempfile.TemporaryDirectory() as existing:
+        staging_dir = os.path.join(root, "Incoming")
+        candidate = os.path.join(
+            staging_dir,
+            "failed_imports",
+            "candidate",
+        )
+        os.makedirs(candidate)
+        slskd_dir = os.path.join(root, "slskd")
+        os.makedirs(slskd_dir)
+        processing_dir = os.path.join(root, "processing")
+        os.makedirs(processing_dir, mode=0o700)
+        os.makedirs(os.path.join(processing_dir, "preview"), mode=0o700)
         for track in range(1, track_count + 1):
             Path(candidate, f"{track:02d}.mp3").write_bytes(
                 f"candidate-{track}".encode()
@@ -395,7 +429,11 @@ def _run_candidate_snapshot_reuse_world(
 
         download_log_id: int | None = None
         if job_mode == "force":
-            download_log_id = db.log_download(request_id, outcome="rejected")
+            download_log_id = db.log_download(
+                request_id,
+                outcome="rejected",
+                validation_result={"failed_path": candidate},
+            )
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=request_id,
@@ -512,25 +550,25 @@ def _run_candidate_snapshot_reuse_world(
         ini["Beets Validation"] = {
             "harness_path": "/fake/harness/run_beets_harness.sh",
             "audio_check": "off",
+            "staging_dir": staging_dir,
         }
+        ini["Slskd"] = {"download_dir": slskd_dir}
+        ini["Paths"] = {"processing_dir": processing_dir}
         ini["Pipeline DB"] = {"enabled": "true"}
         cfg = CratediggerConfig.from_ini(ini)
-        with patch(
-            "scripts.import_preview_worker.read_runtime_config",
-            return_value=cfg,
-        ):
-            updated = process_claimed_preview_job(
-                db,
-                claimed,
-                spectral_detail_analyzer=analyze,
-                existing_spectral_resolver=lambda _release_id: (
-                    ExistingSpectralAuditLookup(
-                        path=existing if has_have else None,
-                    )
-                ),
-                preview_fn=full_preview,
-                current_evidence_loader=load_current,
-            )
+        updated = process_claimed_preview_job(
+            db,
+            claimed,
+            spectral_detail_analyzer=analyze,
+            existing_spectral_resolver=lambda _release_id: (
+                ExistingSpectralAuditLookup(
+                    path=existing if has_have else None,
+                )
+            ),
+            preview_fn=full_preview,
+            current_evidence_loader=load_current,
+            runtime_config=cfg,
+        )
         assert updated is not None
         preview_result = updated.preview_result or {}
         candidate_status = preview_result.get("candidate_status")

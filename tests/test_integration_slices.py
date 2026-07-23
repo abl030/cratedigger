@@ -6084,26 +6084,25 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 assert detail is not None
                 return detail
 
+            preview_cfg = _preview_worker_config(
+                staging_dir=staging_dir,
+                processing_dir=os.path.join(root, "processing"),
+            )
             with patch(
                 "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
                 side_effect=_sentinel_preview,
             ), patch(
                 "lib.import_preview.measure_preimport_state",
                 side_effect=_sentinel_measure,
-            ), patch(
-                "lib.config.read_runtime_config",
-                return_value=_preview_worker_config(
-                    staging_dir=staging_dir,
-                    processing_dir=os.path.join(root, "processing"),
-                ),
             ):
                 updated = import_preview_worker.process_claimed_preview_job(
-                    cast(Any, db),
+                    db,
                     claimed,
                     spectral_detail_analyzer=analyze,
                     existing_spectral_resolver=lambda _mbid: (
                         ExistingSpectralAuditLookup(path="existing")
                     ),
+                    runtime_config=preview_cfg,
                 )
 
             self.assertEqual(
@@ -6114,7 +6113,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             assert updated is not None
             assert updated.preview_result is not None
             preview_ir = ImportResult.from_dict(
-                cast(dict[str, Any], updated.preview_result["import_result"])
+                updated.preview_result["import_result"]
             )
             self.assertEqual(preview_ir.spectral, audit)
             import_claimed = db.claim_next_import_job(
@@ -7786,7 +7785,12 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     import_result=result,
                 )
 
-            def preview(db_arg: Any, _job: Any):
+            preview_cfg = _preview_worker_config(
+                staging_dir=staging_dir,
+                processing_dir=os.path.join(root, "processing"),
+            )
+
+            def preview(db_arg, _job):
                 return measure_and_persist_candidate_evidence(
                     db_arg,
                     request_id=40,
@@ -7795,23 +7799,18 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     download_log_id=download_log_id,
                     import_job_id=claimed.id,
                     run_import_fn=run_import,
+                    runtime_config=preview_cfg,
                 )
 
             with (
                 patch("lib.measurement.spectral_analyze", side_effect=analyze),
                 patch("lib.beets_db.BeetsDB", _mock_beets_db(None)),
-                patch(
-                    "lib.config.read_runtime_config",
-                    return_value=_preview_worker_config(
-                        staging_dir=staging_dir,
-                        processing_dir=os.path.join(root, "processing"),
-                    ),
-                ),
             ):
                 updated = import_preview_worker.process_claimed_preview_job(
-                    cast(Any, db),
+                    db,
                     claimed,
                     preview_fn=preview,
+                    runtime_config=preview_cfg,
                 )
 
             self.assertEqual(len(analyzer_calls), 1)
@@ -7858,7 +7857,12 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 harness_called = True
                 raise AssertionError("harness must not run after spectral failure")
 
-            def preview(db_arg: Any, _job: Any):
+            preview_cfg = _preview_worker_config(
+                staging_dir=staging_dir,
+                processing_dir=os.path.join(root, "processing"),
+            )
+
+            def preview(db_arg, _job):
                 return measure_and_persist_candidate_evidence(
                     db_arg,
                     request_id=41,
@@ -7867,23 +7871,18 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     download_log_id=download_log_id,
                     import_job_id=claimed.id,
                     run_import_fn=run_import,
+                    runtime_config=preview_cfg,
                 )
 
             with (
                 patch("lib.measurement.spectral_analyze", side_effect=analyze),
                 patch("lib.beets_db.BeetsDB", _mock_beets_db(None)),
-                patch(
-                    "lib.config.read_runtime_config",
-                    return_value=_preview_worker_config(
-                        staging_dir=staging_dir,
-                        processing_dir=os.path.join(root, "processing"),
-                    ),
-                ),
             ):
                 updated = import_preview_worker.process_claimed_preview_job(
-                    cast(Any, db),
+                    db,
                     claimed,
                     preview_fn=preview,
+                    runtime_config=preview_cfg,
                 )
 
             self.assertEqual(len(analyzer_calls), 1)
@@ -7982,24 +7981,22 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 ),
             )
 
+            preview_cfg = CratediggerConfig(
+                beets_harness_path=_HARNESS,
+                pipeline_db_enabled=True,
+                beets_staging_dir=staging_dir,
+                slskd_download_dir=os.path.join(root, "slskd"),
+                processing_dir=os.path.join(root, "processing"),
+            )
             with patch(
                 "lib.import_preview.measure_preimport_state",
                 return_value=measured_facts,
             ), patch(
                 "lib.import_preview.run_import_one",
                 return_value=SimpleNamespace(import_result=harness_ir),
-            ), patch(
-                "lib.config.read_runtime_config",
-                return_value=CratediggerConfig(
-                    beets_harness_path=_HARNESS,
-                    pipeline_db_enabled=True,
-                    beets_staging_dir=staging_dir,
-                    slskd_download_dir=os.path.join(root, "slskd"),
-                    processing_dir=os.path.join(root, "processing"),
-                ),
             ):
                 updated_job = import_preview_worker.process_claimed_preview_job(
-                    cast(Any, db), claimed,
+                    db, claimed, runtime_config=preview_cfg,
                 )
 
             # Preview marked the job evidence_ready.
@@ -8114,24 +8111,22 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 ),
             )
 
+            preview_cfg = CratediggerConfig(
+                beets_harness_path=_HARNESS,
+                pipeline_db_enabled=True,
+                beets_staging_dir=staging_dir,
+                slskd_download_dir=os.path.join(root, "slskd"),
+                processing_dir=os.path.join(root, "processing"),
+            )
             with patch(
                 "lib.import_preview.measure_preimport_state",
                 return_value=measured_facts,
             ), patch(
                 "lib.import_preview.run_import_one",
                 return_value=SimpleNamespace(import_result=harness_ir),
-            ), patch(
-                "lib.config.read_runtime_config",
-                return_value=CratediggerConfig(
-                    beets_harness_path=_HARNESS,
-                    pipeline_db_enabled=True,
-                    beets_staging_dir=staging_dir,
-                    slskd_download_dir=os.path.join(root, "slskd"),
-                    processing_dir=os.path.join(root, "processing"),
-                ),
             ):
                 updated_job = import_preview_worker.process_claimed_preview_job(
-                    cast(Any, db), claimed,
+                    db, claimed, runtime_config=preview_cfg,
                 )
 
             assert updated_job is not None
@@ -8195,24 +8190,22 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     "harness must not run on corrupt audio in the measure-and-persist path"
                 )
 
+            preview_cfg = CratediggerConfig(
+                beets_harness_path=_HARNESS,
+                pipeline_db_enabled=True,
+                beets_staging_dir=staging_dir,
+                slskd_download_dir=os.path.join(root, "slskd"),
+                processing_dir=os.path.join(root, "processing"),
+            )
             with patch(
                 "lib.import_preview.measure_preimport_state",
                 return_value=measured_facts,
             ), patch(
                 "lib.import_preview.run_import_one",
                 side_effect=_harness_sentinel,
-            ), patch(
-                "lib.config.read_runtime_config",
-                return_value=CratediggerConfig(
-                    beets_harness_path=_HARNESS,
-                    pipeline_db_enabled=True,
-                    beets_staging_dir=staging_dir,
-                    slskd_download_dir=os.path.join(root, "slskd"),
-                    processing_dir=os.path.join(root, "processing"),
-                ),
             ):
                 updated_job = import_preview_worker.process_claimed_preview_job(
-                    cast(Any, db), claimed,
+                    db, claimed, runtime_config=preview_cfg,
                 )
 
             self.assertFalse(sentinels["harness_called"])

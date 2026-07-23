@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -175,6 +176,10 @@ class LifecycleWorld:
         except BaseException:
             self.db.close()
             raise
+        self._processing_tmp = tempfile.TemporaryDirectory(
+            prefix="cratedigger-world-processing-",
+            dir=self._repo_root,
+        )
         self._release_by_request: dict[int, BeetsWorldRelease] = {}
         self._dispatch_counter = 0
         self._operator_counter = 0
@@ -187,7 +192,10 @@ class LifecycleWorld:
         try:
             self.beets.close()
         finally:
-            self.db.close()
+            try:
+                self._processing_tmp.cleanup()
+            finally:
+                self.db.close()
 
     def __enter__(self) -> LifecycleWorld:
         return self
@@ -694,19 +702,27 @@ class LifecycleWorld:
                 return ExistingSpectralAuditLookup()
             return ExistingSpectralAuditLookup(path=installed.album_path)
 
+        processing_dir = Path(self._processing_tmp.name)
+        processing_dir.mkdir(mode=0o700, exist_ok=True)
+        processing_dir.chmod(0o700)
+        preview_dir = processing_dir / "preview"
+        preview_dir.mkdir(mode=0o700, exist_ok=True)
+        preview_dir.chmod(0o700)
+        slskd_dir = self.beets.root / "slskd"
+        slskd_dir.mkdir(exist_ok=True)
         cfg = CratediggerConfig(
             pipeline_db_enabled=True,
             beets_directory=str(self.beets.library_root),
             beets_library_db=str(self.beets.library_db),
+            beets_staging_dir=str(self.beets.incoming_root),
+            slskd_download_dir=str(slskd_dir),
+            processing_dir=str(processing_dir),
         )
         # ``derive_canonical_import_folder`` does a call-time
         # ``from lib.config import read_runtime_config`` for the automation
         # front gate, so patch that binding too — the world never touches the
         # deployed runtime config.
         with patch(
-            "scripts.import_preview_worker.read_runtime_config",
-            return_value=cfg,
-        ), patch(
             "lib.config.read_runtime_config",
             return_value=cfg,
         ):
@@ -726,6 +742,7 @@ class LifecycleWorld:
                         "exact album not in beets",
                     )
                 ),
+                runtime_config=cfg,
             )
         if updated is None:
             raise AssertionError("preview boundary lost its claimed job")
@@ -768,8 +785,13 @@ class LifecycleWorld:
             raise AssertionError("preview boundary world requires a wanted row")
         release = replace(self._release_by_request[request_id], codec=codec)
         self._dispatch_counter += 1
+        source_parent = (
+            self.beets.incoming_root / "failed_imports"
+            if job_mode == "force"
+            else self.beets.incoming_root
+        )
         source = (
-            self.beets.incoming_root
+            source_parent
             / f"preview-{job_mode}-{request_id}-{self._dispatch_counter:04d}"
         )
         self.beets.stage_release(release, source_dir=source)
@@ -1081,7 +1103,7 @@ class LifecycleWorld:
             / f"force-{request_id}-{self._dispatch_counter:04d}"
         )
         source = (
-            self.beets.root
+            self.beets.incoming_root
             / "failed_imports"
             / f"force-{request_id}-{self._dispatch_counter:04d}"
         )
