@@ -693,10 +693,23 @@ def _run_lossless_spectral_failure_world(
     )
     from scripts import import_preview_worker
 
-    root = tempfile.mkdtemp(prefix="cratedigger-lossless-spectral-gen-")
+    root = tempfile.mkdtemp(
+        prefix="cratedigger-lossless-spectral-gen-",
+        dir=os.getcwd(),
+    )
     try:
-        source = os.path.join(root, "album")
+        staging_dir = os.path.join(root, "Incoming")
+        source = os.path.join(
+            staging_dir,
+            "failed_imports",
+            "album",
+        )
         os.makedirs(source)
+        slskd_dir = os.path.join(root, "slskd")
+        os.makedirs(slskd_dir)
+        processing_dir = os.path.join(root, "processing")
+        os.makedirs(processing_dir, mode=0o700)
+        os.makedirs(os.path.join(processing_dir, "preview"), mode=0o700)
         with open(os.path.join(source, "01.flac"), "wb") as handle:
             handle.write(b"generated-lossless-audio")
 
@@ -706,7 +719,11 @@ def _run_lossless_spectral_failure_world(
             status="downloading",
             mb_release_id="generated-lossless-mbid",
         ))
-        log_id = db.log_download(71, outcome="rejected")
+        log_id = db.log_download(
+            71,
+            outcome="rejected",
+            validation_result={"failed_path": source},
+        )
         db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=71,
@@ -732,7 +749,7 @@ def _run_lossless_spectral_failure_world(
         def analyzer(_path: str) -> SpectralAnalysisDetail:
             return cast(SpectralAnalysisDetail, detail)
 
-        def preview(db_arg: Any, _job: Any):
+        def preview(db_arg, _job):
             return measure_and_persist_candidate_evidence(
                 db_arg,
                 request_id=71,
@@ -745,13 +762,17 @@ def _run_lossless_spectral_failure_world(
                 existing_spectral_resolver=(
                     lambda _release_id: ExistingSpectralAuditLookup()
                 ),
+                runtime_config=cfg,
             )
 
         ini = configparser.ConfigParser()
         ini["Beets Validation"] = {
             "harness_path": "/fake/harness/run_beets_harness.sh",
             "audio_check": "normal" if audio_corrupt else "off",
+            "staging_dir": staging_dir,
         }
+        ini["Slskd"] = {"download_dir": slskd_dir}
+        ini["Paths"] = {"processing_dir": processing_dir}
         ini["Pipeline DB"] = {"enabled": "true"}
         cfg = CratediggerConfig.from_ini(ini)
         fake_beets = FakeBeetsDB()
@@ -785,9 +806,6 @@ def _run_lossless_spectral_failure_world(
             failed_paths=("01.flac",) if audio_corrupt else (),
         )
         with patch(
-            "lib.config.read_runtime_config",
-            return_value=cfg,
-        ), patch(
             "lib.beets_db.BeetsDB",
             lambda **_kwargs: fake_beets,
         ), patch(
@@ -795,9 +813,10 @@ def _run_lossless_spectral_failure_world(
             return_value=audio_result,
         ):
             updated = import_preview_worker.process_claimed_preview_job(
-                cast(Any, db),
+                db,
                 claimed,
                 preview_fn=preview,
+                runtime_config=cfg,
             )
         assert updated is not None
         preview_result = updated.preview_result or {}

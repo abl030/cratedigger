@@ -53,7 +53,7 @@ against that reality, not against a hypothetical public exposure.
 |----|----------|-------|------------------|
 | CD-SEC-01 | High | Historical credentials committed to a public repo | deleted notifier docs, git history |
 | CD-SEC-02 | High | No auth + wildcard CORS on file-destructive endpoints | `web/server.py` |
-| CD-SEC-03 | Medium | Import-preview accepts an arbitrary absolute path (+ in-place `mp3val -f`) | `web/routes/imports.py`, `lib/util.py` |
+| CD-SEC-03 | Medium | Remediated: HTTP import-preview is path-free and snapshots authorized DB paths | `web/routes/imports.py`, `lib/import_preview.py` |
 | CD-SEC-04 | Medium | No systemd sandboxing on services that process attacker-controlled bytes | `nix/module.nix` |
 | CD-SEC-05 | Low | Internal exception strings reflected in HTTP 500 bodies | `web/server.py` |
 | CD-SEC-06 | Medium | Removed: notifier TLS fallback now fails closed | `lib/util.py` |
@@ -61,7 +61,7 @@ against that reality, not against a hypothetical public exposure.
 | CD-SEC-08 | Low | Unvalidated MB `id` interpolated into the mirror URL (request-shaping) | `web/routes/browse.py`, `web/mb.py` |
 | CD-SEC-09 | Low | Latent identifier-interpolation SQLi footguns (hardcoded today) | `lib/pipeline_db/requests.py`, `lib/pipeline_db/dashboard.py` |
 | CD-SEC-10 | Low | Unescaped controlled-vocabulary metadata in a few JS rows | `web/js/pipeline.js`, `web/js/library.js`, `web/js/wrong-matches.js` |
-| CD-SEC-11 | Medium | Symlink escape in wrong-match streaming + containment asymmetries | `lib/processing_paths.py`, `web/wrong_match_file_service.py` |
+| CD-SEC-11 | Medium | Remediated: no-follow descriptor authority for materialize, explorer, and stream | `lib/fs_authority.py`, `web/wrong_match_file_service.py` |
 | CD-SEC-12 | Low | Vulnerable-version matches in the locked closure + narrow CI scope | `flake.lock`, `nix/package.nix` |
 | CD-SEC-13 | Info | Plex XML parsed with stdlib ElementTree | `lib/util.py` |
 | CD-SEC-14 | Critical | Remediated: destructive identifiers bind to one server-owned release | `lib/destructive_release_service.py` |
@@ -276,6 +276,14 @@ before writing the mandatory download audit.
 
 ### CD-SEC-03 — Arbitrary absolute path in import-preview (Medium)
 
+**Remediated in the #663 path-authority workstream.** HTTP accepts exactly one
+strict Pydantic mode: nested typed values or a positive `download_log_id`.
+It has no caller-provided path mode. DB `failed_path` remains audit data but is
+opened only below configured `failed_imports`/`wrong_matches` authority roots,
+then copied with no-follow descriptors into private preview scratch before
+mp3val, Mutagen, ffmpeg, or measurement see bytes. The local CLI intentionally
+retains its explicit operator-authority path mode.
+
 `web/routes/imports.py` (`post_import_preview`) forwards an operator-supplied
 `path` to the resolver in `lib/util.py`, which returns
 `os.path.abspath` of **any** existing directory with no staging-root
@@ -433,6 +441,14 @@ the codebase's own escaping discipline.
 ## Containment, dependency and defense-in-depth
 
 ### CD-SEC-11 — Symlink escape in wrong-match streaming + containment asymmetries (Medium)
+
+**Remediated in the #663 path-authority workstream.** Candidate roots and
+children are walked relative to no-follow directory descriptors; only regular
+files are accepted. Ranges and stream bytes come from the same opened descriptor
+that was `fstat`ed. Materialization preflights each event-stamped source under
+the slskd authority, copies it to a private processing-root temporary album,
+atomically publishes the complete directory, and only then unlinks an unchanged
+source inode.
 
 The containment guard in `lib/processing_paths.py` normalizes `..` textually but
 does not resolve symlinks (`abspath`/`normpath`, not `realpath`). The wrong-match
@@ -592,13 +608,13 @@ Priority data-loss / audit-integrity work:
 
 Priority containment / integrity work:
 
-- [ ] CD-SEC-03 — within-root confinement + `parse_body` on import endpoints.
+- [x] CD-SEC-03 — path-free HTTP contract plus no-follow authorized snapshots.
 - [ ] CD-SEC-04 — systemd hardening block (gated by the module VM check).
 - [x] CD-SEC-06 — remove the unreachable `CERT_NONE` fallback; notifier leaves
       use default CA-verified TLS and fail closed (tracking issue remains open
       pending deploy/live proof).
-- [ ] CD-SEC-11 — symlink-safe stream open + `realpath` containment +
-      move-source within-root check.
+- [x] CD-SEC-11 — no-follow descriptor authority, private atomic materialize,
+      and same-descriptor stream reads.
 - [ ] CD-SEC-18 — transactional track replacement + real-PG failure pin/property.
 - [ ] CD-SEC-19 — strict job-specific JSONB payload Structs at the DB boundary.
 

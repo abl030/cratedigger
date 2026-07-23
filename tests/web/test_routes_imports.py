@@ -11,6 +11,9 @@ import os
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
+from email.message import Message
+from io import BufferedIOBase, BytesIO, IOBase
 from unittest.mock import patch
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
@@ -144,6 +147,32 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         row = self.db.get_request(request_id)
         assert row is not None
         self.db.seed_request({**row, **overrides})
+
+    @contextmanager
+    def _wrong_match_runtime_config(self, slskd_root: str):
+        """Point the real runtime-config loader at temp quarantine roots."""
+        config_path = os.path.join(slskd_root, "cratedigger-test.ini")
+        previous = os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
+        with open(config_path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "[Slskd]\n"
+                f"download_dir = {slskd_root}\n"
+                "\n[Search Settings]\n"
+                "number_of_albums_to_grab = 2\n"
+                "\n[Beets Validation]\n"
+                f"staging_dir = {os.path.join(slskd_root, 'Incoming')}\n"
+                "\n[Paths]\n"
+                f"processing_dir = {os.path.join(slskd_root, 'processing')}\n",
+            )
+        os.environ["CRATEDIGGER_RUNTIME_CONFIG"] = config_path
+        try:
+            yield
+        finally:
+            if previous is None:
+                os.environ.pop("CRATEDIGGER_RUNTIME_CONFIG", None)
+            else:
+                os.environ["CRATEDIGGER_RUNTIME_CONFIG"] = previous
+            os.unlink(config_path)
 
     def _seed_wrong_match(
         self, *,
@@ -433,20 +462,23 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
 
     def test_wrong_match_explorer_lists_audio_files_and_source_dirs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            track_path = os.path.join(tmpdir, "01 - Track.mp3")
+            failed_dir = os.path.join(tmpdir, "failed_imports", "Test")
+            os.makedirs(failed_dir)
+            track_path = os.path.join(failed_dir, "01 - Track.mp3")
             with open(track_path, "wb") as handle:
                 handle.write(b"fake mp3 bytes")
 
             log_id = self.db.log_download(
                 100, outcome="rejected",
                 validation_result={
-                    "failed_path": tmpdir,
+                    "failed_path": failed_dir,
                     "source_dirs": ["baduser\\Artist\\Album"],
                 },
             )
 
-            status, data = self._get(
-                f"/api/wrong-matches/explorer?download_log_id={log_id}")
+            with self._wrong_match_runtime_config(tmpdir):
+                status, data = self._get(
+                    f"/api/wrong-matches/explorer?download_log_id={log_id}")
 
         self.assertEqual(status, 200)
         self.assertEqual(data["status"], "ok")
@@ -458,15 +490,55 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
             f"/api/wrong-matches/audio?download_log_id={log_id}",
             data["files"][0]["stream_url"])
 
+    def test_wrong_match_explorer_caps_total_entries_across_tree(self):
+        """A broad nested quarantine tree stops at one global entry budget."""
+        from lib.config import CratediggerConfig
+        from web.wrong_match_file_service import (
+            WrongMatchExplorerLimits,
+            build_wrong_match_explorer,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            failed_dir = os.path.join(tmpdir, "failed_imports", "Test")
+            os.makedirs(failed_dir)
+            for index in range(4):
+                nested = os.path.join(failed_dir, f"disc-{index}")
+                os.mkdir(nested)
+                with open(os.path.join(nested, "01.mp3"), "wb") as handle:
+                    handle.write(b"audio")
+            log_id = self.db.log_download(
+                100, outcome="rejected",
+                validation_result={"failed_path": failed_dir},
+            )
+
+            entry = self.db.get_download_log_entry(log_id)
+            assert entry is not None
+            data = build_wrong_match_explorer(
+                download_log_id=log_id,
+                entry=entry,
+                cfg=CratediggerConfig(
+                    slskd_download_dir=tmpdir,
+                    beets_staging_dir=os.path.join(tmpdir, "Incoming"),
+                    processing_dir=os.path.join(tmpdir, "processing"),
+                ),
+                limits=WrongMatchExplorerLimits(max_entries=3),
+            )
+
+        self.assertTrue(data["partial"])
+        self.assertEqual(data["truncated_reason"], "entry_limit")
+        self.assertEqual(data["files"], [])
+
     def test_wrong_match_explorer_normalizes_raw_id3_tags_and_skips_artwork_frames(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            track_path = os.path.join(tmpdir, "01 - Track.mp3")
+            failed_dir = os.path.join(tmpdir, "failed_imports", "Test")
+            os.makedirs(failed_dir)
+            track_path = os.path.join(failed_dir, "01 - Track.mp3")
             with open(track_path, "wb") as handle:
                 handle.write(b"fake mp3 bytes")
 
             log_id = self.db.log_download(
                 100, outcome="rejected",
-                validation_result={"failed_path": tmpdir},
+                validation_result={"failed_path": failed_dir},
             )
 
             class _FakeInfo:
@@ -486,7 +558,8 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                 }
                 info = _FakeInfo()
 
-            with patch("mutagen.File", return_value=_FakeAudio()):
+            with patch("mutagen.File", return_value=_FakeAudio()), \
+                    self._wrong_match_runtime_config(tmpdir):
                 status, data = self._get(
                     f"/api/wrong-matches/explorer?download_log_id={log_id}")
 
@@ -506,14 +579,16 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
 
     def test_wrong_match_explorer_returns_files_in_beets_matched_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
+            failed_dir = os.path.join(tmpdir, "failed_imports", "Test")
+            os.makedirs(failed_dir)
             for filename in ("a.mp3", "b.mp3", "c.mp3"):
-                with open(os.path.join(tmpdir, filename), "wb") as handle:
+                with open(os.path.join(failed_dir, filename), "wb") as handle:
                     handle.write(b"fake mp3 bytes")
 
             log_id = self.db.log_download(
                 100, outcome="rejected",
                 validation_result={
-                    "failed_path": tmpdir,
+                    "failed_path": failed_dir,
                     "candidates": [{
                         "is_target": True,
                         "mapping": [
@@ -538,8 +613,12 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                 length = 181.0
                 bitrate = 320000
 
-            def _fake_audio(path: str):
-                basename = os.path.basename(path)
+            def _fake_audio(source: object, **_kwargs: object):
+                # Explorer deliberately hands Mutagen the already-open fd;
+                # recover the test fixture basename from that descriptor.
+                assert isinstance(source, IOBase)
+                basename = os.path.basename(os.readlink(
+                    f"/proc/self/fd/{source.fileno()}"))
 
                 class _FakeAudio:
                     info = _FakeInfo()
@@ -552,7 +631,8 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
 
                 return _FakeAudio()
 
-            with patch("mutagen.File", side_effect=_fake_audio):
+            with patch("mutagen.File", side_effect=_fake_audio), \
+                    self._wrong_match_runtime_config(tmpdir):
                 status, data = self._get(
                     f"/api/wrong-matches/explorer?download_log_id={log_id}")
 
@@ -571,54 +651,90 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         """A file truncated mid-stream writes fewer bytes than the
         declared Content-Length; the server must close the keep-alive
         socket instead of letting the next response desync (#427)."""
-        import http.client
         import tempfile
         import os as _os
+        from lib.fs_authority import (
+            OpenedRegularFile,
+            open_directory_path,
+            open_regular_relative,
+        )
+        from web.routes.imports import get_wrong_match_audio
+
+        class RecordingHandler:
+            def __init__(self) -> None:
+                self.headers = Message()
+                self.body = BytesIO()
+                self.wfile: BufferedIOBase = self.body
+                self.close_connection = False
+                self.status: int | None = None
+                self.response_headers: dict[str, str] = {}
+
+            def send_response(self, code: int, message: str | None = None) -> None:
+                del message
+                self.status = code
+
+            def send_header(self, keyword: str, value: str) -> None:
+                self.response_headers[keyword] = value
+
+            def end_headers(self) -> None:
+                pass
+
+            def _json(self, data: object, status: int = 200) -> None:
+                raise AssertionError(f"unexpected JSON response {status}: {data!r}")
+
+            def _error(self, msg: str, status: int = 400) -> None:
+                raise AssertionError(f"unexpected route error {status}: {msg}")
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            track_path = _os.path.join(tmpdir, "01 - Track.mp3")
+            failed_dir = _os.path.join(tmpdir, "failed_imports", "Test")
+            _os.makedirs(failed_dir)
+            track_path = _os.path.join(failed_dir, "01 - Track.mp3")
             with open(track_path, "wb") as handle:
                 handle.write(b"abcdef")
 
             log_id = self.db.log_download(
                 100, outcome="rejected",
-                validation_result={"failed_path": tmpdir},
+                validation_result={"failed_path": failed_dir},
             )
 
-            conn = http.client.HTTPConnection(
-                "127.0.0.1", self.port, timeout=10)
-            try:
-                # Pretend the file is 4 bytes longer than it is — the
-                # stream loop hits EOF early, leaving remaining > 0.
-                with patch("web.routes.imports.os.path.getsize",
-                           return_value=10):
-                    conn.request(
-                        "GET",
-                        "/api/wrong-matches/audio"
-                        f"?download_log_id={log_id}"
-                        "&path=01%20-%20Track.mp3",
-                    )
-                    resp = conn.getresponse()
-                    self.assertEqual(resp.status, 200)
-                    self.assertEqual(
-                        resp.getheader("Content-Length"), "10")
-                    # Server closed after the short body: the client
-                    # sees an incomplete read promptly rather than
-                    # blocking for 4 bytes that will never come.
-                    with self.assertRaises(http.client.IncompleteRead):
-                        resp.read()
-            finally:
-                conn.close()
+            # Present a real opened descriptor with a larger already-held
+            # stat snapshot.  The route's explicit resolver seam drives the
+            # actual short-read branch without replacing a production helper.
+            with open_directory_path(failed_dir) as root_fd:
+                actual = open_regular_relative(root_fd, "01 - Track.mp3")
+                opened = OpenedRegularFile(
+                    fd=actual.fd,
+                    parent_fd=actual.parent_fd,
+                    name=actual.name,
+                    stat_result=os.stat_result(
+                        (0, 0, 0, 0, 0, 0, 10, 0, 0, 0)),
+                )
+                handler = RecordingHandler()
+                get_wrong_match_audio(
+                    handler,
+                    {
+                        "download_log_id": [str(log_id)],
+                        "path": ["01 - Track.mp3"],
+                    },
+                    stream_file_resolver=lambda **_kwargs: (opened, "audio/mpeg"),
+                )
+
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(handler.response_headers["Content-Length"], "10")
+        self.assertEqual(handler.body.getvalue(), b"abcdef")
+        self.assertTrue(handler.close_connection)
 
     def test_wrong_match_audio_supports_byte_ranges(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            track_path = os.path.join(tmpdir, "01 - Track.mp3")
+            failed_dir = os.path.join(tmpdir, "failed_imports", "Test")
+            os.makedirs(failed_dir)
+            track_path = os.path.join(failed_dir, "01 - Track.mp3")
             with open(track_path, "wb") as handle:
                 handle.write(b"abcdef")
 
             log_id = self.db.log_download(
                 100, outcome="rejected",
-                validation_result={"failed_path": tmpdir},
+                validation_result={"failed_path": failed_dir},
             )
 
             req = Request(
@@ -626,11 +742,12 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                 f"?download_log_id={log_id}&path=01%20-%20Track.mp3",
                 headers={"Range": "bytes=1-3"},
             )
-            with urlopen(req) as resp:
-                body = resp.read()
-                status = resp.status
-                content_range = resp.headers["Content-Range"]
-                accept_ranges = resp.headers["Accept-Ranges"]
+            with self._wrong_match_runtime_config(tmpdir):
+                with urlopen(req) as resp:
+                    body = resp.read()
+                    status = resp.status
+                    content_range = resp.headers["Content-Range"]
+                    accept_ranges = resp.headers["Accept-Ranges"]
 
         self.assertEqual(status, 206)
         self.assertEqual(body, b"bcd")

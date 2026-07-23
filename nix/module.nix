@@ -344,6 +344,9 @@
     stalled_timeout = ${toString cfg.slskd.stalledTimeout}
     remote_queue_timeout = ${toString cfg.slskd.remoteQueueTimeout}
 
+    [Paths]
+    processing_dir = ${cfg.processingDir}
+
     [Release Settings]
     use_most_common_tracknum = ${if cfg.releaseSettings.useMostCommonTracknum then "True" else "False"}
     allow_multi_disc = ${if cfg.releaseSettings.allowMultiDisc then "True" else "False"}
@@ -604,6 +607,17 @@ in {
       type = types.str;
       default = "/var/lib/cratedigger";
       description = "Runtime state directory (config.ini, lock file).";
+    };
+
+    processingDir = mkOption {
+      type = types.str;
+      default = "${cfg.stateDir}/processing";
+      defaultText = lib.literalExpression ''"''${cfg.stateDir}/processing"'';
+      description = ''
+        Private Cratedigger-owned root for materialized albums and preview
+        snapshots.  It must be absolute, disjoint from slskd.downloadDir,
+        and beneath a parent that is not writable by slskd or another group.
+      '';
     };
 
     timer = {
@@ -1320,6 +1334,19 @@ in {
         message = "services.cratedigger.slskd.downloadDir is not set: point it at the directory slskd downloads land in (slskd's directories.downloads).";
       }
       {
+        assertion = lib.hasPrefix "/" cfg.processingDir;
+        message = "services.cratedigger.processingDir must be an absolute path";
+      }
+      {
+        assertion = cfg.slskd.downloadDir == null || (
+          let
+            processing = lib.removeSuffix "/" cfg.processingDir;
+            downloads = lib.removeSuffix "/" cfg.slskd.downloadDir;
+          in !(lib.hasPrefix "${processing}/" downloads || lib.hasPrefix "${downloads}/" processing || processing == downloads)
+        );
+        message = "services.cratedigger.processingDir must be lexically disjoint from services.cratedigger.slskd.downloadDir";
+      }
+      {
         assertion = cfg.pipelineDb.createLocally || cfg.pipelineDb.dsn != null;
         message = "services.cratedigger.pipelineDb: set either pipelineDb.dsn (external PostgreSQL) or pipelineDb.createLocally = true (provision a local database with peer auth).";
       }
@@ -1391,6 +1418,12 @@ in {
     systemd.tmpfiles.rules =
       [
         "d ${cfg.stateDir} 0755 ${cfg.user} ${cfg.group} -"
+        "d ${cfg.processingDir} 0700 ${cfg.user} ${cfg.group} -"
+        "d ${cfg.processingDir}/albums 0700 ${cfg.user} ${cfg.group} -"
+        "d ${cfg.processingDir}/preview 0700 ${cfg.user} ${cfg.group} -"
+        # Only ephemeral preview children are age-cleaned.  Canonical albums
+        # are durable in-flight state and are never a tmpfiles cleanup target.
+        "e ${cfg.processingDir}/preview 0700 ${cfg.user} ${cfg.group} 7d"
         # BEETSDIR for every beets consumer (cratedigger-beet, harness).
         # U4 renders config.yaml into it; the dir must exist regardless so
         # the wrapper works on a fresh boot.

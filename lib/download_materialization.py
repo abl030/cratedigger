@@ -9,22 +9,41 @@ in :mod:`lib.download_processing`, and poll state in :mod:`lib.download`.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
 import shutil
+import secrets
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 from lib.download_recovery import ProcessingPathLocation, classify_processing_path
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.dispatch import _build_download_info
+from lib.fs_authority import (
+    FilesystemAuthorityError,
+    OpenedRegularFile,
+    copy_opened_file,
+    exclusive_relative_lock,
+    open_private_child_directory,
+    open_private_processing_root,
+    open_relative_directory,
+    open_regular_relative,
+    open_regular_under_root,
+    rename_relative_noreplace,
+    remove_relative_tree,
+    same_open_directory,
+    unlink_if_same,
+)
 from lib.import_manifest import audio_relative_paths, manifest_trace_summary
 from lib.processing_paths import (
     attempt_fingerprint,
     canonical_folder_for_row,
     normalize_processing_path,
     path_is_within_root,
+    processing_albums_dir,
     stage_to_ai_root,
 )
 from lib.quality import ActiveDownloadState, ValidationResult
@@ -92,6 +111,29 @@ class MaterializeGuarded:
 
 
 MaterializeResult = Materialized | MaterializeFailed | MaterializeGuarded
+
+
+def _materialize_token(canonical_name: str) -> str:
+    """Bounded stable token for locks and unpublished transaction names."""
+    return hashlib.sha256(canonical_name.encode("utf-8", "surrogateescape")).hexdigest()
+
+
+def _canonical_manifest_complete(
+    albums_fd: int,
+    canonical_name: str,
+    destination_names: list[str],
+) -> bool:
+    """Does the no-follow canonical directory contain exactly this manifest?"""
+    try:
+        with open_relative_directory(albums_fd, canonical_name) as existing_fd:
+            if set(os.listdir(existing_fd)) != set(destination_names):
+                return False
+            for name in destination_names:
+                checked = open_regular_relative(existing_fd, name)
+                checked.close()
+        return True
+    except (FileNotFoundError, FilesystemAuthorityError, OSError):
+        return False
 """Return type of ``_materialize_processing_dir`` and
 ``_evaluate_staged_path_readiness`` (issue #509 — the shared staged-path
 resume decision the former's non-canonical branch delegates to, and
@@ -149,7 +191,7 @@ def classify_staged_album_location(
         year=album_data.year,
         request_id=album_data.db_request_id or 0,
         staging_dir=ctx.cfg.beets_staging_dir,
-        slskd_download_dir=ctx.cfg.slskd_download_dir,
+        canonical_root=processing_albums_dir(ctx.cfg.processing_dir),
         attempt_fingerprint=_attempt_fingerprint_for(album_data.files),
     )
 
@@ -586,10 +628,19 @@ def _materialize_processing_dir(
     ctx: CratediggerContext,
     *,
     persist_current_path: bool = True,
+    before_file_copy: Callable[[], None] | None = None,
+    before_publish: Callable[[int, str], None] | None = None,
 ) -> MaterializeResult:
-    """Ensure ``staged_album.current_path`` holds the album's local files."""
+    """Ensure ``staged_album.current_path`` holds the album's local files.
+
+    ``before_file_copy`` and ``before_publish`` are optional transaction
+    boundary hooks.  They are deliberately called while the private
+    descriptor authority and shard lock are held, so observability or a caller
+    that coordinates a competing writer cannot redirect the real copy or
+    ``renameat2(RENAME_NOREPLACE)`` operations.
+    """
     canonical_path = canonical_folder_for_row(
-        album_data, ctx.cfg.slskd_download_dir)
+        album_data, processing_albums_dir(ctx.cfg.processing_dir))
     logger.info(
         "MANIFEST-TRACE materialize request=%s %s canonical_exists=%s "
         "canonical_existing_audio=%s current_path=%s canonical=%r",
@@ -626,98 +677,160 @@ def _materialize_processing_dir(
             album_data, staged_album, current_path_location, db,
         )
 
-    # Pre-flight: every file must carry a stamped, on-disk local_path from
-    # slskd's DownloadFileComplete event — or already-moved evidence at the
-    # destination. Checked for the whole album BEFORE any move so a
-    # missing stamp never causes move-then-rollback churn. A stamp can be
-    # legitimately absent for one cycle (completion-vs-event-write race);
-    # the poller retries within ``PROCESSING_MATERIALIZE_GRACE_S`` and
-    # self-heals to re-download past it.
-    missing_stamps: list[str] = []
-    for file in album_data.files:
-        dst_file = staged_album.import_path_for(file)
-        file.import_path = dst_file
-        src = file.local_path
-        if src is not None and os.path.exists(src):
-            continue
-        if os.path.exists(dst_file):
-            continue  # Already moved by a prior crashed attempt.
-        if src is None:
-            missing_stamps.append(f"{file.filename} (not_stamped)")
-        else:
-            missing_stamps.append(f"{file.filename} (stale_stamp: {src})")
-    if missing_stamps:
-        logger.error(
-            "EVENT-PATH MISSING: request_id=%s %s - %s has no authoritative "
-            "local path for %d file(s): %s. The DownloadFileComplete event "
-            "was never ingested (pre-bootstrap completion or cursor gap) or "
-            "the stamped file vanished from disk.",
-            album_data.db_request_id,
-            album_data.artist,
-            album_data.title,
-            len(missing_stamps),
-            "; ".join(missing_stamps),
-        )
-        return MaterializeFailed(reason="event_path_missing")
-
-    rm_dirs: list[str] = []
-    moved_files_history: list[tuple[str, str]] = []
-    if os.path.exists(canonical_path):
-        logger.info(f"Staging folder {canonical_path} already exists — "
-                    f"resuming or reusing prior attempt")
-    else:
-        try:
-            os.makedirs(canonical_path, exist_ok=True)
-        except OSError:
-            # ENAMETOOLONG, EACCES, ENOSPC, etc. Letting this propagate
-            # would abort the entire poll loop and starve every later row.
-            logger.exception(
-                "Failed to create canonical staging dir %s for request %s — "
-                "leaving for next poll cycle",
-                canonical_path,
-                album_data.db_request_id,
-            )
-            return MaterializeFailed(reason="staging_dir_create_failed")
+    # One atomic private directory publish replaces the old per-file move /
+    # backup transaction.  The source tree is adversarial: names are opened
+    # only below its authority fd and the opened inode is retained until the
+    # destination is durable.
+    destination_names = [os.path.basename(staged_album.import_path_for(file))
+                         for file in album_data.files]
+    if not destination_names:
+        return MaterializeFailed(reason="empty_manifest")
+    if len(destination_names) != len(set(destination_names)):
+        return MaterializeFailed(reason="duplicate_final_basename")
 
     for file in album_data.files:
-        dst_file = file.import_path
-        assert dst_file is not None
-        src_file = file.local_path
-        if src_file is None or not os.path.exists(src_file):
-            # Pre-flight proved the destination copy exists.
-            logger.info(f"Already-moved file detected: {dst_file} (src gone, skipping)")
-            continue
-        src_folder = os.path.dirname(src_file)
-        if src_folder not in rm_dirs:
-            rm_dirs.append(src_folder)
-        try:
-            # Destination keeps the clean remote basename (via
-            # ``import_path_for``) even when slskd appended a ``_<ticks>``
-            # collision suffix to the source.
-            shutil.move(src_file, dst_file)
-            moved_files_history.append((src_file, dst_file))
-        except Exception:
-            logger.exception(f"Failed to move: {file.filename} to temp location for import. Rolling back...")
-            for src, dst in reversed(moved_files_history):
-                try:
-                    shutil.move(dst, src)
-                except Exception:
-                    logger.exception(f"Critical failure during rollback: could not move {dst} back to {src}")
-            try:
-                os.rmdir(canonical_path)
-            except OSError:
-                logger.warning(f"Could not remove temp import directory {canonical_path}")
-            return MaterializeFailed(reason="file_move_failed")
+        file.import_path = staged_album.import_path_for(file)
 
-    for rm_dir in rm_dirs:
-        if os.path.abspath(rm_dir) == os.path.abspath(canonical_path):
-            continue
-        try:
-            os.rmdir(rm_dir)
-        except OSError:
-            logger.warning(f"Skipping removal of {rm_dir} because it's not empty.")
+    processing_dir = ctx.cfg.processing_dir
+    albums_name = "albums"
+    canonical_name = os.path.basename(canonical_path)
+    materialize_token = _materialize_token(canonical_name)
+    opened_sources: list[OpenedRegularFile] = []
+    try:
+        with open_private_processing_root(
+            processing_dir, ctx.cfg.slskd_download_dir,
+        ) as processing_fd:
+            with open_private_child_directory(processing_fd, albums_name) as albums_fd:
+                # A bounded shard lock avoids unbounded persistent lock files
+                # and works even when the canonical basename consumes all
+                # NAME_MAX bytes.  Hash collisions only serialize work.
+                with exclusive_relative_lock(
+                    albums_fd, f".materialize-lock-shard-{materialize_token[:2]}",
+                ):
+                    transaction_prefix = f".materialize-tmp-{materialize_token}-"
+                    for entry_name in os.listdir(albums_fd):
+                        if entry_name.startswith(transaction_prefix):
+                            remove_relative_tree(albums_fd, entry_name)
 
-    album_data.import_folder = staged_album.current_path
+                    # An existing destination is valid only when it is a
+                    # complete exact regular-file manifest. Never add files
+                    # to it, including an empty directory.
+                    if _canonical_manifest_complete(
+                        albums_fd, canonical_name, destination_names,
+                    ):
+                        if not same_open_directory(processing_dir, processing_fd):
+                            return MaterializeGuarded(detail="processing_root_relocated")
+                        staged_album.current_path = canonical_path
+                        album_data.import_folder = canonical_path
+                        if persist_current_path:
+                            staged_album.persist_current_path(db)
+                        return Materialized()
+                    try:
+                        os.stat(canonical_name, dir_fd=albums_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        return MaterializeGuarded(detail="incomplete_or_unsafe_canonical")
+
+                    # Preflight *all* event-stamped sources before creating a
+                    # destination. Missing stamps, path escapes, symlinks and
+                    # special files all leave every byte untouched.
+                    for file in album_data.files:
+                        if file.local_path is None:
+                            raise FilesystemAuthorityError("event_path_missing")
+                        try:
+                            opened_sources.append(open_regular_under_root(
+                                ctx.cfg.slskd_download_dir, file.local_path,
+                            ))
+                        except FilesystemAuthorityError as exc:
+                            if "No such file" in str(exc):
+                                raise FilesystemAuthorityError("event_path_missing") from exc
+                            raise FilesystemAuthorityError("unsafe_source_path") from exc
+
+                    temp_name = f"{transaction_prefix}{secrets.token_hex(16)}"
+                    os.mkdir(temp_name, 0o700, dir_fd=albums_fd)
+                    temp_fd = os.open(
+                        temp_name,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                        dir_fd=albums_fd,
+                    )
+                    published = False
+                    try:
+                        for opened, name in zip(opened_sources, destination_names, strict=True):
+                            destination_fd = os.open(
+                                name,
+                                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                                0o600,
+                                dir_fd=temp_fd,
+                            )
+                            try:
+                                if before_file_copy is not None:
+                                    before_file_copy()
+                                copy_opened_file(opened.fd, destination_fd)
+                            finally:
+                                os.close(destination_fd)
+                        os.fsync(temp_fd)
+                        if before_publish is not None:
+                            before_publish(albums_fd, canonical_name)
+                        published = rename_relative_noreplace(
+                            albums_fd, temp_name, canonical_name,
+                        )
+                        if published:
+                            os.fsync(albums_fd)
+                    finally:
+                        os.close(temp_fd)
+                        if not published:
+                            remove_relative_tree(albums_fd, temp_name)
+
+                    if not published:
+                        # A writer that bypassed this process's shard lock
+                        # won between our preflight and publish. Never
+                        # overwrite it; converge only an exact manifest.
+                        if not _canonical_manifest_complete(
+                            albums_fd, canonical_name, destination_names,
+                        ):
+                            return MaterializeGuarded(
+                                detail="incomplete_or_unsafe_canonical",
+                            )
+                        if not same_open_directory(processing_dir, processing_fd):
+                            return MaterializeGuarded(detail="processing_root_relocated")
+                        staged_album.current_path = canonical_path
+                        album_data.import_folder = canonical_path
+                        if persist_current_path:
+                            staged_album.persist_current_path(db)
+                        return Materialized()
+
+                    # Verify the lexical root still names this held private
+                    # inode before publishing/persisting its pathname or
+                    # deleting source bytes.
+                    if not same_open_directory(processing_dir, processing_fd):
+                        return MaterializeGuarded(detail="processing_root_relocated")
+
+                    # Reopen the winner for convergence proof. A success
+                    # cannot coexist with a stale transaction under this lock.
+                    with open_relative_directory(albums_fd, canonical_name) as winner_fd:
+                        if set(os.listdir(winner_fd)) != set(destination_names):
+                            return MaterializeGuarded(detail="published_manifest_mismatch")
+                        for name in destination_names:
+                            winner = open_regular_relative(winner_fd, name)
+                            winner.close()
+
+                    # The durable private album is now visible. An
+                    # adversarial slskd replacement is never unlinked.
+                    for opened in opened_sources:
+                        unlink_if_same(opened)
+    except FilesystemAuthorityError as exc:
+        logger.error("MATERIALIZE AUTHORITY FAILED request=%s: %s", request_id, exc)
+        return MaterializeFailed(reason=str(exc).split(":", 1)[0])
+    except OSError:
+        logger.exception("MATERIALIZE FAILED request=%s", request_id)
+        return MaterializeFailed(reason="private_materialize_failed")
+    finally:
+        for opened in opened_sources:
+            opened.close()
+
+    staged_album.current_path = canonical_path
+    album_data.import_folder = canonical_path
     if persist_current_path:
         staged_album.persist_current_path(db)
     return Materialized()

@@ -22,7 +22,7 @@ class TestClassifyProcessingPath(unittest.TestCase):
             year="2020",
             request_id=1,
             staging_dir="/tmp/staging",
-            slskd_download_dir="/tmp/downloads",
+            canonical_root="/tmp/downloads",
         )
 
         self.assertEqual(location.kind, "canonical")
@@ -36,7 +36,7 @@ class TestClassifyProcessingPath(unittest.TestCase):
             year="2020",
             request_id=1,
             staging_dir="/tmp/staging",
-            slskd_download_dir="/tmp/downloads",
+            canonical_root="/tmp/downloads",
         )
 
         self.assertEqual(location.kind, "request_scoped_auto_import_staged")
@@ -51,7 +51,7 @@ class TestClassifyProcessingPath(unittest.TestCase):
             year="2020",
             request_id=1,
             staging_dir="/tmp/staging",
-            slskd_download_dir="/tmp/downloads",
+            canonical_root="/tmp/downloads",
         )
 
         self.assertEqual(location.kind, "request_scoped_post_validation_staged")
@@ -66,7 +66,7 @@ class TestClassifyProcessingPath(unittest.TestCase):
             year="2020",
             request_id=1,
             staging_dir="/tmp/staging",
-            slskd_download_dir="/tmp/downloads",
+            canonical_root="/tmp/downloads",
         )
 
         self.assertEqual(location.kind, "legacy_shared_staged")
@@ -80,7 +80,7 @@ class TestClassifyProcessingPath(unittest.TestCase):
             year="2020",
             request_id=1,
             staging_dir="/tmp/staging",
-            slskd_download_dir="/tmp/downloads",
+            canonical_root="/tmp/downloads",
         )
 
         self.assertEqual(location.kind, "external")
@@ -95,7 +95,7 @@ class TestResolveMissingCurrentPath(unittest.TestCase):
             year="2020",
             request_id=1,
             staging_dir="/tmp/staging",
-            slskd_download_dir="/tmp/downloads",
+            canonical_root="/tmp/downloads",
             has_entries=lambda _path: False,
         )
 
@@ -120,7 +120,7 @@ class TestResolveMissingCurrentPath(unittest.TestCase):
             year="2020",
             request_id=1,
             staging_dir="/tmp/staging",
-            slskd_download_dir="/tmp/downloads",
+            canonical_root="/tmp/downloads",
             has_entries=lambda path: path == candidate,
         )
 
@@ -140,7 +140,7 @@ class TestResolveMissingCurrentPath(unittest.TestCase):
             year="2020",
             request_id=1,
             staging_dir="/tmp/staging",
-            slskd_download_dir="/tmp/downloads",
+            canonical_root="/tmp/downloads",
             has_entries=lambda path: path == candidate,
         )
 
@@ -158,7 +158,7 @@ class TestResolveMissingCurrentPath(unittest.TestCase):
             year="2020",
             request_id=1,
             staging_dir="/tmp/staging",
-            slskd_download_dir="/tmp/downloads",
+            canonical_root="/tmp/downloads",
             has_entries=lambda path: path in candidates,
         )
 
@@ -181,7 +181,7 @@ class TestReconcileProcessingCurrentPath(unittest.TestCase):
             year="2020",
             request_id=1,
             staging_dir="/tmp/staging",
-            slskd_download_dir="/tmp/downloads",
+            canonical_root="/tmp/downloads",
             has_entries=lambda path: path == staged_path,
         )
 
@@ -214,7 +214,7 @@ class TestFindBlockedRecoveryIssues(unittest.TestCase):
             }],
             set(),
             staging_dir="/tmp/staging",
-            slskd_download_dir="/tmp/downloads",
+            canonical_root="/tmp/downloads",
             has_entries=lambda path: path == "/tmp/staging/Test Artist/Test Album",
         )
 
@@ -241,7 +241,7 @@ class TestFindBlockedRecoveryIssues(unittest.TestCase):
             }],
             set(),
             staging_dir="/tmp/staging",
-            slskd_download_dir="/tmp/downloads",
+            canonical_root="/tmp/downloads",
             has_entries=lambda path: (
                 path
                 == "/tmp/staging/auto-import/Test Artist/Test Album [request-1]"
@@ -273,7 +273,7 @@ class TestFindBlockedProcessingPathIssues(unittest.TestCase):
             }],
             set(),
             staging_dir="/tmp/staging",
-            slskd_download_dir="/tmp/downloads",
+            canonical_root="/tmp/downloads",
             has_entries=lambda path: path == "/tmp/staging/Test Artist/Test Album",
         )
 
@@ -306,7 +306,7 @@ class TestFindBlockedProcessingPathIssues(unittest.TestCase):
             }],
             set(),
             staging_dir="/tmp/staging",
-            slskd_download_dir="/tmp/downloads",
+            canonical_root="/tmp/downloads",
             has_entries=lambda path: (
                 path
                 == "/tmp/staging/auto-import/Test Artist/Test Album [request-1]"
@@ -343,7 +343,7 @@ class TestFindBlockedProcessingPathIssues(unittest.TestCase):
             }],
             set(),
             staging_dir="/tmp/staging",
-            slskd_download_dir="/tmp/downloads",
+            canonical_root="/tmp/downloads",
             has_entries=lambda _path: False,
             auto_import_in_progress=lambda request_id, mb_release_id: (
                 request_id == 1 and mb_release_id == "test-mbid"
@@ -377,7 +377,7 @@ class TestFindBlockedProcessingPathIssues(unittest.TestCase):
             }],
             set(),
             staging_dir="/tmp/staging",
-            slskd_download_dir="/tmp/downloads",
+            canonical_root="/tmp/downloads",
             has_entries=lambda _path: False,
             auto_import_in_progress=lambda _request_id, _mb_release_id: False,
         )
@@ -412,7 +412,7 @@ class TestFindBlockedProcessingPathIssues(unittest.TestCase):
             }],
             set(),
             staging_dir="/tmp/staging",
-            slskd_download_dir="/tmp/downloads",
+            canonical_root="/tmp/downloads",
             has_entries=lambda path: (
                 path
                 == "/tmp/staging/auto-import/Test Artist/Test Album [request-1]"
@@ -450,7 +450,7 @@ class TestFindBlockedProcessingPathIssues(unittest.TestCase):
             }],
             set(),
             staging_dir="/tmp/staging",
-            slskd_download_dir="/tmp/downloads",
+            canonical_root="/tmp/downloads",
             has_entries=lambda path: (
                 path
                 == "/tmp/staging/auto-import/Test Artist/Test Album [request-1]"
@@ -487,7 +487,7 @@ class TestFindBlockedProcessingPathIssues(unittest.TestCase):
             }],
             set(),
             staging_dir="/tmp/staging",
-            slskd_download_dir="/tmp/downloads",
+            canonical_root="/tmp/downloads",
             has_entries=lambda path: (
                 path
                 == "/tmp/staging/auto-import/Test Artist/Test Album [request-1]"
@@ -528,7 +528,7 @@ class TestFindBlockedProcessingPathIssues(unittest.TestCase):
             }],
             set(),
             staging_dir="/tmp/staging",
-            slskd_download_dir="/tmp/downloads",
+            canonical_root="/tmp/downloads",
             has_entries=lambda path: (
                 path
                 == "/tmp/staging/auto-import/Test Artist/Test Album [request-1]"

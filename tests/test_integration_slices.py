@@ -58,12 +58,23 @@ from tests.helpers import (
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
 
 
-def _preview_worker_config() -> CratediggerConfig:
+def _preview_worker_config(
+    *,
+    staging_dir: str = "",
+    processing_dir: str = "",
+) -> CratediggerConfig:
     ini = configparser.ConfigParser()
     ini["Beets Validation"] = {
         "harness_path": _HARNESS,
         "audio_check": "off",
+        "staging_dir": staging_dir,
     }
+    if staging_dir:
+        ini["Slskd"] = {
+            "download_dir": os.path.join(os.path.dirname(staging_dir), "slskd"),
+        }
+    if processing_dir:
+        ini["Paths"] = {"processing_dir": processing_dir}
     ini["Pipeline DB"] = {"enabled": "true"}
     return CratediggerConfig.from_ini(ini)
 
@@ -3414,8 +3425,10 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         reset-to-wanted transition.
         """
         from lib import download as dl_mod
+        from lib import download_materialization
         from lib import transitions
         from lib import download_validation
+        from collections.abc import Callable
         from lib.context import CratediggerContext
         from lib.dispatch import DispatchCoreFn
         from lib.download_processing import CompletionFailed, CompletionResult
@@ -3431,9 +3444,12 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
             validate_fn: download_validation.ValidateFn | None = None,
             handle_valid_fn: download_validation.HandleValidFn | None = None,
             dispatch_fn: DispatchCoreFn | None = None,
+            materialize_before_file_copy: Callable[[], None] | None = None,
+            materialize_fn: Callable[..., download_materialization.MaterializeResult] | None = None,
         ) -> CompletionResult:
             del album_data, ctx, import_job_id
             del validate_fn, handle_valid_fn, dispatch_fn
+            del materialize_before_file_copy, materialize_fn
             transitions.finalize_request(
                 cast(Any, db),
                 42,
@@ -3501,7 +3517,11 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         from lib import download as dl_mod
         from tests.helpers import make_download_file
 
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with (
+            tempfile.TemporaryDirectory(dir=os.getcwd()) as tmpdir,
+            tempfile.TemporaryDirectory(dir=os.getcwd()) as processing_dir,
+        ):
+            os.makedirs(os.path.join(processing_dir, "albums"), mode=0o700)
             src_dir = os.path.join(tmpdir, "source_dir")
             os.makedirs(src_dir)
             src_file = os.path.join(src_dir, "01 - Track.mp3")
@@ -3521,6 +3541,7 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
             db.seed_request(make_request_row(id=42, status="downloading"))
             ctx = self._ctx(db)
             ctx.cfg.slskd_download_dir = tmpdir
+            ctx.cfg.processing_dir = processing_dir
             ctx.cfg.beets_validation_enabled = False
 
             result = dl_mod._run_completed_processing(
@@ -6001,13 +6022,23 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
         from tests.helpers import noop_quality_gate
 
-        with tempfile.TemporaryDirectory() as source:
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as root:
+            staging_dir = os.path.join(root, "Incoming")
+            source = os.path.join(staging_dir, "failed_imports", "candidate")
+            os.makedirs(source)
+            os.makedirs(os.path.join(root, "slskd"))
+            os.makedirs(os.path.join(root, "processing"), mode=0o700)
+            os.makedirs(os.path.join(root, "processing", "preview"), mode=0o700)
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             db = FakePipelineDB()
             db.seed_request(make_request_row(id=42))
             db.set_tracks(42, [{"track_number": 1, "title": "Track"}])
-            log_id = db.log_download(42, outcome="rejected")
+            log_id = db.log_download(
+                42,
+                outcome="rejected",
+                validation_result={"failed_path": source},
+            )
             db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
@@ -6053,6 +6084,10 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 assert detail is not None
                 return detail
 
+            preview_cfg = _preview_worker_config(
+                staging_dir=staging_dir,
+                processing_dir=os.path.join(root, "processing"),
+            )
             with patch(
                 "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
                 side_effect=_sentinel_preview,
@@ -6061,12 +6096,13 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 side_effect=_sentinel_measure,
             ):
                 updated = import_preview_worker.process_claimed_preview_job(
-                    cast(Any, db),
+                    db,
                     claimed,
                     spectral_detail_analyzer=analyze,
                     existing_spectral_resolver=lambda _mbid: (
                         ExistingSpectralAuditLookup(path="existing")
                     ),
+                    runtime_config=preview_cfg,
                 )
 
             self.assertEqual(
@@ -6077,7 +6113,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             assert updated is not None
             assert updated.preview_result is not None
             preview_ir = ImportResult.from_dict(
-                cast(dict[str, Any], updated.preview_result["import_result"])
+                updated.preview_result["import_result"]
             )
             self.assertEqual(preview_ir.spectral, audit)
             import_claimed = db.claim_next_import_job(
@@ -6627,7 +6663,15 @@ class TestU5PreviewWorkerLifecycleSlice(unittest.TestCase):
             return_value=preview_result,
         ):
             updated = import_preview_worker.process_claimed_preview_job(
-                cast(Any, db), claimed,
+                cast(Any, db),
+                claimed,
+                preview_fn=lambda _db, _job: (
+                    import_preview_worker.measure_and_persist_candidate_evidence(
+                        cast(Any, _db),
+                        request_id=42,
+                        path="/tmp/u5-vanished",
+                    )
+                ),
             )
 
         assert updated is not None
@@ -6677,7 +6721,15 @@ class TestU5PreviewWorkerLifecycleSlice(unittest.TestCase):
             return_value=preview_result,
         ):
             updated = import_preview_worker.process_claimed_preview_job(
-                cast(Any, db), claimed,
+                cast(Any, db),
+                claimed,
+                preview_fn=lambda _db, _job: (
+                    import_preview_worker.measure_and_persist_candidate_evidence(
+                        cast(Any, _db),
+                        request_id=43,
+                        path="/tmp/u5-vanished",
+                    )
+                ),
             )
 
         assert updated is not None
@@ -6799,7 +6851,11 @@ class TestU5PreviewEvidenceReadySlice(unittest.TestCase):
         with tempfile.TemporaryDirectory() as source:
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
-            download_log_id = db.log_download(42, outcome="rejected")
+            download_log_id = db.log_download(
+                42,
+                outcome="rejected",
+                validation_result={"failed_path": source},
+            )
             db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
@@ -6848,7 +6904,15 @@ class TestU5PreviewEvidenceReadySlice(unittest.TestCase):
                 side_effect=fake_preview,
             ):
                 updated = import_preview_worker.process_claimed_preview_job(
-                    cast(Any, db), claimed,
+                    cast(Any, db),
+                    claimed,
+                    preview_fn=lambda _db, _job: (
+                        import_preview_worker.measure_and_persist_candidate_evidence(
+                            cast(Any, _db),
+                            request_id=42,
+                            path=source,
+                        )
+                    ),
                 )
 
         assert updated is not None
@@ -7604,7 +7668,11 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             artist_name="Boards of Canada",
             album_title="Geogaddi",
         ))
-        log_id = db.log_download(request_id, outcome="rejected")
+        log_id = db.log_download(
+            request_id,
+            outcome="rejected",
+            validation_result={"failed_path": source_path},
+        )
         db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=request_id,
@@ -7662,7 +7730,13 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
-        with tempfile.TemporaryDirectory() as source:
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as root:
+            staging_dir = os.path.join(root, "Incoming")
+            source = os.path.join(staging_dir, "failed_imports", "candidate")
+            os.makedirs(source)
+            os.makedirs(os.path.join(root, "slskd"))
+            os.makedirs(os.path.join(root, "processing"), mode=0o700)
+            os.makedirs(os.path.join(root, "processing", "preview"), mode=0o700)
             with open(os.path.join(source, "01.flac"), "wb") as handle:
                 handle.write(b"lossless-audio")
             claimed, download_log_id = self._seed_force_job(
@@ -7711,7 +7785,12 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     import_result=result,
                 )
 
-            def preview(db_arg: Any, _job: Any):
+            preview_cfg = _preview_worker_config(
+                staging_dir=staging_dir,
+                processing_dir=os.path.join(root, "processing"),
+            )
+
+            def preview(db_arg, _job):
                 return measure_and_persist_candidate_evidence(
                     db_arg,
                     request_id=40,
@@ -7720,20 +7799,18 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     download_log_id=download_log_id,
                     import_job_id=claimed.id,
                     run_import_fn=run_import,
+                    runtime_config=preview_cfg,
                 )
 
             with (
                 patch("lib.measurement.spectral_analyze", side_effect=analyze),
                 patch("lib.beets_db.BeetsDB", _mock_beets_db(None)),
-                patch(
-                    "lib.config.read_runtime_config",
-                    return_value=_preview_worker_config(),
-                ),
             ):
                 updated = import_preview_worker.process_claimed_preview_job(
-                    cast(Any, db),
+                    db,
                     claimed,
                     preview_fn=preview,
+                    runtime_config=preview_cfg,
                 )
 
             self.assertEqual(len(analyzer_calls), 1)
@@ -7753,7 +7830,13 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
-        with tempfile.TemporaryDirectory() as source:
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as root:
+            staging_dir = os.path.join(root, "Incoming")
+            source = os.path.join(staging_dir, "failed_imports", "candidate")
+            os.makedirs(source)
+            os.makedirs(os.path.join(root, "slskd"))
+            os.makedirs(os.path.join(root, "processing"), mode=0o700)
+            os.makedirs(os.path.join(root, "processing", "preview"), mode=0o700)
             with open(os.path.join(source, "01.flac"), "wb") as handle:
                 handle.write(b"lossless-audio")
             claimed, download_log_id = self._seed_force_job(
@@ -7774,7 +7857,12 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 harness_called = True
                 raise AssertionError("harness must not run after spectral failure")
 
-            def preview(db_arg: Any, _job: Any):
+            preview_cfg = _preview_worker_config(
+                staging_dir=staging_dir,
+                processing_dir=os.path.join(root, "processing"),
+            )
+
+            def preview(db_arg, _job):
                 return measure_and_persist_candidate_evidence(
                     db_arg,
                     request_id=41,
@@ -7783,20 +7871,18 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     download_log_id=download_log_id,
                     import_job_id=claimed.id,
                     run_import_fn=run_import,
+                    runtime_config=preview_cfg,
                 )
 
             with (
                 patch("lib.measurement.spectral_analyze", side_effect=analyze),
                 patch("lib.beets_db.BeetsDB", _mock_beets_db(None)),
-                patch(
-                    "lib.config.read_runtime_config",
-                    return_value=_preview_worker_config(),
-                ),
             ):
                 updated = import_preview_worker.process_claimed_preview_job(
-                    cast(Any, db),
+                    db,
                     claimed,
                     preview_fn=preview,
+                    runtime_config=preview_cfg,
                 )
 
             self.assertEqual(len(analyzer_calls), 1)
@@ -7843,7 +7929,13 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
-        with tempfile.TemporaryDirectory() as source:
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as root:
+            staging_dir = os.path.join(root, "Incoming")
+            source = os.path.join(staging_dir, "failed_imports", "candidate")
+            os.makedirs(source)
+            os.makedirs(os.path.join(root, "slskd"))
+            os.makedirs(os.path.join(root, "processing"), mode=0o700)
+            os.makedirs(os.path.join(root, "processing", "preview"), mode=0o700)
             with open(os.path.join(source, "01.mp3"), "wb") as h:
                 h.write(b"audio")
 
@@ -7889,21 +7981,22 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 ),
             )
 
+            preview_cfg = CratediggerConfig(
+                beets_harness_path=_HARNESS,
+                pipeline_db_enabled=True,
+                beets_staging_dir=staging_dir,
+                slskd_download_dir=os.path.join(root, "slskd"),
+                processing_dir=os.path.join(root, "processing"),
+            )
             with patch(
                 "lib.import_preview.measure_preimport_state",
                 return_value=measured_facts,
             ), patch(
                 "lib.import_preview.run_import_one",
                 return_value=SimpleNamespace(import_result=harness_ir),
-            ), patch(
-                "lib.config.read_runtime_config",
-                return_value=CratediggerConfig(
-                    beets_harness_path=_HARNESS,
-                    pipeline_db_enabled=True,
-                ),
             ):
                 updated_job = import_preview_worker.process_claimed_preview_job(
-                    cast(Any, db), claimed,
+                    db, claimed, runtime_config=preview_cfg,
                 )
 
             # Preview marked the job evidence_ready.
@@ -7974,7 +8067,13 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
-        with tempfile.TemporaryDirectory() as source:
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as root:
+            staging_dir = os.path.join(root, "Incoming")
+            source = os.path.join(staging_dir, "failed_imports", "candidate")
+            os.makedirs(source)
+            os.makedirs(os.path.join(root, "slskd"))
+            os.makedirs(os.path.join(root, "processing"), mode=0o700)
+            os.makedirs(os.path.join(root, "processing", "preview"), mode=0o700)
             with open(os.path.join(source, "01.mp3"), "wb") as h:
                 h.write(b"audio")
 
@@ -8012,21 +8111,22 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 ),
             )
 
+            preview_cfg = CratediggerConfig(
+                beets_harness_path=_HARNESS,
+                pipeline_db_enabled=True,
+                beets_staging_dir=staging_dir,
+                slskd_download_dir=os.path.join(root, "slskd"),
+                processing_dir=os.path.join(root, "processing"),
+            )
             with patch(
                 "lib.import_preview.measure_preimport_state",
                 return_value=measured_facts,
             ), patch(
                 "lib.import_preview.run_import_one",
                 return_value=SimpleNamespace(import_result=harness_ir),
-            ), patch(
-                "lib.config.read_runtime_config",
-                return_value=CratediggerConfig(
-                    beets_harness_path=_HARNESS,
-                    pipeline_db_enabled=True,
-                ),
             ):
                 updated_job = import_preview_worker.process_claimed_preview_job(
-                    cast(Any, db), claimed,
+                    db, claimed, runtime_config=preview_cfg,
                 )
 
             assert updated_job is not None
@@ -8047,7 +8147,13 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
-        with tempfile.TemporaryDirectory() as source:
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as root:
+            staging_dir = os.path.join(root, "Incoming")
+            source = os.path.join(staging_dir, "failed_imports", "candidate")
+            os.makedirs(source)
+            os.makedirs(os.path.join(root, "slskd"))
+            os.makedirs(os.path.join(root, "processing"), mode=0o700)
+            os.makedirs(os.path.join(root, "processing", "preview"), mode=0o700)
             with open(os.path.join(source, "01.mp3"), "wb") as h:
                 h.write(b"audio")
 
@@ -8084,21 +8190,22 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     "harness must not run on corrupt audio in the measure-and-persist path"
                 )
 
+            preview_cfg = CratediggerConfig(
+                beets_harness_path=_HARNESS,
+                pipeline_db_enabled=True,
+                beets_staging_dir=staging_dir,
+                slskd_download_dir=os.path.join(root, "slskd"),
+                processing_dir=os.path.join(root, "processing"),
+            )
             with patch(
                 "lib.import_preview.measure_preimport_state",
                 return_value=measured_facts,
             ), patch(
                 "lib.import_preview.run_import_one",
                 side_effect=_harness_sentinel,
-            ), patch(
-                "lib.config.read_runtime_config",
-                return_value=CratediggerConfig(
-                    beets_harness_path=_HARNESS,
-                    pipeline_db_enabled=True,
-                ),
             ):
                 updated_job = import_preview_worker.process_claimed_preview_job(
-                    cast(Any, db), claimed,
+                    db, claimed, runtime_config=preview_cfg,
                 )
 
             self.assertFalse(sentinels["harness_called"])
@@ -8271,7 +8378,12 @@ class TestWrongMatchStaleEvidenceRefreshSlice(unittest.TestCase):
     not enqueue import jobs or write new download_log rows.
     """
 
-    def _patch_cfg(self):
+    def _patch_cfg(
+        self,
+        *,
+        staging_dir: str = "",
+        processing_dir: str = "",
+    ):
         from lib.quality import QualityRankConfig
         from types import SimpleNamespace as _SN
         cfg = _SN(
@@ -8280,6 +8392,9 @@ class TestWrongMatchStaleEvidenceRefreshSlice(unittest.TestCase):
             beets_library_db="/tmp/cratedigger-test-beets-library.db",
             beets_directory="/tmp/cratedigger-test-beets-library",
             audio_check_mode="normal",
+            beets_staging_dir=staging_dir,
+            slskd_download_dir=os.path.join(staging_dir, "slskd"),
+            processing_dir=processing_dir,
         )
         return patch("lib.config.read_runtime_config", return_value=cfg)
 
@@ -8296,9 +8411,12 @@ class TestWrongMatchStaleEvidenceRefreshSlice(unittest.TestCase):
             cleanup_wrong_match,
         )
 
-        root = tempfile.mkdtemp()
+        root = tempfile.mkdtemp(dir=os.getcwd())
         source = os.path.join(root, "failed_imports", "stale-album")
         os.makedirs(source)
+        os.makedirs(os.path.join(root, "slskd"))
+        os.makedirs(os.path.join(root, "processing"), mode=0o700)
+        os.makedirs(os.path.join(root, "processing", "preview"), mode=0o700)
         try:
             # The track the original evidence describes: a real size that no
             # longer matches disk (the #271 race — file truncated to 0 bytes
@@ -8364,7 +8482,10 @@ class TestWrongMatchStaleEvidenceRefreshSlice(unittest.TestCase):
             beets = FakeBeetsDB()
             beets.set_album_info("mbid-1", None)
 
-            with self._patch_cfg(), \
+            with self._patch_cfg(
+                staging_dir=root,
+                processing_dir=os.path.join(root, "processing"),
+            ), \
                     patch("lib.beets_db.BeetsDB", return_value=beets):
                 result = cleanup_wrong_match(db, log_id)
 

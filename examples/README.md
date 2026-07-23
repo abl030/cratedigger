@@ -15,5 +15,10 @@ What you always need besides cratedigger: **slskd** (`services.slskd`
 exists in nixpkgs) and somewhere for music to live. PostgreSQL is
 provisioned for you by `pipelineDb.createLocally = true`.
 
+The sample keeps `services.cratedigger.processingDir` under a root-owned
+high-capacity parent and outside slskd's writable download tree. Run slskd and
+Cratedigger under distinct identities; add Cratedigger only to the slskd
+download-directory group.
+
 The honest account of what each mirror buys you (and the degraded modes
 without them) is in [`docs/mirrors.md`](../docs/mirrors.md).

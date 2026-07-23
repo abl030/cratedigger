@@ -6897,67 +6897,6 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
 
         self.assertEqual(removed, 1)
 
-    def test_get_owned_attempt_folders_joins_request_identity(self):
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=1, artist_name="Artist", album_title="Album", year=2020))
-        db.record_transfer_enqueue([
-            TransferLedgerRow(
-                request_id=1, username="p0", filename="a.flac",
-                attempt_fingerprint="fp1"),
-        ])
-        db.confirm_transfer_enqueue("p0", "a.flac")
-
-        folders = db.get_owned_attempt_folders()
-
-        self.assertEqual(folders, [{
-            "request_id": 1,
-            "attempt_fingerprint": "fp1",
-            "artist_name": "Artist",
-            "album_title": "Album",
-            "year": 2020,
-        }])
-
-    def test_get_owned_attempt_folders_dedupes_same_attempt(self):
-        # Two files from the SAME attempt (same fingerprint) collapse to
-        # one folder entry.
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=1))
-        db.record_transfer_enqueue([
-            TransferLedgerRow(
-                request_id=1, username="p0", filename="a.flac",
-                attempt_fingerprint="fp1"),
-            TransferLedgerRow(
-                request_id=1, username="p0", filename="b.flac",
-                attempt_fingerprint="fp1"),
-        ])
-        db.confirm_transfer_enqueue("p0", "a.flac")
-        db.confirm_transfer_enqueue("p0", "b.flac")
-
-        self.assertEqual(len(db.get_owned_attempt_folders()), 1)
-
-    def test_get_owned_attempt_folders_excludes_null_fingerprint(self):
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=1))
-        db.record_transfer_enqueue([
-            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
-        ])
-
-        self.assertEqual(db.get_owned_attempt_folders(), [])
-
-    def test_get_owned_attempt_folders_drops_hard_deleted_request(self):
-        # No seeded request for request_id=999 -- mirrors the real INNER
-        # JOIN silently excluding a row whose request no longer exists.
-        db = FakePipelineDB()
-        db.record_transfer_enqueue([
-            TransferLedgerRow(
-                request_id=999, username="p0", filename="a.flac",
-                attempt_fingerprint="fp1"),
-        ])
-
-        self.assertEqual(db.get_owned_attempt_folders(), [])
-
-
 class TestFakeSlskdEvents(unittest.TestCase):
     """Self-tests for the events sub-API fake (issue #146)."""
 

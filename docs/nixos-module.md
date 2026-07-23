@@ -28,6 +28,7 @@ The flake export is a wrapper that pins the module's package set to **cratedigge
 | `musicbrainz.apiBase` | `https://musicbrainz.org` | ONE MB origin for web/mb.py (via config.ini, read at `cratedigger-web` startup), pipeline-cli lookups, and the rendered beets musicbrainz block (KTD6). Public default is functional but ~1 req/s. |
 | `discogs.apiBase` | `null` | Discogs mirror origin. Mirror-REQUIRED: unset ⇒ Discogs browse off with a 503 mirror-required message (public api.discogs.com does not serve this API shape). |
 | `stateDir` | `/var/lib/cratedigger` | Runtime state (config.ini, lock file). |
+| `processingDir` | `${stateDir}/processing` | Private `0700` Cratedigger-owned root: canonical albums live in `albums/`, bounded preview scratch in `preview/`. Must be absolute and disjoint from slskd's download tree. |
 | `slskd.apiKeyFile` | (required) | Path to a file containing the raw slskd API key (one line). |
 | `slskd.downloadDir` | (required) | Where slskd downloads land. |
 | `slskd.hostUrl` | `http://localhost:5030` | slskd HTTP base URL. |
@@ -72,6 +73,17 @@ Three options under `services.cratedigger.searchSettings.*` control the slskd se
 ## Running non-root + filesystem permissions
 
 The `user`/`group` table row above defaults to root — zero-config, since slskd downloads and the beets library commonly live outside any unprivileged user's reach. Running non-root is fully supported (issue #570) and is the right shape when other services (Jellyfin, Plex) need to read AND write inside the same library tree.
+
+### Private processing boundary
+
+`processingDir` is deliberately separate from `slskd.downloadDir`: slskd is a
+source authority, not a safe destination. The module creates the root and its
+`albums/` and `preview/` children as `0700` for the Cratedigger identity;
+tmpfiles may age-clean only `preview/` children. Put a large processing root
+directly beneath a root-owned, non-group-writable parent. Do not run slskd as
+the Cratedigger user and do not put processing beneath a parent writable by
+slskd. The module rejects relative and lexically overlapping paths, while the
+runtime also refuses symlinked/unsafe roots.
 
 ### The `permissions` plugin + `fix_library_modes`
 

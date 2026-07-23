@@ -9,9 +9,9 @@ import os
 import socket
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import timedelta
-from typing import Any, TYPE_CHECKING
+from typing import Any, Protocol, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from cratedigger import TrackRecord
@@ -23,7 +23,8 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from lib.config import read_runtime_config
+from lib.config import CratediggerConfig, read_runtime_config
+from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
 from lib.dispatch import _record_preview_measurement_failed
 from lib.import_preview import (
     PREVIEW_VERDICT_EVIDENCE_READY,
@@ -33,6 +34,8 @@ from lib.import_preview import (
     load_current_evidence_for_preview,
     load_persisted_existing_spectral,
     measure_and_persist_candidate_evidence,
+    remove_preview_snapshot,
+    snapshot_configured_quarantine_directory,
     persist_exact_current_spectral_from_attempt,
     prepare_current_evidence_for_failure,
     preserve_existing_source_spectral,
@@ -69,6 +72,7 @@ from lib.quality_evidence import (
     load_candidate_evidence_for_source,
 )
 from lib.youtube_ingest_service import YoutubeImportPayload
+from lib.validation_envelope import decode_validation_envelope
 
 logger = logging.getLogger("cratedigger-import-preview-worker")
 STALE_PREVIEW_MESSAGE = "Preview worker restarted while job was running; retry queued"
@@ -79,6 +83,15 @@ PREVIEW_STALE_AGE = timedelta(minutes=15)
 
 FailureHavePrepareFn = Callable[..., str]
 FailureHaveEnrichFn = Callable[..., str]
+
+
+def _resolve_runtime_config(
+    runtime_config: CratediggerConfig | None,
+) -> CratediggerConfig:
+    """Use an injected worker configuration or load the production config now."""
+    if runtime_config is not None:
+        return runtime_config
+    return read_runtime_config()
 
 
 def _preview_result_dict(result: ImportPreviewResult) -> dict[str, Any]:
@@ -133,13 +146,12 @@ def derive_canonical_import_folder(
     """
     from lib.config import read_runtime_config
     from lib.download_reconstruction import reconstruct_grab_list_entry
-    from lib.processing_paths import canonical_folder_for_row
 
     cfg = read_runtime_config()
     entry = reconstruct_grab_list_entry(row, state)
     if entry.import_folder:
         return entry.import_folder
-    return canonical_folder_for_row(entry, cfg.slskd_download_dir)
+    return canonical_folder_for_row(entry, processing_albums_dir(cfg.processing_dir))
 
 
 class _PreviewDBSource:
@@ -223,9 +235,8 @@ def _front_gate_source_path(db: Any, job: ImportJob) -> str | None:
     """
     payload = job.payload or {}
     if job.job_type == IMPORT_JOB_FORCE:
-        failed_path = payload.get("failed_path")
-        if isinstance(failed_path, str) and failed_path:
-            return failed_path
+        # A force payload is audit metadata, not filesystem authority. Its
+        # path is resolved only from the download_log row at execution time.
         return None
     if job.job_type == IMPORT_JOB_YOUTUBE:
         # KTD1: YT path NEVER reads ``active_download_state``. The
@@ -270,6 +281,34 @@ def _front_gate_source_path(db: Any, job: ImportJob) -> str | None:
     return None
 
 
+class _DownloadLogEntryReader(Protocol):
+    def get_download_log_entry(
+        self,
+        download_log_id: int,
+    ) -> Mapping[str, object] | None: ...
+
+
+class _ImportPreviewJobClaimer(Protocol):
+    def claim_next_import_preview_job(self, *, worker_id: str) -> ImportJob | None: ...
+
+
+def _force_download_log_failed_path(
+    db: _DownloadLogEntryReader,
+    job: ImportJob,
+) -> tuple[int, str]:
+    """Return the sole filesystem name authoritative for a force preview."""
+    download_log_id = _download_log_id_from_job(job)
+    if download_log_id is None:
+        raise ValueError("Force import preview job is missing download_log_id")
+    entry = db.get_download_log_entry(download_log_id)
+    if not entry:
+        raise ValueError(f"Download log {download_log_id} not found")
+    raw_path = decode_validation_envelope(entry.get("validation_result")).failed_path
+    if not raw_path:
+        raise ValueError("Download log has no failed_path")
+    return download_log_id, raw_path
+
+
 def _reused_evidence_preview_payload(
     job: ImportJob,
     evidence: AlbumQualityEvidence,
@@ -311,6 +350,9 @@ def _reused_evidence_preview_payload(
 def _front_gate_check(
     db: Any,
     job: ImportJob,
+    *,
+    runtime_config: CratediggerConfig | None = None,
+    candidate_evidence_loader: Callable[..., EvidenceBuildResult] | None = None,
 ) -> tuple[EvidenceBuildResult | None, str | None]:
     """Run the cheap candidate-evidence front-gate for ``job``.
 
@@ -319,6 +361,37 @@ def _front_gate_check(
     measurement path) and the caller should fall through. A non-None
     result with ``status == 'ready'`` means measurement can be skipped.
     """
+    if job.job_type == IMPORT_JOB_FORCE:
+        raw_path: str | None = None
+        try:
+            download_log_id, raw_path = _force_download_log_failed_path(db, job)
+            cfg = _resolve_runtime_config(runtime_config)
+            snapshot = snapshot_configured_quarantine_directory(raw_path, cfg)
+            try:
+                load_candidate = (
+                    candidate_evidence_loader
+                    or load_candidate_evidence_for_source
+                )
+                result = load_candidate(
+                    db,
+                    source_path=snapshot,
+                    download_log_id=download_log_id,
+                    import_job_id=job.id,
+                )
+            finally:
+                remove_preview_snapshot(snapshot, cfg)
+            return result, raw_path
+        except Exception:
+            logger.debug(
+                "force front-gate isolation failed for job %s; falling through",
+                job.id,
+                exc_info=True,
+            )
+            # The front gate has already recovered the persisted force source.
+            # Keep it for a later failure audit even when its isolated snapshot
+            # was not available; only the evidence-reuse optimization failed.
+            return None, raw_path
+
     source_path = _front_gate_source_path(db, job)
     if not source_path:
         return None, None
@@ -346,20 +419,7 @@ def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
 
     payload = job.payload or {}
     if job.job_type == IMPORT_JOB_FORCE:
-        failed_path = payload.get("failed_path")
-        if not isinstance(failed_path, str) or not failed_path:
-            raise ValueError("Force import preview job is missing failed_path")
-        download_log_id = payload.get("download_log_id")
-        return {
-            "request_id": job.request_id,
-            "path": failed_path,
-            "force": True,
-            "download_log_id": (
-                int(download_log_id)
-                if isinstance(download_log_id, int)
-                else None
-            ),
-        }
+        raise ValueError("Force import preview inputs are resolved from download_log")
 
     if job.job_type == IMPORT_JOB_AUTOMATION:
         row = db.get_request(job.request_id)
@@ -400,7 +460,31 @@ def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
     raise ValueError(f"Unsupported import job type: {job.job_type}")
 
 
-def execute_preview_job(db: Any, job: ImportJob) -> ImportPreviewResult:
+def execute_preview_job(
+    db: Any,
+    job: ImportJob,
+    *,
+    runtime_config: CratediggerConfig | None = None,
+) -> ImportPreviewResult:
+    if job.job_type == IMPORT_JOB_FORCE:
+        if job.request_id is None:
+            raise ValueError("Import job has no request_id")
+        download_log_id, raw_path = _force_download_log_failed_path(db, job)
+        cfg = _resolve_runtime_config(runtime_config)
+        snapshot = snapshot_configured_quarantine_directory(raw_path, cfg)
+        try:
+            return measure_and_persist_candidate_evidence(
+                db,
+                request_id=job.request_id,
+                path=snapshot,
+                source_display_path=raw_path,
+                force=True,
+                download_log_id=download_log_id,
+                import_job_id=job.id,
+                runtime_config=cfg,
+            )
+        finally:
+            remove_preview_snapshot(snapshot, cfg)
     preview_input = _preview_input(db, job)
     return measure_and_persist_candidate_evidence(
         db,
@@ -416,6 +500,7 @@ def _handle_measurement_failed(
     *,
     prepare_failure_have_fn: FailureHavePrepareFn | None = None,
     enrich_failure_have_fn: FailureHaveEnrichFn | None = None,
+    runtime_config: CratediggerConfig | None = None,
 ) -> ImportJob | None:
     """Persist a measurement failure through one DB-owned terminal bundle.
 
@@ -456,11 +541,11 @@ def _handle_measurement_failed(
         )
 
     mb_release_id = request.get("mb_release_id")
-    runtime_config = None
+    configured_runtime = runtime_config
     prepared_outcome: str | None = None
     if isinstance(mb_release_id, str) and mb_release_id:
         try:
-            runtime_config = read_runtime_config()
+            configured_runtime = _resolve_runtime_config(configured_runtime)
         except Exception:
             logger.warning(
                 "Unable to load runtime config while preparing HAVE evidence "
@@ -468,7 +553,7 @@ def _handle_measurement_failed(
                 job.request_id,
                 exc_info=True,
             )
-        if runtime_config is not None:
+        if configured_runtime is not None:
             prepare_fn = (
                 prepare_failure_have_fn
                 or prepare_current_evidence_for_failure
@@ -478,8 +563,8 @@ def _handle_measurement_failed(
                     db,
                     request_id=job.request_id,
                     mb_release_id=mb_release_id,
-                    quality_ranks=runtime_config.quality_ranks,
-                    beets_library_root=runtime_config.beets_directory,
+                    quality_ranks=configured_runtime.quality_ranks,
+                    beets_library_root=configured_runtime.beets_directory,
                 )
             except Exception:
                 logger.warning(
@@ -499,7 +584,7 @@ def _handle_measurement_failed(
         requeue_to_wanted=job.job_type == IMPORT_JOB_AUTOMATION,
     )
 
-    if prepared_outcome == "ready" and runtime_config is not None:
+    if prepared_outcome == "ready" and configured_runtime is not None:
         enrich_fn = (
             enrich_failure_have_fn
             or enrich_incomplete_current_evidence_for_request
@@ -509,8 +594,8 @@ def _handle_measurement_failed(
                 db,
                 request_id=job.request_id,
                 mb_release_id=mb_release_id,
-                quality_ranks=runtime_config.quality_ranks,
-                beets_library_root=runtime_config.beets_directory,
+                quality_ranks=configured_runtime.quality_ranks,
+                beets_library_root=configured_runtime.beets_directory,
             )
         except Exception:
             logger.warning(
@@ -538,6 +623,7 @@ def process_claimed_preview_job(
     prepare_failure_have_fn: FailureHavePrepareFn | None = None,
     enrich_failure_have_fn: FailureHaveEnrichFn | None = None,
     current_evidence_loader: Callable[..., EvidenceBuildResult] | None = None,
+    runtime_config: CratediggerConfig | None = None,
 ) -> ImportJob | None:
     def handle_measurement_failed(result: ImportPreviewResult) -> ImportJob | None:
         return _handle_measurement_failed(
@@ -546,6 +632,7 @@ def process_claimed_preview_job(
             result,
             prepare_failure_have_fn=prepare_failure_have_fn,
             enrich_failure_have_fn=enrich_failure_have_fn,
+            runtime_config=runtime_config,
         )
 
     def handle_current_authority_failed(
@@ -574,7 +661,11 @@ def process_claimed_preview_job(
     # snapshot guard, mark the job importable without invoking measurement.
     # The post-measurement gate below remains as belt-and-braces for the
     # fall-through path.
-    front_gate_result, front_gate_source = _front_gate_check(db, job)
+    front_gate_result, front_gate_source = _front_gate_check(
+        db,
+        job,
+        runtime_config=runtime_config,
+    )
     if (
         front_gate_result is not None
         and front_gate_result.status == "ready"
@@ -599,7 +690,7 @@ def process_claimed_preview_job(
                         job.request_id,
                     )
                 )
-                preview_cfg = read_runtime_config()
+                preview_cfg = _resolve_runtime_config(runtime_config)
                 load_current = (
                     current_evidence_loader
                     or load_current_evidence_for_preview
@@ -655,7 +746,7 @@ def process_claimed_preview_job(
         audit_resolver: ExistingSpectralResolver | None = existing_spectral_resolver
         if audit_resolver is None:
             try:
-                audit_cfg = read_runtime_config()
+                audit_cfg = _resolve_runtime_config(runtime_config)
             except Exception as exc:
                 logger.exception("Unable to load config for reused HAVE audit")
                 failed_lookup = ExistingSpectralAuditLookup(
@@ -732,7 +823,14 @@ def process_claimed_preview_job(
         )
 
     try:
-        result = (preview_fn or execute_preview_job)(db, job)
+        if preview_fn is not None:
+            result = preview_fn(db, job)
+        else:
+            result = execute_preview_job(
+                db,
+                job,
+                runtime_config=runtime_config,
+            )
     except Exception as exc:
         logger.exception("Import job %s preview crashed", job.id)
         # Worker-mode preview should not raise — but if it does, route the
@@ -852,10 +950,15 @@ def process_claimed_preview_job_with_heartbeat(
     job: ImportJob,
     *,
     heartbeat_interval: float = PREVIEW_HEARTBEAT_INTERVAL_SECONDS,
+    runtime_config: CratediggerConfig | None = None,
 ) -> ImportJob | None:
     dsn = getattr(db, "dsn", None)
     if not dsn:
-        return process_claimed_preview_job(db, job)
+        return process_claimed_preview_job(
+            db,
+            job,
+            runtime_config=runtime_config,
+        )
 
     stop = threading.Event()
     heartbeat_thread = threading.Thread(
@@ -872,17 +975,22 @@ def process_claimed_preview_job_with_heartbeat(
     )
     heartbeat_thread.start()
     try:
-        return process_claimed_preview_job(db, job)
+        return process_claimed_preview_job(
+            db,
+            job,
+            runtime_config=runtime_config,
+        )
     finally:
         stop.set()
         heartbeat_thread.join(timeout=5.0)
 
 
 def run_once(
-    db: PipelineDB,
+    db: _ImportPreviewJobClaimer,
     *,
     worker_id: str,
     heartbeat_interval: float = PREVIEW_HEARTBEAT_INTERVAL_SECONDS,
+    runtime_config: CratediggerConfig | None = None,
 ) -> ImportJob | None:
     job = db.claim_next_import_preview_job(worker_id=worker_id)
     if job is None:
@@ -892,6 +1000,7 @@ def run_once(
         db,
         job,
         heartbeat_interval=heartbeat_interval,
+        runtime_config=runtime_config,
     )
 
 

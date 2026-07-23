@@ -1,14 +1,12 @@
 """Operator import route handlers — force import and wrong matches."""
 
-import json
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from email.message import Message
 from io import BufferedIOBase
 from typing import Any, Protocol, TypedDict
 
-import msgspec
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from web.routes._pydantic import parse_body
 
@@ -40,9 +38,9 @@ from lib.wrong_match_delete_service import (
 from lib.import_preview import (
     ImportPreviewValues,
     preview_import_from_download_log,
-    preview_import_from_path,
     preview_import_from_values,
 )
+from lib.fs_authority import OpenedRegularFile
 from lib.validation_envelope import (
     ValidationResultEnvelope,
     decode_validation_envelope,
@@ -514,7 +512,12 @@ class _StreamingRouteHandler(RouteHandler, Protocol):
 
 
 def get_wrong_match_audio(
-    h: _StreamingRouteHandler, params: dict[str, list[str]],
+    h: _StreamingRouteHandler,
+    params: dict[str, list[str]],
+    *,
+    stream_file_resolver: (
+        Callable[..., tuple[OpenedRegularFile, str]] | None
+    ) = None,
 ) -> None:
     """Stream one wrong-match audio file with byte-range support."""
     try:
@@ -534,7 +537,8 @@ def get_wrong_match_audio(
         return
 
     try:
-        abs_path, mime_type = resolve_wrong_match_stream_file(
+        resolve_stream = stream_file_resolver or resolve_wrong_match_stream_file
+        opened, mime_type = resolve_stream(
             entry=entry,
             relative_path=relative_path,
         )
@@ -545,49 +549,51 @@ def get_wrong_match_audio(
         h._error(str(exc), 404)
         return
 
-    size = os.path.getsize(abs_path)
     try:
-        requested_range = _byte_range(h.headers.get("Range"), size)
-    except ValueError:
-        h.send_response(416)
-        h.send_header("Content-Range", f"bytes */{size}")
+        size = opened.stat_result.st_size
+        try:
+            requested_range = _byte_range(h.headers.get("Range"), size)
+        except ValueError:
+            h.send_response(416)
+            h.send_header("Content-Range", f"bytes */{size}")
+            h.send_header("Access-Control-Allow-Origin", "*")
+            h.send_header("Content-Length", "0")
+            h.end_headers()
+            return
+
+        start = 0
+        end = size - 1
+        content_length = size
+        status = 200
+        if requested_range is not None:
+            start, end, content_length = requested_range
+            status = 206
+
+        h.send_response(status)
+        h.send_header("Content-Type", mime_type)
+        h.send_header("Content-Length", str(content_length))
+        h.send_header("Accept-Ranges", "bytes")
+        h.send_header("Cache-Control", "no-cache")
         h.send_header("Access-Control-Allow-Origin", "*")
-        h.send_header("Content-Length", "0")
+        if requested_range is not None:
+            h.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         h.end_headers()
-        return
 
-    start = 0
-    end = size - 1
-    content_length = size
-    status = 200
-    if requested_range is not None:
-        start, end, content_length = requested_range
-        status = 206
-
-    h.send_response(status)
-    h.send_header("Content-Type", mime_type)
-    h.send_header("Content-Length", str(content_length))
-    h.send_header("Accept-Ranges", "bytes")
-    h.send_header("Cache-Control", "no-cache")
-    h.send_header("Access-Control-Allow-Origin", "*")
-    if requested_range is not None:
-        h.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-    h.end_headers()
-
-    with open(abs_path, "rb") as handle:
-        handle.seek(start)
+        os.lseek(opened.fd, start, os.SEEK_SET)
         remaining = content_length
         while remaining > 0:
-            chunk = handle.read(min(64 * 1024, remaining))
+            chunk = os.read(opened.fd, min(64 * 1024, remaining))
             if not chunk:
                 break
             h.wfile.write(chunk)
             remaining -= len(chunk)
-    if remaining > 0:
-        # Short read (file truncated mid-stream): the body is shorter
-        # than the declared Content-Length, so the keep-alive stream is
-        # desynced — never reuse this socket.
-        h.close_connection = True
+        if remaining > 0:
+            # Short read (file truncated mid-stream): the body is shorter
+            # than the declared Content-Length, so the keep-alive stream is
+            # desynced — never reuse this socket.
+            h.close_connection = True
+    finally:
+        opened.close()
 
 
 def _delete_wrong_match_row(
@@ -849,57 +855,76 @@ def post_wrong_match_converge(h: RouteHandler, body: dict[str, object]) -> None:
     }, status=202)
 
 
-def _preview_values_from_body(body: dict[str, object]) -> ImportPreviewValues:
-    raw_values = body.get("values")
-    if raw_values is None and body.get("values_json"):
-        raw_values = json.loads(str(body["values_json"]))
-    if raw_values is None:
-        raw_values = body
-    if not isinstance(raw_values, dict):
-        raise ValueError("values must be an object")
-    return msgspec.convert(raw_values, type=ImportPreviewValues)
+class ImportPreviewValuesRequest(BaseModel):
+    """Strict HTTP representation of ``ImportPreviewValues``.
+
+    The CLI intentionally retains its explicit filesystem path mode.  HTTP
+    gets only simulation values or a server-owned download-log identifier.
+    """
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    is_flac: bool = False
+    min_bitrate: int | None = None
+    is_cbr: bool = False
+    is_vbr: bool | None = None
+    avg_bitrate: int | None = None
+    spectral_grade: str | None = None
+    spectral_bitrate: int | None = None
+    existing_min_bitrate: int | None = None
+    existing_avg_bitrate: int | None = None
+    existing_spectral_bitrate: int | None = None
+    existing_spectral_grade: str | None = None
+    override_min_bitrate: int | None = None
+    existing_format: str | None = None
+    existing_is_cbr: bool = False
+    post_conversion_min_bitrate: int | None = None
+    post_conversion_is_cbr: bool | None = None
+    converted_count: int = 0
+    candidate_verified_lossless_proof: bool = False
+    verified_lossless_target: str | None = None
+    target_format: str | None = None
+    new_format: str | None = None
+    audio_check_mode: str = "normal"
+    audio_corrupt: bool = False
+    has_nested_audio: bool = False
+    candidate_v0_probe_avg: int | None = None
+    candidate_v0_probe_min: int | None = None
+    existing_v0_probe_avg: int | None = None
+    candidate_v0_probe_kind: str | None = None
+    existing_v0_probe_kind: str | None = None
+    supported_lossless_source: bool | None = None
+
+
+class ImportPreviewRequest(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    values: ImportPreviewValuesRequest | None = None
+    download_log_id: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _one_mode(self) -> "ImportPreviewRequest":
+        if (self.values is None) == (self.download_log_id is None):
+            raise ValueError("provide exactly one of values or download_log_id")
+        return self
 
 
 def post_import_preview(h: RouteHandler, body: dict[str, object]) -> None:
-    """Preview either typed values, a request/path, or a download-log row."""
-    has_values = any(k in body for k in ("values", "values_json", "is_flac", "min_bitrate"))
-    has_download_log = body.get("download_log_id") is not None
-    has_path = body.get("request_id") is not None and body.get("path")
-    mode_count = sum(1 for value in (has_values, has_download_log, has_path) if value)
-    if mode_count != 1:
-        h._error("Provide exactly one preview mode: values, download_log_id, or request_id+path")
+    """HTTP preview: strict nested values or a server-owned log id only."""
+    request = parse_body(h, body, ImportPreviewRequest)
+    if request is None:
         return
-
-    try:
-        if has_values:
-            from lib.config import read_runtime_rank_config
-            preview = preview_import_from_values(
-                _preview_values_from_body(body),
-                cfg=read_runtime_rank_config(),
-            )
-        elif has_download_log:
-            download_log_db = _server()._db()
-            raw_download_log_id = body["download_log_id"]
-            if not isinstance(raw_download_log_id, (str, int, float)):
-                raise TypeError("download_log_id must be a number or string")
-            preview = preview_import_from_download_log(
-                download_log_db,
-                int(raw_download_log_id),
-            )
-        else:
-            path_db = _server()._db()
-            raw_request_id = body["request_id"]
-            if not isinstance(raw_request_id, (str, int, float)):
-                raise TypeError("request_id must be a number or string")
-            preview = preview_import_from_path(
-                path_db,
-                request_id=int(raw_request_id),
-                path=str(body["path"]),
-                force=bool(body.get("force", True)),
-            )
-    except (ValueError, TypeError, msgspec.ValidationError) as exc:
-        h._error(f"Invalid preview input: {exc}")
-        return
+    if request.values is not None:
+        from lib.config import read_runtime_rank_config
+        preview = preview_import_from_values(
+            ImportPreviewValues(**request.values.model_dump()),
+            cfg=read_runtime_rank_config(),
+        )
+    else:
+        assert request.download_log_id is not None
+        preview = preview_import_from_download_log(
+            _server()._db(), request.download_log_id,
+        )
     h._json(preview.to_dict())
 
 
@@ -980,8 +1005,8 @@ ROUTES: list[RouteRegistration] = [
     ),
     route(
         "POST", "/api/import-preview", post_import_preview,
-        "Preview whether an import would pass — accepts typed values, "
-        "a download_log_id, or a request_id+path.",
+        "Preview whether an import would pass — accepts exactly one strict "
+        "typed values object or a positive server-owned download_log_id.",
         classified=True,
     ),
     route(

@@ -7,9 +7,10 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from lib.config import CratediggerConfig
 from lib.dispatch import (
@@ -21,6 +22,7 @@ from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
     IMPORT_JOB_YOUTUBE,
+    ImportJob,
     automation_import_dedupe_key,
     force_import_dedupe_key,
     force_import_payload,
@@ -89,6 +91,62 @@ def _make_failed_import_source() -> tuple[str, str]:
     source = os.path.join(root, "failed_imports", "Album")
     os.makedirs(source)
     return root, source
+
+
+@contextmanager
+def _force_preview_source():
+    """Make a real configured failed-import source for worker preview tests."""
+    with tempfile.TemporaryDirectory(dir=os.getcwd()) as parent:
+        download_root = os.path.join(parent, "downloads")
+        source = os.path.join(download_root, "failed_imports", "Album")
+        processing_dir = os.path.join(parent, "processing")
+        os.makedirs(source)
+        os.mkdir(processing_dir, 0o700)
+        os.mkdir(os.path.join(processing_dir, "albums"), 0o700)
+        os.mkdir(os.path.join(processing_dir, "preview"), 0o700)
+        cfg = CratediggerConfig(
+            slskd_download_dir=download_root,
+            processing_dir=processing_dir,
+            audio_check_mode="off",
+        )
+        yield source, cfg
+
+
+def _force_download_log(
+    db: FakePipelineDB,
+    request_id: int,
+    failed_path: str,
+) -> int:
+    """Seed the DB-owned force source; payload paths are not authority."""
+    return db.log_download(
+        request_id,
+        outcome="rejected",
+        validation_result={
+            "scenario": "high_distance",
+            "failed_path": failed_path,
+        },
+    )
+
+
+def assert_force_preview_authority(
+    *,
+    lookup_path: str,
+    db_failed_path: str,
+    payload_failed_path: str,
+    lookup_bytes: bytes,
+    expected_db_bytes: bytes,
+    preview_root: str,
+    preview_children: list[str],
+) -> None:
+    """Force evidence must see a cleaned DB-authorized private snapshot."""
+    if lookup_path in {db_failed_path, payload_failed_path}:
+        raise AssertionError("force front gate used an unisolated filesystem path")
+    if os.path.commonpath([lookup_path, preview_root]) != preview_root:
+        raise AssertionError("force front gate lookup escaped private preview")
+    if lookup_bytes != expected_db_bytes:
+        raise AssertionError("force front gate did not copy DB-authorized bytes")
+    if preview_children:
+        raise AssertionError("force front gate leaked a private preview snapshot")
 
 
 class TestAutomationEvidenceReuse(unittest.TestCase):
@@ -1297,10 +1355,18 @@ class TestImporterWorker(unittest.TestCase):
             recovered = importer.recover_abandoned_running_jobs(cast(Any, db))
             self.assertEqual([job.id for job in recovered], [claimed.id])
 
+            processing_parent = tempfile.mkdtemp(
+                prefix="cratedigger-import-queue-processing-", dir=os.getcwd())
+            self.addCleanup(shutil.rmtree, processing_parent, ignore_errors=True)
+            processing_dir = os.path.join(processing_parent, "processing")
+            os.mkdir(processing_dir, 0o700)
+            os.mkdir(os.path.join(processing_dir, "albums"), 0o700)
+            os.mkdir(os.path.join(processing_dir, "preview"), 0o700)
             cfg = type("Cfg", (), {
                 "slskd_download_dir": slskd_root,
                 "beets_staging_dir": staging_root,
                 "beets_validation_enabled": False,
+                "processing_dir": processing_dir,
             })()
             ctx = make_ctx_with_fake_db(db, cfg=cfg)
             updated = importer.run_once(cast(Any, db), worker_id="new-worker", ctx=ctx)
@@ -1406,16 +1472,17 @@ class TestImportPreviewWorker(unittest.TestCase):
     def test_force_job_preview_would_import_marks_importable(self):
         from scripts import import_preview_worker
 
-        with tempfile.TemporaryDirectory() as source:
+        with _force_preview_source() as (source, cfg):
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             db = FakePipelineDB()
-            db.enqueue_import_job(
+            download_log_id = _force_download_log(db, 42, source)
+            job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
-                dedupe_key=force_import_dedupe_key(7),
+                dedupe_key=force_import_dedupe_key(download_log_id),
                 payload=force_import_payload(
-                    download_log_id=7,
+                    download_log_id=download_log_id,
                     failed_path=source,
                     source_username="alice",
                 ),
@@ -1441,15 +1508,18 @@ class TestImportPreviewWorker(unittest.TestCase):
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,
                     claimed,
+                    runtime_config=cfg,
                 )
 
         preview.assert_called_once_with(
             db,
             request_id=42,
-            path=source,
+            path=ANY,
+            source_display_path=source,
             force=True,
-            download_log_id=7,
+            download_log_id=download_log_id,
             import_job_id=claimed.id,
+            runtime_config=cfg,
         )
         assert updated is not None
         self.assertEqual(updated.status, "queued")
@@ -1457,6 +1527,78 @@ class TestImportPreviewWorker(unittest.TestCase):
         assert updated.preview_result is not None
         self.assertEqual(updated.preview_result["verdict"], "evidence_ready")
         self.assertIsNotNone(updated.importable_at)
+
+    def test_force_execute_path_requires_forwarded_runtime_config(self):
+        """The real execute path must retain the caller's private config.
+
+        The request is deliberately absent, so after the configured outer
+        snapshot the real measurement returns ``request_not_found`` before it
+        can load its own runtime config.  Dropping ``runtime_config`` before
+        ``execute_preview_job`` instead makes the production config reject
+        this private test source at the exact execute boundary.
+        """
+        from scripts import import_preview_worker
+        from lib.fs_authority import FilesystemAuthorityError
+
+        with _force_preview_source() as (source, cfg):
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"database authority")
+            parent = os.path.dirname(os.path.dirname(os.path.dirname(source)))
+            payload_source = os.path.join(
+                parent, "payload", "failed_imports", "Payload",
+            )
+            os.makedirs(payload_source)
+            with open(os.path.join(payload_source, "01.mp3"), "wb") as handle:
+                handle.write(b"payload metadata")
+
+            def new_job() -> tuple[FakePipelineDB, ImportJob]:
+                db = FakePipelineDB()
+                download_log_id = _force_download_log(db, 42, source)
+                db.enqueue_import_job(
+                    IMPORT_JOB_FORCE,
+                    request_id=42,
+                    dedupe_key=force_import_dedupe_key(download_log_id),
+                    payload=force_import_payload(
+                        download_log_id=download_log_id,
+                        failed_path=payload_source,
+                    ),
+                )
+                claimed = db.claim_next_import_preview_job(worker_id="preview")
+                assert claimed is not None
+                return db, claimed
+
+            def run_with(
+                runtime_config: CratediggerConfig | None,
+            ) -> tuple[ImportJob, FakePipelineDB]:
+                db, claimed = new_job()
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                    runtime_config=runtime_config,
+                )
+                assert updated is not None
+                return updated, db
+
+            updated, _ = run_with(cfg)
+            self.assertEqual(updated.status, "failed")
+            self.assertEqual(updated.preview_status, "measurement_failed")
+            assert updated.preview_result is not None
+            self.assertEqual(updated.preview_result["reason"], "request_not_found")
+            self.assertEqual(updated.preview_result["source_path"], source)
+            self.assertEqual(
+                os.listdir(os.path.join(cfg.processing_dir, "preview")),
+                [],
+            )
+
+            # Known-bad fault injection: this invokes the real execute path
+            # after discarding the config at its exact call boundary.
+            mutant_db, mutant_job = new_job()
+            with self.assertRaises(FilesystemAuthorityError):
+                import_preview_worker.execute_preview_job(
+                    mutant_db,
+                    mutant_job,
+                    runtime_config=None,
+                )
 
     def test_automation_job_preview_uses_active_download_current_path(self):
         from scripts import import_preview_worker
@@ -1615,17 +1757,18 @@ class TestImportPreviewWorker(unittest.TestCase):
     def test_run_once_heartbeats_while_preview_is_running(self):
         from scripts import import_preview_worker
 
-        with tempfile.TemporaryDirectory() as source:
+        with _force_preview_source() as (source, cfg):
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             db = FakePipelineDB()
             setattr(db, "dsn", "postgresql://fake")
+            download_log_id = _force_download_log(db, 42, source)
             db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
-                dedupe_key=force_import_dedupe_key(7),
+                dedupe_key=force_import_dedupe_key(download_log_id),
                 payload=force_import_payload(
-                    download_log_id=7,
+                    download_log_id=download_log_id,
                     failed_path=source,
                     source_username="alice",
                 ),
@@ -1676,6 +1819,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                     cast(Any, db),
                     worker_id="preview",
                     heartbeat_interval=0.01,
+                    runtime_config=cfg,
                 )
 
             assert updated is not None
@@ -2186,7 +2330,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         from lib.beets_db import AlbumInfo
         from lib.quality import SpectralAnalysisDetail
 
-        with tempfile.TemporaryDirectory() as source, \
+        with _force_preview_source() as (source, cfg), \
              tempfile.TemporaryDirectory() as existing:
             for root in (source, existing):
                 with open(os.path.join(root, "01.mp3"), "wb") as handle:
@@ -2224,7 +2368,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 album_path=existing,
                 format="Opus",
             ))
-            download_log_id = db.log_download(42, outcome="rejected")
+            download_log_id = _force_download_log(db, 42, source)
             db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
@@ -2260,6 +2404,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     db,
                     claimed,
                     spectral_detail_analyzer=analyze,
+                    runtime_config=cfg,
                 )
 
         preview.assert_not_called()
@@ -2293,12 +2438,12 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         from scripts import import_preview_worker
         from lib.quality_evidence import EvidenceBuildResult
 
-        with tempfile.TemporaryDirectory() as source:
+        with _force_preview_source() as (source, cfg):
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             db = FakePipelineDB()
             db.seed_request(make_request_row(id=42, status="wanted"))
-            download_log_id = db.log_download(42, outcome="rejected")
+            download_log_id = _force_download_log(db, 42, source)
             db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
@@ -2327,6 +2472,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     lambda *_args, **_kwargs: "no_current_evidence"
                 ),
                 current_evidence_loader=stale_current,
+                runtime_config=cfg,
             )
 
         assert updated is not None
@@ -2342,12 +2488,12 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         """An authority adapter exception cannot authorize candidate reuse."""
         from scripts import import_preview_worker
 
-        with tempfile.TemporaryDirectory() as source:
+        with _force_preview_source() as (source, cfg):
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             db = FakePipelineDB()
             db.seed_request(make_request_row(id=42, status="wanted"))
-            download_log_id = db.log_download(42, outcome="rejected")
+            download_log_id = _force_download_log(db, 42, source)
             db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
@@ -2372,6 +2518,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     lambda *_args, **_kwargs: "no_current_evidence"
                 ),
                 current_evidence_loader=raising_current,
+                runtime_config=cfg,
             )
 
         assert updated is not None
@@ -2393,7 +2540,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         from lib.measurement import ExistingSpectralAuditLookup
         from lib.quality import SpectralAnalysisDetail
 
-        with tempfile.TemporaryDirectory() as source, \
+        with _force_preview_source() as (source, cfg), \
              tempfile.TemporaryDirectory() as existing:
             for root in (source, existing):
                 with open(os.path.join(root, "01.mp3"), "wb") as handle:
@@ -2415,7 +2562,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 container="mp3",
                 storage_format="MP3",
             )
-            download_log_id = db.log_download(42, outcome="rejected")
+            download_log_id = _force_download_log(db, 42, source)
             db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
@@ -2439,18 +2586,15 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     bitrate_kbps=128 if path == existing else None,
                 )
 
-            with patch(
-                "scripts.import_preview_worker.read_runtime_config",
-                return_value=CratediggerConfig(audio_check_mode="off"),
-            ):
-                updated = import_preview_worker.process_claimed_preview_job(
-                    db,
-                    claimed,
-                    spectral_detail_analyzer=analyze,
-                    existing_spectral_resolver=lambda _mbid: (
-                        ExistingSpectralAuditLookup(path=existing)
-                    ),
-                )
+            updated = import_preview_worker.process_claimed_preview_job(
+                db,
+                claimed,
+                spectral_detail_analyzer=analyze,
+                existing_spectral_resolver=lambda _mbid: (
+                    ExistingSpectralAuditLookup(path=existing)
+                ),
+                runtime_config=cfg,
+            )
 
         self.assertEqual(
             calls,
@@ -2479,7 +2623,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         from lib.measurement import ExistingSpectralAuditLookup
         from lib.quality import SpectralAnalysisDetail
 
-        with tempfile.TemporaryDirectory() as source, \
+        with _force_preview_source() as (source, cfg), \
              tempfile.TemporaryDirectory() as existing:
             for root in (source, existing):
                 with open(os.path.join(root, "01.mp3"), "wb") as handle:
@@ -2514,7 +2658,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 album_path=existing,
                 format="MP3",
             ))
-            download_log_id = db.log_download(42, outcome="rejected")
+            download_log_id = _force_download_log(db, 42, source)
             db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
@@ -2537,9 +2681,6 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 )
 
             with patch(
-                "scripts.import_preview_worker.read_runtime_config",
-                return_value=CratediggerConfig(audio_check_mode="off"),
-            ), patch(
                 "lib.beets_db.BeetsDB",
                 lambda *_args, **_kwargs: fake_beets,
             ):
@@ -2550,6 +2691,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     existing_spectral_resolver=lambda _mbid: (
                         ExistingSpectralAuditLookup(path=existing)
                     ),
+                    runtime_config=cfg,
                 )
 
             linked_id = db.get_request_current_evidence_id(42)
@@ -2567,7 +2709,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         from lib.measurement import ExistingSpectralAuditLookup
         from lib.quality import SpectralAnalysisDetail
 
-        with tempfile.TemporaryDirectory() as source, \
+        with _force_preview_source() as (source, cfg), \
              tempfile.TemporaryDirectory() as existing:
             for root in (source, existing):
                 with open(os.path.join(root, "01.mp3"), "wb") as handle:
@@ -2592,7 +2734,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 container="mp3",
                 storage_format="MP3",
             )
-            download_log_id = db.log_download(42, outcome="rejected")
+            download_log_id = _force_download_log(db, 42, source)
             db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
@@ -2614,18 +2756,15 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     bitrate_kbps=128 if path == existing else None,
                 )
 
-            with patch(
-                "scripts.import_preview_worker.read_runtime_config",
-                return_value=CratediggerConfig(audio_check_mode="off"),
-            ):
-                updated = import_preview_worker.process_claimed_preview_job(
-                    db,
-                    claimed,
-                    spectral_detail_analyzer=analyze,
-                    existing_spectral_resolver=lambda _mbid: (
-                        ExistingSpectralAuditLookup(path=existing)
-                    ),
-                )
+            updated = import_preview_worker.process_claimed_preview_job(
+                db,
+                claimed,
+                spectral_detail_analyzer=analyze,
+                existing_spectral_resolver=lambda _mbid: (
+                    ExistingSpectralAuditLookup(path=existing)
+                ),
+                runtime_config=cfg,
+            )
 
             linked_id = db.get_request_current_evidence_id(42)
             linked = db.load_album_quality_evidence_by_id(linked_id)
@@ -2647,12 +2786,12 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 del request_id
                 raise RuntimeError("current evidence unavailable")
 
-        with tempfile.TemporaryDirectory() as source:
+        with _force_preview_source() as (source, cfg):
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             db = HaveLookupFailureDB()
             db.seed_request(make_request_row(id=42))
-            download_log_id = db.log_download(42, outcome="rejected")
+            download_log_id = _force_download_log(db, 42, source)
             db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
@@ -2682,6 +2821,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 existing_spectral_resolver=lambda _mbid: (
                     ExistingSpectralAuditLookup()
                 ),
+                runtime_config=cfg,
             )
 
         self.assertEqual(calls, [])
@@ -2703,12 +2843,12 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
     def test_reused_evidence_does_not_call_candidate_analyzer(self):
         from scripts import import_preview_worker
 
-        with tempfile.TemporaryDirectory() as source:
+        with _force_preview_source() as (source, cfg):
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             db = FakePipelineDB()
             db.seed_request(make_request_row(id=42))
-            download_log_id = db.log_download(42, outcome="rejected")
+            download_log_id = _force_download_log(db, 42, source)
             db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
@@ -2733,6 +2873,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 db,
                 claimed,
                 spectral_detail_analyzer=raising_analyzer,
+                runtime_config=cfg,
             )
 
         assert updated is not None
@@ -2827,12 +2968,12 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         """No evidence row → worker runs full preview measurement (legacy path)."""
         from scripts import import_preview_worker
 
-        with tempfile.TemporaryDirectory() as source:
+        with _force_preview_source() as (source, cfg):
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             db = FakePipelineDB()
             db.seed_request(make_request_row(id=42))
-            download_log_id = db.log_download(42, outcome="rejected")
+            download_log_id = _force_download_log(db, 42, source)
             db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
@@ -2876,6 +3017,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,
                     claimed,
+                    runtime_config=cfg,
                 )
 
         # Front-gate misses (no evidence) → preview is called.
@@ -2893,12 +3035,12 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         """Stale snapshot → measurement runs; new evidence replaces stale row."""
         from scripts import import_preview_worker
 
-        with tempfile.TemporaryDirectory() as source:
+        with _force_preview_source() as (source, cfg):
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             db = FakePipelineDB()
             db.seed_request(make_request_row(id=42))
-            download_log_id = db.log_download(42, outcome="rejected")
+            download_log_id = _force_download_log(db, 42, source)
             db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
@@ -2953,6 +3095,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,
                     claimed,
+                    runtime_config=cfg,
                 )
 
         # Snapshot mismatch → front-gate misses → preview ran.
@@ -2975,7 +3118,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         from lib.quality import SpectralAnalysisDetail
         from scripts import import_preview_worker
 
-        with tempfile.TemporaryDirectory() as source:
+        with _force_preview_source() as (source, cfg):
             for track in range(1, 13):
                 with open(
                     os.path.join(source, f"{track:02d}.flac"),
@@ -2991,7 +3134,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 artist_name="The Rolling Stones",
                 album_title="The Rolling Stones No. 2",
             ))
-            download_log_id = db.log_download(8883, outcome="rejected")
+            download_log_id = _force_download_log(db, 8883, source)
             db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=8883,
@@ -3051,6 +3194,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                         "exact album not in beets",
                     )
                 ),
+                runtime_config=cfg,
             )
 
         self.assertEqual(preview_calls, 0)
@@ -3966,3 +4110,94 @@ class TestFrontGateSourcePathYoutubeImport(unittest.TestCase):
             import_preview_worker._preview_input(cast(Any, db), job)
 
         self.assertIn("malformed", str(ctx.exception).lower())
+
+
+class TestForcePreviewPathAuthority(unittest.TestCase):
+    def test_front_gate_uses_db_failed_path_not_payload_and_cleans_snapshot(self) -> None:
+        """The force payload is audit metadata, never filesystem authority."""
+        from scripts import import_preview_worker
+        from lib.quality_evidence import EvidenceBuildResult
+
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as parent:
+            incoming = os.path.join(parent, "Incoming")
+            downloads = os.path.join(parent, "downloads")
+            processing = os.path.join(parent, "processing")
+            for directory in (incoming, downloads, processing):
+                os.mkdir(directory, 0o700)
+            os.mkdir(os.path.join(processing, "albums"), 0o700)
+            os.mkdir(os.path.join(processing, "preview"), 0o700)
+            db_source = os.path.join(
+                incoming, "auto-import", "Database", "failed_imports", "Album",
+            )
+            payload_source = os.path.join(
+                incoming, "manual", "Payload", "failed_imports", "Album",
+            )
+            os.makedirs(payload_source)
+            os.makedirs(db_source)
+            with open(os.path.join(db_source, "01.mp3"), "wb") as handle:
+                handle.write(b"database")
+            with open(os.path.join(payload_source, "01.mp3"), "wb") as handle:
+                handle.write(b"payload")
+            db = FakePipelineDB()
+            download_log_id = _force_download_log(db, 42, db_source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=payload_source,
+                ),
+            )
+            cfg = CratediggerConfig(
+                slskd_download_dir=downloads,
+                beets_staging_dir=incoming,
+                processing_dir=processing,
+                audio_check_mode="off",
+            )
+            seen: list[tuple[str, bytes]] = []
+
+            def capture_lookup(
+                _db: object,
+                *,
+                source_path: str,
+                download_log_id: int | None = None,
+                import_job_id: int | None = None,
+            ) -> EvidenceBuildResult:
+                del download_log_id, import_job_id
+                lookup_path = source_path
+                with open(os.path.join(lookup_path, "01.mp3"), "rb") as handle:
+                    seen.append((lookup_path, handle.read()))
+                return EvidenceBuildResult(None, "missing")
+
+            result, display_path = import_preview_worker._front_gate_check(
+                db,
+                job,
+                runtime_config=cfg,
+                candidate_evidence_loader=capture_lookup,
+            )
+
+            self.assertIsNotNone(result)
+            self.assertEqual(display_path, db_source)
+            self.assertEqual(len(seen), 1)
+            assert_force_preview_authority(
+                lookup_path=seen[0][0],
+                db_failed_path=db_source,
+                payload_failed_path=payload_source,
+                lookup_bytes=seen[0][1],
+                expected_db_bytes=b"database",
+                preview_root=os.path.join(processing, "preview"),
+                preview_children=os.listdir(os.path.join(processing, "preview")),
+            )
+
+    def test_force_authority_checker_trips_on_payload_lookup(self) -> None:
+        with self.assertRaises(AssertionError):
+            assert_force_preview_authority(
+                lookup_path="/payload",
+                db_failed_path="/database",
+                payload_failed_path="/payload",
+                lookup_bytes=b"payload",
+                expected_db_bytes=b"database",
+                preview_root="/preview",
+                preview_children=[],
+            )

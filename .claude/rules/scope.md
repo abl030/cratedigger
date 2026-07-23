@@ -8,7 +8,13 @@
 
 ## Single-operator, no backwards-compat
 
-Cratedigger has exactly one user: the operator running this fork. **There is no "other people's installs" to worry about.** Treat that as a hard rule, not a casual observation — it shapes a class of decisions:
+Each Cratedigger deployment has one trusted operator. The module is still
+distributed and other installations exist, so defaults, examples, and security
+boundaries must not rely on this homelab's paths or identities. The one-operator
+rule removes multi-tenant authorization and backwards-compatibility machinery;
+it does not turn a co-resident service or another installation into trusted
+authority. Treat that as a hard rule, not a casual observation — it shapes a
+class of decisions:
 
 - **Backfills are not product code.** Anything that has to walk the existing data once after a schema change is an operator/agent-driven one-shot. The agent runs it during the deploy window (live `python3 -c '...'`, heredoc'd Python on doc2, raw SQL via `pipeline-cli query`, whatever fits) and then throws it away. Pure-SQL data work belongs in a numbered migration (run-once by the migrator). Network-dependent data work that the migrator can't express belongs in the agent's working memory or the deploy doc as a reference shape — never in a committed `scripts/backfill_*.py`. See the search-plan iter2 PR1 cleanup (commits in the 2026-05-25 series) for the canonical instance.
 - **Forward-only data assumptions.** After a deploy completes, the code assumes the new column/row exists with the expected values. No defensive `if old_shape_exists: …` branches, no fallback paths for "what if the migration didn't run," no `getattr(row, 'new_field', sensible_default)`. The migration ran. The data is there. Move on.

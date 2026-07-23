@@ -19,6 +19,14 @@
 { config, pkgs, ... }:
 
 {
+  # The default example deliberately exercises the non-root service shape.
+  # `users` is the shared media-reader group; slskd owns its download tree.
+  users.users.cratedigger = {
+    isSystemUser = true;
+    group = "users";
+    extraGroups = [ "slskd" "cratedigger-ops" ];
+  };
+
   # ---------------------------------------------------------------------
   # slskd — the Soulseek client cratedigger drives. Bring your own
   # credentials; the API key must also land in the file cratedigger reads
@@ -39,23 +47,28 @@
 
   services.cratedigger = {
     enable = true;
+    user = "cratedigger";
+    group = "users";
 
     # --- The two things you must always provide -----------------------
     slskd = {
-      # Raw API key, one line, readable by the cratedigger user (root by
-      # default). Same value slskd itself was given above.
+      # Raw API key, one line, readable by the cratedigger user. Same value
+      # slskd itself was given above.
       apiKeyFile = "/var/lib/secrets/slskd-api-key";
       downloadDir = "/srv/music/slskd-downloads";
     };
+    # Private high-capacity processing belongs beneath a root-owned parent,
+    # never in the group-writable slskd tree. Keep the service identities
+    # distinct; Cratedigger needs only the slskd download-directory group.
+    processingDir = "/srv/cratedigger-processing";
 
     # --- Database: provisioned locally, peer auth, zero passwords -----
     pipelineDb.createLocally = true;
 
     # --- Beets: cratedigger owns the package, config, and binary ------
-    # `cratedigger-beet` lands on your PATH for manual ops (run it with
-    # sudo — the service runs as root by default; see the "Running as a
-    # non-root user" block near the end of this file for the group-`users`
-    # / media-server-friendly alternative).
+    # `cratedigger-beet` lands on your PATH for manual ops. Run it as the
+    # configured cratedigger service identity so it uses the same ownership
+    # and rendered configuration as automated imports.
     beets.config = {
       directory = "/srv/music/library";          # where tagged albums live
       library = "/srv/music/beets-library.db";   # parent dir must exist
@@ -90,34 +103,13 @@
   };
 
   # ---------------------------------------------------------------------
-  # Running as a non-root user (recommended for media-server integration)
+  # Non-root media-server filesystem posture
   # ---------------------------------------------------------------------
-  # By default (above), cratedigger runs as root — zero-config, since slskd
-  # downloads and the beets library commonly live outside any unprivileged
-  # user's reach. If Jellyfin/Plex/etc. also need to read album art AND
-  # write NFO/artwork into the library, run cratedigger non-root instead
-  # (issue #570). Uncomment and adapt:
-  #
-  # users.users.cratedigger = {
-  #   isSystemUser = true;
-  #   group = "users";                     # shared consumer group (Jellyfin's gid)
-  #   extraGroups = [
-  #     "slskd"           # slskd's download-dir group — reap/move in-flight files
-  #     "cratedigger-ops" # whatever group owns /run/cratedigger-secrets/*
-  #   ];
-  # };
-  #
-  # services.cratedigger.user = "cratedigger";
-  # services.cratedigger.group = "users";
-  #
   # Give the library roots a setgid layout so new album/artist dirs inherit
   # the `users` group automatically — plain 0775 strips the setgid bit and
   # silently breaks this:
   #
-  # systemd.tmpfiles.rules = [
-  #   "d /srv/music/library 2775 cratedigger users -"
-  #   "d /srv/music/incoming 2775 cratedigger users -"
-  # ];
+  # The enabled tmpfiles rules below create this shape on a fresh host.
   #
   # For a library tree that already exists, fix it once as an operator
   # action (not committed config):
@@ -137,10 +129,10 @@
   # docs/nixos-module.md § "Running non-root + filesystem permissions".
 
   # The staging/library parents must exist; the module manages only its
-  # own state dir. (Swap the mode/owner below to `2775 cratedigger users`
-  # if you enable the non-root block above.)
+  # own state and private processing roots.
   systemd.tmpfiles.rules = [
-    "d /srv/music 0775 root root -"
-    "d /srv/music/incoming 0775 root root -"
+    "d /srv/music 2775 cratedigger users -"
+    "d /srv/music/library 2775 cratedigger users -"
+    "d /srv/music/incoming 2775 cratedigger users -"
   ];
 }

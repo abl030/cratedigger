@@ -49,6 +49,7 @@ from lib.processing_paths import (
     attempt_fingerprint,
     canonical_folder_for_row,
     directory_has_entries,
+    processing_albums_dir,
 )
 from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
                          CooldownConfig,
@@ -644,7 +645,7 @@ def _run_completed_processing(
         if entry.import_folder is None:
             entry.import_folder = canonical_folder_for_row(
                 entry,
-                ctx.cfg.slskd_download_dir,
+                processing_albums_dir(ctx.cfg.processing_dir),
             )
         state.processing_started_at = datetime.now(timezone.utc).isoformat()
         if not _persist_updated_download_state(db, request_id, entry, state):
@@ -825,13 +826,13 @@ def _enqueue_completed_processing(
     if entry.import_folder is None:
         entry.import_folder = (
             state.current_path
-            or canonical_folder_for_row(entry, ctx.cfg.slskd_download_dir)
+            or canonical_folder_for_row(entry, processing_albums_dir(ctx.cfg.processing_dir))
         )
     staged_album = StagedAlbum.from_entry(
         entry,
         default_path=canonical_folder_for_row(
             entry,
-            ctx.cfg.slskd_download_dir,
+            processing_albums_dir(ctx.cfg.processing_dir),
         ),
     )
     materialized = _materialize_processing_dir(
@@ -962,7 +963,7 @@ def _processing_path_ready_for_importer(
         year=entry.year,
         request_id=request_id,
         staging_dir=ctx.cfg.beets_staging_dir,
-        slskd_download_dir=ctx.cfg.slskd_download_dir,
+        canonical_root=processing_albums_dir(ctx.cfg.processing_dir),
         attempt_fingerprint=attempt_fingerprint(
             [(f.username, f.filename) for f in entry.files],
         ),
@@ -1098,7 +1099,7 @@ def _poll_one_active_download(
             year=str(row["year"] or ""),
             request_id=request_id,
             staging_dir=ctx.cfg.beets_staging_dir,
-            slskd_download_dir=ctx.cfg.slskd_download_dir,
+            canonical_root=processing_albums_dir(ctx.cfg.processing_dir),
             has_entries=directory_has_entries,
             attempt_fingerprint=attempt_fingerprint(
                 [(f.username, f.filename) for f in state.files],
@@ -1115,7 +1116,7 @@ def _poll_one_active_download(
         initial_entry = _reconstruct_grab_list_entry(row, state)
         completion_current_path = canonical_folder_for_row(
             initial_entry,
-            ctx.cfg.slskd_download_dir,
+            processing_albums_dir(ctx.cfg.processing_dir),
         )
         for file in state.files:
             transfer = match_transfer_for_attempt(

@@ -10,15 +10,17 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
-import tempfile
-from collections.abc import Mapping, Callable
+import secrets
+import stat
+from collections.abc import Callable, Generator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
 
 import msgspec
 
 if TYPE_CHECKING:
+    from lib.config import CratediggerConfig
     from lib.pipeline_db.rows import DownloadLogWithEvidenceRow
 
 from lib.dispatch import run_import_one
@@ -72,11 +74,275 @@ from lib.quality import (
     full_pipeline_decision,
     quality_gate_decision,
 )
-from lib.util import repair_mp3_headers, resolve_failed_path
+from lib.fs_authority import (
+    FilesystemAuthorityError,
+    copy_opened_file,
+    exclusive_relative_lock,
+    open_configured_quarantine_directory,
+    open_directory_path,
+    open_private_child_directory,
+    open_private_processing_root,
+    open_regular_relative,
+    remove_relative_tree,
+)
+from lib.processing_paths import processing_preview_dir
+from lib.util import repair_mp3_headers
 from lib.validation_envelope import decode_validation_envelope
 from lib.v0_probe import probe_installed_album_as_v0
 
 logger = logging.getLogger("cratedigger")
+
+_PREVIEW_MAX_DEPTH = 32
+_PREVIEW_MAX_ENTRIES = 5000
+_PREVIEW_MAX_FILES = 5000
+_PREVIEW_MAX_BYTES = 100 * 1024**3
+_PREVIEW_FREE_RESERVE_BYTES = 100 * 1024**2
+
+
+@dataclass(frozen=True)
+class PreviewSnapshotLimits:
+    """Bounded-copy policy for one isolated preview snapshot.
+
+    The normal worker uses the module defaults.  Accepting this immutable
+    value at the snapshot boundary also lets callers exercise a small bounded
+    world without changing global process policy.
+    """
+
+    max_depth: int = _PREVIEW_MAX_DEPTH
+    max_entries: int = _PREVIEW_MAX_ENTRIES
+    max_files: int = _PREVIEW_MAX_FILES
+    max_bytes: int = _PREVIEW_MAX_BYTES
+    free_reserve_bytes: int = _PREVIEW_FREE_RESERVE_BYTES
+
+
+PreviewCopyFn = Callable[..., int]
+PreviewAvailableBytesFn = Callable[[int], int]
+
+
+def _preview_available_bytes(preview_fd: int) -> int:
+    info = os.fstatvfs(preview_fd)
+    return info.f_bavail * info.f_frsize
+
+
+@contextmanager
+def _preview_copy_lock(
+    cfg: CratediggerConfig,
+) -> Generator[int, None, None]:
+    """Serialize bounded source snapshots before they consume private disk.
+
+    The lock intentionally covers only the untrusted-tree copy and its
+    free-space admission check.  Measurement and the harness run after it is
+    released, so one slow preview cannot serialize all operator work.
+    """
+    with open_private_processing_root(
+        cfg.processing_dir, cfg.slskd_download_dir,
+    ) as processing_fd:
+        # Keep locks out of the aged preview directory: its contents are
+        # ephemeral snapshots and tmpfiles may prune them independently.
+        with exclusive_relative_lock(processing_fd, ".preview-snapshot.lock"):
+            with open_private_child_directory(processing_fd, "preview") as preview_fd:
+                yield preview_fd
+
+
+def _assert_preview_space(
+    preview_fd: int,
+    next_write_bytes: int,
+    *,
+    free_reserve_bytes: int,
+    available_bytes_fn: PreviewAvailableBytesFn,
+) -> None:
+    if available_bytes_fn(preview_fd) - next_write_bytes < free_reserve_bytes:
+        raise FilesystemAuthorityError("insufficient private preview space")
+
+
+def _snapshot_opened_directory(
+    source_root_fd: int,
+    cfg: CratediggerConfig,
+    *,
+    limits: PreviewSnapshotLimits | None = None,
+    available_bytes_fn: PreviewAvailableBytesFn | None = None,
+    copy_fn: PreviewCopyFn | None = None,
+) -> str:
+    """Boundedly copy an already-held source directory into private preview.
+
+    Every byte is copied from an opened regular inode.  The inventory later
+    used for evidence is consequently taken from the private copy, never a
+    second walk of the externally mutable source pathname.
+    """
+    effective_limits = limits or PreviewSnapshotLimits()
+    effective_available_bytes = available_bytes_fn or _preview_available_bytes
+    effective_copy = copy_fn or copy_opened_file
+    snapshot_name = f"preview-{secrets.token_hex(16)}"
+    snapshot_path = os.path.join(processing_preview_dir(cfg.processing_dir), snapshot_name)
+    files = 0
+    entries_seen = 0
+    copied_bytes = 0
+    made_snapshot = False
+    try:
+        with _preview_copy_lock(cfg) as preview_fd:
+            _assert_preview_space(
+                preview_fd,
+                0,
+                free_reserve_bytes=effective_limits.free_reserve_bytes,
+                available_bytes_fn=effective_available_bytes,
+            )
+            os.mkdir(snapshot_name, 0o700, dir_fd=preview_fd)
+            made_snapshot = True
+            snapshot_fd = os.open(
+                snapshot_name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=preview_fd,
+            )
+            def copy_directory(
+                source_dir_fd: int,
+                destination_dir_fd: int,
+                depth: int,
+            ) -> None:
+                """Copy depth-first so the descriptor footprint is bounded."""
+                nonlocal copied_bytes, entries_seen, files
+                try:
+                    names: list[str] = []
+                    with os.scandir(source_dir_fd) as entries:
+                        for entry in entries:
+                            entries_seen += 1
+                            if entries_seen > effective_limits.max_entries:
+                                raise FilesystemAuthorityError(
+                                    "preview snapshot entry limit exceeded",
+                                )
+                            names.append(entry.name)
+                    names.sort()
+                    for name in names:
+                        try:
+                            child_fd = os.open(
+                                name,
+                                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                                dir_fd=source_dir_fd,
+                            )
+                        except OSError:
+                            child_fd = -1
+                        if child_fd >= 0:
+                            try:
+                                if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
+                                    raise FilesystemAuthorityError("snapshot contains non-directory")
+                                if depth >= effective_limits.max_depth:
+                                    raise FilesystemAuthorityError("preview depth limit exceeded")
+                                os.mkdir(name, 0o700, dir_fd=destination_dir_fd)
+                                destination_child_fd = os.open(
+                                    name,
+                                    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                                    dir_fd=destination_dir_fd,
+                                )
+                                next_source_fd = child_fd
+                                child_fd = -1
+                                copy_directory(
+                                    next_source_fd, destination_child_fd, depth + 1,
+                                )
+                            finally:
+                                if child_fd >= 0:
+                                    os.close(child_fd)
+                            continue
+                        opened = open_regular_relative(source_dir_fd, name)
+                        try:
+                            files += 1
+                            declared_size = opened.stat_result.st_size
+                            if (
+                                files > effective_limits.max_files
+                                or copied_bytes + declared_size > effective_limits.max_bytes
+                            ):
+                                raise FilesystemAuthorityError("preview snapshot limit exceeded")
+                            destination_fd = os.open(
+                                name,
+                                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                                0o600,
+                                dir_fd=destination_dir_fd,
+                            )
+                            try:
+                                def assert_space_before_write(count: int) -> None:
+                                    _assert_preview_space(
+                                        preview_fd,
+                                        count,
+                                        free_reserve_bytes=(
+                                            effective_limits.free_reserve_bytes
+                                        ),
+                                        available_bytes_fn=effective_available_bytes,
+                                    )
+
+                                copied = effective_copy(
+                                    opened.fd,
+                                    destination_fd,
+                                    max_bytes=declared_size,
+                                    before_write=assert_space_before_write,
+                                )
+                            finally:
+                                os.close(destination_fd)
+                            copied_bytes += copied
+                        finally:
+                            opened.close()
+                finally:
+                    os.close(source_dir_fd)
+                    os.close(destination_dir_fd)
+
+            copy_directory(os.dup(source_root_fd), snapshot_fd, 0)
+        return snapshot_path
+    except Exception:
+        if made_snapshot:
+            with _preview_copy_lock(cfg) as preview_fd:
+                remove_relative_tree(preview_fd, snapshot_name)
+        raise
+
+
+def _snapshot_authorized_directory(
+    path: str,
+    cfg: CratediggerConfig,
+    *,
+    limits: PreviewSnapshotLimits | None = None,
+    available_bytes_fn: PreviewAvailableBytesFn | None = None,
+    copy_fn: PreviewCopyFn | None = None,
+) -> str:
+    """Snapshot a direct caller path through a held no-follow descriptor."""
+    with open_directory_path(path) as source_fd:
+        return _snapshot_opened_directory(
+            source_fd,
+            cfg,
+            limits=limits,
+            available_bytes_fn=available_bytes_fn,
+            copy_fn=copy_fn,
+        )
+
+
+def snapshot_configured_quarantine_directory(
+    raw_path: str,
+    cfg: CratediggerConfig,
+    *,
+    limits: PreviewSnapshotLimits | None = None,
+    available_bytes_fn: PreviewAvailableBytesFn | None = None,
+    copy_fn: PreviewCopyFn | None = None,
+) -> str:
+    """Copy a failed/wrong-match folder from its held configured authority."""
+    with open_configured_quarantine_directory(raw_path, cfg) as source:
+        return _snapshot_opened_directory(
+            source.fd,
+            cfg,
+            limits=limits,
+            available_bytes_fn=available_bytes_fn,
+            copy_fn=copy_fn,
+        )
+
+
+def _remove_preview_tree(path: str, cfg: CratediggerConfig) -> None:
+    """Remove only a direct, service-owned private snapshot directory."""
+    name = os.path.basename(path)
+    if name == path or not name.startswith("preview-"):
+        raise FilesystemAuthorityError("not a private preview snapshot")
+    if os.path.dirname(path) != processing_preview_dir(cfg.processing_dir):
+        raise FilesystemAuthorityError("preview snapshot is outside private root")
+    with _preview_copy_lock(cfg) as preview_fd:
+        remove_relative_tree(preview_fd, name)
+
+
+def remove_preview_snapshot(path: str, cfg: CratediggerConfig) -> None:
+    """Public counterpart for callers that own a private preview snapshot."""
+    _remove_preview_tree(path, cfg)
 
 
 def _prefer_successful_spectral_detail(
@@ -1413,6 +1679,7 @@ def measure_and_persist_candidate_evidence(
     *,
     request_id: int,
     path: str,
+    source_display_path: str | None = None,
     force: bool = True,
     download_log_id: int | None = None,
     import_job_id: int | None = None,
@@ -1421,6 +1688,7 @@ def measure_and_persist_candidate_evidence(
     spectral_detail_analyzer: SpectralDetailAnalyzer | None = None,
     existing_spectral_resolver: ExistingSpectralResolver | None = None,
     current_evidence_loader: Callable[..., EvidenceBuildResult] | None = None,
+    runtime_config: CratediggerConfig | None = None,
 ) -> ImportPreviewResult:
     """Measure a source folder and persist candidate evidence; never decide.
 
@@ -1469,6 +1737,11 @@ def measure_and_persist_candidate_evidence(
     """
     from lib.config import read_runtime_config
 
+    # A force job measures a private snapshot, but its audit trail must keep
+    # the original download-log failed_path rather than leaking that private
+    # implementation location into operator-facing provenance.
+    audit_path = source_display_path or path
+
     # --- Sanity checks ---
     req = db.get_request(request_id)
     if not req:
@@ -1479,7 +1752,7 @@ def measure_and_persist_candidate_evidence(
             detail=f"Request {request_id} not found",
             request_id=request_id,
             download_log_id=download_log_id,
-            source_path=path,
+            source_path=audit_path,
         )
 
     mbid = str(req.get("mb_release_id") or "")
@@ -1491,46 +1764,10 @@ def measure_and_persist_candidate_evidence(
             detail="No MusicBrainz release ID",
             request_id=request_id,
             download_log_id=download_log_id,
-            source_path=path,
+            source_path=audit_path,
         )
 
-    if not os.path.isdir(path):
-        return _measurement_failed_result(
-            mode="path",
-            reason="source_vanished",
-            decision="path_missing",
-            detail=f"Path not found: {path}",
-            request_id=request_id,
-            download_log_id=download_log_id,
-            source_path=path,
-        )
-
-    # --- Source cleanup BEFORE snapshot ---
-    # mp3val runs once on the source so the snapshot captures the
-    # post-cleanup state. Source is then immutable until beets consumes
-    # it: the importer's freshness check, the harness's
-    # ``_validate_quality_evidence_action_snapshot``, and any later
-    # wrong-match triage all see the same bytes the preview measured.
-    try:
-        repair_mp3_headers(path)
-    except Exception:
-        pass
-
-    # --- Snapshot for freshness guard + evidence files column ---
-    try:
-        source_snapshot = snapshot_audio_files(path)
-    except OSError as exc:
-        return _measurement_failed_result(
-            mode="path",
-            reason="snapshot_stale",
-            decision="evidence_snapshot_failed",
-            detail=str(exc),
-            request_id=request_id,
-            download_log_id=download_log_id,
-            source_path=path,
-        )
-
-    cfg = read_runtime_config()
+    cfg = runtime_config or read_runtime_config()
     (
         current_evidence,
         existing_spectral_evidence,
@@ -1559,7 +1796,7 @@ def measure_and_persist_candidate_evidence(
             ),
             request_id=request_id,
             download_log_id=download_log_id,
-            source_path=path,
+            source_path=audit_path,
         )
     else:
         current_evidence = current_result.evidence
@@ -1570,23 +1807,38 @@ def measure_and_persist_candidate_evidence(
         )
     preserve_have_source = preserve_existing_source_spectral(current_evidence)
 
-    temp_root = tempfile.mkdtemp(prefix="cratedigger-import-preview-")
     try:
-        preview_path = os.path.join(
-            temp_root,
-            os.path.basename(os.path.abspath(path)) or "album",
+        temp_root = _snapshot_authorized_directory(path, cfg)
+    except (FilesystemAuthorityError, OSError) as exc:
+        return _measurement_failed_result(
+            mode="path",
+            reason="materialization_error",
+            decision="materialization_failed",
+            detail=f"private descriptor snapshot failed: {exc}",
+            request_id=request_id,
+            download_log_id=download_log_id,
+            source_path=audit_path,
         )
+    try:
+        preview_path = temp_root
         try:
-            shutil.copytree(path, preview_path)
+            repair_mp3_headers(preview_path)
+        except Exception:
+            pass
+        try:
+            # Address evidence from precisely the immutable private bytes
+            # being inspected and passed to the harness.  Never re-inventory
+            # the external source after the descriptor copy completed.
+            source_snapshot = snapshot_audio_files(preview_path)
         except OSError as exc:
             return _measurement_failed_result(
                 mode="path",
-                reason="materialization_error",
-                decision="materialization_failed",
-                detail=f"shutil.copytree failed: {exc}",
+                reason="snapshot_stale",
+                decision="evidence_snapshot_failed",
+                detail=str(exc),
                 request_id=request_id,
                 download_log_id=download_log_id,
-                source_path=path,
+                source_path=audit_path,
             )
         inspection = inspect_local_files(preview_path)
 
@@ -1639,7 +1891,7 @@ def measure_and_persist_candidate_evidence(
                 detail=f"{type(exc).__name__}: {exc}",
                 request_id=request_id,
                 download_log_id=download_log_id,
-                source_path=path,
+                source_path=audit_path,
             )
 
         # Integrity facts are authoritative even when the same corrupt
@@ -1664,7 +1916,7 @@ def measure_and_persist_candidate_evidence(
                 detail=spectral_failure,
                 request_id=request_id,
                 download_log_id=download_log_id,
-                source_path=path,
+                source_path=audit_path,
                 import_result=ImportResult(spectral=measurement.spectral_audit),
             )
 
@@ -1677,17 +1929,6 @@ def measure_and_persist_candidate_evidence(
         # early-exit branches.
         audit_result = ImportResult(spectral=measurement.spectral_audit)
         if measurement_rejecting:
-            if not audio_snapshot_matches(path, source_snapshot):
-                return _measurement_failed_result(
-                    mode="path",
-                    reason="snapshot_stale",
-                    decision="source_changed_during_preview",
-                    detail="source files changed while preview was running",
-                    request_id=request_id,
-                    download_log_id=download_log_id,
-                    source_path=path,
-                    import_result=audit_result,
-                )
             try:
                 evidence_result = (
                     persist_measurement_fn
@@ -1695,7 +1936,7 @@ def measure_and_persist_candidate_evidence(
                 )(
                     db,
                     mb_release_id=mbid,
-                    source_path=path,
+                    source_path=audit_path,
                     measurement=measurement,
                     download_log_id=download_log_id,
                     import_job_id=import_job_id,
@@ -1709,7 +1950,7 @@ def measure_and_persist_candidate_evidence(
                     detail=f"{type(exc).__name__}: {exc}",
                     request_id=request_id,
                     download_log_id=download_log_id,
-                    source_path=path,
+                    source_path=audit_path,
                     import_result=audit_result,
                 )
             if evidence_result.status != "ready":
@@ -1720,7 +1961,7 @@ def measure_and_persist_candidate_evidence(
                     detail=evidence_result.reason or f"evidence_{evidence_result.status}",
                     request_id=request_id,
                     download_log_id=download_log_id,
-                    source_path=path,
+                    source_path=audit_path,
                     import_result=audit_result,
                 )
             decision_hint = _measurement_decision_hint(measurement)
@@ -1732,7 +1973,7 @@ def measure_and_persist_candidate_evidence(
                 stage_chain=[f"measure_preimport:{decision_hint}"],
                 request_id=request_id,
                 download_log_id=download_log_id,
-                source_path=path,
+                source_path=audit_path,
                 import_result=ImportResult(spectral=measurement.spectral_audit),
             )
 
@@ -1771,7 +2012,7 @@ def measure_and_persist_candidate_evidence(
             preview_spectral_file = _write_preview_spectral_evidence_file(
                 directory=temp_root,
                 mb_release_id=mbid,
-                source_path=path,
+                source_path=audit_path,
                 measurement=measurement,
                 files=source_snapshot,
                 lossless_candidate=measurement.lossless_candidate,
@@ -1810,7 +2051,7 @@ def measure_and_persist_candidate_evidence(
                 detail=f"{type(exc).__name__}: {exc}",
                 request_id=request_id,
                 download_log_id=download_log_id,
-                source_path=path,
+                source_path=audit_path,
                 import_result=audit_result,
             )
 
@@ -1822,7 +2063,7 @@ def measure_and_persist_candidate_evidence(
                 detail="import_one.py emitted no JSON",
                 request_id=request_id,
                 download_log_id=download_log_id,
-                source_path=path,
+                source_path=audit_path,
                 import_result=audit_result,
                 subprocess_stderr=run.stderr,
             )
@@ -1947,7 +2188,7 @@ def measure_and_persist_candidate_evidence(
                 detail=run.import_result.error or run.import_result.decision,
                 request_id=request_id,
                 download_log_id=download_log_id,
-                source_path=path,
+                source_path=audit_path,
                 import_result=run.import_result,
                 audio_validation=(
                     conversion_validation
@@ -1967,22 +2208,9 @@ def measure_and_persist_candidate_evidence(
                 detail="ImportResult missing source_measurement",
                 request_id=request_id,
                 download_log_id=download_log_id,
-                source_path=path,
+                source_path=audit_path,
                 import_result=run.import_result,
                 subprocess_stderr=run.stderr,
-            )
-
-        # --- Snapshot freshness guard (post-measurement) ---
-        if not audio_snapshot_matches(path, source_snapshot):
-            return _measurement_failed_result(
-                mode="path",
-                reason="snapshot_stale",
-                decision="source_changed_during_preview",
-                detail="source files changed while preview was running",
-                request_id=request_id,
-                download_log_id=download_log_id,
-                source_path=path,
-                import_result=run.import_result,
             )
 
         # --- Persist candidate evidence ---
@@ -1990,7 +2218,7 @@ def measure_and_persist_candidate_evidence(
             evidence_result = persist_candidate_evidence_from_import_result(
                 db,
                 mb_release_id=mbid,
-                source_path=path,
+                source_path=audit_path,
                 import_result=run.import_result,
                 download_log_id=download_log_id,
                 import_job_id=import_job_id,
@@ -2005,7 +2233,7 @@ def measure_and_persist_candidate_evidence(
                 detail=f"{type(exc).__name__}: {exc}",
                 request_id=request_id,
                 download_log_id=download_log_id,
-                source_path=path,
+                source_path=audit_path,
                 import_result=run.import_result,
             )
         if evidence_result.status != "ready":
@@ -2016,7 +2244,7 @@ def measure_and_persist_candidate_evidence(
                 detail=evidence_result.reason or f"evidence_{evidence_result.status}",
                 request_id=request_id,
                 download_log_id=download_log_id,
-                source_path=path,
+                source_path=audit_path,
                 import_result=run.import_result,
             )
 
@@ -2031,11 +2259,11 @@ def measure_and_persist_candidate_evidence(
             ],
             request_id=request_id,
             download_log_id=download_log_id,
-            source_path=path,
+            source_path=audit_path,
             import_result=run.import_result,
         )
     finally:
-        shutil.rmtree(temp_root, ignore_errors=True)
+        _remove_preview_tree(temp_root, cfg)
 
 
 def _measurement_decision_hint(measurement: Any) -> str:
@@ -2066,6 +2294,7 @@ def preview_import_from_path(
     download_log_id: int | None = None,
     import_job_id: int | None = None,
     persist_candidate_evidence: bool = False,
+    _already_isolated: bool = False,
 ) -> ImportPreviewResult:
     """Classify a real source folder without mutating source files or beets.
 
@@ -2163,51 +2392,64 @@ def preview_import_from_path(
         )
     preserve_have_source = preserve_existing_source_spectral(current_evidence)
 
-    # --- Source cleanup BEFORE snapshot ---
-    # mp3val runs once on the source so the snapshot captures the
-    # post-cleanup state and the source stays stable through the
-    # importer + harness lifecycle.
+    # Every preview runs against one bounded, descriptor-copied private
+    # snapshot.  The download-log entry point has already made that snapshot;
+    # direct CLI path mode takes the same no-follow route here rather than an
+    # unbounded ``copytree``.  No external tool receives a DB- or CLI-supplied
+    # pathname before this boundary is complete.
     try:
-        repair_mp3_headers(path)
-    except Exception:
-        pass
-
-    source_snapshot = None
-    if persist_candidate_evidence:
-        try:
-            source_snapshot = snapshot_audio_files(path)
-        except OSError as exc:
-            return _preview_result(
-                mode="path",
-                verdict=PREVIEW_VERDICT_UNCERTAIN,
-                decision="evidence_snapshot_failed",
-                reason="evidence_snapshot_failed",
-                detail=str(exc),
-                request_id=request_id,
-                download_log_id=download_log_id,
-                source_path=path,
-            )
-        if not source_snapshot:
-            # Empty source snapshot: evidence persistence requires at least
-            # one file, so surface the empty fileset as an uncertain verdict.
-            return _preview_result(
-                mode="path",
-                verdict=PREVIEW_VERDICT_UNCERTAIN,
-                decision="evidence_empty_fileset",
-                reason="evidence_empty_fileset",
-                detail="no audio files found",
-                request_id=request_id,
-                download_log_id=download_log_id,
-                source_path=path,
-            )
-
-    temp_root = tempfile.mkdtemp(prefix="cratedigger-import-preview-")
-    try:
-        preview_path = os.path.join(
-            temp_root,
-            os.path.basename(os.path.abspath(path)) or "album",
+        temp_root = None if _already_isolated else _snapshot_authorized_directory(
+            path, cfg,
         )
-        shutil.copytree(path, preview_path)
+    except (FilesystemAuthorityError, OSError) as exc:
+        return _preview_result(
+            mode="path",
+            verdict=PREVIEW_VERDICT_UNCERTAIN,
+            decision="path_unauthorized",
+            reason="path_unauthorized",
+            detail=str(exc),
+            request_id=request_id,
+            download_log_id=download_log_id,
+            source_path=path,
+        )
+    try:
+        preview_path = path if temp_root is None else temp_root
+        # Header repair is deliberately against the private copy. This keeps
+        # the source immutable while preserving the importer-facing order:
+        # repair before inspection, measurement, and the dry-run harness.
+        try:
+            repair_mp3_headers(preview_path)
+        except Exception:
+            pass
+
+        source_snapshot = None
+        if persist_candidate_evidence:
+            try:
+                source_snapshot = snapshot_audio_files(preview_path)
+            except OSError as exc:
+                return _preview_result(
+                    mode="path",
+                    verdict=PREVIEW_VERDICT_UNCERTAIN,
+                    decision="evidence_snapshot_failed",
+                    reason="evidence_snapshot_failed",
+                    detail=str(exc),
+                    request_id=request_id,
+                    download_log_id=download_log_id,
+                    source_path=path,
+                )
+            if not source_snapshot:
+                # Empty source snapshot: evidence persistence requires at
+                # least one file, so surface the empty fileset as uncertain.
+                return _preview_result(
+                    mode="path",
+                    verdict=PREVIEW_VERDICT_UNCERTAIN,
+                    decision="evidence_empty_fileset",
+                    reason="evidence_empty_fileset",
+                    detail="no audio files found",
+                    request_id=request_id,
+                    download_log_id=download_log_id,
+                    source_path=path,
+                )
         inspection = inspect_local_files(preview_path)
         if inspection.has_nested_audio:
             detail = (
@@ -2373,7 +2615,7 @@ def preview_import_from_path(
             )
 
         preview_spectral_file = _write_preview_spectral_evidence_file(
-            directory=temp_root,
+            directory=temp_root or preview_path,
             mb_release_id=mbid,
             source_path=path,
             measurement=measurement,
@@ -2407,7 +2649,7 @@ def preview_import_from_path(
         evidence_status: str | None = None
         evidence_reason: str | None = None
         if persist_candidate_evidence:
-            if source_snapshot is None or not audio_snapshot_matches(path, source_snapshot):
+            if source_snapshot is None:
                 detail = "source files changed while preview was running"
                 return _preview_result(
                     mode="path",
@@ -2473,7 +2715,8 @@ def preview_import_from_path(
             cleanup_eligible=cleanup_eligible,
         )
     finally:
-        shutil.rmtree(temp_root, ignore_errors=True)
+        if temp_root is not None:
+            _remove_preview_tree(temp_root, cfg)
 
 
 def preview_import_from_download_log(
@@ -2511,21 +2754,30 @@ def preview_import_from_download_log(
             request_id=request_id_raw,
             download_log_id=download_log_id,
         )
-    resolved = resolve_failed_path(raw_path)
-    if resolved is None:
+    from lib.config import read_runtime_config
+
+    cfg = read_runtime_config()
+    try:
+        snapshot = snapshot_configured_quarantine_directory(raw_path, cfg)
+    except (FilesystemAuthorityError, OSError) as exc:
         return _preview_result(
             mode="download_log",
             verdict=PREVIEW_VERDICT_UNCERTAIN,
-            decision="path_missing",
-            reason=f"Path not found: {raw_path}",
+            decision="path_unauthorized",
+            reason=f"Failed path is missing or unauthorized: {raw_path}",
+            detail=str(exc),
             request_id=request_id_raw,
             download_log_id=download_log_id,
             source_path=raw_path,
         )
-    return preview_import_from_path(
-        db,
-        request_id=request_id_raw,
-        path=resolved,
-        force=True,
-        download_log_id=download_log_id,
-    )
+    try:
+        return preview_import_from_path(
+            db,
+            request_id=request_id_raw,
+            path=snapshot,
+            force=True,
+            download_log_id=download_log_id,
+            _already_isolated=True,
+        )
+    finally:
+        _remove_preview_tree(snapshot, cfg)

@@ -261,6 +261,11 @@ function renderWrongMatchExplorer(data) {
   const sourceDirs = sourceDirsForEntry(data);
   const sharedTags = sharedExplorerTags(files);
   const orderedBy = typeof data?.ordered_by === 'string' ? data.ordered_by : 'folder';
+  const partial = data?.partial === true;
+  const truncatedReason = typeof data?.truncated_reason === 'string' ? data.truncated_reason.replace(/_/g, ' ') : 'limit';
+  const partialNotice = partial
+    ? `<div style="color:#e5a84b;font-size:0.76em;margin:6px 0;">Partial explorer result: ${esc(truncatedReason)} reached.</div>`
+    : '';
   let summary = '';
   if (sourceDirs.length > 0 || Object.keys(sharedTags).length > 0) {
     const parts = [];
@@ -278,12 +283,13 @@ function renderWrongMatchExplorer(data) {
       </div>`;
   }
   if (files.length === 0) {
-    return `${summary}<div style="color:#666;font-size:0.78em;padding:8px 0;">No audio files found in this folder.</div>`;
+    return `${summary}${partialNotice}<div style="color:#666;font-size:0.78em;padding:8px 0;">${partial ? 'No audio files were found before exploration was truncated.' : 'No audio files found in this folder.'}</div>`;
   }
 
   let html = `
     <div style="margin-top:10px;">
       ${summary}
+      ${partialNotice}
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
         <div style="color:#888;font-size:0.78em;">${audioFileCount} track${audioFileCount === 1 ? '' : 's'} in surviving folder${orderedBy === 'matched' ? ' in matched order' : ''}</div>
         ${otherFileCount > 0 ? `<div style="color:#666;font-size:0.74em;">${otherFileCount} non-audio file${otherFileCount === 1 ? '' : 's'} hidden</div>` : ''}

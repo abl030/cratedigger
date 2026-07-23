@@ -46,7 +46,6 @@ TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "lib/pipeline_db/search_ledger.py": {"any": 2},
     "lib/pipeline_db/search_plan.py": {"any": 7},
     "lib/pipeline_db/terminal_outcomes.py": {"any": 6},
-    "lib/pipeline_db/transfer_ledger.py": {"any": 2},
     "lib/pipeline_db/youtube.py": {"any": 10},
     "lib/plex_pin_service.py": {"any": 2},
     "lib/quality/dispatch_actions.py": {"any": 2},
@@ -96,5 +95,5 @@ TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "web/routes/imports.py": {"any": 2},
     "web/routes/youtube.py": {"any": 15},
     "web/triage_runner.py": {"any": 8},
-    "web/wrong_match_file_service.py": {"any": 8},
+    "web/wrong_match_file_service.py": {"any": 7},
 }
